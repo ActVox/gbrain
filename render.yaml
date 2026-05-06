@@ -89,7 +89,9 @@ services:
       export PATH="$HOME/.bun/bin:$PATH"
       bun install --frozen-lockfile
       bun run build
-    startCommand: ./bin/gbrain jobs supervisor --concurrency 4
+    # PATH export so apply-migrations can spawn `gbrain init --migrate-only` subprocess.
+    # apply-migrations is idempotent — running on every boot is safe.
+    startCommand: 'export PATH="/opt/render/project/src/bin:$PATH"; gbrain apply-migrations --yes && gbrain jobs supervisor --concurrency 4'
     disk:
       name: gbrain-data
       mountPath: /var/gbrain
