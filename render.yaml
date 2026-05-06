@@ -58,6 +58,7 @@ services:
       curl -fsSL https://bun.sh/install | bash
       export PATH="$HOME/.bun/bin:$PATH"
       bun install --frozen-lockfile
+      (cd admin && bun install --frozen-lockfile)
       bun run build:admin
       bun run build
     startCommand: ./bin/gbrain serve --http --port $PORT --public-url $GBRAIN_PUBLIC_URL --token-ttl 3600
