@@ -89,9 +89,34 @@ services:
       export PATH="$HOME/.bun/bin:$PATH"
       bun install --frozen-lockfile
       bun run build
-    # PATH export so apply-migrations can spawn `gbrain init --migrate-only` subprocess.
-    # apply-migrations is idempotent — running on every boot is safe.
-    startCommand: 'export PATH="/opt/render/project/src/bin:$PATH"; gbrain apply-migrations --yes && gbrain jobs supervisor --concurrency 4'
+    # Idempotent startup: clones the team repos to the persistent disk on first boot,
+    # then exec's the supervisor. Re-deploys skip clone if .git already exists.
+    # GIT_PAT must be set as an env var (see envVars below) — fine-grained PAT with
+    # contents-read on the team's repos.
+    startCommand: |
+      set -e
+      cd /var/gbrain
+      mkdir -p repos audit
+      cd repos
+      declare -A PAIRS=(
+        ["basaev-app"]="app.basaev-web"
+        ["bsv-spec"]="bsv-spec"
+        ["basaev-com"]="basaev.com"
+        ["research-actvox"]="research-actvox"
+        ["mandala-estate"]="mandala-estate"
+        ["ask-stars"]="ask-stars"
+        ["ai-rozum"]="ai-rozum"
+      )
+      for ID in "${!PAIRS[@]}"; do
+        REPO="${PAIRS[$ID]}"
+        if [ ! -d "$ID/.git" ]; then
+          echo "[startup] cloning ActVox/$REPO into $ID"
+          rm -rf "$ID"
+          git clone --depth 1 "https://x-access-token:$GIT_PAT@github.com/ActVox/$REPO.git" "$ID" || echo "[startup] WARN: clone $REPO failed"
+        fi
+      done
+      cd /opt/render/project/src
+      exec ./bin/gbrain jobs supervisor --concurrency 4
     disk:
       name: gbrain-data
       mountPath: /var/gbrain
@@ -100,4 +125,54 @@ services:
       - fromGroup: gbrain-shared
       - key: GBRAIN_AUDIT_DIR
         value: /var/gbrain/audit             # persistent on the disk
+      - key: GIT_PAT
+        sync: false                          # Fine-grained GitHub PAT (contents:read on the 7 team repos)
       # Worker does not need GBRAIN_PUBLIC_URL or GBRAIN_ADMIN_BOOTSTRAP_TOKEN.
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Cron Jobs — autopilot polling fallback + nightly maintenance
+  # No disk. Submit minion jobs to the queue; main worker processes them.
+  # ─────────────────────────────────────────────────────────────────────
+  - type: cron
+    name: gbrain-cron-sync
+    runtime: node
+    plan: starter                            # tiny — runs for ~5 sec per invocation
+    region: oregon
+    repo: https://github.com/ActVox/gbrain
+    branch: ATX-HUB
+    schedule: "*/30 * * * *"                 # every 30 min — fallback for missed webhooks
+    buildCommand: |
+      set -e
+      curl -fsSL https://bun.sh/install | bash
+      export PATH="$HOME/.bun/bin:$PATH"
+      bun install --frozen-lockfile
+      bun run build
+    command: |
+      for SRC in basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum; do
+        echo "submit sync $SRC"
+        ./bin/gbrain jobs submit sync --params "{\"sourceId\":\"$SRC\"}" --idempotency-key "cron:sync:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | head -2
+      done
+      echo "submit embed --stale"
+      ./bin/gbrain jobs submit embed --idempotency-key "cron:embed:$(date -u +%Y-%m-%dT%H)" 2>&1 | head -2
+    envVars:
+      - fromGroup: gbrain-shared              # only needs DATABASE_URL really
+
+  - type: cron
+    name: gbrain-cron-dream
+    runtime: node
+    plan: starter
+    region: oregon
+    repo: https://github.com/ActVox/gbrain
+    branch: ATX-HUB
+    schedule: "0 2 * * *"                    # 02:00 UTC daily
+    buildCommand: |
+      set -e
+      curl -fsSL https://bun.sh/install | bash
+      export PATH="$HOME/.bun/bin:$PATH"
+      bun install --frozen-lockfile
+      bun run build
+    command: |
+      echo "submit autopilot-cycle (nightly)"
+      ./bin/gbrain jobs submit autopilot-cycle --idempotency-key "cron:autopilot:$(date -u +%Y-%m-%d)" 2>&1 | head -3
+    envVars:
+      - fromGroup: gbrain-shared
