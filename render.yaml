@@ -61,7 +61,7 @@ services:
       (cd admin && bun install --frozen-lockfile)
       bun run build:admin
       bun run build
-    startCommand: ./bin/gbrain serve --http --port $PORT --public-url $GBRAIN_PUBLIC_URL --token-ttl 3600
+    startCommand: ./bin/gbrain serve --http --port $PORT --public-url $GBRAIN_PUBLIC_URL --token-ttl 2592000
     envVars:
       - fromGroup: gbrain-shared
       - key: GBRAIN_PUBLIC_URL
