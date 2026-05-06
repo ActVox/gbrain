@@ -64,7 +64,7 @@ services:
     envVars:
       - fromGroup: gbrain-shared
       - key: GBRAIN_PUBLIC_URL
-        value: https://brain.actvox.io      # CHANGE to your custom domain
+        value: https://gbrain.actvox.dev      # CHANGE to your custom domain
       - key: GBRAIN_ADMIN_BOOTSTRAP_TOKEN
         generateValue: true                  # Render generates; never logged (OV-14)
       - key: GBRAIN_AUDIT_DIR
