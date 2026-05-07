@@ -148,9 +148,17 @@ services:
       bun install --frozen-lockfile
       bun run build
     startCommand: |
-      for SRC in basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum; do
+      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum"
+      for SRC in $SOURCES; do
         echo "submit sync $SRC"
         ./bin/gbrain jobs submit sync --params "{\"sourceId\":\"$SRC\"}" --idempotency-key "cron:sync:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | head -2
+      done
+      # Extract links + timeline so traverse_graph / get_backlinks / get_timeline return data.
+      # Worker FIFO with --concurrency 4 means extract may race a still-running sync on the
+      # same source; the next 30-min cron picks up any links missed in the race window.
+      for SRC in $SOURCES; do
+        echo "submit extract $SRC"
+        ./bin/gbrain jobs submit extract --params "{\"mode\":\"all\",\"dir\":\"/var/gbrain/repos/$SRC\"}" --idempotency-key "cron:extract:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | head -2
       done
       echo "submit embed --stale"
       ./bin/gbrain jobs submit embed --idempotency-key "cron:embed:$(date -u +%Y-%m-%dT%H)" 2>&1 | head -2
