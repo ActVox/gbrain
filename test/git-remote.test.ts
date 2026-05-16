@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, chmodSync }
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
+  GIT_NO_RECURSE_SUBMODULES_FLAG,
   GIT_SSRF_FLAGS,
   parseRemoteUrl,
   RemoteUrlError,
@@ -86,7 +87,6 @@ describe('GIT_SSRF_FLAGS', () => {
       '-c', 'http.followRedirects=false',
       '-c', 'protocol.file.allow=never',
       '-c', 'protocol.ext.allow=never',
-      '--no-recurse-submodules',
     ]);
   });
 });
@@ -229,9 +229,12 @@ describe('cloneRepo', () => {
     const calls = readArgvLog();
     expect(calls.length).toBe(1);
     const argv = calls[0];
-    // Pin the SSRF flags before the 'clone' verb (codex Q2 invariant).
+    // Pin the SSRF config flags before the 'clone' verb. Command flags must
+    // follow the subcommand; git rejects `git --no-recurse-submodules clone`.
     expect(argv.slice(0, GIT_SSRF_FLAGS.length)).toEqual([...GIT_SSRF_FLAGS]);
-    expect(argv).toContain('clone');
+    const cloneIdx = argv.indexOf('clone');
+    expect(cloneIdx).toBeGreaterThan(-1);
+    expect(argv[cloneIdx + 1]).toBe(GIT_NO_RECURSE_SUBMODULES_FLAG);
     expect(argv).toContain('--depth=1');
     expect(argv).toContain('https://example.com/repo');
     expect(argv[argv.length - 1]).toBe(dest);
@@ -307,8 +310,10 @@ describe('pullRepo', () => {
     expect(argv[0]).toBe('-C');
     expect(argv[1]).toBe(repo);
     expect(argv.slice(2, 2 + GIT_SSRF_FLAGS.length)).toEqual([...GIT_SSRF_FLAGS]);
-    expect(argv).toContain('pull');
-    expect(argv).toContain('--ff-only');
+    const pullIdx = argv.indexOf('pull');
+    expect(pullIdx).toBeGreaterThan(-1);
+    expect(argv[pullIdx + 1]).toBe('--ff-only');
+    expect(argv[pullIdx + 2]).toBe(GIT_NO_RECURSE_SUBMODULES_FLAG);
     rmSync(repo, { recursive: true, force: true });
   });
 

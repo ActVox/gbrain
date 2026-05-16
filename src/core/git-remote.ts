@@ -6,8 +6,8 @@
  * IPv6 loopback, IPv4-mapped IPv6, metadata hostnames, hex/octal bypass,
  * and CGNAT 100.64/10).
  *
- * cloneRepo and pullRepo both spread GIT_SSRF_FLAGS so a future flag added
- * to one path lands on both — single source of truth.
+ * cloneRepo and pullRepo both spread GIT_SSRF_CONFIG_FLAGS so a future git
+ * config lockdown added to one path lands on both — single source of truth.
  *
  * Tailscale 100.64/10 trips the integrations.ts allowlist (CGNAT line in
  * url-safety.ts isPrivateIpv4). For self-hosted internal git servers
@@ -24,14 +24,20 @@ import { isInternalUrl } from './url-safety.ts';
  * - http.followRedirects=false: closes DNS rebinding via redirect chains
  * - protocol.file.allow=never: no local-file URLs (defense in depth)
  * - protocol.ext.allow=never: no external helpers (`git-remote-foo`)
- * - --no-recurse-submodules: .gitmodules cannot become a second fetch surface
+ * Command-specific flags such as --no-recurse-submodules must be placed after
+ * the git subcommand (`clone` / `pull`), not in the top-level git argv.
  */
-export const GIT_SSRF_FLAGS = [
+export const GIT_SSRF_CONFIG_FLAGS = [
   '-c', 'http.followRedirects=false',
   '-c', 'protocol.file.allow=never',
   '-c', 'protocol.ext.allow=never',
-  '--no-recurse-submodules',
 ] as const;
+
+/** .gitmodules cannot become a second fetch surface. Must follow clone/pull. */
+export const GIT_NO_RECURSE_SUBMODULES_FLAG = '--no-recurse-submodules' as const;
+
+/** Back-compat alias for callers/tests that only need top-level git flags. */
+export const GIT_SSRF_FLAGS = GIT_SSRF_CONFIG_FLAGS;
 
 export type RemoteUrlErrorCode =
   | 'invalid_url'
@@ -153,7 +159,7 @@ export function cloneRepo(url: string, destDir: string, opts: CloneOpts = {}): v
     }
   }
 
-  const args: string[] = [...GIT_SSRF_FLAGS, 'clone'];
+  const args: string[] = [...GIT_SSRF_CONFIG_FLAGS, 'clone', GIT_NO_RECURSE_SUBMODULES_FLAG];
   if (opts.depth !== 0) {
     args.push(`--depth=${opts.depth ?? 1}`);
   }
@@ -179,7 +185,13 @@ export function cloneRepo(url: string, destDir: string, opts: CloneOpts = {}): v
 
 /** Pull a repo with --ff-only and the same SSRF-defensive flags as cloneRepo. */
 export function pullRepo(repoPath: string, opts: { timeoutMs?: number } = {}): void {
-  const args: string[] = ['-C', repoPath, ...GIT_SSRF_FLAGS, 'pull', '--ff-only'];
+  const args: string[] = [
+    '-C', repoPath,
+    ...GIT_SSRF_CONFIG_FLAGS,
+    'pull',
+    '--ff-only',
+    GIT_NO_RECURSE_SUBMODULES_FLAG,
+  ];
   try {
     execFileSync('git', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
