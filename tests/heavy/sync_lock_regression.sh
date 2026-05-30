@@ -127,7 +127,7 @@ echo "[sync_lock_regression] outcomes: winners=$WINNERS losers=$LOSERS unknown=$
 
 # Step 5: assert no leaked gbrain_cycle_locks rows. The pkey column is `id`,
 # not `lock_id` (column name confirmed via \d gbrain_cycle_locks).
-LEAKED=$(psql "$DATABASE_URL" -t -A -v lock_id="$SYNC_LOCK_ID" -c "SELECT COUNT(*) FROM gbrain_cycle_locks WHERE id = :'lock_id';" 2>>"$LOG" | tr -d ' ')
+LEAKED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM gbrain_cycle_locks WHERE id = 'gbrain-sync:default';" 2>>"$LOG" | tr -d ' ')
 echo "[sync_lock_regression] post-run gbrain_cycle_locks($SYNC_LOCK_ID) row count: $LEAKED" | tee -a "$LOG"
 
 # Step 6: verdict
