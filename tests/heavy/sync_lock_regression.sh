@@ -3,7 +3,7 @@
 # Sync writer-lock concurrency regression test.
 #
 # Spawns N concurrent `gbrain sync` processes against one DB; asserts:
-#   1. Exactly one wins the writer lock (`gbrain-sync` row in `gbrain_cycle_locks`).
+#   1. Exactly one wins the writer lock (`gbrain-sync:default` row in `gbrain_cycle_locks`).
 #   2. N-1 lose with "Another sync is in progress" — they fail FAST, they don't queue.
 #      (Per src/commands/sync.ts:377 — performSync uses `tryAcquireDbLock`, no wait.)
 #   3. After all processes exit, zero leaked `gbrain_cycle_locks` rows remain.
@@ -32,8 +32,8 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 
 TS=$(date -u +%Y%m%d-%H%M%SZ)
-# Isolate from the developer's real ~/.gbrain so writing sync.repo_path doesn't
-# clobber their config. Restored on exit.
+# Isolate from the developer's real ~/.gbrain so this test cannot clobber
+# their local config or audit logs. Restored on exit.
 TMP_GBRAIN_HOME=$(mktemp -d -t gbrain-sync-lock-home-XXXXXX)
 export GBRAIN_HOME="$TMP_GBRAIN_HOME"
 LOG_DIR="$GBRAIN_HOME/audit"
@@ -44,6 +44,7 @@ SURFACE_LOG="${TMPDIR:-/tmp}/heavy-sync_lock_regression-$TS.log"
 trap 'rm -rf "$TMP_GBRAIN_HOME"; cp -f "$LOG" "$SURFACE_LOG" 2>/dev/null || true' EXIT
 
 NUM_PARALLEL="${NUM_PARALLEL:-4}"
+SYNC_LOCK_ID="${SYNC_LOCK_ID:-gbrain-sync:default}"
 echo "[sync_lock_regression] DATABASE_URL=$DATABASE_URL"
 echo "[sync_lock_regression] log=$LOG"
 echo "[sync_lock_regression] spawning $NUM_PARALLEL parallel sync processes..."
@@ -55,8 +56,7 @@ echo "[sync_lock_regression] spawning $NUM_PARALLEL parallel sync processes..."
 echo "[sync_lock_regression] init schema via gbrain doctor..." | tee -a "$LOG"
 timeout 180s bun run src/cli.ts doctor --json > /dev/null 2>>"$LOG" || true
 
-# Step 2: create a tiny brain dir + register it as sync.repo_path so each sync
-# call has something legitimate to do.
+# Step 2: create a tiny brain dir so each sync call has something legitimate to do.
 BRAIN_DIR=$(mktemp -d -t gbrain-sync-lock-XXXXXX)
 # Compose with the earlier GBRAIN_HOME-cleanup trap (NOT overwrite it).
 trap 'rm -rf "$BRAIN_DIR" "$TMP_GBRAIN_HOME"; cp -f "$LOG" "$SURFACE_LOG" 2>/dev/null || true' EXIT
@@ -81,17 +81,6 @@ EOF
 # git-init so sync's diff-walk has something to anchor (sync expects a git repo)
 (cd "$BRAIN_DIR" && git init -q && git add . && git -c user.email=test@test -c user.name=test commit -q -m "seed" >/dev/null 2>&1) || true
 
-# Tell gbrain to use this brain dir. v0.41 introduced the source registry
-# (sources table) as the canonical "where do pages come from" surface;
-# `sync.repo_path` is the legacy key and sync now reads the source row's
-# `local_path` column. Update the default source's local_path directly via
-# psql (mirrors how fm_wallclock.sh registers via the engine API — same
-# semantics, lower process-spawn overhead).
-psql "$DATABASE_URL" -c "INSERT INTO sources (id, name, local_path) VALUES ('default', 'default', '$BRAIN_DIR') ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path;" >>"$LOG" 2>&1
-# Keep the legacy config key set too — some code paths still read it, and
-# setting both is the belt-and-suspenders shape downstream callers expect.
-bun run src/cli.ts config set sync.repo_path "$BRAIN_DIR" >/dev/null 2>&1 || true
-
 # Step 3: spawn N parallel sync processes. Capture each one's exit code +
 # stdout/stderr. The race for the lock happens during their startup window.
 PIDS=()
@@ -102,14 +91,7 @@ for ((i=1; i<=NUM_PARALLEL; i+=1)); do
   OUT_F=$(mktemp -t sync-lock-out-XXXXXX)
   EXIT_FILES+=("$EXIT_F")
   OUT_FILES+=("$OUT_F")
-  # --no-embed: this test measures the writer-lock race, not embeddings.
-  # CI runners don't pipe ZEROENTROPY_API_KEY / OPENAI_API_KEY / VOYAGE_API_KEY,
-  # so without --no-embed every sync fails with "Embedding model X requires Y"
-  # and the test classifier reports unknown failures instead of lock outcomes.
-  # --repo: sync's canonical brain-dir flag (the older --dir is silently
-  # ignored; the script previously paired it with `config set sync.repo_path`
-  # which sync no longer reads in the source-registry world).
-  ( bun run src/cli.ts sync --repo "$BRAIN_DIR" --no-embed >"$OUT_F" 2>&1; echo $? > "$EXIT_F" ) &
+  ( set +e; bun run src/cli.ts sync --repo "$BRAIN_DIR" >"$OUT_F" 2>&1; echo $? > "$EXIT_F" ) &
   PIDS+=($!)
 done
 
@@ -145,8 +127,8 @@ echo "[sync_lock_regression] outcomes: winners=$WINNERS losers=$LOSERS unknown=$
 
 # Step 5: assert no leaked gbrain_cycle_locks rows. The pkey column is `id`,
 # not `lock_id` (column name confirmed via \d gbrain_cycle_locks).
-LEAKED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM gbrain_cycle_locks WHERE id = 'gbrain-sync';" 2>>"$LOG" | tr -d ' ')
-echo "[sync_lock_regression] post-run gbrain_cycle_locks(gbrain-sync) row count: $LEAKED" | tee -a "$LOG"
+LEAKED=$(psql "$DATABASE_URL" -t -A -v lock_id="$SYNC_LOCK_ID" -c "SELECT COUNT(*) FROM gbrain_cycle_locks WHERE id = :'lock_id';" 2>>"$LOG" | tr -d ' ')
+echo "[sync_lock_regression] post-run gbrain_cycle_locks($SYNC_LOCK_ID) row count: $LEAKED" | tee -a "$LOG"
 
 # Step 6: verdict
 FAIL=0
@@ -169,7 +151,7 @@ fi
 
 # The lock row must be cleaned up on exit (release via try/finally).
 if [ "$LEAKED" != "0" ]; then
-  echo "[sync_lock_regression] FAIL: $LEAKED leaked gbrain_cycle_locks(gbrain-sync) row(s) after all syncs exited" >&2
+  echo "[sync_lock_regression] FAIL: $LEAKED leaked gbrain_cycle_locks($SYNC_LOCK_ID) row(s) after all syncs exited" >&2
   FAIL=1
 fi
 
