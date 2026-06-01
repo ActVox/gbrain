@@ -25,7 +25,15 @@ envVarGroups:
   - name: gbrain-shared
     envVars:
       - key: DATABASE_URL
-        sync: false                          # Supabase transaction-pooler URL
+        sync: false                          # Supabase transaction-pooler URL (port 6543, read pool)
+      - key: GBRAIN_DIRECT_DATABASE_URL
+        sync: false                          # Supabase SESSION-pooler URL (port 5432) — DDL/bulk/migration pool.
+                                             # REQUIRED on Render: without it gbrain derives db.<ref>.supabase.co
+                                             # (IPv6-only, unreachable from Render) and migrations + graph
+                                             # link-inserts silently fail. See
+                                             # docs/plans/2026-06-01-atx-hub-recovery-runbook.md
+      - key: ZEROENTROPY_API_KEY
+        sync: false                          # Embedding (zeroentropyai:zembed-1) + query embedding
       - key: OPENAI_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
