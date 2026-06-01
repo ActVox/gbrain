@@ -72,7 +72,7 @@ GBrain's edge over plain RAG comes from typed-link knowledge graph extraction (`
 
 Multi-source has been mature since v0.18:
 - `pages.source_id` discriminator on every row
-- Source-aware ranking at the SQL layer (v0.22.0) — boost curated `originals/` over `wintermute/chat/` extends naturally to "boost project-X's docs when query intent matches project-X"
+- Source-aware ranking at the SQL layer (v0.22.0) — boost curated `originals/` over `openclaw/chat/` extends naturally to "boost project-X's docs when query intent matches project-X"
 - Per-source `sources.last_commit` anchor (v0.22.5, PR #475) so each project's git sync has its own bookmark
 - v0.22.13 hardened the writer lock + head-drift gate for concurrent multi-source syncs
 
