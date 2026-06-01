@@ -61,13 +61,15 @@ services:
       (cd admin && bun install --frozen-lockfile)
       bun run build:admin
       bun run build
-    startCommand: ./bin/gbrain serve --http --port $PORT --public-url $GBRAIN_PUBLIC_URL --token-ttl 2592000
+    startCommand: ./bin/gbrain serve --http --port $PORT --bind 0.0.0.0 --public-url $GBRAIN_PUBLIC_URL --token-ttl 2592000
     envVars:
       - fromGroup: gbrain-shared
       - key: GBRAIN_PUBLIC_URL
         value: https://gbrain.actvox.dev      # CHANGE to your custom domain
       - key: GBRAIN_ADMIN_BOOTSTRAP_TOKEN
         generateValue: true                  # Render generates; never logged (OV-14)
+      - key: GBRAIN_HTTP_TRUST_PROXY
+        value: "1"                           # Render terminates TLS at its edge (1 hop); fixes rate-limit client IP + cookie Secure flag
       - key: GBRAIN_AUDIT_DIR
         value: /tmp/gbrain-audit             # ephemeral; web has no disk
 
