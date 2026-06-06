@@ -116,6 +116,7 @@ services:
         ["mandala-estate"]="mandala-estate"
         ["ask-stars"]="ask-stars"
         ["ai-rozum"]="ai-rozum"
+        ["acre"]="Acre"
       )
       for ID in "${!PAIRS[@]}"; do
         REPO="${PAIRS[$ID]}"
@@ -126,7 +127,7 @@ services:
         fi
       done
       cd /opt/render/project/src
-      exec ./bin/gbrain jobs supervisor --concurrency 4
+      exec ./bin/gbrain jobs supervisor --concurrency 2
     disk:
       name: gbrain-data
       mountPath: /var/gbrain
@@ -158,13 +159,13 @@ services:
       bun install --frozen-lockfile
       bun run build
     startCommand: |
-      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum"
+      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum acre"
       for SRC in $SOURCES; do
         echo "submit sync $SRC"
         ./bin/gbrain jobs submit sync --params "{\"sourceId\":\"$SRC\"}" --idempotency-key "cron:sync:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | head -2
       done
       # Extract links + timeline so traverse_graph / get_backlinks / get_timeline return data.
-      # Worker FIFO with --concurrency 4 means extract may race a still-running sync on the
+      # Worker FIFO with --concurrency 2 means extract may race a still-running sync on the
       # same source; the next 30-min cron picks up any links missed in the race window.
       for SRC in $SOURCES; do
         echo "submit extract $SRC"
