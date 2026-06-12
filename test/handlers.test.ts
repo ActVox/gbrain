@@ -47,6 +47,40 @@ describe('registerBuiltinHandlers', () => {
   test('total handler count includes all 7 names', () => {
     expect(worker.registeredNames.length).toBeGreaterThanOrEqual(7);
   });
+
+  test('extract handler can run DB-source extraction for a non-default source', async () => {
+    const sourceId = 'handler-src';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, $2, '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [sourceId, 'Handler Source'],
+    );
+    await engine.putPage('people/handler-alice', {
+      type: 'person',
+      title: 'Handler Alice',
+      compiled_truth: 'Target page.',
+      timeline: '',
+    }, { sourceId });
+    await engine.putPage('notes/handler-ref', {
+      type: 'note',
+      title: 'Handler Ref',
+      compiled_truth: 'References [[people/handler-alice]] from the same source.',
+      timeline: '',
+    }, { sourceId });
+
+    const handler = (worker as any).handlers.get('extract');
+    expect(handler).toBeDefined();
+    const result = await handler({
+      data: { source: 'db', mode: 'links', source_id: sourceId },
+      signal: { aborted: false } as any,
+      job: { id: 100, name: 'extract' } as any,
+    });
+
+    expect((result as any).pages_processed).toBeGreaterThanOrEqual(2);
+    const links = await engine.getLinks('notes/handler-ref', { sourceId });
+    expect(links.some(l => l.to_slug === 'people/handler-alice')).toBe(true);
+  });
 });
 
 describe('autopilot-cycle handler — partial failure does NOT throw', () => {
