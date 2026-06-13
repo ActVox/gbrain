@@ -116,7 +116,7 @@ services:
         ["mandala-estate"]="mandala-estate"
         ["ask-stars"]="ask-stars"
         ["ai-rozum"]="ai-rozum"
-        ["acre"]="Acre"
+        ["openclaw"]="openclaw"
       )
       for ID in "${!PAIRS[@]}"; do
         REPO="${PAIRS[$ID]}"
@@ -159,7 +159,7 @@ services:
       bun install --frozen-lockfile
       bun run build
     startCommand: |
-      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum acre"
+      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum openclaw"
       for SRC in $SOURCES; do
         echo "submit sync $SRC"
         ./bin/gbrain jobs submit sync --params "{\"sourceId\":\"$SRC\"}" --idempotency-key "cron:sync:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | head -2
