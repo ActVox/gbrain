@@ -365,15 +365,16 @@ async function main() {
   // contract. Daemons (`serve`) are excluded so they stay alive.
   const DISCONNECT_HARD_DEADLINE_MS = 10_000;
   let forceExitTimer: ReturnType<typeof setTimeout> | undefined;
+  let opHandlerCompleted = false;
   if (shouldForceExitAfterMain()) {
     forceExitTimer = setTimeout(() => {
+      const exitCode = opHandlerCompleted ? (process.exitCode ?? 0) : (process.exitCode ?? 1);
       console.warn(
-        `[cli] engine.disconnect() did not return within ${DISCONNECT_HARD_DEADLINE_MS}ms — force-exiting`,
+        `[cli] engine.disconnect() did not return within ${DISCONNECT_HARD_DEADLINE_MS}ms — force-exiting with exit ${exitCode}`,
       );
-      // v0.42.20.0 (codex): honor an exit code an errored op already set —
-      // a bare process.exit(0) here would mask a failed op as success if the
-      // drain/disconnect then hangs.
-      process.exit(process.exitCode ?? 0);
+      // Preserve real handler failures, but do not convert a successful write/read
+      // into a failed CLI just because local Bun/PGLite teardown wedged.
+      process.exit(exitCode);
     }, DISCONNECT_HARD_DEADLINE_MS);
     // unref so the timer itself doesn't keep the event loop alive — only
     // the actual pending work (PGLite WASM handle) does. Without unref,
@@ -391,6 +392,7 @@ async function main() {
     const result = JSON.parse(JSON.stringify(rawResult));
     const output = formatResult(op.name, result);
     if (output) process.stdout.write(output);
+    opHandlerCompleted = true;
   } catch (e: unknown) {
     // v0.42.20.0 (codex D4): on error, set exitCode + return so the `finally`
     // STILL runs (drains every background-work sink + disconnects). A bare
@@ -1478,6 +1480,7 @@ async function handleCliOnly(command: string, args: string[]) {
 
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
+  let commandBodyCompleted = false;
   try {
     switch (command) {
       case 'import': {
@@ -1911,6 +1914,7 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
     }
+    commandBodyCompleted = true;
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     // v0.42.20.0 (#1762) — the CLI_ONLY path (which owns `gbrain capture`)
@@ -1930,8 +1934,9 @@ async function handleCliOnly(command: string, args: string[]) {
       let hardExitTimer: ReturnType<typeof setTimeout> | undefined;
       if (forceExit) {
         hardExitTimer = setTimeout(() => {
-          console.warn('[cli] engine.disconnect() did not return within 10000ms — force-exiting');
-          process.exit(process.exitCode ?? 0);
+          const exitCode = commandBodyCompleted ? (process.exitCode ?? 0) : (process.exitCode ?? 1);
+          console.warn(`[cli] engine.disconnect() did not return within 10000ms — force-exiting with exit ${exitCode}`);
+          process.exit(exitCode);
         }, 10_000);
         hardExitTimer.unref?.();
       }
