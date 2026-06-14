@@ -482,6 +482,7 @@ async function main() {
     const result = JSON.parse(JSON.stringify(rawResult, bigintToStringReplacer));
     const output = formatResult(op.name, result);
     if (output) process.stdout.write(output);
+    opHandlerCompleted = true;
   } catch (e: unknown) {
     // v0.42.20.0 (codex D4): on error, set exitCode + return so the `finally`
     // STILL runs (drains every background-work sink + disconnects). A bare
@@ -1709,6 +1710,7 @@ async function handleCliOnly(command: string, args: string[]) {
 
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
+  let commandBodyCompleted = false;
   try {
     switch (command) {
       case 'import': {
@@ -2197,6 +2199,7 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
     }
+    commandBodyCompleted = true;
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     // #2084 — the CLI_ONLY fall-through teardown (drain every background-work
