@@ -9,6 +9,8 @@
  * Cosine re-score: blend 0.7*rrf + 0.3*cosine for query-specific ranking
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 import type { SearchResult, SearchOpts, HybridSearchMeta } from '../types.ts';
@@ -366,6 +368,212 @@ export function applyTitleBoost(
 
 /** Default title-phrase boost multiplier (mode-overridable via `title_boost`). */
 export const DEFAULT_TITLE_BOOST = 1.25;
+
+interface OperationalMemoryPolicyConfig {
+  intent_patterns?: string[];
+  raw_source_patterns?: string[];
+  canonical_rules?: Array<{ pattern: string; slugs: string[] }>;
+  boost_types?: Record<string, number>;
+  boost_prefixes?: Record<string, number>;
+  demote_prefixes?: Record<string, number>;
+}
+
+const DEFAULT_OPERATIONAL_MEMORY_POLICY: Required<OperationalMemoryPolicyConfig> = {
+  intent_patterns: [
+    '\\b(what\\s+now|next\\s+action|current\\s+actions?|status|today\\s+rail|command\\s+center|task\\s+trust|operational\\s+state|canonical\\s+pages?|retrieval\\s+policy|memory\\s+operating\\s+contract|eval\\s+suite)\\b',
+  ],
+  raw_source_patterns: [
+    '\\b(raw|transcript|exact\\s+wording|what\\s+did\\s+.*say|meeting\\s+transcript|source\\s+audit|provenance)\\b',
+  ],
+  canonical_rules: [
+    {
+      pattern: 'memory|retrieval|canonical|eval\\s+suite|operating\\s+contract|policy',
+      slugs: [
+        'ops/memory-operating-contract',
+        'ops/retrieval-policy',
+        'ops/canonical-page-registry',
+        'ops/retrieval-eval-suite',
+      ],
+    },
+  ],
+  boost_types: {
+    'synthesized-action-page': 2.4,
+    'task-list': 2.4,
+    'health-context': 1.9,
+    'retrieval-policy': 2.0,
+    'canonical-page-registry': 2.0,
+    'retrieval-eval-suite': 2.0,
+    'memory-system-contract': 2.0,
+    'graph-index': 1.25,
+  },
+  boost_prefixes: {
+    'ops/current': 1.8,
+    'ops/tasks': 1.8,
+    'health/current-': 1.8,
+  },
+  demote_prefixes: {
+    'meetings/circleback/': 0.35,
+    'dream-cycle-summaries/': 0.25,
+    'wiki/personal/reflections/': 0.55,
+    'wiki/originals/ideas/': 0.55,
+  },
+};
+
+let operationalMemoryPolicyCache: { key: string; policy: Required<OperationalMemoryPolicyConfig> } | null = null;
+
+function mergeOperationalMemoryPolicy(input?: OperationalMemoryPolicyConfig | null): Required<OperationalMemoryPolicyConfig> {
+  if (!input || typeof input !== 'object') return DEFAULT_OPERATIONAL_MEMORY_POLICY;
+  return {
+    intent_patterns: [
+      ...DEFAULT_OPERATIONAL_MEMORY_POLICY.intent_patterns,
+      ...(Array.isArray(input.intent_patterns) ? input.intent_patterns : []),
+    ],
+    raw_source_patterns: [
+      ...DEFAULT_OPERATIONAL_MEMORY_POLICY.raw_source_patterns,
+      ...(Array.isArray(input.raw_source_patterns) ? input.raw_source_patterns : []),
+    ],
+    canonical_rules: [
+      ...DEFAULT_OPERATIONAL_MEMORY_POLICY.canonical_rules,
+      ...(Array.isArray(input.canonical_rules) ? input.canonical_rules : []),
+    ],
+    boost_types: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.boost_types, ...(input.boost_types ?? {}) },
+    boost_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.boost_prefixes, ...(input.boost_prefixes ?? {}) },
+    demote_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.demote_prefixes, ...(input.demote_prefixes ?? {}) },
+  };
+}
+
+function loadOperationalMemoryPolicy(): Required<OperationalMemoryPolicyConfig> {
+  const envJson = process.env.GBRAIN_OPERATIONAL_MEMORY_POLICY_JSON;
+  const envPath = process.env.GBRAIN_OPERATIONAL_MEMORY_POLICY;
+  const homePath = process.env.GBRAIN_HOME
+    ? join(process.env.GBRAIN_HOME, '.gbrain', 'operational-memory-policy.json')
+    : '';
+  const key = envJson ? `json:${envJson}` : `file:${envPath || homePath}`;
+  if (operationalMemoryPolicyCache?.key === key) return operationalMemoryPolicyCache.policy;
+  let parsed: OperationalMemoryPolicyConfig | null = null;
+  try {
+    if (envJson) {
+      parsed = JSON.parse(envJson) as OperationalMemoryPolicyConfig;
+    } else {
+      const path = envPath || homePath;
+      if (path && existsSync(path)) {
+        parsed = JSON.parse(readFileSync(path, 'utf8')) as OperationalMemoryPolicyConfig;
+      }
+    }
+  } catch {
+    parsed = null;
+  }
+  const policy = mergeOperationalMemoryPolicy(parsed);
+  operationalMemoryPolicyCache = { key, policy };
+  return policy;
+}
+
+function matchesAnyPattern(query: string, patterns: string[]): boolean {
+  return patterns.some((p) => {
+    try { return new RegExp(p, 'i').test(query); }
+    catch { return false; }
+  });
+}
+
+function isOperationalMemoryQuery(query?: string): boolean {
+  if (!query) return false;
+  const policy = loadOperationalMemoryPolicy();
+  return matchesAnyPattern(query, policy.intent_patterns) && !matchesAnyPattern(query, policy.raw_source_patterns);
+}
+
+function canonicalOperationalSlugsForQuery(query?: string): string[] {
+  if (!query || !isOperationalMemoryQuery(query)) return [];
+  const policy = loadOperationalMemoryPolicy();
+  const slugs = new Set<string>();
+  for (const rule of policy.canonical_rules) {
+    try {
+      if (new RegExp(rule.pattern, 'i').test(query)) {
+        for (const slug of rule.slugs) slugs.add(slug);
+      }
+    } catch {
+      // Ignore malformed operator policy rules; retrieval must fail open.
+    }
+  }
+  return [...slugs];
+}
+
+function operationalMemoryFactor(r: SearchResult, query?: string): number {
+  if (!isOperationalMemoryQuery(query)) return 1.0;
+  const policy = loadOperationalMemoryPolicy();
+  let factor = policy.boost_types[r.type] ?? 1.0;
+  for (const [prefix, boost] of Object.entries(policy.boost_prefixes)) {
+    if (r.slug.startsWith(prefix)) factor *= boost;
+  }
+  for (const [prefix, demotion] of Object.entries(policy.demote_prefixes)) {
+    if (r.slug.startsWith(prefix)) factor *= demotion;
+  }
+  return factor;
+}
+
+export function applyOperationalMemoryPolicy(results: SearchResult[], query?: string): void {
+  if (!isOperationalMemoryQuery(query)) return;
+  for (const r of results) {
+    if (!Number.isFinite(r.score)) continue;
+    const factor = operationalMemoryFactor(r, query);
+    if (factor !== 1.0) {
+      r.score *= factor;
+      (r as SearchResult & { operational_memory_factor?: number }).operational_memory_factor = factor;
+    }
+  }
+}
+
+async function injectCanonicalOperationalResults(
+  engine: BrainEngine,
+  results: SearchResult[],
+  query: string | undefined,
+  opts?: { sourceId?: string; sourceIds?: string[] },
+): Promise<SearchResult[]> {
+  const slugs = canonicalOperationalSlugsForQuery(query);
+  if (slugs.length === 0) return results;
+  const out = [...results];
+  const existing = new Map(out.map(r => [`${r.source_id ?? 'default'}::${r.slug}`, r]));
+  const topScore = out.reduce((m, r) => Number.isFinite(r.score) && r.score > m ? r.score : m, 0.1);
+  const sourceId = opts?.sourceId ?? (opts?.sourceIds?.length === 1 ? opts.sourceIds[0] : undefined);
+  let rank = 0;
+  for (const slug of slugs) {
+    try {
+      const page = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
+      if (!page) continue;
+      const key = `${page.source_id ?? 'default'}::${slug}`;
+      const injectedScore = topScore * (1.2 - Math.min(rank, 10) * 0.01);
+      const already = existing.get(key);
+      if (already) {
+        already.score = Math.max(already.score, injectedScore);
+        rank++;
+        continue;
+      }
+      const chunks = await engine.getChunks(slug, { sourceId: page.source_id });
+      const chunk = chunks.find(c => c.chunk_source === 'compiled_truth') ?? chunks[0];
+      out.push({
+        slug,
+        page_id: page.id,
+        title: page.title,
+        type: page.type,
+        chunk_text: chunk?.chunk_text ?? page.compiled_truth.slice(0, 2000),
+        chunk_source: chunk?.chunk_source === 'timeline' ? 'timeline' : 'compiled_truth',
+        chunk_id: chunk?.id ?? -page.id,
+        chunk_index: chunk?.chunk_index ?? 0,
+        score: injectedScore,
+        stale: false,
+        source_id: page.source_id,
+        effective_date: page.effective_date ? page.effective_date.toISOString().slice(0, 10) : null,
+        effective_date_source: page.effective_date_source ?? null,
+        base_score: injectedScore,
+      });
+      rank++;
+    } catch {
+      // Best-effort: canonical injection must never break search.
+    }
+  }
+  applyOperationalMemoryPolicy(out, query);
+  out.sort((a, b) => b.score - a.score);
+  return out;
+}
 
 /**
  * v0.42.x — Life Chronicle (#2390) E1 temporal recall arm. On temporal queries
@@ -1159,8 +1367,12 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
-    stampEvidence(noEmbedHopped);
-    const noEmbedSliced = noEmbedHopped.slice(offset, offset + limit);
+    const noEmbedOperational = await injectCanonicalOperationalResults(engine, noEmbedHopped, query, {
+      sourceId: opts?.sourceId,
+      sourceIds: opts?.sourceIds,
+    });
+    stampEvidence(noEmbedOperational);
+    const noEmbedSliced = noEmbedOperational.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the no-embedding-provider path.
     const { results: noEmbedBudgeted, meta: noEmbedBudgetMeta } = enforceTokenBudget(noEmbedSliced, resolvedMode.tokenBudget);
     await stampContentFlags(engine, noEmbedBudgeted);
@@ -1395,8 +1607,12 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
-    stampEvidence(kwHopped);
-    const kwSliced = kwHopped.slice(offset, offset + limit);
+    const kwOperational = await injectCanonicalOperationalResults(engine, kwHopped, query, {
+      sourceId: opts?.sourceId,
+      sourceIds: opts?.sourceIds,
+    });
+    stampEvidence(kwOperational);
+    const kwSliced = kwOperational.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
     const { results: kwBudgeted, meta: kwBudgetMeta } = enforceTokenBudget(kwSliced, resolvedMode.tokenBudget);
     await stampContentFlags(engine, kwBudgeted);
@@ -1582,11 +1798,16 @@ export async function hybridSearch(
     sourceIds: opts?.sourceIds,
   });
 
+  const operationalPool = await injectCanonicalOperationalResults(engine, aliasHopped, query, {
+    sourceId: opts?.sourceId,
+    sourceIds: opts?.sourceIds,
+  });
+
   // T4 — stamp evidence + create_safety so the agent's don't-duplicate
   // decision keys off WHY a page matched, not a raw blended score. Stamp on
   // the full alias-hopped set before any adaptive trim so the kept results
   // carry evidence regardless of where the cap lands.
-  stampEvidence(aliasHopped);
+  stampEvidence(operationalPool);
 
   // v0.42 — intent-aware adaptive return-sizing (opt-in, default off). Trim
   // the ranked candidate set to an intent-driven cap BEFORE the limit slice,
@@ -1598,10 +1819,10 @@ export async function hybridSearch(
     opts?.adaptiveReturn,
     adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
   );
-  let returnPool = aliasHopped;
+  let returnPool = operationalPool;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;
   if (adaptiveCfg.enabled && offset === 0) {
-    const r = applyAdaptiveReturn(aliasHopped, suggestions.intent, adaptiveCfg);
+    const r = applyAdaptiveReturn(operationalPool, suggestions.intent, adaptiveCfg);
     returnPool = r.kept;
     adaptiveDecision = r.decision;
   }
@@ -1777,6 +1998,7 @@ export async function hybridSearchCached(
   );
   const skipCache =
     !cache.isEnabled() ||
+    isOperationalMemoryQuery(query) ||
     (opts?.walkDepth ?? 0) > 0 ||
     Boolean(opts?.nearSymbol) ||
     isNonDefaultColumn ||
