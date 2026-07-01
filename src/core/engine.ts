@@ -2,7 +2,7 @@ import type {
   Page, PageInput, PageFilters, GetPageOpts,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow,
   SearchResult, SearchOpts,
-  Link, GraphNode, GraphPath,
+  Link, GraphNode, GraphPath, RelationalFanoutRow, RelationalFanoutOpts,
   TimelineEntry, TimelineInput, TimelineOpts,
   RawData,
   PageVersion,
@@ -650,6 +650,15 @@ export interface BrainEngine {
   // Lifecycle
   connect(config: EngineConfig): Promise<void>;
   disconnect(): Promise<void>;
+  /**
+   * Recover a dropped connection using the config captured at the last
+   * `connect()`. Callers (autopilot health probe, batchRetry) MUST use this
+   * instead of `disconnect()` + bare `connect()`: the latter loses the config
+   * (#2034 — a bare `connect()` with no args throws `database_url undefined`
+   * forever) AND opens a null-connection window. Implemented on BOTH engines
+   * for parity so the call is never a silent no-op.
+   */
+  reconnect(ctx?: { error?: unknown }): Promise<void>;
   initSchema(): Promise<void>;
   transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T>;
   /**
@@ -1136,13 +1145,23 @@ export interface BrainEngine {
    * sources (pre-v0.31.8 behavior; preserved via two-branch query in both
    * engines). When set, the from-page filter becomes
    * `WHERE f.slug = $1 AND f.source_id = $X`.
+   *
+   * #2200: `opts.sourceIds` is a federated read grant (caller's allowedSources).
+   * It takes precedence over scalar `sourceId` and constrains BOTH endpoints
+   * (from AND to) to the grant via `source_id = ANY($::text[])` — so an in-grant
+   * page linking to an out-of-grant page does NOT leak the foreign slug/context
+   * (carries the `traversePaths` both-endpoint invariant). Remote MCP clients
+   * always route here (sourceScopeOpts emits an array for any allowedSources
+   * grant); the scalar branch is internal/CLI and keeps cross-source visibility
+   * (reconcileLinks + back-link validators depend on it).
    */
-  getLinks(slug: string, opts?: { sourceId?: string }): Promise<Link[]>;
+  getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]>;
   /**
    * v0.31.8 (D12 + D16): same `opts.sourceId` semantics as `getLinks`,
-   * applied to the to-page side of the join.
+   * applied to the to-page side of the join. #2200: `opts.sourceIds` federated
+   * grant constrains both endpoints (see `getLinks`).
    */
-  getBacklinks(slug: string, opts?: { sourceId?: string }): Promise<Link[]>;
+  getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]>;
   /**
    * v114 (#1941): distinct link_source provenances with edge counts, for
    * `gbrain link-sources`. Source-scoped via `{sourceId?, sourceIds?}` (both
@@ -1197,6 +1216,30 @@ export interface BrainEngine {
     slug: string,
     opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both'; sourceId?: string; sourceIds?: string[] },
   ): Promise<GraphPath[]>;
+  /**
+   * Typed-edge relational fan-out for the relational recall arm (v0.43).
+   *
+   * Generalizes traversePaths to a SEED ARRAY and aggregates to ranked NODES
+   * (not edges): for each reached page, the shortest hop from any seed, a
+   * connection-richness count, the edge types it was reached by, the shortest
+   * connecting slug path, and the page's canonical (lowest-ordinal) chunk id.
+   *
+   * Invariants:
+   * - WITHIN-SOURCE: a walk never crosses a source boundary (each branch
+   *   stays in its seed's own source), even when multiple sources are in
+   *   scope. Cross-source edge traversal is a separate, security-reviewed
+   *   feature.
+   * - `link_source='mentions'` edges are EXCLUDED by default (noisy + the
+   *   densest fan-out source); opt in via `includeMentions`.
+   * - `deleted_at IS NULL` at seed, every neighbor, and every returned node.
+   * - Deterministic ordering: hop ASC, edge_count DESC, source_id, slug.
+   * Must move in lockstep with the PGLite implementation
+   * (test/e2e/engine-parity.test.ts).
+   */
+  relationalFanout(
+    seeds: string[],
+    opts?: RelationalFanoutOpts,
+  ): Promise<RelationalFanoutRow[]>;
   /**
    * For a list of slugs, return how many inbound links each has.
    * Used by hybrid search backlink boost. Single SQL query, not N+1.
@@ -1297,7 +1340,13 @@ export interface BrainEngine {
    */
   addTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void>;
   removeTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void>;
-  getTags(slug: string, opts?: { sourceId?: string }): Promise<string[]>;
+  /**
+   * #2200: getTags ALSO accepts a federated `sourceIds[]` read grant (precedence
+   * over scalar `sourceId`); it unions tags across the matched same-slug pages
+   * via `page_id IN (…) … DISTINCT`. The write-side addTag/removeTag deliberately
+   * stay scalar-only — `allowedSources` is a read grant; writes route to one source.
+   */
+  getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<string[]>;
 
   // Timeline
   /**
@@ -1654,7 +1703,20 @@ export interface BrainEngine {
    * until the v0_32_2 migration backfills them. Cycle-phase callers in
    * commit 7 add the empty-fence-guard as a belt-and-suspenders check.
    */
-  deleteFactsForPage(slug: string, source_id: string): Promise<{ deleted: number }>;
+  /**
+   * #1928: `excludeSourcePrefixes` protects facts whose `source` matches any
+   * given prefix (e.g. `['cli:']` for conversation facts written by
+   * `extract-conversation-facts`) from a fence reconcile. Those rows are NOT
+   * fence-owned — a destructive wipe-and-reinsert pass would delete them and
+   * never recreate them (the page has no `## Facts` fence). Omitted ⇒ legacy
+   * behavior (delete every fact on the page coordinate). NULL/empty `source`
+   * rows are always deletable (fence default).
+   */
+  deleteFactsForPage(
+    slug: string,
+    source_id: string,
+    opts?: { excludeSourcePrefixes?: string[] },
+  ): Promise<{ deleted: number }>;
 
   /**
    * Mark a fact expired. Never DELETE. Returns true iff a row was updated.
