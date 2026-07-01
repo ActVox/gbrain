@@ -1,14 +1,16 @@
-# Render Blueprint — ATX-HUB GBrain centralization rollout
+# Render Blueprint — ActVox GBrain production rollout
 #
 # Provisions:
 #   gbrain-web    — HTTP MCP server (stateless, Standard 2GB)
 #   gbrain-worker — minion supervisor + sync/embed/dream cycle (Pro 4GB, 50GB disk)
 #
-# Cron Job is added in Phase 5 (after first sync) — see plan file at
-# ~/.claude/plans/starry-growing-matsumoto.md.
+# Production branch policy:
+#   ActVox/gbrain:master is the production/integration branch.
+#   garrytan/gbrain:master is the external upstream.
+#   ATX-HUB is a legacy rollout branch / rollback reference only.
 #
-# To apply: push this file to ATX-HUB, then in Render dashboard:
-#   New → Blueprint → connect ActVox/gbrain → branch ATX-HUB → Apply
+# To apply: push this file to master, then in Render dashboard:
+#   New → Blueprint → connect ActVox/gbrain → branch master → Apply
 # Render reads this file and creates both services + the disk + the env
 # var group in one shot.
 #
@@ -58,7 +60,7 @@ services:
     plan: standard                           # 2GB / 1 CPU
     region: oregon                           # CHANGE if Supabase is elsewhere
     repo: https://github.com/ActVox/gbrain
-    branch: ATX-HUB                          # rollout branch; switch to master after merge
+    branch: master                           # ActVox production/integration branch
     autoDeploy: true
     healthCheckPath: /health
     buildCommand: |
@@ -91,7 +93,7 @@ services:
     plan: pro                                # 4GB / 2 CPU — bulk-import RAM peaks
     region: oregon                           # MUST match web service region
     repo: https://github.com/ActVox/gbrain
-    branch: ATX-HUB
+    branch: master
     autoDeploy: true
     buildCommand: |
       set -e
@@ -150,7 +152,7 @@ services:
     plan: starter                            # tiny — runs for ~5 sec per invocation
     region: oregon
     repo: https://github.com/ActVox/gbrain
-    branch: ATX-HUB
+    branch: master
     schedule: "*/30 * * * *"                 # every 30 min — fallback for missed webhooks
     buildCommand: |
       set -e
@@ -182,7 +184,7 @@ services:
     plan: starter
     region: oregon
     repo: https://github.com/ActVox/gbrain
-    branch: ATX-HUB
+    branch: master
     schedule: "0 2 * * *"                    # 02:00 UTC daily
     buildCommand: |
       set -e
