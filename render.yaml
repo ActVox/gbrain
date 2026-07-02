@@ -125,7 +125,7 @@ services:
         if [ ! -d "$ID/.git" ]; then
           echo "[startup] cloning ActVox/$REPO into $ID"
           rm -rf "$ID"
-          git clone --depth 1 "https://x-access-token:$GIT_PAT@github.com/ActVox/$REPO.git" "$ID" || echo "[startup] WARN: clone $REPO failed"
+          git clone --depth 1 "https://x-access-token:${GIT_PAT:?GIT_PAT missing}@github.com/ActVox/$REPO.git" "$ID" || echo "[startup] WARN: clone $REPO failed"
         fi
       done
       cd /opt/render/project/src
