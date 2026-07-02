@@ -87,9 +87,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc  # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Use the OSS CLI container directly. gitleaks/gitleaks-action requires
+      # a commercial license for organizations and fails before scanning.
+      - uses: docker://zricethezav/gitleaks:v8.28.0
+        with:
+          args: detect --source=. --no-banner --redact --exit-code=1
 
   verify:
     # Pre-test gates: privacy/jsonb/source-id/etc + typecheck + admin-build.
