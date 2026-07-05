@@ -36,6 +36,7 @@ import { join, dirname, isAbsolute, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
+import { MinionWorker } from '../minions/worker.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
 import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
 import { discoverTranscripts, type DiscoveredTranscript } from './transcript-discovery.ts';
@@ -480,12 +481,15 @@ export async function runPhaseSynthesize(
           idempotency_key,
           timeout_ms: 30 * 60 * 1000, // 30 min per chunk
         };
-        const child = await queue.add(
+        let child = await queue.add(
           'subagent',
           childData as unknown as Record<string, unknown>,
           submitOpts,
           { allowProtectedSubmit: true },
         );
+        if (shouldRetryExistingSynthesizeChild(child.status)) {
+          child = (await queue.retryJob(child.id)) ?? child;
+        }
         childIds.push(child.id);
         if (isChunked) {
           chunkInfo.set(child.id, { idx: i, hash6 });
@@ -496,23 +500,31 @@ export async function runPhaseSynthesize(
     // Wait for every child to reach a terminal state. Tick yieldDuringPhase
     // every 5 min so the cycle lock TTL refreshes.
     const childOutcomes: Array<{ jobId: number; status: string }> = [];
-    for (const jobId of childIds) {
-      try {
-        const job = await waitForCompletion(queue, jobId, {
-          timeoutMs: 35 * 60 * 1000,
-          pollMs: 5 * 1000,
-        });
-        childOutcomes.push({ jobId, status: job.status });
-      } catch (e) {
-        if (e instanceof TimeoutError) {
-          childOutcomes.push({ jobId, status: 'timeout' });
-        } else {
-          throw e;
+    const inlineWorker = await maybeStartInlineSynthesizeWorker(engine, childIds.length);
+    try {
+      for (const jobId of childIds) {
+        try {
+          const job = await waitForCompletion(queue, jobId, {
+            timeoutMs: 35 * 60 * 1000,
+            pollMs: shouldRunInlineSynthesizeWorker(engine.kind, childIds.length) ? 250 : 5 * 1000,
+          });
+          childOutcomes.push({ jobId, status: job.status });
+        } catch (e) {
+          if (e instanceof TimeoutError) {
+            childOutcomes.push({ jobId, status: 'timeout' });
+          } else {
+            throw e;
+          }
+        }
+        // After each child terminal, give the cycle lock + worker job lock a chance.
+        if (opts.yieldDuringPhase) {
+          try { await opts.yieldDuringPhase(); } catch { /* best-effort */ }
         }
       }
-      // After each child terminal, give the cycle lock + worker job lock a chance.
-      if (opts.yieldDuringPhase) {
-        try { await opts.yieldDuringPhase(); } catch { /* best-effort */ }
+    } finally {
+      if (inlineWorker) {
+        inlineWorker.worker.stop();
+        await inlineWorker.done;
       }
     }
 
@@ -543,7 +555,7 @@ export async function runPhaseSynthesize(
 
     const ms = Date.now() - start;
     const submittedTranscripts = worthProcessing.length - skipReports.length;
-    return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, {
+    const details = {
       transcripts_discovered: transcripts.length,
       transcripts_processed: submittedTranscripts,
       pages_written: writtenSlugs.length,
@@ -561,11 +573,56 @@ export async function runPhaseSynthesize(
       skips: skipReports,
       summary_slug: summarySlug,
       verdicts,
-    });
+    };
+    const badChildren = childOutcomes.filter(o => isBadChildOutcome(o.status));
+    if (badChildren.length > 0) {
+      return warn(
+        `${badChildren.length}/${childOutcomes.length} synthesize child job(s) did not complete cleanly`,
+        { ...details, bad_child_outcomes: badChildren },
+      );
+    }
+    return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, details);
   } catch (e) {
     return failed(makeError('InternalError', 'SYNTH_PHASE_FAIL',
       e instanceof Error ? (e.message || 'synthesize phase threw') : String(e)));
   }
+}
+
+// ── PGLite inline Minion worker ───────────────────────────────────────
+
+/**
+ * PGLite has no durable external worker in the private-brain cron topology.
+ * If synthesize submits child subagent jobs and then only polls, those jobs
+ * remain waiting forever until the wrapper timeout SIGTERMs the phase.
+ */
+export function shouldRunInlineSynthesizeWorker(engineKind: string | undefined, childCount: number): boolean {
+  return engineKind === 'pglite' && childCount > 0;
+}
+
+function isBadChildOutcome(status: string): boolean {
+  return status === 'dead' || status === 'failed' || status === 'cancelled' || status === 'timeout';
+}
+
+function shouldRetryExistingSynthesizeChild(status: string): boolean {
+  return status === 'dead' || status === 'failed';
+}
+
+async function maybeStartInlineSynthesizeWorker(
+  engine: BrainEngine,
+  childCount: number,
+): Promise<{ worker: MinionWorker; done: Promise<void> } | null> {
+  if (!shouldRunInlineSynthesizeWorker(engine.kind, childCount)) return null;
+
+  const worker = new MinionWorker(engine, {
+    queue: 'default',
+    concurrency: 1,
+    pollInterval: 250,
+    healthCheckInterval: 0,
+  });
+  const { registerBuiltinHandlers } = await import('../../commands/jobs.ts');
+  await registerBuiltinHandlers(worker, engine, { quiet: true });
+  const done = worker.start();
+  return { worker, done };
 }
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -1211,6 +1268,10 @@ function ok(summary: string, details: Record<string, unknown> = {}): PhaseResult
   return { phase: 'synthesize', status: 'ok', duration_ms: 0, summary, details };
 }
 
+function warn(summary: string, details: Record<string, unknown> = {}): PhaseResult {
+  return { phase: 'synthesize', status: 'warn', duration_ms: 0, summary, details };
+}
+
 function skipped(reason: string, summary: string): PhaseResult {
   return {
     phase: 'synthesize',
@@ -1242,4 +1303,7 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
   collectChildPutPageSlugs,
+  isBadChildOutcome,
+  shouldRetryExistingSynthesizeChild,
+  shouldRunInlineSynthesizeWorker,
 };
