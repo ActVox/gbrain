@@ -1332,10 +1332,19 @@ export interface BrainHealth {
    * DELETEs can produce dangling references.
    */
   dead_links: number;
-  /** Fraction of entity pages (person/company) with >= 1 inbound link. */
-  link_coverage: number;
-  /** Fraction of entity pages (person/company) with >= 1 structured timeline entry. */
-  timeline_coverage: number;
+  /**
+   * Fraction of entity pages (person/company) with >= 1 inbound link.
+   * `undefined` for markdown-only / journal / wiki brains (zero entity pages) -
+   * coverage is structurally undefined there, so callers must NOT penalize a
+   * brain for it. Mirrors doctor.ts graph_coverage "not applicable".
+   */
+  link_coverage?: number;
+  /**
+   * Fraction of entity pages (person/company) with >= 1 structured timeline
+   * entry. `undefined` for markdown-only brains (zero entity pages); see
+   * link_coverage.
+   */
+  timeline_coverage?: number;
   /** Top 5 entities by total link count (in + out). */
   most_connected: Array<{ slug: string; link_count: number }>;
   /**

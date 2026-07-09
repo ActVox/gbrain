@@ -4729,7 +4729,8 @@ export class PGLiteEngine implements BrainEngine {
           GREATEST((SELECT count(*) FROM entity_pages), 1)::float as link_coverage,
         (SELECT count(*) FROM entity_pages e
          WHERE EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = e.id))::float /
-          GREATEST((SELECT count(*) FROM entity_pages), 1)::float as timeline_coverage
+          GREATEST((SELECT count(*) FROM entity_pages), 1)::float as timeline_coverage,
+        (SELECT count(*) FROM entity_pages)::int as entity_count
     `);
 
     // Top 5 most connected entities by total link count (in + out).
@@ -4749,6 +4750,11 @@ export class PGLiteEngine implements BrainEngine {
     const deadLinks = Number(r.dead_links);
     const linkCount = Number(r.link_count);
     const pagesWithTimeline = Number(r.pages_with_timeline);
+    // Markdown-only / journal / wiki brains have zero person/company pages, so
+    // entity link/timeline coverage is structurally undefined. Emit undefined
+    // (not 0.0) so `gbrain health` neither penalizes the score nor prints a
+    // misleading "0.0%". Mirrors doctor.ts graph_coverage "not applicable".
+    const entityCount = Number(r.entity_count);
 
     const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
     const timelineCoverageDensity = pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
@@ -4778,8 +4784,8 @@ export class PGLiteEngine implements BrainEngine {
       missing_embeddings: Number(r.missing_embeddings),
       brain_score: brainScore,
       dead_links: deadLinks,
-      link_coverage: Number(r.link_coverage),
-      timeline_coverage: Number(r.timeline_coverage),
+      link_coverage: entityCount > 0 ? Number(r.link_coverage) : undefined,
+      timeline_coverage: entityCount > 0 ? Number(r.timeline_coverage) : undefined,
       most_connected: (connected as { slug: string; link_count: number }[]).map(c => ({
         slug: c.slug,
         link_count: Number(c.link_count),

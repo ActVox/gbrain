@@ -19,6 +19,7 @@
  *  12. Progress phase events fire under --progress-json
  *  13. Schema migration verified — link_source='mentions' insert succeeds
  *  14. Empty brain (no entity pages) → no-op with informative message
+ *  15. Entity slug-prefix pages with custom types are linkable
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
@@ -244,6 +245,27 @@ describe('gbrain extract links --by-mention — integration', () => {
     // Informative message in stdout.
     const stdoutText = stdoutBuffer.join('\n');
     expect(stdoutText).toMatch(/no linkable entity pages|nothing to scan/i);
+  });
+
+  test('15. entity slug-prefix pages with custom types are linkable', async () => {
+    await engine.putPage('people/alice-custom', {
+      type: 'person-context',
+      title: 'Alice Example',
+      compiled_truth: 'alice body',
+      timeline: '',
+      frontmatter: {},
+    });
+    await seedContentPage('writing/post-1', 'We met Alice Example yesterday.');
+    await runCli(['links', '--by-mention', '--source', 'db']);
+    const rows = await engine.executeRaw<{ to_slug: string }>(
+      `SELECT tp.slug AS to_slug
+       FROM links l
+       JOIN pages fp ON fp.id = l.from_page_id
+       JOIN pages tp ON tp.id = l.to_page_id
+       WHERE fp.slug = 'writing/post-1' AND l.link_source = 'mentions'`,
+      [],
+    );
+    expect(rows.map(r => r.to_slug)).toContain('people/alice-custom');
   });
 
   test('5. --source-id scopes page WALK', async () => {

@@ -1278,6 +1278,18 @@ describe('PGLiteEngine: getHealth graph metrics', () => {
     expect(h.timeline_coverage).toBeCloseTo(1 / 3, 2);
   });
 
+  test('link/timeline_coverage = undefined for markdown-only brains (zero entity pages)', async () => {
+    // Wipe the entity pages seeded in beforeEach and replace with a note-only
+    // page. With zero person/company pages entity coverage is structurally
+    // undefined - getHealth must emit undefined (not 0.0) so callers neither
+    // penalize the score nor print a misleading "0.0%".
+    await truncateAll();
+    await engine.putPage('notes/journal', { ...testPage, type: 'note', title: 'Journal' });
+    const h = await engine.getHealth();
+    expect(h.link_coverage).toBeUndefined();
+    expect(h.timeline_coverage).toBeUndefined();
+  });
+
   test('most_connected lists top entities by link count', async () => {
     await engine.addLink('people/alice', 'companies/acme', '', 'works_at');
     await engine.addLink('people/bob', 'companies/acme', '', 'invested_in');
