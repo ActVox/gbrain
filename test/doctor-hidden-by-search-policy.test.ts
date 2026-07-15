@@ -14,6 +14,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { readContentChunksEmbeddingDim } from '../src/core/embedding-dim-check.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { checkHiddenBySearchPolicy } from '../src/commands/doctor.ts';
@@ -23,10 +24,11 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import type { ChunkInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
+let embeddingDim = 0;
 
-function basisEmbedding(idx: number, dim = 1536): Float32Array {
-  const emb = new Float32Array(dim);
-  emb[idx % dim] = 1.0;
+function basisEmbedding(idx: number): Float32Array {
+  const emb = new Float32Array(embeddingDim);
+  emb[idx % embeddingDim] = 1.0;
   return emb;
 }
 
@@ -61,6 +63,11 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  const probe = await readContentChunksEmbeddingDim(engine);
+  if (!probe.exists || probe.dims === null) {
+    throw new Error('content_chunks.embedding column missing after initSchema');
+  }
+  embeddingDim = probe.dims;
 }, 60_000);
 
 afterAll(async () => {

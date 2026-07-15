@@ -144,7 +144,7 @@
     "bun": ">=1.3.10"
   },
   "license": "MIT",
-  "version": "0.42.58.0",
+  "version": "0.42.59.0",
   "overrides": {
     "@hono/node-server": "^2.0.6",
     "fast-uri": "^4.1.0",
