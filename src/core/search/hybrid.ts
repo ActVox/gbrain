@@ -344,6 +344,15 @@ interface OperationalMemoryPolicyConfig {
   boost_types?: Record<string, number>;
   boost_prefixes?: Record<string, number>;
   demote_prefixes?: Record<string, number>;
+  /**
+   * v0.42.54 — ALWAYS-ON raw-source demotion. Unlike `demote_prefixes`
+   * (which only fires when a query trips `isOperationalMemoryQuery`), these
+   * prefixes are demoted on EVERY retrieval so distilled canon out-ranks raw
+   * meeting/dream chatter for ordinary queries too. Opt-out: when the query
+   * matches `raw_source_patterns` (user explicitly wants the transcript /
+   * provenance), the demotion is skipped. See task t_6bdbbd3e.
+   */
+  raw_demote_prefixes?: Record<string, number>;
 }
 
 const DEFAULT_OPERATIONAL_MEMORY_POLICY: Required<OperationalMemoryPolicyConfig> = {
@@ -385,6 +394,16 @@ const DEFAULT_OPERATIONAL_MEMORY_POLICY: Required<OperationalMemoryPolicyConfig>
     'wiki/personal/reflections/': 0.55,
     'wiki/originals/ideas/': 0.55,
   },
+  // Always-on demotion (fires on every query, not just operational-intent
+  // ones). Kept intentionally MILDER than the operational-intent
+  // `demote_prefixes` above so a genuinely on-topic transcript can still
+  // surface — it just no longer out-ranks the distilled spec. Skipped when
+  // the query asks for raw/transcript/provenance (`raw_source_patterns`).
+  raw_demote_prefixes: {
+    'meetings/circleback/': 0.6,
+    'meetings/': 0.7,
+    'dream-cycle-summaries/': 0.5,
+  },
 };
 
 let operationalMemoryPolicyCache: { key: string; policy: Required<OperationalMemoryPolicyConfig> } | null = null;
@@ -407,6 +426,7 @@ function mergeOperationalMemoryPolicy(input?: OperationalMemoryPolicyConfig | nu
     boost_types: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.boost_types, ...(input.boost_types ?? {}) },
     boost_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.boost_prefixes, ...(input.boost_prefixes ?? {}) },
     demote_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.demote_prefixes, ...(input.demote_prefixes ?? {}) },
+    raw_demote_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.raw_demote_prefixes, ...(input.raw_demote_prefixes ?? {}) },
   };
 }
 
@@ -487,6 +507,50 @@ export function applyOperationalMemoryPolicy(results: SearchResult[], query?: st
       r.score *= factor;
       (r as SearchResult & { operational_memory_factor?: number }).operational_memory_factor = factor;
     }
+  }
+}
+
+/**
+ * v0.42.54 (task t_6bdbbd3e) — ALWAYS-ON raw-source demotion.
+ *
+ * The operational-memory policy (`applyOperationalMemoryPolicy`) only fires
+ * when a query trips `isOperationalMemoryQuery` — i.e. explicitly operational
+ * phrasing like "current actions" / "status". For an ORDINARY topical query
+ * ("routing architecture", "model routing policy") that gate is false, so raw
+ * `meetings/circleback/*` transcripts and dream-cycle summaries compete with
+ * distilled canon at full weight and frequently out-rank the actual spec.
+ *
+ * This stage runs on EVERY retrieval path via runPostFusionStages. It applies
+ * the (milder) `raw_demote_prefixes` multipliers unconditionally, with ONE
+ * opt-out: if the query matches `raw_source_patterns` (user asked for the raw
+ * transcript / exact wording / provenance), demotion is skipped so evidence
+ * queries still surface the primary source.
+ *
+ * Mutates `results` in place; caller re-sorts. Fail-open: never throws.
+ */
+export function applyRawSourceDemotion(results: SearchResult[], query?: string): void {
+  if (results.length === 0) return;
+  const policy = loadOperationalMemoryPolicy();
+  const prefixes = Object.entries(policy.raw_demote_prefixes);
+  if (prefixes.length === 0) return;
+  // Opt-out: explicit raw/transcript/provenance intent keeps sources at full
+  // weight. (This is the same signal that suppresses operational demotion.)
+  if (matchesAnyPattern(query ?? '', policy.raw_source_patterns)) return;
+  for (const r of results) {
+    let factor = 1.0;
+    for (const [prefix, demotion] of prefixes) {
+      if (r.slug.startsWith(prefix)) factor *= demotion;
+    }
+    if (factor === 1.0) continue;
+    // Demote every score signal that can drive final ordering. `score` is the
+    // RRF/cosine signal (used on non-reranked paths + canonical-injection
+    // re-sort); `rerank_score` is the cross-encoder signal the reranked paths
+    // order by. Penalizing only one leaves the other to re-float the raw page.
+    if (Number.isFinite(r.score)) r.score *= factor;
+    if (typeof r.rerank_score === 'number' && Number.isFinite(r.rerank_score)) {
+      r.rerank_score *= factor;
+    }
+    (r as SearchResult & { raw_source_demotion?: number }).raw_source_demotion = factor;
   }
 }
 
@@ -1277,6 +1341,16 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
+    // v0.42.54 (task t_6bdbbd3e) — apply always-on raw-source demotion on the
+    // no-embedding-provider fallback too, so the "runs on EVERY retrieval path"
+    // contract holds even in the degraded keyword-only mode. Fail-open; score
+    // is the only ordering signal here (no reranker on this path), so re-sort.
+    try {
+      applyRawSourceDemotion(noEmbedOperational, query);
+      noEmbedOperational.sort((a, b) => b.score - a.score);
+    } catch {
+      // Non-fatal; retrieval must fail open.
+    }
     stampEvidence(noEmbedOperational);
     const noEmbedSliced = noEmbedOperational.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the no-embedding-provider path.
@@ -1513,6 +1587,15 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
+    // v0.42.54 (task t_6bdbbd3e) — always-on raw-source demotion on the
+    // keyword-fallback path (embedding empty / search-lite). Score is the sole
+    // ordering signal here, so re-sort after demoting. Fail-open.
+    try {
+      applyRawSourceDemotion(kwOperational, query);
+      kwOperational.sort((a, b) => b.score - a.score);
+    } catch {
+      // Non-fatal; retrieval must fail open.
+    }
     stampEvidence(kwOperational);
     const kwSliced = kwOperational.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
@@ -1691,6 +1774,38 @@ export async function hybridSearch(
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
   });
+
+  // v0.42.54 (task t_6bdbbd3e) — always-on raw-source demotion. Runs HERE,
+  // after the reranker + alias-hop + canonical injection, because those
+  // stages own the final ordering signal (rerank_score) and any earlier
+  // demotion is invisible to them. NOT gated behind operational-intent
+  // detection: fires on every retrieval so raw meeting/circleback transcripts
+  // and dream chatter can't out-rank distilled canon on ordinary topical
+  // queries. Backs off only when the query explicitly asks for the raw
+  // transcript/provenance. Fail-open — a policy error must not break search.
+  try {
+    applyRawSourceDemotion(operationalPool, query);
+    // Re-establish ranked order after demotion. Preserve rerank.ts's
+    // [reranked-head, un-reranked-tail] structure: items the cross-encoder
+    // scored always outrank un-scored tail items (a demotion sinks a raw page
+    // WITHIN the reranked band, it does not banish it below the tail). Stable
+    // sort keeps original order for equal keys, so a no-op demotion is a
+    // bit-for-bit no-op on ordering.
+    const withIdx = operationalPool.map((r, i) => ({ r, i }));
+    withIdx.sort((a, b) => {
+      const aHas = typeof a.r.rerank_score === 'number' && Number.isFinite(a.r.rerank_score);
+      const bHas = typeof b.r.rerank_score === 'number' && Number.isFinite(b.r.rerank_score);
+      if (aHas !== bHas) return aHas ? -1 : 1; // scored head before un-scored tail
+      if (aHas && bHas) {
+        const d = (b.r.rerank_score as number) - (a.r.rerank_score as number);
+        if (d !== 0) return d;
+      }
+      return a.i - b.i; // stable: preserve prior relative order
+    });
+    operationalPool.splice(0, operationalPool.length, ...withIdx.map(x => x.r));
+  } catch {
+    // Non-fatal; retrieval must fail open.
+  }
 
   // T4 — stamp evidence + create_safety so the agent's don't-duplicate
   // decision keys off WHY a page matched, not a raw blended score. Stamp on

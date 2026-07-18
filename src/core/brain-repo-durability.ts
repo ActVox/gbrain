@@ -134,9 +134,15 @@ brain_push() {
   if git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
     echo "$(date -u +%FT%TZ) [push] ok $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
   fi
-  echo "$(date -u +%FT%TZ) [push] rejected; rebase-pull $_branch" >>"$_log"
-  if git pull --rebase origin "$_branch" >>"$_log" 2>&1 && git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
-    echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+  echo "$(date -u +%FT%TZ) [push] rejected; fetch-rebase $_branch" >>"$_log"
+  if git fetch origin "$_branch" >>"$_log" 2>&1; then
+    if git merge-base --is-ancestor FETCH_HEAD HEAD >/dev/null 2>&1; then
+      if git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
+        echo "$(date -u +%FT%TZ) [push] ok-after-fetch $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+      fi
+    elif git rebase FETCH_HEAD >>"$_log" 2>&1 && git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
+      echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+    fi
   fi
   git rebase --abort >/dev/null 2>&1 || true
   echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short HEAD 2>/dev/null) could not reach origin. Run: gbrain sources pull <id> && git push" >>"$_log"
@@ -183,9 +189,15 @@ if [ "\${1:-}" = "--push-only" ]; then
 fi
 
 _msg="\${1:?usage: brain-commit-push.sh <message> <path> [paths...]}"; shift || true
-# Pull first so the local tree is current before we stage.
-git fetch origin >/dev/null 2>&1 || true
-git pull --rebase origin "$_branch" || { git rebase --abort >/dev/null 2>&1 || true; echo "rebase conflict: manual attention needed" >&2; exit 3; }
+# Pull first so the local tree is current before we stage. Use explicit
+# fetch+rebase rather than git-pull: newer Git can treat pull's configured
+# upstream plus the explicit ref as multiple rebase targets for local bare
+# remotes (the durability-hook CI fixture).
+if git fetch origin "$_branch"; then
+  if ! git merge-base --is-ancestor FETCH_HEAD HEAD >/dev/null 2>&1; then
+    git rebase FETCH_HEAD || { git rebase --abort >/dev/null 2>&1 || true; echo "rebase conflict: manual attention needed" >&2; exit 3; }
+  fi
+fi
 
 # EXPLICIT paths only — never a blind 'git add -A' (would risk committing
 # secrets, temp files, or unrelated edits).

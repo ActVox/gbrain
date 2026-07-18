@@ -790,6 +790,14 @@ export interface SearchResult {
    */
   alias_resolved_boost?: number;
   /**
+   * v0.42.54 (task t_6bdbbd3e) — multiplier applied by applyRawSourceDemotion
+   * (< 1.0). Fires on EVERY query whose slug matches a `raw_demote_prefixes`
+   * entry (raw meeting/circleback transcripts, dream-cycle summaries), unless
+   * the query explicitly asks for the raw transcript/provenance. Keeps
+   * distilled canon out-ranking raw chatter for ordinary topical queries.
+   */
+  raw_source_demotion?: number;
+  /**
    * T2 (retrieval-maxpool incident) — multiplier applied by applyTitleBoost
    * (1.0 = unchanged; default ~1.25x). Fires when the normalized query is a
    * contiguous token-run inside the page title (or an exact full-title match).
