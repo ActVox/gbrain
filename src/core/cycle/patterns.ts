@@ -23,6 +23,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
+import { MinionWorker } from '../minions/worker.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
 import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
@@ -105,16 +106,28 @@ export async function runPhasePatterns(
       allowProtectedSubmit: true,
     });
 
+    // PGLite has no durable external worker in the private-brain cron topology.
+    // Without an inline worker the subagent job stays `waiting` forever until
+    // the wrapper SIGTERMs the phase — producing child_outcome=timeout,
+    // patterns_written=0 every cycle. Mirror synthesize's inline-worker fix.
+    const inlineWorker = await maybeStartInlinePatternsWorker(engine);
+    const usingInlineWorker = inlineWorker !== null;
+
     let outcome: string;
     try {
       const final = await waitForCompletion(queue, job.id, {
         timeoutMs: config.subagentWaitTimeoutMs,
-        pollMs: 5 * 1000,
+        pollMs: usingInlineWorker ? 250 : 5 * 1000,
       });
       outcome = final.status;
     } catch (e) {
       if (e instanceof TimeoutError) outcome = 'timeout';
       else throw e;
+    } finally {
+      if (inlineWorker) {
+        inlineWorker.worker.stop();
+        await inlineWorker.done;
+      }
     }
 
     if (opts.yieldDuringPhase) {
@@ -208,6 +221,7 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
   const enabled = enabledStr === null ? true : enabledStr === 'true';
   const lookbackStr = await engine.getConfig('dream.patterns.lookback_days');
   const minEvidenceStr = await engine.getConfig('dream.patterns.min_evidence');
+
   // v0.28: unified model resolution
   const { resolveModel } = await import('../model-config.ts');
   const model = await resolveModel(engine, {
@@ -229,6 +243,33 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
       engine, 'dream.patterns.subagent_wait_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS,
     ),
   };
+}
+
+// ── PGLite inline Minion worker ───────────────────────────────────────
+
+/**
+ * PGLite has no durable external worker in the private-brain cron topology.
+ * If patterns submits a child subagent job and then only polls, that job
+ * remains `waiting` forever until the wrapper timeout SIGTERMs the phase
+ * (child_outcome=timeout, patterns_written=0). Start an inline worker for
+ * the duration of the phase; stop it in the caller's `finally`. Mirrors
+ * synthesize.ts:maybeStartInlineSynthesizeWorker.
+ */
+async function maybeStartInlinePatternsWorker(
+  engine: BrainEngine,
+): Promise<{ worker: MinionWorker; done: Promise<void> } | null> {
+  if (engine.kind !== 'pglite') return null;
+
+  const worker = new MinionWorker(engine, {
+    queue: 'default',
+    concurrency: 1,
+    pollInterval: 250,
+    healthCheckInterval: 0,
+  });
+  const { registerBuiltinHandlers } = await import('../../commands/jobs.ts');
+  await registerBuiltinHandlers(worker, engine, { quiet: true });
+  const done = worker.start();
+  return { worker, done };
 }
 
 // ── Reflection gathering ─────────────────────────────────────────────
