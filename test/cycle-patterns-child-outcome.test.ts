@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { runPhasePatterns } from '../src/core/cycle/patterns.ts';
+import { isSuccessfulPatternsChildOutcome, runPhasePatterns } from '../src/core/cycle/patterns.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
@@ -64,6 +64,13 @@ async function seedReflections(): Promise<void> {
 }
 
 describe('runPhasePatterns child-outcome status (#2782)', () => {
+  test('Minion completed job is the only success terminal status', () => {
+    expect(isSuccessfulPatternsChildOutcome('completed')).toBe(true);
+    expect(isSuccessfulPatternsChildOutcome('complete')).toBe(false);
+    expect(isSuccessfulPatternsChildOutcome('failed')).toBe(false);
+    expect(isSuccessfulPatternsChildOutcome('timeout')).toBe(false);
+  });
+
   test('child dead with zero writes → status fail (was silent ok)', async () => {
     const brainDir = mkdtempSync(join(tmpdir(), 'gbrain-patterns-outcome-'));
     try {
