@@ -735,6 +735,24 @@ describe('MinionQueue: Cancel & Retry', () => {
     expect(retried!.status).toBe('waiting');
     expect(retried!.error_text).toBeNull();
   });
+
+  test('retry cancelled job requires explicit opt-in and resets execution timestamps', async () => {
+    const job = await queue.add('sync', {}, { timeout_ms: 60_000 });
+    await queue.claim('retry-cancelled-test', 30_000, 'default', ['sync']);
+    await queue.cancelJob(job.id);
+    const cancelled = await queue.getJob(job.id);
+    expect(cancelled!.started_at).not.toBeNull();
+    expect(await queue.retryJob(job.id)).toBeNull();
+    const retried = await queue.retryJob(job.id, {
+      includeCancelled: true,
+      dataOverrides: { model: 'google:gemini-2.5-pro' },
+    });
+    expect(retried!.status).toBe('waiting');
+    expect(retried!.data.model).toBe('google:gemini-2.5-pro');
+    expect(retried!.started_at).toBeNull();
+    expect(retried!.timeout_at).toBeNull();
+    expect(retried!.stalled_counter).toBe(0);
+  });
 });
 
 // --- Pause / Resume (5 tests) ---
