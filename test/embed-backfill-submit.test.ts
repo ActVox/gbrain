@@ -14,6 +14,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
   submitEmbedBackfill,
+  BATCH_SIZE_CONFIG_KEY,
   COOLDOWN_CONFIG_KEY,
   SPEND_CAP_CONFIG_KEY,
 } from '../src/core/embed-backfill-submit.ts';
@@ -49,6 +50,7 @@ describe('submitEmbedBackfill — happy path', () => {
     expect(job!.name).toBe('embed-backfill');
     expect(job!.priority).toBe(5);
     expect((job!.data as { sourceId: string }).sourceId).toBe('default');
+    expect((job!.data as { batchSize: number }).batchSize).toBe(50);
   });
 
   test('respects opts.priority override', async () => {
@@ -60,6 +62,15 @@ describe('submitEmbedBackfill — happy path', () => {
     const queue = new MinionQueue(engine);
     const job = await queue.getJob(result.jobId!);
     expect(job!.priority).toBe(-10);
+  });
+
+  test('respects embed.backfill_batch_size override', async () => {
+    await engine.setConfig(BATCH_SIZE_CONFIG_KEY, '25');
+    const result = await submitEmbedBackfill(engine, 'default', { reason: 'unit' });
+    expect(result.status).toBe('submitted');
+    const queue = new MinionQueue(engine);
+    const job = await queue.getJob(result.jobId!);
+    expect((job!.data as { batchSize: number }).batchSize).toBe(25);
   });
 });
 
