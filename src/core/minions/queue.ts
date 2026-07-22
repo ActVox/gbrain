@@ -471,15 +471,23 @@ export class MinionQueue {
     });
   }
 
-  /** Re-queue a failed or dead job for retry. */
-  async retryJob(id: number): Promise<MinionJob | null> {
+  /** Re-queue a failed/dead job, or an explicitly opted-in cancelled job. */
+  async retryJob(
+    id: number,
+    opts: { includeCancelled?: boolean; dataOverrides?: Record<string, unknown> } = {},
+  ): Promise<MinionJob | null> {
+    const retryableStatuses = opts.includeCancelled
+      ? "('failed', 'dead', 'cancelled')"
+      : "('failed', 'dead')";
     const rows = await this.engine.executeRaw<Record<string, unknown>>(
       `UPDATE minion_jobs SET status = 'waiting', error_text = NULL,
+        data = data || $2::text::jsonb,
         lock_token = NULL, lock_until = NULL, delay_until = NULL,
+        started_at = NULL, timeout_at = NULL, stalled_counter = 0,
         finished_at = NULL, updated_at = now()
-       WHERE id = $1 AND status IN ('failed', 'dead')
+       WHERE id = $1 AND status IN ${retryableStatuses}
        RETURNING *`,
-      [id]
+      [id, JSON.stringify(opts.dataOverrides ?? {})]
     );
     return rows.length > 0 ? rowToMinionJob(rows[0]) : null;
   }

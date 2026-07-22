@@ -919,6 +919,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'dream.synthesize.output_root',
   'dream.synthesize.subagent_timeout_ms',
   'dream.synthesize.subagent_wait_timeout_ms',
+  // Explicit incident-recovery override; default false so cancelled jobs stay terminal.
+  'dream.synthesize.retry_cancelled',
   'dream.patterns.lookback_days',
   'dream.patterns.min_evidence',
   // #2782-family: patterns-phase subagent timeouts (mirror of the

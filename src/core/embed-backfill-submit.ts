@@ -29,6 +29,7 @@
  * Both bounds are config-overridable:
  *   - `embed.backfill_cooldown_min`        (default 10)
  *   - `embed.backfill_max_usd_per_source_24h`  (default 25)
+ *   - `embed.backfill_batch_size`          (default 50)
  *
  * Returns a tagged-union status so callers can render the right user signal
  * (`gbrain sources status`, webhook response body, sync completion banner).
@@ -39,9 +40,14 @@ import { parseUsdLimit, resolveSpendPosture, type SpendPosture } from './spend-p
 
 export const COOLDOWN_CONFIG_KEY = 'embed.backfill_cooldown_min';
 export const SPEND_CAP_CONFIG_KEY = 'embed.backfill_max_usd_per_source_24h';
+export const BATCH_SIZE_CONFIG_KEY = 'embed.backfill_batch_size';
 
 const DEFAULT_COOLDOWN_MIN = 10;
 const DEFAULT_SPEND_CAP_USD = 25;
+// Keep one batch comfortably below the Minions lease/heartbeat window. The
+// previous 500-chunk batch repeatedly stalled production workers before the
+// first progress callback could land.
+const DEFAULT_BATCH_SIZE = 50;
 
 export type SubmitEmbedBackfillStatus =
   | 'submitted'
@@ -149,6 +155,7 @@ export async function submitEmbedBackfill(
     opts.spendCapUsdOverride ??
     (raw => parseUsdLimit(raw, DEFAULT_SPEND_CAP_USD))(await engine.getConfig(SPEND_CAP_CONFIG_KEY));
   const posture = opts.postureOverride ?? (await resolveSpendPosture(engine));
+  const batchSize = await readIntConfig(engine, BATCH_SIZE_CONFIG_KEY, DEFAULT_BATCH_SIZE);
 
   // ── Source-level cooldown ─────────────────────────────────────
   // Block re-submission if (a) an embed-backfill is currently active for this
@@ -204,7 +211,7 @@ export async function submitEmbedBackfill(
   const queue = new MinionQueue(engine);
   const job = await queue.add(
     'embed-backfill',
-    { sourceId, batchSize: 500, reason: opts.reason },
+    { sourceId, batchSize, reason: opts.reason },
     {
       priority: opts.priority ?? 5,
       idempotency_key: `embed-backfill:${sourceId}:${bucketize(now, 5 * 60_000)}`,

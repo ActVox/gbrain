@@ -48,12 +48,13 @@ describe('synthesize child-job orchestration helpers', () => {
     expect(__testing.isBadChildOutcome('timeout')).toBe(true);
   });
 
-  test('retries existing failed/dead idempotent synthesize jobs but not completed/cancelled rows', () => {
+  test('retries existing failed/dead idempotent synthesize jobs and only revives cancelled rows with opt-in', () => {
     expect(__testing.shouldRetryExistingSynthesizeChild('dead')).toBe(true);
     expect(__testing.shouldRetryExistingSynthesizeChild('failed')).toBe(true);
     expect(__testing.shouldRetryExistingSynthesizeChild('completed')).toBe(false);
     expect(__testing.shouldRetryExistingSynthesizeChild('cancelled')).toBe(false);
-    expect(__testing.shouldRetryExistingSynthesizeChild('waiting')).toBe(false);
+    expect(__testing.shouldRetryExistingSynthesizeChild('cancelled', true)).toBe(true);
+    expect(__testing.shouldRetryExistingSynthesizeChild('waiting', true)).toBe(false);
   });
 });
 

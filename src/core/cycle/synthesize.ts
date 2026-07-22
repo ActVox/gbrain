@@ -500,8 +500,11 @@ export async function runPhaseSynthesize(
           submitOpts,
           { allowProtectedSubmit: true },
         );
-        if (shouldRetryExistingSynthesizeChild(child.status)) {
-          child = (await queue.retryJob(child.id)) ?? child;
+        if (shouldRetryExistingSynthesizeChild(child.status, config.retryCancelled)) {
+          child = (await queue.retryJob(child.id, {
+            includeCancelled: config.retryCancelled,
+            dataOverrides: childData as unknown as Record<string, unknown>,
+          })) ?? child;
         }
         childIds.push(child.id);
         if (isChunked) {
@@ -625,8 +628,8 @@ function isBadChildOutcome(status: string): boolean {
   return status === 'dead' || status === 'failed' || status === 'cancelled' || status === 'timeout';
 }
 
-function shouldRetryExistingSynthesizeChild(status: string): boolean {
-  return status === 'dead' || status === 'failed';
+function shouldRetryExistingSynthesizeChild(status: string, retryCancelled = false): boolean {
+  return status === 'dead' || status === 'failed' || (retryCancelled && status === 'cancelled');
 }
 
 async function maybeStartInlineSynthesizeWorker(
@@ -681,6 +684,8 @@ interface SynthConfig {
   outputRoot: string;
   subagentTimeoutMs: number;
   subagentWaitTimeoutMs: number;
+  /** Explicit operator override for reviving intentionally cancelled idempotent children. */
+  retryCancelled: boolean;
 }
 
 /** #2415: shared output-root resolution (synthesize + patterns phases). */
@@ -718,7 +723,11 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     tier: 'utility',
     fallback: 'haiku',
   });
-  const cooldownHoursStr = await engine.getConfig('dream.synthesize.cooldown_hours');
+  const cooldownHours = await getNumberConfig(
+    engine,
+    'dream.synthesize.cooldown_hours',
+    12,
+  );
   const maxPromptTokensStr = await engine.getConfig('dream.synthesize.max_prompt_tokens');
   const maxChunksStr = await engine.getConfig('dream.synthesize.max_chunks_per_transcript');
   const subagentTimeoutMs = await getNumberConfig(
@@ -731,6 +740,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     'dream.synthesize.subagent_wait_timeout_ms',
     DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
   );
+  const retryCancelled = (await engine.getConfig('dream.synthesize.retry_cancelled')) === 'true';
 
   let excludePatterns: string[] = ['medical', 'therapy'];
   if (excludeStr) {
@@ -765,12 +775,13 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     excludePatterns,
     model,
     verdictModel,
-    cooldownHours: cooldownHoursStr ? Math.max(0, parseInt(cooldownHoursStr, 10) || 12) : 12,
+    cooldownHours: Math.max(0, Math.floor(cooldownHours)),
     maxPromptTokens,
     maxChunksPerTranscript,
     outputRoot: await loadOutputRoot(engine),
     subagentTimeoutMs,
     subagentWaitTimeoutMs,
+    retryCancelled,
   };
 }
 
