@@ -105,9 +105,19 @@ upstream_sha="$(git rev-parse "$upstream_ref")"
 # production and force-pushing it is intentional: one PR represents latest upstream.
 git checkout -B "$PR_BRANCH" "$base_ref" >/dev/null
 
-if ! git merge --no-ff --no-edit "$upstream_ref"; then
-  conflict_files="$(git diff --name-only --diff-filter=U | sed 's/^/- /')"
-  git merge --abort || true
+merge_exit=0
+git merge --no-ff --no-edit "$upstream_ref" || merge_exit=$?
+if [[ "$merge_exit" -ne 0 ]]; then
+  conflict_files_raw="$(git diff --name-only --diff-filter=U)"
+  if [[ -z "$conflict_files_raw" ]] || ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    echo "ERROR: upstream merge failed without resolvable conflict state (exit ${merge_exit})" >&2
+    exit "$merge_exit"
+  fi
+  conflict_files="$(printf '%s\n' "$conflict_files_raw" | sed 's/^/- /')"
+  if ! git merge --abort; then
+    echo "ERROR: failed to abort conflicted upstream merge" >&2
+    exit 11
+  fi
   cat > /tmp/gbrain-upstream-conflict.md <<EOF
 ## Upstream sync conflict
 
@@ -128,12 +138,34 @@ scripts/guard-gbrain-upstream-merge.sh
 # then create a temporary worktree and resolve the merge into a PR against master
 \`\`\`
 EOF
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'merge_conflict=true\n' >> "$GITHUB_OUTPUT"
+  fi
   if [[ "$PUSH" -eq 1 ]]; then
-    gh issue create \
-      --title "Upstream sync conflict: garrytan/gbrain master" \
-      --body-file /tmp/gbrain-upstream-conflict.md || true
+    if ! issues_enabled="$(gh repo view ActVox/gbrain --json hasIssuesEnabled --jq '.hasIssuesEnabled')"; then
+      echo "ERROR: could not query ActVox/gbrain Issues capability" >&2
+      exit 12
+    fi
+    if [[ "$issues_enabled" == "true" ]]; then
+      gh issue create \
+        --repo ActVox/gbrain \
+        --title "Upstream sync conflict: garrytan/gbrain master" \
+        --body-file /tmp/gbrain-upstream-conflict.md
+    elif [[ "$issues_enabled" == "false" ]]; then
+      echo "INFO: repository Issues are disabled; conflict report kept as a workflow artifact."
+    else
+      echo "ERROR: unexpected hasIssuesEnabled value for ActVox/gbrain: $issues_enabled" >&2
+      exit 12
+    fi
   else
     cat /tmp/gbrain-upstream-conflict.md
+  fi
+  if [[ "${CONFLICT_IS_WARNING:-0}" == "1" ]]; then
+    echo "::warning title=Upstream merge conflict::Manual semantic integration is required; see the uploaded conflict report."
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+      cat /tmp/gbrain-upstream-conflict.md >> "$GITHUB_STEP_SUMMARY"
+    fi
+    exit 0
   fi
   exit 10
 fi

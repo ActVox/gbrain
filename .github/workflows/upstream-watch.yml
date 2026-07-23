@@ -40,6 +40,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Create or update upstream PR
+        id: upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE_BRANCH: master
@@ -48,10 +49,13 @@ jobs:
           ORIGIN_REMOTE: origin
           PR_BRANCH: automation/upstream-master
           PR_TITLE: "chore: sync upstream gbrain master"
+          # Scheduled detection reports a known semantic conflict as a warning.
+          # Manual dispatch preserves the non-zero conflict exit for investigation.
+          CONFLICT_IS_WARNING: ${{ github.event_name == 'schedule' && '1' || '0' }}
         run: bash scripts/create-upstream-pr.sh
 
       - name: Upload conflict report if merge failed
-        if: failure()
+        if: always() && steps.upstream.outputs.merge_conflict == 'true'
         uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4
         with:
           name: gbrain-upstream-conflict-report
