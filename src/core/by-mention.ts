@@ -11,8 +11,8 @@
  * per-page first-mention-only cap (1 link per (source_slug, target_slug)).
  *
  * Design decisions locked in /plan-eng-review for v0.42.0.0:
- *  - D2/D10  Hardcoded entity-type filter (not pack-aware) — pack v2
- *            extension filed as TODO-1.
+ *  - D2/D10  Entity-type filter plus active schema-pack entity prefixes
+ *            so user-defined page types under entity paths still link.
  *  - D6      Token-Map + multi-word phrase pass (no new deps, no regex
  *            alternation, no Aho-Corasick).
  *  - D7      DB-source only — caller restricts page WALK to DB iteration.
@@ -28,9 +28,18 @@
 
 import type { BrainEngine } from './engine.ts';
 import { stripCodeBlocks } from './link-extraction.ts';
+import { loadConfig } from './config.ts';
+import { loadActivePack } from './schema-pack/load-active.ts';
 
-/** D2: hardcoded entity types for v1. Pack-aware extension is TODO-1. */
+/** D2: canonical entity types for v1. */
 export const LINKABLE_ENTITY_TYPES = ['person', 'company', 'organization', 'entity'] as const;
+
+/**
+ * Fallback entity slug prefixes from gbrain-base. Used only if the active
+ * schema pack fails to load; the happy path derives prefixes from
+ * page_types[].primitive === 'entity'.
+ */
+const FALLBACK_ENTITY_PREFIXES = ['people/', 'person/', 'companies/', 'company/', 'yc/', 'civic/'];
 
 /**
  * Minimum title length for gazetteer inclusion. Filters out 2-3 char names
@@ -141,13 +150,32 @@ function tokenizeTitle(title: string): string[] {
   return tokens;
 }
 
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
+async function loadEntityPathPrefixes(): Promise<string[]> {
+  try {
+    const pack = await loadActivePack({ cfg: loadConfig(), remote: false });
+    return pack.manifest.page_types
+      .filter(t => t.primitive === 'entity')
+      .flatMap(t => t.path_prefixes)
+      .filter(p => p.length > 0);
+  } catch {
+    return FALLBACK_ENTITY_PREFIXES;
+  }
+}
+
 /**
  * Build a token-Map gazetteer from all entity-typed pages in the brain.
  *
- * Hardcoded type filter per D2 (pack-awareness is TODO-1). Soft-deleted
- * pages excluded. Pages with too-short titles excluded (MIN_NAME_LENGTH).
- * Ignore-list applied per CK12: built-in ambiguous tokens dropped unless
- * the user has explicitly created the corresponding page.
+ * Includes both explicit entity-like types and active schema-pack entity
+ * path prefixes. That keeps legacy/custom private brains linkable when they
+ * store pages like `people/alice` with a domain-specific type such as
+ * `person-context`. Soft-deleted pages excluded. Pages with too-short titles
+ * excluded (MIN_NAME_LENGTH). Ignore-list applied per CK12: built-in
+ * ambiguous tokens dropped unless the user has explicitly created the
+ * corresponding page.
  *
  * Returned gazetteer is keyed by lowercase first token; entries with the
  * same first token co-exist in the same bucket (e.g. "Acme" + "Acme Corp").
@@ -157,12 +185,17 @@ export async function buildGazetteer(
   opts: BuildGazetteerOpts = {},
 ): Promise<Gazetteer> {
   const typeList = LINKABLE_ENTITY_TYPES.map(t => `'${t}'`).join(', ');
+  const entityPrefixes = await loadEntityPathPrefixes();
+  const params = entityPrefixes.map(p => `${escapeLikeLiteral(p)}%`);
+  const prefixClause = params.length > 0
+    ? ` OR ${params.map((_, i) => `slug LIKE $${i + 1} ESCAPE '\\'`).join(' OR ')}`
+    : '';
   const rows = await engine.executeRaw<{ slug: string; source_id: string | null; title: string | null }>(
     `SELECT slug, source_id, title
      FROM pages
-     WHERE type IN (${typeList})
+     WHERE (type IN (${typeList})${prefixClause})
        AND deleted_at IS NULL`,
-    [],
+    params,
   );
 
   // Pre-build the existing-slug Set so the ignore-list rule can check
