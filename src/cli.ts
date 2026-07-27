@@ -424,6 +424,10 @@ async function main() {
   // timeout the abandoned handler may hold ref'd sockets — harmless here,
   // because the import.meta.main seam exits explicitly on every one-shot path.
   const READ_OP_TIMEOUT_MS = 180_000;
+  // #2084 inline: opHandlerCompleted tracks whether the op returned cleanly,
+  // so the finishCliTeardown force-exit can preserve the real exit code
+  // even when PGLite disconnect hangs after a successful op.
+  let opHandlerCompleted = false;
 
   try {
     const { withTimeout, OperationTimeoutError } = await import('./core/timeout.ts');
