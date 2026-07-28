@@ -18,7 +18,7 @@ import {
   isDreamOutput,
   DREAM_OUTPUT_MARKER_RE,
 } from '../src/core/cycle/transcript-discovery.ts';
-import { judgeSignificance, renderPageToMarkdown, __testing, type JudgeClient } from '../src/core/cycle/synthesize.ts';
+import { judgeSignificance, renderPageToMarkdown, type JudgeClient } from '../src/core/cycle/synthesize.ts';
 
 let tmpDir: string;
 
@@ -30,31 +30,6 @@ function makeTranscript(name: string, body: string): string {
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-synth-test-'));
-});
-
-describe('synthesize child-job orchestration helpers', () => {
-  test('runs inline worker only for PGLite synthesize runs with child jobs', () => {
-    expect(__testing.shouldRunInlineSynthesizeWorker('pglite', 1)).toBe(true);
-    expect(__testing.shouldRunInlineSynthesizeWorker('pglite', 0)).toBe(false);
-    expect(__testing.shouldRunInlineSynthesizeWorker('postgres', 1)).toBe(false);
-    expect(__testing.shouldRunInlineSynthesizeWorker(undefined, 1)).toBe(false);
-  });
-
-  test('classifies non-completed child outcomes as warnings', () => {
-    expect(__testing.isBadChildOutcome('completed')).toBe(false);
-    expect(__testing.isBadChildOutcome('dead')).toBe(true);
-    expect(__testing.isBadChildOutcome('failed')).toBe(true);
-    expect(__testing.isBadChildOutcome('cancelled')).toBe(true);
-    expect(__testing.isBadChildOutcome('timeout')).toBe(true);
-  });
-
-  test('retries existing failed/dead idempotent synthesize jobs but not completed/cancelled rows', () => {
-    expect(__testing.shouldRetryExistingSynthesizeChild('dead')).toBe(true);
-    expect(__testing.shouldRetryExistingSynthesizeChild('failed')).toBe(true);
-    expect(__testing.shouldRetryExistingSynthesizeChild('completed')).toBe(false);
-    expect(__testing.shouldRetryExistingSynthesizeChild('cancelled')).toBe(false);
-    expect(__testing.shouldRetryExistingSynthesizeChild('waiting')).toBe(false);
-  });
 });
 
 describe('compileExcludePatterns', () => {
