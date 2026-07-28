@@ -64,6 +64,10 @@ jobs:
       - name: Run heavy tests
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ZEROENTROPY_API_KEY: ${{ secrets.ZEROENTROPY_API_KEY }}
+          GBRAIN_EMBEDDING_MODEL: openai:text-embedding-3-large
+          GBRAIN_EMBEDDING_DIMENSIONS: "1536"
         run: bun run test:heavy
 
       # The heavy runner writes per-script logs to ~/.gbrain/audit/ on every

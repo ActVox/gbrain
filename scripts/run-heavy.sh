@@ -18,6 +18,13 @@ cd "$(dirname "$0")/.."
 
 PATTERN="${1:-}"
 
+if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${GBRAIN_EMBEDDING_MODEL:-}" ]; then
+  export GBRAIN_EMBEDDING_MODEL="openai:text-embedding-3-large"
+fi
+if [ "${GBRAIN_EMBEDDING_MODEL:-}" = "openai:text-embedding-3-large" ] && [ -z "${GBRAIN_EMBEDDING_DIMENSIONS:-}" ]; then
+  export GBRAIN_EMBEDDING_DIMENSIONS="1536"
+fi
+
 heavy_files=()
 while IFS= read -r f; do
   # Skip README.md, non-shell files, and underscore-prefixed helpers
