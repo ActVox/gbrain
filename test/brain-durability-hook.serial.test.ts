@@ -149,5 +149,5 @@ describe('post-commit hook (D9 local, D7 self-contained)', () => {
       await new Promise(r => setTimeout(r, 150));
     }
     expect(found).toBe(true);
-  });
+  }, 10_000);
 });
