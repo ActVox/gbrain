@@ -2923,6 +2923,47 @@ const submit_job: Operation = {
   },
 };
 
+/**
+ * Run one dream-cycle phase inside the process that already owns the engine.
+ *
+ * PGLite is single-owner: a long-lived stdio MCP server holds its advisory
+ * lock, so spawning `gbrain dream` in a second process necessarily times out.
+ * This local-only operation reuses the open engine and keeps the expensive,
+ * mutating cycle surface off HTTP MCP entirely.
+ */
+const run_dream: Operation = {
+  name: 'run_dream',
+  description:
+    'Run one selected GBrain dream-cycle phase in-process on the already-open local engine. ' +
+    'Local stdio MCP only; never exposed over HTTP. Use repeated calls for multiple phases.',
+  params: {
+    phase: { type: 'string', required: true, description: 'One canonical dream phase name.' },
+    dry_run: { type: 'boolean', description: 'Preview the phase without writes (default false).' },
+  },
+  mutating: true,
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    const { runCycle, ALL_PHASES } = await import('./cycle.ts');
+    const phase = p.phase;
+    if (typeof phase !== 'string' || !ALL_PHASES.includes(phase as (typeof ALL_PHASES)[number])) {
+      throw new OperationError(
+        'invalid_params',
+        `Unknown dream phase: ${String(phase)}`,
+        `Use one of: ${ALL_PHASES.join(', ')}`,
+      );
+    }
+
+    return runCycle(ctx.engine, {
+      brainDir: null,
+      dryRun: ctx.dryRun || p.dry_run === true,
+      pull: false,
+      phases: [phase as (typeof ALL_PHASES)[number]],
+      sourceId: ctx.sourceId,
+    });
+  },
+};
+
 // v0.38 Slice 3 — D13 — remote-callable submit_agent with registration-time
 // binding enforcement. Distinct from `submit_job` because:
 //   1. It's the FIRST op that lets remote MCP callers spawn paid LLM work
@@ -5392,8 +5433,8 @@ export const operations: Operation[] = [
   log_ingest, get_ingest_log,
   // Files
   file_list, file_upload, file_url,
-  // Jobs (Minions)
-  submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
+  // Jobs (Minions) + local in-process dream cycle
+  submit_job, run_dream, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
   submit_agent,
