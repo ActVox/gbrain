@@ -559,11 +559,12 @@ async function injectCanonicalOperationalResults(
   const out = [...results];
   const existing = new Map(out.map(r => [`${r.source_id ?? 'default'}::${r.slug}`, r]));
   const topScore = out.reduce((m, r) => Number.isFinite(r.score) && r.score > m ? r.score : m, 0.1);
-  const sourceId = opts?.sourceId ?? (opts?.sourceIds?.length === 1 ? opts.sourceIds[0] : undefined);
   let rank = 0;
   for (const slug of slugs) {
     try {
-      const page = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
+      // Preserve the full source grant. Collapsing multi-source scope to
+      // `undefined` turns a federated read into an unscoped cross-source read.
+      const page = await engine.getPage(slug, opts);
       if (!page) continue;
       const key = `${page.source_id ?? 'default'}::${slug}`;
       const injectedScore = topScore * (1.2 - Math.min(rank, 10) * 0.01);
