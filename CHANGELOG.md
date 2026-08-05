@@ -2,6 +2,44 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.73.2] - 2026-08-05
+
+**A write that deduplication redirects onto an existing page is now checked against the write scope of whoever asked for it.** When the same content arrives under a new slug, gbrain recognises it and points the write at the page that already holds it. That redirected target is now tested against the caller's own scope — under whichever mechanism confines that caller. One of the two mechanisms was consulted at that point; both are now.
+
+Nothing changes for local CLI use, or for clients that hold unrestricted write access — neither was ever scope-confined. A confined caller whose write dedups onto a page **inside** its own scope keeps working exactly as before; that redirect is a feature and it is preserved, with a regression test to keep it that way. A confined caller whose write dedups onto a page **outside** its scope now gets `permission_denied`, with the remedy in the message: drop the `id:` frontmatter field, or change the content, to write a new page under your own prefix. The denial does not name the page the write resolved to.
+
+Recommended for any brain served over HTTP to scope-restricted clients.
+
+### To take advantage of v0.42.73.2
+
+```bash
+gbrain upgrade
+```
+
+Nothing to configure. Existing clients keep their scopes unchanged, and no re-registration is needed.
+
+### For contributors
+
+Reported privately by an external security researcher, who supplied a fix and a regression test with it. The version that shipped composes the two existing scope-matching rules into a single predicate rather than restating either one, so the check at the door and the check after a redirect cannot drift apart; the audit the report prompted closed the same gap on one further caller path.
+
+## [0.42.73.1] - 2026-08-05
+
+**Removes the PR gate that v0.42.73.0 added, and reverts the v0.42.72.1 contribution-policy change it enforced.** The gate cannot function on this repository, and it caused a real incident before that was understood.
+
+The gate needed two things this repository does not grant it: an `ANTHROPIC_API_KEY` Actions secret for its verdict, and read-write workflow permissions to post a comment or set a label. Without them it can only skip. Worse, on its first live runs a read-only token turned every API call into a 403, the code treated that as a crash, and the check went red on an outside contributor's pull request four times with no comment explaining why. That was fixed in v0.42.73.0, but a check that runs on every pull request and can never reach a verdict does not earn its place in the repository.
+
+The v0.42.72.1 contribution policy is also withdrawn: the human-written intent paragraph and gbrain-in-use screenshot are no longer required on issues and pull requests. `CONTRIBUTING.md`, both issue templates, and the pull-request template return to their pre-2026-08-02 state, and issues and PRs are reviewed on their content by maintainers, as before.
+
+The code is preserved in git history at v0.42.73.0 and can be restored if the repository ever grants those permissions. If it is restored, the mechanical half — the intent and screenshot check, the version-first title rule, the red flags — should render to the Actions job summary instead of a comment, because that needs no token permission and no API key.
+
+### To take advantage of v0.42.73.1
+
+```bash
+gbrain upgrade
+```
+
+Nothing to change. Everything else v0.42.73.0 shipped — the five contributed correctness fixes, `slug_filter`, and the four dependency pins that cleared six CVEs — is unaffected and stays.
+
 ## [0.42.73.0] - 2026-08-04
 
 **Every incoming pull request now gets a verdict before anyone reads it — and five contributed fixes for silent wrong answers.**
