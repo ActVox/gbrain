@@ -4,6 +4,10 @@
 > tutorial walks both paths (local-from-nothing and connect-to-an-existing-brain)
 > end to end, plus the brain-first protocol that makes it worth it. This page is
 > the connection reference.
+>
+> Want the **full agent** — identity, per-turn context, schedules, and a private
+> repo as its durable body — not just a memory? That's `gbrain bootstrap`:
+> see the paste block in the README and [docs/guides/bootstrap.md](../guides/bootstrap.md).
 
 ## Option 1: Local (recommended, zero server needed)
 
@@ -90,6 +94,7 @@ You should see results from your GBrain knowledge base.
 > full-surface — on `--surface verbs` the agent sees only the five memory verbs,
 > and `list_skills` isn't on the surface at all. Note: `capture` is a
 > CLI-only command, not an MCP tool — the agent writes over MCP with `put_page`.
+> Why brains differ on the default: [tutorial A1](../tutorials/connect-coding-agent.md#a1-on-the-host-serve-over-http).
 
 ## Remove
 

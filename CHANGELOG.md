@@ -2,6 +2,113 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.45.0.0] - 2026-08-10
+
+**Your coding agent can now become your personal agent.** Paste one block into Codex or Claude Code and it sets itself up as a persistent agent with a memory that survives across sessions: it interviews you, writes its own identity files from your answers, spins up a local brain, and keeps a private GitHub repo as its durable body. Close the laptop and reopen it tomorrow, and it still knows who you are, who you're talking to, and what you told it last time. This is the OpenClaw/Hermes experience — identity, memory, schedules, persistence — running on the subscription you already pay for, with nothing to deploy.
+
+**Start with Codex.** It runs on your ChatGPT subscription, takes about fifteen minutes, and deploys nothing. Claude Code is the same install. OpenClaw and Hermes are still the way to run GBrain exactly as designed — always on, enriching around the clock — at real server and API cost; Codex is the recommended first step for anyone new to GBrain.
+
+### How to use it
+
+Pick the folder that will become your agent's home and paste (Codex shown; the Claude Code block is identical):
+
+```
+Read and follow every step of:
+https://raw.githubusercontent.com/garrytan/gbrain/latest-stable/BOOTSTRAP_FOR_AGENTS.md
+Goal: set yourself up as my persistent personal agent in this folder, with gbrain
+as your memory. Interview me before writing any identity file — never invent
+answers. Ask before anything destructive. You are not done until
+`gbrain bootstrap verify` exits 0.
+```
+
+The agent runs `gbrain bootstrap` — a new command family (`status`, `interview`, `render`, `repo`, `hooks`, `verify`, `attach`, `uninstall`) that drives the whole install. It works with **zero API keys**: your harness's model is the LLM, so the agent authors memory directly and search runs keyword-only; add one optional key (OpenAI, Anthropic, or Voyage) to unlock semantic search and automatic fact extraction. Everything is consent-gated — hooks, background push, MCP scope — and nothing runs while your harness is closed (the honest desktop contract; true 24/7 is what a hosted brain adds).
+
+### What you get
+
+- **A memory that compounds.** On Claude Code, session hooks inject relevant brain context at the start of each prompt and ingest the transcript when the session ends; on Codex, the rendered `AGENTS.md` carries the same pull protocol. Facts you state get written back through the brain's own tools and resurface next session.
+- **A portable body.** Your workspace is a private GitHub repo (privacy verified via the API before anything is pushed, secret-scanned before every commit). Clone it on a second machine and run `gbrain bootstrap attach`. It mounts anywhere GBrain runs — the exit plan if a provider ever changes its terms.
+- **Multi-model install.** Works in the ChatGPT desktop app, the Codex CLI, Claude Code desktop, and the Claude Code CLI. Same body format, two doors.
+
+### What to know after upgrading
+
+Existing installs are untouched — this is a new, opt-in surface. If you want it, run the paste block in a fresh folder. `gbrain doctor` gained bootstrap health checks (hook heartbeat, push staleness, serve/lock collisions, runbook skew); if anything looks off after an install, `gbrain doctor` names it and prints the fix.
+
+### What we caught and fixed before merging
+
+This shipped through a full review pass (architecture, security, adversarial, cross-model). Highlights, in plain terms: the credential scanner now recognizes today's API-key formats and reads the exact bytes being committed rather than a stale snapshot, so a key can't slip through a timing gap; private-key material is redacted whole, not just its header; and the scanner fails safe — an unreadable or oversized file blocks the push instead of passing unscanned. The GitHub repo is confirmed to belong to you and to be private before any content leaves the machine.
+
+## To take advantage of v0.45.0.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor`
+warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **To try the new agent-bootstrap surface,** paste the block above into Codex
+   or Claude Code in a fresh folder, or read
+   [`docs/guides/bootstrap.md`](docs/guides/bootstrap.md) for the full contract.
+   Existing brains need no action — bootstrap is an opt-in new surface, not a
+   change to how your current install works.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor
+   gbrain stats
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor`
+   and `~/.gbrain/upgrade-errors.jsonl` if it exists.
+## [0.44.1.0] - 2026-08-11
+
+**Any current model works now. gbrain stops rejecting model ids it hasn't heard of.**
+
+New models ship every week. Until now, gbrain kept a built-in list of "known" models for each major provider (Anthropic, OpenAI, Google), and if you configured a model that list hadn't learned yet, gbrain refused to run it, even when the provider was already serving that model to everyone else. In practice that meant a brand-new model like `openai:gpt-5.6-sol` read as "not available" on an install whose binary shipped three weeks earlier, and the error message steered people toward older models instead. Worse, the workaround was inconsistent: the same model id worked when set as `models.default` but was rejected when set as `models.think`, for no reason a user could see.
+
+That whole class of failure is gone. gbrain now checks only what a provider can do (Anthropic has no embedding models, Voyage has no chat models). Which model id you use is your call. If you name one that does not exist, the provider says so at call time, in its own words, and gbrain shows you that message instead of guessing.
+
+How to use it:
+
+```bash
+gbrain config set models.default openai:gpt-5.6-sol   # any current model id
+gbrain config set models.think google:gemini-3.6-flash # per-task keys work identically now
+gbrain models doctor                                    # pre-flight: probes your configured models live
+```
+
+What changed in each case:
+
+| You do | Before | Now |
+|---|---|---|
+| Configure a model newer than your gbrain binary | Rejected: "not listed... Known models: ..." | Runs |
+| Set that model via `models.think` / `models.dream.*` | Rejected even when `models.default` worked | Identical behavior on every key |
+| Typo a model id | Caught instantly, locally | Fails at the provider with the provider's own message; `gbrain models doctor` still catches it pre-flight without spending tokens |
+| Use a chat model from an embeddings-only provider | Rejected | Still rejected (that check is about the provider, not the model) |
+
+Things to watch: a typo'd model id now costs one failed provider call instead of failing free and instantly. Run `gbrain models doctor` after changing model config if you want the old fail-fast feel. `gbrain think`'s fallback answer now carries the provider's actual error text, so a bad model id no longer reads as an API-key problem.
+
+## To take advantage of v0.44.1.0
+
+No migration, no schema change. `gbrain upgrade` is enough.
+
+1. **Set any current model:**
+   ```bash
+   gbrain config set models.default <provider>:<model>
+   ```
+2. **Verify:**
+   ```bash
+   gbrain models doctor
+   ```
+3. **If a model you know is real still fails,** the error now comes from the provider; check the id spelling and your key, then file an issue at https://github.com/garrytan/gbrain/issues with the `gbrain models doctor` output.
+
+### Itemized changes
+
+- `src/core/ai/model-resolver.ts` — `assertTouchpoint(recipe, touchpoint, modelId)` checks provider touchpoint capability only; the native-recipe model allowlist throw is removed. Recipe `models:` arrays remain as data: `models[0]` default selection for `--model <provider>` shorthand and env-ready pickers, guard-test fixtures for the repo's own hardcoded defaults, and `gbrain providers list` display.
+- `src/core/ai/gateway.ts` — the extended-models registry (`_extendedModels`, `registerExtendedModel`, `registerConfigSelectedChatModel`, both registration loops, and the tier-resolution loop that fed them) is deleted. Every per-task model key (`models.think`, `models.dream.*`, `facts.extraction_model`, ...) now behaves exactly like `models.default`. `gateway.rerank()` keeps its own model-list check: each listed reranker id maps to a known request/response wire shape.
+- `src/core/think/index.ts` — the graceful "no LLM available" sentinel surfaces the thrown `AIConfigError`'s own message and fix (which key is missing, or what the provider rejected) instead of generic key advice.
+- `src/core/minions/handlers/contextual-reindex-per-chunk.ts` — drops the now-dead chat-model registration call.
+- Tests — `test/gateway-tier-extended-models.test.ts` deleted (pinned the removed machinery); rejection tests across `test/ai/`, `test/think-*`, and `test/cycle/` now pin the pass-through contract; `unknown_model` still fires for providers lacking the touchpoint, so every probe reason stays reachable; new test pins the sentinel carrying the provider's error text.
+- Docs — `docs/architecture/KEY_FILES.md` entries for the resolver, gateway, and reindex handler updated to the new contract.
+
 ## [0.44.0.0] - 2026-06-12
 
 **BrainBench: agent memory now has a scorecard.** `gbrain eval brainbench` is a public, reproducible, cross-harness conformance suite for the four ways agent memory fails — and from this release forward, every memory PR must hold or move its numbers against a committed baseline that CI compares against master's own copy.

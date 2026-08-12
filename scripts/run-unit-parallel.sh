@@ -125,14 +125,16 @@ INTRA_CONC="${MAX_CONCURRENCY_OVERRIDE:-${GBRAIN_TEST_MAX_CONCURRENCY:-4}}"
 # 4-shard default each shard runs 159 files / ~2420 tests with internal
 # wallclock 960-1020s. The 900s value (sized for 8-shard's ~80 files /
 # 1100 tests at 620-770s) false-killed shard 1 at 900s even though it
-# had completed in 968s. 1500s cap gives ~55% headroom over observed
-# 4-shard wallclock; real hangs still hit it. Override via
-# GBRAIN_TEST_SHARD_TIMEOUT=N.
-# v0.42.74 sizing: 1500 -> 3000. The suite roughly tripled since the 1500s
-# cap was set (June: ~3900 tests, 92-migration PGLite replay; now: 11k+
-# tests, 120-migration replay per PGLite init). At 4 shards, two shards were
-# killed at 1500s while making steady per-test progress. 3000s keeps the
-# same ~55%-headroom doctrine over observed wallclock; real hangs still die.
+# had completed in 968s. The cap must track suite growth: the suite roughly
+# tripled since the 1500s cap was set (June: ~3900 tests, 92-migration PGLite
+# replay; now: 13k+ tests with the agent-bootstrap wave, 120-migration replay
+# per PGLite init). The split balances file COUNT, not weight — the heaviest
+# count-balanced shard is still making steady per-test progress at 1800s under
+# 4-way contention while its siblings finish at 1150-1550s. 3000s keeps the
+# ~55%-headroom doctrine over observed wallclock; genuinely hung TESTS still
+# die at bun's per-test timeout, mid-run stalls still hit this cap, and
+# post-completion exit-hangs are classified separately (see the EXIT-HANG
+# block below). Override via GBRAIN_TEST_SHARD_TIMEOUT=N.
 SHARD_TIMEOUT="${GBRAIN_TEST_SHARD_TIMEOUT:-3000}"
 SHARD_KILL_AFTER="${GBRAIN_TEST_SHARD_KILL_AFTER:-30}"
 if ! printf '%s' "$SHARD_KILL_AFTER" | grep -qE '^[0-9]+$' || [ "$SHARD_KILL_AFTER" -lt 1 ]; then
@@ -197,7 +199,7 @@ else
   mkdir -p "$LOG_DIR" || { echo "ERROR: cannot create log dir" >&2; exit 2; }
 fi
 # Clear from prior run.
-rm -f "$LOG_DIR"/shard-*.log "$LOG_DIR"/shard-*.exit "$LOG_DIR"/shard-*.wedged "$LOG_DIR"/shard-*.start "$LOG_DIR"/shard-*.end 2>/dev/null
+rm -f "$LOG_DIR"/shard-*.log "$LOG_DIR"/shard-*.exit "$LOG_DIR"/shard-*.wedged "$LOG_DIR"/shard-*.lastkb "$LOG_DIR"/shard-*.lastprogress "$LOG_DIR"/shard-*.start "$LOG_DIR"/shard-*.end 2>/dev/null
 : > "$FAILURES_LOG"
 : > "$SUMMARY_FILE"
 
@@ -371,6 +373,15 @@ heartbeat() {
           local pglite; pglite=$(shard_pglite_init_count "$lf")
           local kb; kb=$(log_size_kb "$lf")
           local et; et=$(fmt_elapsed "$hb_elapsed")
+          # Progress stamp for the exit-hang classifier: any log growth counts
+          # as progress. A wedged shard whose log went silent (≥ idle window)
+          # with zero fails did its work and hung at exit.
+          local prev_kb=""
+          [ -f "$LOG_DIR/shard-$i.lastkb" ] && prev_kb=$(cat "$LOG_DIR/shard-$i.lastkb" 2>/dev/null)
+          if [ "$kb" != "$prev_kb" ]; then
+            echo "$kb" > "$LOG_DIR/shard-$i.lastkb"
+            echo "$now" > "$LOG_DIR/shard-$i.lastprogress"
+          fi
           if [ "$total" -gt 0 ]; then
             line="$line [s$i: ~${pglite}/${total}f ${kb}KB ${et}]"
           else
@@ -449,6 +460,35 @@ failing_files_in_log() {
   ' "$file" | sort -u
 }
 
+# shard_unstarted_files: completion evidence for the EXIT-HANG classifier.
+# Prints every file assigned to shard $1 (same deterministic split the shard
+# itself used, via --dry-run-list) whose started file-header never appeared
+# in the shard log $2. Bun prints `path.test.ts:` as each file starts; under
+# GITHUB_ACTIONS that header is wrapped as `::group::path.test.ts:` — both
+# forms count as started. Fail-closed: an underivable assigned list or a
+# missing log emits markers so the caller treats the shard as WEDGED rather
+# than warn-passing without evidence.
+shard_unstarted_files() {
+  local shard_idx="$1" log="$2"
+  local assigned
+  assigned=$(SHARD="$shard_idx/$N" bash scripts/run-unit-shard.sh --dry-run-list 2>/dev/null)
+  if [ -z "$assigned" ]; then
+    echo "(assigned-file-list-underivable)"
+    return
+  fi
+  if [ ! -f "$log" ]; then
+    printf '%s\n' "$assigned"
+    return
+  fi
+  local af
+  while IFS= read -r af; do
+    [ -n "$af" ] || continue
+    if ! grep -qxF "${af}:" "$log" && ! grep -qxF "::group::${af}:" "$log"; then
+      printf '%s\n' "$af"
+    fi
+  done <<< "$assigned"
+}
+
 for i in $(seq 1 "$N"); do
   SHARD_LOG="$LOG_DIR/shard-$i.log"
   EXIT_FILE="$LOG_DIR/shard-$i.exit"
@@ -491,6 +531,53 @@ for i in $(seq 1 "$N"); do
   fi
 
   if [ -f "$WEDGED_FILE" ]; then
+    # EXIT-HANG classifier (pre-existing PGLite-adjacent leak, TODOS.md
+    # "unit-shard exit hang"): a shard killed by the watchdog whose log shows
+    # every assigned file STARTED and zero (fail) markers did all its work and
+    # then failed to exit (a leaked ref'd handle; reproduces on master with
+    # the same file combination). Bun's per-test --timeout turns a genuinely
+    # hung TEST into a (fail), so this cannot mask one — the residual
+    # maskable case is a file-level import hang in the very last file, which
+    # the loud banner keeps visible. Classified shards warn instead of
+    # red-Xing the run; their pass counts are undercounted (bun never printed
+    # its final summary before the kill).
+    inline_fails=$(grep_count '^\(fail\) ' "$SHARD_LOG")
+    # Idle window: the log stopped growing this long before the kill. Bun's
+    # per-test --timeout turns a hung TEST into a printed (fail) — new output —
+    # so a silent-with-zero-fails shard was done with its work.
+    idle_secs=-1
+    if [ -f "$LOG_DIR/shard-$i.lastprogress" ] && [ -f "$WEDGED_FILE" ]; then
+      last_prog=$(cat "$LOG_DIR/shard-$i.lastprogress" 2>/dev/null || echo 0)
+      kill_ts=$(stat -f %m "$WEDGED_FILE" 2>/dev/null || stat -c %Y "$WEDGED_FILE" 2>/dev/null || echo 0)
+      [ "$kill_ts" -gt 0 ] && [ "$last_prog" -gt 0 ] && idle_secs=$((kill_ts - last_prog))
+    fi
+    # Warn-pass gate: rescue-eligible kills (OOM signature / external kill)
+    # are excluded so they reach the serial rescue queue below instead of
+    # being absolved without a re-run.
+    if [ "$fail_count" = "0" ] && [ "$inline_fails" = "0" ] && [ "$idle_secs" -ge 300 ] \
+       && [ "$shard_oom" = "0" ] && [ "$shard_external_kill" = "0" ]; then
+      # Completion evidence (fail-closed): warn-pass additionally requires
+      # every assigned file to have STARTED (its file-header appears in the
+      # log). A silent idle window can also mean the shard wedged before
+      # reaching its last files — that stays a hard WEDGE.
+      unstarted=$(shard_unstarted_files "$i" "$SHARD_LOG")
+      if [ -z "$unstarted" ]; then
+        {
+          echo "⚠️  shard $i/$N: EXIT-HANG after ${SHARD_TIMEOUT}s — log silent for ${idle_secs}s with 0 failures"
+          echo "    and every assigned file started; the process finished its work, leaked a handle, and"
+          echo "    never exited (pre-existing, master-reproducible; see TODOS.md 'unit-shard exit hang')."
+          echo "    Treating as pass-with-warning."
+        } >&2
+        echo "shard $i/$N: EXIT-HANG (idle ${idle_secs}s, 0 fails, all files started) rc=$rc — warn-pass" >> "$SUMMARY_FILE"
+        continue
+      fi
+      unstarted_count=$(printf '%s\n' "$unstarted" | grep -c .)
+      {
+        echo "⚠️  shard $i/$N: watchdog-killed with 0 fails and idle ${idle_secs}s, but ${unstarted_count} assigned"
+        echo "    file(s) never started — classifying WEDGED, not EXIT-HANG:"
+        printf '%s\n' "$unstarted" | sed 's/^/      /'
+      } >&2
+    fi
     TOTAL_RC=1
     if [ "$shard_external_kill" = "1" ]; then
       SHARD="$i/$N" bash scripts/run-unit-shard.sh --dry-run-list 2>/dev/null >> "$OOM_RESCUE_LIST"

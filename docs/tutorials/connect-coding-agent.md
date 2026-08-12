@@ -6,6 +6,11 @@ you decided three meetings ago, and re-derive context you already have written
 down somewhere. GBrain is the retrieval layer that fixes that: search, synthesis,
 and a self-wiring knowledge graph, wired into your agent over MCP.
 
+> This tutorial is the **memory-only** tier. Want the whole agent — identity,
+> per-turn context, schedules, and a private GitHub repo as its durable body?
+> That's `gbrain bootstrap`: the "For Codex" / "For Claude Code" paste blocks in
+> the README, full contract in [docs/guides/bootstrap.md](../guides/bootstrap.md).
+
 There are two ways to do this. Pick the one that matches where you are:
 
 - **Path A — I already run a brain** (OpenClaw, Hermes, or any `gbrain serve`
@@ -61,9 +66,9 @@ special). Turn it on:
 gbrain config set mcp.publish_skills true
 ```
 
-(New brains from `gbrain init` default this ON. Brains upgraded from before
-v0.41.36 stay OFF until you opt in, so this is the common gotcha for existing
-OpenClaw users.)
+(New brains from `gbrain init` default this ON. Brains upgraded from a release
+before skill publishing existed stay OFF until you opt in, so this is the
+common gotcha for existing OpenClaw users.)
 
 ### A2. On the host: mint a token
 
@@ -91,7 +96,7 @@ token fails right now, not silently on the agent's first request. You'll see:
 
 ```
 Added MCP server 'gbrain' -> https://your-host.example.com/mcp.
-Verified: {"version":"0.42.x","engine":"postgres","page_count":146646,...}
+Verified: {"version":"0.42.x","engine":"postgres","page_count":1204,...}
 ```
 
 Drop `--install` to print a paste-ready block instead (useful when the host and
@@ -243,7 +248,7 @@ habits to build. Your agent stops being amnesiac.
 
 ## Next steps
 
-- Go full autonomous: the overnight enrichment daemon ([dream cycle](../../CHANGELOG.md)) fixes citations, dedupes people, builds scorecards while you sleep. See `gbrain autopilot --install`.
+- Go full autonomous: the overnight enrichment daemon ([dream cycle](../guides/operational-disciplines.md)) fixes citations, dedupes people, builds scorecards while you sleep. See `gbrain autopilot --install`.
 - Run a real agent platform on top: [personal-brain tutorial](personal-brain.md).
 - Scale to a team: [company-brain tutorial](company-brain.md).
 - Every MCP client's exact setup: [`docs/mcp/`](../mcp/).
