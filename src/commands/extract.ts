@@ -654,6 +654,29 @@ export interface ExtractOpts {
   includeFrontmatter?: boolean;
 }
 
+export interface ExtractDbOpts {
+  /** What to extract from DB-backed pages. */
+  mode: 'links' | 'timeline' | 'all';
+  /** Report what would change without writing. */
+  dryRun?: boolean;
+  /** Emit JSON/progress-compatible output. */
+  jsonMode?: boolean;
+  /** Restrict extraction to a page type. */
+  typeFilter?: PageType;
+  /** Restrict extraction to pages updated after this date. */
+  since?: string;
+  /** Include frontmatter links in the link pass. */
+  includeFrontmatter?: boolean;
+  /** Restrict the walk to one source_id. */
+  sourceIdFilter?: string;
+  /** Run body-text entity mention linking instead of the normal link pass. */
+  byMention?: boolean;
+  /** Run schema-pack regex/entity inference instead of the normal link pass. */
+  ner?: boolean;
+  /** Run meeting-derived timeline extraction. */
+  fromMeetings?: boolean;
+}
+
 /**
  * Library-level extract. Throws on error; prints nothing unless jsonMode or
  * explicit output is warranted. Safe to call from Minions handlers because it
@@ -709,6 +732,89 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
     result.pages_processed = Math.max(result.pages_processed, r.pages);
   }
 
+  return result;
+}
+
+/**
+ * Library-level DB-source extract. This is the safe surface for Minions/MCP:
+ * it works on checkout-less or multi-source hosts and threads source_id into
+ * both reads and writes. The CLI path below delegates here for --source db.
+ */
+export async function runExtractDbCore(engine: BrainEngine, opts: ExtractDbOpts): Promise<ExtractResult> {
+  if (!['links', 'timeline', 'all'].includes(opts.mode)) {
+    throw new Error(`Invalid extract mode "${opts.mode}". Allowed: links, timeline, all.`);
+  }
+  if (opts.since !== undefined) {
+    const sinceMs = new Date(opts.since).getTime();
+    if (!Number.isFinite(sinceMs)) {
+      throw new Error(`Invalid --since date: "${opts.since}". Must be a parseable date (e.g., "2026-01-15" or full ISO timestamp).`);
+    }
+  }
+  if ((opts.byMention || opts.ner) && opts.mode === 'timeline') {
+    throw new Error('--by-mention/--ner are links-pass options; use mode "links" or "all".');
+  }
+  if (opts.fromMeetings && opts.mode !== 'timeline' && opts.mode !== 'all') {
+    throw new Error('--from-meetings is a timeline-pass option; use mode "timeline" or "all".');
+  }
+
+  const dryRun = !!opts.dryRun;
+  const jsonMode = !!opts.jsonMode;
+  const typeFilter = opts.typeFilter;
+  const since = opts.since;
+  const sourceIdFilter = opts.sourceIdFilter;
+  const includeFrontmatter = !!opts.includeFrontmatter;
+  const result: ExtractResult = { links_created: 0, timeline_entries_created: 0, pages_processed: 0 };
+
+  if (opts.fromMeetings) {
+    const { extractTimelineFromMeetings } = await import('../core/extract-timeline-from-meetings.ts');
+    const r = await extractTimelineFromMeetings(engine, { dryRun, sourceIdFilter });
+    result.timeline_entries_created = r.entries_created;
+    result.pages_processed = r.meetings_scanned;
+    if (!jsonMode) {
+      console.log(`Timeline from meetings: ${r.entries_created} entries on ${r.entities_touched} entity pages from ${r.meetings_scanned} meetings`);
+    }
+    return result;
+  }
+
+  if (opts.byMention || opts.ner) {
+    const sharedGazetteer = opts.ner ? await buildGazetteer(engine) : undefined;
+    if (opts.byMention) {
+      const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter });
+      result.links_created += r.created;
+      result.pages_processed += r.pages;
+    }
+    if (opts.ner) {
+      const { extractNerLinks } = await import('../core/extract-ner.ts');
+      const r = await extractNerLinks(engine, {
+        dryRun,
+        sourceIdFilter,
+        typeFilter,
+        since,
+        gazetteer: sharedGazetteer,
+      });
+      if (r.pack_unavailable && !jsonMode) {
+        console.log('Note: no active schema pack with link_types[].inference.regex — NER pass produced 0 links.');
+      }
+      result.links_created += r.created;
+      if (!opts.byMention) result.pages_processed += r.pages;
+    }
+    return result;
+  }
+
+  if (opts.mode === 'links' || opts.mode === 'all') {
+    const r = await extractLinksFromDB(engine, dryRun, jsonMode, typeFilter, since, {
+      includeFrontmatter,
+      sourceIdFilter,
+      stampWatermark: opts.mode === 'all',
+    });
+    result.links_created = r.created;
+    result.pages_processed = r.pages;
+  }
+  if (opts.mode === 'timeline' || opts.mode === 'all') {
+    const r = await extractTimelineFromDB(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter });
+    result.timeline_entries_created = r.created;
+    result.pages_processed = Math.max(result.pages_processed, r.pages);
+  }
   return result;
 }
 
@@ -969,78 +1075,18 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
   let result: ExtractResult;
   try {
     if (source === 'db') {
-      // DB source: walk pages from the engine. The unified runExtractCore
-      // is fs-only; we keep the dual codepath here so Minions handlers
-      // can opt in via mode + source.
-      result = { links_created: 0, timeline_entries_created: 0, pages_processed: 0 };
-      // v0.41.18.0: --by-mention is a mode dispatch. When set, run ONLY
-      // the mention pass and skip the default link/frontmatter extract.
-      // The two passes write different link_source values ('mentions' vs
-      // 'markdown'/'frontmatter') so they don't conflict, but mixing them
-      // in a single CLI invocation is surprising — keep the surfaces
-      // separate.
-      if (fromMeetings) {
-        // v0.41.18.0 (T8): timeline-from-meetings runs SOLO (doesn't combine
-        // with --by-mention/--ner because those are links passes).
-        const { extractTimelineFromMeetings } = await import('../core/extract-timeline-from-meetings.ts');
-        const r = await extractTimelineFromMeetings(engine, { dryRun, sourceIdFilter });
-        result.timeline_entries_created = r.entries_created;
-        result.pages_processed = r.meetings_scanned;
-        if (!jsonMode) {
-          console.log(`Timeline from meetings: ${r.entries_created} entries on ${r.entities_touched} entity pages from ${r.meetings_scanned} meetings`);
-        }
-        // #2057 (codex): batch failures are no longer swallowed silently — make
-        // them visible at the command surface (and non-zero exit) instead of
-        // printing a clean "N entries" success over failed inserts.
-        if (r.batch_errors > 0) {
-          console.error(
-            `[extract timeline] ${r.batch_errors} batch(es) failed to insert` +
-            (r.first_batch_error ? ` (first error: ${r.first_batch_error})` : '') +
-            ` — timeline is incomplete.`,
-          );
-          setCliExitVerdict(1);
-        }
-      } else if (byMention || ner) {
-        // v0.41.18.0 (T7): combined --by-mention + --ner walk shares one
-        // gazetteer; saves an entire pass on big brains. When only one
-        // flag is set, the other extractor skips silently.
-        const { buildGazetteer: buildGz } = await import('../core/by-mention.ts');
-        const sharedGazetteer = (byMention || ner) ? await buildGz(engine) : undefined;
-        if (byMention) {
-          const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter });
-          result.links_created += r.created;
-          result.pages_processed += r.pages;
-        }
-        if (ner) {
-          const { extractNerLinks } = await import('../core/extract-ner.ts');
-          const r = await extractNerLinks(engine, {
-            dryRun,
-            sourceIdFilter,
-            typeFilter,
-            since,
-            gazetteer: sharedGazetteer,
-          });
-          if (r.pack_unavailable && !jsonMode) {
-            console.log('Note: no active schema pack with link_types[].inference.regex — NER pass produced 0 links.');
-          }
-          result.links_created += r.created;
-          // pages already counted by by-mention if both ran; else count here.
-          if (!byMention) result.pages_processed += r.pages;
-        }
-      } else {
-        if (subcommand === 'links' || subcommand === 'all') {
-          // C3 (D6): only stamp the combined links+timeline watermark when BOTH
-          // ran ('all'); a links-only run must not mark timeline fresh.
-          const r = await extractLinksFromDB(engine, dryRun, jsonMode, typeFilter, since, { includeFrontmatter, sourceIdFilter, stampWatermark: subcommand === 'all' });
-          result.links_created = r.created;
-          result.pages_processed = r.pages;
-        }
-        if (subcommand === 'timeline' || subcommand === 'all') {
-          const r = await extractTimelineFromDB(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter, inferDates });
-          result.timeline_entries_created = r.created;
-          result.pages_processed = Math.max(result.pages_processed, r.pages);
-        }
-      }
+      result = await runExtractDbCore(engine, {
+        mode: subcommand as 'links' | 'timeline' | 'all',
+        dryRun,
+        jsonMode,
+        typeFilter,
+        since,
+        includeFrontmatter,
+        sourceIdFilter,
+        byMention,
+        ner,
+        fromMeetings,
+      });
     } else {
       // #1747: resolve the brain source id and thread it into the fs-walk
       // extractors so batch rows carry from/to_source_id. Without this they
@@ -1878,17 +1924,18 @@ export async function extractStaleFromDB(
       // `page.updated_at.toISOString()` — the JS Date is ms-truncated, so the
       // µs-precision DB updated_at stayed strictly greater and the page never
       // cleared on Postgres. Stamping the exact value makes them equal.
-      //
+//
       // BUT the stamp must also clear the version-staleness clause
       // (`links_extracted_at < versionTs`). A page whose updated_at predates
       // versionTs would otherwise be stamped below the threshold and read as
       // stale forever — a permanent re-extract loop that never clears the lag.
-      // GREATEST(updated_at, versionTs) preserves the race semantics (a real
-      // future edit advances updated_at > versionTs >= stamp → re-extracts)
-      // while lifting old pages to the threshold so they clear.
-      const stampIso = page.updated_at.getTime() >= Date.parse(versionTs)
-        ? page.updated_at_iso
-        : versionTs;
+      // Use GREATEST semantics: NaN-guard both timestamps, fall back to versionTs
+      // when the comparison is indeterminate.
+      const updatedAtMs = Date.parse(page.updated_at_iso);
+      const versionMs = Date.parse(versionTs);
+      const stampIso = Number.isFinite(updatedAtMs) && Number.isFinite(versionMs) && updatedAtMs < versionMs
+        ? versionTs
+        : page.updated_at_iso;
       processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: stampIso });
     }
 

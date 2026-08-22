@@ -947,7 +947,9 @@ function commitScaffolding(repoPath: string, branch: string, redact: (s: string)
       stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
     }).toString().trim();
     if (!staged) return { status: 'ok', detail: 'scaffolding already committed' };
-    execFileSync('git', ['-C', repoPath, 'commit', '-m', 'chore(gbrain): install brain durability scaffolding'], {
+    // This path pushes synchronously below. Bypass the generated post-commit hook
+    // so it cannot race this push and start a concurrent rebase/index writer.
+    execFileSync('git', ['-C', repoPath, 'commit', '--no-verify', '-m', 'chore(gbrain): install brain durability scaffolding'], {
       stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV },
     });
     execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', 'origin', `HEAD:${branch}`], {

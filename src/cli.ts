@@ -655,6 +655,10 @@ async function main() {
   // timeout the abandoned handler may hold ref'd sockets — harmless here,
   // because the import.meta.main seam exits explicitly on every one-shot path.
   const READ_OP_TIMEOUT_MS = 180_000;
+  // #2084 inline: opHandlerCompleted tracks whether the op returned cleanly,
+  // so the finishCliTeardown force-exit can preserve the real exit code
+  // even when PGLite disconnect hangs after a successful op.
+  let opHandlerCompleted = false;
 
   try {
     const { withTimeout, OperationTimeoutError } = await import('./core/timeout.ts');
@@ -716,6 +720,7 @@ async function main() {
     // tail to a slow pipe reader when the exit grace lapses — see
     // writeStdoutFinal.
     if (output) await writeStdoutFinal(output);
+    opHandlerCompleted = true;
     maybePrintConceptNudge(op.name, params);
   } catch (e: unknown) {
     // v0.42.20.0 (codex D4): on error, set exitCode + return so the `finally`
@@ -2536,6 +2541,7 @@ async function handleCliOnly(command: string, args: string[]) {
 
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
+  let commandBodyCompleted = false;
   try {
     switch (command) {
       case 'import': {
@@ -3050,6 +3056,7 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
     }
+    commandBodyCompleted = true;
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     // #2084 — the CLI_ONLY fall-through teardown (drain every background-work

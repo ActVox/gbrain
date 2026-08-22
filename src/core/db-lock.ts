@@ -521,6 +521,41 @@ export async function listStaleLocks(engine: BrainEngine): Promise<LockSnapshot[
 }
 
 /**
+ * Clear all DB locks whose TTL has expired.
+ *
+ * Supervisor boot calls this as a non-fatal cleanup pass so a previous worker
+ * crash cannot leave expired rows around until the next lock acquire path.
+ * Live locks are never touched.
+ */
+export async function clearStaleLocks(engine: BrainEngine): Promise<number> {
+  const maybePG = engine as unknown as { sql?: (...args: unknown[]) => Promise<unknown> };
+  const maybePGLite = engine as unknown as {
+    db?: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> };
+  };
+
+  if (engine.kind === 'postgres' && maybePG.sql) {
+    const sql = maybePG.sql as any;
+    const rows: Array<{ id: string }> = await sql`
+      DELETE FROM gbrain_cycle_locks
+       WHERE ttl_expires_at < NOW()
+      RETURNING id
+    `;
+    return rows.length;
+  }
+
+  if (engine.kind === 'pglite' && maybePGLite.db) {
+    const { rows } = await maybePGLite.db.query(
+      `DELETE FROM gbrain_cycle_locks
+        WHERE ttl_expires_at < NOW()
+       RETURNING id`,
+    );
+    return rows.length;
+  }
+
+  throw new Error(`Unknown engine kind for clearStaleLocks: ${engine.kind}`);
+}
+
+/**
  * Every lock whose holder still looks live (TTL unexpired / holder judged
  * alive by `isLockHolderLive`). This is the "is anything writing right now?"
  * probe: cycle runs, sync imports, and embed backfills all hold rows in

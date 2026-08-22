@@ -635,4 +635,3 @@ export async function checkFactsEmbeddingWidthConsistency(engine: BrainEngine): 
     };
   }
 }
-

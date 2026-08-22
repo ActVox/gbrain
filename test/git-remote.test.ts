@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, chmodSync }
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
+  GIT_NO_RECURSE_SUBMODULES_FLAG,
   GIT_SSRF_FLAGS,
   GIT_SSRF_SUBCOMMAND_FLAGS,
   parseRemoteUrl,
@@ -241,9 +242,12 @@ describe('cloneRepo', () => {
     const calls = readArgvLog();
     expect(calls.length).toBe(1);
     const argv = calls[0];
-    // Global -c config flags must appear BEFORE the 'clone' verb.
+    // Pin the SSRF config flags before the 'clone' verb. Command flags must
+    // follow the subcommand; git rejects `git --no-recurse-submodules clone`.
     expect(argv.slice(0, GIT_SSRF_FLAGS.length)).toEqual([...GIT_SSRF_FLAGS]);
-    expect(argv).toContain('clone');
+    const cloneIdx = argv.indexOf('clone');
+    expect(cloneIdx).toBeGreaterThan(-1);
+    expect(argv[cloneIdx + 1]).toBe(GIT_NO_RECURSE_SUBMODULES_FLAG);
     expect(argv).toContain('--depth=1');
     expect(argv).toContain('https://example.com/repo');
     expect(argv[argv.length - 1]).toBe(dest);
@@ -251,8 +255,6 @@ describe('cloneRepo', () => {
     // git rejects `git --no-recurse-submodules clone ...` with exit 129.
     // The fake-git harness returned 0 for any argv shape, so this
     // position-anchored assertion is the structural regression test.
-    const cloneIdx = argv.indexOf('clone');
-    expect(cloneIdx).toBeGreaterThan(-1);
     for (const subFlag of GIT_SSRF_SUBCOMMAND_FLAGS) {
       const flagIdx = argv.indexOf(subFlag);
       expect(flagIdx).toBeGreaterThan(cloneIdx);

@@ -385,4 +385,3 @@ export function toCorpusText(turns: WindowTurn[]): string {
   if (!turns.length) return '';
   return turns.map((t) => `[${t.role}]\n${t.text}`).join('\n\n') + '\n';
 }
-
