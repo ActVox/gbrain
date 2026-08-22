@@ -1,7 +1,7 @@
 /**
  * Usage accounting op cluster (#4218, revives the #3392 shape).
  *
- * `get_usage` reads the chat_usage_log ledger (migration v136) that
+ * `get_usage` reads the chat_usage_log ledger (migration v140) that
  * gateway.chat() fills at its success boundary via the chat-usage sink.
  * Aggregates only — no raw rows — so the surface exposes spend/volume, never
  * content. The `coverage` block is the honesty contract: it states exactly
@@ -156,7 +156,7 @@ const get_usage: Operation = {
           'failed chat calls (budget-tracker owns pessimistic in-flight spend)',
           'subagent raw-SDK calls',
           'embeddings (embedding-pricing.ts unit)',
-          'calls made before migration v136 / sink registration',
+          'calls made before migration v140 / sink registration',
         ],
       },
     };
