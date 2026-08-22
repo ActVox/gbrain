@@ -105,6 +105,8 @@ export interface SweepReport {
   corpusIngested: number;
   factsReconciled: number;
   linksExtracted: number;
+  /** Stale sweep-owned edges reconciled away (#4196). */
+  linksRemoved: number;
   timelineExtracted: number;
   skipped: SweepSkip[];
   durationMs: number;
@@ -130,6 +132,7 @@ export async function runMaintenanceSweep(
     corpusIngested: 0,
     factsReconciled: 0,
     linksExtracted: 0,
+    linksRemoved: 0,
     timelineExtracted: 0,
     skipped: [],
     durationMs: 0,
@@ -288,11 +291,21 @@ async function runLinksTimelinePass(
   if (!timelineEnabled) skip('auto_timeline_disabled');
   if (!linksEnabled && !timelineEnabled) return;
 
-  const recent = await engine.executeRaw<{ slug: string }>(
-    `SELECT slug FROM pages
+  // #4196: honor the watermark this pass stamps, or repeated bounded sweeps
+  // re-select the same newest batchLimit rows forever and page batchLimit+1
+  // is never reached. Same predicate as the engines' buildStalePagesWhere
+  // (no versionTs branch — extractor-version catch-up is `extract --stale`'s
+  // job; the sweep is a recency back-stop). The µs to_char projection is the
+  // #1768 stamp discipline: stamp the row's READ updated_at, not now(), so an
+  // edit between SELECT and stamp stays stale and re-sweeps.
+  const recent = await engine.executeRaw<{ slug: string; updated_at_iso: string }>(
+    `SELECT slug,
+            to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
+       FROM pages
       WHERE source_id = $1
         AND deleted_at IS NULL
         AND updated_at >= $2::timestamptz
+        AND (links_extracted_at IS NULL OR updated_at > links_extracted_at)
       ORDER BY updated_at DESC
       LIMIT $3`,
     [sourceId, cutoffIso, batchLimit],
@@ -306,11 +319,15 @@ async function runLinksTimelinePass(
 
   const resolver = makeResolver(engine, { mode: 'batch', sourceId });
   const globalBasename = await isGlobalBasenameEnabled(engine);
+  // #3190: pack-aware verbs — the sweep must type edges the same way the
+  // extract command does or reconciliation flip-flops the link_type.
+  const { loadActivePackForLocalEngine } = await import('./schema-pack/best-effort.ts');
+  const pack = (await loadActivePackForLocalEngine(engine))?.manifest ?? null;
 
   type Extracted = Awaited<ReturnType<typeof extractPageLinks>>;
 
   const tlBatch: TimelineBatchInput[] = [];
-  const processedRefs: Array<{ slug: string; source_id: string }> = [];
+  const processedRefs: Array<{ slug: string; source_id: string; extractedAt: string }> = [];
   const pageCandidates: Array<{ slug: string; candidates: Extracted['candidates'] }> = [];
 
   // Phase 1: per-page extraction. The per-slug getPage loop stays a loop —
@@ -332,7 +349,7 @@ async function runLinksTimelinePass(
       // (frontmatter backfill stays a migration-orchestrator concern).
       const extracted = await extractPageLinks(
         slug, fullContent, page.frontmatter, page.type, resolver,
-        { skipFrontmatter: true, globalBasename },
+        { skipFrontmatter: true, globalBasename, pack },
       );
       if (extracted.candidates.length > 0) {
         pageCandidates.push({ slug, candidates: extracted.candidates });
@@ -342,10 +359,12 @@ async function runLinksTimelinePass(
     if (timelineEnabled) {
       for (const entry of parseTimelineEntries(fullContent)) {
         // Same row shape as extractTimelineFromDB's batch push (extract.ts):
-        // no explicit source (engine default applies), detail '' when empty.
+        // #3957 — parsed source label threaded so FS- and DB-extracted rows
+        // share one dedup shape; detail '' when empty.
         tlBatch.push({
           slug,
           date: entry.date,
+          source: entry.source,
           summary: entry.summary,
           detail: entry.detail || '',
           source_id: sourceId,
@@ -353,7 +372,7 @@ async function runLinksTimelinePass(
       }
     }
 
-    processedRefs.push({ slug, source_id: sourceId });
+    processedRefs.push({ slug, source_id: sourceId, extractedAt: recent[i].updated_at_iso });
   }
 
   // Phase 2: endpoint validation is scoped to the slugs the candidates
@@ -402,10 +421,75 @@ async function runLinksTimelinePass(
   if (tlBatch.length > 0) {
     report.timelineExtracted += await engine.addTimelineEntriesBatch(tlBatch); // gbrain-allow-direct-insert: same extract-path rationale as addLinksBatch above [CX-P0.3]
   }
+
+  // #4196: reconcile removals. The sweep is the ONLY link extraction remote
+  // put_page pages ever get (runAutoLink is skipped by design), so add-only
+  // inserts leave a phantom edge forever once a page drops a reference.
+  // Mirror runAutoLink's provenance-scoped removal (ops/pages.ts) — markdown /
+  // NULL-legacy / wikilink-resolved only — minus its own-frontmatter clause:
+  // the sweep extracts with skipFrontmatter, so its desired set can never
+  // contain frontmatter candidates and deleting them would clobber valid
+  // edges. 'manual' and 'mentions' are never touched. A page whose reconcile
+  // fails (or is cut by budget) is left unstamped so the next sweep retries.
+  const stampable = new Set(processedRefs.map(r => r.slug));
+  if (linksEnabled) {
+    const { autoLinkLockKey } = await import('./ops/pages.ts');
+    const desiredBySlug = new Map<string, Set<string>>(
+      processedRefs.map(r => [r.slug, new Set<string>()]),
+    );
+    for (const b of linkBatch) {
+      // runAutoLink's exact key shape (ops/pages.ts outKeys).
+      desiredBySlug.get(b.from_slug)?.add(
+        `${b.to_slug}\u0000${b.link_type}\u0000${b.link_source ?? 'markdown'}`,
+      );
+    }
+    for (const ref of processedRefs) {
+      if (overBudget()) {
+        skip('budget_exhausted:link_reconcile');
+        stampable.delete(ref.slug);
+        continue;
+      }
+      const desired = desiredBySlug.get(ref.slug)!;
+      try {
+        report.linksRemoved += await engine.transaction(async (tx) => {
+          try {
+            // Same advisory lock runAutoLink takes, so sweep reconciliation
+            // serializes against a concurrent local put_page on the slug.
+            await tx.executeRaw(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+              autoLinkLockKey(sourceId, ref.slug),
+            ]);
+          } catch { /* engine without advisory locks — PGLite is single-process */ }
+          const existing = await tx.getLinks(ref.slug, { sourceId });
+          let removed = 0;
+          for (const l of existing) {
+            const reconcilable =
+              l.link_source === 'markdown' || l.link_source == null ||
+              l.link_source === 'wikilink-resolved';
+            if (!reconcilable) continue;
+            const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
+            if (desired.has(key)) continue;
+            await tx.removeLink(ref.slug, l.to_slug, l.link_type, l.link_source ?? undefined, {
+              fromSourceId: sourceId,
+              toSourceId: l.to_source_id,
+            });
+            removed++;
+          }
+          return removed;
+        });
+      } catch {
+        skip('link_reconcile_failed');
+        stampable.delete(ref.slug);
+      }
+    }
+  }
+
   // Stamp only when BOTH kinds ran for these pages (extract.ts C3/D6:
-  // links_extracted_at covers links AND timeline).
-  if (linksEnabled && timelineEnabled && processedRefs.length > 0) {
-    await stampExtracted(engine, processedRefs);
+  // links_extracted_at covers links AND timeline). Per-ref extractedAt is the
+  // page's read updated_at (#1768 µs discipline; D4 — an edit between SELECT
+  // and stamp stays stale).
+  if (linksEnabled && timelineEnabled) {
+    const toStamp = processedRefs.filter(r => stampable.has(r.slug));
+    if (toStamp.length > 0) await stampExtracted(engine, toStamp);
   }
 }
 

@@ -560,6 +560,8 @@ export interface CycleOpts {
    * phases then use their configured timeouts unchanged.
    */
   deadlineAtMs?: number | null;
+  /** Internal: minion job id that owns any phase-created private dream-inline queues. */
+  privateQueueOwnerJobId?: number | null;
 }
 
 // ─── Lock primitives ───────────────────────────────────────────────
@@ -570,6 +572,15 @@ export interface CycleOpts {
  * existing dispatch + every existing minion job in flight at upgrade
  * time use this row in `gbrain_cycle_locks`.
  */
+/**
+ * #4062 review: wall-clock cap for the extract phase's IN-CYCLE stale drain.
+ * Deliberately small — the drain is a backlog nibbler that must not starve
+ * the phases behind it; the full STALE_TIME_BUDGET_MS (~30 min) belongs to
+ * the explicit `gbrain extract --stale` command. A backlog bigger than one
+ * cap's worth drains incrementally across cycles (staleRemaining reports it).
+ */
+export const CYCLE_STALE_DRAIN_BUDGET_MS = 3 * 60 * 1000;
+
 const LEGACY_CYCLE_LOCK_ID = 'gbrain-cycle';
 // v0.41.19.0 (T2 of ops-fix-wave): dropped from 30 min to 5 min so a
 // crashed cycle releases the lock within 5 min instead of holding it for
@@ -857,16 +868,25 @@ export function buildYieldDuringPhase(
  * the next tick). On a fenced refresh returning false, aborts `controller`
  * with a LockStolenError; a thrown (transient) refresh error is logged and
  * retried next tick — the TTL is the backstop.
+ *
+ * #4309: the tick also gates on `externalSignal` (the caller's abort, i.e.
+ * runCycle's opts.signal). An externally-aborted run whose current phase
+ * ignores the abort never reaches runCycle's finally, so without this gate
+ * the leaked timer kept renewing the fenced lock forever and no successor
+ * could ever take over. The once-listener stops the interval the moment the
+ * external abort fires; stop() detaches it so the autopilot daemon's reused
+ * shutdown signal doesn't accumulate one listener per tick.
  */
 export function startCycleLockRefresher(
   lock: LockHandle,
   controller: AbortController,
   lockId: string,
   intervalMs: number = resolveCycleLockRefreshMs(),
+  externalSignal?: AbortSignal,
 ): () => void {
   let inFlight = false;
   const timer = setInterval(() => {
-    if (inFlight || controller.signal.aborted) return;
+    if (inFlight || controller.signal.aborted || externalSignal?.aborted) return;
     inFlight = true;
     void (async () => {
       try {
@@ -884,7 +904,26 @@ export function startCycleLockRefresher(
   }, intervalMs);
   // Don't let the refresher pin the event loop open past real work.
   (timer as unknown as { unref?: () => void }).unref?.();
-  return () => clearInterval(timer);
+  let onExternalAbort: (() => void) | undefined;
+  const stop = () => {
+    clearInterval(timer);
+    if (onExternalAbort && typeof externalSignal?.removeEventListener === 'function') {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      stop();
+    } else if (typeof externalSignal.addEventListener === 'function') {
+      onExternalAbort = stop;
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    // Signal-LIKE objects (the minion job's { aborted } shape) carry no
+    // EventTarget surface — the per-tick `externalSignal.aborted` gate above
+    // still stops refreshing within one interval, which is the #4309
+    // guarantee; only the instant-stop listener is skipped.
+  }
+  return stop;
 }
 
 /** Refresh 6x per TTL window (~50s at the 5-min TTL), matching withRefreshingLock's cadence. */
@@ -1336,6 +1375,40 @@ async function runPhaseExtract(
     const linksCreated = result?.links_created ?? 0;
     const timelineCreated = result?.timeline_entries_created ?? 0;
     const incremental = changedSlugs !== undefined;
+    // #4062: the targeted pass above only covers what sync reported (or the
+    // fs walk found) — pages left stale for any OTHER reason (extractor
+    // version bump, DB-only writes, a prior aborted sweep) never re-extracted
+    // on the cycle, so the links_extracted_at backlog grew unboundedly until
+    // someone hand-ran `gbrain extract --stale`. Drain it here: DB-source,
+    // source-scoped, capped at CYCLE_STALE_DRAIN_BUDGET_MS per cycle (the
+    // full ~30-min STALE_TIME_BUDGET_MS stays with the explicit
+    // `gbrain extract --stale` command — an unbounded in-cycle drain would
+    // starve every later phase behind a big backlog; the remainder drains
+    // across subsequent cycles), no-op when nothing is stale. Failures
+    // degrade to details (the targeted pass already succeeded — a drain
+    // hiccup must not fail the phase).
+    let staleRemaining: number | undefined;
+    let staleDetails: Record<string, unknown> = {};
+    try {
+      const { extractStaleFromDB } = await import('../commands/extract.ts');
+      const drained = await extractStaleFromDB(engine, {
+        dryRun: false,
+        jsonMode: false,
+        includeFrontmatter,
+        sourceIdFilter: sourceId,
+        catchUp: false,
+        timeBudgetMs: CYCLE_STALE_DRAIN_BUDGET_MS,
+      });
+      staleRemaining = drained.staleRemaining;
+      staleDetails = {
+        stale_pages_drained: drained.pagesProcessed,
+        stale_links_created: drained.linksCreated,
+        stale_timeline_created: drained.timelineCreated,
+        staleRemaining: drained.staleRemaining,
+      };
+    } catch (e) {
+      staleDetails = { stale_drain_error: e instanceof Error ? e.message : String(e) };
+    }
     return {
       phase: 'extract',
       status: 'ok',
@@ -1348,6 +1421,8 @@ async function runPhaseExtract(
         pages_processed: result?.pages_processed ?? 0,
         incremental,
         ...(incremental ? { slugs_targeted: changedSlugs.length } : {}),
+        ...staleDetails,
+        ...(staleRemaining !== undefined && staleRemaining > 0 ? { stale_backlog: true } : {}),
       },
     };
   } catch (e) {
@@ -1987,8 +2062,10 @@ export async function runCycle(
   // `cycleLockIdFor` throw here crashed `--source __all__` runs that never
   // needed a lock id). Real acquisition validated above via acquireDbCycleLock.
   const cycleLockId = cycleLockIdLabelFor(opts.sourceId);
+  // #4309: pass the caller's signal so an external abort stops lock renewal
+  // even when a hung phase never lets the run reach the finally's stopRefresher.
   const stopRefresher: (() => void) | undefined = lock && stolen
-    ? startCycleLockRefresher(lock, stolen, cycleLockId)
+    ? startCycleLockRefresher(lock, stolen, cycleLockId, undefined, externalSignal)
     : undefined;
   const onStolen = stolen ? (e: LockStolenError) => { if (!stolen.signal.aborted) stolen.abort(e); } : undefined;
   // The reason can arrive as undefined (see isLockStolenAbort); rejecting a
@@ -2031,6 +2108,26 @@ export async function runCycle(
     } catch (e) {
       // Non-fatal: reaping is a backstop, never blocks the cycle.
       console.warn(`[cycle] dead-holder lock reap failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Orphaned-private-queue recovery at cycle start — the ONLY recovery lane
+    // on engines that never run a supervisor/worker process (PGLite inlines
+    // every child), and a cheap idempotent second net elsewhere. Same posture
+    // as the lock reap above: best-effort, never blocks the cycle; the
+    // classifier skips live queues (healthy child lock / live owner / future
+    // lease), so a concurrent cycle's queue is never touched.
+    try {
+      const { MinionQueue } = await import('./minions/queue.ts');
+      const recovered = await new MinionQueue(engine).reconcileOrphanedPrivateQueues({
+        reason: 'cycle startup recovery: orphaned dream-inline private queue',
+      });
+      if (recovered.cancelled_jobs > 0) {
+        console.warn(
+          `[cycle] private-queue startup recovery: cancelled ${recovered.cancelled_jobs} ` +
+          `job(s) across ${recovered.cancelled_queues} orphaned queue(s)`,
+        );
+      }
+    } catch (e) {
+      console.warn(`[cycle] private-queue startup recovery failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -2142,6 +2239,7 @@ export async function runCycle(
           // job budget (same collision shape as propose_takes, cross-process
           // timeout domain — clamped via the patterns.ts childBudget template).
           deadlineAtMs: opts.deadlineAtMs ?? null,
+          privateQueueOwnerJobId: opts.privateQueueOwnerJobId ?? null,
         }));
         result.duration_ms = duration_ms;
         phaseResults.push(result);
@@ -2262,7 +2360,7 @@ export async function runCycle(
           phase: 'extract_atoms',
           status: 'skipped',
           duration_ms: 0,
-          summary: 'extract_atoms: active pack does not declare this phase (run `gbrain dream --phase extract_atoms --drain` to drain a backlog)',
+          summary: 'extract_atoms: active pack does not declare this phase in its phases: list — add it or activate a lens pack that ships it (gbrain-creator / gbrain-everything); run `gbrain dream --phase extract_atoms --drain` to drain a backlog',
           details: { reason: 'not_in_active_pack', pack_gated: true },
         });
       } else {
@@ -2350,6 +2448,7 @@ export async function runCycle(
           yieldDuringPhase: buildYieldDuringPhase(lock, opts.yieldDuringPhase, onStolen),
           once: opts.onceForPhase === 'patterns',
           deadlineAtMs: opts.deadlineAtMs ?? null,
+          privateQueueOwnerJobId: opts.privateQueueOwnerJobId ?? null,
           // #1586: scope pattern writes to the cycle's resolved source, same as
           // synthesize above. Without it the child's put_page rows land in
           // 'default' while the reverse-write drops the file into the named
@@ -2388,7 +2487,7 @@ export async function runCycle(
           phase: 'synthesize_concepts',
           status: 'skipped',
           duration_ms: 0,
-          summary: 'synthesize_concepts: active pack does not declare this phase',
+          summary: 'synthesize_concepts: active pack does not declare this phase in its phases: list — add it or activate a lens pack that ships it (gbrain-creator / gbrain-everything)',
           details: { reason: 'not_in_active_pack', pack_gated: true },
         });
       } else {
@@ -2515,7 +2614,10 @@ export async function runCycle(
           // clean partial-exit fires before the worker's kill switch (same
           // literal shape as the patterns call above so the structural guard
           // matches both).
-          const { result, duration_ms } = await timePhase(() => runPhaseProposeTakes(calibrationCtx, { repoPath: brainDir ?? undefined, deadlineAtMs: opts.deadlineAtMs ?? null }) as Promise<PhaseResult>);
+          // #4102: `once` bypasses the cycle.propose_takes.enabled off switch
+          // for `gbrain dream --phase propose_takes --once` (same semantics as
+          // conversation_facts_backfill / enrich_thin above).
+          const { result, duration_ms } = await timePhase(() => runPhaseProposeTakes(calibrationCtx, { repoPath: brainDir ?? undefined, deadlineAtMs: opts.deadlineAtMs ?? null, once: opts.onceForPhase === 'propose_takes' }) as Promise<PhaseResult>);
           result.duration_ms = duration_ms;
           phaseResults.push(result);
           progress.finish();

@@ -9,19 +9,24 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { clampSearchLimit } from '../engine.ts';
-import type { PageType } from '../types.ts';
+import type { Page, PageType } from '../types.ts';
 import { importFromContent } from '../import-file.ts';
+import { serializePageToMarkdown } from '../markdown.ts';
 import { writePageThrough, type WriteThroughResult } from '../write-through.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from '../link-extraction.ts';
+// #3190: pack-aware link typing on the put_page auto-link path.
+import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
 import { isFactsBackstopEligible } from '../facts/eligibility.ts';
 import { stripTakesFence } from '../takes-fence.ts';
 import type { WriterLintPayload } from '../output/post-write.ts';
 import { stripFactsFence } from '../facts-fence.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
+import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
+import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
 import { LIST_PAGES_DESCRIPTION, CAPTURE_DESCRIPTION } from '../operations-descriptions.ts';
 import { OperationError } from './contract.ts';
-import type { Operation } from './contract.ts';
+import type { Operation, OperationContext } from './contract.ts';
 import {
   enforceSubagentSlugFence,
   slugOutsideCallerFence,
@@ -33,18 +38,106 @@ import {
 
 // --- Page CRUD ---
 
+/**
+ * #4329: parse a per-call `source_id` param. Pre-fix, get_page / delete_page /
+ * restore_page had NO source_id in their contracts, so an agent-passed
+ * source_id was SILENTLY dropped and the op acted on ctx.sourceId —
+ * soft-deleting the WRONG row on a multi-source brain while returning a
+ * success that named the requested slug. A caller-supplied value is either
+ * honored or rejected loudly — never ignored. `allowAll` admits the
+ * `__all__` sentinel for read ops (resolveRequestedScope collapses it per
+ * trust); destructive ops target exactly one source and reject it.
+ */
+function parseSourceIdParam(
+  raw: unknown,
+  opName: string,
+  opts?: { allowAll?: boolean },
+): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === 'string') {
+    if (raw === ALL_SOURCES) {
+      if (opts?.allowAll === true) return raw;
+      throw new OperationError(
+        'invalid_params',
+        `${opName}: source_id '${ALL_SOURCES}' is not a valid target — this op acts on exactly one source.`,
+        'Pass the single source_id of the row to target, or omit source_id to use the ambient source scope.',
+      );
+    }
+    if (isValidSourceId(raw)) return raw;
+  }
+  throw new OperationError(
+    'invalid_params',
+    `${opName}: invalid source_id ${JSON.stringify(raw)} — must be 1-32 lowercase alnum chars with optional interior hyphens.`,
+    'Pass a registered source id (see list_sources), or omit source_id to use the ambient source scope.',
+  );
+}
+
+/**
+ * #4329 (S1-tightened): write-authority gate for a per-call source_id on the
+ * destructive page ops. Trusted local callers (ctx.remote === false) own the
+ * brain and may target any source (slug fences still apply). EVERY other
+ * caller — authenticated HTTP MCP, unauthenticated transports (stdio MCP,
+ * subagent dispatch), unset trust — may target ONLY its write authority:
+ * `ctx.auth.sourceId` when auth exists (falling back to `ctx.sourceId` for
+ * legacy tokens that predate the v0.34.1 source grant), else `ctx.sourceId`.
+ *
+ * `ctx.auth.allowedSources` is the READ-federation grant (see contract.ts:
+ * "array of source ids this OAuth client may READ from") and plays NO role
+ * in writes — mirroring put_page, which writes only to ctx.sourceId
+ * (`localFederatedSourceIds` is likewise consumed exclusively by
+ * federatedSearchScope, a read path). Fail-closed permission_denied
+ * otherwise, never a silent retarget.
+ */
+function assertSourceInWriteGrant(ctx: OperationContext, sourceId: string): void {
+  if (ctx.remote === false) return;
+  const writeAuthority = ctx.auth?.sourceId ?? ctx.sourceId;
+  if (sourceId === writeAuthority) return;
+  throw new OperationError(
+    'permission_denied',
+    `source '${sourceId}' is outside your write authority`,
+    'Omit source_id (or pass your write source) to target your write source. Federated read grants do not confer delete/restore access.',
+  );
+}
+
+/**
+ * #4352 remediation — filter fuzzy-resolution candidates so get_page's
+ * ambiguous_slug candidate list can't enumerate private slugs to an
+ * untrusted caller. Probe SQL lives ONCE in findPrivateOnlySlugs (a slug
+ * with at least one non-private in-scope page stays visible; candidates
+ * come from resolveSlugs, so every slug has a live page row).
+ * Order-preserving (resolveSlugs returns ranked candidates). Read-only,
+ * scope-threaded — not a getPage/putPage pair (no unscoped-check/scoped-write
+ * hazard).
+ */
+async function dropPrivateSlugs(
+  engine: BrainEngine,
+  candidates: string[],
+  scope: { sourceId?: string; sourceIds?: string[] },
+  includeDeleted: boolean,
+): Promise<string[]> {
+  const hidden = await findPrivateOnlySlugs(engine, candidates, scope, { includeDeleted });
+  return candidates.filter(c => !hidden.has(c));
+}
+
 const get_page: Operation = {
   name: 'get_page',
-  description: 'Read a page by slug (supports optional fuzzy matching). Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
+  description: 'Read a page by slug (supports optional fuzzy matching). To edit a page, pass include_content: true — the returned `content` field is the canonical full markdown (frontmatter + body + timeline sentinel); edit THAT and pass it back to put_page to round-trip losslessly. Reassembling compiled_truth/timeline by hand risks dropping sections. Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug' },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
+    include_content: { type: 'boolean', description: '#2225: include the canonical serialized `content` field (frontmatter + body + timeline sentinel) for lossless get→edit→put_page round-trips. Default false — it roughly duplicates compiled_truth + timeline, so read-only callers should not pay for it.' },
     include_deleted: { type: 'boolean', description: 'v0.26.5: surface soft-deleted pages with deleted_at populated (default: false). Used by restore workflows.' },
+    source_id: { type: 'string', description: "#4329: scope the lookup to a single source (a multi-source brain can hold the same slug in several sources). Defaults to ctx.sourceId / the caller's grant. '__all__' spans every source for trusted local callers, your granted sources for remote callers." },
   },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;
+    const includeContent = (p.include_content as boolean) === true;
+    // #4329: honor a per-call source_id (pre-fix it was silently dropped).
+    // resolveRequestedScope (inside federatedSearchScope) enforces the remote
+    // caller's grant on the explicit value.
+    const sourceIdParam = parseSourceIdParam(p.source_id, 'get_page', { allowAll: true });
     // #1393: route BOTH the exact-match read and the fuzzy resolveSlugs through
     // the canonical precedence ladder (federated array > scalar > nothing). The
     // exact path previously used scalar `ctx.sourceId` only, so a remote client
@@ -53,17 +146,35 @@ const get_page: Operation = {
     // now honors sourceIds[] (both engines), so the same scope closes both paths.
     // #3242: federatedSearchScope (not bare sourceScopeOpts) so an unqualified
     // read sees pages in `federated: true` sources, matching search/query.
-    const sourceOpts = federatedSearchScope(ctx);
+    const sourceOpts = federatedSearchScope(ctx, sourceIdParam);
     const fuzzyScope = sourceOpts;
 
+    // #4352 remediation: untrusted callers never read `visibility: private`
+    // bodies — the same resolveExcludePrivatePages gate search/recall/entity
+    // already apply (trusted local + the operator opt-outs resolve to false).
+    // A gated private page behaves exactly like a missing one (no existence
+    // oracle), composing with — not replacing — the source-grant scope above.
+    const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
+
     let page = await ctx.engine.getPage(slug, { includeDeleted, ...sourceOpts });
+    if (page && excludePrivate && isPrivatePage(page.frontmatter)) page = null;
     let resolved_slug: string | undefined;
 
     if (!page && fuzzy) {
-      const candidates = await ctx.engine.resolveSlugs(slug, fuzzyScope);
+      let candidates = await ctx.engine.resolveSlugs(slug, fuzzyScope);
+      // #4352: the ambiguous_slug candidate list must not enumerate private slugs.
+      if (excludePrivate && candidates.length > 0) {
+        candidates = await dropPrivateSlugs(ctx.engine, candidates, fuzzyScope, includeDeleted);
+      }
       if (candidates.length === 1) {
-        page = await ctx.engine.getPage(candidates[0], { includeDeleted, ...sourceOpts });
-        resolved_slug = candidates[0];
+        const fuzzyPage = await ctx.engine.getPage(candidates[0], { includeDeleted, ...sourceOpts });
+        // Multi-source backstop: the slug may still resolve to a private
+        // variant (same slug private in one source, world in another —
+        // getPage returns the first in-scope match).
+        if (fuzzyPage && !(excludePrivate && isPrivatePage(fuzzyPage.frontmatter))) {
+          page = fuzzyPage;
+          resolved_slug = candidates[0];
+        }
       } else if (candidates.length > 1) {
         return { error: 'ambiguous_slug', candidates };
       }
@@ -125,15 +236,94 @@ const get_page: Operation = {
     // it" signal it would get from search. The marker is also in frontmatter;
     // this is the clean, documented accessor.
     const content_flag = getContentFlag(page.frontmatter as Record<string, unknown> | null);
+    // #2225: `content` is the canonical serialized markdown (frontmatter +
+    // compiled_truth + `<!-- timeline -->` sentinel + timeline). Clients that
+    // edit-and-put_page this field round-trip losslessly; hand-concatenating
+    // compiled_truth + timeline without the sentinel used to silently destroy
+    // pages.timeline on the next write. Built from visibleBody so the
+    // privacy-fence strip above applies to untrusted readers here too.
+    // Opt-in (include_content: true): get_page is the most-called read op, and
+    // `content` roughly duplicates compiled_truth + timeline — always emitting
+    // it would double every reader's payload for the round-trip minority.
     return {
       ...visibleBody,
       tags,
+      ...(includeContent ? { content: serializePageToMarkdown(visibleBody as Page, tags) } : {}),
       ...(resolved_slug ? { resolved_slug } : {}),
       ...(content_flag ? { content_flag } : {}),
     };
   },
   scope: 'read',
   cliHints: { name: 'get', positional: ['slug'] },
+};
+
+/**
+ * #4039: OpenAI deep-research adapter. ChatGPT's deep research mode requires
+ * an MCP server to expose a `search`/`fetch` PAIR with a fixed contract:
+ * search results carry an `id`, and `fetch(id)` returns
+ * `{ id, title, text, url, metadata }`. gbrain had `search` but no `fetch`,
+ * so the connector worked in normal chat and failed in deep research. This
+ * is a thin get_page adapter: id = slug (the `search` op stamps `id: slug`
+ * on every result so the pair round-trips), same source scoping and
+ * remote-reader privacy fences as get_page, no fuzzy resolution (deep
+ * research always echoes back an id it was handed).
+ */
+const fetch_page: Operation = {
+  name: 'fetch',
+  description: "Fetch the full text of one search result by its `id` (OpenAI deep-research contract: the search/fetch pair). `id` is the page slug stamped on every `search` result. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown. For the richer gbrain-native read (fuzzy slugs, soft-delete recovery, lossless edit round-trips), use get_page.",
+  params: {
+    id: { type: 'string', required: true, description: 'Result id from a prior `search` call (= the page slug).' },
+  },
+  handler: async (ctx, p) => {
+    const id = p.id as string;
+    if (typeof id !== 'string' || !id.trim()) {
+      throw new OperationError('invalid_params', 'fetch requires a non-empty id', 'Pass the `id` field from a `search` result.');
+    }
+    const slug = id.trim();
+    // Same scope ladder as get_page's unqualified read: federated array >
+    // scalar > nothing — a remote caller only fetches what its grant spans.
+    const sourceOpts = federatedSearchScope(ctx);
+    let page = await ctx.engine.getPage(slug, sourceOpts);
+    // #4352 remediation: a `visibility: private` page reads as missing for
+    // untrusted callers (same resolveExcludePrivatePages gate as get_page —
+    // fetch is remote-facing by design, every MCP transport). Cheap row
+    // check first; the resolver short-circuits for trusted local callers.
+    if (page && isPrivatePage(page.frontmatter) && (await resolveExcludePrivatePages(ctx.engine, ctx.remote))) {
+      page = null;
+    }
+    if (!page) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Pass an id returned by a `search` call.');
+    }
+    bumpLastRetrievedAt(ctx.engine, [page.id]);
+    const tags = await ctx.engine.getTags(page.slug, { sourceId: page.source_id });
+    // Same privacy boundary as get_page: untrusted readers (ctx.remote ===
+    // true — every MCP transport) never see takes or private facts fences.
+    const visibleBody = ctx.remote === false
+      ? page
+      : {
+          ...page,
+          compiled_truth: stripFactsFence(
+            stripTakesFence(page.compiled_truth),
+            { keepVisibility: ['world'] },
+          ),
+        };
+    return {
+      id: page.slug,
+      title: page.title,
+      text: serializePageToMarkdown(visibleBody as Page, tags),
+      // Pages have no public http home; a stable brain-local URI satisfies
+      // the contract's citation slot without inventing a fake web URL.
+      url: `gbrain://page/${page.source_id}/${page.slug}`,
+      metadata: {
+        type: page.type,
+        source_id: page.source_id,
+        updated_at: page.updated_at,
+        tags,
+      },
+    };
+  },
+  scope: 'read',
+  cliHints: { name: 'fetch', positional: ['id'] },
 };
 
 const put_page: Operation = {
@@ -418,11 +608,20 @@ const put_page: Operation = {
           const fullContent = result.parsedPage.compiled_truth + '\n' + result.parsedPage.timeline;
           const entries = parseTimelineEntries(fullContent);
           if (entries.length > 0) {
+            // #3957: thread source_id — the batch JOIN maps a missing
+            // source_id to 'default', so a put_page against a named source
+            // silently dropped every timeline row (or attached them to a
+            // same-slug page in 'default'). Also carry the parsed source
+            // label so the row shape matches the FS/db extract paths and
+            // the (page_id, date, summary, source) dedup collapses
+            // re-extractions of the same bullet.
             const batch = entries.map(e => ({
               slug,
               date: e.date,
+              source: e.source,
               summary: e.summary,
               detail: e.detail || '',
+              ...(ctx.sourceId ? { source_id: ctx.sourceId } : {}),
             }));
             // v0.41.18.0: engine self-retries on Supavisor circuit-breaker
             // recovery. auditSite label routes the audit JSONL emission so
@@ -548,10 +747,35 @@ const put_page: Operation = {
       writerLint = { status: 'lint_error' };
     }
 
+    // #2822: a 0-chunk put looks like success but the page is unsearchable —
+    // say WHY instead of leaving the caller to discover it at query time.
+    let chunkSkipReason: string | undefined;
+    if (result.chunks === 0) {
+      if (result.status === 'skipped') {
+        chunkSkipReason = 'write_skipped'; // dedup / unchanged content — prior chunks stand
+      } else if (result.parsedPage) {
+        const { isQuarantined } = await import('../quarantine.ts');
+        const { isEmbedSkipped } = await import('../embed-skip.ts');
+        const fm = result.parsedPage.frontmatter as Record<string, unknown> | undefined;
+        const bodyBlank = `${result.parsedPage.compiled_truth ?? ''}${result.parsedPage.timeline ?? ''}`.trim() === '';
+        chunkSkipReason = isQuarantined(fm) ? 'quarantined'
+          : isEmbedSkipped(fm) ? 'embed_skip'
+          : bodyBlank ? 'empty_body'
+          : 'unknown';
+      }
+    }
+
     return {
       slug: result.slug,
       status: result.status === 'imported' ? 'created_or_updated' : result.status,
       chunks: result.chunks,
+      // #3984: a skipped/error status without the reason is a silent no-op to
+      // MCP callers (e.g. the >5MB size guard returned bare status 'skipped'
+      // and the agent had no idea why the page never appeared). Thread
+      // importFromContent's error text through. capture delegates here, so
+      // it inherits the reason too.
+      ...(result.error ? { error: result.error } : {}),
+      ...(chunkSkipReason ? { chunk_skip_reason: chunkSkipReason } : {}),
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
       ...(writerLint ? { writer_lint: writerLint } : {}),
@@ -659,18 +883,42 @@ async function runAutoLink(
   const resolver = makeResolver(engine, { mode: 'live', sourceId: opts?.sourceId });
   // Issue #972: opt-in bare-wikilink basename resolution. Off by default.
   const globalBasename = await isGlobalBasenameEnabled(engine);
+  // #3190: pack-aware link typing + pack frontmatter_links on the put_page
+  // auto-link path. Loaded via the local-engine best-effort resolver (this
+  // hook only runs for trusted-local / trusted-workspace writes); null keeps
+  // the legacy in-code inference.
+  const pack = (await loadActivePackForLocalEngine(engine))?.manifest ?? null;
   const { candidates, unresolved } = await extractPageLinks(
     slug, fullContent, parsed.frontmatter, parsed.type, resolver,
-    { globalBasename },
+    { globalBasename, pack },
   );
 
   // Resolve which targets exist (skip refs to non-existent pages to avoid FK
-  // violation churn in addLink). One getAllSlugs call upfront, O(1) lookup.
-  // v0.31.8 (D12): scoped to the source when opts.sourceId is set so wikilink
-  // resolution doesn't span unrelated sources.
-  const allSlugs = await engine.getAllSlugs(sourceOpts);
+  // violation churn in addLink). #2544: targeted membership probe over just
+  // the candidate target/from slugs instead of materializing the whole slug
+  // set — getAllSlugs was a full-table scan on EVERY put_page while the
+  // candidates are typically a handful. Mirrors the proven oneshot probe
+  // (subagent-oneshot.ts). Deliberately does NOT filter deleted_at: the
+  // getAllSlugs it replaces included soft-deleted pages, and changing link
+  // visibility is out of scope here. Skips the query entirely when there are
+  // no candidates. v0.31.8 (D12): scoped to the source when opts.sourceId is
+  // set so wikilink resolution doesn't span unrelated sources.
+  const candidateSlugs = [...new Set(candidates.flatMap(c => (c.fromSlug ? [c.targetSlug, c.fromSlug] : [c.targetSlug])))];
+  let existingSlugs = new Set<string>();
+  if (candidateSlugs.length > 0) {
+    const rows = opts?.sourceId
+      ? await engine.executeRaw<{ slug: string }>(
+          `SELECT slug FROM pages WHERE slug = ANY($1::text[]) AND source_id = $2`,
+          [candidateSlugs, opts.sourceId],
+        )
+      : await engine.executeRaw<{ slug: string }>(
+          `SELECT slug FROM pages WHERE slug = ANY($1::text[])`,
+          [candidateSlugs],
+        );
+    existingSlugs = new Set(rows.map(r => r.slug));
+  }
   const valid = candidates.filter(c =>
-    allSlugs.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug))
+    existingSlugs.has(c.targetSlug) && (!c.fromSlug || existingSlugs.has(c.fromSlug))
   );
 
   // Split candidates by direction. Outgoing (fromSlug === slug or unset) are
@@ -809,16 +1057,23 @@ const delete_page: Operation = {
   description: 'Soft-delete a page. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed.',
   params: {
     slug: { type: 'string', required: true, description: "Slug of the page to soft-delete, e.g. 'people/alice-example'." },
+    source_id: { type: 'string', description: "#4329: source holding the row to soft-delete (a multi-source brain can hold the same slug in several sources). Defaults to ctx.sourceId. Remote callers may only target their write source — federated read grants do not confer delete access." },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
     enforceClientSlugFence(ctx, slug, 'delete_page');
+    // #4329: honor a per-call source_id (pre-fix it was silently dropped and
+    // the delete landed on ctx.sourceId's row — the wrong-source soft-delete).
+    const requestedSource = parseSourceIdParam(p.source_id, 'delete_page');
+    if (requestedSource !== undefined) assertSourceInWriteGrant(ctx, requestedSource);
     if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug };
     // v0.31.8 (D7): thread ctx.sourceId so multi-source brains soft-delete the
     // intended row instead of always targeting (default, slug).
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const sourceOpts = requestedSource
+      ? { sourceId: requestedSource }
+      : ctx.sourceId ? { sourceId: ctx.sourceId } : {};
     // v0.26.5: rewired from hard-delete to soft-delete. The hard-delete primitive
     // (engine.deletePage) is now reserved for purgeDeletedPages and explicit
     // tests. softDeletePage returns null when the slug is unknown OR already
@@ -829,11 +1084,13 @@ const delete_page: Operation = {
       // clear signal. Probe once with include_deleted to disambiguate.
       const existing = await ctx.engine.getPage(slug, { includeDeleted: true, ...sourceOpts });
       if (!existing) {
-        throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug.');
+        throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug (and source_id on a multi-source brain).');
       }
-      return { status: 'already_soft_deleted', slug, deleted_at: existing.deleted_at };
+      return { status: 'already_soft_deleted', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}), deleted_at: existing.deleted_at };
     }
-    return { status: 'soft_deleted', slug, recoverable_until: 'now + 72h via restore_page' };
+    // Echo the targeted source so a multi-source caller can verify WHICH row
+    // the delete landed on (#4329's false-confidence failure mode).
+    return { status: 'soft_deleted', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}), recoverable_until: 'now + 72h via restore_page' };
   },
   cliHints: { name: 'delete', positional: ['slug'] },
 };
@@ -843,25 +1100,31 @@ const restore_page: Operation = {
   description: 'v0.26.5 — restore a soft-deleted page (clear deleted_at). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.',
   params: {
     slug: { type: 'string', required: true, description: "Slug of the soft-deleted page to restore, e.g. 'people/alice-example'." },
+    source_id: { type: 'string', description: "#4329: source holding the row to restore (a multi-source brain can hold the same slug in several sources). Defaults to ctx.sourceId. Remote callers may only target their write source — federated read grants do not confer restore access." },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
     enforceClientSlugFence(ctx, slug, 'restore_page');
+    // #4329: honor a per-call source_id (pre-fix it was silently dropped).
+    const requestedSource = parseSourceIdParam(p.source_id, 'restore_page');
+    if (requestedSource !== undefined) assertSourceInWriteGrant(ctx, requestedSource);
     if (ctx.dryRun) return { dry_run: true, action: 'restore_page', slug };
     // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const sourceOpts = requestedSource
+      ? { sourceId: requestedSource }
+      : ctx.sourceId ? { sourceId: ctx.sourceId } : {};
     const ok = await ctx.engine.restorePage(slug, sourceOpts);
     if (!ok) {
       // Distinguish "not found" from "already active" (idempotent-as-false).
       const existing = await ctx.engine.getPage(slug, { includeDeleted: true, ...sourceOpts });
       if (!existing) {
-        throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug.');
+        throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug (and source_id on a multi-source brain).');
       }
-      return { status: 'already_active', slug };
+      return { status: 'already_active', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}) };
     }
-    return { status: 'restored', slug };
+    return { status: 'restored', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}) };
   },
   cliHints: { name: 'restore', positional: ['slug'] },
 };
@@ -909,6 +1172,17 @@ const list_pages: Operation = {
       description: 'Sort order. Default updated_desc (matches pre-v0.29). Options: updated_desc, updated_asc, created_desc, slug.',
     },
     include_deleted: { type: 'boolean', description: 'v0.26.5: include soft-deleted pages (default: false). Used by restore workflows and operator diagnostics.' },
+    // #4400 — list_pages had no source-scoping param at all: unlike
+    // search/query it silently ignored any caller-supplied source and always
+    // fell back to whatever federatedSearchScope() resolved from ctx alone,
+    // so a non-federated source's pages could never be enumerated remotely
+    // (get_stats counts them; list_pages could not list them). Mirrors the
+    // `source_id` param already on search/query, same '__all__' semantics.
+    source_id: {
+      type: 'string',
+      description:
+        "v0.46.25: scope listing to a single source. Defaults to OperationContext.sourceId / federated scope. Pass '__all__' to span every source for trusted local callers; for remote callers '__all__' spans only your granted sources.",
+    },
   },
   handler: async (ctx, p) => {
     // Whitelist the sort enum at the handler before passing to the engine.
@@ -923,9 +1197,18 @@ const list_pages: Operation = {
     // enumerate src-B pages. Pre-fix, ctx.sourceId / ctx.auth?.allowedSources
     // were ignored at this op handler and the engine returned every source's
     // pages indiscriminately.
-    // #3242: federatedSearchScope so unqualified listing spans federated
-    // sources (same visibility set as search / get_page). Grants still win.
-    const scope = federatedSearchScope(ctx);
+    // #3242 / #4400: federatedSearchScope so unqualified listing spans
+    // federated sources (same visibility set as search / get_page); an
+    // explicit per-call source_id (including '__all__') wins, same contract
+    // as search/query's sourceIdParam.
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const scope = federatedSearchScope(ctx, sourceIdParam);
+    // #4352 remediation: untrusted listing never enumerates
+    // `visibility: private` pages (slugs + titles are the leak surface here).
+    // Composes with the #4400 per-call source_id and the v0.34.1 grant scope
+    // above — an ADDITIONAL predicate threaded into PageFilters, never a
+    // replacement for the source filter. Trusted local enumeration unchanged.
+    const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
     // The 100-row cap exists to protect remote MCP/OAuth transports from
     // unbounded result dumps. Local CLI callers (ctx.remote === false — the
     // same trust boundary that already bypasses scope enforcement, see the
@@ -965,6 +1248,7 @@ const list_pages: Operation = {
       includeDeleted: (p.include_deleted as boolean) === true,
       updated_after: typeof p.updated_after === 'string' ? p.updated_after : undefined,
       sort,
+      excludePrivate,
       ...scope,
     });
     const truncated = rows.length > limit;
@@ -1090,4 +1374,5 @@ const capture: Operation = {
 export const pagesOperations: Operation[] = [
   get_page, put_page, delete_page, list_pages,
   restore_page, purge_deleted_pages, capture,
+  fetch_page,
 ];

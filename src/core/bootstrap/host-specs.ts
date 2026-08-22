@@ -260,6 +260,16 @@ export function claudeUserSettingsPath(): string {
   return join(claudeConfigBase(), 'settings.json');
 }
 
+/**
+ * #4325: the config-dir base itself, exported for detection — a machine with
+ * a `~/.claude` (or CLAUDE_CONFIG_DIR) directory has Claude Code configured
+ * even when the `claude` binary isn't on the probing process's PATH (CI
+ * runners, alias-only shells). Mirrors detectCodex's config-file fallback.
+ */
+export function claudeConfigDir(): string {
+  return claudeConfigBase();
+}
+
 /** permissions.allow entry that pre-approves an MCP server's tools for headless runs. */
 export function mcpPermissionEntry(serverName: string): string {
   return `mcp__${serverName}`;
@@ -278,9 +288,13 @@ export function claudeUserMcpConfigPath(): string {
   return join(home || homedir(), '.claude.json');
 }
 
-/** Where Claude Code stores session transcripts — the confinement root [S3#8]. */
+/**
+ * Where Claude Code stores session transcripts — the confinement root [S3#8].
+ * Uses the same config-dir base as settings/skills so custom config dirs keep
+ * legitimate transcript paths inside the allowed root.
+ */
 export function claudeProjectsDir(): string {
-  return join(homedir(), '.claude', 'projects');
+  return join(claudeConfigBase(), 'projects');
 }
 
 /**

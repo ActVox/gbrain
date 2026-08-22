@@ -1,6 +1,8 @@
 # ActVox Team GBrain migration to v0.46.24.0
 
-Status: prepared only. Merging this PR deploys production because Render tracks `ActVox/gbrain:master` with `autoDeploy: true`.
+> Historical prepared target, superseded by `docs/operations/actvox-v0.46.28-production-migration.md`. Do not execute this older target.
+
+Status: superseded preparation only. Merging this historical PR head would deploy production because Render tracks `ActVox/gbrain:master` with `autoDeploy: true`.
 
 ## Scope
 

@@ -40,13 +40,14 @@ export interface ResolveModelOpts {
   /** Env var to consult after global default. Defaults to `GBRAIN_MODEL`. */
   envVar?: string;
   /**
-   * Tier classification (v0.31.12). Looked up after `models.default` and
-   * before the env var. Routing groups: `utility` (haiku-class, classification
-   * + expansion + verdict), `reasoning` (sonnet-class, default chat +
-   * synthesis + fact extraction), `deep` (opus-class, expensive reasoning),
-   * `subagent` (Anthropic-only multi-turn tool loop — never inherits a
-   * non-Anthropic `models.default`; falls back to TIER_DEFAULTS.subagent
-   * with a one-shot stderr warn instead).
+   * Tier classification (v0.31.12). Looked up after the per-feature config
+   * keys and BEFORE `models.default` (#3873 — tier-specific beats generic),
+   * then before the env var. Routing groups: `utility` (haiku-class,
+   * classification + expansion + verdict), `reasoning` (sonnet-class,
+   * default chat + synthesis + fact extraction), `deep` (opus-class,
+   * expensive reasoning), `subagent` (Anthropic-only multi-turn tool loop —
+   * never inherits a non-Anthropic `models.default`; falls back to
+   * TIER_DEFAULTS.subagent with a one-shot stderr warn instead).
    */
   tier?: ModelTier;
   /** Hardcoded last-resort fallback. */
@@ -381,20 +382,23 @@ export async function resolveModelDetailed(
       }
     }
 
-    // 4. Global default
-    const def = await engine.getConfig('models.default');
-    if (def && def.trim()) {
-      const resolved = await resolveAlias(engine, def.trim());
-      return { model: enforceSubagentCapable(resolved, opts.tier, 'models.default'), source: 'models_default' };
-    }
-
-    // 5. Tier override (v0.31.12)
+    // 4. Tier override (v0.31.12; hoisted above models.default by #3873).
+    //    `models.tier.<tier>` is strictly more specific than the generic
+    //    `models.default`, so it must win — pre-fix, setting a cheap utility
+    //    tier was silently ignored on any brain that also set models.default.
     if (opts.tier) {
       const tierVal = await engine.getConfig(`models.tier.${opts.tier}`);
       if (tierVal && tierVal.trim()) {
         const resolved = await resolveAlias(engine, tierVal.trim());
         return { model: enforceSubagentCapable(resolved, opts.tier, `models.tier.${opts.tier}`), source: 'tier_config' };
       }
+    }
+
+    // 5. Global default
+    const def = await engine.getConfig('models.default');
+    if (def && def.trim()) {
+      const resolved = await resolveAlias(engine, def.trim());
+      return { model: enforceSubagentCapable(resolved, opts.tier, 'models.default'), source: 'models_default' };
     }
   }
 
@@ -446,6 +450,9 @@ export async function resolveModel(
  *
  *   - `unusable:no_tools` → fall back to TIER_DEFAULTS.subagent + warn (the
  *     loop literally cannot dispatch tools, so the resolved model is wrong)
+ *   - `unusable:no_subagent_loop` → fall back to TIER_DEFAULTS.subagent + warn
+ *     (the recipe declares tool_call_ids unstable across crash/replay, so the
+ *     loop can't reconcile — same refusal class as no_tools)
  *   - `unknown` → fall back to TIER_DEFAULTS.subagent + warn (unknown provider
  *     — defensive: don't burn money on a model we can't verify supports tools)
  *   - `degraded:no_caching` → return resolved; warn once per (source, model)
@@ -463,7 +470,7 @@ function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, s
   // (capabilities → model-resolver → recipes; this would create a cycle if
   // model-config itself were imported by recipes, which it isn't, but
   // defensive against future drift).
-  let verdict: 'ok' | 'degraded:no_caching' | 'degraded:no_parallel' | 'unusable:no_tools' | 'unknown';
+  let verdict: 'ok' | 'degraded:no_caching' | 'degraded:no_parallel' | 'unusable:no_tools' | 'unusable:no_subagent_loop' | 'unknown';
   try {
     // Synchronous-style import via require shim isn't available in ESM; the
     // helper is pure, so a synchronous static import is fine here. Pulling
@@ -479,16 +486,19 @@ function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, s
   }
 
   const key = `${source}:${resolved}`;
-  if (verdict === 'unusable:no_tools' || verdict === 'unknown') {
+  if (verdict === 'unusable:no_tools' || verdict === 'unusable:no_subagent_loop' || verdict === 'unknown') {
     if (!_subagentTierWarningsEmitted.has(key)) {
       _subagentTierWarningsEmitted.add(key);
       const reason = verdict === 'unusable:no_tools'
         ? `lacks tool-calling support`
-        : `is an unrecognized provider`;
+        : verdict === 'unusable:no_subagent_loop'
+          ? `declares the subagent loop unsupported (supports_subagent_loop: false)`
+          : `is an unrecognized provider`;
       process.stderr.write(
         `[models] tier.subagent resolved to "${resolved}" via "${source}", which ${reason}. ` +
         `The subagent tool loop cannot run on this model — falling back to ${TIER_DEFAULTS.subagent}. ` +
-        `Fix: gbrain config set models.tier.subagent <provider>:<model-with-tools>\n`,
+        `Fix: gbrain config set models.tier.subagent <provider>:<model> ` +
+        `(the provider's recipe must declare supports_subagent_loop: true)\n`,
       );
     }
     return TIER_DEFAULTS.subagent;

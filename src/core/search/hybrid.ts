@@ -33,14 +33,19 @@ import {
   type AdaptiveReturnDecision,
 } from './return-policy.ts';
 import { applyAutocut, type AutocutDecision } from './autocut.ts';
-import { buildRelationalArm } from './relational-recall.ts';
+import {
+  buildRelationalArm,
+  ensureRelationalEvidenceSlot,
+  type RelationalEvidenceSlotDecision,
+} from './relational-recall.ts';
 import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
 import { applyReranker } from './rerank.ts';
 import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
 import { isTitlePhraseMatch } from './title-match.ts';
 import { normalizeAlias } from './alias-normalize.ts';
-import { stampEvidence } from './evidence.ts';
+import { stampEvidence, markKeywordHits } from './evidence.ts';
+import { applyExactLookupTier } from './exact-lookup.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget, searchSalvageEnabled, type TokenBudgetMeta } from './token-budget.ts';
 import { warnOncePerProcess } from '../utils.ts';
@@ -57,6 +62,15 @@ import {
 
 export const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
+
+// D-3002: pre-fusion candidate-pool floor. `limit*2` alone starves RRF fusion
+// at small limits (limit=10 → a 20-row budget per recall arm) and turns offset
+// pagination into a cliff: slice(offset, offset + limit) past the pool returns
+// empty pages even when deeper matches exist. Each recall arm fetches at least
+// this many candidates (and at least offset + limit), capped by
+// MAX_SEARCH_LIMIT. Result-affecting for identical knobs → KNOBS_HASH_VERSION
+// bumped to 20 in mode.ts so pre-floor cache rows can't be served post-upgrade.
+export const PRE_FUSION_POOL_FLOOR = 50;
 
 /**
  * Which detail levels get the compiled_truth boost (#3430).
@@ -121,6 +135,11 @@ export async function stampContentFlags(engine: BrainEngine, results: SearchResu
  * One batched query over the candidate arms' page_ids. Fail-open on the
  * fetch (a marker-fetch failure must not break retrieval) — the boost then
  * applies, but the SQL-side source-boost guard still holds.
+ *
+ * #4220: the same batched query now surfaces the page's raw
+ * `frontmatter.status` value, stamped on `SearchResult.status` for EVERY
+ * result whose page carries one (draft/superseded/restricted/verified/...).
+ * `unverified` remains the special case requiring the full quarantine pair.
  */
 export async function stampUnverifiedExtractions(
   engine: BrainEngine,
@@ -132,10 +151,13 @@ export async function stampUnverifiedExtractions(
       results.map((r) => r.page_id).filter((n): n is number => typeof n === 'number' && Number.isFinite(n)),
     )];
     if (ids.length === 0) return;
-    const unverified = await engine.getUnverifiedExtractionPageIds(ids);
-    if (unverified.size === 0) return;
+    const marks = await engine.getUnverifiedExtractionPageIds(ids);
+    if (marks.size === 0) return;
     for (const r of results) {
-      if (unverified.has(r.page_id)) r.unverified = true;
+      const m = marks.get(r.page_id);
+      if (!m) continue;
+      r.status = m.status;
+      if (m.unverified) r.unverified = true;
     }
   } catch {
     // best-effort: never break retrieval.
@@ -1038,7 +1060,7 @@ export async function applyAliasHop(
   engine: import('../engine.ts').BrainEngine,
   results: SearchResult[],
   query: string,
-  opts: { sourceId?: string; sourceIds?: string[] },
+  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
 ): Promise<SearchResult[]> {
   if (!query) return results;
   const qNorm = normalizeAlias(query);
@@ -1078,6 +1100,13 @@ export async function applyAliasHop(
       continue;
     }
     if (!page) continue;
+    // #4352 — the alias inject path bypasses the engines' SQL visibility
+    // clause (getPage, not search); re-apply the private predicate here so
+    // an untrusted caller can't hop into a `visibility: private` page.
+    if (
+      opts.excludePrivate &&
+      ((page.frontmatter as Record<string, unknown> | null | undefined)?.visibility === 'private')
+    ) continue;
     injectScore += 1e-6;
     out.push({
       // #2339-sibling: include page_id. The `as SearchResult` cast hid its
@@ -1372,7 +1401,10 @@ export async function hybridSearch(
 
   const limit = opts?.limit || resolvedMode.searchLimit;
   const offset = opts?.offset || 0;
-  const innerLimit = Math.min(limit * 2, MAX_SEARCH_LIMIT);
+  const innerLimit = Math.min(
+    Math.max(limit * 2, PRE_FUSION_POOL_FLOOR, offset + limit),
+    MAX_SEARCH_LIMIT,
+  );
 
   // v0.32.x search-lite: classify intent once up front. Drives BOTH the
   // legacy auto-detail / salience / recency suggestions AND the new
@@ -1416,6 +1448,11 @@ export async function hybridSearch(
     // ordering means we can't lazy-spread the full opts).
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
+    // #4352 — page-level private-visibility enforcement is trust-scoped
+    // state, same leak class as source scoping above: dropping it here would
+    // let an untrusted caller read `visibility: private` pages through the
+    // hybrid hot path.
+    excludePrivate: opts?.excludePrivate,
     // v0.36 (D11): pass the pre-validated descriptor into the engine so
     // it never has to read config. Engines normalize string-or-descriptor
     // via normalizeEngineColumn; the descriptor path is the strict one.
@@ -1513,7 +1550,14 @@ export async function hybridSearch(
     earlyModality === 'image'
       ? [[], []]
       : await Promise.all([
-          engine.searchKeyword(query, searchOpts),
+          engine.searchKeyword(query, searchOpts).catch((err: unknown) => {
+            warnOncePerProcess(
+              'search-keyword-arm-failed',
+              `[gbrain] searchKeyword arm failed (fail-open, keyword candidates skipped): ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+            return [] as SearchResult[];
+          }),
           engine.searchTitles(query, searchOpts).catch((err: unknown) => {
             warnOncePerProcess(
               'search-titles-arm-failed',
@@ -1523,6 +1567,12 @@ export async function hybridSearch(
             return [] as SearchResult[];
           }),
         ]);
+  // #3783 — stamp lexical-arm membership pre-fusion so evidence's
+  // keyword_exact label is earned by an actual FTS hit, never by a solid
+  // blended score alone. Both arms are the lexical-evidence class (chunk
+  // FTS + title FTS); vector/relational arms are deliberately NOT marked.
+  markKeywordHits(keywordResults);
+  markKeywordHits(titleResults);
 
   // v0.29.1: resolve salience/recency from caller (back-compat aliases for
   // PR #618's `recencyBoost` numeric scale) or fall back to the heuristic.
@@ -1586,6 +1636,10 @@ export async function hybridSearch(
       sourceIds: opts?.sourceIds,
       depth: resolvedMode.relational_retrieval_depth,
       limit: opts?.limit ?? resolvedMode.searchLimit,
+      // #4352 remediation: the arm hydrates titles + compiled_truth snippets
+      // straight from pages — thread the caller's private-page gate or a
+      // remote relational query bypasses the keyword/vector visibility clause.
+      excludePrivate: opts?.excludePrivate,
       onMeta: opts?.onRelationalMeta,
     });
   }
@@ -1645,16 +1699,36 @@ export async function hybridSearch(
     }
     // T3/T4 — alias hop + evidence stamp even without an embedding provider
     // (the named-thing fix is most valuable exactly when vector is unavailable).
-    const noEmbedHopped = await applyAliasHop(engine, dedupResults(noEmbedResults), query, {
+    const noEmbedPreExact = await applyAliasHop(engine, dedupResults(noEmbedResults), query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
+      excludePrivate: opts?.excludePrivate,
+    });
+    // #1663 — structural exact-lookup tier (slug / exact-title identity).
+    const noEmbedHopped = await applyExactLookupTier(engine, noEmbedPreExact, query, {
+      sourceId: opts?.sourceId,
+      sourceIds: opts?.sourceIds,
+      titleCandidates: titleResults,
     });
     const noEmbedOperational = await injectCanonicalOperationalResults(engine, noEmbedHopped, query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
     });
     stampEvidence(noEmbedOperational, { cosineFloor: resolvedMode.evidence_cosine_floor });
-    const noEmbedSliced = noEmbedOperational.slice(offset, offset + limit);
+    // #3995 — guaranteed page-1 relational evidence: a fired arm's answer is
+    // often lexically unrecoverable, so its single-arm fused row can land
+    // beyond the limit slice on keyword-heavy corpora. Promote/inject before
+    // slicing (first page only; pure no-op when the arm didn't fire).
+    let noEmbedPool = noEmbedOperational;
+    let noEmbedRelSlot: RelationalEvidenceSlotDecision | undefined;
+    if (relationalList.length > 0) {
+      const r = ensureRelationalEvidenceSlot(noEmbedOperational, relationalList, limit, offset, {
+        cosineFloor: resolvedMode.evidence_cosine_floor,
+      });
+      noEmbedPool = r.pool;
+      noEmbedRelSlot = r.decision;
+    }
+    const noEmbedSliced = noEmbedPool.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the no-embedding-provider path.
     const { results: noEmbedBudgeted, meta: noEmbedBudgetMeta } = enforceTokenBudget(noEmbedSliced, resolvedMode.tokenBudget);
     await stampContentFlags(engine, noEmbedBudgeted);
@@ -1664,6 +1738,23 @@ export async function hybridSearch(
     // vector didn't run, and whether the keyword arm itself came up empty
     // (skipped-by-modality is not a keyword miss, hence the image gate).
     pushDegraded(degraded, 'embed_unavailable', 'no_provider');
+    // #3808: meta names the degradation for programmatic callers, but a CLI
+    // human never saw it — mirror the embed-failure warn (once per process,
+    // stderr) with the diagnose reason so a silently keyword-only brain is
+    // visible the first time it ships results.
+    try {
+      const { diagnoseEmbedding } = await import('../ai/gateway.ts');
+      const diag = diagnoseEmbedding(providerProbe);
+      const reason = diag.ok ? 'provider_unreachable' : (diag.reason ?? 'provider_unreachable');
+      warnOncePerProcess(
+        'search-vector-leg-unavailable',
+        `[gbrain] vector search unavailable (${reason}) — results are keyword-only. Run \`gbrain doctor\` to diagnose.`,
+      );
+    } catch {
+      // Fail-open like every sibling stage: the warning is best-effort and a
+      // gateway import/diagnose throw must never fail the already-computed
+      // keyword-only degraded results it exists to explain.
+    }
     if (keywordResults.length === 0 && earlyModality !== 'image') {
       pushDegraded(degraded, 'keyword_zero');
     }
@@ -1680,6 +1771,7 @@ export async function hybridSearch(
       ...(resolvedMode.tokenBudget && resolvedMode.tokenBudget > 0
         ? { token_budget: noEmbedBudgetMeta }
         : {}),
+      ...(noEmbedRelSlot ? { relational_evidence_slot: noEmbedRelSlot } : {}),
     });
     return noEmbedBudgeted;
   }
@@ -2007,9 +2099,16 @@ export async function hybridSearch(
       await runPostFusionStages(engine, fallbackResults, postFusionOpts);
       fallbackResults.sort((a, b) => b.score - a.score);
     }
-    const kwHopped = await applyAliasHop(engine, dedupResults(fallbackResults), query, {
+    const kwPreExact = await applyAliasHop(engine, dedupResults(fallbackResults), query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
+      excludePrivate: opts?.excludePrivate,
+    });
+    // #1663 — structural exact-lookup tier (slug / exact-title identity).
+    const kwHopped = await applyExactLookupTier(engine, kwPreExact, query, {
+      sourceId: opts?.sourceId,
+      sourceIds: opts?.sourceIds,
+      titleCandidates: titleResults,
     });
     const kwOperational = await injectCanonicalOperationalResults(engine, kwHopped, query, {
       sourceId: opts?.sourceId,
@@ -2206,9 +2305,22 @@ export async function hybridSearch(
   // T3 — free-text alias hop. Runs AFTER rerank so a query that is a page's
   // declared chosen name reliably surfaces that page regardless of how the
   // reranker scored body chunks. Fail-open on pre-v110 brains.
-  const aliasHopped = await applyAliasHop(engine, reranked, query, {
+  const preExact = await applyAliasHop(engine, reranked, query, {
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
+    excludePrivate: opts?.excludePrivate,
+  });
+
+  // #1663 — structural exact-lookup tier: a query that IS a page identity
+  // (slug / exact normalized title) gets that page at rank-1 regardless of
+  // how the scorers ranked body chunks. Supersession-filtered inside; reuses
+  // the already-fetched title arm (no extra queries); pure no-op for
+  // non-lookup-shaped queries. Runs after the alias hop so all three
+  // identity surfaces (alias, slug, title) share the same injection shape.
+  const aliasHopped = await applyExactLookupTier(engine, preExact, query, {
+    sourceId: opts?.sourceId,
+    sourceIds: opts?.sourceIds,
+    titleCandidates: titleResults,
   });
 
   const operationalPool = await injectCanonicalOperationalResults(engine, aliasHopped, query, {
@@ -2276,10 +2388,28 @@ export async function hybridSearch(
       // Preserve alias-hop exact matches: applyAliasHop injects the canonical
       // page AFTER reranking, so it has no rerank_score. Without this it would
       // be dropped whenever autocut cuts on the scored set (Codex P1).
-      (x) => x.alias_hit === true,
+      // #1663: same guarantee for structural exact-lookup tier hits (slug /
+      // exact-title identity matches also arrive post-rerank, unscored).
+      (x) => x.alias_hit === true || x.exact_lookup !== undefined,
     );
     returnPool = r.kept;
     autocutDecision = r.decision;
+  }
+
+  // #3995 — guaranteed page-1 relational evidence. A fired arm's answer is
+  // often lexically unrecoverable (unverified entity stub, single-arm RRF
+  // score), so its fused row can land beyond the limit slice on multi-arm
+  // corpora, and autocut's preserve predicate only covers alias hits — the
+  // relational row (no rerank_score) is exactly what a cut drops. Promote the
+  // fused row into the page-1 window, or re-inject the arm's top candidate
+  // when it was dropped entirely. First page only; pure no-op otherwise.
+  let relationalSlotDecision: RelationalEvidenceSlotDecision | undefined;
+  if (relationalList.length > 0 && effectiveModality !== 'image') {
+    const r = ensureRelationalEvidenceSlot(returnPool, relationalList, limit, offset, {
+      cosineFloor: resolvedMode.evidence_cosine_floor,
+    });
+    returnPool = r.pool;
+    relationalSlotDecision = r.decision;
   }
 
   const sliced = returnPool.slice(offset, offset + limit);
@@ -2307,6 +2437,7 @@ export async function hybridSearch(
     ...(vectorPoolUnderfill ? { vector_pool_underfilled: vectorPoolUnderfill } : {}),
     ...(adaptiveDecision ? { adaptive_return: adaptiveDecision } : {}),
     ...(autocutDecision ? { autocut: autocutDecision } : {}),
+    ...(relationalSlotDecision ? { relational_evidence_slot: relationalSlotDecision } : {}),
   });
   return budgeted;
 }
@@ -2410,6 +2541,13 @@ export async function hybridSearchCached(
     // bare hybridSearch does (opts.detail ?? autoDetectDetail(query)) so an
     // auto-detected `high` query keys like an explicit `high` one.
     detail: opts?.detail ?? autoDetectDetail(query),
+    // #4352 follow-up — fold the private-visibility posture into the key
+    // (xp=, v=23) for BOTH the lookup and the write below (they share this
+    // one hash), instead of the original wholesale skipCache bypass. A
+    // remote-default (excludePrivate=true) caller now caches normally, on
+    // rows that can never be served to (or written by) a trusted
+    // private-included call.
+    excludePrivate: opts?.excludePrivate === true,
   });
 
   // Cache decision: opts.useCache (explicit) wins over global config; global
@@ -2442,6 +2580,26 @@ export async function hybridSearchCached(
   // now-relative timestamp, which a persisted cache row can't express.
   const dateFiltered =
     Boolean(opts?.since ?? opts?.afterDate) || Boolean(opts?.until ?? opts?.beforeDate);
+  // #3985: type-filtered requests skip the cache — `types` is not part of
+  // knobsHash, so a filtered result set could be served to an unfiltered
+  // lookup (and vice versa). Mirrors the #3442 date-filter bypass.
+  const typeFiltered = (opts?.types?.length ?? 0) > 0;
+  // Offset pages are cache-hostile until the pre-slice POOL itself is what's
+  // stored: the cache holds the already offset/limit-sliced page (bare
+  // hybridSearch slices before returning), so a hit for any other offset
+  // re-slices an already-sliced page — page-2 reads after a page-1 write come
+  // back wrong/empty. And innerLimit is derived from offset (D-3002 pool
+  // floor), making offset a result-affecting input that sits OUTSIDE the
+  // knobs hash. Bypass the cache entirely (lookup AND store — the store is
+  // gated on cacheStatus === 'miss' below, so 'disabled' covers both) for
+  // offset>0 requests; offset===0 semantics are unchanged.
+  const pagedRequest = (opts?.offset ?? 0) > 0;
+  // #4352 follow-up — excludePrivate no longer skips the cache: the posture
+  // is folded into knobsHash (xp=, v=23), so a private-included (trusted)
+  // write can never serve a private-excluding lookup and vice versa. The
+  // original wholesale skip disabled the semantic cache for every remote MCP
+  // caller (excludePrivate=true is their default) — exactly the
+  // highest-volume beneficiaries of the ~50% cache savings.
   const skipCache =
     !cache.isEnabled() ||
     isOperationalMemoryQuery(query) ||
@@ -2449,7 +2607,9 @@ export async function hybridSearchCached(
     Boolean(opts?.nearSymbol) ||
     isNonDefaultColumn ||
     adaptiveReturnOn ||
-    dateFiltered;
+    dateFiltered ||
+    typeFiltered ||
+    pagedRequest;
 
   let cacheStatus: 'hit' | 'miss' | 'disabled' = skipCache ? 'disabled' : 'miss';
   let cacheSimilarity: number | undefined;
@@ -2493,15 +2653,23 @@ export async function hybridSearchCached(
   }
 
   if (!skipCache && queryEmbedding && cacheStatus !== 'disabled') {
-    const hit = await cache.lookup(queryEmbedding, { sourceId: cacheScopeKey(opts), knobsHash: cacheKnobsHash });
+    const hit = await cache.lookup(queryEmbedding, { sourceId: cacheScopeKey(opts), knobsHash: cacheKnobsHash, queryText: query }); // queryText → #1469 text guard
     if (hit.hit && hit.results) {
       cacheStatus = 'hit';
       cacheSimilarity = hit.similarity;
       cacheAge = hit.ageSeconds;
 
+      // #3871 defense-in-depth: re-filter the stored rows by the CALLER's
+      // scope BEFORE paging. A legacy row written under the pre-fix key
+      // scheme (unscoped all-sources writes keyed 'default') can carry rows
+      // from other sources; the filter guarantees a scoped read never pages
+      // a foreign row — and filtering first means foreign rows can't
+      // displace legitimate ones off the offset/limit window either.
+      const scopedResults = filterResultsByCallerScope(hit.results, opts);
+
       const limit = opts?.limit || 20;
       const offset = opts?.offset || 0;
-      const sliced = hit.results.slice(offset, offset + limit);
+      const sliced = scopedResults.slice(offset, offset + limit);
 
       // Budget enforcement — same pipeline tail as fresh path.
       const { results: budgeted, meta: budgetMeta } = enforceTokenBudget(sliced, opts?.tokenBudget);
@@ -2693,13 +2861,49 @@ function rrfKey(r: SearchResult): string {
  *   - federated (sourceIds set) → `__set__:` + sorted, comma-joined ids
  *     (order-independent; two different source-sets get distinct keys)
  *   - scalar sourceId           → the id itself (single-source unchanged)
- *   - unscoped                  → `'default'` (single-source brains unchanged)
+ *   - unscoped                  → `'__unscoped__'` sentinel (#3871)
+ *
+ * #3871: an UNSCOPED search reads ALL sources, so its cached result set can
+ * carry rows from every source. It used to key to `'default'` — the same
+ * key a scalar `sourceId: 'default'` read uses — so a default-source-scoped
+ * read could be served an all-sources row (cross-source leak). The
+ * `'__unscoped__'` sentinel keeps the two populations on distinct rows;
+ * `filterResultsByCallerScope` on the hit path is the belt-and-braces for
+ * legacy rows written under the old scheme.
  */
 export function cacheScopeKey(opts?: { sourceId?: string; sourceIds?: string[] }): string {
   if (opts?.sourceIds && opts.sourceIds.length > 0) {
     return '__set__:' + [...opts.sourceIds].sort().join(',');
   }
-  return opts?.sourceId ?? 'default';
+  return opts?.sourceId ?? '__unscoped__';
+}
+
+/**
+ * #3871 — re-filter cached results by the CALLER's scope (hit-path
+ * defense-in-depth). A cache row written under the pre-fix key scheme
+ * (unscoped all-sources writes keyed `'default'`) can hold rows from ANY
+ * source; serving it verbatim to a scoped read is a cross-source leak.
+ * The `'__unscoped__'` key split stops NEW contamination; this filter
+ * guarantees even a legacy/poisoned row can never page foreign rows into
+ * a scoped response. Runs BEFORE offset/limit so foreign rows can't
+ * displace legitimate ones off the page either.
+ *
+ *   - federated (sourceIds set) → set membership on (source_id ?? 'default')
+ *   - scalar sourceId           → (source_id ?? 'default') === sourceId
+ *   - unscoped                  → no filter (caller reads all sources)
+ */
+export function filterResultsByCallerScope(
+  results: SearchResult[],
+  opts?: { sourceId?: string; sourceIds?: string[] },
+): SearchResult[] {
+  if (opts?.sourceIds && opts.sourceIds.length > 0) {
+    const allowed = new Set(opts.sourceIds);
+    return results.filter((r) => allowed.has(r.source_id ?? 'default'));
+  }
+  if (opts?.sourceId != null) {
+    return results.filter((r) => (r.source_id ?? 'default') === opts.sourceId);
+  }
+  return results;
 }
 
 /**
@@ -2712,7 +2916,7 @@ export function rrfFusionWeighted(
   lists: Array<{ list: SearchResult[]; k: number }>,
   applyBoost = true,
 ): SearchResult[] {
-  const scores = new Map<string, { result: SearchResult; score: number }>();
+  const scores = new Map<string, { result: SearchResult; score: number; keywordHit: boolean }>();
 
   for (const { list, k } of lists) {
     for (let rank = 0; rank < list.length; rank++) {
@@ -2723,8 +2927,12 @@ export function rrfFusionWeighted(
 
       if (existing) {
         existing.score += rrfScore;
+        // #3783 — OR-propagate lexical-arm membership: a row that fusion
+        // first saw via a vector list must still read keyword_hit when the
+        // keyword arm ALSO surfaced it.
+        if (r.keyword_hit === true) existing.keywordHit = true;
       } else {
-        scores.set(key, { result: r, score: rrfScore });
+        scores.set(key, { result: r, score: rrfScore, keywordHit: r.keyword_hit === true });
       }
     }
   }
@@ -2745,7 +2953,10 @@ export function rrfFusionWeighted(
 
   return entries
     .sort((a, b) => b.score - a.score)
-    .map(({ result, score }) => ({ ...result, score }));
+    .map(({ result, score, keywordHit }) =>
+      keywordHit && result.keyword_hit !== true
+        ? { ...result, score, keyword_hit: true }
+        : { ...result, score });
 }
 
 /**
@@ -2754,7 +2965,7 @@ export function rrfFusionWeighted(
  * After accumulation: normalize to 0-1, then boost compiled_truth chunks.
  */
 export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true): SearchResult[] {
-  const scores = new Map<string, { result: SearchResult; score: number }>();
+  const scores = new Map<string, { result: SearchResult; score: number; keywordHit: boolean }>();
 
   for (const list of lists) {
     for (let rank = 0; rank < list.length; rank++) {
@@ -2765,8 +2976,10 @@ export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true)
 
       if (existing) {
         existing.score += rrfScore;
+        // #3783 — OR-propagate lexical-arm membership across merge order.
+        if (r.keyword_hit === true) existing.keywordHit = true;
       } else {
-        scores.set(key, { result: r, score: rrfScore });
+        scores.set(key, { result: r, score: rrfScore, keywordHit: r.keyword_hit === true });
       }
     }
   }
@@ -2795,7 +3008,10 @@ export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true)
   // Sort by boosted score descending
   return entries
     .sort((a, b) => b.score - a.score)
-    .map(({ result, score }) => ({ ...result, score }));
+    .map(({ result, score, keywordHit }) =>
+      keywordHit && result.keyword_hit !== true
+        ? { ...result, score, keyword_hit: true }
+        : { ...result, score });
 }
 
 /**

@@ -48,6 +48,7 @@ import {
 } from '../core/schema-pack/index.ts';
 import type { SchemaPackManifest, PackPrimitive } from '../core/schema-pack/manifest-v1.ts';
 import { PACK_PRIMITIVES } from '../core/schema-pack/manifest-v1.ts';
+import { bundledPackPath } from '../core/schema-pack/bundled-assets.ts';
 import { gbrainPath, loadConfig, configPath, toEngineConfig } from '../core/config.ts';
 
 export async function runSchema(args: string[]): Promise<void> {
@@ -166,8 +167,27 @@ Resolution chain (7-tier, tier 1 trust-gated):
 
 async function runActive(_args: string[]): Promise<void> {
   const cfg = loadConfig();
-  const resolution = resolveActivePackNameOnly({ cfg, remote: false });
-  const pack = await loadActivePack({ cfg, remote: false });
+  // #3792: consult the DB-plane schema_pack (tier 4) so `gbrain schema
+  // active` reports the SAME pack the engine queries with on brains whose
+  // active pack was flipped via `gbrain config set schema_pack` /
+  // unify-types. Best-effort AND gated on an actually-configured brain
+  // (cfg non-null): an unconfigured home has no DB plane to consult, and
+  // connecting would cold-CREATE a PGLite data dir as a side effect of a
+  // read-only inspection command.
+  let dbConfig: string | undefined;
+  if (cfg) {
+    try {
+      dbConfig = await withConnectedEngine(async (engine) => {
+        try {
+          return (await engine.getConfig('schema_pack')) ?? undefined;
+        } catch {
+          return undefined;
+        }
+      });
+    } catch { /* no connectable DB — file/env resolution stands */ }
+  }
+  const resolution = resolveActivePackNameOnly({ cfg, remote: false, dbConfig });
+  const pack = await loadActivePack({ cfg, remote: false, dbConfig });
   console.log(`Active pack: ${pack.manifest.name} v${pack.manifest.version}`);
   console.log(`Source: ${resolution.source}`);
   console.log(`Pack identity: ${pack.identity}`);
@@ -368,7 +388,12 @@ function runUse(args: string[]): void {
 
 function packPathByName(name: string): string | null {
   if (BUNDLED_PACK_NAMES.has(name)) {
-    // Resolve bundled YAML — try source and compiled-binary deployment layouts.
+    // Statically bundled asset path [ENG-6] (#4266): resolves in dev AND
+    // inside `bun build --compile` binaries, where the import.meta-relative
+    // candidates below don't exist.
+    const asset = bundledPackPath(name);
+    if (asset) return asset;
+    // Resolve bundled YAML — fall back across source and compiled deployment layouts.
     const here = dirname(new URL(import.meta.url).pathname);
     const candidates = [
       join(here, '..', 'core', 'schema-pack', 'base', `${name}.yaml`),
