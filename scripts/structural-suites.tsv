@@ -200,6 +200,7 @@ test/regression-strict-source-id.test.ts	cycle reverse-write call sites use the 
 test/regression-strict-source-id.test.ts	utils.ts no longer carries an inline permissive regex	2	readFileSync
 test/reindex-code-recovery.test.ts	CLI help line (#3970 surface 1)	1	readFileSync
 test/release-workflow.test.ts	release.yml ↔ binary-self-update asset contract	10	readFileSync
+test/release-workflow.test.ts	semgrep.yml differential baseline contract	2	readFileSync
 test/remediation-command-resolution.test.ts	#3697 — remediation text resolves against the live CLI surface	3	readFileSync
 test/reranker-default-seam.test.ts	LEGACY_DEFAULT_RERANKER_MODEL seam (#3657)	4	readFileSync
 test/resolver.test.ts	RESOLVER.md trigger round-trip (D5/C)	2	readFileSync

@@ -713,4 +713,3 @@ export async function checkPgliteScratchProbe(opts: {
     return { name, status: 'warn', message: `scratch probe could not run: ${msg}` };
   }
 }
-

@@ -31,6 +31,8 @@ jobs:
           # Full history so --baseline-commit can diff against the PR base;
           # a shallow clone would not contain the base commit.
           fetch-depth: 0
+      - name: Trust checkout for containerized git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # Graduated from advisory: on a PR, fail only on findings NEW since the PR
       # base (semgrep --baseline-commit), so legacy findings never block an
       # unrelated PR and no full-tree triage is required. Scheduled/dispatch
@@ -44,7 +46,11 @@ jobs:
             # event time: the checkout is the merge ref against current master,
             # so a finding master landed after the event would otherwise be
             # attributed to this PR. merge-base is the true common ancestor.
-            BASELINE="$(git merge-base "$BASE_SHA" HEAD || echo "$BASE_SHA")"
+            # Fail closed if the merge base cannot be computed. Falling back
+            # to BASE_SHA misattributes the full upstream integration as new
+            # PR findings and turns the differential gate into a false red.
+            BASELINE="$(git merge-base "$BASE_SHA" HEAD)"
+            test -n "$BASELINE"
             echo "PR scan — failing only on findings new since $BASELINE"
             semgrep scan --config p/default --config p/typescript --error --baseline-commit "$BASELINE"
           else

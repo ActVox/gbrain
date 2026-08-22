@@ -3,21 +3,21 @@
 # Raising a ceiling is a conscious, reviewer-visible act. Lower ceilings in
 # the same commit as any peel (the guard fails on >50 lines of stale slack).
 # Columns: path	max_lines	policy	note
-src/commands/doctor.ts	4422	ratchet	grown v0.46.26.0 megawave: silent-death checks, self-upgrade honesty, noise pruning (#3944 #3925 #3958)
-src/core/operations.ts	315	ratchet	peel target: containment sprint C4-C7; grown v0.46.26.0 megawave op wiring
-src/core/postgres-engine.ts	6166	ratchet	grown v0.46.26.0 megawave (#4218 #3986 #4352) + master v0.46.26.0 private-queue token bootstrap probe
-src/core/pglite-engine.ts	6062	ratchet	grown v0.46.26.0 megawave parity twins + master v0.46.26.0 private-queue columns
-src/core/migrate.ts	687	region-exempt	append-only MIGRATIONS array grows freely; runner logic is ratcheted — grown v0.46.26.0: repair-handler hooks (#3957 pages-upsert-arbiter)
-src/commands/sync.ts	4512	ratchet	grown v0.46.26.0 megawave: image sync, ingest-log gating, dry-run purity, checkpoint honesty (#2683 #4342 #3875) + 3 nosemgrep dataflow annotations (path-traversal audit)
-src/core/ai/gateway.ts	4494	ratchet	grown v0.46.26.0 megawave: config-plane probes + halt telemetry (#3387 #4312)
-src/cli.ts	3723	ratchet	grown v0.46.26.0 megawave: SIGCHLD reaper install, silent-failure surfacing, confirm-race gate (#2443 #2898 #2297)
-src/core/cycle.ts	3171	ratchet	grown v0.46.26.0 megawave (#4102 #2608) + master v0.46.26.0 cycle-start orphan recovery
-src/commands/serve-http.ts	3294	ratchet	grown v0.46.25.0 D2: /mcp per-request teardown (#2844)
-src/commands/jobs.ts	3111	ratchet	grown v0.46.26.0 megawave (#4098 #2308) + master v0.46.26.0 worker startup recovery + stats gating
-src/core/search/hybrid.ts	2845	ratchet	grown v0.46.26.0 megawave: CRAG escalation seam, degradation visibility, excludePrivate knobs-fold v23 (#1663 #3873 #4352)
-src/core/engine.ts	2495	ratchet	grown v0.46.26.0 megawave: relational/visibility/usage contract surface (#4352 #4218)
-src/commands/autopilot.ts	2641	ratchet	grown v0.46.26.0 megawave (#4300 #4285 #3696) + master v0.46.27.0 env-file lane + boot warning + reload-safe install (#2608 #4443) + 1 nosemgrep dataflow annotation (path-traversal audit)
-src/commands/extract.ts	2332	ratchet	grown v0.46.26.0 megawave: FS-walk stamp snapshot + legacy timeline repair wiring (#3957 D4)
+src/commands/doctor.ts	4422	ratchet	grown v0.46.28.0 megawave: silent-death checks, self-upgrade honesty, noise pruning (#3944 #3925 #3958)
+src/core/operations.ts	315	ratchet	peel target: containment sprint C4-C7; grown v0.46.28.0 operation wiring
+src/core/postgres-engine.ts	6166	ratchet	grown v0.46.28.0 parity, usage, and private-queue surfaces
+src/core/pglite-engine.ts	6062	ratchet	grown v0.46.28.0 parity and private-queue surfaces
+src/core/migrate.ts	687	region-exempt	append-only MIGRATIONS array grows freely; runner logic is ratcheted
+src/commands/sync.ts	4512	ratchet	grown v0.46.28.0 image sync, ingest gating, dry-run purity, and audited path handling
+src/core/ai/gateway.ts	4494	ratchet	grown v0.46.28.0 config-plane probes and halt telemetry
+src/cli.ts	3730	ratchet	v0.46.28 reconciliation: upstream reaper and failure surfacing plus ActVox teardown verdict
+src/core/cycle.ts	3171	ratchet	grown v0.46.28.0 cycle recovery and phase boundaries
+src/commands/serve-http.ts	3307	ratchet	v0.46.28 reconciliation: per-request cleanup plus ActVox HTTP lifecycle/CORS hardening
+src/commands/jobs.ts	3132	ratchet	v0.46.28 reconciliation: worker recovery plus ActVox source-aware DB extraction
+src/core/search/hybrid.ts	3077	ratchet	v0.46.28 reconciliation: CRAG/relational visibility plus ActVox operational-memory injection
+src/core/engine.ts	2495	ratchet	grown v0.46.28.0 relational, visibility, and usage contracts
+src/commands/autopilot.ts	2641	ratchet	grown v0.46.28.0 env-file, path, and recovery hardening
+src/commands/extract.ts	2392	ratchet	v0.46.28 reconciliation: upstream timeline/rebuild fixes through ActVox DB-source core
 src/commands/extract-conversation-facts.ts	2045	ratchet	grown v0.46.x per-provider gateway-unavailable copy
 src/core/import-file.ts	2142	ratchet	grown v0.46.26.0 megawave: OCR budget + image import + embed-retry rewire (#3973 #3374)
 src/core/cycle/synthesize.ts	2792	ratchet	merged waves; grown v0.46.26.0 megawave + master rolling lease via shared throttled renewer

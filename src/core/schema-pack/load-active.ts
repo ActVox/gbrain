@@ -103,12 +103,19 @@ function defaultPackLocator(name: string): string | null {
     // Resolve bundled YAML relative to this source file — fallback for
     // direct-bun execution should the asset path ever be unreadable.
     const here = dirname(fileURLToPath(import.meta.url));
-    const bundledPath = join(here, 'base', `${name}.yaml`);
-    if (existsSync(bundledPath)) return bundledPath;
-    // Repo-root fallback for tests running from a worktree where the
-    // module path doesn't resolve to the source tree.
-    const repoRootFallback = join(here, '..', '..', '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`);
-    if (existsSync(repoRootFallback)) return repoRootFallback;
+    const candidates = [
+      join(here, 'base', `${name}.yaml`),
+      // Repo/worktree fallbacks for compiled binaries. Bun's virtual module URL
+      // is not a real directory, while Render/local installs keep src/ beside
+      // the executable checkout.
+      join(here, '..', '..', '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(process.cwd(), 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(dirname(process.argv[1] ?? ''), '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(dirname(process.execPath ?? ''), '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
     return null;
   }
   // User-installed pack at ~/.gbrain/schema-packs/<name>/pack.{yaml,json}

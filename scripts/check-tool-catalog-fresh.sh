@@ -24,7 +24,7 @@ if [ ! -f "$COMMITTED" ]; then
 fi
 
 cd "$REPO_ROOT"
-bun -e "import { renderToolCatalogMarkdown } from './src/mcp/tool-catalog.ts'; process.stdout.write(renderToolCatalogMarkdown() + '\n');" > "$TMP"
+bun -e "import { renderToolCatalogMarkdown } from './src/mcp/tool-catalog.ts'; const md = renderToolCatalogMarkdown().replace(/\\n*$/, '\\n'); process.stdout.write(md);" > "$TMP"
 
 if ! diff -q "$COMMITTED" "$TMP" >/dev/null 2>&1; then
   echo "ERROR: docs/TOOL_CATALOG.md is stale." >&2

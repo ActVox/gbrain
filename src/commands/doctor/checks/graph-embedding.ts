@@ -635,8 +635,6 @@ export async function checkFactsEmbeddingWidthConsistency(engine: BrainEngine): 
     };
   }
 }
-
-
 // ---------------------------------------------------------------------------
 // #4222 junk_entity_hubs — near-empty entity pages with huge edge counts
 // ---------------------------------------------------------------------------

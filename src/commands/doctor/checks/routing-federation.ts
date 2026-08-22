@@ -495,4 +495,3 @@ export function checkCyclePhaseScope(): Check {
     return { name: 'cycle_phase_scope', status: 'warn', message: `Check failed: ${msg}` };
   }
 }
-
