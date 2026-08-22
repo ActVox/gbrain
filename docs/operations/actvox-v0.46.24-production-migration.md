@@ -50,7 +50,16 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
    - `GBRAIN_DIRECT_DATABASE_URL` is present and reaches the direct Postgres endpoint, not only the transaction pooler;
    - the migration role can create/alter tables, indexes, functions, and constraints;
    - `gbrain apply-migrations --list` and `gbrain apply-migrations --dry-run` complete without mutating state.
-4. Inspect the v0.46.3 host migration for ZeroEntropy sunset exposure. If the effective embedding or reranker model uses ZeroEntropy, do not silently combine a vector-provider migration with this code/schema cutover. Record the destination provider, dimensions, backup, cost gate, re-embed plan, and rollback as a separate approved migration before production go.
+4. Run the provider-sunset go/no-go with the candidate binary:
+
+   ```bash
+   gbrain migrate embeddings --status
+   gbrain doctor --json | jq -e '
+     [.checks[] | select(.name == "provider_sunset")][0].status == "ok"
+   '
+   ```
+
+   If the gate fails because the effective embedding or reranker model uses ZeroEntropy, do not silently combine a vector-provider migration with this code/schema cutover. Separately approve and run the Voyage migration with a vector backup, explicit model/dimensions, `VOYAGE_API_KEY` on every Render process, cost gate, resume test, reranker disposition, and rollback. Production go requires `provider_sunset=ok`; suppression is not acceptance.
 5. Take a fresh custom-format Postgres backup:
 
    ```bash
@@ -66,6 +75,18 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
 6. Restore the dump into a disposable Postgres database and run the ActVox deployment candidate against the restored copy. Use the schema-only migration entrypoint so host-file/provider orchestrators cannot mutate unrelated state during the database rehearsal:
 
    ```bash
+   : "${DISPOSABLE_DIRECT_DATABASE_URL:?set a disposable direct Postgres URL}"
+   psql "$DISPOSABLE_DIRECT_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+   CREATE EXTENSION IF NOT EXISTS vector;
+   CREATE EXTENSION IF NOT EXISTS pg_trgm;
+   CREATE EXTENSION IF NOT EXISTS pgcrypto;
+   CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+   SQL
+   pg_restore --exit-on-error --single-transaction --no-owner --no-acl \
+     --schema=public --dbname "$DISPOSABLE_DIRECT_DATABASE_URL" \
+     "$BACKUP_DIR/gbrain-pre-v0.46.24.dump"
+   export DATABASE_URL="$DISPOSABLE_DIRECT_DATABASE_URL"
+   export GBRAIN_DIRECT_DATABASE_URL="$DISPOSABLE_DIRECT_DATABASE_URL"
    gbrain init --migrate-only
    gbrain doctor
    gbrain stats
@@ -84,12 +105,19 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
    test "$EXPECTED_ACTVOX_SHA" = "$(git ls-remote https://github.com/ActVox/gbrain.git refs/heads/master | cut -f1)"
    ```
 
-3. Manually deploy `EXPECTED_ACTVOX_SHA` to web while worker and crons remain suspended. Do not re-enable broad auto-deploy until the full cutover is verified.
-4. Run `gbrain init --migrate-only` once with the ActVox 0.46.24 candidate if startup did not already complete migrations.
-5. Confirm migration `132` before starting any worker.
-6. Deploy/start the 0.46.24 worker on `EXPECTED_ACTVOX_SHA`.
-7. Deploy/enable cron jobs on `EXPECTED_ACTVOX_SHA` only after worker readiness and queue smoke pass.
-8. Never re-enable a 0.42 process after migration v131.
+3. Run a one-off `EXPECTED_ACTVOX_SHA` migration process against `GBRAIN_DIRECT_DATABASE_URL` while web, worker, and crons remain stopped:
+
+   ```bash
+   gbrain init --migrate-only
+   gbrain doctor --json | jq -e '
+     [.checks[] | select(.name == "schema_version")][0].message | test("Version 132 \\(latest: 132\\)")
+   '
+   ```
+
+4. Manually deploy web on `EXPECTED_ACTVOX_SHA` and verify `/health` plus read-only MCP before starting write workers. Do not re-enable broad auto-deploy until the full cutover is verified.
+5. Deploy/start the 0.46.24 worker on `EXPECTED_ACTVOX_SHA`.
+6. Deploy/enable cron jobs on `EXPECTED_ACTVOX_SHA` only after worker readiness and queue smoke pass.
+7. Never re-enable a 0.42 process after migration v131.
 
 ## Live verification
 
