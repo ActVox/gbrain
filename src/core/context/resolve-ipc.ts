@@ -28,6 +28,15 @@
  * request (`{ok:true, block:null}`, no echo) and the client degrades to a
  * typed { degraded: 'stale_serve' } instead of trusting the empty block.
  *
+ *   sync_start / sync_status / sync_abort (secret-gated, protocol:2):
+ *     serve-delegated sync — a `gbrain sync` CLI that finds a live serve
+ *     holding the PGLite lock delegates the run through these kinds instead
+ *     of failing on LiveServeLockError. Wire shapes + option validation live
+ *     in sync-ipc.ts; execution lives in serve-sync-runner.ts. Start+poll
+ *     (never a held-open connection): every request stays one line / one
+ *     response, and an old serve answers `unknown_kind:sync_start` so the
+ *     client degrades to the documented stop-the-serve refusal.
+ *
  * Local-only (unix socket in a 0700 dir on the brain's data dir, socket mode
  * 0600 set before readiness is announced) — no network surface.
  */
@@ -48,6 +57,14 @@ import type { EntityCandidate } from './entity-salience.ts';
 import type { WindowTurn } from './entity-salience.ts';
 import type { PointerBlock } from './retrieval-reflex.ts';
 import type { TurnContextResult } from './turn-context.ts';
+import type {
+  SyncAbortRequest,
+  SyncAbortResponse,
+  SyncStartRequest,
+  SyncStartResponse,
+  SyncStatusRequest,
+  SyncStatusResponse,
+} from './sync-ipc.ts';
 
 const SOCK_NAME = '.gbrain-resolve.sock';
 const SECRET_NAME = '.gbrain-ipc-secret';
@@ -57,6 +74,27 @@ const CLIENT_TIMEOUT_MS = 250;
 export const TURN_CONTEXT_CLIENT_TIMEOUT_MS = 600;
 /** Server-side self-budget for turn_context assembly (< client timeout). */
 export const TURN_CONTEXT_SERVER_BUDGET_MS = 400;
+/**
+ * v0.45.7 ambient recall — context_pack budgets. Packs build entity CARDS
+ * (heavier than turn_context's three arms), and their consumer is the
+ * session-start hook (1.5s self-deadline, 5s harness timeout), so they get a
+ * wider budget. The server passes its budget into the assembler as a
+ * wall-clock deadline, so overrun returns a PARTIAL pack (degradedReason
+ * 'deadline'), never an empty hard failure (eng 4A).
+ */
+export const CONTEXT_PACK_CLIENT_TIMEOUT_MS = 1000;
+/** Assembler deadline. Backstop = +200; client 1000 leaves a real transport
+ * margin (adversarial review: 800+200 == client timeout was zero margin). */
+export const CONTEXT_PACK_SERVER_BUDGET_MS = 600;
+/**
+ * Delegated-sync kinds are O(1) in-memory registrations/reads — no assembly
+ * work, so no server-side budget race. start is a touch wider: its handler
+ * validates options and registers the job before answering, and a serve loop
+ * mid-import can sit on a long WASM statement before dispatching.
+ */
+export const SYNC_START_CLIENT_TIMEOUT_MS = 1500;
+export const SYNC_STATUS_CLIENT_TIMEOUT_MS = 1000;
+export const SYNC_ABORT_CLIENT_TIMEOUT_MS = 1000;
 const MAX_MSG_BYTES = 256 * 1024;
 
 /** Marker the client returns when no server is reachable (vs. a real null result). */
@@ -78,6 +116,11 @@ export interface ResolveRequest {
   sourceId?: string;
   /** v0.43 (#2095, codex D7): suppression mode — 'slug-only' under windowing. */
   suppression?: 'slug-and-title' | 'slug-only';
+  /**
+   * v0.46.15: lexical-arms kill switch. Either side may disable: a client
+   * `false` wins; otherwise the server applies its own file-config gate.
+   */
+  lexicalArms?: boolean;
 }
 
 export interface TurnContextRequest {
@@ -93,9 +136,72 @@ export interface TurnContextRequest {
   /** Optional source claim — the server REJECTS any value other than its bound source [CX2-10]. */
   sourceId?: string;
   maxBytes?: number;
+  /**
+   * Event-attribution channel for the delivery-point feedback loop (harness
+   * hook adapters): the server logs the delivered block's volunteered pages /
+   * pointers to context_volunteer_events under this channel so
+   * `volunteer-context --stats` and the volunteer_channels doctor check see
+   * per-harness firing. Validated server-side against the known channel set;
+   * absent/unknown → 'claude-code' (the only harness bootstrap registers
+   * hooks for today). Additive: old servers ignore it (no logging — the
+   * pre-feedback-loop status quo).
+   */
+  channel?: string;
 }
 
-export type IpcRequest = ResolveRequest | TurnContextRequest;
+/**
+ * v0.45.7 ambient recall — boundary context pack over IPC. Two modes:
+ *   - assembly (default): the server resolves standing entities (request
+ *     `entities` + window extraction + the session row's banked set), assembles
+ *     a pack (cards + open threads + hot facts + since-delta vs the session
+ *     cursor), advances the cursor, and returns the injectable block.
+ *   - bankOnly: PreCompact banking — extract entities from `window`, merge
+ *     them into the session row's standing set, return an empty block. The
+ *     post-compaction SessionStart (source=compact) then serves a warm pack.
+ * Same secret + source-binding posture as turn_context. World-only ALWAYS
+ * (the push path never widens — include_private is a pull-verb affordance).
+ */
+export interface ContextPackRequest {
+  kind: 'context_pack';
+  protocol: 2;
+  secret: string;
+  sessionId?: string;
+  sourceId?: string;
+  /** Explicit standing entities (names/slugs); merged with the session row's banked set. */
+  entities?: string[];
+  /** Recent turns for entity extraction (compact banking / cold-start fallback). */
+  window?: WindowTurn[];
+  maxBytes?: number;
+  /** Trigger discriminator ('session-start:<source>' | 'compact-bank').
+   * RESERVED: carried on the wire for future server-side telemetry; no
+   * server-side consumer yet (the hook-side heartbeat is the current
+   * observability channel). */
+  trigger?: string;
+  /** PreCompact banking mode: persist entities, skip assembly. */
+  bankOnly?: boolean;
+  /**
+   * Cathedral 5 (additive, bankOnly companion): BASENAME of a corpus segment
+   * this hook just banked — serve schedules a prompt checkpoint harvest of it
+   * (fire-and-forget; the ack never waits on the LLM). Version-skew tolerant
+   * BY DESIGN: an old serve destructures known fields and ignores this one
+   * (today's behavior); the sweep backstop still extracts the segment.
+   */
+  flushCorpusFile?: string;
+  /**
+   * Cathedral 5 (additive, read-only): return the session's checkpoint
+   * manifest links — no assembly, no cursor advance, no banking. Used by the
+   * OpenClaw assemble poll.
+   */
+  manifestOnly?: boolean;
+}
+
+export type IpcRequest =
+  | ResolveRequest
+  | TurnContextRequest
+  | ContextPackRequest
+  | SyncStartRequest
+  | SyncStatusRequest
+  | SyncAbortRequest;
 
 export interface ResolveResponse {
   ok: boolean;
@@ -112,13 +218,31 @@ export interface TurnContextResponse {
   error?: string;
 }
 
+export interface ContextPackResponse {
+  ok: boolean;
+  /** Always 2 on a v2 server (stale-serve detector, same as turn_context [A9]). */
+  protocol: 2;
+  block?: TurnContextResult | null;
+  degradedReason?: string;
+  error?: string;
+}
+
 export type ResolveHandler = (req: ResolveRequest) => Promise<PointerBlock | null>;
 export type TurnContextHandler = (req: TurnContextRequest) => Promise<TurnContextResult | null>;
+export type ContextPackHandler = (req: ContextPackRequest) => Promise<TurnContextResult | null>;
+
+export type SyncStartIpcHandler = (req: SyncStartRequest) => SyncStartResponse | Promise<SyncStartResponse>;
+export type SyncStatusIpcHandler = (req: SyncStatusRequest) => SyncStatusResponse | Promise<SyncStatusResponse>;
+export type SyncAbortIpcHandler = (req: SyncAbortRequest) => SyncAbortResponse | Promise<SyncAbortResponse>;
 
 /** Handler MAP replacing the single closure [ENG-3]. */
 export interface IpcHandlers {
   resolve: ResolveHandler;
   turn_context?: TurnContextHandler;
+  context_pack?: ContextPackHandler;
+  sync_start?: SyncStartIpcHandler;
+  sync_status?: SyncStatusIpcHandler;
+  sync_abort?: SyncAbortIpcHandler;
 }
 
 export interface IpcServerOpts {
@@ -130,6 +254,16 @@ export interface IpcServerOpts {
    * count as "volunteered".
    */
   onDelivered?: (block: PointerBlock, req: ResolveRequest) => void;
+  /**
+   * turn_context sibling of onDelivered — fired ONLY after an ok
+   * turn_context response with a non-empty block was successfully written to
+   * the client. This is the #2095 feedback-loop seam for the hook lane: the
+   * callback logs the block's post-trim volunteered pages + pointers to
+   * context_volunteer_events under req.channel. Same red-team rule as
+   * onDelivered: a block the client's budget abandoned was never injected
+   * and must not be counted.
+   */
+  onTurnContextDelivered?: (result: TurnContextResult, req: TurnContextRequest) => void;
   /**
    * The server's registered source [CX2-10]. turn_context requests naming a
    * DIFFERENT sourceId are rejected with 'source_mismatch'; the handler always
@@ -258,7 +392,15 @@ export async function requestTurnContext(
     window: Array.isArray(req.window) ? [...req.window] : [],
   };
   let line = JSON.stringify(full);
-  // Trim oldest-first until the request fits the message cap [G11].
+  // Trim to the message cap [G11] in priority order: the ADVISORY dedupe
+  // payload (priorContextText) is dropped BEFORE any essential window turn —
+  // evicting the window first would silently hollow out candidate extraction
+  // (empty blocks with ok:true) to preserve a hint. Then window turns,
+  // oldest-first.
+  if (Buffer.byteLength(line, 'utf8') + 1 > MAX_MSG_BYTES && full.priorContextText) {
+    delete full.priorContextText;
+    line = JSON.stringify(full);
+  }
   while (Buffer.byteLength(line, 'utf8') + 1 > MAX_MSG_BYTES && full.window.length > 0) {
     full.window.shift();
     line = JSON.stringify(full);
@@ -272,6 +414,109 @@ export async function requestTurnContext(
   // as a resolve request; its block is meaningless for turn_context.
   if ((resp as { protocol?: unknown }).protocol !== 2) return { degraded: 'stale_serve' };
   return resp as TurnContextResponse;
+}
+
+/** Client-facing context_pack request shape (kind/protocol filled in by the helper). */
+export type ContextPackClientRequest = Omit<ContextPackRequest, 'kind' | 'protocol'>;
+
+export type ContextPackIpcResult =
+  | ContextPackResponse
+  | TurnContextStaleServe
+  | typeof IPC_UNAVAILABLE;
+
+/**
+ * v0.45.7 client: request a boundary context pack (or a PreCompact entity bank)
+ * from a running serve. Same fail-soft ladder as requestTurnContext: transport
+ * trouble → IPC_UNAVAILABLE; missing protocol echo → stale_serve; otherwise
+ * the server's typed response. Never throws. Window trims oldest-first under
+ * the message cap [G11].
+ */
+export async function requestContextPack(
+  socketPath: string,
+  req: ContextPackClientRequest,
+  opts: { timeoutMs?: number } = {},
+): Promise<ContextPackIpcResult> {
+  const full: ContextPackRequest = {
+    kind: 'context_pack',
+    protocol: 2,
+    ...req,
+    ...(req.window ? { window: [...req.window] } : {}),
+  };
+  let line = JSON.stringify(full);
+  while (
+    Buffer.byteLength(line, 'utf8') + 1 > MAX_MSG_BYTES &&
+    Array.isArray(full.window) &&
+    full.window.length > 0
+  ) {
+    full.window.shift();
+    line = JSON.stringify(full);
+  }
+  if (Buffer.byteLength(line, 'utf8') + 1 > MAX_MSG_BYTES) return IPC_UNAVAILABLE;
+
+  const resp = await roundTrip(socketPath, line, opts.timeoutMs ?? CONTEXT_PACK_CLIENT_TIMEOUT_MS);
+  if (resp === IPC_UNAVAILABLE) return IPC_UNAVAILABLE;
+  if (!resp || typeof resp !== 'object') return IPC_UNAVAILABLE;
+  if ((resp as { protocol?: unknown }).protocol !== 2) return { degraded: 'stale_serve' };
+  return resp as ContextPackResponse;
+}
+
+// ── Delegated-sync clients ────────────────────────────────────────────────
+
+/** Client-facing shapes (kind/protocol filled in by the helpers). */
+export type SyncStartClientRequest = Omit<SyncStartRequest, 'kind' | 'protocol'>;
+export type SyncStatusClientRequest = Omit<SyncStatusRequest, 'kind' | 'protocol'>;
+export type SyncAbortClientRequest = Omit<SyncAbortRequest, 'kind' | 'protocol'>;
+
+export type SyncStartIpcResult = SyncStartResponse | TurnContextStaleServe | typeof IPC_UNAVAILABLE;
+export type SyncStatusIpcResult = SyncStatusResponse | TurnContextStaleServe | typeof IPC_UNAVAILABLE;
+export type SyncAbortIpcResult = SyncAbortResponse | TurnContextStaleServe | typeof IPC_UNAVAILABLE;
+
+/**
+ * Delegated-sync clients: same fail-soft ladder as requestTurnContext —
+ * transport trouble → IPC_UNAVAILABLE; a response without the protocol echo
+ * (a pre-delegation serve answered `unknown_kind:*` or treated the line as a
+ * resolve request) → { degraded: 'stale_serve' }; otherwise the server's
+ * typed response, INCLUDING ok:false rejections ('busy', 'unauthorized',
+ * 'unknown_job', …) that the sync CLI turns into remediation text. Never throw.
+ */
+export async function requestSyncStart(
+  socketPath: string,
+  req: SyncStartClientRequest,
+  opts: { timeoutMs?: number } = {},
+): Promise<SyncStartIpcResult> {
+  const line = JSON.stringify({ kind: 'sync_start', protocol: 2, ...req } satisfies SyncStartRequest);
+  return syncRoundTrip<SyncStartResponse>(socketPath, line, opts.timeoutMs ?? SYNC_START_CLIENT_TIMEOUT_MS);
+}
+
+export async function requestSyncStatus(
+  socketPath: string,
+  req: SyncStatusClientRequest,
+  opts: { timeoutMs?: number } = {},
+): Promise<SyncStatusIpcResult> {
+  const line = JSON.stringify({ kind: 'sync_status', protocol: 2, ...req } satisfies SyncStatusRequest);
+  return syncRoundTrip<SyncStatusResponse>(socketPath, line, opts.timeoutMs ?? SYNC_STATUS_CLIENT_TIMEOUT_MS);
+}
+
+export async function requestSyncAbort(
+  socketPath: string,
+  req: SyncAbortClientRequest,
+  opts: { timeoutMs?: number } = {},
+): Promise<SyncAbortIpcResult> {
+  const line = JSON.stringify({ kind: 'sync_abort', protocol: 2, ...req } satisfies SyncAbortRequest);
+  return syncRoundTrip<SyncAbortResponse>(socketPath, line, opts.timeoutMs ?? SYNC_ABORT_CLIENT_TIMEOUT_MS);
+}
+
+async function syncRoundTrip<Resp extends { ok: boolean; protocol: 2 }>(
+  socketPath: string,
+  line: string,
+  timeoutMs: number,
+): Promise<Resp | TurnContextStaleServe | typeof IPC_UNAVAILABLE> {
+  if (Buffer.byteLength(line, 'utf8') + 1 > MAX_MSG_BYTES) return IPC_UNAVAILABLE;
+  const resp = await roundTrip(socketPath, line, timeoutMs);
+  if (resp === IPC_UNAVAILABLE) return IPC_UNAVAILABLE;
+  if (!resp || typeof resp !== 'object') return IPC_UNAVAILABLE;
+  if ((resp as { protocol?: unknown }).protocol !== 2) return { degraded: 'stale_serve' };
+  return resp as Resp;
 }
 
 /** One request line out, one response line back. Fail-soft to IPC_UNAVAILABLE. */
@@ -364,15 +609,24 @@ export async function startResolveIpcServer(
   return new Promise((resolve) => {
     const server = net.createServer((conn) => {
       let buf = '';
+      // One request per connection: once a line is being handled, later data
+      // events are ignored. Without this, bytes arriving after the newline
+      // while the async handler is mid-await would re-find the SAME first
+      // line and process it concurrently — duplicate handler work, duplicate
+      // response writes, and duplicated delivery-point event logging.
+      let handled = false;
       conn.setEncoding('utf8');
       conn.on('data', async (chunk: string) => {
+        if (handled) return;
         buf += chunk;
         if (buf.length > MAX_MSG_BYTES) { conn.destroy(); return; }
         const nl = buf.indexOf('\n');
         if (nl < 0) return;
+        handled = true;
         const line = buf.slice(0, nl);
         let resp: string;
         let delivered: { block: PointerBlock; req: ResolveRequest } | null = null;
+        let deliveredTurnContext: { result: TurnContextResult; req: TurnContextRequest } | null = null;
         try {
           const parsed = JSON.parse(line) as IpcRequest;
           const kind = (parsed as { kind?: unknown }).kind ?? 'resolve';
@@ -391,8 +645,30 @@ export async function startResolveIpcServer(
               if (block) delivered = { block, req };
             }
           } else if (kind === 'turn_context') {
+            const req = parsed as TurnContextRequest;
+            const tcResp = await handleTurnContext(req, handlers, opts);
+            resp = JSON.stringify(tcResp);
+            // Feedback-loop seam: only an ok response carrying a non-empty
+            // block counts as a candidate delivery (rejections, degraded-null
+            // and empty blocks injected nothing).
+            if (tcResp.ok && tcResp.block && tcResp.block.text) {
+              deliveredTurnContext = { result: tcResp.block, req };
+            }
+          } else if (kind === 'context_pack') {
             resp = JSON.stringify(
-              await handleTurnContext(parsed as TurnContextRequest, handlers, opts),
+              await handleContextPack(parsed as ContextPackRequest, handlers, opts),
+            );
+          } else if (kind === 'sync_start') {
+            resp = JSON.stringify(
+              await handleSyncKind(parsed as SyncStartRequest, handlers.sync_start, opts),
+            );
+          } else if (kind === 'sync_status') {
+            resp = JSON.stringify(
+              await handleSyncKind(parsed as SyncStatusRequest, handlers.sync_status, opts),
+            );
+          } else if (kind === 'sync_abort') {
+            resp = JSON.stringify(
+              await handleSyncKind(parsed as SyncAbortRequest, handlers.sync_abort, opts),
             );
           } else {
             resp = JSON.stringify({ ok: false, error: `unknown_kind:${String(kind)}` });
@@ -406,6 +682,9 @@ export async function startResolveIpcServer(
           // up, but this is the closest observable delivery point.
           if (delivered && opts.onDelivered) {
             try { opts.onDelivered(delivered.block, delivered.req); } catch { /* telemetry only */ }
+          }
+          if (deliveredTurnContext && opts.onTurnContextDelivered) {
+            try { opts.onTurnContextDelivered(deliveredTurnContext.result, deliveredTurnContext.req); } catch { /* telemetry only */ }
           }
         } catch { /* client gone — do NOT log undelivered pointers */ }
         conn.end();
@@ -457,6 +736,73 @@ async function handleTurnContext(
       block: result,
       ...(result?.degradedReason ? { degradedReason: result.degradedReason } : {}),
     };
+  } catch (e) {
+    return { ok: false, protocol: 2, error: (e as Error).message };
+  }
+}
+
+/**
+ * context_pack server path — same ladder as turn_context (auth [S3#6] →
+ * source binding [CX2-10] → budgeted work), with a WIDER budget (cards) and
+ * partial-pack semantics: the registered handler passes the budget into the
+ * assembler as a wall-clock deadline, so the race below is only the backstop
+ * for a hung handler, not the primary degrade mechanism (eng 4A).
+ */
+async function handleContextPack(
+  req: ContextPackRequest,
+  handlers: IpcHandlers,
+  opts: IpcServerOpts,
+): Promise<ContextPackResponse> {
+  if (!handlers.context_pack) {
+    return { ok: false, protocol: 2, error: 'unsupported_kind' };
+  }
+  if (req.protocol !== 2) {
+    return { ok: false, protocol: 2, error: 'unsupported_protocol' };
+  }
+  if (!opts.secret || !secretMatches(req.secret, opts.secret)) {
+    return { ok: false, protocol: 2, error: 'unauthorized' };
+  }
+  if (req.sourceId && opts.boundSourceId && req.sourceId !== opts.boundSourceId) {
+    return { ok: false, protocol: 2, error: 'source_mismatch' };
+  }
+  try {
+    const budget = new Promise<'__budget__'>((r) => {
+      const t = setTimeout(() => r('__budget__'), CONTEXT_PACK_SERVER_BUDGET_MS + 200);
+      t.unref?.();
+    });
+    const result = await Promise.race([handlers.context_pack(req), budget]);
+    if (result === '__budget__') {
+      return { ok: true, protocol: 2, block: null, degradedReason: 'server_budget' };
+    }
+    return {
+      ok: true,
+      protocol: 2,
+      block: result,
+      ...(result?.degradedReason ? { degradedReason: result.degradedReason } : {}),
+    };
+  } catch (e) {
+    return { ok: false, protocol: 2, error: (e as Error).message };
+  }
+}
+
+/**
+ * Shared auth ladder for the delegated-sync kinds — same fail-closed posture
+ * as turn_context (handler absent → unsupported_kind; protocol mismatch →
+ * unsupported_protocol; missing/wrong secret → unauthorized). No budget race:
+ * the handlers are O(1) in-memory operations in serve-sync-runner.ts.
+ */
+async function handleSyncKind<Req extends { protocol: number; secret: string }, Resp extends { ok: boolean; protocol: 2 }>(
+  req: Req,
+  handler: ((req: Req) => Resp | Promise<Resp>) | undefined,
+  opts: IpcServerOpts,
+): Promise<Resp | { ok: false; protocol: 2; error: string }> {
+  if (!handler) return { ok: false, protocol: 2, error: 'unsupported_kind' };
+  if (req.protocol !== 2) return { ok: false, protocol: 2, error: 'unsupported_protocol' };
+  if (!opts.secret || !secretMatches(req.secret, opts.secret)) {
+    return { ok: false, protocol: 2, error: 'unauthorized' };
+  }
+  try {
+    return await handler(req);
   } catch (e) {
     return { ok: false, protocol: 2, error: (e as Error).message };
   }

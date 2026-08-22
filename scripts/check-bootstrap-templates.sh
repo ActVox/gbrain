@@ -2,7 +2,7 @@
 # scripts/check-bootstrap-templates.sh — bootstrap template guard
 # [D4, D5, A1 + privacy].
 #
-# Four independent sections, each SKIP-GRACEFUL (a section whose inputs don't
+# Five independent sections, each SKIP-GRACEFUL (a section whose inputs don't
 # exist yet prints SKIP and moves on, so CI stays green while the parallel
 # bootstrap tasks land):
 #
@@ -25,6 +25,16 @@
 #   (d) Phase-list check [D5]: every `Phase: <name>` in BOOTSTRAP_FOR_AGENTS.md
 #       must appear in src/core/bootstrap/status.ts (the TS phase list is the
 #       single source; the runbook defers to it). Skips while either is absent.
+#   (e) Harness-scoping counter-signal pins: the MCP-scope consent applies on
+#       Claude Code and opencode (Codex has no scope flag — `codex mcp add` is
+#       user-global; opencode DEFAULTS to user-global — no trust gate on
+#       project-config servers). Tripwires against accidental deletion of the
+#       load-bearing prose, not proofs of placement: the runbook must carry the
+#       Codex bullet's "Do NOT offer an MCP scope choice" and the phase-3
+#       "Claude Code and opencode" scoping; questions.json's MCP_SCOPE.question
+#       must START WITH "(Claude Code and opencode". Intentional rewording
+#       updates these pins in the same commit. Skips while the runbook/bank are
+#       absent.
 #
 # BSD/GNU grep portable (no \t escapes). Uses `bun` for JSON parsing — the
 # check runs via `bun run verify`, so bun is always present.
@@ -185,6 +195,50 @@ if [ -f "$RUNBOOK" ] && [ -f "$STATUS_TS" ]; then
   done <<< "$phases"
 else
   echo "SKIP: phase-list check (runbook or src/core/bootstrap/status.ts absent)"
+fi
+
+# ── (e) harness-scoping counter-signal pins (scope = Claude Code + opencode) ─
+if [ -f "$RUNBOOK" ]; then
+  if ! grep -qF 'Do NOT offer an MCP scope choice' "$RUNBOOK"; then
+    fail=1
+    echo "FAIL: BOOTSTRAP_FOR_AGENTS.md lost the Codex counter-signal" >&2
+    echo "      ('Do NOT offer an MCP scope choice'). Codex has no scope flag —" >&2
+    echo "      without this line, Codex-door agents re-ask a dead question." >&2
+    echo "      Rewording intentionally? Update this pin in the same commit." >&2
+  fi
+  if ! grep -qF 'Claude Code and opencode' "$RUNBOOK"; then
+    fail=1
+    echo "FAIL: BOOTSTRAP_FOR_AGENTS.md lost the 'Claude Code and opencode' scoping" >&2
+    echo "      on the MCP-scope consent (phase 3). Without it the consent reads as" >&2
+    echo "      harness-blind: Codex-door agents ask a dead question and opencode" >&2
+    echo "      agents miss the inverted (user-global) default." >&2
+    echo "      Rewording intentionally? Update this pin in the same commit." >&2
+  fi
+  if ! grep -qF 'NO trust prompt' "$RUNBOOK"; then
+    fail=1
+    echo "FAIL: BOOTSTRAP_FOR_AGENTS.md lost the opencode spawn-gate rationale" >&2
+    echo "      ('NO trust prompt'). Without it agents recommend the Claude-style" >&2
+    echo "      project default on opencode — where a committed project entry" >&2
+    echo "      auto-executes on every collaborator machine." >&2
+    echo "      Rewording intentionally? Update this pin in the same commit." >&2
+  fi
+else
+  echo "SKIP: harness-scoping pins (runbook absent)"
+fi
+if [ -f "$QUESTIONS" ] && command -v bun >/dev/null 2>&1; then
+  if ! GBRAIN_QJSON="$QUESTIONS" bun -e \
+    'const fs=require("fs");let b;try{b=JSON.parse(fs.readFileSync(process.env.GBRAIN_QJSON,"utf8"));}catch(e){process.exit(1);}if(!b.questions){process.exit(1);}const e=b.questions.MCP_SCOPE;const q=(e&&e.question)||"";process.exit(q.startsWith("(Claude Code and opencode")&&e.phase==="interview"?0:1);'; then
+    fail=1
+    echo "FAIL: questions.json MCP_SCOPE.question must start with '(Claude Code and opencode'" >&2
+    echo "      AND MCP_SCOPE.phase must be 'interview' (the consent is recorded" >&2
+    echo "      pre-confirm during the interview; a 'wire' phase re-creates the" >&2
+    echo "      bank-vs-runbook contradiction). Also fails when the questions" >&2
+    echo "      object or the MCP_SCOPE entry is missing, or questions.json fails" >&2
+    echo "      to parse — a bank without them silently passes section (a) too." >&2
+    echo "      Rewording intentionally? Update this pin in the same commit." >&2
+  fi
+else
+  echo "SKIP: MCP_SCOPE bank pin (questions.json or bun absent)"
 fi
 
 if [ "$fail" -ne 0 ]; then

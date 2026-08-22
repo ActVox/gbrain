@@ -16,8 +16,11 @@ import type { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes, createHash, createHmac } from 'crypto';
 import { safeHexEqual } from '../core/timing-safe.ts';
+import { isValidRepoName } from '../core/github-source.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -25,15 +28,31 @@ import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { OAuthTokenRevocationRequestSchema } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { BrainEngine } from '../core/engine.ts';
-import { operations, OperationError } from '../core/operations.ts';
+import { operations, OperationError, opAllowedForBoundClient } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
-import { GBrainOAuthProvider, validateTokenEndpointAuthMethod } from '../core/oauth-provider.ts';
+import { disabledOpsForPublishGates } from '../mcp/publish-gates.ts';
+import {
+  GBrainOAuthProvider,
+  validateTokenEndpointAuthMethod,
+  dcrRegistrationContext,
+  DEFAULT_DCR_TTL_MIN_SECONDS,
+} from '../core/oauth-provider.ts';
 import type { SqlQuery } from '../core/oauth-provider.ts';
 import { hasScope, ALLOWED_SCOPES_LIST, normalizeScopesInput } from '../core/scope.ts';
+import { normalizeTokenScopes } from '../core/legacy-token-scope.ts';
 import { normalizeSourceInput, normalizeFederatedReadInput } from '../core/source-id.ts';
-import { summarizeMcpParams, dispatchToolCall } from '../mcp/dispatch.ts';
-import { paramDefToSchema } from '../mcp/tool-defs.ts';
-import { filterOpsForSurface } from '../mcp/surface.ts';
+import { summarizeMcpParams, dispatchToolCall, requestLogStatusForResult } from '../mcp/dispatch.ts';
+import { resolveStrictParamsMode } from '../mcp/validate-params.ts';
+import { buildToolDefs } from '../mcp/tool-defs.ts';
+import {
+  filterOpsForSurface,
+  clampSurface,
+  minSurface,
+  resolveClientRowSurface,
+  resolveDefaultClientSurface,
+  type McpSurface,
+} from '../mcp/surface.ts';
+import { writeSurfaceChangeAudit } from '../core/surface-audit.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
@@ -41,6 +60,98 @@ import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
+/**
+ * v0.46: normalize the per-event GitHub webhook payload shape into
+ * {repo, number, kind}. Events differ: issues/issue_comment/label/
+ * assignee/milestone carry a top-level `issue` (PRs appear there too,
+ * flagged by `issue.pull_request`), pull_request/review events carry
+ * top-level `pull_request`, and check events nest the linked PRs under
+ * check_run/check_suite/workflow_run. Returns null when the payload
+ * carries no item reference (ping, branch, non-PR checks).
+ */
+export function extractGitHubItemRef(parsed: Record<string, unknown>): { repo: string; number: number; kind: 'issue' | 'pr' } | null {
+  const repoObj = parsed.repository as { full_name?: string } | undefined;
+  const repo = repoObj?.full_name ?? '';
+  const issueObj = parsed.issue as { number?: number; pull_request?: unknown } | undefined;
+  const prObj = parsed.pull_request as { number?: number } | undefined;
+  const checkRun = parsed.check_run as { pull_requests?: Array<{ number?: number }> } | undefined;
+  const checkSuite = parsed.check_suite as { pull_requests?: Array<{ number?: number }> } | undefined;
+  const workflowRun = parsed.workflow_run as { pull_requests?: Array<{ number?: number }> } | undefined;
+  const nestedPrNumber =
+    checkRun?.pull_requests?.[0]?.number ??
+    checkSuite?.pull_requests?.[0]?.number ??
+    workflowRun?.pull_requests?.[0]?.number;
+  const number = prObj?.number ?? issueObj?.number ?? nestedPrNumber;
+  if (typeof number !== 'number' || !isValidRepoName(repo)) return null;
+  const kind = prObj !== undefined || issueObj?.pull_request !== undefined || nestedPrNumber !== undefined ? 'pr' : 'issue';
+  return { repo, number, kind };
+}
+
+/**
+ * True when a github-kind source covers `fullName`: explicit gh_repos list
+ * for scope=repos, the last-discovered state file for scope=auto (accept
+ * when no state exists yet — the sync engine re-checks scope). Repo names
+ * are case-insensitive on GitHub, so matching folds case on both sides
+ * (config and legacy state files may carry canonical-case entries).
+ */
+export function githubKindCoversRepo(
+  cfg: Record<string, unknown>,
+  localPath: string | null,
+  fullName: string,
+): boolean {
+  const repo = fullName.toLowerCase();
+  if (cfg.gh_scope === 'repos') {
+    const repos = typeof cfg.gh_repos === 'string' ? cfg.gh_repos.split(',').map((s) => s.trim().toLowerCase()) : [];
+    return repos.includes(repo);
+  }
+  if (localPath) {
+    try {
+      const state = JSON.parse(readFileSync(join(localPath, '.github-source.json'), 'utf-8')) as {
+        repos?: unknown[];
+      };
+      if (Array.isArray(state.repos)) {
+        return state.repos.some((r) => typeof r === 'string' && r.toLowerCase() === repo);
+      }
+    } catch {
+      /* no state yet */
+    }
+  }
+  return true;
+}
+
+/**
+ * Partition signature-verified webhook sources for an item event. Only a
+ * github-kind source can service a github_item refresh — the sync core
+ * rejects github_item on any other kind, so enqueueing for a legacy
+ * github_repo push source would only mint a dead job. Legacy matches are
+ * reported so the handler can ACK-and-ignore them instead.
+ */
+export function selectGitHubItemSources<Row extends { local_path: string | null; config: unknown }>(
+  rows: Row[],
+  repo: string,
+  verify: (cfg: Record<string, unknown>) => boolean,
+): { verified: Row[]; legacyMatched: boolean } {
+  const verified: Row[] = [];
+  let legacyMatched = false;
+  for (const row of rows) {
+    const cfg = (typeof row.config === 'string' ? JSON.parse(row.config) : (row.config ?? {})) as Record<string, unknown>;
+    if (cfg.kind === 'github' && githubKindCoversRepo(cfg, row.local_path, repo) && verify(cfg)) {
+      verified.push(row);
+      continue;
+    }
+    if (cfg.github_repo === repo && verify(cfg)) legacyMatched = true;
+  }
+  return { verified, legacyMatched };
+}
+import {
+  registerScopedClient,
+  preflightOauthClientColumns,
+  TOKEN_TTL_MIN_SECONDS,
+  TOKEN_TTL_MAX_SECONDS,
+  type RegisteredClient,
+} from './auth.ts';
+import { registerClientNameLockKey } from './agent-register.ts';
+import { isUndefinedColumnError } from '../core/utils.ts';
 import { isRetryableError } from '../core/retry-matcher.ts';
 import {
   computeContentHash,
@@ -482,11 +593,14 @@ interface ServeHttpOptions {
    */
   suppressBootstrapToken?: boolean;
   /**
-   * MEMORY_VERBS v1: tool-surface mode. 'verbs' = exactly the five protocol
-   * verbs; 'full' (default) = every non-localOnly operation. Enforced on the
-   * tool list AND in dispatch (fail-closed).
+   * MEMORY_VERBS v1 + WP4: tool-surface mode. 'verbs' = exactly the seven
+   * protocol verbs; 'starter' = the STARTER_OPS daily-driver set; 'full'
+   * (default) = every non-localOnly operation. Enforced on the tool list AND
+   * in dispatch (fail-closed). WP4/D2: this is the server CEILING — each
+   * request resolves min(ceiling, client row surface ?? config default),
+   * so per-client rows can narrow below it but never widen past it.
    */
-  surface?: 'verbs' | 'full';
+  surface?: McpSurface;
   /**
    * #2624: force-print the generated admin bootstrap token even on a
    * non-TTY (containerized) start. By default the raw token is only printed
@@ -537,7 +651,13 @@ export async function queryAgentClientSpend(engine: BrainEngine): Promise<AgentC
         SELECT SUM(spend_cents)::text
           FROM mcp_spend_log
          WHERE client_id = c.client_id
-           AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+           -- Double AT TIME ZONE: the inner one yields NAIVE UTC-midnight;
+           -- the outer one converts it back to a timestamptz INSTANT. Without
+           -- it, the naive value is reinterpreted in the SESSION timezone, so
+           -- any non-UTC session (host-tz PGLite, a tz-configured Postgres
+           -- role) shifts the day boundary by the offset and today's spend
+           -- underreports every evening.
+           AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
       ), '0') AS spent_cents_today,
       COALESCE((
         SELECT SUM(estimated_cents)::text
@@ -707,11 +827,41 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // constructor option instead of monkey-patching `_clientsStore` after
   // construction. Same outcome (no /register endpoint when --enable-dcr
   // is not passed); cleaner shape for tests and future maintainers.
+  // #2179: admin-configured clamp window for DCR-requested token TTLs.
+  // DB-plane config keys (`gbrain config set oauth.dcr_ttl_min_seconds ...`).
+  // FAIL-CLOSED defaults: an unset/invalid max is bounded by the operator's
+  // own --token-ttl (never a fixed permissive ceiling), and an inverted
+  // window collapses to the min bound — the same direction clampDcrTokenTtl
+  // itself resolves. A bad config narrows the window; it never widens it.
+  const parseDcrTtlBound = (raw: unknown, fallback: number): number => {
+    const n = Number(raw);
+    return raw != null && Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+  };
+  let dcrTtlMinSeconds = DEFAULT_DCR_TTL_MIN_SECONDS;
+  let dcrTtlMaxSeconds = Math.max(tokenTtl, dcrTtlMinSeconds);
+  try {
+    dcrTtlMinSeconds = parseDcrTtlBound(await engine.getConfig('oauth.dcr_ttl_min_seconds'), DEFAULT_DCR_TTL_MIN_SECONDS);
+    dcrTtlMaxSeconds = parseDcrTtlBound(await engine.getConfig('oauth.dcr_ttl_max_seconds'), Math.max(tokenTtl, dcrTtlMinSeconds));
+  } catch {
+    // Config read is best-effort; the fail-closed defaults stand.
+    dcrTtlMaxSeconds = Math.max(tokenTtl, dcrTtlMinSeconds);
+  }
+  if (dcrTtlMinSeconds > dcrTtlMaxSeconds) {
+    console.error(
+      `[serve-http] WARNING: oauth.dcr_ttl_min_seconds (${dcrTtlMinSeconds}) exceeds ` +
+      `oauth.dcr_ttl_max_seconds (${dcrTtlMaxSeconds}); collapsing the window to ` +
+      `the min bound (${dcrTtlMinSeconds}).`,
+    );
+    dcrTtlMaxSeconds = dcrTtlMinSeconds;
+  }
+
   const oauthProvider = new GBrainOAuthProvider({
     sql,
     tokenTtl,
     dcrDisabled: !enableDcr,
     allowClientCredentialsDcr: enableDcrInsecure === true,
+    dcrTtlMinSeconds,
+    dcrTtlMaxSeconds,
   });
 
   // #1353: loud stderr security WARN when DCR is enabled. DCR is an
@@ -832,6 +982,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.use('/authorize', cors(corsOAuthOptions));
   app.use('/register', cors(corsOAuthOptions));
   app.use('/revoke', cors(corsOAuthOptions));
+
+  // #2179: capture the optional `token_ttl_seconds` DCR extension field
+  // BEFORE the SDK's /register handler runs — its request schema strips
+  // unknown body members, so the value would never reach registerClient.
+  // The rest of the chain runs inside dcrRegistrationContext; the clients
+  // store clamps + persists it. Malformed values are ignored (fail-safe:
+  // absent → server default; out-of-range → clamped downstream; a TTL hint
+  // never rejects a registration). express.json() here is idempotent with
+  // the SDK router's own body parser.
+  app.use('/register', express.json(), (req: Request, _res: Response, next: NextFunction) => {
+    const raw = (req.body as Record<string, unknown> | null | undefined)?.token_ttl_seconds;
+    const tokenTtlSeconds = typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+    dcrRegistrationContext.run({ tokenTtlSeconds }, next);
+  });
 
   // ---------------------------------------------------------------------------
   // Custom client_credentials handler (before mcpAuthRouter)
@@ -1316,7 +1480,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       `;
       const legacyKeys = await sql`
         SELECT a.id, a.name, 'api_key' as auth_type,
-          '{"bearer"}' as grant_types, 'read write admin' as scope, a.created_at, null as token_ttl,
+          '{"bearer"}' as grant_types,
+          a.scopes,
+          a.created_at, null as token_ttl,
           CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' ELSE 'active' END as status,
           a.last_used_at,
           (SELECT count(*)::int FROM mcp_request_log WHERE token_name = a.name) as total_requests,
@@ -1325,7 +1491,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       `;
       res.json([
         ...oauthClients,
-        ...legacyKeys.map((key) => ({ ...key, source_id: null, federated_read: [] })),
+        ...legacyKeys.map(({ scopes, ...key }) => ({
+          ...key,
+          // The SAME normalizer the verify path uses — the dashboard must
+          // never display a grant the serve doesn't enforce (NULL =
+          // grandfathered full access; damaged/deny rows show empty).
+          scope: normalizeTokenScopes(scopes)?.join(' ') ?? 'read write admin',
+          source_id: null,
+          federated_read: [],
+        })),
       ]);
     } catch (e) {
       res.status(503).json({ error: 'service_unavailable' });
@@ -1379,8 +1553,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     try {
       const now = Math.floor(Date.now() / 1000);
       const [expiring] = await sql`SELECT count(*)::int as count FROM oauth_tokens WHERE token_type = 'access' AND expires_at BETWEEN ${now} AND ${now + 86400}`;
-      const [errors] = await sql`SELECT count(*)::int as count FROM mcp_request_log WHERE status != 'success' AND created_at > now() - interval '24 hours'`;
-      const [total] = await sql`SELECT count(*)::int as count FROM mcp_request_log WHERE created_at > now() - interval '24 hours'`;
+      // Excluded from the error numerator: success and success_with_warnings
+      // (a warn-mode success); denied_after_list stays counted — a denied
+      // call IS a failure signal. surface_change is an OPERATION value (audit
+      // rows carry status='success'), so audit rows are excluded from BOTH
+      // counts — they are records of operator/self actions, not traffic.
+      const [errors] = await sql`SELECT count(*)::int as count FROM mcp_request_log WHERE status NOT IN ('success', 'success_with_warnings') AND operation != 'surface_change' AND created_at > now() - interval '24 hours'`;
+      const [total] = await sql`SELECT count(*)::int as count FROM mcp_request_log WHERE operation != 'surface_change' AND created_at > now() - interval '24 hours'`;
       const errorRate = (total as any).count > 0 ? ((errors as any).count / (total as any).count * 100).toFixed(1) : '0';
       res.json({
         expiring_soon: (expiring as any).count,
@@ -1662,6 +1841,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Register client from admin dashboard
   app.post('/admin/api/register-client', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    // Set only once the client row has COMMITTED — the catch below folds it
+    // into the 500 payload so a post-commit failure never reads as
+    // "nothing was created".
+    let createdClientId: string | undefined;
     try {
       // v0.39.3.0 WARN-9 + CV12: accept BOTH `scopes` (admin SPA convention)
       // AND `scope` (OAuth wire-format convention, singular). The pre-fix
@@ -1724,16 +1907,129 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         });
         return;
       }
-      const result = await oauthProvider.registerClientManual(
-        name, grants, scopeString, uris, sourceId, federatedReadIds, validatedAuthMethod,
-      );
-      // Set per-client TTL if specified
-      if (tokenTtl && Number(tokenTtl) > 0) {
-        await sql`UPDATE oauth_clients SET token_ttl = ${Number(tokenTtl)} WHERE client_id = ${result.clientId}`;
+      // cathedral-6: a WELL-FORMED but nonexistent source used to surface as
+      // a 500 (the source_id FK fires inside the INSERT). Check existence +
+      // archived up front for a structured 400 — same contract as the
+      // malformed case, mirroring the CLI lane. ONE batched query on the
+      // engine lane (SqlQuery forbids arrays; engine is in scope).
+      {
+        const idsToCheck = [...new Set([sourceId, ...(federatedReadIds ?? [])])];
+        const found = await engine.executeRaw<{ id: string; archived: boolean | null }>(
+          `SELECT id, archived FROM sources WHERE id = ANY($1::text[])`,
+          [idsToCheck],
+        );
+        const byId = new Map(found.map(r => [r.id, r]));
+        for (const id of idsToCheck) {
+          const row = byId.get(id);
+          if (!row) {
+            res.status(400).json({
+              error: 'unknown_source',
+              message: `source "${id}" does not exist — create it first (gbrain sources add ${id})`,
+            });
+            return;
+          }
+          if (row.archived) {
+            res.status(400).json({
+              error: 'archived_source',
+              message: `source "${id}" is archived — unarchive it or drop it from the grant`,
+            });
+            return;
+          }
+        }
       }
-      res.json({ ...result, tokenTtl: tokenTtl ? Number(tokenTtl) : null });
+      // cathedral-6: validate tokenTtl BEFORE the transaction. The old
+      // `Number(tokenTtl) > 0` passed Infinity/floats through to fail the
+      // integer UPDATE inside the tx (rollback → opaque 500). Falsy values
+      // (omitted / null / 0 / '') keep the historical "no TTL requested"
+      // meaning; anything else must be an integer inside the shared bounds.
+      let ttlNum: number | undefined;
+      if (tokenTtl) {
+        const v = Number(tokenTtl);
+        if (!Number.isInteger(v) || v < TOKEN_TTL_MIN_SECONDS || v > TOKEN_TTL_MAX_SECONDS) {
+          res.status(400).json({
+            error: 'invalid_token_ttl',
+            message: `tokenTtl must be an integer number of seconds between ${TOKEN_TTL_MIN_SECONDS} and ${TOKEN_TTL_MAX_SECONDS} (90 days); got ${JSON.stringify(tokenTtl)}. Omit the field (or pass 0/null) to keep the server default.`,
+          });
+          return;
+        }
+        ttlNum = v;
+      }
+      // Column pre-flight OUTSIDE the tx (25P02 — nothing inside may degrade):
+      // pre-v61 brains lack the scoped-client columns and registerClientManual's
+      // internal 42703 retry ladder would abort the transaction, so refuse up
+      // front with the CLI lane's brain_too_old contract. Passing {columns}
+      // through also makes the ttl write SKIP (rather than throw) on brains
+      // without token_ttl.
+      const columns = await preflightOauthClientColumns(sql);
+      if (!columns.has('source_id') || !columns.has('federated_read')) {
+        res.status(400).json({
+          error: 'brain_too_old',
+          message: 'this brain predates scoped OAuth clients (source_id/federated_read columns) — run `gbrain apply-migrations --yes` first.',
+        });
+        return;
+      }
+      // Duplicate-name parity with the CLI lane: a second client under the
+      // same name is a 409, never a silent second row. The dup-check and the
+      // INSERT run in ONE transaction under the SAME name-scoped advisory
+      // lock the CLI takes — two concurrent same-name requests serialize, and
+      // the loser sees the winner's committed row (as two separate autocommit
+      // statements, both used to pass the pre-check). deleted_at tolerance is
+      // preflight-decided (no in-tx 42703 retry).
+      let dupClientId: string | null = null;
+      let registered: RegisteredClient | undefined;
+      await engine.transaction(async (tx) => {
+        await tx.executeRaw(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [registerClientNameLockKey(name)]);
+        const txSql = sqlQueryForEngine(tx);
+        const dupRows = columns.has('deleted_at')
+          ? await txSql`SELECT client_id FROM oauth_clients WHERE client_name = ${name} AND deleted_at IS NULL`
+          : await txSql`SELECT client_id FROM oauth_clients WHERE client_name = ${name}`;
+        if (dupRows.length > 0) {
+          dupClientId = String(dupRows[0].client_id);
+          return;
+        }
+        // Compose the SAME core the CLI uses (registerScopedClient) instead of
+        // open-coding registerClientManual + a raw TTL UPDATE — the two paths
+        // had already drifted once (this route hardcoded 'default' pre-v0.41).
+        registered = await registerScopedClient(txSql, name, {
+          grantTypes: grants,
+          scopes: scopeString,
+          sourceId,
+          federatedRead: federatedReadIds,
+          redirectUris: uris,
+          tokenEndpointAuthMethod: validatedAuthMethod,
+          boundTools: undefined,
+          boundSourceId: undefined,
+          boundBrainId: undefined,
+          boundSlugPrefixes: undefined,
+          boundMaxConcurrent: undefined,
+          budgetUsdPerDay: undefined,
+          tokenTtlSeconds: undefined,
+        }, { tokenTtlSeconds: ttlNum, columns });
+      });
+      if (dupClientId !== null) {
+        res.status(409).json({
+          error: 'duplicate_name',
+          client_id: dupClientId,
+        });
+        return;
+      }
+      // Post-commit: the row exists from here on — any later failure must
+      // name the created client (no false "nothing was created").
+      const reg = registered!;
+      createdClientId = reg.clientId;
+      res.json({
+        clientId: reg.clientId,
+        ...(reg.clientSecret !== undefined ? { clientSecret: reg.clientSecret } : {}),
+        tokenTtl: reg.tokenTtl ?? null,
+      });
     } catch (e) {
-      res.status(500).json({ error: e instanceof Error ? e.message : 'Registration failed' });
+      // A throw INSIDE the tx rolls the row back (no client persists); the
+      // only window where a client exists at failure time is post-commit,
+      // marked by createdClientId — include it so the operator can revoke.
+      res.status(500).json({
+        error: e instanceof Error ? e.message : 'Registration failed',
+        ...(createdClientId !== undefined ? { client_id: createdClientId } : {}),
+      });
     }
   });
 
@@ -1757,7 +2053,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // validator inside rescopeClient.
   app.post('/admin/api/rescope-client', requireAdmin, express.json(), async (req: Request, res: Response) => {
     try {
-      const { clientId, sourceId, federatedRead, boundSlugPrefixes } = req.body ?? {};
+      const { clientId, sourceId, federatedRead, boundSlugPrefixes, surface } = req.body ?? {};
       if (!clientId || typeof clientId !== 'string') {
         res.status(400).json({ error: 'clientId required' });
         return;
@@ -1779,12 +2075,31 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         res.status(400).json({ error: 'boundSlugPrefixes must be null or an array of slug-prefix strings' });
         return;
       }
-      const result = await oauthProvider.rescopeClient(clientId, { sourceId, federatedRead, boundSlugPrefixes });
+      // WP4: tri-state surface rescope — omitted = untouched, null = clear
+      // (surface + surface_set_by both NULL), value = set + operator lock
+      // (mirrors the CLI's --surface verbs|starter|full|clear).
+      if (surface !== undefined && surface !== null &&
+          surface !== 'verbs' && surface !== 'starter' && surface !== 'full') {
+        res.status(400).json({ error: 'surface must be null or one of: verbs, starter, full' });
+        return;
+      }
+      const result = await oauthProvider.rescopeClient(clientId, { sourceId, federatedRead, boundSlugPrefixes, surface });
+      // WP4 (amendment 32 / ENG-8): every surface mutation writes an audit
+      // row — this endpoint, the rescope CLI, and the request_tools persist.
+      if (surface !== undefined) {
+        await writeSurfaceChangeAudit(engine, {
+          actor: 'admin-api',
+          client_id: clientId,
+          old: result.surfaceOld ?? null,
+          new: result.surface ?? null,
+          via: 'admin_api',
+        });
+      }
       res.json(result);
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Rescope failed';
       const status = /No OAuth client found/.test(message) ? 404
-        : /Invalid source_id|requires --source|cannot be empty|does not exist|cannot be an empty list|bound_slug_prefixes entr/.test(message) ? 400
+        : /Invalid source_id|requires --source|cannot be empty|does not exist|cannot be an empty list|bound_slug_prefixes entr|--surface must be/.test(message) ? 400
         : 500;
       res.status(status).json({ error: message });
     }
@@ -1879,13 +2194,46 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // ---------------------------------------------------------------------------
   // MCP tool calls (bearer auth + scope enforcement)
   // ---------------------------------------------------------------------------
-  // MEMORY_VERBS v1: surface filter applies AFTER the localOnly filter; the
-  // same set feeds dispatch as allowedOps so hidden ops are uncallable, not
-  // just unlisted [c2].
-  const surface = options.surface ?? 'full';
-  const mcpOperations = filterOpsForSurface(operations.filter(op => !op.localOnly), surface);
-  const surfaceAllowedOps: ReadonlySet<string> | undefined =
-    surface === 'full' ? undefined : new Set(mcpOperations.map(o => o.name));
+  // MEMORY_VERBS v1 + WP4 (D2): the server-resolved surface is the CEILING.
+  // The per-REQUEST effective surface — min(ceiling, client row surface ??
+  // config default), clamped by the GBRAIN_MCP_FORCE_SURFACE kill switch
+  // (narrow-only, FOV-6a) — is resolved inside the /mcp handler so a rescope
+  // or config flip takes effect on the client's next request without a
+  // restart, and the dispatch allow-set is recomputed per request
+  // (amendment 20). The surface filter applies AFTER the localOnly filter;
+  // the same set feeds dispatch as allowedOps so hidden ops are uncallable,
+  // not just unlisted [c2].
+  const serverSurfaceCeiling: McpSurface = options.surface ?? 'full';
+  const mcpOperationsBase = operations.filter(op => !op.localOnly);
+
+  /**
+   * WP4 (D2): resolve this request's effective surface from the caller's
+   * verified auth. The config default (`mcp.default_surface_dcr`) is read
+   * dual-plane ONLY when the client row carries no usable surface — the
+   * common full-surface path pays no extra config read. Unknown row values
+   * are ignored with a warn-once per client (amendment 18). Never throws:
+   * surface resolution must not take a request down. On a default-surface
+   * read failure the LAST successfully read default (per process) still
+   * applies, so a transient config outage cannot silently widen a client
+   * that normally resolves narrower than the ceiling; with no prior read,
+   * the ceiling is the only floor available (pre-WP4 behavior).
+   */
+  let lastKnownDefaultSurface: McpSurface | null = null;
+  async function resolveEffectiveSurface(authInfo: AuthInfo): Promise<{ ceiling: McpSurface; effective: McpSurface }> {
+    const ceiling = clampSurface(serverSurfaceCeiling);
+    // min() can never go below the narrowest surface: a 'verbs' ceiling makes
+    // the row/default resolution a no-op, so skip the awaited config read.
+    if (ceiling === 'verbs') return { ceiling, effective: ceiling };
+    const rowSurface = resolveClientRowSurface(authInfo.surface, authInfo.clientId);
+    if (rowSurface !== null) return { ceiling, effective: minSurface(ceiling, rowSurface) };
+    try {
+      const dflt = await resolveDefaultClientSurface(engine, config);
+      lastKnownDefaultSurface = dflt ?? null;
+      return { ceiling, effective: minSurface(ceiling, dflt ?? ceiling) };
+    } catch {
+      return { ceiling, effective: minSurface(ceiling, lastKnownDefaultSurface ?? ceiling) };
+    }
+  }
 
   // v0.36.x #1076: MCP Streamable HTTP spec — GET /mcp opens an optional SSE
   // backchannel for server-initiated messages. gbrain's transport is stateless
@@ -1908,6 +2256,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     // for legacy tokens or when the JOIN row's client_name is NULL.
     const agentName = authInfo.clientName ?? authInfo.clientId;
 
+    // WP4 (D2): per-request effective surface + fail-closed allow-set,
+    // recomputed per request (amendment 20) so rescopes/request_tools
+    // persists take effect on the next request with zero restart.
+    const { ceiling: surfaceCeiling, effective: surface } = await resolveEffectiveSurface(authInfo);
+    const mcpOperations = filterOpsForSurface(mcpOperationsBase, surface);
+    const surfaceAllowedOps: ReadonlySet<string> | undefined =
+      surface === 'full' ? undefined : new Set(mcpOperations.map(o => o.name));
+
     // Create a fresh MCP server per request (stateless)
     const server = new Server(
       { name: 'gbrain', version: VERSION },
@@ -1915,10 +2271,48 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // WP1 honest catalog: the advertised list is exactly what THIS token
+      // can call. Three per-request filters, cheapest first:
+      //   1. token scope — a read-only token never sees admin/write tools;
+      //   2. bound-client fence — a slug-bound client never sees ops the
+      //      dispatch fence would deny (same predicate, cannot drift);
+      //   3. publish gates — gated ops (skills/advisor) are hidden while
+      //      their gate is off; the resolver never throws (read failure =
+      //      hidden, matching the default-off consent posture) so a config
+      //      hiccup costs at most the 4 gated tools, never the whole list.
+      // Call-time enforcement (hasScope / fence / assertPublishEnabled)
+      // stays as the fail-closed backstop for all three layers.
+      // Both per-request config reads are independent — issue them
+      // concurrently (one RTT of latency on network Postgres, not two).
+      const [gateDisabled, strictParamsMode] = await Promise.all([
+        disabledOpsForPublishGates(engine, config),
+        resolveStrictParamsMode(engine, config),
+      ]);
+      // FOV-4: `agent` deliberately implies only itself, which would strand
+      // agent-only tokens with ZERO discovery — ops flagged `agentCallable`
+      // (request_tools) are visible to (and callable by, below) agent scope
+      // in addition to their declared scope.
+      const visibleOps = mcpOperations.filter(op =>
+        (hasScope(authInfo.scopes, op.scope ?? 'read')
+          || (op.agentCallable === true && hasScope(authInfo.scopes, 'agent')))
+        && opAllowedForBoundClient(authInfo, op)
+        && !gateDisabled.has(op.name),
+      );
+      // WP3 (amendment 14): ONE schema mapper — the inline map this handler
+      // carried is unified onto buildToolDefs so the byte-pin test covers the
+      // transport consumers actually use. strict_params is read dual-plane
+      // PER REQUEST (same restart-free property as the publish gates above):
+      // 'reject' closes each schema with additionalProperties:false and
+      // declares the _meta/dry_run passthrough keys (D14.1).
+      const strictParams = strictParamsMode === 'reject';
+      const tools = buildToolDefs(visibleOps, { strictParams });
       // v0.28.10: log every JSON-RPC method, not just successful tools/call.
       // Pre-fix, /admin/api/requests showed nothing for clients that only
       // ever called tools/list, and the v0.26.3 persistence regression test
       // asserting >= 2 rows after tools/list + tools/call was unreachable.
+      // Amendment 23 stopgap (full list-size telemetry deferred): the row's
+      // params carry the listed-tool count so per-token-class list sizes are
+      // queryable (`params->>'tool_count'`) without new telemetry plumbing.
       const latency = Date.now() - startTime;
       try {
         await executeRawJsonb(
@@ -1926,7 +2320,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
            VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
           [authInfo.clientId, agentName, 'tools/list', latency, 'success'],
-          [null],
+          [{ tool_count: tools.length }],
         );
       } catch { /* best effort */ }
       broadcastEvent({
@@ -1937,22 +2331,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         status: 'success',
         timestamp: new Date().toISOString(),
       });
-      return {
-        tools: mcpOperations.map(op => ({
-          name: op.name,
-          description: op.description,
-          inputSchema: {
-            type: 'object' as const,
-            properties: Object.fromEntries(
-              Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
-            ),
-            required: Object.entries(op.params).filter(([, v]) => v.required).map(([k]) => k),
-          },
-          // MEMORY_VERBS v1: ToolAnnotations emitted only when the op defines
-          // them — existing tools stay byte-identical (mirrors buildToolDefs).
-          ...(op.annotations ? { annotations: op.annotations } : {}),
-        })),
-      };
+      return { tools };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -1990,17 +2369,26 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // hierarchy. Plain string includes() at this site would have made
       // sources_admin tokens look like they couldn't even read.)
       const requiredScope = op.scope || 'read';
-      if (!hasScope(authInfo.scopes, requiredScope)) {
+      // FOV-4: agentCallable carve-out mirrors the tools/list filter above —
+      // an op listed for an agent-only token must not scope-deny at call time.
+      const scopeSatisfied = hasScope(authInfo.scopes, requiredScope)
+        || (op.agentCallable === true && hasScope(authInfo.scopes, 'agent'));
+      if (!scopeSatisfied) {
         // v0.28.10: persist scope-rejected attempts. Same operator-visibility
         // motivation as the unknown-op path — and it makes the v0.26.3
         // persistence regression test reliable across both rejection paths.
+        // Amendment 33: a call-time scope deny is a LIST-LEVEL denial (the
+        // tools/list filter uses this same hasScope predicate, so the op was
+        // never advertised to this token — the client ignored or staled its
+        // list, or list/call drifted). status='denied_after_list' makes the
+        // honest-catalog metric a one-line count that trends to zero.
         const latency = Date.now() - startTime;
         try {
           await executeRawJsonb(
             engine,
             `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
              VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', `insufficient_scope: requires '${requiredScope}'`],
+            [authInfo.clientId, agentName, name, latency, 'denied_after_list', `insufficient_scope: requires '${requiredScope}'`],
             [null],
           );
         } catch { /* best effort */ }
@@ -2009,7 +2397,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           operation: name,
           scopes: authInfo.scopes.join(','),
           latency_ms: latency,
-          status: 'error',
+          status: 'denied_after_list',
           error: { code: 'insufficient_scope', message: `requires '${requiredScope}'` },
           timestamp: new Date().toISOString(),
         });
@@ -2069,16 +2457,37 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // verifyAccessToken. The env-fallback is gone.
       const tokenSourceId = authInfo.sourceId ?? 'default';
 
+      // #3242 parity: the legacy-transport and stdio dispatch sites widen a
+      // no-grant caller's unqualified reads across the federated source set
+      // (localFederatedSourceIds); this SDK-transport site never did, so the
+      // same token saw federated pages over /mcp on one serve mode and scalar
+      // 'default' on the other. hasSourceGrant === false is set ONLY for
+      // legacy bearer tokens with no operator source grant (oauth-provider);
+      // granted tokens and OAuth clients never widen. Best-effort: a resolver
+      // failure keeps the scalar scope.
+      const { noGrantFederatedScope } = await import('../core/source-resolver.ts');
+      const localFederated = await noGrantFederatedScope(
+        engine,
+        authInfo.hasSourceGrant,
+        tokenSourceId,
+      );
+
       let toolResult: Awaited<ReturnType<typeof dispatchToolCall>>;
       try {
         toolResult = await dispatchToolCall(engine, name, params as Record<string, unknown> | undefined, {
           remote: true,
+          // WP1/D7: network transport — the dispatch-layer localOnly
+          // backstop keys off this marker.
+          transport: 'http',
           takesHoldersAllowList: tokenAllowList,
           sourceId: tokenSourceId,
+          ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
           metaHook: getBrainHotMemoryMeta,
           // MEMORY_VERBS v1: fail-closed surface enforcement + usage attribution.
           ...(surfaceAllowedOps ? { allowedOps: surfaceAllowedOps } : {}),
           surface,
+          // WP4 (D2): request_tools bounds its catalog + persist by this.
+          surfaceCeiling,
           // v0.31 follow-up fix: thread auth so the whoami op (and any
           // future scope-aware handlers) can introspect the caller. The
           // original D12/eE1 refactor moved dispatch into dispatchToolCall
@@ -2126,17 +2535,24 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         // dispatchToolCall serializes the error into the content text;
         // for the audit log we re-extract a message string for the
         // mcp_request_log error_message column. Best-effort parse.
+        // Amendment 33 / D10: op-level denials the list should have
+        // prevented (publish-gate backstop `config_key=...`, bound-client
+        // fence op-level deny `fence=op`) log status='denied_after_list'
+        // instead of plain 'error' — the honest-catalog trend-to-zero
+        // metric. Argument-level fence denials carry no marker and stay
+        // 'error' (legitimate for a listed op).
         let errMsg = 'unknown_error';
         try {
           const parsed = JSON.parse(toolResult.content[0]?.text ?? '{}');
           errMsg = parsed.error?.message ?? parsed.message ?? errMsg;
         } catch { /* ignore */ }
+        const errStatus = requestLogStatusForResult(toolResult);
         try {
           await executeRawJsonb(
             engine,
             `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
              VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', errMsg],
+            [authInfo.clientId, agentName, name, latency, errStatus, errMsg],
             [logParamsObj],
           );
         } catch { /* best effort */ }
@@ -2146,19 +2562,24 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           params: broadcastParams,
           scopes: authInfo.scopes.join(','),
           latency_ms: latency,
-          status: 'error',
+          status: errStatus,
           error: { code: 'op_error', message: errMsg },
           timestamp: new Date().toISOString(),
         });
         return toolResult;
       }
 
+      // WP3 (amendment 13): warn-mode observability. A success whose _meta
+      // carries a non-empty warnings array logs as 'success_with_warnings' so
+      // the reject-flip decision is evidence-based (count per client via the
+      // status column). Warn CONTENTS (the raw unknown keys) are never logged.
+      const successStatus = requestLogStatusForResult(toolResult);
       try {
         await executeRawJsonb(
           engine,
           `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
            VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-          [authInfo.clientId, agentName, name, latency, 'success'],
+          [authInfo.clientId, agentName, name, latency, successStatus],
           [logParamsObj],
         );
       } catch { /* best effort */ }
@@ -2168,7 +2589,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         params: broadcastParams,
         scopes: authInfo.scopes.join(','),
         latency_ms: latency,
-        status: 'success',
+        status: successStatus,
         timestamp: new Date().toISOString(),
       });
       return toolResult;
@@ -2492,6 +2913,111 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     message: { error: 'rate_limit_exceeded', message: 'too many GitHub webhook requests' },
   });
 
+  /**
+   * v0.46: issue/PR event handling for github-kind sources. The payload
+   * names a single item (repo + number); we verify the per-source HMAC and
+   * submit a targeted `sync` job with github_item so exactly that item is
+   * refreshed. Out-of-scope repos are rejected at queue time by the sync
+   * engine's own scope check.
+   */
+  async function handleGitHubItemEvent(
+    engine: BrainEngine,
+    parsed: Record<string, unknown>,
+    sigHeader: string,
+    payload: Buffer,
+    res: Response,
+    eventName: string,
+  ): Promise<void> {
+    const ref = extractGitHubItemRef(parsed);
+    if (ref === null) {
+      // Not an item-bearing payload (e.g. check events without a linked PR,
+      // ping, branch protection). Acknowledge so GitHub does not retry.
+      res.status(202).json({ status: 'ignored', reason: 'no_item_ref' });
+      return;
+    }
+
+    // Collect ALL candidate sources: exact github_repo matches (legacy
+    // webhook config) and github-kind sources with a webhook secret, then
+    // verify HMAC per candidate. Only github-kind sources may enqueue a
+    // github_item refresh; two verifying github-kind sources mean ambiguous
+    // configuration and must not pick silently.
+    let source: { id: string; local_path: string | null; config: unknown } | null = null;
+    try {
+      const rows = await engine.executeRaw<{ id: string; local_path: string | null; config: unknown }>(
+        `SELECT id, local_path, config FROM sources
+           WHERE archived = false
+             AND ((config->>'github_repo' = $1)
+               OR (config->>'kind' = 'github' AND config->>'webhook_secret' IS NOT NULL))`,
+        [ref.repo],
+      );
+      const { verified, legacyMatched } = selectGitHubItemSources(rows, ref.repo, (cfg) =>
+        verifyWebhookSig(cfg, sigHeader, payload),
+      );
+      if (verified.length > 1) {
+        res.status(500).json({
+          error: 'ambiguous_webhook',
+          message: `multiple sources verified the signature for ${ref.repo}; configure one webhook secret per source`,
+          sources: verified.map((v) => v.id),
+        });
+        return;
+      }
+      if (verified.length === 0 && legacyMatched) {
+        // A legacy push-webhook source verified the signature but cannot
+        // service item events — ACK so GitHub doesn't retry, exactly like
+        // the pre-item-flow non-push behavior.
+        res.status(202).json({ status: 'ignored', reason: `event=${eventName}` });
+        return;
+      }
+      source = verified[0] ?? null;
+    } catch (err) {
+      console.error('webhook: github-kind source lookup error:', err);
+      res.status(500).json({ error: 'lookup_failed' });
+      return;
+    }
+    if (!source) {
+      res.status(404).json({ error: 'unknown_repo', repo: ref.repo });
+      return;
+    }
+
+    try {
+      const queue = new MinionQueue(engine);
+      const job = await queue.add(
+        'sync',
+        {
+          sourceId: source.id,
+          noExtract: false,
+          github_item: {
+            repo: ref.repo,
+            number: ref.number,
+            kind: ref.kind,
+            ...(eventName === 'issues' && parsed.action === 'deleted' ? { deleted: true } : {}),
+          },
+          embed_reason: 'webhook',
+        },
+        {
+          priority: -10,
+          idempotency_key: `webhook:item:${source.id}:${ref.repo}:${ref.number}:${Math.floor(Date.now() / 30_000)}`,
+          maxWaiting: 1,
+        },
+      );
+      res.status(202).json({ job_id: job.id, source_id: source.id, item: ref });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('webhook: item queue submission error:', msg);
+      res.status(500).json({ error: 'queue_submission_failed', message: msg });
+    }
+  }
+
+  function verifyWebhookSig(cfg: Record<string, unknown>, sigHeader: string, payload: Buffer): boolean {
+    const secret = cfg.webhook_secret;
+    if (typeof secret !== 'string' || secret === '') return false;
+    // Strict hex shape first: a malformed 64-char signature would make
+    // safeHexEqual throw (500 instead of 401).
+    if (!/^sha256=[0-9a-f]{64}$/.test(sigHeader)) return false;
+    const computedHex = createHmac('sha256', secret).update(payload).digest('hex');
+    return safeHexEqual(sigHeader.slice('sha256='.length), computedHex);
+  }
+
   app.post(
     '/webhooks/github',
     githubWebhookLimiter,
@@ -2506,10 +3032,25 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       }
 
       // D5: filter by event header. GitHub fires webhooks for every event
-      // type. Anything other than 'push' is acknowledged with 202 + reason
-      // so GitHub doesn't retry — but no source lookup or job submission.
+      // type. Anything not in the handled set is acknowledged with 202 +
+      // reason so GitHub doesn't retry — but no source lookup or job
+      // submission. Push events drive git-source sync (below). Issue/PR
+      // events drive github-kind single-item refresh (itemFlow).
       const event = req.header('X-GitHub-Event') ?? '';
-      if (event !== 'push') {
+      const GH_ITEM_EVENTS = new Set([
+        'issues',
+        'pull_request',
+        'issue_comment',
+        'pull_request_review',
+        'pull_request_review_comment',
+        'label',
+        'assignee',
+        'milestone',
+        'check_run',
+        'check_suite',
+        'workflow_run',
+      ]);
+      if (event !== 'push' && !GH_ITEM_EVENTS.has(event)) {
         res.status(202).json({ status: 'ignored', reason: `event=${event || '(missing)'}` });
         return;
       }
@@ -2520,7 +3061,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
 
-      let parsed: { repository?: { full_name?: string }; ref?: string };
+      let parsed: Record<string, unknown>;
       try {
         parsed = JSON.parse(payload.toString('utf8'));
       } catch {
@@ -2528,8 +3069,17 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
 
-      const fullName = parsed.repository?.full_name;
-      const ref = parsed.ref;
+      // GitHub-kind item refresh path (v0.46): issues / pull_request /
+      // comment / review / label / assignee / milestone / check events
+      // refresh exactly the item that changed.
+      if (GH_ITEM_EVENTS.has(event)) {
+        await handleGitHubItemEvent(engine, parsed, sigHeader, payload, res, event);
+        return;
+      }
+
+      const pushParsed = parsed as { repository?: { full_name?: string }; ref?: string };
+      const fullName = pushParsed.repository?.full_name;
+      const ref = pushParsed.ref;
       if (!fullName || !ref) {
         res.status(400).json({ error: 'missing_fields', message: 'repository.full_name and ref are required' });
         return;
@@ -2582,12 +3132,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // safeHexEqual because Buffer.from('sha256=...', 'hex') silently
       // truncates at the first non-hex char (the 's'), leaving both
       // operands as 0-byte buffers and making every signature "match".
-      // Pinned by test/sources-webhook.test.ts tamper assertions.
+      // Strict hex shape first: a malformed 64-char signature would make
+      // safeHexEqual throw (500 instead of 401), codex LOW.
       const { createHmac } = await import('node:crypto');
       const computedHex = createHmac('sha256', secret).update(payload).digest('hex');
       const prefix = 'sha256=';
-      if (!sigHeader.startsWith(prefix)) {
-        res.status(401).json({ error: 'signature_mismatch', message: 'expected sha256= prefix' });
+      if (!/^sha256=[0-9a-f]{64}$/.test(sigHeader)) {
+        res.status(401).json({ error: 'signature_mismatch', message: 'expected sha256=<64 hex> signature' });
         return;
       }
       if (!safeHexEqual(sigHeader.slice(prefix.length), computedHex)) {

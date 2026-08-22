@@ -56,6 +56,13 @@ describe('#2185 sweep — every command rejects a nonsense flag', () => {
     // And --migrate-only alone stays legal.
     expect(validateCommandFlags('init', ['--migrate-only'])).toBeNull();
   });
+
+  test('whoknows stays a CLI_ONLY member (reachability pin)', () => {
+    // The #2035 class: `case 'whoknows'` has a live handler (runWhoknows) that
+    // is shadowed by find_experts' hidden op hint — dropping this CLI_ONLY
+    // entry makes whoknows unreachable because its op hint is hidden.
+    expect(CLI_ONLY.has('whoknows')).toBe(true);
+  });
 });
 
 describe('#2185 acceptance — real usage stays legal', () => {
@@ -98,6 +105,14 @@ describe('#2185 acceptance — real usage stays legal', () => {
     expect(validateCommandFlags('serve', ['--print-admin-token'])).toBeNull();
     expect(validateCommandFlags('embed', ['--stale', '--pace'])).toBeNull();
     expect(validateCommandFlags('sync', ['--full'])).toBeNull();
+  });
+
+  test('scope flags require direct consumption on upgrade surfaces', () => {
+    expect(validateCommandFlags('reindex', ['--markdown', '--type', 'atom'])).toBeNull();
+    expect(validateCommandFlags('upgrade', ['--type', 'atom'])).toBe('--type');
+    expect(validateCommandFlags('post-upgrade', ['--type', 'atom'])).toBe('--type');
+    expect(validateCommandFlags('upgrade', ['--aliases'])).toBe('--aliases');
+    expect(validateCommandFlags('post-upgrade', ['--aliases'])).toBe('--aliases');
   });
 
   test('sources push accepts --message/--allow-unverified-remote (registry-regen regression)', () => {
@@ -217,6 +232,19 @@ describe('#2185 drift + freshness guards', () => {
   test('every CLI_ONLY member has a registry entry (drift guard)', () => {
     const missing = [...CLI_ONLY].filter(c => !CLI_FLAG_REGISTRY[c]);
     expect(missing).toEqual([]);
+  });
+
+  test('every op whose cliHints.name is in CLI_ONLY is hidden (shadow guard)', () => {
+    // CLI_ONLY wins over op-generated dispatch (src/cli.ts handleCliOnly
+    // check precedes cliOps lookup), so a NON-hidden cliHints name that
+    // collides with CLI_ONLY is dead code that lies to the catalog — the
+    // think/salience/anomalies/whoknows class this wave swept. New collisions
+    // must mark the hint hidden (the advisor pattern) or drop the CLI_ONLY
+    // entry.
+    const shadowed = operations
+      .filter(op => op.cliHints?.name && CLI_ONLY.has(op.cliHints.name) && op.cliHints.hidden !== true)
+      .map(op => `${op.name} (cliHints.name='${op.cliHints?.name}')`);
+    expect(shadowed).toEqual([]);
   });
 
   test('committed registry matches a fresh generator run (freshness guard)', () => {

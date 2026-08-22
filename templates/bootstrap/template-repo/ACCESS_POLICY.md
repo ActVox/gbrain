@@ -36,11 +36,25 @@ enter a session (and should not be filed where retrieval can inject it).
 
 ## MCP registration scope
 
-A `project`-scoped MCP registration exposes this brain only to sessions opened
-in this folder. A `user`-scoped registration makes the brain queryable from ANY
-repository opened on this machine — including someone else's checked-out code
-whose files may carry hostile instructions that try to read it. Prefer project
-scope; choose user scope only after accepting that tradeoff.
+Claude Code: a `project`-scoped MCP registration exposes this brain only to
+sessions opened in this folder. A `user`-scoped registration makes the brain
+reachable — read and write — from ANY repository opened on this machine,
+including someone else's checked-out code whose files may carry hostile
+instructions. Prefer project scope; choose user scope only after accepting
+that tradeoff.
+
+Codex: there is no choice — `codex mcp add` has no scope flag, so the
+registration is always user-global and the tradeoff above is the standing
+state. Off-ramps: `codex mcp remove gbrain` removes just the registration;
+`gbrain bootstrap uninstall` is the full teardown.
+
+opencode: the scope logic is INVERTED from Claude Code. opencode spawns
+servers from a project `opencode.json` with NO trust prompt, so a
+project-scoped registration in a repo you share means anyone who checks the
+repo out gets the entry executed on open. gbrain therefore defaults to a
+user-global registration; project scope is an explicit opt-in that prints a
+sharing warning. Off-ramps: `gbrain bootstrap uninstall` removes the entry
+from both scope files; deleting the `mcp.gbrain` key by hand also works.
 
 ## The transcript corpus
 

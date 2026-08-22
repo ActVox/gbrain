@@ -45,14 +45,15 @@ describe('chat touchpoint — recipe registry', () => {
     }
   });
 
-  test('only Anthropic and model-family-gated OpenRouter claim supports_prompt_cache', () => {
+  test('only known cache-capable recipes claim supports_prompt_cache', () => {
     for (const r of listRecipes()) {
       if (!r.touchpoints.chat) continue;
-      if (r.id === 'anthropic') {
+      if (r.id === 'anthropic' || r.id === 'llama-server') {
         expect(r.touchpoints.chat.supports_prompt_cache).toBe(true);
-      } else if (r.id === 'openrouter') {
-        // Family-scoped predicate (openai/* + anthropic/claude-*), never a
-        // blanket true — see recipe-openrouter.test.ts for the model matrix.
+      } else if (r.id === 'openrouter' || r.id === 'google') {
+        // Scoped predicates, never a blanket true: OpenRouter by routed model
+        // family (openai/* + anthropic/claude-*), Google by Gemini version
+        // (implicit caching is 2.5+). Matrices live in each recipe's test.
         expect(typeof r.touchpoints.chat.supports_prompt_cache).toBe('function');
       } else {
         expect(r.touchpoints.chat.supports_prompt_cache ?? false).toBe(false);
@@ -380,5 +381,112 @@ describe('chat touchpoint — provider_chat_options passthrough', () => {
         thinking: { type: 'disabled' },
       },
     });
+  });
+});
+
+describe('chat touchpoint — per-part providerMetadata round trip (#4201)', () => {
+  beforeEach(() => {
+    resetGateway();
+    __setGenerateTextTransportForTests(null);
+  });
+
+  const SIG = { google: { thoughtSignature: 'opaque-turn1-signature' } };
+
+  test('chat() captures part providerMetadata onto ChatBlocks (inbound half)', async () => {
+    __setGenerateTextTransportForTests(async () => ({
+      content: [
+        { type: 'text', text: 'calling a tool', providerMetadata: SIG },
+        { type: 'tool-call', toolCallId: 'g1', toolName: 'search', input: { q: 'x' }, providerMetadata: SIG },
+      ],
+      finishReason: 'tool-calls',
+      usage: { inputTokens: 5, outputTokens: 5 },
+    }) as any);
+    configureGateway({
+      chat_model: 'google:gemini-3-pro-preview',
+      env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
+    });
+    const result = await chat({
+      model: 'google:gemini-3-pro-preview',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const toolCall = result.blocks.find(b => b.type === 'tool-call') as any;
+    expect(toolCall.providerMetadata).toEqual(SIG);
+    const text = result.blocks.find(b => b.type === 'text') as any;
+    expect(text.providerMetadata).toEqual(SIG);
+  });
+
+  test('next-turn request echoes the signature as providerOptions (outbound half)', async () => {
+    let capturedMessages: any[] | undefined;
+    __setGenerateTextTransportForTests(async (args: any) => {
+      capturedMessages = args.messages;
+      return {
+        content: [{ type: 'text', text: 'done' }],
+        finishReason: 'stop',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      } as any;
+    });
+    configureGateway({
+      chat_model: 'google:gemini-3-pro-preview',
+      env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
+    });
+    // Turn-2 request: the transcript contains turn 1's tool-call block WITH
+    // the captured metadata (exactly what toolLoop pushes into messages) plus
+    // the tool-result user turn.
+    await chat({
+      model: 'google:gemini-3-pro-preview',
+      messages: [
+        { role: 'user', content: 'hello' },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', toolCallId: 'g1', toolName: 'search', input: { q: 'x' }, providerMetadata: SIG }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool-result', toolCallId: 'g1', toolName: 'search', output: { hits: 1 } }],
+        },
+      ],
+    });
+    expect(capturedMessages).toBeDefined();
+    const assistant = (capturedMessages as any[]).find(m => m.role === 'assistant');
+    expect(assistant.content[0].providerOptions).toEqual(SIG);
+  });
+});
+
+describe('chat — typed provider error status carried to the top level', () => {
+  beforeEach(() => {
+    resetGateway();
+    __setGenerateTextTransportForTests(null);
+  });
+
+  test('claude-cli 429 envelope error keeps apiErrorStatus readable on the normalized error', async () => {
+    // normalizeAIError wraps provider errors (here in AITransientError); the
+    // status a caller branches on must survive as a top-level property, not
+    // only inside `cause`.
+    const { ClaudeCliProcessError } = await import('../../src/core/ai/providers/claude-cli-language-model.ts');
+    const { AITransientError } = await import('../../src/core/ai/errors.ts');
+    __setGenerateTextTransportForTests(async () => {
+      throw new ClaudeCliProcessError(
+        'claude-cli API error 429: monthly spend limit reached',
+        { apiErrorStatus: 429, exitCode: 1 },
+      );
+    });
+    configureGateway({ chat_model: 'claude-cli:claude-sonnet-4-6', env: {} });
+
+    let caught: unknown;
+    try {
+      await chat({
+        model: 'claude-cli:claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'hello' }],
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(AITransientError);
+    const err = caught as InstanceType<typeof AITransientError> & { apiErrorStatus?: number };
+    expect(err.message).toContain('claude-cli API error 429');
+    expect(err.apiErrorStatus).toBe(429);
+    // The original typed error stays reachable as the cause.
+    expect(err.cause).toBeInstanceOf(ClaudeCliProcessError);
   });
 });

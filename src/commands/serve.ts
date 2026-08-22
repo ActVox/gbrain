@@ -1,6 +1,14 @@
 import { spawnSync } from 'node:child_process';
 import type { BrainEngine } from '../core/engine.ts';
 import { startMcpServer } from '../mcp/server.ts';
+import { VERB_NAMES } from '../core/verbs.ts';
+import { redirectStdoutLoggingToStderr } from '../core/console-prefix.ts';
+import {
+  delegatedSyncSettleMs,
+  isDelegatedSyncRunning,
+  maybeDrainDeferredEmbeds,
+  shutdownDelegatedSync,
+} from '../core/serve-sync-runner.ts';
 
 // Maximum time the stdio path will wait for engine.disconnect() (PGLite
 // close + advisory lock release) before forcing exit. Keeps a wedged
@@ -56,7 +64,7 @@ export interface ServeOptions {
   // (which unconditionally attaches a 'data' listener to real
   // process.stdin and would pollute the test runner's stdin handle).
   // Defaults to the real implementation when omitted.
-  startMcpServer?: (engine: BrainEngine, opts?: { surface?: 'verbs' | 'full' }) => Promise<void>;
+  startMcpServer?: (engine: BrainEngine, opts?: { surface?: 'verbs' | 'starter' | 'full'; sourceGuard?: boolean }) => Promise<void>;
   // Test seam for the parent-process watchdog. The default
   // (`readLiveParentPid`) reads the live kernel PPID via `ps` on POSIX
   // because `process.ppid` is captured at process creation and does not
@@ -171,11 +179,29 @@ export async function runServe(
   const isHttp = args.includes('--http');
 
   // MEMORY_VERBS v1: tool-surface mode. Flag > config `mcp_surface` > 'full'.
-  // 'verbs' exposes exactly the five protocol verbs (the quickstart surface);
-  // 'full' (default) keeps every operation — existing installs see no change.
+  // 'verbs' exposes exactly the seven protocol verbs (the quickstart surface);
+  // 'starter' the ~20-op daily-driver set; 'full' (default) keeps every
+  // operation — existing installs see no change.
   const { parseSurfaceFlag, resolveSurface } = await import('../mcp/surface.ts');
   const { loadConfig } = await import('../core/config.ts');
   const surface = resolveSurface(parseSurfaceFlag(args), loadConfig());
+
+  // --source-guard (plugin lanes, EV1): fail-closed write routing for
+  // user-global serves whose cwd is meaningless (plugin snapshots). Write/
+  // admin ops error actionably unless the source resolution tier proves the
+  // binding is deliberate or unambiguous — sole-source brains are a pure
+  // no-op. Stdio-only: the OAuth HTTP path scopes writes per token instead.
+  const sourceGuard = args.includes('--source-guard');
+  if (sourceGuard && isHttp) {
+    // Loud posture warning (the --log-full-params precedent): the guard is a
+    // stdio-lane mechanism; HTTP writes are scoped per token instead. An
+    // operator who passed the flag believing fail-closed routing is active
+    // must not discover otherwise silently.
+    console.error(
+      '[gbrain serve] WARNING: --source-guard applies to the stdio lane only and is IGNORED with --http — ' +
+        'HTTP writes are scoped by per-token grants (access_tokens.permissions), not the tier guard.',
+    );
+  }
 
   if (isHttp) {
     const portIdx = args.indexOf('--port');
@@ -236,9 +262,17 @@ export async function runServe(
   // and is intentionally NOT wired into this stdio plumbing.
   console.error(
     surface === 'verbs'
-      ? 'Starting GBrain MCP server (stdio) — serving 5 memory verbs (MEMORY_VERBS v1)...'
+      // v0.45.7: count derives from VERB_NAMES (7 with context_pack + delta)
+      // so the banner can't drift from the frozen set again.
+      ? `Starting GBrain MCP server (stdio) — serving ${VERB_NAMES.length} memory verbs (MEMORY_VERBS v1)...`
       : 'Starting GBrain MCP server (stdio)...',
   );
+
+  // stdout is reserved for JSON-RPC frames from here on. Ops that run
+  // in-process (sync_brain -> performSync -> embed --stale) emit progress
+  // via slog/console.log, which would otherwise land on stdout and make
+  // the MCP client log "Failed to parse JSONRPC message" for every line.
+  redirectStdoutLoggingToStderr();
 
   installStdioLifecycle(engine, args, opts);
 
@@ -276,7 +310,7 @@ export async function runServe(
   }
 
   try {
-    await start(engine, { surface });
+    await start(engine, { surface, ...(sourceGuard ? { sourceGuard } : {}) });
   } finally {
     if (bootDeadline) clearTimeout(bootDeadline);
   }
@@ -360,15 +394,25 @@ function installStdioLifecycle(
     // to trap us forever. If we hit the deadline we still exit; the
     // lock dir is advisory and the next process's stale-lock check
     // (process.kill(pid, 0) → ESRCH) will reclaim it.
+    // A running delegated sync extends the deadline by exactly its settle
+    // bound: shutdownDelegatedSync must finish its abort+settle against the
+    // live engine BEFORE disconnect, and a fixed 5s would force-exit mid-
+    // settle (second-outside-voice finding EV1).
+    const settleExtensionMs = isDelegatedSyncRunning() ? delegatedSyncSettleMs() : 0;
     const deadline = setTimeout(() => {
       deps.log(
-        `GBrain MCP server: cleanup deadline (${CLEANUP_DEADLINE_MS}ms) exceeded — forcing exit`,
+        `GBrain MCP server: cleanup deadline (${CLEANUP_DEADLINE_MS + settleExtensionMs}ms) exceeded — forcing exit`,
       );
       deps.exit(0);
-    }, CLEANUP_DEADLINE_MS);
+    }, CLEANUP_DEADLINE_MS + settleExtensionMs);
     deadline.unref?.();
 
     Promise.resolve()
+      // Idempotent shared promise — mcp/server.ts's shutdown races here on
+      // the same signals; whichever runs first does the abort+settle, the
+      // other awaits it. Must precede disconnect (settle writes need the
+      // live engine; the disconnect-mode drain is allowAbort:false).
+      .then(() => shutdownDelegatedSync())
       .then(() => engine.disconnect())
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
@@ -474,12 +518,18 @@ function installStdioLifecycle(
   const sweepEnabled = opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0');
   if (sweepEnabled) {
     const runIdleSweep = opts.sweep ?? (async (e: BrainEngine) => {
+      // A delegated sync owns the event loop right now — sweeping under it
+      // is pointless contention; the next idle tick catches up.
+      if (isDelegatedSyncRunning()) return;
       // Lazy import keeps the sweep core off the serve boot path.
       const { runMaintenanceSweep } = await import('../core/sweep.ts');
       await runMaintenanceSweep(e, {
         sourceId: process.env.GBRAIN_SOURCE || 'default',
         budgetMs: IDLE_SWEEP_BUDGET_MS,
       });
+      // Deferred-embed drain: delegated syncs always run noEmbed (the #2139
+      // cost gate lives in runSync); the lock owner closes that loop here.
+      await maybeDrainDeferredEmbeds(e);
     });
     let stdinSawData = false;
     let sweepInFlight = false;
