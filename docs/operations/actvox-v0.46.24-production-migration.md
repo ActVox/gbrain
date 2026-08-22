@@ -1,12 +1,12 @@
 # ActVox Team GBrain migration to v0.46.24.0
 
-Status: prepared only. Merging this PR deploys production because Render tracks `ActVox/gbrain:master` with `autoDeploy: true`.
+Status: prepared only. Production is deployed from the ActVox candidate branch; merging PR #22 into `master` is not a cutover prerequisite.
 
 ## Scope
 
 - Current production: `0.42.62.0`, Postgres, migration `123`.
 - Upstream base: exact tag `v0.46.24.0`, commit `7e3ce95bbf4c2e4902c8a35ff6a1f79bdbd54081`.
-- Deployment artifact: the post-merge `ActVox/gbrain:master` commit for this PR, rooted at that tag, not the raw upstream tag or the pre-merge PR head. Capture it as `EXPECTED_ACTVOX_SHA` after merge and require every Render service to report that exact SHA.
+- Deployment artifact: the exact reviewed commit on `ActVox/gbrain:integration/gbrain-upstream-0.42.66-20260727`, rooted at that tag, not the raw upstream tag or a future merge commit. Capture it as `EXPECTED_ACTVOX_SHA` before cutover and require every Render service to report that exact SHA.
 - Target migration level: `132`.
 - Active schema pack must remain `gbrain-base-v2@1.0.0+f4f6494a`, sourced from `env`.
 
@@ -33,7 +33,7 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
 ## Pre-deploy gate
 
 1. Freeze production writes:
-   - disable Render auto-deploy or suspend every affected service before merging, because `render.yaml` tracks `master` with `autoDeploy: true` and otherwise web/worker/crons race their deployments independently;
+   - disable Render auto-deploy for the candidate branch or suspend every affected service before promoting the candidate, so web/worker/crons cannot race their deployments independently;
    - suspend Render worker;
    - suspend dream, sync, extract and autopilot cron jobs;
    - stop the old web service or put the endpoint behind maintenance routing;
@@ -97,12 +97,13 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
 ## Cutover
 
 1. Keep the 0.42 fleet stopped.
-2. After merging, capture and freeze the deployment identity:
+2. Capture and freeze the reviewed candidate identity without merging it to `master`:
 
    ```bash
-   EXPECTED_ACTVOX_SHA="$(gh pr view 22 --repo ActVox/gbrain --json mergeCommit --jq '.mergeCommit.oid')"
+   CANDIDATE_BRANCH='integration/gbrain-upstream-0.42.66-20260727'
+   EXPECTED_ACTVOX_SHA="$(git ls-remote https://github.com/ActVox/gbrain.git "refs/heads/$CANDIDATE_BRANCH" | cut -f1)"
    test -n "$EXPECTED_ACTVOX_SHA"
-   test "$EXPECTED_ACTVOX_SHA" = "$(git ls-remote https://github.com/ActVox/gbrain.git refs/heads/master | cut -f1)"
+   test "$EXPECTED_ACTVOX_SHA" = "$(gh pr view 22 --repo ActVox/gbrain --json headRefOid --jq '.headRefOid')"
    ```
 
 3. Run a one-off `EXPECTED_ACTVOX_SHA` migration process against `GBRAIN_DIRECT_DATABASE_URL` while web, worker, and crons remain stopped:
