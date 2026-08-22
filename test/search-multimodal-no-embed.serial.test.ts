@@ -109,7 +109,7 @@ describe('multimodal-only install: no-embedding early-return is multimodal-aware
 
     let voyageCalled = 0;
     let openaiCalled = 0;
-    let meta: { vector_enabled: boolean } | undefined;
+    let meta: { vector_enabled: boolean; degraded?: Array<{ stage: string }> } | undefined;
     fetchHandler = async (url) => {
       if (url.includes('multimodalembeddings')) {
         voyageCalled++;
@@ -134,6 +134,7 @@ describe('multimodal-only install: no-embedding early-return is multimodal-aware
     expect(voyageCalled).toBeGreaterThanOrEqual(1);
     expect(openaiCalled).toBe(0);
     expect(meta?.vector_enabled).toBe(true);
+    expect(meta?.degraded?.some((entry) => entry.stage === 'embed_unavailable')).toBe(true);
     expect(results.some(result => result.slug === 'photos/voyage-both-retained')).toBe(true);
     expect(results.find(result => result.slug === 'photos/voyage-both-retained')?.modality).toBe('image');
   });

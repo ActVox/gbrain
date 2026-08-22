@@ -1976,6 +1976,14 @@ export async function hybridSearch(
     }
   }
 
+  // ActVox multimodal fail-open invariant: in `both` mode, a successful
+  // image arm remains usable even when every text-query embed/vector arm
+  // fails. The upstream salvage fan-out otherwise leaves vectorLists empty
+  // and drops into keyword-only despite holding valid image candidates.
+  if (vectorLists.length === 0 && effectiveModality === 'both' && imageVectorList !== null) {
+    vectorLists = [imageVectorList];
+  }
+
   if (vectorLists.length === 0) {
     // Embed/vector failed silently; record that vector did not run.
     // v0.29.1 codex pass-2 #4: this is the third return path. Apply

@@ -14,7 +14,7 @@ src/cli.ts	3506	ratchet	v0.46.24 fork reconciliation: preserve ActVox CLI teardo
 src/core/cycle.ts	3080	ratchet	grown v0.46.20.0 phase-boundary split (resolveCyclePhases + normalizeQueuedSourcePhases + deriveStatus exclusion filter)
 src/commands/serve-http.ts	3207	ratchet	v0.46.24 fork reconciliation: retain ActVox HTTP lifecycle and auth hardening
 src/commands/jobs.ts	3046	ratchet	v0.46.24 fork reconciliation: retain DB extract job surface with upstream stale continuation
-src/core/search/hybrid.ts	2853	ratchet	v0.46.24 fork reconciliation: retain ActVox operational-memory injection across all fallback paths
+src/core/search/hybrid.ts	2861	ratchet	v0.46.24 fork reconciliation: retain ActVox operational-memory injection and image-arm fallback across all degraded paths
 src/core/engine.ts	2351	ratchet	grown v0.46.23.0: putPage allowEmptyOverwrite contract (#4335)
 src/commands/autopilot.ts	2301	ratchet
 src/commands/extract.ts	2208	ratchet	v0.46.24 fork reconciliation: retain ActVox DB-source extraction surface
