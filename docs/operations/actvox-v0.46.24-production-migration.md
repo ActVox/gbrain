@@ -6,7 +6,7 @@ Status: prepared only. Merging this PR deploys production because Render tracks 
 
 - Current production: `0.42.62.0`, Postgres, migration `123`.
 - Upstream base: exact tag `v0.46.24.0`, commit `7e3ce95bbf4c2e4902c8a35ff6a1f79bdbd54081`.
-- Deployment artifact: the reviewed ActVox PR merge commit rooted at that tag, not the raw upstream tag. The fork adds `render.yaml`, production invariants, conflict resolutions, and this runbook.
+- Deployment artifact: the post-merge `ActVox/gbrain:master` commit for this PR, rooted at that tag, not the raw upstream tag or the pre-merge PR head. Capture it as `EXPECTED_ACTVOX_SHA` after merge and require every Render service to report that exact SHA.
 - Target migration level: `132`.
 - Active schema pack must remain `gbrain-base-v2@1.0.0+f4f6494a`, sourced from `env`.
 
@@ -33,6 +33,7 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
 ## Pre-deploy gate
 
 1. Freeze production writes:
+   - disable Render auto-deploy or suspend every affected service before merging, because `render.yaml` tracks `master` with `autoDeploy: true` and otherwise web/worker/crons race their deployments independently;
    - suspend Render worker;
    - suspend dream, sync, extract and autopilot cron jobs;
    - stop the old web service or put the endpoint behind maintenance routing;
@@ -55,7 +56,7 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
    ```bash
    umask 077
    pg_dump --format=custom --no-owner --no-acl \
-     --file "$BACKUP_DIR/gbrain-pre-v0.46.24.dump" "$DATABASE_URL"
+     --file "$BACKUP_DIR/gbrain-pre-v0.46.24.dump" "$GBRAIN_DIRECT_DATABASE_URL"
    pg_restore --list "$BACKUP_DIR/gbrain-pre-v0.46.24.dump" \
      > "$BACKUP_DIR/gbrain-pre-v0.46.24.restore.list"
    shasum -a 256 "$BACKUP_DIR/gbrain-pre-v0.46.24.dump" \
@@ -75,12 +76,20 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
 ## Cutover
 
 1. Keep the 0.42 fleet stopped.
-2. Deploy the exact reviewed ActVox PR merge commit, not the raw upstream tag.
-3. Run `gbrain init --migrate-only` once with the ActVox 0.46.24 candidate if startup did not already complete migrations.
-4. Confirm migration `132` before starting any worker.
-5. Deploy/start the 0.46.24 worker.
-6. Deploy/enable cron jobs only after worker readiness and queue smoke pass.
-7. Never re-enable a 0.42 process after migration v131.
+2. After merging, capture and freeze the deployment identity:
+
+   ```bash
+   EXPECTED_ACTVOX_SHA="$(gh pr view 22 --repo ActVox/gbrain --json mergeCommit --jq '.mergeCommit.oid')"
+   test -n "$EXPECTED_ACTVOX_SHA"
+   test "$EXPECTED_ACTVOX_SHA" = "$(git ls-remote https://github.com/ActVox/gbrain.git refs/heads/master | cut -f1)"
+   ```
+
+3. Manually deploy `EXPECTED_ACTVOX_SHA` to web while worker and crons remain suspended. Do not re-enable broad auto-deploy until the full cutover is verified.
+4. Run `gbrain init --migrate-only` once with the ActVox 0.46.24 candidate if startup did not already complete migrations.
+5. Confirm migration `132` before starting any worker.
+6. Deploy/start the 0.46.24 worker on `EXPECTED_ACTVOX_SHA`.
+7. Deploy/enable cron jobs on `EXPECTED_ACTVOX_SHA` only after worker readiness and queue smoke pass.
+8. Never re-enable a 0.42 process after migration v131.
 
 ## Live verification
 
@@ -97,7 +106,7 @@ hermes -p vulcan mcp test gbrain-team
 Expected:
 
 - `/health.version = 0.46.24.0` and `engine = postgres`;
-- every Render service reports the exact reviewed ActVox merge commit; `/health.version` alone proves the version string, not fork artifact identity;
+- every Render service reports `EXPECTED_ACTVOX_SHA`; `/health.version` alone proves the version string, not fork artifact identity;
 - doctor reports migration `132` as latest;
 - active schema pack remains `gbrain-base-v2@1.0.0+f4f6494a` from `env`;
 - page and chunk counts match the fresh pre-deploy baseline;
