@@ -5,7 +5,8 @@ Status: prepared only. Merging this PR deploys production because Render tracks 
 ## Scope
 
 - Current production: `0.42.62.0`, Postgres, migration `123`.
-- Target release: upstream tag `v0.46.24.0`, commit `7e3ce95bbf4c2e4902c8a35ff6a1f79bdbd54081`.
+- Upstream base: exact tag `v0.46.24.0`, commit `7e3ce95bbf4c2e4902c8a35ff6a1f79bdbd54081`.
+- Deployment artifact: the reviewed ActVox PR merge commit rooted at that tag, not the raw upstream tag. The fork adds `render.yaml`, production invariants, conflict resolutions, and this runbook.
 - Target migration level: `132`.
 - Active schema pack must remain `gbrain-base-v2@1.0.0+f4f6494a`, sourced from `env`.
 
@@ -43,7 +44,13 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
    - active schema pack identity;
    - queue counts by status;
    - source sync freshness.
-3. Take a fresh custom-format Postgres backup:
+3. Verify the migration connection plane before taking any lock or running DDL:
+   - `DATABASE_URL` points at the production database;
+   - `GBRAIN_DIRECT_DATABASE_URL` is present and reaches the direct Postgres endpoint, not only the transaction pooler;
+   - the migration role can create/alter tables, indexes, functions, and constraints;
+   - `gbrain apply-migrations --list` and `gbrain apply-migrations --dry-run` complete without mutating state.
+4. Inspect the v0.46.3 host migration for ZeroEntropy sunset exposure. If the effective embedding or reranker model uses ZeroEntropy, do not silently combine a vector-provider migration with this code/schema cutover. Record the destination provider, dimensions, backup, cost gate, re-embed plan, and rollback as a separate approved migration before production go.
+5. Take a fresh custom-format Postgres backup:
 
    ```bash
    umask 077
@@ -55,21 +62,21 @@ Migration v128 also mutates queue state by cancelling duplicate waiting autopilo
      > "$BACKUP_DIR/gbrain-pre-v0.46.24.dump.sha256"
    ```
 
-4. Restore the dump into a disposable Postgres database and run the target binary against the restored copy:
+6. Restore the dump into a disposable Postgres database and run the ActVox deployment candidate against the restored copy. Use the schema-only migration entrypoint so host-file/provider orchestrators cannot mutate unrelated state during the database rehearsal:
 
    ```bash
-   gbrain apply-migrations --yes
+   gbrain init --migrate-only
    gbrain doctor
    gbrain stats
    ```
 
-5. Require migration `132`, unchanged page/chunk counts, 100% embedding coverage and no failed migration ledger entry.
+7. Require migration `132`, unchanged page/chunk counts, 100% embedding coverage and no failed migration ledger entry.
 
 ## Cutover
 
 1. Keep the 0.42 fleet stopped.
-2. Deploy the exact PR merge commit to the web service.
-3. Run `gbrain apply-migrations --yes` once with the 0.46.24 binary if startup did not already complete migrations.
+2. Deploy the exact reviewed ActVox PR merge commit, not the raw upstream tag.
+3. Run `gbrain init --migrate-only` once with the ActVox 0.46.24 candidate if startup did not already complete migrations.
 4. Confirm migration `132` before starting any worker.
 5. Deploy/start the 0.46.24 worker.
 6. Deploy/enable cron jobs only after worker readiness and queue smoke pass.
@@ -90,6 +97,7 @@ hermes -p vulcan mcp test gbrain-team
 Expected:
 
 - `/health.version = 0.46.24.0` and `engine = postgres`;
+- every Render service reports the exact reviewed ActVox merge commit; `/health.version` alone proves the version string, not fork artifact identity;
 - doctor reports migration `132` as latest;
 - active schema pack remains `gbrain-base-v2@1.0.0+f4f6494a` from `env`;
 - page and chunk counts match the fresh pre-deploy baseline;
