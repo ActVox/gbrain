@@ -7686,27 +7686,28 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
 
 ## Megawave follow-ups (filed from v0.46.28.0, #4475)
 
-- [ ] **P2 — #4477: db.ts initSchema legacy blob-replay path lacks
-  forward-reference bootstrap.** The legacy schema-blob replay in
-  `src/core/db.ts` doesn't run the bootstrap probe set, so an
-  upgrade-boundary DB can wedge when a migration builds an index on a column
-  the replayed blob predates. Bring the replay path under the same
-  forward-reference probes `initSchema` uses. Effort: M.
-- [ ] **P3 — #4478: subagent-crash-replay-multi-provider openrouter matrix
-  rows stale.** The matrix rows have been stale since
-  `supports_subagent_loop: false` enforcement landed; re-derive or prune the
-  openrouter rows so the suite tests what the gateway actually allows.
-  Effort: S.
-- [ ] **P3 — #4479: ci-local hardening.** (a) pin the `oven/bun` image to the
-  host bun version (drift between host and container bun has produced
-  container-only results); (b) fix the upload-path fuzz depth-1 `/app` mount
-  expectation. Effort: S.
-- [ ] **P2 — #4480: deferred review findings from the megawave** (each
-  >10-line, needs its own design pass): (a) `take-proposals.ts` TOCTOU —
-  claim-first CAS restructure (local CLI, low concurrency, but the
-  check-then-write window is real); (b) `cjk-keyword-sql.ts` doesn't honor
-  `types`/`exclude_slugs` filters — builder-param plumbing across BOTH
-  engines + exact-lookup gating; (c) `get_usage` per-engine sink —
-  last-engine-wins when multiple engines are live (the read→admin scope
-  tightening landed in v0.46.28.0; the sink unification did not). Effort: M
-  spread.
+- [x] **P2 — #4477: db.ts initSchema legacy blob-replay path lacks
+  forward-reference bootstrap.** DONE (v0.46.29.0, #4567): peeled into
+  `src/core/postgres-engine/forward-reference-bootstrap.ts`
+  (`applyPostgresForwardReferenceBootstrap`), run by BOTH SCHEMA_SQL replay
+  entrypoints — `PostgresEngine.initSchema()` and the standalone
+  `db.ts:initSchema()`. Pinned by `test/e2e/postgres-bootstrap.test.ts`.
+- [x] **P3 — #4478: subagent-crash-replay-multi-provider openrouter matrix
+  rows stale.** DONE (v0.46.29.0, #4567): generic openrouter rows pruned
+  (the capability gate refuses them before replay; pinned by a dedicated
+  refusal describe), and the #4514 Anthropic-via-OR carve-out gets its own
+  replay coverage in `test/e2e/openrouter-anthropic-subagent-replay.live.test.ts`
+  + `test/e2e/subagent-gateway-path.test.ts`.
+- [x] **P3 — #4479: ci-local hardening.** DONE (v0.46.29.0, #4567): (a)
+  `docker-compose.ci.yml` pins `oven/bun:${GBRAIN_CI_BUN_TAG:-1.3.14}` to the
+  host bun (override per-run to test latest); (b) the upload-path fuzz suite
+  chdirs to a guaranteed-deep cwd so the depth-1 `/app` mount can't false-fail
+  the `..`-probes; plus a container-lane `GBRAIN_TEST_TIMEOUT_MULTIPLIER=6`.
+- [x] **P2 — #4480: deferred review findings from the megawave.** DONE
+  (v0.46.29.0, #4567), all three: (a) `take-proposals.ts` accept is now
+  claim-first CAS (exactly one caller wins the pending row; best-effort
+  rollback on post-claim failure; stranded claimed-but-unpromoted rows get a
+  named error); (b) `cjk-keyword-sql.ts` honors `type`/`types`/`exclude_slugs`
+  like the main keyword arm; (c) the chat-usage sink is a registry stack with
+  deregister-on-disconnect (records route to the top LIVE entry), so a
+  multi-engine process no longer loses its ledger to a closed engine.
