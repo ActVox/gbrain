@@ -74,7 +74,7 @@ describe('renderToolCatalogMarkdown', () => {
 describe('freshness guard', () => {
   test('committed docs/TOOL_CATALOG.md matches a fresh render', () => {
     const committed = readFileSync(join(REPO_ROOT, 'docs', 'TOOL_CATALOG.md'), 'utf-8');
-    expect(committed).toBe(renderToolCatalogMarkdown().replace(/\n*$/, '\n'));
+    expect(committed).toBe(renderToolCatalogMarkdown() + '\n');
   });
 
   test('check script exists and is wired into package.json + the verify chain', () => {

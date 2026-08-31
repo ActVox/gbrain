@@ -9,8 +9,6 @@
  * Cosine re-score: blend 0.7*rrf + 0.3*cosine for query-specific ranking
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 import type {
@@ -23,6 +21,7 @@ import type {
 } from '../types.ts';
 import { embed, embedQuery } from '../embedding.ts';
 import { registerBackgroundWorkDrainer } from '../background-work.ts';
+import { isDbAccessFailure } from '../pg-access-classify.ts';
 import { resolveEmbeddingColumn, isCacheSafe } from './embedding-column.ts';
 import { resolveHardExcludes } from './source-boost.ts';
 import {
@@ -41,7 +40,13 @@ import {
 import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
 import { applyReranker } from './rerank.ts';
-import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
+import {
+  classifyQuery,
+  classifyQueryWithBrainPatterns,
+  isAmbiguousModalityQuery,
+  loadEngineIntentPatterns,
+  type QuerySuggestions,
+} from './query-intent.ts';
 import { isTitlePhraseMatch } from './title-match.ts';
 import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence, markKeywordHits } from './evidence.ts';
@@ -225,7 +230,9 @@ const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
 /**
  * Apply backlink boost to a result list in place. Mutates each result's score
  * by (1 + BACKLINK_BOOST_COEF * log(1 + count)). Pure data transform; no DB call.
- * Caller fetches counts via engine.getBacklinkCounts.
+ * Caller fetches counts via engine.getBacklinkCounts. Counts are keyed by
+ * page_id, not slug, so namesake slugs across sources never share a boost
+ * (#4380).
  *
  * v0.35.6.0 — floor-ratio gate. When `floorThreshold` is provided, results
  * with `r.score < floorThreshold` are SKIPPED (no boost applied). NaN scores
@@ -241,13 +248,13 @@ const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
  */
 export function applyBacklinkBoost(
   results: SearchResult[],
-  counts: Map<string, number>,
+  counts: Map<number, number>,
   floorThreshold?: number,
 ): void {
   for (const r of results) {
     if (!Number.isFinite(r.score)) continue;
     if (floorThreshold !== undefined && r.score < floorThreshold) continue;
-    const count = counts.get(r.slug) ?? 0;
+    const count = counts.get(r.page_id) ?? 0;
     if (count > 0) {
       const factor = 1.0 + BACKLINK_BOOST_COEF * Math.log(1 + count);
       r.score *= factor;
@@ -424,213 +431,6 @@ export function applyTitleBoost(
 /** Default title-phrase boost multiplier (mode-overridable via `title_boost`). */
 export const DEFAULT_TITLE_BOOST = 1.25;
 
-interface OperationalMemoryPolicyConfig {
-  intent_patterns?: string[];
-  raw_source_patterns?: string[];
-  canonical_rules?: Array<{ pattern: string; slugs: string[] }>;
-  boost_types?: Record<string, number>;
-  boost_prefixes?: Record<string, number>;
-  demote_prefixes?: Record<string, number>;
-}
-
-const DEFAULT_OPERATIONAL_MEMORY_POLICY: Required<OperationalMemoryPolicyConfig> = {
-  intent_patterns: [
-    '\\b(what\\s+now|next\\s+action|current\\s+actions?|status|today\\s+rail|command\\s+center|task\\s+trust|operational\\s+state|canonical\\s+pages?|retrieval\\s+policy|memory\\s+operating\\s+contract|eval\\s+suite)\\b',
-  ],
-  raw_source_patterns: [
-    '\\b(raw|transcript|exact\\s+wording|what\\s+did\\s+.*say|meeting\\s+transcript|source\\s+audit|provenance)\\b',
-  ],
-  canonical_rules: [
-    {
-      pattern: 'memory|retrieval|canonical|eval\\s+suite|operating\\s+contract|policy',
-      slugs: [
-        'ops/memory-operating-contract',
-        'ops/retrieval-policy',
-        'ops/canonical-page-registry',
-        'ops/retrieval-eval-suite',
-      ],
-    },
-  ],
-  boost_types: {
-    'synthesized-action-page': 2.4,
-    'task-list': 2.4,
-    'health-context': 1.9,
-    'retrieval-policy': 2.0,
-    'canonical-page-registry': 2.0,
-    'retrieval-eval-suite': 2.0,
-    'memory-system-contract': 2.0,
-    'graph-index': 1.25,
-  },
-  boost_prefixes: {
-    'ops/current': 1.8,
-    'ops/tasks': 1.8,
-    'health/current-': 1.8,
-  },
-  demote_prefixes: {
-    'meetings/circleback/': 0.35,
-    'dream-cycle-summaries/': 0.25,
-    'wiki/personal/reflections/': 0.55,
-    'wiki/originals/ideas/': 0.55,
-  },
-};
-
-let operationalMemoryPolicyCache: { key: string; policy: Required<OperationalMemoryPolicyConfig> } | null = null;
-
-function mergeOperationalMemoryPolicy(input?: OperationalMemoryPolicyConfig | null): Required<OperationalMemoryPolicyConfig> {
-  if (!input || typeof input !== 'object') return DEFAULT_OPERATIONAL_MEMORY_POLICY;
-  return {
-    intent_patterns: [
-      ...DEFAULT_OPERATIONAL_MEMORY_POLICY.intent_patterns,
-      ...(Array.isArray(input.intent_patterns) ? input.intent_patterns : []),
-    ],
-    raw_source_patterns: [
-      ...DEFAULT_OPERATIONAL_MEMORY_POLICY.raw_source_patterns,
-      ...(Array.isArray(input.raw_source_patterns) ? input.raw_source_patterns : []),
-    ],
-    canonical_rules: [
-      ...DEFAULT_OPERATIONAL_MEMORY_POLICY.canonical_rules,
-      ...(Array.isArray(input.canonical_rules) ? input.canonical_rules : []),
-    ],
-    boost_types: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.boost_types, ...(input.boost_types ?? {}) },
-    boost_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.boost_prefixes, ...(input.boost_prefixes ?? {}) },
-    demote_prefixes: { ...DEFAULT_OPERATIONAL_MEMORY_POLICY.demote_prefixes, ...(input.demote_prefixes ?? {}) },
-  };
-}
-
-function loadOperationalMemoryPolicy(): Required<OperationalMemoryPolicyConfig> {
-  const envJson = process.env.GBRAIN_OPERATIONAL_MEMORY_POLICY_JSON;
-  const envPath = process.env.GBRAIN_OPERATIONAL_MEMORY_POLICY;
-  const homePath = process.env.GBRAIN_HOME
-    ? join(process.env.GBRAIN_HOME, '.gbrain', 'operational-memory-policy.json')
-    : '';
-  const key = envJson ? `json:${envJson}` : `file:${envPath || homePath}`;
-  if (operationalMemoryPolicyCache?.key === key) return operationalMemoryPolicyCache.policy;
-  let parsed: OperationalMemoryPolicyConfig | null = null;
-  try {
-    if (envJson) {
-      parsed = JSON.parse(envJson) as OperationalMemoryPolicyConfig;
-    } else {
-      const path = envPath || homePath;
-      if (path && existsSync(path)) {
-        parsed = JSON.parse(readFileSync(path, 'utf8')) as OperationalMemoryPolicyConfig;
-      }
-    }
-  } catch {
-    parsed = null;
-  }
-  const policy = mergeOperationalMemoryPolicy(parsed);
-  operationalMemoryPolicyCache = { key, policy };
-  return policy;
-}
-
-function matchesAnyPattern(query: string, patterns: string[]): boolean {
-  return patterns.some((p) => {
-    try { return new RegExp(p, 'i').test(query); }
-    catch { return false; }
-  });
-}
-
-function isOperationalMemoryQuery(query?: string): boolean {
-  if (!query) return false;
-  const policy = loadOperationalMemoryPolicy();
-  return matchesAnyPattern(query, policy.intent_patterns) && !matchesAnyPattern(query, policy.raw_source_patterns);
-}
-
-function canonicalOperationalSlugsForQuery(query?: string): string[] {
-  if (!query || !isOperationalMemoryQuery(query)) return [];
-  const policy = loadOperationalMemoryPolicy();
-  const slugs = new Set<string>();
-  for (const rule of policy.canonical_rules) {
-    try {
-      if (new RegExp(rule.pattern, 'i').test(query)) {
-        for (const slug of rule.slugs) slugs.add(slug);
-      }
-    } catch {
-      // Ignore malformed operator policy rules; retrieval must fail open.
-    }
-  }
-  return [...slugs];
-}
-
-function operationalMemoryFactor(r: SearchResult, query?: string): number {
-  if (!isOperationalMemoryQuery(query)) return 1.0;
-  const policy = loadOperationalMemoryPolicy();
-  let factor = policy.boost_types[r.type] ?? 1.0;
-  for (const [prefix, boost] of Object.entries(policy.boost_prefixes)) {
-    if (r.slug.startsWith(prefix)) factor *= boost;
-  }
-  for (const [prefix, demotion] of Object.entries(policy.demote_prefixes)) {
-    if (r.slug.startsWith(prefix)) factor *= demotion;
-  }
-  return factor;
-}
-
-export function applyOperationalMemoryPolicy(results: SearchResult[], query?: string): void {
-  if (!isOperationalMemoryQuery(query)) return;
-  for (const r of results) {
-    if (!Number.isFinite(r.score)) continue;
-    const factor = operationalMemoryFactor(r, query);
-    if (factor !== 1.0) {
-      r.score *= factor;
-      (r as SearchResult & { operational_memory_factor?: number }).operational_memory_factor = factor;
-    }
-  }
-}
-
-async function injectCanonicalOperationalResults(
-  engine: BrainEngine,
-  results: SearchResult[],
-  query: string | undefined,
-  opts?: { sourceId?: string; sourceIds?: string[] },
-): Promise<SearchResult[]> {
-  const slugs = canonicalOperationalSlugsForQuery(query);
-  if (slugs.length === 0) return results;
-  const out = [...results];
-  const existing = new Map(out.map(r => [`${r.source_id ?? 'default'}::${r.slug}`, r]));
-  const topScore = out.reduce((m, r) => Number.isFinite(r.score) && r.score > m ? r.score : m, 0.1);
-  let rank = 0;
-  for (const slug of slugs) {
-    try {
-      // Preserve the full source grant. Collapsing multi-source scope to
-      // `undefined` turns a federated read into an unscoped cross-source read.
-      const page = await engine.getPage(slug, opts);
-      if (!page) continue;
-      const key = `${page.source_id ?? 'default'}::${slug}`;
-      const injectedScore = topScore * (1.2 - Math.min(rank, 10) * 0.01);
-      const already = existing.get(key);
-      if (already) {
-        already.score = Math.max(already.score, injectedScore);
-        rank++;
-        continue;
-      }
-      const chunks = await engine.getChunks(slug, { sourceId: page.source_id });
-      const chunk = chunks.find(c => c.chunk_source === 'compiled_truth') ?? chunks[0];
-      out.push({
-        slug,
-        page_id: page.id,
-        title: page.title,
-        type: page.type,
-        chunk_text: chunk?.chunk_text ?? page.compiled_truth.slice(0, 2000),
-        chunk_source: chunk?.chunk_source === 'timeline' ? 'timeline' : 'compiled_truth',
-        chunk_id: chunk?.id ?? -page.id,
-        chunk_index: chunk?.chunk_index ?? 0,
-        score: injectedScore,
-        stale: false,
-        source_id: page.source_id,
-        effective_date: page.effective_date ? page.effective_date.toISOString().slice(0, 10) : null,
-        effective_date_source: page.effective_date_source ?? null,
-        base_score: injectedScore,
-      });
-      rank++;
-    } catch {
-      // Best-effort: canonical injection must never break search.
-    }
-  }
-  applyOperationalMemoryPolicy(out, query);
-  out.sort((a, b) => b.score - a.score);
-  return out;
-}
-
 /**
  * v0.42.x — Life Chronicle (#2390) E1 temporal recall arm. On temporal queries
  * (the caller gates this on recency !== 'off'), give chronicle `event`/`diary`
@@ -753,8 +553,8 @@ export async function runPostFusionStages(
   // Backlink stage (existing behavior, preserved).
   if (opts.applyBacklinks) {
     try {
-      const slugs = Array.from(new Set(results.map(r => r.slug)));
-      const counts = await engine.getBacklinkCounts(slugs);
+      const pageIds = Array.from(new Set(results.map(r => r.page_id)));
+      const counts = await engine.getBacklinkCounts(pageIds);
       applyBacklinkBoost(results, counts, floorThreshold);
     } catch {
       // Non-fatal; preserves the existing pre-v0.29.1 contract.
@@ -1408,17 +1208,20 @@ export async function hybridSearch(
 
   // v0.32.x search-lite: classify intent once up front. Drives BOTH the
   // legacy auto-detail / salience / recency suggestions AND the new
-  // weight-adjustment path. Intent weighting is on by default and can
-  // be disabled via `opts.intentWeighting = false`. The mode bundle
-  // supplies the default when neither per-call nor per-key sets it.
-  const suggestions = classifyQuery(query);
+  // weight-adjustment path. Intent weighting is on by default (off via
+  // `opts.intentWeighting = false`; mode bundle supplies the default).
+  // #4415: merges the brain's `search.intent_patterns` config over the banks.
+  const suggestions = await classifyQueryWithBrainPatterns(engine, query);
   const intentWeightingOn = resolvedMode.intentWeighting;
   const intentWeights = intentWeightingOn
     ? weightsForIntent(suggestions.intent)
     : weightsForIntent('general');
 
-  // Auto-detect detail level from query intent when caller doesn't specify
-  const detail = opts?.detail ?? autoDetectDetail(query);
+  // Auto-detect detail level from query intent when caller doesn't specify.
+  // wave-g: read the pattern-aware suggestion computed above (per-engine
+  // banks) rather than the pattern-less autoDetectDetail — the two drifted
+  // on the first query of a fresh process before the config was applied.
+  const detail = opts?.detail ?? suggestions.suggestedDetail;
   const detailResolved: 'low' | 'medium' | 'high' | null = detail ?? null;
   const searchOpts: SearchOpts = {
     limit: innerLimit,
@@ -1460,8 +1263,8 @@ export async function hybridSearch(
     // D2 fix (fix/title-retrieval-arm, Reviewer F1): the hybrid keyword arm
     // is a recall arm — opt in to the engine's AND→OR zero-recall fallback.
     // Direct searchKeyword consumers (countMentions, link-extraction, eval)
-    // do NOT set this and keep the strict-AND contract.
-    orFallback: true,
+    // do NOT set this. Knob: search.keywordOrFallback (rationale: ModeBundle).
+    orFallback: resolvedMode.keywordOrFallback,
     // v0.46.15: collect searchVector's bounded-escalation exhaustion signal —
     // engines have no telemetry sink (R2-10); hybrid owns the meta emit.
     // ACCUMULATES across vector calls (adversarial F8): expansion runs N
@@ -1546,11 +1349,21 @@ export async function hybridSearch(
   // SIGNAL (Reviewer F2): a SQL error (e.g. a pre-search_vector brain)
   // degrades to no title candidates, but warns once per process so a
   // broken engine arm cannot ship dark.
+  // db-availability loop: per-arm fail-open is for DEGRADED arms (schema
+  // gaps, pre-migration brains) — it must never convert a DEAD DATABASE into
+  // an empty success. Capture access-class errors PER ARM; rethrow only when
+  // BOTH lexical arms FAILED with one (an arm that succeeded — even with
+  // zero rows — proves the DB is alive, and the vector arms may still
+  // serve). The classified database_error envelope (GBRAIN_DB_ACCESS
+  // marker) then reaches the caller instead of a silent [].
+  let keywordAccessError: unknown = null;
+  let titleAccessError: unknown = null;
   const [keywordResults, titleResults]: [SearchResult[], SearchResult[]] =
     earlyModality === 'image'
       ? [[], []]
       : await Promise.all([
           engine.searchKeyword(query, searchOpts).catch((err: unknown) => {
+            if (isDbAccessFailure(err)) keywordAccessError = err;
             warnOncePerProcess(
               'search-keyword-arm-failed',
               `[gbrain] searchKeyword arm failed (fail-open, keyword candidates skipped): ` +
@@ -1559,6 +1372,7 @@ export async function hybridSearch(
             return [] as SearchResult[];
           }),
           engine.searchTitles(query, searchOpts).catch((err: unknown) => {
+            if (isDbAccessFailure(err)) titleAccessError = err;
             warnOncePerProcess(
               'search-titles-arm-failed',
               `[gbrain] searchTitles arm failed (fail-open, title candidates skipped): ` +
@@ -1567,6 +1381,9 @@ export async function hybridSearch(
             return [] as SearchResult[];
           }),
         ]);
+  if (keywordAccessError && titleAccessError) {
+    throw keywordAccessError;
+  }
   // #3783 — stamp lexical-arm membership pre-fusion so evidence's
   // keyword_exact label is earned by an actual FTS hit, never by a solid
   // blended score alone. Both arms are the lexical-evidence class (chunk
@@ -1577,32 +1394,13 @@ export async function hybridSearch(
   // v0.29.1: resolve salience/recency from caller (back-compat aliases for
   // PR #618's `recencyBoost` numeric scale) or fall back to the heuristic.
   // The wrapper fires from ALL THREE return paths (codex pass-1 #2 + pass-2 #4).
-  //
-  // v0.32.x search-lite: when caller hasn't set recency and the intent
-  // classifier suggests one, prefer that (suggestedRecency on temporal /
-  // event intents). The legacy heuristic still wins when intent weighting
-  // is off.
-  // Back-compat: recencyBoost: 1|2 → 'on'|'strong'; 0 → 'off'.
-  const legacyRecency: 'off' | 'on' | 'strong' | undefined =
-    opts?.recencyBoost === 2 ? 'strong' :
-    opts?.recencyBoost === 1 ? 'on' :
-    opts?.recencyBoost === 0 ? 'off' :
-    undefined;
-  const salienceMode: 'off' | 'on' | 'strong' = opts?.salience ?? suggestions.suggestedSalience;
-  // Intent-weighting recency suggestion is a NUDGE — it only fires when
-  // the caller left recency unspecified AND the legacy heuristic also
-  // didn't fire. The classifier's own suggestedRecency (from v0.29.1)
-  // still wins when it's set; the new intent suggestion is a fallback.
-  const intentRecency =
-    intentWeightingOn && intentWeights.suggestedRecency != null
-      ? intentWeights.suggestedRecency
-      : null;
+  // wave-g: extracted to resolveEffectiveSalience/resolveEffectiveRecency so
+  // hybridSearchCached's knobs-hash key parts (sal=/rec=, v=24) resolve
+  // through the IDENTICAL chain — drift here would key cache rows under a
+  // different mode than the stored results used.
+  const salienceMode: 'off' | 'on' | 'strong' = resolveEffectiveSalience(opts, suggestions);
   const recencyMode: 'off' | 'on' | 'strong' =
-    opts?.recency
-    ?? legacyRecency
-    ?? (suggestions.suggestedRecency !== 'off'
-        ? suggestions.suggestedRecency
-        : (intentRecency ?? suggestions.suggestedRecency));
+    resolveEffectiveRecency(opts, suggestions, intentWeightingOn);
   const postFusionOpts: PostFusionOpts = {
     applyBacklinks: true,
     salience: salienceMode,
@@ -1709,20 +1507,20 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       titleCandidates: titleResults,
+      // #4480: gate tier injections on the caller's shape filters.
+      type: opts?.type,
+      types: opts?.types,
+      excludeSlugs: opts?.exclude_slugs,
     });
-    const noEmbedOperational = await injectCanonicalOperationalResults(engine, noEmbedHopped, query, {
-      sourceId: opts?.sourceId,
-      sourceIds: opts?.sourceIds,
-    });
-    stampEvidence(noEmbedOperational, { cosineFloor: resolvedMode.evidence_cosine_floor });
+    stampEvidence(noEmbedHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
     // #3995 — guaranteed page-1 relational evidence: a fired arm's answer is
     // often lexically unrecoverable, so its single-arm fused row can land
     // beyond the limit slice on keyword-heavy corpora. Promote/inject before
     // slicing (first page only; pure no-op when the arm didn't fire).
-    let noEmbedPool = noEmbedOperational;
+    let noEmbedPool = noEmbedHopped;
     let noEmbedRelSlot: RelationalEvidenceSlotDecision | undefined;
     if (relationalList.length > 0) {
-      const r = ensureRelationalEvidenceSlot(noEmbedOperational, relationalList, limit, offset, {
+      const r = ensureRelationalEvidenceSlot(noEmbedHopped, relationalList, limit, offset, {
         cosineFloor: resolvedMode.evidence_cosine_floor,
       });
       noEmbedPool = r.pool;
@@ -2064,16 +1862,7 @@ export async function hybridSearch(
           vectorLists = [...vectorLists, imageVectorList];
         }
       }
-
     }
-  }
-
-  // ActVox multimodal fail-open invariant: in `both` mode, a successful
-  // image arm remains usable even when every text-query embed/vector arm
-  // fails. The upstream salvage fan-out otherwise leaves vectorLists empty
-  // and drops into keyword-only despite holding valid image candidates.
-  if (vectorLists.length === 0 && effectiveModality === 'both' && imageVectorList !== null) {
-    vectorLists = [imageVectorList];
   }
 
   if (vectorLists.length === 0) {
@@ -2109,13 +1898,13 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       titleCandidates: titleResults,
+      // #4480: gate tier injections on the caller's shape filters.
+      type: opts?.type,
+      types: opts?.types,
+      excludeSlugs: opts?.exclude_slugs,
     });
-    const kwOperational = await injectCanonicalOperationalResults(engine, kwHopped, query, {
-      sourceId: opts?.sourceId,
-      sourceIds: opts?.sourceIds,
-    });
-    stampEvidence(kwOperational, { cosineFloor: resolvedMode.evidence_cosine_floor });
-    const kwSliced = kwOperational.slice(offset, offset + limit);
+    stampEvidence(kwHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
+    const kwSliced = kwHopped.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
     const { results: kwBudgeted, meta: kwBudgetMeta } = enforceTokenBudget(kwSliced, resolvedMode.tokenBudget);
     await stampContentFlags(engine, kwBudgeted);
@@ -2321,18 +2110,17 @@ export async function hybridSearch(
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
     titleCandidates: titleResults,
-  });
-
-  const operationalPool = await injectCanonicalOperationalResults(engine, aliasHopped, query, {
-    sourceId: opts?.sourceId,
-    sourceIds: opts?.sourceIds,
+    // #4480: gate tier injections on the caller's shape filters.
+    type: opts?.type,
+    types: opts?.types,
+    excludeSlugs: opts?.exclude_slugs,
   });
 
   // T4 — stamp evidence + create_safety so the agent's don't-duplicate
   // decision keys off WHY a page matched, not a raw blended score. Stamp on
   // the full alias-hopped set before any adaptive trim so the kept results
   // carry evidence regardless of where the cap lands.
-  stampEvidence(operationalPool, { cosineFloor: resolvedMode.evidence_cosine_floor });
+  stampEvidence(aliasHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
 
   // v0.42 — intent-aware adaptive return-sizing (opt-in, default off). Trim
   // the ranked candidate set to an intent-driven cap BEFORE the limit slice,
@@ -2344,7 +2132,7 @@ export async function hybridSearch(
     opts?.adaptiveReturn,
     adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
   );
-  let returnPool = operationalPool;
+  let returnPool = aliasHopped;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;
   if (adaptiveCfg.enabled && offset === 0) {
     // v0.46.15: 'concept' maps to the recall-preserving 'general' cap for
@@ -2352,7 +2140,7 @@ export async function hybridSearch(
     // concept intent, and concept queries are exactly the ones that want
     // breadth (widening the union is the adaptive-ablation wave's call).
     const adaptiveIntent = suggestions.intent === 'concept' ? 'general' : suggestions.intent;
-    const r = applyAdaptiveReturn(operationalPool, adaptiveIntent, adaptiveCfg);
+    const r = applyAdaptiveReturn(aliasHopped, adaptiveIntent, adaptiveCfg);
     returnPool = r.kept;
     adaptiveDecision = r.decision;
   }
@@ -2447,6 +2235,50 @@ export async function hybridSearch(
 // ----------------------------------------------------------------------
 
 /**
+ * wave-g (#4415 knobs-hash fold) — the ONE salience resolution chain, shared
+ * by bare hybridSearch (post-fusion boost) and hybridSearchCached (the
+ * `sal=` cache-key part). Explicit per-call opt wins; otherwise the
+ * classifier's pattern-aware suggestion.
+ */
+function resolveEffectiveSalience(
+  opts: HybridSearchOpts | undefined,
+  suggestions: QuerySuggestions,
+): 'off' | 'on' | 'strong' {
+  return opts?.salience ?? suggestions.suggestedSalience;
+}
+
+/**
+ * wave-g (#4415 knobs-hash fold) — the ONE recency resolution chain, shared
+ * by bare hybridSearch and hybridSearchCached (the `rec=` cache-key part).
+ *
+ * Back-compat: recencyBoost: 1|2 → 'on'|'strong'; 0 → 'off'.
+ * Intent-weighting recency suggestion is a NUDGE — it only fires when the
+ * caller left recency unspecified AND the classifier's own suggestedRecency
+ * (v0.29.1) didn't fire; it stays null when intent weighting is off.
+ */
+function resolveEffectiveRecency(
+  opts: HybridSearchOpts | undefined,
+  suggestions: QuerySuggestions,
+  intentWeightingOn: boolean,
+): 'off' | 'on' | 'strong' {
+  const legacyRecency: 'off' | 'on' | 'strong' | undefined =
+    opts?.recencyBoost === 2 ? 'strong' :
+    opts?.recencyBoost === 1 ? 'on' :
+    opts?.recencyBoost === 0 ? 'off' :
+    undefined;
+  const intentRecency = intentWeightingOn
+    ? (weightsForIntent(suggestions.intent).suggestedRecency ?? null)
+    : null;
+  return (
+    opts?.recency
+    ?? legacyRecency
+    ?? (suggestions.suggestedRecency !== 'off'
+        ? suggestions.suggestedRecency
+        : (intentRecency ?? suggestions.suggestedRecency))
+  );
+}
+
+/**
  * Public wrapper around hybridSearch that adds the v0.32.x search-lite
  * features: semantic query cache + token budget enforcement. Both are
  * additive and backward-compatible; callers that don't opt in see the
@@ -2523,6 +2355,15 @@ export async function hybridSearchCached(
   const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
   const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);
 
+  // wave-g (#4415): classify ONCE with the brain's `search.intent_patterns`
+  // applied (loadEngineIntentPatterns is per-engine + TTL-cached) so the
+  // det=/sal=/rec= key parts reflect the SAME classification bare
+  // hybridSearch resolves. Pre-fix, det= was computed via the pattern-less
+  // global classifier, so a fresh process keyed its first cache row under a
+  // pattern-less detail while the stored results used the pattern-aware one.
+  const intentStateForCache = await loadEngineIntentPatterns(engine);
+  const cacheSuggestions = classifyQuery(query, intentStateForCache.banks);
+
   // Cache key carries the column + provider so different embedding spaces
   // never collide on the same `(source_id, query_text)` row.
   const cacheKnobsHash = knobsHash(resolvedForCache, {
@@ -2538,9 +2379,21 @@ export async function hybridSearchCached(
     // gates dedup, chunk-source filtering, and the compiled_truth boost, so
     // a `--detail low` write (compiled-truth-only result set) must never be
     // served to a default `medium` lookup. Resolve auto-detect the same way
-    // bare hybridSearch does (opts.detail ?? autoDetectDetail(query)) so an
+    // bare hybridSearch does (opts.detail ?? pattern-aware suggestion) so an
     // auto-detected `high` query keys like an explicit `high` one.
-    detail: opts?.detail ?? autoDetectDetail(query),
+    detail: opts?.detail ?? cacheSuggestions.suggestedDetail,
+    // #4415 (wave-g, v=24) — fold the EFFECTIVE salience/recency modes.
+    // Both reorder the post-fusion result set, and #4415 put the per-call
+    // overrides on the default MCP `search` surface, so a salience:'strong'
+    // write must never serve a salience:'off' lookup of the same query.
+    // Resolved by the SAME chain bare hybridSearch uses (helpers above).
+    salience: resolveEffectiveSalience(opts, cacheSuggestions),
+    recency: resolveEffectiveRecency(opts, cacheSuggestions, resolvedForCache.intentWeighting),
+    // #4415 (wave-g, v=24) — fold the applied intent-pattern config
+    // fingerprint: a `search.intent_patterns` edit changes classification
+    // (and thus results), so it must change the key immediately instead of
+    // serving old-classification rows for the rest of the cache TTL.
+    intentPatterns: intentStateForCache.fingerprint,
     // #4352 follow-up — fold the private-visibility posture into the key
     // (xp=, v=23) for BOTH the lookup and the write below (they share this
     // one hash), instead of the original wholesale skipCache bypass. A
@@ -2592,17 +2445,26 @@ export async function hybridSearchCached(
   // floor), making offset a result-affecting input that sits OUTSIDE the
   // knobs hash. Bypass the cache entirely (lookup AND store — the store is
   // gated on cacheStatus === 'miss' below, so 'disabled' covers both) for
-  // offset>0 requests; offset===0 semantics are unchanged.
-  const pagedRequest = (opts?.offset ?? 0) > 0;
+  // any nonzero offset; offset===0 semantics are unchanged. #4358 residual
+  // gap (this condition landed via #4368's wave as `> 0`, which absorbed
+  // the positive-offset half of the original fix but not this one): a
+  // negative offset re-slices the stored page just as badly as a positive
+  // one (Array.prototype.slice treats a negative start as counting from
+  // the array's end) — e.g. for offset=-21/limit=9 on a 21-row pool, the
+  // store-time slice correctly returns the pool's first 9 rows, but
+  // re-applying that same negative offset a second time (hit path, now
+  // against the already-9-row stored page) clamps both bounds to the
+  // array's start and returns nothing — so `> 0` let those requests
+  // read/write the cache anyway.
+  const pagedRequest = (opts?.offset ?? 0) !== 0;
   // #4352 follow-up — excludePrivate no longer skips the cache: the posture
-  // is folded into knobsHash (xp=, v=23), so a private-included (trusted)
+  // is folded into knobsHash (xp=), so a private-included (trusted)
   // write can never serve a private-excluding lookup and vice versa. The
   // original wholesale skip disabled the semantic cache for every remote MCP
   // caller (excludePrivate=true is their default) — exactly the
   // highest-volume beneficiaries of the ~50% cache savings.
   const skipCache =
     !cache.isEnabled() ||
-    isOperationalMemoryQuery(query) ||
     (opts?.walkDepth ?? 0) > 0 ||
     Boolean(opts?.nearSymbol) ||
     isNonDefaultColumn ||
@@ -2667,7 +2529,28 @@ export async function hybridSearchCached(
       // displace legitimate ones off the offset/limit window either.
       const scopedResults = filterResultsByCallerScope(hit.results, opts);
 
-      const limit = opts?.limit || 20;
+      // #4356 — was a hard `|| 20`, independent of the mode-resolution the
+      // miss path uses (`opts?.limit || resolvedMode.searchLimit` above, in
+      // bare hybridSearch): a balanced-mode miss could cache 25 results,
+      // then the next identical-shape hit sliced that row down to 20.
+      // `resolvedForCache` (resolved once, above, at the top of this
+      // function) already folds `opts?.limit` through the same per-call
+      // resolver bare hybridSearch's own `resolvedMode` uses (including 0 —
+      // see mode.ts `resolveSearchMode`'s `pick()`), so mirroring it here
+      // keeps hit/miss consistent for the common case without a second
+      // config round-trip. Caveat: this is a SEPARATE `resolveSearchMode`
+      // call from the one bare hybridSearch performs internally on a miss
+      // (hybrid.ts's inner `resolvedMode`, computed when `hybridSearch` is
+      // invoked below) — not literally the same object — so a `search.mode`
+      // / `search.searchLimit` config change landing between these two
+      // resolutions within one request could theoretically desync the
+      // stored row's actual size from what its own `knobsHash` (built from
+      // `resolvedForCache`) implies. Narrow and pre-existing (the double
+      // resolution itself predates this PR); tracked as #4359, not fixed
+      // here — closing it would mean threading one resolved snapshot into
+      // the inner `hybridSearch` call, a larger change than this PR's
+      // `|| 20` → `|| resolvedMode.searchLimit` substitution.
+      const limit = opts?.limit || resolvedForCache.searchLimit;
       const offset = opts?.offset || 0;
       const sliced = scopedResults.slice(offset, offset + limit);
 
@@ -3017,8 +2900,11 @@ export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true)
 /**
  * Cosine re-scoring: blend RRF score with query-chunk cosine similarity.
  * Runs before dedup so semantically better chunks survive.
+ *
+ * Exported (only) for direct unit testing of the chunkless-row blend fix
+ * (#3695) — not part of the public search API surface.
  */
-async function cosineReScore(
+export async function cosineReScore(
   engine: BrainEngine,
   results: SearchResult[],
   queryEmbedding: Float32Array,
@@ -3048,10 +2934,18 @@ async function cosineReScore(
   const maxRrf = Math.max(...results.map(r => r.score));
 
   return results.map(r => {
+    // v0.46.28.0 (#3695): a row with no hydratable chunk embedding (the
+    // synthetic chunkless row for an embed_skip'd oversized page, or a
+    // chunk_id whose embedding didn't hydrate) used to return `r` untouched
+    // — keeping its RAW post-RRF score on a [0, ~2.0] scale while every
+    // other row got compressed onto the [0, 1.0] blended scale below. That
+    // gave chunkless rows a structural 2x head start (#3695's reported
+    // symptom: an empty-snippet embed_skip page outranking on-point
+    // results). Route it through the SAME blend with cosine=0 instead of
+    // excluding it — excluding would make embed_skip pages unsearchable,
+    // a different (undesired) behavior change.
     const chunkEmb = r.chunk_id != null ? embeddingMap.get(r.chunk_id) : undefined;
-    if (!chunkEmb) return r;
-
-    const cosine = cosineSimilarity(queryEmbedding, chunkEmb);
+    const cosine = chunkEmb ? cosineSimilarity(queryEmbedding, chunkEmb) : 0;
     const normRrf = maxRrf > 0 ? r.score / maxRrf : 0;
     const blended = 0.7 * normRrf + 0.3 * cosine;
 

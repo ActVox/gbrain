@@ -91,54 +91,6 @@ describe('multimodal-only install: no-embedding early-return is multimodal-aware
     expect(Array.isArray(results)).toBe(true);
   });
 
-  test('both mode retains successful image vectors when the text provider is unavailable', async () => {
-    await engine.putPage('photos/voyage-both-retained', {
-      type: 'image',
-      page_kind: 'image',
-      title: 'unrelated asset',
-      compiled_truth: '',
-      timeline: '',
-    });
-    await engine.upsertChunks('photos/voyage-both-retained', [{
-      chunk_index: 0,
-      chunk_text: 'opaque-asset-123',
-      chunk_source: 'image_asset',
-      embedding_image: new Float32Array(1024).fill(0.1),
-      modality: 'image',
-    }]);
-
-    let voyageCalled = 0;
-    let openaiCalled = 0;
-    let meta: { vector_enabled: boolean; degraded?: Array<{ stage: string }> } | undefined;
-    fetchHandler = async (url) => {
-      if (url.includes('multimodalembeddings')) {
-        voyageCalled++;
-        return new Response(JSON.stringify({
-          data: [{ embedding: Array.from({ length: 1024 }, () => 0.1), index: 0 }],
-        }), { status: 200 });
-      }
-      if (url.includes('api.openai.com') && url.includes('embeddings')) {
-        openaiCalled++;
-      }
-      return new Response(JSON.stringify({
-        data: [{ embedding: Array.from({ length: 1536 }, () => 0.1), index: 0 }],
-      }), { status: 200 });
-    };
-
-    const results = await hybridSearch(engine, 'sunset visual similarity', {
-      limit: 5,
-      crossModal: 'both',
-      onMeta: (captured) => { meta = captured; },
-    });
-
-    expect(voyageCalled).toBeGreaterThanOrEqual(1);
-    expect(openaiCalled).toBe(0);
-    expect(meta?.vector_enabled).toBe(true);
-    expect(meta?.degraded?.some((entry) => entry.stage === 'embed_unavailable')).toBe(true);
-    expect(results.some(result => result.slug === 'photos/voyage-both-retained')).toBe(true);
-    expect(results.find(result => result.slug === 'photos/voyage-both-retained')?.modality).toBe('image');
-  });
-
   test('unified_multimodal routing reaches the multimodal vector path on a text-provider-absent install', async () => {
     await engine.setConfig('search.unified_multimodal', 'true');
     let voyageCalled = 0;

@@ -3,7 +3,6 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, chmodSync }
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
-  GIT_NO_RECURSE_SUBMODULES_FLAG,
   GIT_SSRF_FLAGS,
   GIT_SSRF_SUBCOMMAND_FLAGS,
   parseRemoteUrl,
@@ -18,6 +17,7 @@ import {
 } from '../src/core/git-remote.ts';
 import { execFileSync } from 'child_process';
 import { withEnv } from './helpers/with-env.ts';
+import { gitStderrLeads } from './helpers/git-stderr-probe.ts';
 
 // ---------------------------------------------------------------------------
 // Fake-git harness: write a shell script that records its argv to a log file,
@@ -246,12 +246,9 @@ describe('cloneRepo', () => {
     const calls = readArgvLog();
     expect(calls.length).toBe(1);
     const argv = calls[0];
-    // Pin the SSRF config flags before the 'clone' verb. Command flags must
-    // follow the subcommand; git rejects `git --no-recurse-submodules clone`.
+    // Global -c config flags must appear BEFORE the 'clone' verb.
     expect(argv.slice(0, GIT_SSRF_FLAGS.length)).toEqual([...GIT_SSRF_FLAGS]);
-    const cloneIdx = argv.indexOf('clone');
-    expect(cloneIdx).toBeGreaterThan(-1);
-    expect(argv[cloneIdx + 1]).toBe(GIT_NO_RECURSE_SUBMODULES_FLAG);
+    expect(argv).toContain('clone');
     expect(argv).toContain('--depth=1');
     expect(argv).toContain('https://example.com/repo');
     expect(argv[argv.length - 1]).toBe(dest);
@@ -259,6 +256,8 @@ describe('cloneRepo', () => {
     // git rejects `git --no-recurse-submodules clone ...` with exit 129.
     // The fake-git harness returned 0 for any argv shape, so this
     // position-anchored assertion is the structural regression test.
+    const cloneIdx = argv.indexOf('clone');
+    expect(cloneIdx).toBeGreaterThan(-1);
     for (const subFlag of GIT_SSRF_SUBCOMMAND_FLAGS) {
       const flagIdx = argv.indexOf(subFlag);
       expect(flagIdx).toBeGreaterThan(cloneIdx);
@@ -490,7 +489,10 @@ describe('#1315 — stderr-first GitOperationError (real git, file-origin repo)'
     return mirror;
   }
 
-  test('pullRepo message leads with the real git stderr, not the Command-failed envelope', () => {
+  // skipIf: pins "git's own fatal: appears within the first 200 chars" —
+  // unrunnable behind an ambient git PATH shim that prints its own stderr
+  // first (e.g. Conductor's auth-broker wrapper). See helpers/git-stderr-probe.
+  test.skipIf(!gitStderrLeads())('pullRepo message leads with the real git stderr, not the Command-failed envelope', () => {
     const mirror = mkFileOriginMirror();
     let threw: GitOperationError | undefined;
     try {
@@ -509,7 +511,7 @@ describe('#1315 — stderr-first GitOperationError (real git, file-origin repo)'
     expect(threw!.cause).toBeDefined();
   });
 
-  test('fetchRemote message is stderr-first too', () => {
+  test.skipIf(!gitStderrLeads())('fetchRemote message is stderr-first too', () => {
     const mirror = mkFileOriginMirror();
     let threw: GitOperationError | undefined;
     try {

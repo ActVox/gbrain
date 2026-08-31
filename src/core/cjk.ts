@@ -111,3 +111,4 @@ export function splitCJKQueryTerms(query: string): string[] {
   const terms = query.split(/\s+/).filter(t => t.length > 0);
   return Array.from(new Set(terms));
 }
+

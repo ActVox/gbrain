@@ -46,7 +46,7 @@ Heuristic link-type inference (`attended`, `works_at`, `invested_in`, `founded`,
 
 ## Cross-encoder reranker: 60% top-1 reshuffle
 
-The reranker is on for the `balanced` and `tokenmax` mode bundles, off for `conservative`. New installs with a Voyage key get `rerank-2.5` written as explicit `search.reranker.model` config (the recommended reranker; same `VOYAGE_API_KEY` as embeddings — keyed installs without one get reranking explicitly disabled instead); brains that never set the key still fall back to the legacy ZeroEntropy `zerank-2` mode-bundle default, which is deprecated (the hosted API ends 2026-09-04 — switch with `gbrain config set search.reranker.model voyage:rerank-2.5`) and remains the fallback only until the September cutover. On a real-corpus benchmark across 20 queries, zerank-2 reshuffles **60% of top-1 results** after the hybrid + RRF + graph stack. That's the headline number.
+The reranker is on for the `balanced` and `tokenmax` mode bundles, off for `conservative`. New installs with a Voyage key get `rerank-2.5` written as explicit `search.reranker.model` config (the recommended reranker; same `VOYAGE_API_KEY` as embeddings — keyed installs without one get reranking explicitly disabled instead); brains that never set the key still fall back to the legacy ZeroEntropy `zerank-2` mode-bundle default, which is deprecated (the hosted API ends 2026-09-04 — switch with `gbrain config set search.reranker.model voyage:rerank-2.5`) and remains the fallback only until the September cutover. Past that sunset date the gateway short-circuits the dead hosted call before any HTTP (no per-query timeout burn): search fails open unreranked, with one audit row per process per model plus a single stderr line naming the switch command, and `gbrain doctor`'s `provider_sunset` check explains the state; a `base_urls` recipe override (self-hosted wire-compatible endpoint) suppresses the short-circuit. On a real-corpus benchmark across 20 queries, zerank-2 reshuffles **60% of top-1 results** after the hybrid + RRF + graph stack. That's the headline number.
 
 The mechanical reason: hybrid ranking is locally optimal per strategy but globally suboptimal. A cross-encoder reranker reads the query + each candidate document jointly, with full attention. It catches the cases where the vector + keyword + graph signals all agreed on a document that's semantically related but topically wrong.
 
@@ -58,7 +58,7 @@ Hybrid search applies a source-factor CASE expression at the SQL layer (lives in
 
 `archive/` is deliberately NOT hard-excluded (issue #1777): it holds high-signal historical content users expect to find, so it is demoted (`0.5x` in `DEFAULT_SOURCE_BOOSTS`), not hidden. The demote is a prior applied in the outer SQL re-rank; the cross-encoder reranker (balanced/tokenmax modes) can still PROMOTE an archive page that survives the demote into the rerank candidate window — it is not an unconditional suppression. `gbrain doctor`'s `hidden_by_search_policy` check reports how many chunked pages remain hidden by the surviving exclude prefixes.
 
-The boost map is configurable via `GBRAIN_SOURCE_BOOST` env var or per-call `SearchOpts.exclude_slug_prefixes`. Temporal queries (`detail: 'high'`) bypass the boost so chat pages re-surface for time-sensitive lookups.
+The boost map is configurable via the `GBRAIN_SOURCE_BOOST` env var. Hard exclusions are separate: the exclusion set is defaults ∪ `GBRAIN_SEARCH_EXCLUDE` (env, comma-separated prefixes) ∪ per-call `SearchOpts.exclude_slug_prefixes`. Temporal queries (`detail: 'high'`) bypass the boost so chat pages re-surface for time-sensitive lookups.
 
 ## Named-thing retrieval (per-page pool + title + alias + evidence)
 
@@ -168,14 +168,27 @@ reranker (cross-encoder — balanced/tokenmax; fail-open)
 alias hop (exact alias match injects/boosts the canonical page)
        │
        ▼
+exact-lookup tier (lookup-shaped queries only: slug + exact-title probes
+   promote/inject the identity page at rank-1; supersession-filtered;
+   fail-open — src/core/search/exact-lookup.ts)
+       │
+       ▼
 evidence stamp → adaptive return (opt-in) → autocut (reranked modes)
        │
        ▼
 limit slice → token-budget enforcement (per mode bundle)
        │
        ▼
-results
+results (+ retrieval-confidence grade in query-op meta — crag.ts)
 ```
+
+Per-arm fail-open has one deliberate exception: when BOTH lexical arms
+(`searchKeyword` + `searchTitles`) come back empty because of an ACCESS-class
+failure (`isDbAccessFailure` in `src/core/pg-access-classify.ts` — the DB
+itself is unreachable, not a schema gap), `hybridSearch` rethrows the arm
+error instead of returning an empty result set. A dead database must surface
+as the classified `database_error` envelope, never as a silent "no results".
+Schema-class arm failures (pre-migration brains) keep the fail-open contract.
 
 The stage order is pinned by `hybridSearch` in `src/core/search/hybrid.ts`:
 dedup runs BEFORE the reranker (so the reranker sees a diverse candidate pool,
@@ -183,6 +196,23 @@ capped by its own `topNIn`), the alias hop runs AFTER the reranker (so a query
 that is a page's declared name reliably surfaces that page regardless of how
 the reranker scored body chunks), and the token budget is enforced last, on
 the final slice.
+
+Two cross-cutting seams sit around the pipeline rather than inside it:
+
+- **Private-page visibility.** For untrusted (remote/MCP) callers, every
+  recall arm filters `visibility: private` pages via the shared predicate in
+  `src/core/search/private-visibility.ts` (fail-closed default; operator
+  opt-outs documented in `docs/operations/mcp-surface-runbook.md`). The
+  posture folds into the query-cache key, so trusted and untrusted runs never
+  share cache rows.
+- **CRAG-style confidence gate.** `src/core/search/crag.ts` grades every
+  `query` op result (`strong`/`moderate`/`weak`) from the already-stamped
+  honesty signals — zero LLM, zero added latency — and attaches the grade to
+  response meta. Config-gated and default OFF: `search.crag_escalation=true`
+  re-runs a weak retrieval once at a higher ceiling (expansion + relational +
+  wide limit, autocut off) and keeps the better-graded run;
+  `search.crag_think=true` (local callers) escalates a still-weak result to
+  `think`.
 
 ### Autocut: score-discontinuity result-sizing
 

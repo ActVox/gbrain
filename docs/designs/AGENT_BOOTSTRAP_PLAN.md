@@ -817,3 +817,4 @@ settings.local.json + config.toml writers (single module owns each host format).
   `gbrain bootstrap`; paste block is pinned to a release tag (supply-chain integrity).
   BOOTSTRAP_FOR_AGENTS.md opens with a scope note: "For Claude Code / Codex. Running
   OpenClaw or Hermes? Use INSTALL_FOR_AGENTS.md instead."
+

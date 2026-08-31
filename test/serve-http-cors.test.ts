@@ -17,12 +17,7 @@ import { describe, test, expect } from 'bun:test';
 import express from 'express';
 import cors from 'cors';
 import type { Server } from 'http';
-import {
-  isOAuthCorsRequestAllowed,
-  mountOAuthCorsGate,
-  parseCorsAllowlistOAuth,
-  resolveCorsOrigin,
-} from '../src/commands/serve-http.ts';
+import { parseCorsAllowlistOAuth, resolveCorsOrigin, mountOAuthCorsGate } from '../src/commands/serve-http.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 describe('parseCorsAllowlistOAuth', () => {
@@ -77,23 +72,6 @@ describe('parseCorsAllowlistOAuth', () => {
       expect(set!.has('https://Claude.AI')).toBe(true);
       expect(set!.has('https://claude.ai')).toBe(false);
     });
-  });
-});
-
-describe('isOAuthCorsRequestAllowed', () => {
-  test('missing Origin is allowed as same-origin / non-browser traffic', () => {
-    expect(isOAuthCorsRequestAllowed(undefined, null)).toBe(true);
-    expect(isOAuthCorsRequestAllowed(undefined, new Set(['https://claude.ai']))).toBe(true);
-  });
-
-  test('default-deny blocks browser Origin when allowlist is unset', () => {
-    expect(isOAuthCorsRequestAllowed('https://evil.example', null)).toBe(false);
-  });
-
-  test('allowlist gates before SDK OAuth router can add wildcard CORS', () => {
-    const allowlist = new Set(['https://claude.ai']);
-    expect(isOAuthCorsRequestAllowed('https://claude.ai', allowlist)).toBe(true);
-    expect(isOAuthCorsRequestAllowed('https://evil.example', allowlist)).toBe(false);
   });
 });
 

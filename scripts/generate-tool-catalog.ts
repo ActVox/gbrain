@@ -19,10 +19,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const OUT_PATH = join(REPO_ROOT, 'docs', 'TOOL_CATALOG.md');
 
-// Normalize to exactly one final newline. The renderer already ends with a
-// newline; blindly appending another creates a blank EOF line that fails the
-// downstream fork's `git diff --check` integration gate.
-const md = renderToolCatalogMarkdown().replace(/\n*$/, '\n');
+const md = renderToolCatalogMarkdown() + '\n';
 
 mkdirSync(dirname(OUT_PATH), { recursive: true });
 writeFileSync(OUT_PATH, md, 'utf-8');
