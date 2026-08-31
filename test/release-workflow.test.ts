@@ -17,6 +17,10 @@ import { EXPECTED_BUILDER_IDS, expectedAssetName } from '../src/core/binary-self
 const ROOT = join(import.meta.dir, '..');
 const WORKFLOW = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
 const SEMGREP_WORKFLOW = readFileSync(join(ROOT, '.github/workflows/semgrep.yml'), 'utf8');
+const FORBID_ATX_HUB_WORKFLOW = readFileSync(
+  join(ROOT, '.github/workflows/forbid-atx-hub-pr-base.yml'),
+  'utf8',
+);
 
 /** Every platform/arch the self-updater can request an asset for. */
 const EXPECTED_ASSETS = (
@@ -112,15 +116,26 @@ describe('release.yml ↔ binary-self-update asset contract', () => {
 describe('semgrep.yml differential baseline contract', () => {
   test('containerized git trusts the checkout before computing merge-base', () => {
     const trustIdx = SEMGREP_WORKFLOW.indexOf('safe.directory "$GITHUB_WORKSPACE"');
-    const mergeBaseIdx = SEMGREP_WORKFLOW.indexOf('git merge-base "$BASE_SHA" HEAD');
+    const mergeBaseIdx = SEMGREP_WORKFLOW.indexOf('bash scripts/test-select-semgrep-baseline.sh');
     expect(trustIdx).toBeGreaterThan(-1);
     expect(mergeBaseIdx).toBeGreaterThan(trustIdx);
   });
 
   test('merge-base failure is fail-closed instead of silently scanning from BASE_SHA', () => {
     expect(SEMGREP_WORKFLOW).not.toContain('git merge-base "$BASE_SHA" HEAD || echo "$BASE_SHA"');
-    expect(SEMGREP_WORKFLOW).toContain('BASELINE="$(git merge-base "$BASE_SHA" HEAD)"');
+    expect(SEMGREP_WORKFLOW).toContain(
+      'BASELINE="$(bash scripts/select-semgrep-baseline.sh "$BASE_SHA" "$HEAD_SHA")"',
+    );
     expect(SEMGREP_WORKFLOW).toContain('test -n "$BASELINE"');
+  });
+});
+
+describe('forbid-atx-hub-pr-base.yml expression boundary', () => {
+  test('the shell body reads pull-request metadata only through env', () => {
+    const shellBody = FORBID_ATX_HUB_WORKFLOW.slice(FORBID_ATX_HUB_WORKFLOW.indexOf('run: |'));
+    expect(FORBID_ATX_HUB_WORKFLOW).toContain('PR_BASE: ${{ github.base_ref }}');
+    expect(shellBody).not.toContain('${{ github.base_ref }}');
+    expect(shellBody).toContain('echo "PR base is allowed: $PR_BASE"');
   });
 });
 

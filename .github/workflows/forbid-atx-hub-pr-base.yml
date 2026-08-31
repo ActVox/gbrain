@@ -17,9 +17,11 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Forbid ATX-HUB as PR base
+        env:
+          PR_BASE: ${{ github.base_ref }}
         run: |
-          if [ "${{ github.base_ref }}" = "ATX-HUB" ]; then
+          if [ "$PR_BASE" = "ATX-HUB" ]; then
             echo "ATX-HUB is rollback-only. Open upstream-integration PRs against master."
             exit 1
           fi
-          echo "PR base is allowed: ${{ github.base_ref }}"
+          echo "PR base is allowed: $PR_BASE"

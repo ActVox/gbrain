@@ -66,7 +66,7 @@ import {
   SemanticQueryCache,
   loadCacheConfig,
 } from './query-cache.ts';
-
+import { PageRegexBudget } from '../schema-pack/redos-guard.ts';
 export const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
 
@@ -533,10 +533,10 @@ function loadOperationalMemoryPolicy(): Required<OperationalMemoryPolicyConfig> 
 }
 
 function matchesAnyPattern(query: string, patterns: string[]): boolean {
-  return patterns.some((p) => {
-    try { return new RegExp(p, 'i').test(query); }
-    catch { return false; }
-  });
+  const budget = new PageRegexBudget();
+  return patterns.some((pattern, index) => Boolean(
+    budget.runBounded(`operational-memory-${index}`, pattern, query, 'i'),
+  ));
 }
 
 function isOperationalMemoryQuery(query?: string): boolean {
@@ -549,13 +549,13 @@ function canonicalOperationalSlugsForQuery(query?: string): string[] {
   if (!query || !isOperationalMemoryQuery(query)) return [];
   const policy = loadOperationalMemoryPolicy();
   const slugs = new Set<string>();
-  for (const rule of policy.canonical_rules) {
-    try {
-      if (new RegExp(rule.pattern, 'i').test(query)) {
-        for (const slug of rule.slugs) slugs.add(slug);
-      }
-    } catch {
-      // Ignore malformed operator policy rules; retrieval must fail open.
+  const budget = new PageRegexBudget();
+  for (const [index, rule] of policy.canonical_rules.entries()) {
+    const matched = Boolean(
+      budget.runBounded(`operational-canonical-${index}`, rule.pattern, query, 'i'),
+    );
+    if (matched) {
+      for (const slug of rule.slugs) slugs.add(slug);
     }
   }
   return [...slugs];

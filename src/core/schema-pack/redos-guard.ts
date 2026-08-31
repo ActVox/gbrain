@@ -133,7 +133,7 @@ export class PageRegexBudget {
    * Codex F5 (deterministic degrade order): callers MUST sort verbs lex
    * before iterating so degraded sets reproduce across runs.
    */
-  runBounded(verb: string, pattern: string, text: string): RegExpMatchArray | null | undefined {
+  runBounded(verb: string, pattern: string, text: string, flags = ''): RegExpMatchArray | null | undefined {
     if (this.exhausted) {
       // Already over budget. Degrade silently — the caller is responsible
       // for treating undefined as "degrade to mentions".
@@ -142,7 +142,7 @@ export class PageRegexBudget {
     const start = performance.now();
     let match: RegExpMatchArray | null;
     try {
-      match = runRegexBounded(pattern, text, PER_REGEX_TIMEOUT_MS);
+      match = runRegexBounded(pattern, text, PER_REGEX_TIMEOUT_MS, flags);
     } catch (e) {
       // Treat timeout as degrade-to-mentions, not hard error.
       this.cumulativeMs += PER_REGEX_TIMEOUT_MS;
@@ -186,6 +186,7 @@ export function runRegexBounded(
   pattern: string,
   text: string,
   _timeoutMs: number = PER_REGEX_TIMEOUT_MS,
+  flags = '',
 ): RegExpMatchArray | null {
   // v0.41.37.0 #1569: input-length cap first. Over the cap, skip the regex
   // entirely (the surrounding budget treats the throw as degrade).
@@ -199,9 +200,12 @@ export function runRegexBounded(
   if (NESTED_QUANTIFIER_RE.test(pattern)) {
     throw new RegexCatastrophicPatternError(pattern);
   }
+  if (!/^[dgimsuvy]*$/.test(flags) || new Set(flags).size !== flags.length) {
+    throw new RegexTimeoutError('<invalid-flags>', pattern);
+  }
   try {
-    // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- this function IS the bounded-exec chokepoint for community pack regexes: input is capped at MAX_REGEX_INPUT_CHARS and nested-quantifier (catastrophic-backtracking) shapes are refused above BEFORE exec, and every caller routes through PageRegexBudget's per-page cumulative budget (see header: the vm-watchdog alternative wedges Bun+PGLite)
-    return new RegExp(pattern).exec(text);
+    // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- this function IS the bounded-exec chokepoint for community pack and operator-policy regexes: input is capped, catastrophic shapes are refused, flags are allowlisted, and callers route through PageRegexBudget
+    return new RegExp(pattern, flags).exec(text);
   } catch {
     // Malformed pattern (compile error). Treat as a degrade signal — the
     // caller counts it against the budget, same as before.
