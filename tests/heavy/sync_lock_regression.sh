@@ -17,6 +17,10 @@
 
 set -euo pipefail
 
+# #3485: shared name floor — these scripts mutate whatever DATABASE_URL names
+# and are documented for direct invocation, so each sources the floor itself.
+source "$(dirname "$0")/_db_floor.sh"
+
 cd "$(dirname "$0")/../.."
 
 if [ -z "${DATABASE_URL:-}" ]; then
@@ -81,17 +85,6 @@ EOF
 # git-init so sync's diff-walk has something to anchor (sync expects a git repo)
 (cd "$BRAIN_DIR" && git init -q && git add . && git -c user.email=test@test -c user.name=test commit -q -m "seed" >/dev/null 2>&1) || true
 
-# Tell gbrain to use this brain dir. v0.41 introduced the source registry
-# (sources table) as the canonical "where do pages come from" surface;
-# `sync.repo_path` is the legacy key and sync now reads the source row's
-# `local_path` column. Update the default source's local_path directly via
-# psql (mirrors how fm_wallclock.sh registers via the engine API — same
-# semantics, lower process-spawn overhead).
-psql "$DATABASE_URL" -c "INSERT INTO sources (id, name, local_path) VALUES ('default', 'default', '$BRAIN_DIR') ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path;" >>"$LOG" 2>&1
-# Keep the legacy config key set too — some code paths still read it, and
-# setting both is the belt-and-suspenders shape downstream callers expect.
-bun run src/cli.ts config set sync.repo_path "$BRAIN_DIR" >/dev/null 2>&1 || true
-
 # Step 3: spawn N parallel sync processes. Capture each one's exit code +
 # stdout/stderr. The race for the lock happens during their startup window.
 PIDS=()
@@ -102,14 +95,7 @@ for ((i=1; i<=NUM_PARALLEL; i+=1)); do
   OUT_F=$(mktemp -t sync-lock-out-XXXXXX)
   EXIT_FILES+=("$EXIT_F")
   OUT_FILES+=("$OUT_F")
-  # --no-embed: this test measures the writer-lock race, not embeddings.
-  # CI runners don't pipe ZEROENTROPY_API_KEY / OPENAI_API_KEY / VOYAGE_API_KEY,
-  # so without --no-embed every sync fails with "Embedding model X requires Y"
-  # and the test classifier reports unknown failures instead of lock outcomes.
-  # --repo: sync's canonical brain-dir flag (the older --dir is silently
-  # ignored; the script previously paired it with `config set sync.repo_path`
-  # which sync no longer reads in the source-registry world).
-  ( set +e; bun run src/cli.ts sync --repo "$BRAIN_DIR" --no-embed >"$OUT_F" 2>&1; echo $? > "$EXIT_F" ) &
+  ( set +e; bun run src/cli.ts sync --repo "$BRAIN_DIR" >"$OUT_F" 2>&1; echo $? > "$EXIT_F" ) &
   PIDS+=($!)
 done
 

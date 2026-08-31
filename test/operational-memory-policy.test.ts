@@ -59,4 +59,21 @@ describe('operational memory retrieval policy', () => {
         .toBeGreaterThan(rows.find(r => r.slug === 'raw/imports/alpha-call')!.score);
     });
   });
+
+  test('operator patterns are case-insensitive and catastrophic shapes degrade safely', async () => {
+    await withEnv({
+      GBRAIN_OPERATIONAL_MEMORY_POLICY_JSON: JSON.stringify({
+        intent_patterns: ['PROJECT-ALPHA', '(a+)+$'],
+        boost_prefixes: { 'private/current-alpha': 3 },
+      }),
+    }, async () => {
+      const matched = [result('private/current-alpha', 'note', 1)];
+      applyOperationalMemoryPolicy(matched, 'project-alpha');
+      expect(matched[0].score).toBe(3);
+
+      const degraded = [result('private/current-alpha', 'note', 1)];
+      applyOperationalMemoryPolicy(degraded, `${'a'.repeat(2_000)}!`);
+      expect(degraded[0].score).toBe(1);
+    });
+  });
 });
