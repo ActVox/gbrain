@@ -28,7 +28,11 @@ while IFS= read -r merge_commit; do
 
   upstream_parent=${parents[1]}
   release_tag=$(git tag --points-at "$upstream_parent" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
-  [[ -n "$release_tag" ]] || continue
+  if [[ -z "$release_tag" ]]; then
+    printf 'Semgrep baseline error: integration merge %s has no mirrored exact release tag on second parent %s\n' \
+      "$merge_commit" "$upstream_parent" >&2
+    exit 65
+  fi
 
   printf 'Semgrep baseline: exact upstream release %s (%s) from integration merge %s\n' \
     "$release_tag" "$upstream_parent" "$merge_commit" >&2

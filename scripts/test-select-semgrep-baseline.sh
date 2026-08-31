@@ -46,8 +46,10 @@ git -C "$repo" add fork.txt
 git -C "$repo" commit -q -m 'fix: fork overlay'
 git -C "$repo" merge -q --no-ff "$untagged_parent" -m 'chore: integrate GBrain untagged candidate'
 untagged_merge=$(git -C "$repo" rev-parse HEAD)
-actual=$(cd "$repo" && bash "$selector" "$base" "$untagged_merge")
-[[ "$actual" == "$base" ]]
+if (cd "$repo" && bash "$selector" "$base" "$untagged_merge" >/dev/null 2>&1); then
+  printf 'selector accepted an untagged integration merge\n' >&2
+  exit 1
+fi
 
 if (cd "$repo" && bash "$selector" deadbeef "$ordinary" >/dev/null 2>&1); then
   printf 'selector accepted a missing base commit\n' >&2
