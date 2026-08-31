@@ -7410,15 +7410,96 @@ respective shapes. Small, mechanical; pinned by `test/init-embed-check.test.ts`
   `CREATE UNIQUE INDEX ... ON access_tokens (name) WHERE revoked_at IS NULL` would
   make names honest for humans too. Needs a dedup pass first on brains that already
   carry twins. **Start:** `src/core/migrate.ts` (CONCURRENTLY + `transaction: false`).
-- [ ] **P2 — codex hook lane.** codex-cli 0.147.0 ships a real hook system (hooks.json;
-  PreToolUse…SessionEnd — recorded on `TARGETS['codex-2026-08']` in
-  `src/core/bootstrap/host-specs.ts`), falsifying the old "codex has no hooks" premise.
-  Wiring SessionEnd transcript capture (+ SessionStart context) would give codex
-  sessions the same memory loop Claude Code gets, and supersedes the FF2 notify-sweeper
-  idea. Needs its own dated spec-target verification (payload shapes, deny-unknown-fields
-  config) + e2e before any writer lands. **Trigger:** first user asking why codex
-  sessions don't persist; **Start:** `host-specs.ts` TARGETS + a codex sibling of
-  `writeClaudeHooksAt`.
+- [x] **P2 — codex hook lane.** DONE (Memorable wave): SessionEnd capture landed —
+  `src/core/bootstrap/codex-hooks.ts` (trust-gated two-file writer, verified spec
+  target 2026-08-25) + `src/core/transcripts/codex-hook-lane.ts` + the capture-spec
+  dispatch in hook.ts. SessionStart context on codex remains open (below).
+- [ ] **P3 — codex SessionStart context lane.** The SessionEnd capture lane landed;
+  a SessionStart greeting/context injection lane would close the loop (same
+  trust-gated hooks.json mechanics, `CODEX_HOOK_EVENTS` gains 'SessionStart').
+  **Start:** `src/core/bootstrap/codex-hooks.ts` (writer already generalizes),
+  `src/commands/hook.ts` session-start branch. Filed from the Memorable wave
+  (v0.46.30.0-era, 2026-08-25).
+- [ ] **P1 — OpenClaw tool-call ARGS capture (Memorable value gate).** The openclaw
+  lane ships name-only tool calls (`input: null` — the args field is unobserved in
+  OpenClaw's session format), and Memorable's extraction API REFUSES name-only traces
+  as `no_decisive_steps` (verified live with a synthetic ingest 2026-08-25): openclaw
+  relays are currently rejected politely. One observation run against a real
+  `~/.openclaw/agents/<agent>/sessions/*.jsonl` store must characterize the toolCall
+  args field (+ any result block), then extend `mapOpenclawLine` — the interface
+  (`ToolCallRecord`) is already final, so enrichment is additive. Until then the
+  openclaw lane is plumbing-correct but value-dry. **Start:**
+  `src/core/transcripts/openclaw.ts` (OPENCLAW_SPEC_TARGET note carries the checklist).
+  Filed from the Memorable wave (2026-08-25).
+- [ ] **P3 — native opencode capture lane.** opencode has no characterized session
+  store, no transcript adapter, no discovery root — it rides `HookIo.harness` as a
+  channel label only, and `captureSpecFor('opencode')` deliberately resolves to the
+  claude spec (documented). A native lane needs an observation run against opencode
+  1.18.18 (session store location + format), a new adapter, and a plugin/event-system
+  integration (in-process JS, not a `gbrain hook` subprocess — raises the engine-free
+  question). Until then: `memorable ingest -` is the documented path. **Start:**
+  `docs/mcp/OPENCODE-CLI-PIN.md` + an observation run. Filed from the Memorable wave
+  (2026-08-25).
+- [ ] **P3 — hermes native capture lane.** SQLite one-store-many-sessions breaks the
+  hand-the-hook-a-path contract, and `src/core/transcripts/hermes.ts` is still
+  `provisional` (no populated production sample verified). `memorable ingest` is the
+  documented path. Filed from the Memorable wave (2026-08-25).
+- [ ] **P2 — verify memorable-cli ≥0.3.5 fixes the consent-before-egress ordering.**
+  0.3.4's `record` POSTs the trace to `/v1/extract` BEFORE its consent-checked store
+  (decompile-verified); gbrain mitigates with its own pre-spawn evidence check, but
+  the complete fix is CLI-side (asked in the adoption PR, along with confirming the
+  extraction API accepts arbitrary `harness` strings server-side). When a new CLI
+  version ships, re-verify by decompile and consider relaxing nothing — the gbrain
+  gate stays regardless. Filed from the Memorable wave (2026-08-25).
+- [ ] **P2 — win32: resolveMemorableBin finds `.cmd` shims spawn() refuses to run.**
+  The resolver accepts `.cmd`/`.exe` on win32 but the detached relay spawn passes no
+  `shell: true` — Node/Bun refuse direct `.cmd` spawn since the CVE-2024-27980
+  hardening, the async error is swallowed, and an npm-installed memorable on Windows
+  looks resolvable yet never executes (only the delayed `relay_never_reported` doctor
+  warn surfaces it). Fix: spawn via `cmd.exe /c` for `.cmd`/`.bat`, or resolve the
+  underlying `.js` entry. **Start:** `src/core/context/hook-heartbeat.ts`
+  resolveMemorableBin + the spawn site. Filed from the ship review (2026-08-26).
+- [ ] **P3 — openclaw-only hosts never compact session-receipts.jsonl.** The openclaw
+  lane deliberately skips receipts compaction (hook lane is the ONE compactor —
+  two-writer rename race), so a host running ONLY the openclaw lane grows the file
+  unbounded (slowly: name-only receipts are ~1-2 KB/line vs claude's ~110 KB). Fix
+  shape: a converging-trim discipline like the relay file's, or a quiet-path
+  compaction outside the compact() callback. **Start:**
+  `src/core/context/hook-heartbeat.ts` appendSessionReceipt + context-engine.ts
+  receipt block. Filed from the ship review (2026-08-26).
+- [ ] **P3 — flag-registry generator: exclude spawn-argv string literals.** The
+  text-scan generator picked up `--session` (from the memorable spawn argv) and
+  `--harness` (from imports) into commands' accept-lists, so
+  `gbrain sync --harness codex` is silently accepted instead of failing loud. Teach
+  `scripts/generate-flag-registry.ts` to skip flags that only appear inside
+  spawn()/argv arrays (or add an exclusion marker), then regenerate. **Start:**
+  `scripts/generate-flag-registry.ts` + `src/core/cli-flag-registry.generated.ts`.
+  Filed from the ship review (2026-08-26).
+- [ ] **P3 — consolidate the memorable test fixtures.** The stub `memorable` shell
+  script, the CLI-evidence config seed, and the full opt-in chain are re-implemented
+  in four suites (memorable-relay.serial, context-engine-checkpoint.serial,
+  doctor-memorable, session-receipts) — extract `test/helpers/memorable-fixtures.ts`
+  so a consent-shape change is one edit. Filed from the ship review (2026-08-26).
+- [ ] **P3 — readJsonlTailLines: incremental window growth.** The doubling retry
+  re-opens and re-reads the whole window from scratch (up to ~31 MB cumulative in
+  the pathological case) and zero-fills with Buffer.alloc; read only the
+  newly-uncovered prefix on retry and use allocUnsafe. Rare path (fires only when a
+  window holds zero complete lines). **Start:** `src/core/context/hook-heartbeat.ts`
+  readJsonlTailLines. Filed from the ship review (2026-08-26).
+- [ ] **P2 — openclaw real-plugin door: extend with a receipt+relay assertion.** The
+  per-compaction Memorable receipt is pinned at the unit/serial tier
+  (context-engine-checkpoint.serial MR1-MR3) but the installed-plugin e2e door
+  (`test/e2e/openclaw-plugin-load-real.test.ts`) does not yet assert a receipt lands
+  through the real plugin path; a deadline-seam unit test for the always-skip
+  receipts-compaction posture is also unwritten. Filed from the ship review
+  (2026-08-26).
+- [ ] **P2 — codex e2e door: assert codex EXECUTES the trust-gated hook.** The heavy
+  door asserts the hooks.json + trust-entry pair EXISTS but not that a live
+  `codex exec` session-end actually fires it (a receipt landing after the smoke turn
+  would pin gbrain's codexTrustHash against codex's fingerprint.rs for real — the
+  golden-vector unit test pins OUR recipe, not the consumer's acceptance). **Start:**
+  `test/e2e/bootstrap-real-codex.serial.test.ts` (heavy lane, keyless codex turn).
+  Filed from the ship review (2026-08-26).
 - [ ] **P3 — PGLite admin-lane scoped minting.** `gbrain bootstrap harness` refuses to
   mint under a live PGLite serve (single-writer) and points at pre-mint + `--token`.
   Auto-driving `POST /admin/login` + `POST /admin/api/api-keys` (when
