@@ -395,11 +395,14 @@ function packPathByName(name: string): string | null {
     // candidates below don't exist.
     const asset = bundledPackPath(name);
     if (asset) return asset;
-    // Resolve bundled YAML — import.meta fallback, try a few locations.
+    // Resolve bundled YAML — fall back across source and compiled deployment layouts.
     const here = dirname(new URL(import.meta.url).pathname);
     const candidates = [
       join(here, '..', 'core', 'schema-pack', 'base', `${name}.yaml`),
       join(here, '..', '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(process.cwd(), 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(dirname(process.argv[1] ?? ''), '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(dirname(process.execPath ?? ''), '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
     ];
     for (const c of candidates) {
       if (existsSync(c)) return c;

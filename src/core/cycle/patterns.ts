@@ -328,7 +328,7 @@ export async function runPhasePatterns(
     // returned status:ok even when the subagent timed out (e.g. no
     // subagent-capable worker slot free for the whole wait window) and zero
     // pattern pages were written — a silent no-op for days.
-    if (outcome !== 'completed') {
+    if (!isSuccessfulPatternsChildOutcome(outcome)) {
       if (writtenRefs.length === 0) {
         return {
           phase: 'patterns',
@@ -381,6 +381,11 @@ export async function runPhasePatterns(
     }
     void start;
   }
+}
+
+/** Minion queue job statuses use `completed`; `complete` belongs to ChildOutcome messages. */
+export function isSuccessfulPatternsChildOutcome(status: string): boolean {
+  return status === 'completed';
 }
 
 // ── Config ────────────────────────────────────────────────────────────

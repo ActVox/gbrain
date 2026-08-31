@@ -30,6 +30,12 @@ describe('#1569 input-length cap', () => {
     expect(runRegexBounded('zzz', 'hello world')).toBeNull();
   });
 
+  test('runRegexBounded allowlists flags and supports bounded case-insensitive matching', () => {
+    expect(runRegexBounded('HELLO', 'hello world', undefined, 'i')).not.toBeNull();
+    expect(() => runRegexBounded('hello', 'hello world', undefined, 'ii')).toThrow();
+    expect(() => runRegexBounded('hello', 'hello world', undefined, 'x')).toThrow();
+  });
+
   test('PageRegexBudget.runBounded degrades (null) on oversize input', () => {
     const budget = new PageRegexBudget();
     const big = 'a'.repeat(MAX_REGEX_INPUT_CHARS + 1);

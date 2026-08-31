@@ -538,10 +538,15 @@ export function parseCorsAllowlistOAuth(): Set<string> | null {
  */
 export function resolveCorsOrigin(allowlist: Set<string> | null): cors.CorsOptions['origin'] {
   if (allowlist === null) return false;
-  return (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+  return (origin, cb) => {
     if (!origin) return cb(null, true);
     cb(null, allowlist.has(origin));
   };
+}
+
+export function isOAuthCorsRequestAllowed(origin: string | undefined, allowlist: Set<string> | null): boolean {
+  if (!origin) return true;
+  return allowlist?.has(origin) === true;
 }
 
 /**
@@ -968,6 +973,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Express 5 app
   const app = express();
+  app.disable('x-powered-by');
   // v0.41.3 (T8): configurable trust-proxy via GBRAIN_HTTP_TRUST_PROXY env.
   // Default 'loopback' (trust Caddy/Tailscale on the same host) preserves
   // pre-v0.41.3 behavior. Operators behind Fly.io / Render / Vercel / nginx
@@ -1017,6 +1023,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   };
+  const oauthCorsPaths = new Set(['/mcp', '/token', '/authorize', '/register', '/revoke']);
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!oauthCorsPaths.has(req.path)) return next();
+    const origin = req.get('Origin');
+    if (isOAuthCorsRequestAllowed(origin, corsAllowlistOAuth)) return next();
+    res.status(403).json({ error: 'cors_forbidden' });
+  });
   app.use('/mcp', cors(corsOAuthOptions));
   app.use('/authorize', cors(corsOAuthOptions));
   // /token, /revoke and /register are shadowed by the MCP SDK's own bare

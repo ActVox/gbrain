@@ -673,4 +673,3 @@ export async function checkRerankerHealth(engine: BrainEngine): Promise<Check> {
     };
   }
 }
-

@@ -241,4 +241,3 @@ Every non-localOnly operation on the MCP surface: 121 tools across 23 areas. **S
 |---|---|---|---|---|
 | `add_timeline_entry` | Add timeline entry to a page. | write | yes |  |
 | `get_timeline` | Get timeline entries for a page, optionally filtered by date window | read |  |  |
-

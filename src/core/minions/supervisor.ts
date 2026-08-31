@@ -61,7 +61,9 @@ export type SupervisorEvent =
   | 'health_error'
   | 'max_crashes_exceeded'
   | 'shutting_down'
-  | 'stopped';
+  | 'stopped'
+  | 'stale_locks_cleared'
+  | 'stale_lock_clear_failed';
 
 export interface SupervisorEmission {
   event: SupervisorEvent;
@@ -788,6 +790,25 @@ export class MinionSupervisor {
      // would be a tight DB-hammering loop, not the no-op users expect.
     if (this.opts.healthInterval > 0) {
       this.healthTimer = setInterval(() => { void this.healthCheck(); }, this.opts.healthInterval);
+    }
+
+    // 4.5 Clear stale DB locks left by previous workers that crashed
+    // without releasing (SIGKILL by Render mid-acquire, OOM, etc.).
+    // tryAcquireDbLock's upsert WHERE clause normally handles this on
+    // the next acquire, but if the new supervisor goes wedged before
+    // trying to sync, the row sits indefinitely and blocks every future
+    // acquire attempt. Clearing on boot guarantees a fresh supervisor's
+    // first sync attempt isn't blocked by a long-dead worker's stale row.
+    try {
+      const { clearStaleLocks } = await import('../db-lock.ts');
+      const cleared = await clearStaleLocks(this.engine);
+      if (cleared > 0) {
+        this.emit('stale_locks_cleared', { count: cleared });
+      }
+    } catch (err) {
+      this.emit('stale_lock_clear_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
 
     // 5. Announce start.

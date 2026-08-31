@@ -31,21 +31,28 @@ jobs:
           # Full history so --baseline-commit can diff against the PR base;
           # a shallow clone would not contain the base commit.
           fetch-depth: 0
-      # Graduated from advisory: on a PR, fail only on findings NEW since the PR
-      # base (semgrep --baseline-commit), so legacy findings never block an
-      # unrelated PR and no full-tree triage is required. Scheduled/dispatch
-      # runs have no PR base, so they do a full-tree report-only scan.
+      - name: Trust checkout for containerized git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # Graduated from advisory: ordinary PRs fail only on findings new since
+      # their merge base. Exact-tag upstream integrations are different: the
+      # upstream release is scanned report-only, while the ActVox overlay is
+      # blocking. This keeps registry false positives in adopted upstream code
+      # visible without turning every release train into a false-red PR.
       - name: Semgrep scan
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [ -n "$BASE_SHA" ]; then
-            # Diff against the MERGE BASE, not the base-branch head captured at
-            # event time: the checkout is the merge ref against current master,
-            # so a finding master landed after the event would otherwise be
-            # attributed to this PR. merge-base is the true common ancestor.
-            BASELINE="$(git merge-base "$BASE_SHA" HEAD || echo "$BASE_SHA")"
-            echo "PR scan — failing only on findings new since $BASELINE"
+            bash scripts/test-select-semgrep-baseline.sh
+            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            BASELINE="$(bash scripts/select-semgrep-baseline.sh "$BASE_SHA" "$HEAD_SHA")"
+            test -n "$BASELINE"
+            if [ "$BASELINE" != "$MERGE_BASE" ]; then
+              echo "Exact-tag upstream integration — full-tree report-only audit"
+              semgrep scan --config p/default --config p/typescript || true
+            fi
+            echo "PR scan — blocking only on fork-overlay findings new since $BASELINE"
             semgrep scan --config p/default --config p/typescript --error --baseline-commit "$BASELINE"
           else
             echo "Full-tree scan (schedule/dispatch) — report-only"

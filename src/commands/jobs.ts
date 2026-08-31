@@ -4,6 +4,7 @@
  */
 
 import type { BrainEngine } from '../core/engine.ts';
+import type { PageType } from '../core/types.ts';
 import type { FactsBackstopResult } from '../core/facts/backstop.ts';
 // Leaf module (no flag surface of its own) — see that file for why this
 // isn't imported from extract-conversation-facts.ts directly (#4135).
@@ -430,7 +431,8 @@ HANDLER TYPES (built in)
   embed             (Re-)embed pages; --params '{"slug":...}' or '{"all":true}'
   lint              Run page linter; --params '{"dir":"...","fix":true}'
   import            Bulk import markdown; --params '{"dir":"..."}'
-  extract           Extract links + timeline entries; '{"mode":"all"}'
+  extract           Extract links + timeline entries; '{"mode":"all"}' or
+                    '{"source":"db","mode":"all","source_id":"research-actvox"}'
   backlinks         Check or fix back-links; '{"action":"fix"}'
   autopilot-cycle   One autopilot pass (sync+extract+embed+backlinks)
   shell             Run a command or argv. Requires GBRAIN_ALLOW_SHELL_JOBS=1
@@ -2421,7 +2423,7 @@ export async function registerBuiltinHandlers(
   });
 
   worker.register('extract', async (job) => {
-    const { runExtractCore, extractStaleFromDB, STALE_TIME_BUDGET_MS } = await import('./extract.ts');
+    const { runExtractCore, runExtractDbCore, extractStaleFromDB, STALE_TIME_BUDGET_MS } = await import('./extract.ts');
     // #2849: stale mode — the durable follow-up for extraction deferred by
     // performSync's size gate (totalChanges > 100). Runs the same DB-source
     // watermark sweep as `gbrain extract --stale`, scoped to the source the
@@ -2462,6 +2464,25 @@ export async function registerBuiltinHandlers(
     const mode = (typeof job.data.mode === 'string' && ['links', 'timeline', 'all'].includes(job.data.mode))
       ? (job.data.mode as 'links' | 'timeline' | 'all')
       : 'all';
+    const source = job.data.source === 'db' ? 'db' : 'fs';
+    if (source === 'db') {
+      return await runExtractDbCore(engine, {
+        mode,
+        dryRun: !!job.data.dryRun,
+        jsonMode: !!job.data.jsonMode,
+        includeFrontmatter: !!job.data.includeFrontmatter,
+        sourceIdFilter: typeof job.data.source_id === 'string'
+          ? job.data.source_id
+          : (typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined),
+        typeFilter: typeof job.data.type === 'string' ? job.data.type as PageType : undefined,
+        since: typeof job.data.since === 'string' ? job.data.since : undefined,
+        byMention: !!job.data.byMention || !!job.data.by_mention,
+        rebuild: !!job.data.rebuild,
+        ner: !!job.data.ner,
+        fromMeetings: !!job.data.fromMeetings || !!job.data.from_meetings,
+        inferDates: !!job.data.inferDates || !!job.data.infer_dates,
+      });
+    }
     const dir = typeof job.data.dir === 'string'
       ? job.data.dir
       : (await engine.getConfig('sync.repo_path')) ?? '.';
