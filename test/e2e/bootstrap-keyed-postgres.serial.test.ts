@@ -20,6 +20,7 @@ import { join } from 'node:path';
 
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+
 import { addSource } from '../../src/core/sources-ops.ts';
 import { loadCorpusPages } from '../helpers/bootstrap-corpus.ts';
 import { runEmbedCore } from '../../src/commands/embed.ts';
@@ -39,6 +40,10 @@ import {
   VERIFY_MAGIC_TOKEN,
 } from '../../src/core/bootstrap/verify.ts';
 import type { CapabilityReport } from '../../src/core/capability.ts';
+
+// Cold-path opt-out (conservative): runs runSchemaTransition (embedding-width
+// schema migration) on top of a fresh engine — the base must be cold-built.
+delete process.env.GBRAIN_PGLITE_SNAPSHOT;
 
 const OPENAI = process.env.OPENAI_API_KEY;
 const VOYAGE = process.env.VOYAGE_API_KEY;
@@ -223,6 +228,12 @@ describe.skipIf(!OPENAI && !ANTHROPIC)('keyed auto fact-extraction (LLM takes)',
       title: 'Keyed Extraction Probe',
       compiled_truth: PROSE,
     });
+    // #4473: takes are md-first — the probe page needs a real markdown home
+    // (a page with no locatable .md is skipped, never written DB-only).
+    const repo = join(root, 'brain');
+    mkdirSync(join(repo, 'concepts'), { recursive: true });
+    writeFileSync(join(repo, `${SLUG}.md`), `# Keyed Extraction Probe\n\n${PROSE}\n`, 'utf-8');
+    await engine.setConfig('sync.repo_path', repo);
   }, 120_000);
 
   afterAll(async () => {
