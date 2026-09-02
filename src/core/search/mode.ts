@@ -102,11 +102,14 @@ export interface ModeBundle {
   expansion: boolean;
   /**
    * Default `limit` for the operation layer (`src/core/operations.ts:1087`).
-   * Note: production `query` op TODAY defaults to 20. Mode bundle becomes
-   * the default ONLY when the caller omits the field — same chain semantics
-   * as model-tier resolution. See `[CDX-1+2+3]` in the plan: the original
-   * "tokenmax preserves Garry's setup" framing is wrong; tokenmax is an
-   * EXPANSION from the implicit current default (limit 20).
+   * Mode bundle becomes the default ONLY when the caller omits the field —
+   * same chain semantics as model-tier resolution. See `[CDX-1+2+3]` in the
+   * plan: the original "tokenmax preserves Garry's setup" framing is wrong;
+   * tokenmax is an EXPANSION from the implicit historical default (limit 20).
+   * (That flat-20 default no longer exists anywhere in `query`: #4360 fixed
+   * the text/hybrid path's cache-hit slice, #4356 Problem 2 fixed the
+   * image-similarity branch. `search_by_image`, a separate op with no mode
+   * param, still hard-defaults to 20 — a different public contract.)
    */
   searchLimit: number;
   /**
@@ -949,7 +952,17 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // within cache.ttl_seconds (3600s default). (Authored as 23→24 on the
 // wave-g branch; 24 and 25 were claimed by the two bumps above while it
 // was in flight, so it takes the next free number per the D8 convention.)
-export const KNOBS_HASH_VERSION = 27;
+//
+// v=27 (master, 0.48.0.0): adaptive-return gate + intent fold (see the ar=/ari=
+// key parts below). bump 27→28 (#4256, fixes #3695's fusion path): compiledTruthBoost now
+// suppresses the 2x compiled-truth authority boost for synthetic chunkless
+// title rows (chunk_id 0 + empty chunk_text) in both rrfFusion variants —
+// result ordering changes for identical knobs, so cached rows ranked under
+// the old boost must not be served under the new semantics. No new key
+// part; version-only invalidation (same class as the 13→14 detail=medium
+// boost-scope bump and the 21→22 stamp/injection epoch). One-time global
+// cold-miss spike on upgrade; refills within cache.ttl_seconds (3600s).
+export const KNOBS_HASH_VERSION = 28;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The

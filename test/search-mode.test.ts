@@ -453,7 +453,10 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // 26→27: ar=/arem=/arom=/armk=/ari= — adaptive-return gate params +
     // resolved intent class fold (2026-08 fix wave E5b + outside-voice F11);
     // adaptive-on calls now cache instead of skipping.
-    expect(KNOBS_HASH_VERSION).toBe(27);
+    // 27→28: compiledTruthBoost suppresses the 2x boost for synthetic
+    // chunkless title rows (#4256, fixes #3695's fusion path) — reorders
+    // fused rows for identical knobs; version-only invalidation.
+    expect(KNOBS_HASH_VERSION).toBe(28);
   });
 
   test('#3515: detail set vs unset produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -481,7 +484,9 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // 26→27: ar=/arem=/arom=/armk=/ari= — adaptive-return gate params +
     // resolved intent class fold (2026-08 fix wave E5b + outside-voice F11);
     // adaptive-on calls now cache instead of skipping.
-    expect(KNOBS_HASH_VERSION).toBe(27);
+    // 27→28: compiledTruthBoost synthetic-row suppression (#4256/#3695) —
+    // version-only invalidation.
+    expect(KNOBS_HASH_VERSION).toBe(28);
   });
 
   test('#4352 follow-up: excludePrivate true vs false produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -697,8 +702,8 @@ describe('v0.40.4 — graph_signals knob', () => {
 });
 
 describe('v0.42.3.0 — autocut knobs', () => {
-  test('KNOBS_HASH_VERSION is 27 (…; 24→25 keywordOrFallback knob kof=; 25→26 salience/recency + intent_patterns fold #4415; 26→27 adaptive-return gate + intent fold E5b/F11)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(27);
+  test('KNOBS_HASH_VERSION is 28 (…; 24→25 keywordOrFallback knob kof=; 25→26 salience/recency + intent_patterns fold #4415; 26→27 adaptive-return gate + intent fold E5b/F11; 27→28 compiledTruthBoost synthetic-row suppression #4256)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(28);
   });
 
   test('bundle defaults: conservative off, balanced/tokenmax on @0.20', () => {

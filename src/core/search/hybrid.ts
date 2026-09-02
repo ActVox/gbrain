@@ -38,7 +38,7 @@ import {
 } from './relational-recall.ts';
 import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
-import { applyReranker } from './rerank.ts';
+import { applyReranker, type RerankPassThroughReason } from './rerank.ts';
 import {
   classifyQuery,
   classifyQueryWithBrainPatterns,
@@ -100,6 +100,25 @@ export const PRE_FUSION_POOL_FLOOR = 50;
  */
 export function shouldBoostCompiledTruth(detail: string | null | undefined): boolean {
   return detail === 'low';
+}
+
+/**
+ * #3695 — the boost multiplier for one fused row. The title arm COALESCEs a
+ * page with no text chunk into a synthetic row (chunk_id 0 + empty chunk_text,
+ * both engines' searchTitles); it has no real compiled_truth chunk and must
+ * not gain chunk authority — pre-fix the 2x boost let an embed_skip page ride
+ * to #1 with an empty snippet on the keyword-only / no-provider paths where
+ * cosineReScore never runs. Unverified auto-extracted stubs stay excluded
+ * (issue #160, stamped pre-fusion by stampUnverifiedExtractions).
+ */
+export function compiledTruthBoost(result: SearchResult, applyBoost: boolean): number {
+  const syntheticTitleRow = result.chunk_id === 0 && (result.chunk_text ?? '').trim().length === 0;
+  return applyBoost &&
+    result.chunk_source === 'compiled_truth' &&
+    result.unverified !== true &&
+    !syntheticTitleRow
+    ? COMPILED_TRUTH_BOOST
+    : 1.0;
 }
 const pendingCacheWrites = new Set<Promise<unknown>>();
 
@@ -2137,8 +2156,19 @@ export async function hybridSearch(
     model: resolvedMode.reranker_model,
     timeoutMs: resolvedMode.reranker_timeout_ms,
   };
+  // #4648: a success-shaped pass-through (provider answered 200 with an
+  // empty/malformed result set) stamps the degraded[] channel so callers can
+  // tell "reranker off for this call" from "reranker died silently" —
+  // results come back in raw RRF order with no rerank_score either way.
   const reranked = rerankerOpts.enabled
-    ? await applyReranker(query, deduped, rerankerOpts as any)
+    ? await applyReranker(query, deduped, {
+        ...(rerankerOpts as any),
+        onPassThrough: (reason: RerankPassThroughReason) => {
+          pushDegraded(degraded, 'rerank_passthrough', reason);
+          // Chain a per-call callback if the caller supplied one.
+          (rerankerOpts as { onPassThrough?: (r: RerankPassThroughReason) => void }).onPassThrough?.(reason);
+        },
+      })
     : deduped;
 
   // T3 — free-text alias hop. Runs AFTER rerank so a query that is a page's
@@ -2917,9 +2947,9 @@ export function rrfFusionWeighted(
   if (maxScore > 0) {
     for (const e of entries) {
       e.score = e.score / maxScore;
-      // issue #160: unverified auto-extracted stubs (stamped pre-fusion by
-      // stampUnverifiedExtractions) never get the compiled-truth authority boost.
-      const boost = applyBoost && e.result.chunk_source === 'compiled_truth' && e.result.unverified !== true ? COMPILED_TRUTH_BOOST : 1.0;
+      // issue #160 + #3695: unverified stubs and synthetic chunkless title
+      // rows never get the compiled-truth authority boost.
+      const boost = compiledTruthBoost(e.result, applyBoost);
       e.score *= boost;
     }
   }
@@ -2980,8 +3010,9 @@ export function rrfFusion(lists: SearchResult[][], k: number, applyBoost = true)
       e.score = e.score / maxScore;
 
       // Apply compiled truth boost after normalization (skip for detail=high;
-      // skip for unverified auto-extracted stubs — issue #160)
-      const boost = applyBoost && e.result.chunk_source === 'compiled_truth' && e.result.unverified !== true ? COMPILED_TRUTH_BOOST : 1.0;
+      // skip for unverified auto-extracted stubs — issue #160; skip for
+      // synthetic chunkless title rows — #3695)
+      const boost = compiledTruthBoost(e.result, applyBoost);
       e.score *= boost;
 
       if (DEBUG) {

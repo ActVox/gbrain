@@ -1,5 +1,215 @@
 # TODOS
 
+## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
+
+- [ ] **P1 — Fix-wave 2: the 27 deferred M-effort verified issues.**
+  **What:** the v0.48.1.0 community fix wave triaged every open issue; 22
+  were fixed in-wave and 27 verified M-effort issues were deferred to a
+  second wave. Full triage records (verdict, rationale, fix sketch, key
+  files per issue) live in `.context/fix-wave-triage.json` (gitignored —
+  wave working state, not repo content). Deferred issue numbers: #4744
+  #4741 #4738 #4732 #4729 #4728 #4696 #4684 #4679 #4653 #4652 #4649 #4620
+  #4616 #4609 #4606 #4605 #4603 #4601 #4597 #4589 #4588 #4586 #4578 #4563
+  #4558 #4359. (#4636 and #4564 were also triaged M but got fixed in-wave —
+  #4636 by the #4279 adoption, #4564 by the #4583 default-write guard.)
+  **How:** same discipline as wave 1 — red-proven regression test per fix,
+  themed trains, per-train targeted sweeps.
+- [ ] **P2 — Enforce pack vocabulary at the put_page choke point, not
+  per-surface.** **What:** #4655's write-time vocabulary enforcement
+  (`src/core/schema-pack/write-vocabulary.ts`) is wired at three surfaces
+  (capture op, add_link op, `gbrain capture` CLI). Any OTHER write path
+  that sets an explicit page type (put_page with frontmatter `type`,
+  future verbs) bypasses it, and each new surface must remember to opt in.
+  **Right altitude:** validate once where every page write converges
+  (put_page / import-file boundary), with the same "no resolvable pack =
+  no enforcement" fail-open contract and an explicit carve-out for the
+  sync importer (existing repo content must never be refused on re-import).
+  **Where:** `src/core/ops/pages.ts`, `src/core/import-file.ts`,
+  `src/core/schema-pack/write-vocabulary.ts`.
+- [ ] **P2 — Default-write guard at the dispatch choke point.** **What:**
+  the #4583 guard (`assessDefaultWriteGuard`) is called per-command:
+  `sync` refuses, `import` warns, MCP stdio prints a once-per-process
+  advisory. Each future write-capable command needs its own call site, and
+  the three surfaces already phrase/latch the warning differently.
+  **Right altitude:** assess once where source resolution converges (the
+  seed_default tier of the resolution ladder in `source-resolver.ts` /
+  op-context scope resolution) and let callers choose refuse-vs-warn
+  policy, not re-implement detection. **Where:**
+  `src/core/source-resolver.ts`, `src/commands/sync.ts`,
+  `src/commands/import.ts`, `src/mcp/server.ts`.
+- [ ] **P2 — Transcript adapter contract methods instead of per-format
+  special cases in discover.ts.** **What:** discovery carries grok-specific
+  knowledge inline (the grok-sidecar filter scoped to proven grok trees,
+  the session-dir shape); the hermes and openclaw adapters have their own
+  inline carve-outs (`.checkpoint.*.jsonl`, wal/shm sidecars). Every new
+  harness grows discover.ts. **Right altitude:** extend the
+  `TranscriptAdapter` contract with `isSessionFile(path)` /
+  `sessionIdMatchesPath(id, path)` (names indicative) so each adapter owns
+  its own layout knowledge and discover.ts just asks. **Where:**
+  `src/core/transcripts/types.ts`, `discover.ts`, `detect.ts`, each
+  adapter.
+- [ ] **P3 — Derive the transcripts `--format` allowlist from the adapter
+  registry.** **What:** `src/commands/transcripts.ts` hand-maintains
+  `FORMATS` (`claude-code`, `codex`, `openclaw`, `hermes`, `grok`,
+  `chatgpt`, `claude-export`) parallel to the registry in
+  `src/core/transcripts/detect.ts` — adding grok touched both, and the next
+  adapter will too. Export the format ids from the registry and derive the
+  CLI allowlist (and its error-message enumeration) from it. **Where:**
+  `src/commands/transcripts.ts`, `src/core/transcripts/detect.ts`.
+- [ ] **P3 — Doctor checks call the runtime resolvers instead of
+  mirroring them.** **What:** two wave fixes stopped active drift but left
+  mirrors in place: `subagent_capability` (#4575) now walks a shared
+  exported precedence LIST from model-config.ts rather than calling
+  `resolveModelDetailed` itself (a future resolver behavior change — env
+  handling, alias mapping — that isn't expressible as list order drifts
+  again), and the `default_source_local_path` gathering wrapper
+  re-implements the #2018 write-through collision predicate ("sync.repo_path
+  is another source's own working tree") rather than importing the one
+  `resolvePageWriteTarget` uses. Mirrors drift; resolvers don't.
+  **Right altitude:** call `resolveModelDetailed` (or a read-only wrapper)
+  from the check, and export the #2018 collision predicate from
+  write-through.ts for the doctor wrapper. **Where:**
+  `src/commands/doctor/checks/search-eval.ts` (checkSubagentCapability),
+  `src/commands/doctor/checks/default-source-path.ts`,
+  `src/core/model-config.ts`, `src/core/write-through.ts`.
+
+### Ship-review deferrals (follow-up from v0.48.1.0 ship review)
+
+Items the three cross-model review rounds surfaced and deliberately deferred
+(each has a bounded blast radius today; none blocks the ship). The 27
+deferred M-effort issues above are NOT repeated here.
+
+- [ ] **P2 — loops_extract enqueue budget is a racy count-then-insert.**
+  **What:** `enqueueLoopsExtraction` (`src/core/google/google-source.ts`)
+  counts this source's waiting `loops_extract` jobs, then adds up to
+  `LOOPS_EXTRACT_ENQUEUE_CEILING - waiting`. Two concurrent sweeps of the
+  same source (a manual `sync --source` racing autopilot) each read the same
+  depth and both fill the budget, so the ceiling can be overshot by one
+  sweep's worth. Bounded: the per-revision idempotency key
+  (`loops:<source>:<slug>:<newestMs>`) means no thread is ever queued twice,
+  so the overshoot is spend headroom, never duplicate work. **Right
+  altitude:** reserve the budget in the same statement that inserts (an
+  `INSERT … SELECT` gated on the live count, or a per-source advisory lock
+  around the enqueue), or let `MinionQueue` own a `countWaiting(name,
+  predicate)` + `addBounded` pair. **Where:**
+  `src/core/google/google-source.ts`, `src/core/minions/queue.ts`.
+- [ ] **P3 — Grok per-message timestamps equal the session bounds.**
+  **What:** `chat_history.jsonl` carries no per-message times, so the adapter
+  stamps every message with `created_at` and only the last with
+  `last_active_at` (`src/core/transcripts/grok.ts`). Real source times, never
+  fabricated — but a downstream consumer that orders or windows by message
+  timestamp sees a flat session. Interpolation would fabricate provenance;
+  the honest fix is a per-message `timestamp_source` (or a session-level
+  `message_times: 'session_bounds'` stamp) so consumers can tell bounds
+  from real per-message times. **Where:** `src/core/transcripts/grok.ts`,
+  `render.ts`.
+- [ ] **P2 — Unbound legacy atom adoption can collide on slug.** **What:**
+  `isCompatibleAtomBinding` (`src/core/cycle/extract-atoms.ts`) treats an
+  atom with NO `source_slug`/`source_path` as adoptable by any source page
+  (pre-binding-era adoption). Two different source pages whose legacy
+  title-only slug coincides therefore both adopt the same unbound atom; the
+  second re-extraction rebinds it away from the first. Bounded to the
+  pre-binding era (new atoms are always bound). **Right altitude:** stamp
+  `source_slug` on first adoption so the second adopter hits the fail-closed
+  guard, and surface the conflict as a warn rather than a silent rebind.
+  **Where:** `src/core/cycle/extract-atoms.ts` (`resolvePageAtomSlug`,
+  `assertAtomImportBinding`).
+- [ ] **P3 — Provenance-link failures are counted as provider failures in
+  the drain summary.** **What:** in the extract_atoms batch, a failed
+  provenance-edge write (`link_source: 'atom-provenance'`, the #3961 bank)
+  lands in the same per-item failure records that feed
+  `status: 'provider_failure'` in `runExtractAtomsDrain`'s summary, so a
+  link-table hiccup reads as an LLM outage in `--json` and in doctor advice.
+  **Right altitude:** a typed failure `kind` (`provider` | `provenance` |
+  `write`) on the failure record, with `provider_failure` derived from the
+  provider kind only. **Where:** `src/core/cycle/extract-atoms.ts`,
+  `src/core/cycle/extract-atoms-drain.ts`.
+- [ ] **P3 — Cross-modal single-model quorum should stamp a degraded
+  verdict.** **What:** with only one of the three default slots keyed, a
+  cycle still emits PASS/FAIL from a single judge; the 2-model case is
+  already documented as "permanently inconclusive", but the 1-of-3 case
+  looks like a full-panel verdict. **Right altitude:** stamp
+  `degraded: 'single_model'` (and the reachable slot ids) on the verdict and
+  print it in the human summary. **Where:**
+  `src/core/cross-modal-eval/runner.ts`, `aggregate.ts`.
+- [ ] **P3 — OpenRouter `reasoning_content` promote shim buffers responses
+  for every family.** **What:** the compat fetch that promotes DeepSeek's
+  `reasoning_content` into an empty `content` reads and re-serializes the
+  whole JSON body for every OpenRouter response, not just the deepseek/
+  family it exists for (non-JSON bodies pass through byte-identical).
+  Correct, but it costs a parse per call and would break a streamed body.
+  **Right altitude:** family-gate the promote (the `openrouter-families.ts`
+  registry already names the families) and skip the parse otherwise.
+  **Where:** `src/core/ai/recipes/openrouter.ts`,
+  `src/core/ai/recipes/deepseek.ts`, `src/core/ai/openrouter-families.ts`.
+- [ ] **P3 — DRY dedupes left standing.** **What:** three hand-rolled copies
+  the review rounds saw but did not fold: `treeNeedsPush` in
+  `src/commands/hook.ts` duplicates the dirty-or-ahead probe the
+  `bootstrap_push_health` check (`src/commands/doctor/bootstrap-checks.ts`)
+  performs; `gatewayClient` in `src/commands/eval-longmemeval.ts` is a
+  private `ThinkLLMClient` adapter over the gateway that the other eval
+  commands re-derive; and the "waiting jobs for name N" count SQL lives in
+  `MinionQueue` (`queue.ts`) AND is hand-rolled (with a `sourceId`
+  predicate) in `google-source.ts`. **Right altitude:** one exported helper
+  each — a `git-state.ts` push-needed probe, a `gateway-think-client.ts`,
+  and `MinionQueue.countWaiting(name, { payloadFilter? })`. **Where:** as
+  named.
+- [ ] **P2 — `import-file.ts` protected-frontmatter strip is gated on
+  `opts.remote === true` (fail-open when `remote` is unset).** **What:**
+  the strip that keeps an untrusted writer from planting completion markers
+  (`atoms_scan_hash` and friends) only runs when the caller passed
+  `remote: true`; a caller that omits `remote` gets the trusted path. The
+  repo's trust rule is the opposite (`remote !== false` is untrusted). Every
+  current untrusted caller does thread `remote: true`, so this is a latent
+  fail-open, not a live hole. **Right altitude:** thread `remote: false`
+  explicitly from every trusted importer (sync, CLI import, cycle) first,
+  THEN flip the gate to `opts.remote !== false`. **Where:**
+  `src/core/import-file.ts`, `src/commands/import.ts`,
+  `src/commands/sync.ts`, `src/core/cycle/*`.
+- [ ] **P3 — `import.ts` `last_sync_at` stamp skips sources whose
+  `local_path` sits under ANY ancestor git repo.** **What:** the #1691 stamp
+  detects "git-tracked local_path" via `discoverGitRoot` (walks UP), so a
+  plain folder source nested anywhere inside an unrelated git checkout
+  (notes under a dotfiles repo, a vault inside `~/code`) never gets stamped
+  and stays flagged stale by `sync_freshness`. **Right altitude:** compare
+  the discovered git root against the source's OWN `local_path` /
+  `sync.repo_path` binding — only a source that sync itself would anchor to
+  that root should be excluded. **Where:** `src/commands/import.ts` (the
+  clean-run stamp block), `src/core/sync-git.ts:discoverGitRoot`.
+- [ ] **P3 — Remote `traverse_graph` flips to both/depth 2 even when
+  `link_type` is passed.** **What:** the conservative default keys on
+  `direction` alone, so a `link_type`-only remote call also walks
+  bidirectionally at depth 2 (pinned as intended, but a caller cannot tell a
+  defaulted walk from a requested one). **Right altitude:** stamp
+  `depth_defaulted` / `direction_defaulted` in the op's response meta (or the
+  stderr note) so agents can see when the walk was clamped for them. **Where:**
+  `src/core/ops/links.ts`.
+- [ ] **P2 — Pages for the PREVIOUS calendar are not reconciled when
+  `g_calendar_id` is re-pointed.** **What:** the sync token now rebinds and
+  the switch is logged, but the old calendar's event pages remain in the
+  brain until a `--full` reconcile learns to scope calendar pages by calendar
+  id. **Right altitude:** stamp `calendar_id` into the rendered event
+  frontmatter and reconcile by it, or delete the old calendar's pages on the
+  switch behind a confirm. **Where:** `src/core/google/google-render.ts`,
+  `src/core/google/google-source.ts:sweepCalendar`.
+- [ ] **P3 — CLI `gbrain capture` default slug uses only `--type`.** **What:**
+  the CLI lane keeps a frontmatter `type:` via `mergeCaptureFrontmatter`'s
+  user-wins fallback, but its default slug (the `inbox/` prefix decision) is
+  computed from `--type` alone, so a frontmatter-typed capture without
+  `--type` still lands under `inbox/`. The MCP `capture` op now derives both
+  the slug and the merge from the validated effective type; align the CLI.
+  **Where:** `src/commands/capture.ts`, `src/core/capture-content.ts`.
+- [ ] **P2 — `src/core/ops/pages.ts` sits at its 1505-line ratchet ceiling.**
+  **What:** the wave's capture-vocabulary enforcement and the get_page alias
+  ladder landed together and the ship-review alias-owner fix was a net-zero
+  edit to stay under the cap. The next change cannot land without a peel.
+  **Right altitude:** peel `capture` (+ `explicitCaptureType` wiring) into
+  `ops/pages-capture.ts` and the get_page resolution ladder into
+  `ops/pages-resolve.ts`, re-exported through `pages.ts`; lower the TSV row
+  in the same commit. **Where:** `src/core/ops/pages.ts`,
+  `scripts/module-size-limits.tsv`.
+
+## Eval write-path fix wave follow-ups (filed 2026-08-31; the five CEO-review-deferred items — wave receipt: gbrain-evals Cat 35 bracketing runs, pre-wave baseline dream 70.2% / quote fidelity 54.2% / emission 16/20 at aa820c7f)
 ## Eval retrieval fix wave follow-ups (filed 2026-08-31, second wave; receipts: LongMemEval recall_all@5 rescore 83.40% + Cat 34 openclaw 9-miss itemization at 6bf8db90)
 
 - [ ] **P2 — facts-lane `idea` kind quality gap.** **What:** Cat 35's facts
@@ -20,7 +230,7 @@
   analog of the per-call `dedupOpts.maxPerPage` (publicized by the LongMemEval
   `hybrid-diverse` row). Deferred at the 2026-08 CEO review (D3.5): ship only
   with a Class-1-dominant decomposition receipt; folds into the NEXT
-  KNOBS_HASH bump (v=28), never its own. **Where:** `src/core/search/dedup.ts`
+  KNOBS_HASH bump (v=29 as of 0.48.1.0 — 28 is the compiled-truth-boost epoch), never its own. **Where:** `src/core/search/dedup.ts`
   + `mode.ts` + `config.ts` registry. **Effort:** S.
 - [ ] **P3 — single-pool volunteer resolve micro-opt.** **What:** Arm 1 + Arm 2
   currently issue two resolver calls per windowed turn (pointer budget, then
@@ -5070,7 +5280,7 @@ contributor traps.
 
 - [x] **OpenRouter Anthropic subagent loop.** Anthropic routes (`openrouter:anthropic/…`) now declare `supports_subagent_loop` via a per-id predicate. `isAnthropicProvider` stays false (Messages SDK cannot speak OR); the handler auto-routes those jobs through `gateway.toolLoop()` when `agent.use_gateway_loop` is off. Live abort/retry: `test/e2e/openrouter-anthropic-subagent-replay.live.test.ts` (skip-gated on `OPENROUTER_API_KEY`). Other OR families stay refused.
 
-- [ ] **v0.37.x: Live-test non-Anthropic OpenRouter families (DeepSeek / OpenAI / Gemini) for the subagent loop.** Same abort/retry pin as Anthropic-via-OR before flipping the predicate wider.
+- [x] **DeepSeek DONE (v0.48.1.0 wave, #4672): Live-test non-Anthropic OpenRouter families for the subagent loop.** DeepSeek routes now drive the subagent loop with a live abort/retry pin (`test/e2e/openrouter-deepseek-subagent-replay.live.test.ts`); supported families are declared once in `src/core/ai/openrouter-families.ts`. REMAINING: OpenAI / Gemini families stay refused until each gets the same abort/retry pin before the predicate widens further.
 
 - [ ] **v0.37.x: Quarterly OR catalog refresh.** v0.37.6.0 ships 8 curated chat slugs (gpt-5.2, gpt-5.2-chat, gpt-5.5, claude-haiku-4.5, claude-sonnet-4.6, claude-opus-4.7, gemini-3-flash-preview, deepseek-chat) with `price_last_verified: '2026-05-20'`. OR's catalog churns weekly; specific slugs get deprecated, renamed, or merged. Refresh cadence: every 90 days, walk https://openrouter.ai/models, prune deprecated slugs, add new frontier IDs that match the recipe's curation logic (frontier-tier + cheap-routing entry points). Bump `price_last_verified`. The shape-test regression in `test/ai/recipe-openrouter.test.ts` (`MODEL_SHAPE` regex) means typos surface immediately; the catalog refresh is about discovery, not validation.
 
@@ -6962,7 +7172,7 @@ iteration's residuals.
 - **DNS rebinding protection for HTTP health_checks.** Current `isInternalUrl` validates the hostname string; DNS resolution happens later inside `fetch`. A malicious DNS server can return a public IP on first lookup and an internal IP on the actual request. Fix: resolve hostname via `dns.lookup` before fetch, pin the IP with a custom `http.Agent` `lookup` override, re-validate post-resolution. Alternative: use `ssrf-req-filter` library.
 - **Extended IPv6 private-range coverage.** Block `fc00::/7` (Unique Local Addresses), `fe80::/10` (link-local), `2002::/16` (6to4), `2001::/32` (Teredo), `::/128`. Current code covers `::1`, `::`, and IPv4-mapped (`::ffff:*`) via hex hextet parsing.
 - **IPv4 shorthand parsing.** `127.1` (legacy 2-octet form = 127.0.0.1), `127.0.1` (3-octet), mixed-radix with trailing dots. Current code handles hex/octal/decimal integer-form IPs but not these shorthand variants.
-- **Broader operation-layer limit caps.** `traverse_graph` `depth` param, plus `get_chunks`, `get_links`, `get_backlinks`, `get_timeline`, `get_versions`, `get_raw_data`, `resolve_slugs` — all currently accept unbounded `limit`/`depth`. Wave 3 only clamped `list_pages` and `get_ingest_log`.
+- **Broader operation-layer limit caps.** `traverse_graph` `depth` param, plus `get_chunks`, `get_links`, `get_backlinks`, `get_timeline`, `get_versions`, `get_raw_data`, `resolve_slugs` — all currently accept unbounded `limit`/`depth`. Wave 3 only clamped `list_pages` and `get_ingest_log`. _(partially addressed in v0.48.1.0: remote `traverse_graph` defaults to depth 2 and both engines cap the recursive walk at 5,000 rows; other ops still uncapped.)_
 - **`sync_brain` repo path validation.** The `repo` parameter accepts an arbitrary filesystem path. Same threat model as `file_upload` before wave 3. Add `validateUploadPath` (strict) for remote callers.
 - **`file_upload` size limit.** `readFileSync` loads the entire file into memory. Trivial memory-DoS from MCP. Add ~100MB cap (matches CLI's TUS routing threshold) and stream for larger files.
 - **`file_upload` regular-file check.** Reject directories, devices, FIFOs, Unix sockets via `stat.isFile()` before `readFileSync`.

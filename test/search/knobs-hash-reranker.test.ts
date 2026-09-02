@@ -44,7 +44,7 @@ function baseKnobs(): ResolvedSearchKnobs {
 }
 
 describe('KNOBS_HASH_VERSION + version invariants', () => {
-  test('version is 26 (…; 21→22 result-stamp/injection epoch #1663 #3995 #3783 #4220; 22→23 excludePrivate posture fold #4352; 23→24 negative-offset cache-skip gap #4358 residual; 24→25 keywordOrFallback knob kof= #3617; 25→26 salience/recency + intent_patterns fold #4415)', () => {
+  test('version is 28 (…; 23→24 negative-offset cache-skip gap #4358 residual; 24→25 keywordOrFallback knob kof= #3617; 25→26 salience/recency + intent_patterns fold #4415; 26→27 adaptive-return gate + intent fold E5b/F11; 27→28 compiledTruthBoost synthetic-row suppression #4256/#3695)', () => {
     // v0.35.0.0: 1→2 to fold reranker fields. v0.35.6.0: 2→3 to fold
     // floor_ratio. v0.36 wave: piggybacks on v=3 with 7 cross-modal knobs
     // (D2) PLUS column + provider context (D8/CDX-2 cross-column isolation).
@@ -88,7 +88,10 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // 25→26: sal=/rec=/ipat= — salience/recency + intent_patterns fold (#4415).
     // 26→27: ar=/arem=/arom=/armk=/ari= — adaptive-return gate + intent
     // class fold (2026-08 fix wave E5b); adaptive-on calls now cache.
-    expect(KNOBS_HASH_VERSION).toBe(27);
+    // 27→28: compiledTruthBoost suppresses the 2x boost for synthetic
+    // chunkless title rows (#4256, fixes #3695's fusion path) — reorders
+    // fused rows for identical knobs; version-only invalidation.
+    expect(KNOBS_HASH_VERSION).toBe(28);
   });
 
   test('hash is 16 hex chars regardless of reranker config', () => {
