@@ -138,6 +138,16 @@ export interface AuthInfo {
   token: string;
   clientId: string;
   /**
+   * Credential provenance resolved by the verifier. Identity rendering must
+   * not infer this from clientId naming: manually provisioned OAuth clients
+   * may use valid non-generated IDs, and legacy token names can collide with
+   * the generated `gbrain_cl_` prefix.
+   *
+   * Optional for compatibility with older/custom transports. Consumers may
+   * retain their historical fallback only when this field is absent.
+   */
+  authKind?: 'oauth' | 'legacy';
+  /**
    * Human-readable agent name resolved at token-verification time.
    * For OAuth clients this is `oauth_clients.client_name`; for legacy
    * bearer tokens it is `access_tokens.name`. Threading this through

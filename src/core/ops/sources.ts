@@ -47,10 +47,12 @@ const whoami: Operation = {
           'or set ctx.remote === false.',
       );
     }
-    // OAuth tokens have client_id starting with 'gbrain_cl_'; legacy
-    // access_tokens reuse `name` as both clientId and clientName (verifyAccessToken
-    // at oauth-provider.ts:417-430). Detect by inspecting the prefix.
-    const isOauth = ctx.auth.clientId.startsWith('gbrain_cl_');
+    // The verifier knows which table accepted the credential; use that
+    // provenance instead of inferring identity from clientId naming. Keep the
+    // prefix fallback only for older/custom transports that do not yet thread
+    // authKind.
+    const isOauth = ctx.auth.authKind === 'oauth' ||
+      (ctx.auth.authKind === undefined && ctx.auth.clientId.startsWith('gbrain_cl_'));
     if (isOauth) {
       return {
         transport: 'oauth',

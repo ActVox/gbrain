@@ -80,6 +80,32 @@ describe('whoami op contract', () => {
     });
   });
 
+  test('oauth transport uses verifier provenance for a non-generated client id', async () => {
+    const auth: AuthInfo = {
+      token: 'gbrain_at_manual',
+      clientId: 'manual-enterprise-client',
+      authKind: 'oauth',
+      clientName: 'manual enterprise client',
+      scopes: ['read', 'write'],
+      expiresAt: 1234567890,
+      sourceId: 'research-actvox',
+      allowedSources: ['research-actvox', 'default'],
+    };
+    const result = (await whoami.handler(
+      ctxWith({ remote: true, auth }),
+      {},
+    )) as any;
+    expect(result).toEqual({
+      transport: 'oauth',
+      client_id: 'manual-enterprise-client',
+      client_name: 'manual enterprise client',
+      scopes: ['read', 'write'],
+      expires_at: 1234567890,
+      source_id: 'research-actvox',
+      federated_read: ['research-actvox', 'default'],
+    });
+  });
+
   test('oauth transport uses fail-closed empty values when source grants are absent', async () => {
     const auth: AuthInfo = {
       token: 'gbrain_at_pre_migration',
@@ -143,6 +169,24 @@ describe('whoami op contract', () => {
     expect(result.transport).toBe('legacy');
     expect(result.token_name).toBe('my-personal-token');
     expect(result.scopes).toEqual(['read', 'write', 'admin']);
+    expect(result.expires_at).toBeNull();
+  });
+
+  test('legacy verifier provenance wins over an OAuth-looking token name', async () => {
+    const auth: AuthInfo = {
+      token: 'legacy-token',
+      clientId: 'gbrain_cl_legacy-name-collision',
+      authKind: 'legacy',
+      clientName: 'gbrain_cl_legacy-name-collision',
+      scopes: ['read'],
+      expiresAt: 999999999,
+    };
+    const result = (await whoami.handler(
+      ctxWith({ remote: true, auth }),
+      {},
+    )) as any;
+    expect(result.transport).toBe('legacy');
+    expect(result.token_name).toBe('gbrain_cl_legacy-name-collision');
     expect(result.expires_at).toBeNull();
   });
 

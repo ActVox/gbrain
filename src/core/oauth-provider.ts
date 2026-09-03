@@ -951,7 +951,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       const rowSurfaceSetBy = typeof row.surface_set_by === 'string' ? row.surface_set_by : undefined;
       return {
         token,
-        clientId: row.client_id as string,
+        clientId: row.client_id as string, authKind: 'oauth',
         clientName: (row.client_name as string | null) ?? undefined,
         scopes: (row.scopes as string[]) || [],
         expiresAt,
@@ -1040,7 +1040,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       const grantedScopes = normalizeTokenScopes(legacyRows[0].scopes);
       return {
         token,
-        clientId: name,
+        clientId: name, authKind: 'legacy',
         clientName: name,
         scopes: grantedScopes ?? ['read', 'write', 'admin'],
         expiresAt: Math.floor(Date.now() / 1000) + 365 * 24 * 3600, // Legacy tokens never expire — set 1yr future
