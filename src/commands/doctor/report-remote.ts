@@ -50,6 +50,8 @@ import {
   checkLinkResolutionOpportunity,
   checkFederationHealth,
   checkSelfUpgradeHealth,
+  multiSourceDriftGitRootSkipNote,
+  computeExtractAtomsBacklogCheck,
 } from '../doctor.ts';
 import {
   checkSchemaPackActive,
@@ -68,10 +70,12 @@ export async function doctorReportRemote(
 ): Promise<DoctorReport> {
   const checks: Check[] = [];
 
-  // 1. Connection
+  // 1. Connection. #4592: confined to the caller's source scope (undefined =
+  // brain-wide, the local/unscoped path) — an admin-scope aggregate on the
+  // remote trust boundary leaks an excluded source's size by subtraction.
   let pageCount = 0;
   try {
-    const stats = await engine.getStats();
+    const stats = await engine.getStats({ sourceIds: opts.sourceIds });
     pageCount = stats.page_count ?? 0;
     checks.push({
       name: 'connection',
@@ -161,10 +165,13 @@ export async function doctorReportRemote(
   // schema (event_page_id), NOT a migration verify-hook, per
   // migration-verify-hook-never-runs-on-stamped-brains.
   try {
+    // Source isolation: a scoped caller counts only its own sources' projections.
     const orphans = await engine.executeRaw<{ n: number }>(
       `SELECT count(*)::int AS n FROM timeline_entries te
        JOIN pages ep ON ep.id = te.event_page_id
-       WHERE te.event_page_id IS NOT NULL AND ep.deleted_at IS NOT NULL`,
+       WHERE te.event_page_id IS NOT NULL AND ep.deleted_at IS NOT NULL
+         ${opts.sourceIds ? 'AND ep.source_id = ANY($1::text[])' : ''}`,
+      opts.sourceIds ? [opts.sourceIds] : undefined,
     );
     const n = Number(orphans[0]?.n ?? 0);
     checks.push(
@@ -182,9 +189,9 @@ export async function doctorReportRemote(
     checks.push({ name: 'chronicle_projection_health', status: 'ok', message: 'no event projections yet' });
   }
 
-  // 3. Brain score
+  // 3. Brain score (#4592: same scope as the connection count above)
   try {
-    const health = await engine.getHealth();
+    const health = await engine.getHealth({ sourceIds: opts.sourceIds });
     const score = health.brain_score ?? 0;
     checks.push({
       name: 'brain_score',
@@ -271,8 +278,11 @@ export async function doctorReportRemote(
   // returned to the thin-client over MCP.
   try {
     const { findMisroutedPages } = await import('../../core/multi-source-drift.ts');
+    // Source isolation: a scoped caller's roster (and the sample slugs the
+    // walk returns) stays inside its grant; unscoped = brain-wide.
     const sources = await engine.executeRaw<{ id: string; local_path: string | null }>(
-      `SELECT id, local_path FROM sources`,
+      `SELECT id, local_path FROM sources ${opts.sourceIds ? 'WHERE id = ANY($1::text[])' : ''}`,
+      opts.sourceIds ? [opts.sourceIds] : undefined,
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
@@ -288,19 +298,35 @@ export async function doctorReportRemote(
         });
       } else if (result.count > 0) {
         const sampleStr = result.sample.map(s => `${s.slug} (intended=${s.intended_source})`).join(', ');
+        const skipNote = result.git_root_skipped.length > 0
+          ? multiSourceDriftGitRootSkipNote(result.git_root_skipped)
+          : '';
         checks.push({
           name: 'multi_source_drift',
           status: 'warn',
           message:
             `${result.count} page slug(s) appear at 'default' but NOT at the intended source ` +
             `(e.g., ${sampleStr}). Likely pre-v0.30.3 misroutes OR an incomplete initial sync. ` +
-            `Verify on the brain host: \`gbrain sources status\` then \`gbrain sync --source <id> --full\`.`,
+            `Verify on the brain host: \`gbrain sources status\` then \`gbrain sync --source <id> --full\`.` +
+            skipNote,
         });
       } else {
+        // #4712: see the local doctor's twin check — 'ok' would misreport
+        // "verified clean" if every candidate source was skipped and no
+        // walk actually ran.
+        const allSkipped =
+          result.git_root_skipped.length > 0 &&
+          result.git_root_skipped.length >= nonDefaultWithPath.length;
         checks.push({
           name: 'multi_source_drift',
-          status: 'ok',
-          message: 'No cross-source slug drift detected.',
+          status: allSkipped ? 'warn' : 'ok',
+          message: allSkipped
+            ? `Multi-source drift check performed no verification` +
+              multiSourceDriftGitRootSkipNote(result.git_root_skipped)
+            : result.git_root_skipped.length > 0
+              ? `No cross-source slug drift detected among checked sources.` +
+                multiSourceDriftGitRootSkipNote(result.git_root_skipped)
+              : 'No cross-source slug drift detected.',
         });
       }
     }
@@ -365,6 +391,13 @@ export async function doctorReportRemote(
   // Postgres brains are exactly who can't otherwise see the extraction backlog.
   // Brain-wide here (remote --source scoping is a separate TODO, like orphan_ratio).
   checks.push(await checkLinksExtractionLag(engine));
+
+  // #4576 (related gap): extract_atoms_backlog was absent from the
+  // thin-client surface, so an MCP-only caller couldn't see the backlog at
+  // all. SQL counts + pack/config reads on the server side — the env that
+  // actually runs (or fails to run) the cycle. Source-scoped like the
+  // connection count: the roster + per-source backlog stay inside the grant.
+  checks.push(await computeExtractAtomsBacklogCheck(engine, { sourceIds: opts.sourceIds }));
 
   // v0.39 T7 + T9 — schema-pack health checks (3 checks per v0.38 plan):
   //   schema_pack_active        — active pack resolves cleanly

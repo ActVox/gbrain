@@ -236,7 +236,7 @@ export const SECTIONS: DocSection[] = [
       {
         title: "skills/migrations/",
         description:
-          "Per-version agent-executable migration instructions (latest: v0.46.3.0 — the ZeroEntropy-sunset embedding + reranker switch playbook).",
+          "Per-version agent-executable migration instructions (latest: v0.48.3.0 — index rebuilds and temporary search/report/tool availability).",
         path: "skills/migrations/",
       },
       {
@@ -300,6 +300,13 @@ export const SECTIONS: DocSection[] = [
         title: "docs/architecture/infra-layer.md",
         description: "Shared infra patterns.",
         path: "docs/architecture/infra-layer.md",
+        includeInFull: false,
+      },
+      {
+        title: "docs/memorable-agents.md",
+        description:
+          "Optional Memorable procedural-memory integration: the session-end receipt, the config gate and kill switch, the consent model, and exactly what leaves the machine.",
+        path: "docs/memorable-agents.md",
         includeInFull: false,
       },
     ],
