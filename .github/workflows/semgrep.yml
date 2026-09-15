@@ -43,6 +43,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # The container user differs from checkout's owner. Trust only this
+          # workspace so our merge-base lookup works before Semgrep starts.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           if [ -n "$BASE_SHA" ]; then
             bash scripts/test-select-semgrep-baseline.sh
             MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
