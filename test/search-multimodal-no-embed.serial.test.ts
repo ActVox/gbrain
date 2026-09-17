@@ -18,6 +18,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { hybridSearch } from '../src/core/search/hybrid.ts';
+import { sealPageTextProjection } from '../src/core/page-state/projections.ts';
 
 let engine: PGLiteEngine;
 let fetchHandler: ((url: string, init: RequestInit) => Promise<Response>) | null = null;
@@ -106,6 +107,10 @@ describe('multimodal-only install: no-embedding early-return is multimodal-aware
       embedding_image: new Float32Array(1024).fill(0.1),
       modality: 'image',
     }]);
+    // v0.51 hides unsealed projections from every search path. The raw
+    // upsert above intentionally invalidates the page's projection revision,
+    // so seal the complete fixture before asserting multimodal retrieval.
+    await sealPageTextProjection(engine, 'photos/voyage-both-retained', 'default');
 
     let voyageCalled = 0;
     let openaiCalled = 0;
