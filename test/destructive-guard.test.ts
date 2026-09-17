@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { gbrainPath } from '../src/core/config.ts';
+import { withColdPglite } from './helpers/with-snapshot.ts';
 import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
@@ -34,15 +35,13 @@ import {
   type DestructiveImpact,
 } from '../src/core/destructive-guard.ts';
 
-// Tier 3 opt-out — these tests need the cold-init schema path so the v33
-// migration columns exist on the brain under test.
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
-
 async function setupBrain(): Promise<PGLiteEngine> {
-  const engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
-  return engine;
+  return withColdPglite(async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    return engine;
+  });
 }
 
 async function seedSource(engine: PGLiteEngine, id: string, opts?: { withPages?: number }): Promise<void> {

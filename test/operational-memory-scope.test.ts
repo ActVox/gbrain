@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { hybridSearch } from '../src/core/search/hybrid.ts';
+import { sealPageTextProjection } from '../src/core/page-state/projections.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -36,6 +37,7 @@ describe('operational canonical injection source scope', () => {
       chunk_source: 'compiled_truth',
       token_count: 5,
     }]);
+    await sealPageTextProjection(engine, 'ops/retrieval-policy', 'default');
 
     await engine.putPage('notes/safe', {
       type: 'note',
@@ -48,6 +50,7 @@ describe('operational canonical injection source scope', () => {
       chunk_source: 'compiled_truth',
       token_count: 6,
     }], { sourceId: 'safe' });
+    await sealPageTextProjection(engine, 'notes/safe', 'safe');
 
     await withEnv({
       OPENAI_API_KEY: undefined,
