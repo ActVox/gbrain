@@ -475,15 +475,11 @@ Key routing rules:
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
 
-## gstack (recommended)
+## Shared knowledge and skills
 
-This project uses [gstack](https://github.com/garrytan/gstack) for AI-assisted workflows.
-Install it for the best experience:
-
-```bash
-git clone --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack
-cd ~/.claude/skills/gstack && ./setup --team
-```
-
-Skills like /qa, /ship, /review, /investigate, and /browse become available after install.
-Use /browse for all web browsing. Use ~/.claude/skills/gstack/... for gstack file paths.
+New local brains keep knowledge and a useful memory skillpack in one recorded content
+root. Shared publication, own-principal following and editing have separate authority;
+ordinary memory writes never imply skill editing or script execution. Native router
+installation is not proof of native use. Read
+[shared brain skills](docs/guides/shared-brain-skills.md) and its
+[key-file contracts](docs/architecture/key-files/shared-skills.md) before changing this lifecycle.

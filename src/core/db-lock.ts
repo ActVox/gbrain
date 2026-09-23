@@ -957,7 +957,7 @@ export interface WithRefreshingLockOpts {
 export async function withRefreshingLock<T>(
   engine: BrainEngine,
   lockId: string,
-  work: (signal: AbortSignal) => Promise<T>,
+  work: (signal: AbortSignal, handle: DbLockHandle) => Promise<T>,
   opts: WithRefreshingLockOpts = {},
 ): Promise<T> {
   const ttlMinutes = opts.ttlMinutes ?? DEFAULT_TTL_MINUTES;
@@ -1026,7 +1026,7 @@ export async function withRefreshingLock<T>(
   let workFailed = false;
   try {
     controller.signal.throwIfAborted();
-    return await work(controller.signal);
+    return await work(controller.signal, handle);
   } catch (error) {
     workFailed = true;
     throw error;

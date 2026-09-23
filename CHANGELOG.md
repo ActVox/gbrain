@@ -2,6 +2,149 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.54.1.0] - 2026-09-23
+
+**Your brain has safer repairs and working managed-memory paths.**
+
+Keeping a brain current should not require guessing whether a note was saved,
+whether a background job is stuck, or whether a backup can actually be read.
+This release names blocked work and provides deliberate recovery steps. Health
+checks report proposed repairs instead of executing them, and forced migration
+previews no longer change the database or migration history.
+
+Managed brains can extract facts into existing entity pages, create atoms,
+import Google and GitHub content, and run the supported local synthesis,
+patterns and consolidation paths without bypassing their writer protections.
+Accepted extraction output can be replayed without another model call. Missing
+search data has a separate, preview-first repair with an explicit source and
+cost limit. Failed embedding work stops after bounded attempts instead of
+retrying forever.
+
+Backup status now distinguishes a configured destination from a recently
+verified remote copy. OpenClaw startup and current-turn context handling are
+also corrected, and new Apple-silicon release binaries receive a signature
+check before execution and publication.
+
+### How to inspect before repairing
+
+```bash
+gbrain sources writer status --json
+gbrain backup check --json
+gbrain embed --stale --facts --source source-example --dry-run --json
+```
+
+Replace the example source with the one you intend to inspect. None of these
+commands authorizes an ownership transfer or a paid repair.
+
+| Situation | What you can now see or do |
+| --- | --- |
+| A managed sync file fails | Inspect the source, file, receipt and pinned run, then explicitly retry the corrected input. |
+| An embedding effect exhausts its retries | Reconcile already-complete vectors or authorize one additional bounded cycle for the original request. |
+| A backup destination disappears | See failed or unknown evidence instead of treating configuration as a verified backup. |
+
+### Things to watch
+
+Stop and drain older writers before upgrading a managed deployment, then
+restart its owners and workers together. PGLite inline maintenance still needs
+exclusive access: gracefully stop its owner/supervisor, complete the local job,
+then restart it. Live fact extraction and fact-vector repair have resident IPC
+routes; this is not live-owner delegation for every dream command.
+
+Only the named managed paths are restored. Legacy cycle fence reconciliation,
+bulk conversation extraction/backfill and Google loop extraction refuse before
+provider work. Private facts are not promoted by managed consolidation. Git
+verification covers committed files, not a complete database restore. Native
+macOS 26.2 checks passed; macOS 27 certification, native Windows backup behavior
+and the reported aged-store reindex hang remain separate verification limits.
+
+## To take advantage of v0.54.1.0
+
+Follow [the managed-upgrade and recovery instructions](skills/migrations/v0.54.1.0.md).
+The new repair commands are opt-in; upgrading does not approve a backfill,
+ownership change, service installation or model spend. Existing OpenClaw users
+must inspect the context-engine slot and use `gbrain-context-engine` on current
+hosts. Keep the original installation and a verified full backup until the
+upgraded owner has reopened and the scoped readback checks pass.
+
+### Itemized changes
+
+- Managed writer administration normalizes large counters before IPC, adds
+  reviewed same-owner recovery for device/marker drift, identifies incomplete
+  onboarding, and allows explicit exact dead-local-lock cleanup without a
+  timeout-based takeover.
+- Managed sync records durable, deduplicated failure evidence, preserves
+  unfinished cursors, reports it through CLI/doctor, and performs explicit
+  fresh admission without mutating terminal receipts or hiding another run.
+- Coordinated fact/atom publication retains source authority, private
+  visibility, accepted output and completion receipts. Named local maintenance
+  retains publication results and consolidates semantic evidence atomically;
+  retired takes leave facts unconsolidated.
+- Google/GitHub connectors use guarded imports, deletion and checkpoint CAS.
+  Unbound API sources explicitly publish to the database; bound sources retain
+  canonical file publication. Restarted sync recovers retained publication;
+  explicit `--retry-failed` replaces a failed attempt without changing its old
+  receipt or resetting the API bookmark. Google embedding requests respect the
+  100-item provider limit.
+- Fact reconciliation preserves valid existing vectors on failed embedding
+  and cancellation while retaining privacy/withdrawal changes. Explicit
+  null-vector backfill validates source, model, row version, selected-brain
+  policy and budget before installing projections.
+- Embedding effects check actual vector provenance, avoid re-embedding complete
+  chunks, retain lifetime attempt accounting, and atomically complete vectors
+  with their effect. Readback and explicit retry remain source/authority-bound.
+- Backup checks use bounded, rotating remote-ref readback and expiring evidence.
+  Directory durability uses the narrow Windows error guard without swallowing
+  regular-file or unexpected I/O failures.
+- Retrieval output reuses the canonical credential scanner without changing
+  ranking or opaque identity. This is bounded display hygiene, not a guarantee
+  about all secret formats or earlier provider/evaluation inputs.
+- OpenClaw supports zero-argument factories, canonical slot registration and
+  separate current-turn prompts. Release executables use Bun 1.4.2; required
+  native checks retain older runtimes and add real pinned-host startup coverage.
+- Forced previews are read-only, failed migration phases remain retryable, and
+  installer fixtures no longer overwrite live autopilot files. A detection
+  guard reports accidental real-home changes during tests.
+
+Contributed by @olivershe (#5171), @javieraldape (#5220), @sheelcheyne (#5000),
+@haumanto (#5132), @thiagosian (#5201), @Masashi-Ono0611 (#5314, #5352, #5355),
+@VXNCXNX (#5322), @Mr-B-1 (#4867), @turian (#5305),
+@rokas-tarasevicius (#5287), and @lubosxyz (#5348). Their focused contributions
+were adapted to the current persistence and source-identity contracts.
+## [0.53.0.0] - 2026-09-23
+
+**Keep what your agents know and how they work in the same brain.** New local brains now create a content directory containing both knowledge and useful memory skills. Connected agents can discover the same published instructions instead of maintaining unrelated copies. An explicitly authorized editor can update a skill once, and other connections can fetch the same committed version, including its approved supporting files.
+
+Connecting a managed coding agent also installs an owned brain router in its skill directory. Claude Code, Codex and opencode still need a restart, and an installed file is not proof that a native session used it. Other clients receive portable discovery and clear instructions when their own enablement controls are required.
+
+Existing brains are not silently made more public. Previously approved instruction sharing remains prose-only. Personal edits are preserved, and permission to write memories does not grant permission to rewrite shared skills or execute downloaded scripts.
+
+### How to use it
+
+New host grants follow published skills by default; choose `--skills memory-only` to opt out. Existing grants stay unchanged unless explicitly updated. Use `list_skills` with `schema_version: 2`, then fetch the chosen qualified skill and revision with `get_skill`. Shared editors additionally require `skill_editor` and an explicit operation grant.
+
+| Situation | What happens |
+| --- | --- |
+| Fresh local initialization | Knowledge and packaged memory skills share a recorded content root. Git is optional. |
+| Another agent updates a skill | Readers fetch the new complete revision; conflicting edits are rejected. |
+| An old brain is upgraded | A staged migration records content, ownership and client actions without overwriting edits or expanding disclosure. |
+| A client cannot check freshness | Enforced adapter admission blocks stale use; advisory native integrations do not claim stronger guarantees. |
+
+## To take advantage of v0.53.0.0
+
+1. Run `gbrain upgrade`, then inspect `gbrain apply-migrations --dry-run --json`.
+2. On an existing file-backed brain, stop older writers and skill-serving processes, review writer status, and follow the migration checklist's state-bound claim and activation steps. Shared-skill activation requires explicit administration intent and the reviewed state; quiescence alone is not authority. Re-run `gbrain apply-migrations --yes` to finish eligible mechanical stages.
+3. Read `skills/migrations/v0.53.0.0.md` for explicit follow grants, DB-only export, local conflicts and verification. Reconnect each intended harness; do not count disconnected or native-unverified clients as finished.
+4. See [shared brain skills](docs/guides/shared-brain-skills.md) for scoped editing, disclosure policy, exact-version retrieval and recovery. Keep an operational database backup: Git content does not contain grants, delivery receipts or revocation history.
+
+### Itemized changes
+
+- Add source-qualified sealed skill revisions, bounded approved assets, compare-and-swap publication and durable replay through the canonical writer. Schema migration 164 adds the catalog, enrollment records and protocol guards.
+- Add `join_brain`, `sync_brain_skills`, `leave_brain`, `put_skill`, `delete_skill`, `get_skill_asset` and `set_skill_policy`, with explicit named capabilities and source/operation fences. Discovery joins the starter surface; the seven memory verbs remain unchanged.
+- Serve shared skill resources through the same authorized operations. Existing catalog clients receive compatible prose envelopes after canonical adoption.
+- Install namespaced, ownership-tracked routers and immutable local revision caches, with separate transport, artifact and native-use status. Preserve edited files on update and removal.
+- Add staged combined-content migration, compile-safe default memory skills and explicitly approved DB-only content export with round-trip checks. Existing publishing opt-outs, private files and grant ceilings survive upgrades.
+- Keep fresh-install upgrades compatible with canonical files: grandfathering uses durable metadata publication, preserves existing search projections and vectors, and does not enqueue embedding or fact-extraction work for the compatibility flag.
+
 ## [0.52.2.0] - 2026-09-22
 
 **Repair a memory page without guessing which copy to overwrite.** GBrain keeps
