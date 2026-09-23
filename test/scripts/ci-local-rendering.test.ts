@@ -9,6 +9,17 @@ const source = readFileSync(join(import.meta.dir, '../../scripts/ci-local.sh'), 
 const templateStart = source.indexOf("INNER_CMD=$(cat <<'EOF'");
 const templateEnd = source.indexOf('\n# Conductor / git-worktree support:', templateStart);
 
+test('the CI admin build keeps container dependencies and Vite cache off the host', () => {
+  const compose = Bun.YAML.parse(readFileSync(join(import.meta.dir, '../../docker-compose.ci.yml'), 'utf8')) as {
+    services: { runner: { volumes: string[] } };
+    volumes: Record<string, unknown>;
+  };
+  expect(compose.services.runner.volumes).toContain('gbrain-ci-admin-node-modules:/app/admin/node_modules');
+  expect(Object.hasOwn(compose.volumes, 'gbrain-ci-admin-node-modules')).toBe(true);
+  expect(compose.services.runner.volumes).toContain('gbrain-ci-admin-dist:/app/admin/dist');
+  expect(Object.hasOwn(compose.volumes, 'gbrain-ci-admin-dist')).toBe(true);
+});
+
 describe('ci-local command rendering', () => {
   const cases = [
     { phaseExit: 0, missingTool: '' },
@@ -83,7 +94,7 @@ function runPhases(noShard: boolean, diff: boolean, failStage = '') {
     put('bin/bun', `
 case "$*" in
   "run scripts/select-e2e.ts") printf '%s\\n' test/e2e/one.test.ts test/e2e/two.test.ts; exit 0 ;;
-  "run typecheck") stage=verify ;;
+  "run verify") stage=verify ;;
   "run test:serial") stage=serial ;;
   "run test:slow") stage=slow ;;
   *) exit 0 ;;
@@ -91,9 +102,6 @@ esac
 printf '%s:%s\\n' "$stage" "\${DATABASE_URL-unset}" >> "$TRACE"
 [ "$FAIL_STAGE" != "$stage" ] || exit 7
 `);
-    for (const script of ['check-jsonb-pattern.sh', 'check-progress-to-stdout.sh', 'check-trailing-newline.sh', 'check-wasm-embedded.sh']) {
-      put(`scripts/${script}`, 'exit 0');
-    }
     put('scripts/check-bun-test-timeout.sh', `
 printf 'timeout_guard:%s\\n' "\${DATABASE_URL-unset}" >> "$TRACE"
 [ "$FAIL_STAGE" != timeout_guard ] || exit 7
@@ -218,14 +226,16 @@ describe('ci-local execution coverage', () => {
 });
 
 describe('required PgBouncer execution through run-e2e', () => {
-  for (const [required, passes, testExit, expectedExit, parentCoverageExists] of [
+  for (const [required, passes, testExit, expectedExit, parentCoverageExists, outputBytes = 0] of [
     [true, 2, 0, 0, false],
     [true, 0, 0, 1, false],
     [true, 0, 3, 1, false],
     [false, 0, 0, 0, false],
     [true, 2, 0, 0, true],
+    [true, 2, 0, 0, false, 262144],
+    [true, 0, 0, 1, false, 262144],
   ] as const) {
-    test(`required=${required}, executed=${passes}, Bun exit=${testExit}, parent coverage exists=${parentCoverageExists}`, () => {
+    test(`required=${required}, executed=${passes}, Bun exit=${testExit}, parent coverage exists=${parentCoverageExists}${outputBytes ? `, diagnostic bytes=${outputBytes}` : ''}`, () => {
       const home = mkdtempSync(join(tmpdir(), 'gbrain-ci-pooler-'));
       try {
         const bin = join(home, 'bin');
@@ -238,6 +248,7 @@ describe('required PgBouncer execution through run-e2e', () => {
         writeFileSync(join(bin, 'bun'), `#!/bin/sh
 printf '%s\\n' "$GBRAIN_PGBOUNCER_URL" "$GBRAIN_PGBOUNCER_DIRECT_URL" "$GBRAIN_CI_REQUIRE_PGBOUNCER" "$GBRAIN_TEST_DB" "\${GBRAIN_SOURCE-unset}" "\${COVERAGE_DIR:-disabled}" > "$ENV_REPORT"
 printf ' %s pass\\n 0 fail\\n' "$FAKE_PASSES"
+if [ "$FAKE_OUTPUT_BYTES" -gt 0 ]; then printf '%*s\\n' "$FAKE_OUTPUT_BYTES" ''; fi
 exit "$FAKE_EXIT"
 `, { mode: 0o755 });
         const report = join(home, 'environment');
@@ -264,7 +275,7 @@ exit "$FAKE_EXIT"
             DATABASE_URL: direct, GBRAIN_PGBOUNCER_URL: pooled, GBRAIN_PGBOUNCER_DIRECT_URL: direct,
             GBRAIN_CI_REQUIRE_PGBOUNCER: required ? '1' : '0', GBRAIN_SOURCE: 'ambient-must-be-removed',
             GBRAIN_TEST_DB: '1',
-            ENV_REPORT: report, FAKE_PASSES: String(passes), FAKE_EXIT: String(testExit),
+            ENV_REPORT: report, FAKE_PASSES: String(passes), FAKE_EXIT: String(testExit), FAKE_OUTPUT_BYTES: String(outputBytes),
           },
         });
         expect(result.status, result.stdout + result.stderr).toBe(expectedExit);

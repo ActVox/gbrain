@@ -124,8 +124,10 @@ host, then you install the private handoff inside your coding agent's environmen
 
 ### A1. On the host, grant memory access
 
-Start from the host's existing HTTPS MCP deployment. Preview or create a
-separate `memory-writer` client for each intended agent:
+Start from the host's existing HTTPS MCP deployment (on your own computer,
+`gbrain mcp expose` provides one; see [use your brain from anywhere over
+MCP](../guides/remote-mcp.md)). Preview or create a separate `memory-writer`
+client for each intended agent:
 
 ```bash
 gbrain mcp grant coding-example --harness codex --profile memory-writer \
@@ -174,6 +176,9 @@ ordinary permission repair does not rotate secrets or duplicate clients.
 
 ## Now make it actually useful
 
+Read [memory boundaries](../guides/memory-boundaries.md) before promising graph
+freshness, provider-local processing, or recovery from Markdown export.
+
 ### A compact standing instruction
 
 Add this section to the agent's existing instructions:
@@ -186,6 +191,8 @@ decisions, projects, or prior work. On the memory surface, use recall or entity;
 only use paid synthesis when that capability has been configured and authorized.
 
 Save explicit requests to remember with provenance and the intended brain/source.
+Durable preferences belong in shared memory; transient task state, credentials,
+local configuration, and harness activation state do not.
 Do not automatically capture conversations unless I opt in. A request to save one
 fact does not enable ongoing capture. Chat-only instructions suppress persistence.
 
