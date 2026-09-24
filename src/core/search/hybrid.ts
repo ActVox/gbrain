@@ -525,7 +525,7 @@ const DEFAULT_OPERATIONAL_MEMORY_POLICY: Required<OperationalMemoryPolicyConfig>
   },
 };
 
-let operationalMemoryPolicyCache: { key: string; policy: Required<OperationalMemoryPolicyConfig> } | null = null;
+let operationalMemoryPolicyCache: { key: string; policy: Required<OperationalMemoryPolicyConfig>; queryMatches: Map<string, boolean> } | null = null;
 
 function mergeOperationalMemoryPolicy(input?: OperationalMemoryPolicyConfig | null): Required<OperationalMemoryPolicyConfig> {
   if (!input || typeof input !== 'object') return DEFAULT_OPERATIONAL_MEMORY_POLICY;
@@ -551,9 +551,7 @@ function mergeOperationalMemoryPolicy(input?: OperationalMemoryPolicyConfig | nu
 function loadOperationalMemoryPolicy(): Required<OperationalMemoryPolicyConfig> {
   const envJson = process.env.GBRAIN_OPERATIONAL_MEMORY_POLICY_JSON;
   const envPath = process.env.GBRAIN_OPERATIONAL_MEMORY_POLICY;
-  const homePath = process.env.GBRAIN_HOME
-    ? join(process.env.GBRAIN_HOME, '.gbrain', 'operational-memory-policy.json')
-    : '';
+  const homePath = process.env.GBRAIN_HOME ? join(process.env.GBRAIN_HOME, '.gbrain', 'operational-memory-policy.json') : '';
   const key = envJson ? `json:${envJson}` : `file:${envPath || homePath}`;
   if (operationalMemoryPolicyCache?.key === key) return operationalMemoryPolicyCache.policy;
   let parsed: OperationalMemoryPolicyConfig | null = null;
@@ -570,7 +568,7 @@ function loadOperationalMemoryPolicy(): Required<OperationalMemoryPolicyConfig> 
     parsed = null;
   }
   const policy = mergeOperationalMemoryPolicy(parsed);
-  operationalMemoryPolicyCache = { key, policy };
+  operationalMemoryPolicyCache = { key, policy, queryMatches: new Map() };
   return policy;
 }
 
@@ -584,7 +582,9 @@ function matchesAnyPattern(query: string, patterns: string[]): boolean {
 function isOperationalMemoryQuery(query?: string): boolean {
   if (!query) return false;
   const policy = loadOperationalMemoryPolicy();
-  return matchesAnyPattern(query, policy.intent_patterns) && !matchesAnyPattern(query, policy.raw_source_patterns);
+  const cached = operationalMemoryPolicyCache?.queryMatches.get(query); if (cached !== undefined) return cached;
+  const matches = matchesAnyPattern(query, policy.intent_patterns) && !matchesAnyPattern(query, policy.raw_source_patterns);
+  operationalMemoryPolicyCache?.queryMatches.set(query, matches); return matches;
 }
 
 function canonicalOperationalSlugsForQuery(query?: string): string[] {
@@ -1842,10 +1842,10 @@ export async function hybridSearch(
       types: opts?.types,
       excludeSlugs: opts?.exclude_slugs,
     });
-    const noEmbedOperational = await injectCanonicalOperationalResults(engine, noEmbedHopped, query, {
-      sourceId: opts?.sourceId,
-      sourceIds: opts?.sourceIds,
-    });
+    const noEmbedOperational = isOperationalMemoryQuery(query)
+      ? await injectCanonicalOperationalResults(engine, noEmbedHopped, query,
+        { sourceId: opts?.sourceId, sourceIds: opts?.sourceIds })
+      : noEmbedHopped;
     stampEvidence(noEmbedOperational, { cosineFloor: resolvedMode.evidence_cosine_floor });
     // #3995 — guaranteed page-1 relational evidence: a fired arm's answer is
     // often lexically unrecoverable, so its single-arm fused row can land
@@ -2271,10 +2271,10 @@ export async function hybridSearch(
       types: opts?.types,
       excludeSlugs: opts?.exclude_slugs,
     });
-    const kwOperational = await injectCanonicalOperationalResults(engine, kwHopped, query, {
-      sourceId: opts?.sourceId,
-      sourceIds: opts?.sourceIds,
-    });
+    const kwOperational = isOperationalMemoryQuery(query)
+      ? await injectCanonicalOperationalResults(engine, kwHopped, query,
+        { sourceId: opts?.sourceId, sourceIds: opts?.sourceIds })
+      : kwHopped;
     stampEvidence(kwOperational, { cosineFloor: resolvedMode.evidence_cosine_floor });
     const kwSliced = kwOperational.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
@@ -2577,10 +2577,10 @@ export async function hybridSearch(
     excludeSlugs: opts?.exclude_slugs,
   });
 
-  const operationalPool = await injectCanonicalOperationalResults(engine, aliasHopped, query, {
-    sourceId: opts?.sourceId,
-    sourceIds: opts?.sourceIds,
-  });
+  const operationalPool = isOperationalMemoryQuery(query)
+    ? await injectCanonicalOperationalResults(engine, aliasHopped, query,
+      { sourceId: opts?.sourceId, sourceIds: opts?.sourceIds })
+    : aliasHopped;
 
   // T4 — stamp evidence + create_safety so the agent's don't-duplicate
   // decision keys off WHY a page matched, not a raw blended score. Stamp on
