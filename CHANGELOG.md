@@ -2,6 +2,103 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.56.1.0] - 2026-09-24
+
+**Meeting imports tell you what they could read, and crowded timelines no longer stall extraction.**
+
+Some meeting exports put each speaker's name inside a small structured label instead of a plain heading. GBrain can now read the supported single-quoted form without guessing who spoke. Labels that are malformed, nested, or quoted as examples stay unparsed. When a page cannot be read, the extraction summary says so instead of implying that its facts were already extracted.
+
+You can also preview extraction without asking a model to interpret the transcript. The preview explains whether a page has the wrong type, too few turns, unsupported formatting, or no eligible turns after your chosen cutoff time. Pages with a fresh completion record are counted separately. Existing skip totals remain available to scripts.
+
+Timeline extraction handles long runs of spaces without the previous slowdown. Text hidden inside code stays hidden without joining the real lines around it. The email text-conversion helper also cleans supported escaped markup while preserving ordinary addresses, comparisons, and valid Unicode. This helper change does not add a new email-import path.
+
+### What changes in practice
+
+| Input | What you see |
+|---|---|
+| A supported speaker-object transcript | Utterances retain the explicitly named speaker. |
+| An unsupported transcript | A parse-skip explanation, not a false already-processed message. |
+| A timeline line with excessive leading spaces | Bounded parsing instead of a long stall. |
+| Escaped email formatting | Cleaned text, with unsupported or invalid entities left literal. |
+
+## To take advantage of v0.56.1.0
+
+Run `gbrain upgrade`. For a read-only preview of one meeting source:
+
+```bash
+gbrain extract-conversation-facts --source-id meetings --dry-run
+```
+
+**Say to your agent:** *"Run `extract-conversation-facts --dry-run` on my meeting source and explain why any pages were skipped."*
+
+This release adds no schema migration and does not automatically reprocess historical pages. Correcting a previously unparsed transcript leaves it eligible for a later extraction; fresh completion outcomes keep their existing meaning. The email helper uses a fixed decoding limit and is a text converter, not a browser sanitizer.
+
+### Itemized changes
+
+- Add the narrow `python-dict-utterance` conversation pattern with explicit attribution, conservative wrapper rejection, and normal section boundaries. Contributed by @furuchanchan in #5365; fixes #5364.
+- Preserve `pages_skipped` and add `pages_skipped_unparsed`, `pages_skipped_type_mismatch`, `pages_skipped_insufficient_turns`, and `pages_skipped_since` through CLI and worker aggregation. Keep dry-run parsing model-free.
+- Make both timeline date-prefix matchers non-ambiguous and preserve every CR/LF position and UTF-16 offset when masking code. Contributed by @Masashi-Ono0611 in #5369.
+- Keep `stripEmailHtml` capped before processing, remove recognized markup with quote-aware matching around at most two entity-decoding passes, and validate numeric Unicode scalars. Contributed by @furuchanchan in #5388; fixes #5327.
+
+### For contributors
+
+- Add parser corpus, real-core retry/source/provenance, model-free preview, oversized-page, timeline-consumer, and bounded email-conversion regressions without weakening existing assertions.
+
+## [0.54.1.1] - 2026-09-24
+
+**Your agent can now open administration and guide another agent through a working connection.**
+
+You can ask the agent running your brain to open its administration panel, register another agent, change what it can access, or remove access. An authorized administrator on another computer can follow the same steps. The instructions start by identifying who is allowed to administer the server and who simply needs to connect.
+
+Browser sign-in and private machine credentials now have separate setup paths. Register the kind your client supports, review its access, and deliver the matching instructions. You can return later to recover a download without creating a duplicate client or rotating its secret. Confidential recovery requires an active registration and a retained secret that still matches and has not expired; a missing or stale delivery needs explicit owner maintenance. A downloaded file is reported as delivered; a real call from the intended agent is still required to verify the connection.
+
+If a response is lost, the agent is told to inspect what happened before trying again. Failed lists stay visible as errors, and permission changes refresh the setup instructions immediately.
+
+### How to use it
+
+Use the configured endpoint and the owner's existing private credential file:
+
+```bash
+gbrain mcp admin login-link --url https://brain.example.com/mcp --admin-token-file /private/admin-token --json
+gbrain mcp admin clients --url https://brain.example.com/mcp --admin-token-file /private/admin-token --json
+```
+
+Follow [MCP administration](docs/mcp/ADMIN.md) for registration, native OAuth/PKCE, machine handoffs, permission edits, and recovery.
+
+| Action | What happens |
+|---|---|
+| Invalidate tokens | Current tokens, authorization codes, and pending approvals stop; the registration and secret remain, so machine credentials can obtain new tokens. |
+| Revoke | The registration remains visible, but access stops at the next authority check. |
+| Delete | The registration is removed; audit history and spending records remain. |
+
+### Things to watch
+
+Owner administration requires the separate owner credential. An OAuth client's `admin` scope does not open the dashboard. After a server restart, open a fresh owner session and restart pending authorization in the native client. Token invalidation leaves accepted jobs subject to their existing grant checks; revocation or deletion denies them at their next authority check. Already admitted external work may complete.
+
+## To take advantage of v0.54.1.1
+
+Run `gbrain upgrade` on the server host and on machines using the CLI, then restart the existing server through its usual service manager. Verify owner access with the read-only `mcp admin clients` command above, then open a fresh owner link. This release adds no database migration. Existing grants and token invalidations remain in effect. Keep the configured bootstrap credential private and stable across restarts; follow the runbook's headless recovery steps if it has been lost.
+
+**Say to your agent:** *"Open the MCP admin panel"* or *"Set up MCP OAuth"*. An ordinary client should ask the authorized server administrator to complete owner-only steps.
+
+### Itemized changes
+
+- Add engine-free `gbrain mcp admin` commands for owner links, client inspection, native registration, setup export, token invalidation, revocation, and deletion. Share authenticated HTTP handling with `mcp grant`.
+- Support public and confidential PKCE registration with exact redirect URIs, method-aware setup, explicit mixed-grant flow selection, and private recovery verified against the live registration.
+- Keep lifecycle changes atomic with grant revisions and audit records. Preserve accounting and distinguish deleted-client denial from retryable database failures in delegated work.
+- Preserve pending consent across owner login in a fresh browser. Separate authentication failure, total authentication, and session consent limits.
+- Connect Tailscale publishing guidance to owner login and separate native OAuth from machine setup. Independently managed servers keep using their own configured owner credential.
+- Publish the role router, administration runbook, `mcp-access` skill, adapter guidance, and matching initialization/discovery instructions. Improve dashboard errors, loading states, keyboard access, and connection verification wording.
+
+- Clarify owner login, fresh authorization after scope expansion, consent after OAuth setup recovery, and safe synthetic memory verification with cleanup.
+
+### For contributors
+
+- Add a required pinned Chromium browser lane exercising shipped embedded assets, plus HTTP, credential-redaction, lifecycle-race, and instruction coverage.
+- Stabilize native Codex test fixtures with explicit per-tool approval and bounded MCP startup waiting; isolate provider credentials and home directories in keyless fixtures. Preserve behavioral and security assertions.
+- Update existing HTTP message assertions to check the owner-specific authentication and retry remedies.
+- Preserve complete JSON audit reports in large-checkout tests and allow bounded cleanup of temporarily busy Windows test executables.
+
 ## [0.54.1.0] - 2026-09-23
 
 **Your brain has safer repairs and working managed-memory paths.**
