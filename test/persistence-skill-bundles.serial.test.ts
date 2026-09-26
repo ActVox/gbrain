@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +24,10 @@ import { prepareManagedSyncMutation, type SyncIntent } from '../src/core/persist
 import { managedSyncAuthority } from '../src/core/persistence/sync-authority.ts';
 import { SHARED_SKILLS_PERSISTENCE_SCHEMA_STATEMENTS } from '../src/core/shared-skills/persistence-schema.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { makeGitFixture } from './helpers/git-fixture.ts';
+import { testBackends } from './helpers/test-backends.ts';
 
+const backends = testBackends();
 const home = mkdtempSync(join(tmpdir(), 'gbrain-skill-persistence-'));
 const oldHome = process.env.GBRAIN_HOME;
 const fixtures: Array<{ engine: BrainEngine; root: string; binding: WorktreeBinding; close(): Promise<void> }> = [];
@@ -33,13 +37,18 @@ let hostId: string;
 beforeAll(async () => {
   process.env.GBRAIN_HOME = home;
   hostId = localHostId();
-  const local = new PGLiteEngine();
-  await local.connect({}); await local.initSchema();
-  const engines = [{ engine: local as BrainEngine, close: () => local.disconnect() }];
-  if (process.env.DATABASE_URL) engines.push(await isolatedPersistencePostgres(process.env.DATABASE_URL));
+  const engines: Array<{ engine: BrainEngine; close(): Promise<void> }> = [];
+  if (backends.includes('pglite')) {
+    const local = new PGLiteEngine();
+    await local.connect({}); await local.initSchema();
+    engines.push({ engine: local, close: () => local.disconnect() });
+  }
+  if (backends.includes('postgres')) engines.push(await isolatedPersistencePostgres(process.env.DATABASE_URL!));
   for (const item of engines) {
     for (const statement of SHARED_SKILLS_PERSISTENCE_SCHEMA_STATEMENTS) await item.engine.executeRaw(statement);
-    const root = join(home, item.engine.kind); mkdirSync(root);
+    const gitRoot = join(home, item.engine.kind); mkdirSync(gitRoot);
+    await makeGitFixture(gitRoot);
+    const root = join(gitRoot, 'content'); mkdirSync(root);
     await item.engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
     await registerLocalWriter(item.engine, 'cli');
     const binding = await claimWorktree(item.engine, sourceId, root);
@@ -334,8 +343,10 @@ describe('typed skill bundle persistence', () => {
         mkdirSync(join(f.root, 'skills', name), { recursive: true });
         writeFileSync(join(f.root, path), body);
         const intent: SyncIntent = { kind: 'managed_sync_import', expected_revision: null, sourcePath, path,
+          processingOptions: { noEmbed: true, noExtract: true, noSchemaPack: true },
           rawHash: sha256(body), content: body, ownerEpoch: String(f.binding.owner_epoch), syncAuthority: authority,
-          cursorKey: 'example-frozen-sync', runId: randomUUID(), index: 0, total: 1, from: null, target: 'example-target', slugMode: 'git-root' };
+          cursorKey: 'example-frozen-sync', runId: randomUUID(), index: 0, total: 1, from: null,
+          target: execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), slugMode: 'git-root' };
         const admission: WriteAdmission = { principal: authority.writer.principal, operation: 'submit_job', sourceId,
           sourceIncarnation: f.binding.source_incarnation, slug, worktreeId: f.binding.worktree_id,
           topologyGeneration: f.binding.topology_generation, authority: authority.writer, requestId: randomUUID(), callerIntent: intent, intent };
