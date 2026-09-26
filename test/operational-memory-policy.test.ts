@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { applyOperationalMemoryPolicy } from '../src/core/search/hybrid.ts';
+import { PageRegexBudget } from '../src/core/schema-pack/redos-guard.ts';
 import type { SearchResult } from '../src/core/types.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -74,6 +75,33 @@ describe('operational memory retrieval policy', () => {
       const degraded = [result('private/current-alpha', 'note', 1)];
       applyOperationalMemoryPolicy(degraded, `${'a'.repeat(2_000)}!`);
       expect(degraded[0].score).toBe(1);
+    });
+  });
+
+  test('caches query classification within one policy revision', async () => {
+    await withEnv({
+      GBRAIN_OPERATIONAL_MEMORY_POLICY_JSON: JSON.stringify({
+        intent_patterns: ['\\bperformance-cache-probe\\b'],
+      }),
+    }, async () => {
+      const original = PageRegexBudget.prototype.runBounded;
+      let regexCalls = 0;
+      PageRegexBudget.prototype.runBounded = function(...args) {
+        regexCalls++;
+        return original.apply(this, args);
+      };
+      try {
+        applyOperationalMemoryPolicy([result('ops/current-actions', 'task-list')], 'performance-cache-probe status');
+        const firstPassCalls = regexCalls;
+        expect(firstPassCalls).toBeGreaterThan(0);
+
+        for (let i = 0; i < 100; i++) {
+          applyOperationalMemoryPolicy([result('ops/current-actions', 'task-list')], 'performance-cache-probe status');
+        }
+        expect(regexCalls).toBe(firstPassCalls);
+      } finally {
+        PageRegexBudget.prototype.runBounded = original;
+      }
     });
   });
 });

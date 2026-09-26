@@ -52,6 +52,7 @@ import {
   type SourceRow as OpsSourceRow,
 } from '../core/sources-ops.ts';
 import { isValidRepoName } from '../core/github-source.ts';
+import { ALL_GOOGLE_SERVICES, DEFAULT_CALENDAR_ID } from '../core/google/types.ts';
 import {
   resolveSourceWithTier,
   SOURCE_TIER_NAMES,
@@ -137,7 +138,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
         '[--repos owner/name,...] [--dir <path>] ' +
         '[--app-id <n> --app-pem <path>] [--app-install <n>]\n' +
         '       google kind: --account <email> [--services gmail,calendar,contacts] ' +
-        '[--history-days <n>] [--dir <path>]   (connect first: gbrain google connect)\n' +
+        '[--history-days <n>] [--calendar-id <id>] [--dir <path>]   (connect first: gbrain google connect)\n' +
         '                    [--access vault|command|env] [--token-command "<cmd>"] [--token-env <VAR>]   (non-vault Google access: gog/gcloud/gateway)',
     );
     process.exit(2);
@@ -168,6 +169,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
   let gTokenEnv: string | undefined;
   let gServices: string[] = ['gmail', 'calendar', 'contacts'];
   let gHistoryDays = 90;
+  let gCalendarId: string = DEFAULT_CALENDAR_ID;
 
   for (let i = 1; i < args.length; i++) {
     const a = args[i];
@@ -218,6 +220,15 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
         process.exit(2);
       }
       gHistoryDays = v;
+      continue;
+    }
+    if (a === '--calendar-id') {
+      const v = (args[++i] ?? '').trim();
+      if (!v) {
+        console.error('--calendar-id needs a value (see: gbrain google calendars).');
+        process.exit(2);
+      }
+      gCalendarId = v;
       continue;
     }
     if (a === '--scope') {
@@ -280,28 +291,45 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
   if (gKind) {
-    const { ALL_GOOGLE_SERVICES } = await import('../core/google/types.ts');
     const bad = gServices.filter((s) => !(ALL_GOOGLE_SERVICES as readonly string[]).includes(s));
     if (bad.length > 0) {
       console.error(`Error: unknown --services entries: ${bad.join(', ')}. Valid: gmail, calendar, contacts`);
       process.exit(2);
     }
-    // Duplicate-account guard: a second source for the same account would
-    // duplicate every page/loop in federated reads and coalesce the two
-    // sources' loops_extract jobs. Warn loudly (not refuse — split-window
-    // setups are conceivable) so the duplication is a choice, not a surprise.
+    // Duplicate-account guard: a second source for the same account AND the
+    // same services would duplicate every page/loop in federated reads and
+    // coalesce the two sources' loops_extract jobs. Warn loudly (not refuse —
+    // split-window setups are conceivable) so the duplication is a choice,
+    // not a surprise. Scoped to OVERLAPPING services: a second source for the
+    // same account that syncs a DIFFERENT slice (e.g. a secondary calendar
+    // via --calendar-id, or calendar-only next to gmail-only) is the
+    // supported topology, not duplication.
     try {
       const dupRows = await engine.executeRaw<{ id: string; config: unknown }>(
         `SELECT id, config FROM sources WHERE archived IS NOT TRUE`,
         [],
       );
+      let overlapNote = '';
       const dup = dupRows.find((r) => {
         const c = typeof r.config === 'string' ? (JSON.parse(r.config) as Record<string, unknown>) : ((r.config ?? {}) as Record<string, unknown>);
-        return c.kind === 'google' && c.g_account === gAccount;
+        if (c.kind !== 'google' || c.g_account !== gAccount) return false;
+        const existingServices =
+          typeof c.g_services === 'string'
+            ? c.g_services.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+            : ['gmail', 'calendar', 'contacts'];
+        let overlap = gServices.filter((s) => existingServices.includes(s));
+        // Two calendar sources pointing at DIFFERENT calendars never collide —
+        // one calendar per source is how secondary calendars are ingested.
+        const existingCal =
+          typeof c.g_calendar_id === 'string' && c.g_calendar_id.trim() ? c.g_calendar_id.trim() : DEFAULT_CALENDAR_ID;
+        if (existingCal !== gCalendarId) overlap = overlap.filter((s) => s !== 'calendar');
+        if (overlap.length === 0) return false;
+        overlapNote = overlap.join(', ');
+        return true;
       });
       if (dup) {
         console.error(
-          `Warning: source "${dup.id}" already syncs ${gAccount} — a second source for the same account duplicates its pages and loops in federated reads.`,
+          `Warning: source "${dup.id}" already syncs ${gAccount} (${overlapNote}) — a second source for the same account and services duplicates its pages and loops in federated reads.`,
         );
       }
     } catch { /* preflight is best-effort */ }
@@ -400,6 +428,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
             account: gAccount!,
             services: gServices,
             historyDays: gHistoryDays,
+            calendarId: gCalendarId,
             dir: ghDir ?? defaultCloneDir(`${id}-google`),
             access: (gAccess ?? 'vault') as 'vault' | 'command' | 'env',
             tokenCommand: gTokenCommand,
@@ -1188,6 +1217,10 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
   // Local CLI on the trusted host: probe the live commit hash so a quiet,
   // caught-up source reports lag 0 instead of growing wall-clock (v0.41.32.0).
   const metrics = await computeAllSourceMetrics(engine, sources, { probeContent: true });
+  const { readCompanyBrainSourceStatus } = await import('../core/company-brain/status.ts');
+  const ingestion = new Map(await Promise.all(sources.map(async source =>
+    [source.id, Object.hasOwn(parseSourceConfig(source.config), 'company_brain')
+      ? await readCompanyBrainSourceStatus(engine, source.id) : null] as const)));
 
   // #1950: a source holding a live (non-TTL-expired) per-source sync lock is
   // actively syncing RIGHT NOW. Without this it printed "idle" while a sync
@@ -1207,6 +1240,7 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
       ...m,
       sync_running: syncRunning.has(m.source_id),
       sync_holder: syncRunning.get(m.source_id) ?? null,
+      ...(ingestion.get(m.source_id) ? { ingestion: ingestion.get(m.source_id) } : {}),
     }));
     console.log(JSON.stringify({ schema_version: 1, sources: enriched }, null, 2));
     return;
@@ -1214,6 +1248,9 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
 
   // Human-readable table: SOURCE | LAG | EMBED | BACKFILL | FAILS | QUEUE | PAGES | LAST SYNC
   console.log('SOURCES — health');
+  for (const [sourceId, status] of ingestion) {
+    if (status) console.log(`  ${sourceId}: company ingestion ${status.state}${status.phase ? ` (${status.phase})` : ''}${status.receipt_id ? `, receipt ${status.receipt_id}` : ''}`);
+  }
   console.log('────────────────');
   console.log(
     `  ${'SOURCE'.padEnd(20)}  ${'LAG'.padEnd(8)}  ${'EMBED'.padEnd(7)}  ${'BACKFILL'.padEnd(9)}  ${'FAILS'.padEnd(6)}  ${'QUEUE'.padEnd(6)}  ${'PAGES'.padStart(8)}  LAST SYNC`,
@@ -1753,18 +1790,29 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
 
 // ── Dispatcher ──────────────────────────────────────────────
 
-// v0.40.6.0: my duplicate `runStatus` (line ~895 pre-resolution) was
-// removed during the v0.40.5 merge. Master's source-health.ts-backed
-// runStatus at line ~582 is a strict superset (adds lag / embed coverage
-// / failed-job count / queue depth columns). The `buildSyncStatusReport`
-// + `printSyncStatusReport` exports from src/commands/sync.ts remain
-// available as a library API for callers who want the v0.40.6.0-specific
-// shape (used by test/e2e/sync-status-pglite.test.ts as the IRON RULE
-// regression).
-
 export async function runSources(engine: BrainEngine, args: string[]): Promise<void> {
   const sub = args[0];
   const rest = args.slice(1);
+  if (sub === 'reconcile') {
+    const { runReconcileCli } = await import('./source-reconcile.ts');
+    return runReconcileCli(rest, engine);
+  }
+  if (sub === 'inspect') {
+    const { runCompanyBrainInspection } = await import('./company-brain-inspect.ts');
+    return runCompanyBrainInspection(rest);
+  }
+  if (sub === 'connect') {
+    const { runCompanyBrainConnect } = await import('./company-brain-connect.ts');
+    return runCompanyBrainConnect(rest, async () => engine);
+  }
+  if (sub === 'demo' && rest[0] === 'company-brain') {
+    const { runCompanyBrainDemoCli } = await import('./company-brain-demo.ts');
+    return runCompanyBrainDemoCli(rest.slice(1));
+  }
+  if (sub === 'writer') {
+    const { runPersistenceAdminCli } = await import('./persistence-admin.ts');
+    return runPersistenceAdminCli('writer', rest, engine);
+  }
 
   // Help guards run BEFORE the subcommand switch below (mirrors jobs.ts
   // src/commands/jobs.ts:462-471 — help checked first-position, then any
@@ -1796,6 +1844,10 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     return;
   }
 
+  if (['add', 'remove', 'archive', 'restore', 'purge', 'set-path', 'reclone'].includes(sub)) {
+    const { runConnectedSourceLifecycle } = await import('./sources-lifecycle.ts');
+    if (await runConnectedSourceLifecycle(engine, args)) return;
+  }
   switch (sub) {
     case 'add':        return runAdd(engine, rest);
     case 'list':       return runList(engine, rest);
@@ -1822,6 +1874,8 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'tracked-branch': return runTrackedBranch(engine, rest);
     // v0.40.3.0 contextual retrieval (from master)
     case 'set-cr-mode': return runSetCrMode(engine, rest);
+    // #4739 non-destructive local_path pointer repair
+    case 'set-path':   { const { runSetPath } = await import('./sources-set-path.ts'); return runSetPath(engine, rest); }
     case 'audit':      return runAudit(engine, rest);
     // v0.46 github-source demo (offline, privacy-clean fixtures)
     case 'demo':       { const { runSourcesDemo } = await import('./sources-demo.ts'); return runSourcesDemo(engine, rest); }
@@ -1844,10 +1898,17 @@ function printHelp(): void {
   console.log(`gbrain sources — manage multi-source brain configuration (v0.26.5)
 
 Subcommands:
+  inspect <path> [--profile company-brain] [--json] [--out <file>]
+                                    Preview committed company Markdown without a database or source edits.
+  connect <path> --brain <id> --source <id> [--profile company-brain] [--yes] [--json]
+                                    Preview, approve, import and verify a new company source; --plan <file> reuses a saved inspection.
+  demo company-brain [--json]        Run a fictional company through the real import and graph pipeline offline.
   add <id> --path <p> [--name <n>] [--federated|--no-federated] [--force]
                                     Register a new source. --path must be a git repo
                                     with committed files; --force skips that check.
   list [--json]                     List registered sources with page counts.
+  writer status|claim|activate|transfer  Inspect, activate or transfer canonical ownership (see writer --help).
+  reconcile <id> <slug> --brain <id> Preview or apply a guarded file/database repair (see reconcile --help).
   remove <id> [--confirm-destructive] [--dry-run]
                                     Permanently delete a source and all its data.
                                     Shows impact preview. Requires --confirm-destructive
@@ -1885,6 +1946,12 @@ Subcommands:
                                     override (v0.40.3.0). Pass "unset" or
                                     "default" to clear (NULL falls through
                                     to the global search.mode bundle).
+  set-path <id> <path> [--force]    Repair a source's local_path pointer
+                                    (DB column only, never touches disk).
+                                    --force skips the overlapping-path guard.
+                                    Rejects a missing source or a path that
+                                    doesn't exist. See gbrain doctor's
+                                    default_source_local_path check.
   webhook <set|show|rotate|clear> <id> [options]
                                     v0.40 — per-source webhook secret management.
                                     Run 'sources webhook --help' for subcommand detail.

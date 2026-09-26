@@ -6,6 +6,7 @@
  * + missing-context bugs; this module exists to prevent that recurring.
  */
 
+import { affectsRecall } from '../core/types.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { operations, OperationError, enforceBoundClientOpAllowList } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
@@ -27,6 +28,8 @@ import {
 } from './validate-params.ts';
 import { backupCheckDisabled, backupNagGate, backupNoticeText, loadBackupStatus } from '../core/backup/status-file.ts';
 import { maybeRefreshBackupStatusInProcess } from '../core/backup/coverage.ts';
+import { operationScopesAllowed } from '../core/scope.ts';
+import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
 
 // WP3: normalization + validation moved to validate-params.ts (direct unit
 // surface). Re-exported here so existing imports/tests keep working.
@@ -124,6 +127,8 @@ export interface ToolResult {
 }
 
 export interface DispatchOpts {
+  /** Configuration selected by the resident transport, never populated from wire params. */
+  config?: OperationContext['config'];
   /** Defaults to true (remote/untrusted). Local CLI callers (`gbrain call`) pass false. */
   remote?: boolean;
   /** Override the default stderr logger (e.g. CLI uses console.* directly). */
@@ -336,7 +341,10 @@ export function buildEmptyRetrievalBlock(retrieval: unknown): string | null {
   };
   const parts: string[] = ['0 results.'];
   if (typeof r.retrieved_count === 'number') parts.push(`retrieved ${r.retrieved_count} before trimming.`);
+  // Ranking-only stages (a skipped reranker) cannot cause a miss — the model
+  // must not be told recall was impaired when only ordering was.
   const stages = (r.degraded ?? [])
+    .filter(affectsRecall)
     .map(d => d?.stage)
     .filter((s): s is string => typeof s === 'string' && s.length > 0);
   parts.push(stages.length > 0
@@ -464,7 +472,7 @@ export function buildOperationContext(
       : undefined) ?? metaSessionIdFrom(params);
   return {
     engine,
-    config: loadConfig() || { engine: 'postgres' },
+    config: opts.config ?? loadConfig() ?? { engine: 'postgres' },
     logger: opts.logger || stderrLogger,
     dryRun: !!params.dry_run,
     remote: opts.remote ?? true,
@@ -498,7 +506,7 @@ export async function dispatchToolCall(
   const isVerb = VERB_NAME_SET.has(name);
   // [c11] dispatch-layer usage sidecar for the five verbs — counts validation
   // failures too. Fire-and-forget; never awaited, never throws.
-  const logVerb = (ok: boolean, extra?: { budget_dropped?: number; entity_found?: boolean }) => {
+  const logVerb = (ok: boolean, extra?: { budget_dropped?: number; entity_found?: boolean; remember_status?: string }) => {
     if (!isVerb) return;
     logVerbUsage({
       verb: name,
@@ -600,7 +608,7 @@ export async function dispatchToolCall(
   // config read.
   const unknownParamWarnings = findUnknownParams(op, safeParams);
   if (unknownParamWarnings.length > 0) {
-    const strictMode = await resolveStrictParamsMode(engine, loadConfig());
+    const strictMode = await resolveStrictParamsMode(engine, opts.config ?? loadConfig());
     if (strictMode === 'reject') {
       logVerb(false);
       // Privacy (amendment 11): the raw unknown key rides `suggestion` ONLY.
@@ -660,18 +668,47 @@ export async function dispatchToolCall(
   }
 
   try {
+    if (ctx.remote !== false && op.requiredScopes?.length) {
+      let scopes = ctx.auth?.scopes;
+      if (!scopes && ctx.transport === 'stdio') {
+        const verified = currentVerifiedLocalWriter() ?? await verifyLocalWriter(engine, await readLocalWriter(engine, 'stdio'));
+        scopes = verified.remote ? verified.grant.scopes : [];
+      }
+      if (!operationScopesAllowed(scopes ?? [], op)) {
+        throw new OperationError('permission_denied', 'This operation requires an explicit shared-skills grant.',
+          `Ask the brain owner to grant ${op.requiredScopes.join(', ')} for this connection.`);
+      }
+    }
     // Fail-closed gate for slug-bound OAuth clients, applied here because
     // this is the one path both MCP transports share. Per-op fences still
     // run inside the handlers; this stops an unfenced write op from being
     // a silent hole. See CLIENT_FENCED_WRITE_OPS in operations.ts.
     enforceBoundClientOpAllowList(ctx.auth, op);
-    const result = await op.handler(ctx, safeParams);
+    const sharedStdio = ctx.transport === 'stdio' && !ctx.auth &&
+      (op.requiredScopes?.length || ['list_skills', 'get_skill', 'get_skill_asset', 'list_brain_skillpack'].includes(name));
+    let registration: Awaited<ReturnType<typeof readLocalWriter>> | undefined;
+    if (sharedStdio) {
+      try { registration = await readLocalWriter(engine, 'stdio'); }
+      catch (error) {
+        if (!(error instanceof OperationError) || error.code !== 'writer_registration_required' || op.requiredScopes?.length) throw error;
+      }
+    }
+    const result = registration
+      ? await withVerifiedLocalRegistration(engine, registration, async verified => {
+        if (!verified.remote) throw new OperationError('permission_denied', 'This registration is not an agent-facing connection.');
+        return op.handler(ctx, safeParams);
+      })
+      : await op.handler(ctx, safeParams);
     // [E4] verb success metrics: budget drops + entity hit/miss when present.
     {
-      const r = result as { dropped_count?: number; found?: boolean } | null;
+      const r = result as { dropped_count?: number; found?: boolean; status?: string } | null;
       logVerb(true, {
         ...(typeof r?.dropped_count === 'number' ? { budget_dropped: r.dropped_count } : {}),
         ...(name === 'entity' && typeof r?.found === 'boolean' ? { entity_found: r.found } : {}),
+        // remember's frozen status enum (inserted|duplicate|superseded) —
+        // the memory_writeback doctor counters read this (all-MCP-callers
+        // semantics, labeled honestly there; OV-A11).
+        ...(name === 'remember' && typeof r?.status === 'string' ? { remember_status: r.status } : {}),
       });
     }
     const out: ToolResult = { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

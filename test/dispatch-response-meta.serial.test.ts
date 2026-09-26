@@ -37,7 +37,7 @@ const { dispatchToolCall } = await import('../src/mcp/dispatch.ts');
 
 const engineStub = {
   getConfig: async () => null,
-  executeRaw: async () => [],
+  executeRaw: async (sql: string) => sql.includes('AS pending') ? [{ pending: false }] : [],
 } as unknown as BrainEngine;
 
 const DEGRADED_META = {
@@ -88,7 +88,7 @@ describe('dispatch response meta (WP2/D3/D8)', () => {
   });
 
   test('non-empty results → single block, _meta.retrieval still present (D3: on ALL responses)', async () => {
-    nextResults = [{ page_id: 1, slug: 'a', chunk_text: 'x' }];
+    nextResults = [{ page_id: 1, source_id: 'default', slug: 'a', chunk_text: 'x' }];
     nextMeta = DEGRADED_META;
     const out = await callSearch();
     expect(out.content.length).toBe(1);
@@ -114,6 +114,15 @@ describe('dispatch response meta (WP2/D3/D8)', () => {
 });
 
 describe('buildEmptyRetrievalBlock (unit)', () => {
+  test('a ranking-only stage (reranker_skipped) never impairs recall → still a clean miss', async () => {
+    const { buildEmptyRetrievalBlock } = await import('../src/mcp/dispatch.ts');
+    const out = buildEmptyRetrievalBlock({ retrieved_count: 0, degraded: [{ stage: 'reranker_skipped', reason: 'no_key' }] });
+    expect(out).toContain('clean miss');
+    expect(out).not.toContain('reranker_skipped');
+    const mixed = buildEmptyRetrievalBlock({ retrieved_count: 0, degraded: [{ stage: 'reranker_skipped' }, { stage: 'embed_unavailable', reason: 'no_provider' }] });
+    expect(mixed).toContain('degraded: embed_unavailable.');
+  });
+
   test('hint passthrough + stage dedupe + garbage tolerance', async () => {
     const { buildEmptyRetrievalBlock } = await import('../src/mcp/dispatch.ts');
     const text = buildEmptyRetrievalBlock({

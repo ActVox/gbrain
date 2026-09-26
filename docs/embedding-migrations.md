@@ -5,7 +5,7 @@
 > transition (all three dim-pinned columns), NULL-signature pages, the
 > reranker companion switch, the query cache, locks, and resume-after-kill,
 > and verifies the database before declaring anything done. Preview with
-> `--dry-run`; inspect state with `--status`. Leaving ZeroEntropy: follow
+> `--dry-run`; inspect state with `--status`. For the explicit-consent playbook, follow
 > `skills/migrations/v0.46.3.0.md`. The manual recipes below remain as the
 > appendix for unusual situations (they are what the dimension-mismatch
 > error messages link to).
@@ -21,33 +21,71 @@ automatically.
 this mismatch and refuse to silently proceed. This doc is the recipe
 they point at.
 
-## Same-dimension model swaps (v0.41.31.0 — automatic)
+## Same-dimension model swaps (automatic)
 
 If you switch to a different model at the **same** dimension count
 (e.g. one 1536-dim provider to another, or a re-tuned model that keeps
 its width), the column type doesn't change, so no `ALTER`/wipe recipe
-is needed. As of v0.41.31.0, gbrain stamps an embedding-provenance
+is needed. gbrain stamps an embedding-provenance
 signature (`<provider:model>:<dims>`) onto each page when its chunks are
 embedded. After you point the config at the new model, the stored
 signatures differ from the current one, and `gbrain embed --stale`
-re-embeds exactly those pages:
+revisits those pages. Chunks already matching the target model, current text
+hash, and vector width keep their embeddings. A fully current page can have
+its signature restamped without another provider call; interrupted batches
+do not discard completed current vectors.
 
 ```bash
 # After switching to the new same-dim model in your config:
-gbrain embed --stale          # re-embeds signature-drifted pages
+gbrain embed --stale          # embeds stale chunks; preserves current vectors
 gbrain embed --stale --dry-run # preview the count without re-embedding
 ```
 
 Under federated_v2, the same drift is picked up by the per-source
 `embed-backfill` jobs that `gbrain sync --all` enqueues (capped
-`$X/source/24h`). **Grandfather:** pages embedded before v0.41.31.0
-carry a NULL signature and are NEVER flagged stale, so upgrading to
-v0.41.31.0 does NOT trigger a whole-corpus re-embed. Signatures only
-get stamped going forward.
+`$X/source/24h`). **Grandfather:** pages whose chunks were embedded
+without a provenance stamp carry a NULL signature and are NEVER flagged
+stale by the routine sweep, so a stamp-less corpus is not re-embedded
+wholesale by surprise. `gbrain embed --stale --include-null-signature`
+re-embeds them deliberately, and `gbrain migrate embeddings` always
+includes them.
 
 A **dimension** change still requires the wipe-and-reinit (PGLite) or
 column-alter (Postgres) recipe below — the on-disk `vector(N)` width
 genuinely has to change.
+
+## Repair missing fact vectors deliberately
+
+Fact vectors are separate from page/chunk embeddings. Extraction preserves
+already embedded facts when it cannot produce a complete valid replacement;
+it does not transplant old vectors onto different text or a new model.
+Restrictive source changes still expire removed claims and tighten visibility
+before deferred reconciliation. Existing NULL fact vectors do not heal merely
+because later extraction runs. Preview a selected source without provider work:
+
+```bash
+gbrain embed --stale --facts --source <source-id>
+```
+
+The preview reports the scope and count, not a repair-price estimate. Its zero
+cost means no provider spend occurred during the preview. After reviewing the
+count and choosing a finite spending cap, explicitly authorize a bounded repair:
+
+```bash
+gbrain embed --stale --facts --source <source-id> --yes --max-cost-usd <cap>
+```
+
+The cap must be finite and nonnegative. `--max-facts` limits attempted facts
+(default 100, range 1–10,000); `--batch-size` bounds each batch (default 100,
+range 1–100); `--budget-ms` limits run time (default 60,000, range 1–3,600,000).
+All three accept integers. This is not an automatic, background or full-brain fact sweep.
+Only NULL vectors on current source/incarnation, row-version and withdrawal
+state are eligible; valid vectors are not re-embedded. Each provider attempt
+rechecks the selected-brain and database off switches and spend allowance.
+Managed sources repair physical fact projections under guarded authority, not
+canonical content; an owner-held PGLite brain uses private resident delegation
+without stopping its writer. Failed/unavailable providers leave the original
+facts intact and return bounded diagnostics.
 
 ## Why we don't do this automatically
 
@@ -69,7 +107,7 @@ embedded WASM, not a native extension, and the WASM build rejects the
 column-type alter with `could not access file "$libdir/vector"`. The
 SQL recipe below works against Postgres only.
 
-The path that works on PGLite is **wipe-and-reinit**. v0.37 ships a
+The path that works on PGLite is **wipe-and-reinit**. There is a
 single-command wrapper:
 
 ```bash
@@ -91,7 +129,7 @@ Equivalent by hand:
 mv ~/.gbrain/brain.pglite ~/.gbrain/brain.pglite.bak
 
 # 2. Re-init with the new model + dimensions. `gbrain init` writes
-#    the schema sized to the new dim, and (as of v0.37) preserves
+#    the schema sized to the new dim, and preserves
 #    every other field in ~/.gbrain/config.json (chat model,
 #    expansion model, API keys).
 gbrain init --pglite \
@@ -164,14 +202,12 @@ gbrain embed --stale
 
 ## A note on `gbrain config set`
 
-Pre-v0.37 docs recommended `gbrain config set embedding_model X` to
-switch models. **This is a no-op for the embed pipeline.** `config set`
-writes the DB plane; the embed gateway reads the file plane
-(`~/.gbrain/config.json`). The pre-v0.37 recipe shipped the lie because
-the contract wasn't surfaced.
-
-As of v0.37, `gbrain config set embedding_model` and `gbrain config set
-embedding_dimensions` REFUSE and print the wipe-and-reinit recipe.
+`gbrain config set embedding_model X` cannot switch models: `config set`
+writes the DB plane, and the embed gateway reads the file plane
+(`~/.gbrain/config.json`), so such a write would be a no-op for the embed
+pipeline. For that reason `gbrain config set embedding_model` and
+`gbrain config set embedding_dimensions` REFUSE and print the
+wipe-and-reinit recipe.
 
 To change schema-sizing fields, use `gbrain init` (PGLite) or the SQL
 recipe (Postgres). Both update the file plane AND the schema together.
@@ -188,7 +224,7 @@ After the recipe lands, `gbrain doctor --fast` should report green and
 If it doesn't, file an issue with the doctor output and the steps you
 ran.
 
-## v0.37+ followups
+## Followups
 
 - Auto-fallback to alternative embedding providers when the primary
   fails quota/auth. Tracked; requires explicit `--try-fallback`
