@@ -10,12 +10,10 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/**'
-      - '.github/actionlint.yaml'
   pull_request:
     branches: [master]
     paths:
       - '.github/workflows/**'
-      - '.github/actionlint.yaml'
   workflow_dispatch:
 
 permissions:
@@ -27,7 +25,7 @@ concurrency:
 
 jobs:
   actionlint:
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4

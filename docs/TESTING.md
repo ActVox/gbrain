@@ -14,31 +14,28 @@ only.
 
 ## CI runner capacity
 
-Repository-owned Linux validation jobs use ephemeral Ubicloud runners pinned to
-Ubuntu 24.04. The Ubicloud Managed Runners GitHub App must have access to this
-repository and active billing in its connected project; runner labels alone do
-not grant access. No Ubicloud API token is passed to workflow jobs.
+Repository-owned Linux validation in this public fork uses GitHub-hosted runners.
+The upstream Ubicloud labels require a separately installed GitHub App and active
+billing; without that external account jobs remain queued and the PR gate never
+produces a result. The fork therefore preserves the test topology while routing
+Linux jobs onto runner labels available to the repository itself.
 
-| Workload | Runner | Capacity |
-| --- | --- | --- |
-| Unit, serial, E2E, browser, compatibility, read-performance and deployment-matrix tests | `ubicloud-standard-16-ubuntu-2404` | 16 vCPU, 64 GB RAM |
-| Heavy test suite and persistence invariant/soak matrix | `ubicloud-standard-30-ubuntu-2404` | 30 vCPU, 120 GB RAM |
-| Native ARM64 glibc and musl tests | `ubicloud-standard-16-arm-ubuntu-2404` | 16 vCPU, 48 GB RAM |
-| Coverage reports and Semgrep | `ubicloud-standard-4-ubuntu-2404` | 4 vCPU, 16 GB RAM |
-| Planning, status aggregation, dependency audit, gitleaks and actionlint | `ubicloud-standard-2-ubuntu-2404` | 2 vCPU, 8 GB RAM |
+| Workload | Runner |
+| --- | --- |
+| Unit, serial, E2E, browser, compatibility, heavy tests and status jobs | `ubuntu-latest` |
+| Persistence validation and native x64 locks | `ubuntu-24.04` |
+| Native ARM64 glibc and musl locks | `ubuntu-24.04-arm` |
 
 macOS and Windows matrices stay on GitHub-hosted runners. Release building and
 publishing also stay unchanged. The pinned upstream OSV reusable workflow does
 not expose a runner override, so its runner remains upstream-owned.
 
-The migration does not change shards, test selection, commands, timeouts,
+The fork override does not change shards, test selection, commands, timeouts,
 thresholds, artifact collection or required check identities. The security
-matrix retains its existing OS labels and changes only the Linux execution
-target. `test/scripts/ci-runner-routing.test.ts` pins capacity and platform
-routing; `.github/actionlint.yaml` declares the exact custom runner labels.
-Actual GitHub job records and completed checks establish runner availability;
-local workflow tests do not. More CPU and memory do not guarantee proportional
-speedups for serial tests or external-provider requests.
+matrix retains its native OS labels. `test/scripts/ci-runner-routing.test.ts`
+rejects third-party runner dependencies and pins platform routing. Actual GitHub
+job records and completed checks establish runner availability; local workflow
+tests do not.
 
 Shared-skill tests distinguish canonical publication, protocol delivery, installed
 files and native harness use. `test/shared-skills-transports.test.ts` and
