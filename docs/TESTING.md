@@ -34,7 +34,15 @@ Paid provider and live agent coverage requires an explicit manual
 available for their named doors. Without opt-in, the full free corpus still
 runs, provider secrets are withheld, and the E2E aggregate reports paid coverage
 as unexecuted. Requested paid Tier 2 failures still fail the aggregate. This
-maintenance did not execute paid providers or hosted native/heavy jobs.
+maintenance did not execute paid providers or the optional heavy workload.
+
+Native toolchain setup tries up to four randomized HTTPS mirrors from Zig's
+official mirror list, then the origin. List lookup is bounded to five seconds;
+each archive transfer, including its body, is bounded to 60 seconds and the
+checked-in byte size. The checked-in SHA-256 is authoritative before saving or
+extracting, and the extracted compiler must report the pinned version. Cached
+archives are also hash-checked before extraction. Native job and test timeouts
+are unchanged. See [Zig's mirror guidance](https://ziglang.org/download/community-mirrors/).
 
 ### Pull request, master and nightly scope
 
