@@ -236,7 +236,8 @@ describe('computeBackupCoverage — source repos', () => {
     expect(asset?.detail).toContain('ahead of origin/');
     expect(s.totals.unpushed).toBe(1);
     expect(s.totals.no_remote).toBe(0);
-    expect(s.overall).toBe('ok'); // unpushed does NOT flip warn
+    expect(s.overall).toBe('warn');
+    expect(s.totals.recoverable_repos).toBe(0);
   });
 
   test('localGitProbes:false → unknown assets and getBackupStatus never persists', async () => {
@@ -277,7 +278,7 @@ describe('computeBackupCoverage — source repos', () => {
     expect(repos[0]?.detail).toBe('local_path not found on this machine');
     expect(repos[0]?.fix_argv).toBeNull();
     expect(s.totals.assets).toBe(1); // the missing-path asset IS counted
-    expect(s.overall).toBe('ok'); // unknown never flips warn
+    expect(s.overall).toBe('warn');
   });
 
   test('remote added but NOTHING pushed → no_remote (nothing pushed), overall warn', async () => {
@@ -361,7 +362,7 @@ describe('computeBackupCoverage — db_content and empty brain', () => {
 // ── Bootstrap workspace via the receipt ─────────────────────────────────────
 
 describe('computeBackupCoverage — bootstrap workspace', () => {
-  test('receipt without repo_url → bootstrap_workspace no_remote with bootstrap repo fix', async () => {
+  test('receipt without repo_url → bootstrap_workspace no_remote names both bootstrap repo and attach, fix_argv null', async () => {
     const ws = join(tmp, 'ws');
     mkdirSync(ws, { recursive: true });
     writeReceipt(ws);
@@ -372,7 +373,16 @@ describe('computeBackupCoverage — bootstrap workspace', () => {
     expect(asset).toBeDefined();
     expect(asset?.id).toBe(ws);
     expect(asset?.state).toBe('no_remote');
-    expect(asset?.fix_argv).toEqual(['gbrain', 'bootstrap', 'repo']);
+    // This check is file-plane only (no git subprocess) so it can't tell an
+    // empty/unconfigured origin (needs `bootstrap repo`) from an
+    // already-pushed out-of-band one (needs `bootstrap attach`, since
+    // `bootstrap repo` guaranteed-refuses with ORIGIN_NOT_EMPTY there — see
+    // src/core/bootstrap/repo.ts). fix_argv stays null rather than advertise
+    // a command that's wrong in the out-of-band case; the message names both.
+    expect(asset?.fix_argv).toBeNull();
+    expect(asset?.detail).toContain('no private repo yet');
+    expect(asset?.detail).toContain('bootstrap repo');
+    expect(asset?.detail).toContain('bootstrap attach');
     expect(s.overall).toBe('warn');
     expect(s.totals.no_remote).toBe(1);
   });
@@ -385,9 +395,9 @@ describe('computeBackupCoverage — bootstrap workspace', () => {
     const s = await computeBackupCoverage(stubEngine({}), { localGitProbes: true });
 
     const asset = s.assets.find((a) => a.kind === 'bootstrap_workspace');
-    expect(asset?.state).toBe('ok');
-    expect(s.overall).toBe('ok');
-    expect(s.totals.recoverable_repos).toBe(1);
+    expect(asset?.state).toBe('unknown');
+    expect(s.overall).toBe('warn');
+    expect(s.totals.recoverable_repos).toBe(0);
   });
 });
 
@@ -618,11 +628,10 @@ describe('computeBackupCoverage — dirty tree, shared git roots, non-repo paths
     expect(asset?.state).toBe('dirty');
     expect(asset?.detail).toBe('uncommitted changes');
     expect(asset?.fix_argv).toBeNull();
-    expect(s.overall).toBe('ok'); // dirty does NOT flip warn — only no_remote does
+    expect(s.overall).toBe('warn');
     expect(s.totals.no_remote).toBe(0);
     expect(s.totals.unpushed).toBe(0);
-    // dirty is still recoverable_repos (origin exists; only the delta is at risk)
-    expect(s.totals.recoverable_repos).toBe(1);
+    expect(s.totals.recoverable_repos).toBe(0);
   });
 
   test('two sources in the SAME git repo (root + subdir) dedupe to ONE probed asset with joined ids', async () => {
@@ -666,7 +675,7 @@ describe('computeBackupCoverage — dirty tree, shared git roots, non-repo paths
       expect(a.detail).toBe('not_a_git_repo');
       expect(a.fix_argv).toBeNull();
     }
-    expect(s.overall).toBe('ok'); // unknown never flips warn
+    expect(s.overall).toBe('warn');
     expect(s.totals.no_remote).toBe(0);
   });
 });
@@ -700,15 +709,13 @@ describe('computeBackupCoverage — bootstrap workspace failing push', () => {
     expect(asset).toBeDefined();
     expect(asset?.id).toBe(ws);
     expect(asset?.state).toBe('failing');
-    // Sanitized: backticks/$ replaced, non-printables spaced, content kept.
-    expect(asset?.detail).toContain('push failed');
-    expect(asset?.detail).toContain("'rm -rf'");
+    expect(asset?.detail).toBe('last_push_failed');
     expect(asset?.detail).not.toContain('`');
     expect(asset?.detail).not.toContain('$');
     expect(asset?.detail).not.toContain('\u0007');
     expect(asset?.fix_argv).toEqual(['gbrain', 'sources', 'push', '--path', ws]);
     expect(s.totals.failing).toBe(1);
-    expect(s.overall).toBe('ok'); // failing is not no_remote — the remote exists
+    expect(s.overall).toBe('warn');
     // A failing push means the remote is BEHIND: counting it recoverable would
     // overstate the recovery statement, so recoverable_repos excludes it.
     expect(s.totals.recoverable_repos).toBe(0);
@@ -734,10 +741,10 @@ describe('computeBackupCoverage — bootstrap workspace failing push', () => {
 
     const asset = s.assets.find((a) => a.kind === 'bootstrap_workspace');
     expect(asset).toBeDefined();
-    expect(asset?.state).toBe('ok');
+    expect(asset?.state).toBe('unknown');
     expect(s.totals.failing).toBe(0);
-    expect(s.totals.recoverable_repos).toBe(1);
-    expect(s.overall).toBe('ok');
+    expect(s.totals.recoverable_repos).toBe(0);
+    expect(s.overall).toBe('warn');
   });
 });
 

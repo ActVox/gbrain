@@ -41,9 +41,49 @@ import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
 import type { ResolutionSource } from '../entities/resolve.ts';
 import { isFactsBackstopEligible } from './eligibility.ts';
 import type { PageType } from '../types.ts';
+import type { OperationContext } from '../ops/contract.ts';
+import type { WriteReceipt } from '../persistence/types.ts';
+import type { GBrainConfig } from '../config.ts';
+import { isAvailable } from '../ai/gateway.ts';
+import { withAIInvocationPreflight } from '../ai/invocation-guard.ts';
+import { decideSingleFact } from './single-prepare.ts';
+
+/**
+ * Notability-filter vocabulary shared by the durable facts-absorb payload
+ * writer (queue mode below) and its only reader, the minion handler in
+ * commands/jobs.ts. #4870: the reader must accept every value the writer can
+ * send; `coerceNotabilityFilter` is the validated pass-through (unknown or
+ * absent → 'all', the documented default).
+ */
+export const NOTABILITY_FILTERS = ['all', 'high-only', 'medium-and-up'] as const;
+export type FactNotabilityFilter = typeof NOTABILITY_FILTERS[number];
+export function coerceNotabilityFilter(v: unknown): FactNotabilityFilter {
+  return (NOTABILITY_FILTERS as readonly unknown[]).includes(v) ? (v as FactNotabilityFilter) : 'all';
+}
+
+/**
+ * Context cell for a fact whose entity came from the bare-name
+ * `prefix_expansion` branch of `resolveEntitySlugWithSource`: the sole
+ * `<dir>/<token>-*` page was chosen by cardinality, not identity. The fact is
+ * still written (most such hits are right); the note keeps the uncertainty
+ * visible instead of reading like a confirmed fact.
+ */
+function annotateUnverifiedResolution(
+  context: string | null,
+  resolutionSource: ResolutionSource | null,
+): string | null {
+  if (resolutionSource !== 'prefix_expansion') return context;
+  const note = 'entity matched by bare name only (prefix expansion) — unverified, please confirm';
+  return context ? `${context} — ${note}` : note;
+}
 
 export interface FactsBackstopCtx {
   engine: BrainEngine;
+  config?: GBrainConfig;
+  operationContext?: OperationContext;
+  persistenceRequestId?: string;
+  requestId?: string;
+  requestIntent?: Record<string, unknown>;
   /** Brain source identifier; default 'default'. */
   sourceId: string;
   /** source_session for provenance; null if absent. */
@@ -56,12 +96,14 @@ export interface FactsBackstopCtx {
    *   - 'file_upload'        — file_upload import path
    *   - 'code_import'        — code import path
    *   - 'hook:compact'       — compaction-boundary checkpoint harvest (cathedral 5)
+   *   - 'hook:writeback'     — ambient-writeback Stop-hook backstop (WP4)
    */
-  source: 'sync:import' | 'mcp:put_page' | 'mcp:extract_facts' | 'file_upload' | 'code_import' | 'hook:compact';
+  source: 'sync:import' | 'mcp:put_page' | 'mcp:extract_facts' | 'file_upload' | 'code_import' | 'hook:compact' | 'hook:writeback';
   /** Execution mode — D8. Default 'queue' (fire-and-forget). */
   mode?: 'queue' | 'inline';
-  /** Notability filter — D4. Default 'all'; sync uses 'high-only'. */
-  notabilityFilter?: 'all' | 'high-only';
+  /** Notability filter — D4. Default 'all'; sync uses 'high-only'; the
+   * ambient-writeback lane uses 'medium-and-up' in salient mode. */
+  notabilityFilter?: FactNotabilityFilter;
   /** Abort signal for shutdown propagation. */
   abortSignal?: AbortSignal;
   /** Mirrors OperationContext.remote for trust-aware logging paths. */
@@ -100,6 +142,7 @@ export type FactsBackstopResult =
       duplicate: number;
       superseded: number;
       fact_ids: number[];
+      write_requests?: WriteReceipt[];
       skipped?: 'extraction_disabled' | 'extraction_unavailable' | `eligibility_failed:${string}`;
       /** Set when the LLM extraction step failed non-transport-fatally (see runPipelineWithBody). */
       skipped_reason?: import('./extract.ts').ExtractFailureReason;
@@ -254,6 +297,14 @@ export async function runFactsBackstop(
       ? { mode: 'queue', enqueued: false, queueDepth: 0, skipped }
       : { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped };
   }
+  const { managedPersistenceEnabled } = await import('../persistence/ownership.ts');
+  if (await managedPersistenceEnabled(ctx.engine)) {
+    if (mode !== 'inline') {
+      const { OperationError } = await import('../ops/contract.ts');
+      throw new OperationError('writer_coordinator_required', 'Managed page backstops must use the durable publication outbox.');
+    }
+    return { mode: 'inline', ...await runPipeline(parsedPage, ctx, ctx.abortSignal) };
+  }
 
   // --- Extraction availability gate (engine-aware, EXECUTION-process only) ---
   // Resolves the ACTUAL extraction model (facts.extraction_model /
@@ -331,7 +382,6 @@ export async function runFactsBackstop(
             // re-runnable), never a silent consume.
             max_attempts: 5,
             backoff_delay: 60_000,
-            timeout_ms: 180_000,
           },
         );
         return { mode: 'queue', enqueued: true, queueDepth: 0 };
@@ -434,6 +484,7 @@ export async function runFactsPipeline(
   entity_slugs: string[];
   /** Set when the LLM extraction step failed non-transport-fatally (see runPipelineWithBody). */
   skipped_reason?: import('./extract.ts').ExtractFailureReason;
+  write_requests?: WriteReceipt[];
 }> {
   return runPipelineWithBody({
     turnText,
@@ -461,6 +512,9 @@ async function runPipeline(
       turnText: parsedPage.compiled_truth,
       isDreamGenerated: false,  // eligibility check already rejected dream pages
       ref: parsedPage.slug,
+      // #4819: page provenance for DB-only rows. The turn-path entry
+      // (runFactsPipeline) has no page, so it leaves this unset.
+      pageSlug: parsedPage.slug,
     },
     ctx,
     abortSignal,
@@ -495,7 +549,7 @@ async function runPipeline(
  * fallback regardless of local_path.
  */
 async function runPipelineWithBody(
-  input: { turnText: string; isDreamGenerated: boolean; ref?: string },
+  input: { turnText: string; isDreamGenerated: boolean; ref?: string; pageSlug?: string },
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
@@ -518,7 +572,7 @@ async function runPipelineWithBody(
 
 /** The actual pipeline body — always runs inside a BudgetTracker scope (#4210). */
 async function runPipelineBodyInner(
-  input: { turnText: string; isDreamGenerated: boolean; ref?: string },
+  input: { turnText: string; isDreamGenerated: boolean; ref?: string; pageSlug?: string },
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
@@ -526,16 +580,35 @@ async function runPipelineBodyInner(
   const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
   const { cosineSimilarity } = await import('./classify.ts');
   const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
+  const { isFactWithdrawn } = await import('./withdrawal.ts');
 
   if (abortSignal?.aborted) {
     return { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [] };
   }
+  const { prepareManagedFactsSession, resumeManagedFacts, publishManagedFacts, resolveManagedFactsEmbedding,
+    assertManagedFactsEmbedding } = await import('../persistence/facts-maintenance.ts');
+  const managed = await prepareManagedFactsSession(ctx, input);
+  if (managed) {
+    const replay = await resumeManagedFacts(ctx.engine, managed);
+    if (replay) return replay;
+    const embedding = await resolveManagedFactsEmbedding(ctx.engine, managed.config);
+    managed.embedding = embedding && isAvailable('embedding', embedding.model) ? embedding : null;
+  }
 
   const filter = ctx.notabilityFilter ?? 'all';
+  // `all` means ALL TIERS — a pinned contract (test/facts-backstop.test.ts
+  // "notabilityFilter=all embeds and persists every tier"), so no admission
+  // is passed and the extractor labels low honestly instead of withholding
+  // it. Behavior note for the eval fix wave: pre-wave the extractor prompt
+  // told the model to skip low rows entirely, so `all` under-delivered on
+  // its own promise; it now really does capture them. Callers that want
+  // suppression pass 'high-only' (sync does).
   const notabilityAdmission = filter === 'high-only'
     ? { allowed: ['high'] as const, invalid: 'drop' as const }
-    : undefined;
-  const outcome = await extractFactsFromTurnWithOutcome({
+    : filter === 'medium-and-up'
+      ? { allowed: ['high', 'medium'] as const, invalid: 'drop' as const }
+      : undefined;
+  const extract = () => extractFactsFromTurnWithOutcome({
     turnText: input.turnText,
     sessionId: ctx.sessionId,
     entityHints: ctx.entityHints,
@@ -545,7 +618,14 @@ async function runPipelineBodyInner(
     abortSignal,
     model: ctx.model,
     notabilityAdmission,
+    ...(managed ? { embedding: managed.embedding ?? null } : {}),
   });
+  const outcome = managed ? await withAIInvocationPreflight(async call => {
+    if (call.kind !== 'embedding') return;
+    abortSignal?.throwIfAborted();
+    await assertManagedFactsEmbedding(ctx.engine, managed.config, managed.embedding);
+    if (call.model !== managed.embedding!.model) throw new Error('Fact embedding provider does not match the selected brain.');
+  }, extract) : await extract();
 
   if (!outcome.ok) {
     // Transport-class failures PROPAGATE as a typed error: the queue-mode
@@ -575,6 +655,7 @@ async function runPipelineBodyInner(
   // facts.default_visibility (fail-closed to 'private').
   const { resolveDefaultVisibility } = await import('./visibility.ts');
   const visibility = ctx.visibility ?? (await resolveDefaultVisibility(ctx.engine));
+  if (managed) return publishManagedFacts(ctx.engine, managed, ctx, facts, visibility, input.pageSlug);
 
   let inserted = 0;
   let duplicate = 0;
@@ -602,19 +683,24 @@ async function runPipelineBodyInner(
     const resolved = f.entity_slug
       ? await resolveEntitySlugWithSource(ctx.engine, ctx.sourceId, f.entity_slug)
       : null;
-    const resolvedSlug = resolved?.slug ?? null;
+    const resolvedSlug = resolved?.source === 'fallback_slugify' ? null : resolved?.slug ?? null;
     const resolutionSource = resolved?.source ?? null;
+
+    // B-10: a withdrawn claim for this entity is never re-written; the
+    // fence writer rechecks under its page lock.
+    if (await isFactWithdrawn(ctx.engine, ctx.sourceId, visibility, f.fact, resolvedSlug)) continue;
 
     // Dedup against DB candidates (correct per Codex Q7: fence rows
     // have no embeddings; FS lock + sync invariant means DB == fence
     // at write time). Threshold 0.95 unchanged.
-    let matchedExistingId: number | null = null;
-    if (resolvedSlug && f.embedding) {
+    const exact = resolvedSlug ? await decideSingleFact(ctx.engine, ctx.sourceId, { entity_slug: resolvedSlug, fact: f.fact, kind: f.kind ?? 'fact', visibility }, null) : null;
+    let matchedExistingId: number | null = exact?.candidate?.id ?? null;
+    if (matchedExistingId === null && resolvedSlug && f.embedding) {
       const candidates = await ctx.engine.findCandidateDuplicates(
         ctx.sourceId,
         resolvedSlug,
         f.fact,
-        { embedding: f.embedding, k: DEDUP_CANDIDATE_LIMIT },
+        { embedding: f.embedding, embeddingModel: f.embedding_model, k: DEDUP_CANDIDATE_LIMIT },
       );
       let topId: number | null = null;
       let topScore = -1;
@@ -689,7 +775,7 @@ async function runPipelineBodyInner(
     for (const s of unparented) legacyBucket.push(s);
   }
 
-  for (const { f, resolvedSlug } of legacyBucket) {
+  for (const { f, resolvedSlug, resolutionSource } of legacyBucket) {
     const newFact: NewFact = {
       fact: f.fact,
       kind: f.kind,
@@ -700,9 +786,12 @@ async function runPipelineBodyInner(
       source_session: f.source_session ?? null,
       confidence: f.confidence,
       embedding: f.embedding ?? null,
-      // #4206: caller event-time fallback + provenance context.
+      embedding_model: f.embedding_model ?? null,
+      // #4206: caller event-time fallback + provenance context. #4819: a
+      // DB-only row has no fence to name the page it came from, so the page
+      // path's slug fills context when the caller passed no sourceSlug.
       valid_from: f.valid_from ?? ctx.validFrom,
-      context: ctx.sourceSlug ?? null,
+      context: annotateUnverifiedResolution(ctx.sourceSlug ?? input.pageSlug ?? null, resolutionSource),
     };
     const result = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: legacy DB-only fallback for unparented / thin-client facts (no entity page to fence onto)
     fact_ids.push(result.id);
@@ -723,20 +812,21 @@ async function runPipelineBodyInner(
   for (const [slug, group] of byEntity) {
     if (abortSignal?.aborted) break;
 
-    const inputFacts = group.map(({ f }) => ({
+    const inputFacts = group.map(({ f, resolutionSource }) => ({
       fact: f.fact,
       kind: f.kind,
       notability: f.notability,
       source: f.source,
       // #4206: the caller's source_slug (which page/transcript the turn came
       // from) lands in the fence context cell — visible in recall projections.
-      context: ctx.sourceSlug ?? null,
+      context: annotateUnverifiedResolution(ctx.sourceSlug ?? null, resolutionSource),
       visibility,
       confidence: f.confidence,
       // #4206: extractor-derived date wins; then the caller's event time
       // (historical imports); then import time.
       validFrom: f.valid_from ?? ctx.validFrom ?? new Date(),
       embedding: f.embedding ?? null,
+      embedding_model: f.embedding_model ?? null,
       sessionId: f.source_session ?? null,
     }));
 
@@ -785,9 +875,10 @@ async function runPipelineBodyInner(
           source_session: f.source_session ?? null,
           confidence: f.confidence,
           embedding: f.embedding ?? null,
+          embedding_model: f.embedding_model ?? null,
           // #4206: caller event-time fallback + provenance context.
           valid_from: f.valid_from ?? ctx.validFrom,
-          context: ctx.sourceSlug ?? null,
+          context: ctx.sourceSlug ?? input.pageSlug ?? null,
         };
         const legacyResult = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: stub-guard / unresolvable-target fallback for unprefixed or fallback-resolved entity slugs (no fenceable page or usable tree)
         fact_ids.push(legacyResult.id);
@@ -817,9 +908,10 @@ async function runPipelineBodyInner(
           source_session: f.source_session ?? null,
           confidence: f.confidence,
           embedding: f.embedding ?? null,
+          embedding_model: f.embedding_model ?? null,
           // #4206: caller event-time fallback + provenance context.
           valid_from: f.valid_from ?? ctx.validFrom,
-          context: ctx.sourceSlug ?? null,
+          context: ctx.sourceSlug ?? input.pageSlug ?? null,
         };
         const legacyResult = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: DB-only fallback when the fence lane declined the write (write_through opt-out race / localPath echo)
         fact_ids.push(legacyResult.id);

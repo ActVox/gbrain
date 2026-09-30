@@ -1,3 +1,4 @@
+import { authorizeJobExecution, withSubmissionAuthority } from './submission-authority.ts';
 /**
  * `gbrain jobs run-child` core (issue #5 — per-job process isolation).
  *
@@ -37,8 +38,17 @@ import { withChatPhase } from '../ai/chat-usage.ts';
 import {
   JOB_CHILD_EXIT_NOT_CLAIMED,
   JOB_CHILD_EXIT_RESULT_WRITE_FAILED,
+  WORKER_EXIT_CONFIGURATION,
 } from './worker-exit-codes.ts';
 import { encodeHandlerError, unrefTimer, writeChildOutcomeFile } from './job-isolation.ts';
+import { isLocalConfigurationError } from './configuration-error.ts';
+
+export function writeChildBootstrapError(resultPath: string, error: unknown): number {
+  if (!isLocalConfigurationError(error)) return 1;
+  try { writeChildOutcomeFile(resultPath, encodeHandlerError(error)); }
+  catch { return JOB_CHILD_EXIT_RESULT_WRITE_FAILED; }
+  return WORKER_EXIT_CONFIGURATION;
+}
 
 export interface RunChildOpts {
   jobId: number;
@@ -152,7 +162,8 @@ export async function runChildJobEntry(
     try {
       // #4218: same phase attribution as the in-process worker path — the
       // isolated child runs its own gateway, so the wrap must live here too.
-      const result = await withChatPhase(`job:${job.name}`, () => handler(context));
+      const authority = await authorizeJobExecution(engine, job);
+      const result = await withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => handler(context)), abort.signal);
       // completeJob's {value: x} wrap decision must run BEFORE JSON
       // serialization: a JSON round-trip changes typeof for Date /
       // toJSON-bearing results (object → string), which would flip the wrap

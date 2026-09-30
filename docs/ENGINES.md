@@ -25,10 +25,12 @@ The engine interface means we don't have to choose. PGLite is the zero-friction 
 
 **The single source of truth is `export interface BrainEngine` in
 `src/core/engine.ts`.** It is large (100+ methods) and grows with every
-feature wave — do NOT work from any snapshot of it, including an old copy of
+feature — do NOT work from any snapshot of it, including an old copy of
 this doc. Read the interface itself, and let
 `test/e2e/engine-parity.test.ts` + `test/pglite-engine.test.ts` tell you
-whether both engines agree.
+whether both engines agree. A method in a migrated storage domain has its
+SQL once in `src/core/engine-sql/` (see "Storage domains and engine-sql"
+below).
 
 The method families, to orient you before opening the file:
 
@@ -56,9 +58,63 @@ The method families, to orient you before opening the file:
 
 **Chunking is NOT in the engine.** Same logic. `src/core/chunkers/` handles chunking. The engine stores and retrieves chunks. All engines share the same chunkers.
 
-**Search returns `SearchResult[]`, not raw rows.** The engine is responsible for its own search implementation (tsvector vs FTS5, pgvector vs sqlite-vss) but must return a uniform result type. RRF fusion and dedup happen above the engine, in `src/core/search/hybrid.ts`.
+**Search returns `SearchResult[]`, not raw rows.** The engine is responsible for its own search implementation (tsvector vs FTS5, pgvector vs sqlite-vss) but must return a uniform result type. RRF fusion and dedup happen above the engine, in `src/core/search/hybrid.ts` and its stages under `src/core/search/hybrid/`.
 
 **`traverseGraph` exists but is engine-specific.** Postgres uses recursive CTEs. SQLite would use a loop with depth tracking. The interface is the same: give me a slug and max depth, return the graph.
+
+## Storage domains and engine-sql
+
+Both engines speak the same SQL dialect, so a storage domain's SQL is written
+once. `src/core/engine-sql/<domain>.ts` holds it; each engine method in that
+domain is a one-line delegation. The domains migrated so far are the
+`migrated` rows of `scripts/engine-sql-baseline.tsv`; the remaining rows of
+that file are the engine members that still carry their own SQL, and the file
+only shrinks (`check:engine-sql-ratchet` fails on a new SQL-bearing engine
+member).
+
+```
+PGLiteEngine / PostgresEngine   one-line delegations; RLS scoping per method
+      | get engineSql()         fresh adapter per access, never stored
+      v
+engine-sql/<domain>.ts          the domain's SQL once; sqlFragment composition;
+      |                         ScopedRead / LegacyUnscopedRead brands; row kinds
+      v
+engine-sql/executor.ts          SqlExecutor: query / run / executeRaw / unsafe /
+      |                         transaction; results as { rows, affectedRows }
+      +--> dialect-pglite.ts    db.query on the engine's checkpoint-admitted handle
+      +--> dialect-postgres.ts  runUnsafe(conn, sql, params, { prepare: true, simple: false })
+```
+
+The contract, each part pinned by a test listed in
+[docs/TESTING.md, "Engine-sql"](TESTING.md#engine-sql):
+
+- **Lifetime.** `engineSql` reads the engine's current connection on every
+  access. `transaction()` clones the engine with a swapped connection, so a
+  stored executor would write outside the transaction.
+- **Parameters.** Positional only, composed with `sqlFragment` (placeholders
+  are numbered at render time). Arrays bind as `= ANY($n::type[])`, JSONB
+  through `jsonbParam()`, vectors as a text literal with a `::vector` cast.
+  Only constant text may be spliced (`check:engine-sql-dynamic`).
+- **Results and errors.** `{ rows, affectedRows }`; driver errors pass through
+  unchanged. Columns whose decoding differs between drivers are declared once
+  per statement with `compileRowNormalizer`.
+- **Capabilities.** Real engine differences are capabilities on the executor
+  (`maxBindParamsPerStatement`, `transactionAdvisoryLocks`,
+  `probesEmbeddingCast`), never `if (engine === ...)` in domain code.
+- **RLS scope.** Every read declares how it is scoped: `ScopedRead` (runs
+  inside `withScopedReadTransaction` on Postgres, see the RLS section below)
+  or `LegacyUnscopedRead` (runs on the pool, obtained with
+  `unscopedExecutor(executor, reason)`). The brands are unforgeable
+  (`check:engine-sql-brands`).
+- **Layering.** Nothing under `engine-sql/` imports an engine façade
+  (`check:layering`); take the executor as a parameter.
+
+Code that is genuinely dialect-specific stays in the engine or in
+`src/core/pglite-engine/` / `src/core/postgres-engine/`, marked
+`// engine-sql-ok: <reason>`. The forward-reference bootstrap both engines run
+before replaying the schema blob is `engine-sql/bootstrap.ts`. A step-by-step
+read and write example is in
+[CONTRIBUTING.md, "Worked example"](../CONTRIBUTING.md#worked-example-an-engine-sql-read-and-write).
 
 ## How search works across engines
 
@@ -104,6 +160,17 @@ RRF fusion, multi-query expansion, and 4-layer dedup are engine-agnostic. They o
 
 **Hosting:** Supabase Pro ($25/mo, zero-ops, pgvector built in) is the managed path; self-hosted Postgres + pgvector (Docker or Homebrew — see the "Local Postgres" section below) works the same.
 
+Current-projection filters use `(text_projection_revision = knowledge_revision)
+IS TRUE` with matching expression statistics, rather than relying on the
+planner's fixed column-equality estimate. Migration 160 creates and collects
+those statistics; bulk import, sync, reindex and completed projection recovery
+refresh them outside page locks. This also matters on PGLite, where an empty
+initial schema sample cannot describe later imports. Maintenance needs an
+authorized database role; an RLS-hidden statistics view is not evidence that
+the object is absent. Highly selective queries may correctly choose an exact
+plan. The [retrieval guide](architecture/RETRIEVAL.md#named-thing-retrieval-per-page-pool--title--alias--evidence)
+describes bounded candidate recovery and incomplete-result metadata.
+
 ### Opt-in RLS source-scope binding (`GBRAIN_RLS_SCOPE_BINDING`)
 
 Defense-in-depth layer for Postgres deployments that want the database itself
@@ -119,9 +186,8 @@ bound params). An RLS policy can then filter rows by
 `current_setting('app.scopes', true)`.
 
 **Default off.** With the env var unset, reads call through on the shared pool
-exactly as before — no per-read transaction, no pool-slot hold (the search
-methods keep the transaction they always had for their `SET LOCAL
-statement_timeout`). Existing operators see zero behavior change.
+with no per-read transaction and no pool-slot hold (the search methods keep
+their own transaction for `SET LOCAL statement_timeout`).
 
 **Enabling it** (operator-managed SQL; gbrain ships no DDL for this):
 
@@ -149,12 +215,21 @@ run under the role default and are not backstopped per caller. This is layer 2;
 the app-layer source filters remain layer 1 and stay mandatory. Behavioral pins
 live in `test/postgres-engine-rls-scope.test.ts`.
 
+**In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
+runs through this helper and a `LegacyUnscopedRead` when it runs on the pool
+(`src/core/engine-sql/brands.ts`); the engine obtains the branded executor, so
+the type system keeps each read's scoping as it is. Moving a read from
+unscoped to scoped adds a transaction and a pool hold per read with the flag
+on, so it is a deliberate change with its own load test, never a drive-by.
+The non-owner `NOBYPASSRLS` isolation test is
+`test/e2e/engine-sql-rls-scope.test.ts`.
+
 ## Local Postgres
 
 Self-hosted Postgres + pgvector gives you the PostgresEngine without a Supabase
 account. Two paths:
 
-**Homebrew (macOS)** — contributed by @roysaurav:
+**Homebrew (macOS)**:
 
 ```bash
 brew install postgresql@17
@@ -171,8 +246,7 @@ gbrain doctor
 one step. To point an EXISTING brain config at a different database without
 re-initializing, use `gbrain config set database_url <conn>` — it routes to the
 file plane (`~/.gbrain/config.json`), infers `engine: postgres`, and works even
-when the current database is unreachable. Hand-editing config.json is no longer
-needed.
+when the current database is unreachable.
 
 **Ladder-driven (harness installs)** — `gbrain init --prefer-postgres` probes
 for a usable Postgres before falling back to PGLite: an env URL, Supabase
@@ -200,9 +274,9 @@ Details in INSTALL_FOR_AGENTS.md ("Engine preference for harness installs").
 **What it is:** Embedded Postgres compiled to WASM via ElectricSQL's PGLite. Runs in-process, no server, no Docker, no accounts. Same SQL as PostgresEngine -- not a separate dialect. Implements the full `BrainEngine` interface; `test/e2e/engine-parity.test.ts` pins that the two engines move in lockstep.
 
 **PGLite-specific details:**
-- Uses `pglite-schema.ts` for DDL (pgvector extension, pg_trgm, triggers, indexes)
+- Uses the generated `pglite-schema.generated.ts` template for DDL (pgvector extension, pg_trgm, triggers, indexes; see "Canonical schema sources" below)
 - Parameterized queries throughout (shared utilities in `src/core/utils.ts`)
-- `hybridSearch` keyword-only fallback when `OPENAI_API_KEY` is not set
+- `hybridSearch` keyword-only fallback when no embedding provider key is configured
 - Data stored at `~/.gbrain/brain.pglite` (configurable)
 - pgvector HNSW index for cosine similarity vector search (same as Postgres)
 - tsvector + ts_rank for full-text search (same as Postgres)
@@ -261,9 +335,12 @@ version bump changes it.
    backs up `pg_wal/` + `pg_control` into a sibling
    `<dataDir>.wal-repair-backup-<ts>/` dir, resets the WAL in place
    (pg_resetwal semantics — data files preserved; transactions not
-   checkpointed before the corruption may be lost), and retries once. On
-   success it prints a loud stderr notice naming the backup and recommending
-   `gbrain doctor`. Safety bounds: repair only runs under a cleanly-acquired
+   checkpointed before the corruption may be lost), and retries once. The
+   reset does not rebuild indexes, so a page written just before the crash
+   can be missing from vector search while keyword search still finds it.
+   On success it prints a loud stderr notice naming the backup and the next
+   commands: `gbrain reindex --vectors` (rebuilds every HNSW index from the
+   stored vectors, no re-embedding) and then `gbrain doctor`. Safety bounds: repair only runs under a cleanly-acquired
    data-dir lock (never after reaping another process's lock), skips for a
    cooldown window after a failed attempt
    (`GBRAIN_PGLITE_WAL_REPAIR_COOLDOWN_SECONDS`, default 3600), reuses one
@@ -289,6 +366,61 @@ to connect: it diagnoses the dir from disk, names the repair command, reports
 retained repair backups, and escalates when repairs keep recurring (that
 means the unclean-shutdown genesis is still active — see the ladder's rung 4).
 
+## Canonical schema sources
+
+Schema DDL text has one hand-edited copy. `bun run build:schema`
+(`scripts/build-schema.ts`) generates everything else in a fixed order:
+
+```
+TS fragment modules (canonical for their tables) ─┐
+src/schema.sql (canonical for every other table) ─┴─> src/schema.sql BEGIN/END GENERATED regions
+                                                        ├─> src/core/schema-embedded.generated.ts (Postgres blob)
+                                                        └─> src/core/pglite-schema.generated.ts   (PGLite template)
+```
+
+- **Fragments** (`FRAGMENTS` in the generator): `grants/schema.ts`, `facts/withdrawal-schema.ts`,
+  `lease-schema.ts`, `page-state/schema.ts`, `persistence/schema.ts`,
+  `page-state/projection-schema.ts`, `persistence/topology-schema.ts`,
+  `company-brain/receipt-schema.ts`, `shared-skills/schema-all.ts`. Migrations import the same
+  constants, so a fragment is also the migration text. Each has one region in `src/schema.sql`
+  whose banner names the file to edit; never edit inside a region.
+- **PGLite template**: every `src/schema.sql` statement and fragment, transformed by explicit
+  capability rules (`PGLITE_RULES`, `PGLITE_DO_BLOCKS`, `PGLITE_ADDITIONS`, each with a reason).
+  `getPGLiteSchema(dims, model)` fills `__EMBEDDING_DIMS__` / `__EMBEDDING_MODEL__` and applies the
+  chunk-index and FTS-language policies at runtime. An unknown statement kind, an unclassified
+  `DO` block, or a rule that no longer matches fails the build.
+- **Guards**: `check:schema-fresh` regenerates the whole chain into a temp dir and names the source
+  to edit on drift; the E4 catalog goldens (`test/schema-catalog-golden.test.ts`,
+  `test/e2e/schema-catalog-golden.test.ts`) and `test/pglite-upgrade-replay.test.ts` pin the end
+  state.
+
+Engine differences in the bootstrap (not reconciled; changing them is a schema change):
+`file_migration_ledger` is Postgres-only. PGLite gets `code_edges_chunk`, `code_edges_symbol`,
+`dream_verdicts`, `sources.chunker_version`, the `content_chunks` code-symbol and `search_vector`
+columns (with their indexes and trigger), `pages_generation_idx` and `idx_pages_updated_at_desc`
+from migrations. Postgres gets `slug_aliases`, `page_aliases`, the `page_links` view and
+`persistence_requests_database_pending` from migrations.
+
+Worked examples:
+
+1. **Add a column or index to a hand-written table** (say `pages.foo`). Scaffold the migration
+   (`bun run new:migration add_pages_foo`: `ALTER TABLE pages ADD COLUMN IF NOT EXISTS foo TEXT;`,
+   and for an index on Postgres `CREATE INDEX CONCURRENTLY` with `transaction: false` plus a plain
+   `sqlFor.pglite`). Add the column to the `pages` `CREATE TABLE` in `src/schema.sql` so fresh
+   installs get it, then `bun run build:schema`; both blobs follow.
+2. **Add a table.** Put its `CREATE TABLE` in `src/schema.sql` and create it in a migration. If
+   migrations and the blob should share one text, make it a TS fragment instead: export the SQL
+   constant, import it from the migration, add a `FRAGMENTS` entry and an empty region
+   (`-- BEGIN GENERATED from <path> (<CONST>). ...` / `-- END GENERATED from <path> (<CONST>)`)
+   where the table belongs, then `bun run build:schema`. A Postgres-only table gets a
+   `PGLITE_RULES` drop entry with its reason.
+3. **When the forward-reference bootstrap changes.** Existing brains replay the blob before
+   migrations run. If the blob gains an index, FK, trigger or view that references a column an
+   older brain may lack, add that column's probe and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+   to the forward-reference bootstrap both engines run (`src/core/engine-sql/bootstrap.ts`:
+   probe, gap, DDL). A column only defined in a
+   `CREATE TABLE` needs no bootstrap entry. `test/schema-bootstrap-coverage.test.ts` names any gap.
+
 ## Engine detection and access repair
 
 Two engine-free commands answer "which engine is this brain on?" and "why can't
@@ -301,9 +433,15 @@ point. They anchor the runtime availability loop: classified failure →
 
 Reports (JSON `schema_version: 1`): the effective engine vs the config-file
 engine (they can differ under a transient env URL), `db_url_source`, an
-env-shadow note when a cwd-.env `DATABASE_URL` is being excluded by the #427
-guard (with the precedence note when both `GBRAIN_DATABASE_URL` and
-`DATABASE_URL` are set), redacted URLs only, and — on Postgres — a
+env-shadow note when a cwd-.env `DATABASE_URL` is being excluded by the
+cwd-.env guard (gbrain never adopts a `DATABASE_URL` that Bun auto-loaded
+from the working directory's `.env` family: `.env`, `.env.local`, and the
+`.env.<NODE_ENV>` / `.env.<NODE_ENV>.local` variants for `development`,
+`production` and `test`; with the precedence note when both `GBRAIN_DATABASE_URL` and
+`DATABASE_URL` are set — this `DATABASE_URL` guard matches the file's VALUE; the
+security-relevant `GBRAIN_*` variables get the stricter key-presence quarantine
+described under "Environment variables and cwd `.env` files" in `SECURITY.md`),
+redacted URLs only, and — on Postgres — a
 zero-round-trip pooler block (Supabase pooler detection, prepared-statement
 resolution, pool sizes, direct/session-pooler derivability). `--brain <id>`
 resolves a mounted brain and reports the MOUNT's engine and URL source, never
@@ -373,7 +511,7 @@ names — reasons may be added, never renamed or removed). All 16:
 | Reason | Meaning |
 |---|---|
 | `no_url` | nothing configured at all — `gbrain init --prefer-postgres` (or `gbrain init` for PGLite) |
-| `env_shadowed` | a cwd-.env `DATABASE_URL` exists but the #427 guard excludes it — export `GBRAIN_DATABASE_URL` |
+| `env_shadowed` | a cwd-.env `DATABASE_URL` exists but the cwd-.env guard excludes it — export `GBRAIN_DATABASE_URL` |
 | `auth_failed` | password/role rejected (28P01) — reset credentials, then `gbrain init --url <conn>` |
 | `permission_denied` | 28000/42501 — the role lacks a GRANT or hits RLS |
 | `tenant_not_found` | Supavisor rejected the tenant — pooler usernames are `postgres.<project-ref>`; also raised by paused projects |
@@ -396,7 +534,7 @@ recipe text.
 
 ### Degraded-mode serve
 
-When Postgres is unreachable at `gbrain serve` STARTUP, serve no longer dies:
+When Postgres is unreachable at `gbrain serve` STARTUP, serve does not die:
 it boots on a lazy-reconnect engine, each tool call attempts a single reconnect
 (minimum ~5s between real attempts — no connect storms), and until one succeeds
 tool calls return the classified envelopes above. The call that triggers the
@@ -412,17 +550,18 @@ keep die-on-startup (that lane's repair is `gbrain pglite-repair`), and
 mid-session outages ride the engine's own reconnect plus the per-call
 classified envelopes.
 
-## JSONB writes: never double-encode (the #2339 trap)
+## JSONB writes: never double-encode
 
 Writing a JS value into a `jsonb` column has exactly two correct forms. Get this
 wrong and the write succeeds on PGLite but stores a **jsonb string scalar** on
 real Postgres — `col ->> 'k'` returns NULL, `jsonb_array_elements` throws, and a
-`jsonb_typeof = 'array'` CHECK rejects the row (this aborted every sync in #2339).
+`jsonb_typeof = 'array'` CHECK rejects the row (which aborts the sync that wrote it).
 
 | Form | Verdict |
 |---|---|
 | Template tag: `` sql`... ${sql.json(obj)}` `` (postgres-engine only) | ✅ native jsonb serialization |
 | Positional raw call, raw object: `executeRawJsonb(engine, sql, scalars, [obj])` | ✅ object reaches the wire as jsonb |
+| engine-sql domain code: `` sqlFragment`... ${jsonbParam(obj)}` `` | ✅ bound as `sql.json` on Postgres, serialized for PGLite's native text→jsonb parse |
 | Positional raw call, stringified: `executeRaw(\`... $N::text::jsonb\`, [JSON.stringify(x)])` | ✅ binds as text, the cast parses it |
 | Positional raw call, BARE cast: `executeRaw(\`... $N::jsonb\`, [JSON.stringify(x)])` | ❌ **double-encodes** under postgres.js `.unsafe()` |
 | Template literal interpolation: `` `... ${JSON.stringify(x)}::jsonb` `` | ❌ double-encodes |
@@ -432,7 +571,7 @@ real Postgres — `col ->> 'k'` returns NULL, `jsonb_array_elements` throws, and
 cast then wraps that already-JSON string into a jsonb scalar string instead of
 parsing it. Casting through `$N::text::jsonb` forces a text→jsonb parse.
 **PGLite's `db.query` parses text→jsonb natively, so it hides the bug** — which is
-why a regression only shows up on Postgres (and why the parity test must run there).
+why the bug only shows up on Postgres (and why the parity test must run there).
 
 **Two CI guards enforce this, both wired into `scripts/check-jsonb-pattern.sh`:**
 - the template-tag grep (`${JSON.stringify(x)}::jsonb`), and
@@ -466,9 +605,18 @@ and assert `jsonb_typeof` — the assertion PGLite cannot make.
    ```
    The factory uses dynamic imports so an engine's dependencies (e.g. the
    PGLite WASM blob) are only loaded when that engine is selected.
-3. Store engine type in `~/.gbrain/config.json`: `{ "engine": "myengine", ... }`
-4. Add tests. The test suite should be engine-agnostic where possible... same test cases, different engine constructor.
-5. Document in this file + add a design doc in `docs/`
+3. If the engine speaks the Postgres dialect, add a dialect adapter that
+   implements `SqlExecutor` (`src/core/engine-sql/executor.ts`) beside
+   `dialect-pglite.ts` and `dialect-postgres.ts`, expose it through a private
+   `engineSql` getter over the current connection, and delegate every method
+   of a migrated domain to `src/core/engine-sql/<domain>.ts` the way both
+   engines do. Declare its capabilities honestly. The E5 binding matrix
+   (`test/helpers/executor-binding-matrix.ts`) and the engine-sql contract
+   tests tell you whether the adapter binds, counts, fails and cancels like the
+   others. A non-SQL engine implements every method itself.
+4. Store engine type in `~/.gbrain/config.json`: `{ "engine": "myengine", ... }`
+5. Add tests. The test suite should be engine-agnostic where possible... same test cases, different engine constructor.
+6. Document in this file + add a design doc in `docs/`
 
 ### What you DON'T need to touch
 
@@ -476,7 +624,8 @@ and assert `jsonb_typeof` — the assertion PGLite cannot make.
 - `src/mcp/server.ts` (same)
 - `src/core/chunkers/*` (shared across engines)
 - `src/core/embedding.ts` (shared across engines)
-- `src/core/search/hybrid.ts`, `expansion.ts`, `dedup.ts` (shared, operate on SearchResult[])
+- `src/core/search/hybrid.ts` + `hybrid/`, `expansion.ts`, `dedup.ts` (shared, operate on SearchResult[])
+- `src/core/engine-sql/<domain>.ts` (shared domain SQL, when your engine has a Postgres-dialect adapter)
 - `skills/*` (fat markdown, engine-agnostic)
 
 ### What you DO need to implement
@@ -489,7 +638,7 @@ Every method in `BrainEngine`. The full interface. No optional methods, no featu
 |-----------|---------------|-------------|-------|
 | CRUD | Full | Full | Same SQL |
 | Keyword search | tsvector + ts_rank | tsvector + ts_rank | Identical (real Postgres) |
-| Vector search | pgvector HNSW | pgvector HNSW | Identical (real Postgres) |
+| Vector search | pgvector HNSW | pgvector HNSW | Same operators; bounded fallback/cancellation differs |
 | Fuzzy slug | pg_trgm | pg_trgm | Identical (real Postgres) |
 | Graph traversal | Recursive CTE | Recursive CTE | Same SQL |
 | Transactions | Full ACID | Full ACID | Both support this |
@@ -506,4 +655,4 @@ Every method in `BrainEngine`. The full interface. No optional methods, no featu
 
 **Custom/Remote.** The interface is clean enough that someone could build an engine backed by any storage: Firestore, DynamoDB, a REST API, even a flat file system. The interface doesn't assume SQL.
 
-Note: The original SQLite engine plan (`docs/SQLITE_ENGINE.md`) was superseded by PGLite. PGLite uses the same SQL as Postgres, eliminating the need for a separate SQLite dialect with FTS5/sqlite-vss translation.
+Note: there is no SQLite engine. PGLite uses the same SQL as Postgres, so no separate SQLite dialect with FTS5/sqlite-vss translation is needed.

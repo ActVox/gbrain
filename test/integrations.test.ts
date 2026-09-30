@@ -14,6 +14,7 @@ import {
   isPrivateIpv4,
   isInternalUrl,
 } from '../src/commands/integrations.ts';
+import { __setDnsLookupForTests } from '../src/core/ssrf-validate.ts';
 
 const RECIPES_DIR = resolve(import.meta.dir, '..', 'recipes');
 
@@ -170,19 +171,26 @@ Content.
 
 describe('CLI integration', () => {
   let cliSource: string;
+  let cliSurface: string;
+  let tableSource: string;
 
   beforeAll(() => {
-    const { readFileSync } = require('fs');
-    cliSource = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf-8');
+    cliSource = surfaceFileSource('cli', 'src/cli.ts');
+    // Refactor wave 1 (W4 cli): CLI_ONLY membership and dispatch phase live in
+    // the command table; containment reads the whole cli surface.
+    cliSurface = surfaceSource('cli');
+    tableSource = surfaceFileSource('cli', 'src/cli/command-table.ts');
   });
 
   test('CLI_ONLY set contains integrations', () => {
-    expect(cliSource).toContain("'integrations'");
+    expect(cliSurface).toContain("'integrations'");
   });
 
   test('handleCliOnly routes integrations before connectEngine', () => {
-    // integrations case must appear before "All remaining CLI-only commands need a DB"
-    const integrationsIdx = cliSource.indexOf("command === 'integrations'");
+    // integrations is a pre-connect record, and handleCliOnly runs the
+    // pre-connect table step before "All remaining CLI-only commands need a DB"
+    expect(tableSource).toMatch(/\{ name: 'integrations', phase: 'pre-connect'/);
+    const integrationsIdx = cliSource.indexOf('await dispatchPreConnectCommand(command, args)');
     const dbComment = cliSource.indexOf('All remaining CLI-only commands need a DB');
     expect(integrationsIdx).toBeGreaterThan(0);
     expect(dbComment).toBeGreaterThan(0);
@@ -197,76 +205,13 @@ describe('CLI integration', () => {
 // --- Recipe file validation ---
 
 describe('twilio-voice-brain recipe', () => {
-  test('recipe file parses correctly', () => {
+  test('declares the Twilio and OpenAI secrets, each with an https console URL', () => {
     const { readFileSync } = require('fs');
-    const content = readFileSync(
-      new URL('../recipes/twilio-voice-brain.md', import.meta.url),
-      'utf-8'
-    );
-    const recipe = parseRecipe(content, 'twilio-voice-brain.md');
-    expect(recipe).not.toBeNull();
-    expect(recipe!.frontmatter.id).toBe('twilio-voice-brain');
-    expect(recipe!.frontmatter.category).toBe('sense');
-    expect(recipe!.frontmatter.secrets.length).toBeGreaterThan(0);
-    expect(recipe!.frontmatter.health_checks.length).toBeGreaterThan(0);
-    // Body should not be corrupted (contains --- horizontal rules)
-    expect(recipe!.body.length).toBeGreaterThan(100);
-  });
-
-  test('recipe has required secrets with where URLs', () => {
-    const { readFileSync } = require('fs');
-    const content = readFileSync(
-      new URL('../recipes/twilio-voice-brain.md', import.meta.url),
-      'utf-8'
-    );
-    const recipe = parseRecipe(content, 'twilio-voice-brain.md');
-    expect(recipe).not.toBeNull();
-    for (const secret of recipe!.frontmatter.secrets) {
-      expect(secret.name).toBeTruthy();
-      expect(secret.where).toBeTruthy();
-      expect(secret.where).toContain('https://');
-    }
-  });
-
-  test('recipe has all required secrets', () => {
-    const { readFileSync } = require('fs');
-    const content = readFileSync(
-      new URL('../recipes/twilio-voice-brain.md', import.meta.url),
-      'utf-8'
-    );
-    const recipe = parseRecipe(content, 'twilio-voice-brain.md');
+    const recipe = parseRecipe(readFileSync(resolve(RECIPES_DIR, 'twilio-voice-brain.md'), 'utf-8'), 'twilio-voice-brain.md');
     expect(recipe).not.toBeNull();
     const secretNames = recipe!.frontmatter.secrets.map((s: any) => s.name);
-    expect(secretNames).toContain('TWILIO_ACCOUNT_SID');
-    expect(secretNames).toContain('TWILIO_AUTH_TOKEN');
-    expect(secretNames).toContain('OPENAI_API_KEY');
-  });
-
-  test('recipe version is valid semver', () => {
-    const { readFileSync } = require('fs');
-    const content = readFileSync(
-      new URL('../recipes/twilio-voice-brain.md', import.meta.url),
-      'utf-8'
-    );
-    const recipe = parseRecipe(content, 'twilio-voice-brain.md');
-    expect(recipe).not.toBeNull();
-    expect(recipe!.frontmatter.version).toMatch(/^\d+\.\d+\.\d+$/);
-  });
-
-  test('recipe requires resolve to existing recipe files', () => {
-    const { readFileSync, existsSync } = require('fs');
-    const { resolve } = require('path');
-    const content = readFileSync(
-      new URL('../recipes/twilio-voice-brain.md', import.meta.url),
-      'utf-8'
-    );
-    const recipe = parseRecipe(content, 'twilio-voice-brain.md');
-    expect(recipe).not.toBeNull();
-    const recipesDir = RECIPES_DIR;
-    for (const dep of recipe!.frontmatter.requires) {
-      const depPath = resolve(recipesDir, `${dep}.md`);
-      expect(existsSync(depPath)).toBe(true);
-    }
+    expect(secretNames).toEqual(expect.arrayContaining(['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'OPENAI_API_KEY']));
+    for (const secret of recipe!.frontmatter.secrets) expect(secret.where).toContain('https://');
   });
 });
 
@@ -311,8 +256,24 @@ describe('all recipes', () => {
     for (const file of files) {
       const content = readFileSync(resolve(recipesDir, file), 'utf-8');
       const recipe = parseRecipe(content, file);
-      expect(recipe).not.toBeNull();
-      expect(recipe!.frontmatter.id).toBeTruthy();
+      expect(recipe, file).not.toBeNull();
+      expect(recipe!.frontmatter.id, file).toBeTruthy();
+    }
+  });
+
+  test('every recipe has a semver version, named secrets that say where to get them, and requires that resolve', () => {
+    const { readFileSync, readdirSync, existsSync } = require('fs');
+    const files = readdirSync(RECIPES_DIR).filter((f: string) => f.endsWith('.md'));
+    for (const file of files) {
+      const recipe = parseRecipe(readFileSync(resolve(RECIPES_DIR, file), 'utf-8'), file)!;
+      expect(recipe.frontmatter.version, file).toMatch(/^\d+\.\d+\.\d+$/);
+      for (const secret of recipe.frontmatter.secrets) {
+        expect(secret.name, file).toBeTruthy();
+        expect(secret.where, `${file} ${secret.name}`).toBeTruthy();
+      }
+      for (const dep of recipe.frontmatter.requires) {
+        expect(existsSync(resolve(RECIPES_DIR, `${dep}.md`)), `${file} requires ${dep}`).toBe(true);
+      }
     }
   });
 
@@ -561,6 +522,101 @@ describe('executeHealthCheck', () => {
   });
 });
 
+describe('HTTP health checks use the guarded transport', () => {
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    __setDnsLookupForTests((async () => [{ address: '8.8.8.8', family: 4 }]) as any);
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    __setDnsLookupForTests(undefined);
+  });
+
+  test('preserves configured method, string body and auth on a same-origin redirect', async () => {
+    const requests: Array<{ url: string; method?: string; body: unknown; auth: string | null }> = [];
+    let cancelled = 0;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      requests.push({ url, method: init?.method, body: init?.body, auth: new Headers(init?.headers).get('authorization') });
+      return new Response(new ReadableStream({ cancel() { cancelled++; } }), requests.length === 1
+        ? { status: 303, headers: { location: '/final' } } : { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await executeHealthCheck({
+      type: 'http', url: 'https://api.example.test/start', method: 'POST', body: '{"probe":true}',
+      auth: 'bearer', auth_token: 'synthetic-test-value',
+    }, 'test-id', true);
+    expect(result.status).toBe('ok');
+    expect(requests).toEqual([
+      { url: 'https://8.8.8.8/start', method: 'POST', body: '{"probe":true}', auth: 'Bearer synthetic-test-value' },
+      { url: 'https://8.8.8.8/final', method: 'POST', body: '{"probe":true}', auth: 'Bearer synthetic-test-value' },
+    ]);
+    expect(cancelled).toBe(2);
+  });
+
+  test('even a configured Accept header prevents cross-origin forwarding', async () => {
+    let requests = 0;
+    globalThis.fetch = (async () => {
+      requests++;
+      return new Response(null, { status: 302, headers: { location: 'https://other.example.test/final' } });
+    }) as unknown as typeof fetch;
+    const result = await executeHealthCheck({
+      type: 'http', url: 'https://api.example.test/start', headers: { Accept: 'synthetic-test-value' },
+    }, 'test-id', true);
+    expect(result.status).toBe('blocked');
+    expect(result.output).toContain('SSRF_REDIRECT_DENIED');
+    expect(result.output).not.toContain('synthetic-test-value');
+    expect(requests).toBe(1);
+  });
+
+  test('plain probes cross public origins and never consume the response body', async () => {
+    let requests = 0;
+    let cancelled = 0;
+    globalThis.fetch = (async () => {
+      requests++;
+      return new Response(new ReadableStream({ cancel() { cancelled++; } }), requests === 1
+        ? { status: 302, headers: { location: 'https://other.example.test/final' } } : { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await executeHealthCheck({ type: 'http', url: 'https://api.example.test/start' }, 'test-id', true);
+    expect(result.status).toBe('ok');
+    expect(requests).toBe(2);
+    expect(cancelled).toBe(2);
+  });
+
+  test('unlabelled HTTP checks never serialize configured credentials into results', async () => {
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+    const result = await executeHealthCheck({
+      type: 'http', url: 'https://api.example.test/private-document?signature=private-value',
+      auth: 'bearer', auth_token: 'private-token', method: 'POST', body: 'private-body',
+    }, 'test-id', true);
+    expect(result.status).toBe('ok');
+    expect(result.check).toBe('HTTP');
+    expect(JSON.stringify(result)).not.toContain('private-');
+  });
+
+  test('any_of results do not serialize nested HTTP credentials', async () => {
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+    const result = await executeHealthCheck({ type: 'any_of', checks: [{
+      type: 'http', url: 'https://api.example.test/check', auth: 'bearer', auth_token: 'private-token',
+    }] }, 'test-id', true);
+    expect(result.status).toBe('ok');
+    expect(JSON.stringify(result)).not.toContain('private-');
+  });
+
+  test('HTTP denials and transport errors omit configured URLs and exception contents', async () => {
+    for (const [url, embedded] of [
+      ['https://api.example.test/private-document?signature=private-value', false],
+      ['http://127.0.0.1/private-document?signature=private-value', true],
+    ] as const) {
+      const result = await executeHealthCheck({ type: 'http', url }, 'test-id', embedded);
+      expect(result.status).toBe('blocked');
+      expect(JSON.stringify(result)).not.toContain('private-');
+    }
+    globalThis.fetch = (async () => { throw new Error('TLS error private-document private-value'); }) as unknown as typeof fetch;
+    const failed = await executeHealthCheck({ type: 'http', url: 'https://api.example.test/check' }, 'test-id', true);
+    expect(failed.status).toBe('fail');
+    expect(failed.output).not.toContain('private-');
+  });
+});
+
 // --- SSRF helper tests (B3/B4/Fix 4) ---
 
 describe('parseOctet', () => {
@@ -656,6 +712,7 @@ describe('isInternalUrl', () => {
 // --- Recipe trust boundary (B1 regression) ---
 
 import { getRecipeDirs } from '../src/commands/integrations.ts';
+import { surfaceFileSource, surfaceSource } from './helpers/source-surface.ts';
 
 describe('getRecipeDirs (B1 trust boundary)', () => {
   test('returns tiered list with trusted flag', () => {

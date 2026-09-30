@@ -11,6 +11,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { renderAttachmentInspection, threadAttachmentReceipts } from './attachment-receipts.ts';
 
 import { emailCitation } from '../output/scaffold.ts';
 import type { CalendarEventData, ContactData, GmailThreadData } from './types.ts';
@@ -32,6 +33,64 @@ const NOISE_SENDER_SUBSTRINGS = [
 export function isNoiseSender(fromAddress: string): boolean {
   const f = fromAddress.toLowerCase();
   return NOISE_SENDER_SUBSTRINGS.some((p) => f.includes(p));
+}
+
+/**
+ * Google Calendar system mail — the invitation/response/cancellation notices
+ * Calendar sends ON BEHALF OF a human organiser or attendee.
+ *
+ * Why this needs its own predicate: the mail arrives FROM the colleague's real
+ * address, so neither isNoiseSender nor `loops mute sender` can exclude it —
+ * muting the address would also silence that person's genuine email. In a
+ * measured audit these notices were a large fraction of all open loops, every
+ * one of them a "reply owed" that no human ever expected an answer to.
+ *
+ * PRIMARY signal is structural: a `calendarMethod` that is one of the
+ * iCalendar METHOD values (RFC 5546 — REQUEST/REPLY/CANCEL/…), which Calendar
+ * stamps on all of these and which ordinary human mail never has. Only the
+ * allowlisted values count: an EMPTY method ('' — an .ics-ish part was seen
+ * but no iCalendar METHOD was found, e.g. a human attaching an invite file)
+ * and an unrecognised value are both deliberately NOT trusted as a stamp —
+ * classifying them as system silenced genuine human questions, which could
+ * then neither open nor close loops.
+ *
+ * The subject prefix is a deliberate FALLBACK, reached when no usable MIME
+ * method was captured for the message. It is anchored to the start of the
+ * subject and refuses anything carrying a Re:/Fwd: prefix, so a human forward
+ * that happens to begin "Invitation: ..." still opens a loop. The prefixes
+ * are Calendar's OWN localised headers only — a generic word like
+ * "Notification:" is a human/vendor subject and must never match.
+ */
+const CALENDAR_METHODS = new Set([
+  'REQUEST', 'REPLY', 'CANCEL', 'PUBLISH', 'COUNTER', 'DECLINECOUNTER', 'REFRESH', 'ADD',
+]);
+
+const CALENDAR_SUBJECT_PREFIXES = [
+  // en
+  'invitation:', 'updated invitation:', 'invitation with note:',
+  'updated invitation with note:', 'accepted:', 'declined:', 'tentative:',
+  'canceled event:', 'cancelled event:',
+  // ru
+  'приглашение:', 'обновлённое приглашение:', 'обновленное приглашение:',
+  'принято:', 'отклонено:', 'под вопросом:', 'отменено:', 'отмена мероприятия:',
+  // es / fr / de — the locales Calendar localises these headers into
+  'invitación:', 'invitación actualizada:', 'aceptada:', 'rechazada:',
+  'invitation mise à jour:', 'acceptée:', 'refusée:',
+  'einladung:', 'aktualisierte einladung:', 'zugesagt:', 'abgesagt:',
+];
+
+const REPLY_OR_FORWARD_PREFIX = /^\s*((re|fwd?|aw|sv|vs)\s*:\s*)+/i;
+
+export function isCalendarSystemMail(
+  msg: { calendarMethod?: string | null; subject?: string },
+): boolean {
+  // Allowlisted iCalendar METHOD only; '' and unknown values fall through.
+  if (msg.calendarMethod && CALENDAR_METHODS.has(msg.calendarMethod.trim().toUpperCase())) return true;
+  const subject = (msg.subject ?? '').trim();
+  // A human reply/forward is never Calendar system mail, whatever it is titled.
+  if (REPLY_OR_FORWARD_PREFIX.test(subject)) return false;
+  const lowered = subject.toLowerCase();
+  return CALENDAR_SUBJECT_PREFIXES.some((p) => lowered.startsWith(p));
 }
 
 const SIGNATURE_PATTERNS = [
@@ -174,8 +233,12 @@ export function renderThreadPage(thread: GmailThreadData): RenderedPage | null {
   const subject = first.subject || '(no subject)';
   const signature = thread.messages.some((m) => isSignatureRequest(m.subject, m.from));
   const participants = new Set<string>();
+  // Message AUTHORS only — `loops mute sender` gates on these, never on
+  // recipients, so muting one person cannot silence a whole group thread.
+  const senders = new Set<string>();
   for (const m of thread.messages) {
     participants.add(m.fromAddress);
+    if (m.fromAddress) senders.add(m.fromAddress);
     for (const a of [...m.to, ...m.cc]) participants.add(a);
   }
 
@@ -193,7 +256,9 @@ export function renderThreadPage(thread: GmailThreadData): RenderedPage | null {
     `date: ${yamlStr(last.dateIso)}`,
     `first_message_date: ${yamlStr(first.dateIso)}`,
     `message_count: ${thread.messages.length}`,
+    `gmail_attachment_receipts: ${JSON.stringify(threadAttachmentReceipts(thread))}`,
     `participants: ${yamlList([...participants].sort())}`,
+    `senders: ${yamlList([...senders].sort())}`,
     `labels: ${yamlList([...new Set(thread.messages.flatMap((m) => m.labelIds))].sort())}`,
     ...(signature ? [`noise: signature-request`] : []),
     '---',
@@ -201,12 +266,12 @@ export function renderThreadPage(thread: GmailThreadData): RenderedPage | null {
 
   const body: string[] = ['', `# ${subject}`, ''];
   for (const m of thread.messages) {
-    const cite = emailCitation({
+    const cite = /^[A-Za-z0-9]{10,60}$/.test(m.id) ? emailCitation({
       account: thread.account,
       messageId: m.id,
       subject: m.subject || subject,
       dateISO: m.dateIso.slice(0, 10),
-    });
+    }) : 'Gmail message link unavailable.';
     const sent = m.labelIds.includes('SENT');
     body.push(
       `## ${sent ? '→ ' : ''}${m.from || m.fromAddress} · ${m.dateIso.slice(0, 16).replace('T', ' ')}`,
@@ -215,7 +280,7 @@ export function renderThreadPage(thread: GmailThreadData): RenderedPage | null {
       '',
     );
     if (m.to.length > 0) body.push(`To: ${m.to.join(', ')}${m.cc.length > 0 ? ` · Cc: ${m.cc.join(', ')}` : ''}`, '');
-    body.push(m.bodyText || '_empty message_', '');
+    body.push(m.bodyText || '_empty message_', '', renderAttachmentInspection(m.attachmentInspection), '');
   }
 
   return { relPath: threadRelPath(thread), markdown: fm.join('\n') + body.join('\n') + '\n' };

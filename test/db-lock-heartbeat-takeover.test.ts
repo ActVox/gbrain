@@ -19,6 +19,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 import {
   tryAcquireDbLock,
+  clearStaleLocks,
+  inspectLock,
   resolveStealGraceSeconds,
   DEFAULT_STEAL_GRACE_SECONDS,
 } from '../src/core/db-lock.ts';
@@ -96,6 +98,30 @@ describe('resolveStealGraceSeconds', () => {
 });
 
 describe('heartbeat-aware takeover (ON CONFLICT grace predicate)', () => {
+  test('startup cleanup preserves heartbeat grace and unexpired leases but removes old rows', async () => {
+    await withEnv({ GBRAIN_LOCK_STEAL_GRACE_SECONDS: '600' }, async () => {
+      await seedExpiredLock('test-hb-cleanup-protected', 301);
+      await seedExpiredLock('test-hb-cleanup-stale', 1200);
+      await seedExpiredLock('test-hb-cleanup-null', null);
+      await seedExpiredLock('test-hb-cleanup-live', 1200);
+      await engine.executeRaw(
+        `UPDATE gbrain_cycle_locks SET ttl_expires_at = NOW() + INTERVAL '5 minutes'
+         WHERE id = 'test-hb-cleanup-live'`,
+      );
+      const protectedBefore = await inspectLock(engine, 'test-hb-cleanup-protected');
+      expect(await tryAcquireDbLock(engine, 'test-hb-cleanup-protected', 5)).toBeNull();
+      expect(await clearStaleLocks(engine)).toBe(2);
+      const protectedAfter = await inspectLock(engine, 'test-hb-cleanup-protected');
+      expect(protectedAfter?.acquisition_token).toBe(protectedBefore?.acquisition_token);
+      expect(protectedAfter?.last_refreshed_at).toEqual(protectedBefore?.last_refreshed_at);
+      expect(protectedAfter?.ttl_expires_at).toEqual(protectedBefore?.ttl_expires_at);
+      expect(await inspectLock(engine, 'test-hb-cleanup-live')).not.toBeNull();
+      expect(await inspectLock(engine, 'test-hb-cleanup-stale')).toBeNull();
+      expect(await inspectLock(engine, 'test-hb-cleanup-null')).toBeNull();
+      expect(await tryAcquireDbLock(engine, 'test-hb-cleanup-protected', 5)).toBeNull();
+    });
+  });
+
   test('FRESH holder is NOT stolen even with an expired TTL', async () => {
     // ttl expired 5min ago, but refreshed 1s ago → inside the 600s grace.
     await seedExpiredLock('test-hb-fresh', 1);

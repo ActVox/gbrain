@@ -73,7 +73,7 @@ export interface EntityCard {
   /** Top typed edges, mentions excluded, out-edges first. */
   edges: EntityCardEdge[];
   backlink_count: number;
-  /** Active facts about this entity (capped count; visibility-filtered for remote). */
+  /** Exact active-fact count (indexed COUNT, not payload length); visibility-filtered for remote. */
   active_fact_count: number;
 }
 
@@ -219,7 +219,7 @@ export async function buildEntityCard(
     create_safety: 'exists',
   }));
 
-  const card = await assembleCard(engine, sourceId, best.row, opts.remote);
+  const card = await assembleCard(engine, sourceId, best.row, opts.remote, excludePrivate);
   return {
     found: true,
     card,
@@ -237,9 +237,14 @@ async function assembleCard(
   sourceId: string,
   row: CardPageRow,
   remote: boolean,
+  excludePrivate: boolean,
 ): Promise<EntityCard> {
   const pageSlug = row.slug;
   const visibility = remote ? (['world'] as ('private' | 'world')[]) : undefined;
+  const { privatePagesFilterFragment, privateLinkOriginFilterFragment } = await import('../search/private-visibility.ts');
+  const inboundPrivacy = excludePrivate
+    ? ` AND ${privatePagesFilterFragment('f')} AND ${privateLinkOriginFilterFragment('l')}`
+    : '';
 
   // Parallel depth-1 reads — every arm individually fail-soft so a partial
   // brain (no aliases, no timeline) still returns a card.
@@ -251,8 +256,11 @@ async function assembleCard(
   // a both-sides-scoped query here (f.source_id = t.source_id = this source),
   // mentions excluded (matching the backlink-count convention). Outgoing edges
   // (getLinks) are the entity's OWN declared links — from-side scoped — so they
-  // stay as-is.
-  const [aka, outLinks, inEdges, backlinkCount, timeline, facts] = await Promise.all([
+  // stay as-is. The referrer must also be live and, for an untrusted caller,
+  // readable: the same private-page and private-origin predicates get_backlinks
+  // applies, so a private or derived page never surfaces its slug, its
+  // links.context sentence, or a count.
+  const [aka, outLinks, inEdges, backlinkCount, timeline, facts, activeFactCount] = await Promise.all([
     engine
       .executeRaw<{ alias_norm: string }>(
         `SELECT alias_norm FROM page_aliases WHERE source_id = $1 AND slug = $2 ORDER BY alias_norm`,
@@ -260,15 +268,15 @@ async function assembleCard(
       )
       .then(rs => rs.map(r => r.alias_norm))
       .catch(() => [] as string[]),
-    engine.getLinks(pageSlug, { sourceId }).catch(() => []),
+    engine.getLinks(pageSlug, { sourceId, excludePrivate }).catch(() => []),
     engine
       .executeRaw<{ from_slug: string; link_type: string; context: string | null }>(
         `SELECT f.slug AS from_slug, l.link_type, l.context
            FROM links l
            JOIN pages f ON f.id = l.from_page_id
            JOIN pages t ON t.id = l.to_page_id
-          WHERE t.slug = $1 AND t.source_id = $2 AND f.source_id = $2
-            AND COALESCE(l.link_source, '') <> 'mentions'`,
+          WHERE t.slug = $1 AND t.source_id = $2 AND f.source_id = $2 AND f.deleted_at IS NULL
+            AND COALESCE(l.link_source, '') <> 'mentions'${inboundPrivacy}`,
         [pageSlug, sourceId],
       )
       .catch(() => [] as Array<{ from_slug: string; link_type: string; context: string | null }>),
@@ -278,13 +286,13 @@ async function assembleCard(
            FROM links l
            JOIN pages f ON f.id = l.from_page_id
            JOIN pages t ON t.id = l.to_page_id
-          WHERE t.slug = $1 AND t.source_id = $2 AND f.source_id = $2
-            AND COALESCE(l.link_source, '') <> 'mentions'`,
+          WHERE t.slug = $1 AND t.source_id = $2 AND f.source_id = $2 AND f.deleted_at IS NULL
+            AND COALESCE(l.link_source, '') <> 'mentions'${inboundPrivacy}`,
         [pageSlug, sourceId],
       )
       .then(rs => Number(rs[0]?.n ?? 0))
       .catch(() => 0),
-    engine.getTimeline(pageSlug, { limit: 5, sourceId }).catch(() => []),
+    engine.getTimeline(pageSlug, { limit: 5, sourceId, excludePrivate }).catch(() => []),
     engine
       .listFactsByEntity(sourceId, pageSlug, {
         activeOnly: true,
@@ -292,6 +300,21 @@ async function assembleCard(
         ...(visibility ? { visibility } : {}),
       })
       .catch(() => [] as FactRow[]),
+    // Exact active-fact count: the payload fetch above is capped at
+    // FACT_FETCH_CAP, so facts.length silently reports the cap for bigger
+    // entities. Same predicate as the fetch (active + source + caller
+    // visibility), indexed COUNT instead of rows. Fail-soft to null so a
+    // count failure degrades to the capped payload length, never to 0.
+    engine
+      .executeRaw<{ n: string | number }>(
+        `SELECT COUNT(*) AS n
+           FROM facts
+          WHERE source_id = $1 AND entity_slug = $2
+            AND expired_at IS NULL${remote ? ` AND visibility = 'world'` : ''}`,
+        [sourceId, pageSlug],
+      )
+      .then(rs => Number(rs[0]?.n ?? 0))
+      .catch(() => null),
   ]);
 
   const edges: EntityCardEdge[] = [];
@@ -363,9 +386,13 @@ async function assembleCard(
   if (openThreads.length < OPEN_THREADS_CAP) {
     const cutoff = Date.now() - OPEN_THREAD_TIMELINE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
     for (const t of timeline) {
-      const ts = Date.parse(t.date);
+      // Both engines TYPE this as string, but PGLite returns a Date object at
+      // runtime for the DATE column. Normalize at the public-card boundary so
+      // the frozen string|null contract holds for in-process consumers too.
+      const date = toIso(t.date);
+      const ts = date === null ? NaN : Date.parse(date);
       if (!Number.isFinite(ts) || ts < cutoff) continue;
-      openThreads.push({ kind: 'recent_event', text: t.summary, date: t.date });
+      openThreads.push({ kind: 'recent_event', text: t.summary, date });
       if (openThreads.length >= OPEN_THREADS_CAP) break;
     }
   }
@@ -379,12 +406,12 @@ async function assembleCard(
     last_touched: {
       updated_at: toIso(row.updated_at),
       last_retrieved_at: toIso(row.last_retrieved_at),
-      last_timeline_date: timeline.length ? timeline[0].date : null,
+      last_timeline_date: timeline.length ? toIso(timeline[0].date) : null,
     },
     open_threads: openThreads,
     edges,
     backlink_count: backlinkCount,
-    active_fact_count: facts.length,
+    active_fact_count: activeFactCount ?? facts.length,
   };
 }
 

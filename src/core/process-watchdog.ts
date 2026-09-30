@@ -111,17 +111,47 @@ function defaultWarn(msg: string): void {
 const INERT: WatchdogHandle = { dispose() {}, get active() { return false; } };
 
 /**
+ * Direct fd writes bypass worker-stream forwarding through the main loop.
+ * They must also be asynchronous: fd 2 can be a full, blocking pipe. Signals
+ * wait at most 25ms on this worker's timer, and only one write may be pending.
+ */
+const WORKER_DIAGNOSTICS_SRC = `
+const { write } = require('node:fs');
+let diagnosticInFlight = false;
+function w(m, afterWrite) {
+  let done = false;
+  let timer;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    if (afterWrite) afterWrite();
+  };
+  if (afterWrite) timer = setTimeout(finish, 25);
+  if (diagnosticInFlight) { finish(); return; }
+  diagnosticInFlight = true;
+  try {
+    write(2, '[' + label + '] ' + m + '\\n', () => { diagnosticInFlight = false; finish(); });
+  } catch (e) { diagnosticInFlight = false; finish(); }
+}
+function signal(signalName, message) {
+  w(message, () => { try { process.kill(process.pid, signalName); } catch (e) {} });
+}
+`;
+
+/**
  * Worker body (runs on its own OS thread). Inline string so `eval: true` bakes
  * it into the compiled binary. Uses only built-ins available in a Bun worker.
  *
  * `label` is validated by the caller to a safe charset before it reaches here,
  * so it can't break the string literal or inject log lines.
+ * Diagnostics use bounded asynchronous fd writes, independent of the main loop.
  */
 const WORKER_SRC = `
 const { workerData } = require('node:worker_threads');
 const { deadlineMs, graceMs, label, heartbeatMs } = workerData;
 const t0 = Date.now();
-function w(m) { try { process.stderr.write('[' + label + '] ' + m + '\\n'); } catch (e) {} }
+${WORKER_DIAGNOSTICS_SRC}
 if (heartbeatMs > 0) {
   const hb = setInterval(() => {
     const elapsed = Math.round((Date.now() - t0) / 1000);
@@ -131,12 +161,10 @@ if (heartbeatMs > 0) {
   if (typeof hb.unref === 'function') hb.unref();
 }
 setTimeout(() => {
-  w('deadline reached (' + Math.round(deadlineMs/1000) + 's) — sending SIGTERM for graceful shutdown');
-  try { process.kill(process.pid, 'SIGTERM'); } catch (e) {}
+  signal('SIGTERM', 'deadline reached (' + Math.round(deadlineMs/1000) + 's) — sending SIGTERM for graceful shutdown');
 }, deadlineMs);
 setTimeout(() => {
-  w('grace expired — sending SIGKILL (event loop was starved; this is the orphan-pileup backstop)');
-  try { process.kill(process.pid, 'SIGKILL'); } catch (e) {}
+  signal('SIGKILL', 'grace expired — sending SIGKILL (event loop was starved; this is the orphan-pileup backstop)');
 }, deadlineMs + graceMs);
 `;
 
@@ -352,7 +380,7 @@ const { stallMs, graceMs, label, checkIntervalMs } = workerData;
 let lastPet = Date.now();
 let lastCheck = Date.now();
 let latched = false;
-function w(m) { try { process.stderr.write('[' + label + '] ' + m + '\\n'); } catch (e) {} }
+${WORKER_DIAGNOSTICS_SRC}
 if (parentPort) parentPort.on('message', () => { lastPet = Date.now(); });
 setInterval(() => {
   const now = Date.now();
@@ -366,12 +394,10 @@ setInterval(() => {
   }
   const lag = now - lastPet;
   if (lag >= stallMs + graceMs) {
-    w('main loop unresponsive for ' + Math.round(lag / 1000) + 's (stall ' + Math.round(stallMs / 1000) + 's + grace ' + Math.round(graceMs / 1000) + 's) — sending SIGKILL (loop starved through the grace window; orphan-lock backstop)');
-    try { process.kill(process.pid, 'SIGKILL'); } catch (e) {}
+    signal('SIGKILL', 'main loop unresponsive for ' + Math.round(lag / 1000) + 's (stall ' + Math.round(stallMs / 1000) + 's + grace ' + Math.round(graceMs / 1000) + 's) — sending SIGKILL (loop starved through the grace window; orphan-lock backstop)');
   } else if (lag >= stallMs && !latched) {
     latched = true;
-    w('main loop unresponsive for ' + Math.round(lag / 1000) + 's (>= ' + Math.round(stallMs / 1000) + 's stall threshold) — sending SIGTERM for graceful shutdown');
-    try { process.kill(process.pid, 'SIGTERM'); } catch (e) {}
+    signal('SIGTERM', 'main loop unresponsive for ' + Math.round(lag / 1000) + 's (>= ' + Math.round(stallMs / 1000) + 's stall threshold) — sending SIGTERM for graceful shutdown');
   } else if (latched && lag < stallMs) {
     // mirrors nextStallLatch: the loop recovered (pets resumed), so a later
     // re-stall is a NEW stall — re-arm the graceful SIGTERM rather than

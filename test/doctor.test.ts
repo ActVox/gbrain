@@ -1,4 +1,5 @@
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
+import { resetGateway } from '../src/core/ai/gateway.ts';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -8,16 +9,25 @@ import * as path from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
 import { logRerankFailure } from '../src/core/rerank-audit.ts';
 import { doctorSource, doctorFileSource } from './helpers/doctor-source.ts';
+import { surfaceFileSource } from './helpers/source-surface.ts';
+
+// Health fixtures configure fake provider keys. Clear the gateway snapshot as
+// well as each fixture's process env so later tests cannot send real requests.
+afterEach(() => resetGateway());
 
 describe('doctor command', () => {
-  test('doctor module exports runDoctor', async () => {
-    const { runDoctor } = await import('../src/commands/doctor.ts');
-    expect(typeof runDoctor).toBe('function');
-  });
-
-  test('LATEST_VERSION is importable from migrate', async () => {
-    const { LATEST_VERSION } = await import('../src/core/migrate.ts');
-    expect(typeof LATEST_VERSION).toBe('number');
+  test('dimension recovery previews existing brains without recommending reinitialization', () => {
+    const source = doctorFileSource('doctor/checks/embedding-health.ts');
+    const start = source.indexOf('if (totalChunks > 0)');
+    const end = source.indexOf('surfacedUnconfiguredDrift = true;', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const hint = source.slice(start, end);
+    expect(hint).toContain('--dry-run');
+    expect(hint).toContain('--yes --max-cost-usd <approved-total>');
+    expect(hint).toContain('docs/guides/embedding-migration.md#recovery');
+    expect(hint).not.toContain('init --force');
+    expect(doctorSource()).not.toContain('manual ALTER recipe');
   });
 
   test('CLI registers doctor command', async () => {
@@ -124,10 +134,29 @@ describe('doctor command', () => {
     expect(check.message).toContain('Subagent model resolves via models.subagent to "anthropic:claude-opus-4-7"');
   });
 
-  test('subagent_capability checks models.default before tier fallback', async () => {
+  test('subagent_capability checks models.tier.subagent before models.default (#4575)', async () => {
+    // The runtime hoisted models.tier.<tier> above models.default in #3873;
+    // the check must mirror that order. Pre-fix it read models.default first
+    // and reported an unclearable degraded:no_caching warn on any brain that
+    // set both keys — following the warning's own advice (set
+    // models.tier.subagent) could never retire it.
     const { checkSubagentCapability } = await import('../src/commands/doctor.ts');
     const config = new Map<string, string | null>([
       ['models.tier.subagent', 'anthropic:claude-sonnet-4-6'],
+      ['models.default', 'google:gemini-1.5-pro'],
+    ]);
+    const check = await checkSubagentCapability({
+      async getConfig(key: string): Promise<string | null> {
+        return config.get(key) ?? null;
+      },
+    } as any);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('Subagent model resolves via models.tier.subagent to "anthropic:claude-sonnet-4-6"');
+  });
+
+  test('subagent_capability still explains models.default when it alone is set', async () => {
+    const { checkSubagentCapability } = await import('../src/commands/doctor.ts');
+    const config = new Map<string, string | null>([
       ['models.default', 'google:gemini-1.5-pro'],
     ]);
     const check = await checkSubagentCapability({
@@ -143,14 +172,22 @@ describe('doctor command', () => {
     const { checkRerankerHealth } = await import('../src/commands/doctor.ts');
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-rerank-doctor-'));
     try {
-      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir }, async () => {
+      // v0.48.2: the default reranker is keyed on VOYAGE_API_KEY; without it
+      // the check warns "not running" before reading the audit rows.
+      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir, VOYAGE_API_KEY: 'pa-test-voyage' }, async () => {
+        // readiness reads the live gateway plane — give it the key the CLI
+        // would have folded so the audit ladder below is what gets exercised.
+        (await import('../src/core/ai/gateway.ts')).configureGateway({
+          embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'sk-test', VOYAGE_API_KEY: 'pa-test-voyage' },
+        });
         for (let i = 0; i < 3; i++) {
           logRerankFailure({
-            model: 'zeroentropyai:zerank-2',
+            model: 'voyage:rerank-2.5', // the resolved default — rows for other models are filtered out
             reason: 'unknown',
             query_hash: `unknown${i}`,
             doc_count: 30,
-            error_summary: 'ZeroEntropy reranker requires ZEROENTROPY_API_KEY.',
+            error_summary: 'Voyage reranker requires VOYAGE_API_KEY.',
           });
         }
         const check = await checkRerankerHealth({
@@ -161,7 +198,7 @@ describe('doctor command', () => {
         expect(check.status).toBe('warn');
         expect(check.message).toContain('unknown');
         // v0.46.3: the hint names the reranker provider's key generically
-        // (VOYAGE_API_KEY example) — ZE is sunsetting.
+        // (VOYAGE_API_KEY example).
         expect(check.message).toContain('VOYAGE_API_KEY');
       });
     } finally {
@@ -173,9 +210,17 @@ describe('doctor command', () => {
     const { checkRerankerHealth } = await import('../src/commands/doctor.ts');
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-rerank-budget-doctor-'));
     try {
-      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir }, async () => {
+      // v0.48.2: the default reranker is keyed on VOYAGE_API_KEY; without it
+      // the check warns "not running" before reading the audit rows.
+      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir, VOYAGE_API_KEY: 'pa-test-voyage' }, async () => {
+        // readiness reads the live gateway plane — give it the key the CLI
+        // would have folded so the audit ladder below is what gets exercised.
+        (await import('../src/core/ai/gateway.ts')).configureGateway({
+          embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'sk-test', VOYAGE_API_KEY: 'pa-test-voyage' },
+        });
         logRerankFailure({
-          model: 'acmecorp:unpriced-reranker-v9',
+          model: 'voyage:rerank-2.5', // rows are filtered to the resolved model
           reason: 'budget',
           query_hash: 'budget01',
           doc_count: 30,
@@ -190,6 +235,79 @@ describe('doctor command', () => {
         expect(check.message).toContain('budget/pricing');
         expect(check.message).toContain('embedding-pricing.ts');
         expect(check.message).toContain('--max-cost');
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('#4648: reranker_health warns on >= 3 empty/malformed pass-throughs (named as pass-through)', async () => {
+    const { checkRerankerHealth } = await import('../src/commands/doctor.ts');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-rerank-passthrough-doctor-'));
+    try {
+      // v0.48.2: the check filters audit rows to the RESOLVED reranker (the
+      // Voyage default, keyed on VOYAGE_API_KEY) and reads readiness from the
+      // live gateway plane — configure both so the pass-through ladder is
+      // what gets exercised.
+      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir, VOYAGE_API_KEY: 'pa-test-voyage' }, async () => {
+        (await import('../src/core/ai/gateway.ts')).configureGateway({
+          embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'sk-test', VOYAGE_API_KEY: 'pa-test-voyage' },
+        });
+        const reasons = ['empty_result_set', 'malformed_shape', 'empty_result_set'] as const;
+        reasons.forEach((reason, i) => {
+          logRerankFailure({
+            model: 'voyage:rerank-2.5', // the resolved default — rows for other models are filtered out
+            reason,
+            query_hash: `passthru${i}`,
+            doc_count: 12,
+            error_summary: 'provider answered successfully with an empty result set; results passed through unreranked',
+          });
+        });
+        const check = await checkRerankerHealth({
+          async getConfig(key: string): Promise<string | null> {
+            return key === 'search.reranker.enabled' ? 'true' : null;
+          },
+        } as any);
+        expect(check.status).toBe('warn');
+        expect(check.message).toContain('pass-through');
+        expect(check.message).toContain('3');
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('#4648: two pass-throughs stay below the threshold — no pass-through warn', async () => {
+    const { checkRerankerHealth } = await import('../src/commands/doctor.ts');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-rerank-passthrough-doctor-2-'));
+    try {
+      // v0.48.2: the check filters audit rows to the RESOLVED reranker (the
+      // Voyage default, keyed on VOYAGE_API_KEY) and reads readiness from the
+      // live gateway plane — configure both so the pass-through ladder is
+      // what gets exercised.
+      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir, VOYAGE_API_KEY: 'pa-test-voyage' }, async () => {
+        (await import('../src/core/ai/gateway.ts')).configureGateway({
+          embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'sk-test', VOYAGE_API_KEY: 'pa-test-voyage' },
+        });
+        for (const [i, reason] of (['empty_result_set', 'malformed_shape'] as const).entries()) {
+          logRerankFailure({
+            model: 'voyage:rerank-2.5', // the resolved default — rows for other models are filtered out
+            reason,
+            query_hash: `passthru-low${i}`,
+            doc_count: 12,
+            error_summary: 'provider answered successfully with a non-array result shape; results passed through unreranked',
+          });
+        }
+        const check = await checkRerankerHealth({
+          async getConfig(key: string): Promise<string | null> {
+            return key === 'search.reranker.enabled' ? 'true' : null;
+          },
+        } as any);
+        expect(check.status).toBe('ok');
+        expect(check.message).not.toContain('pass-through');
+        expect(check.message).toContain('below threshold');
       });
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -263,6 +381,8 @@ describe('doctor command', () => {
     const source = doctorSource();
     expect(source).toContain('jsonb_integrity');
     expect(source).toContain('markdown_body_completeness');
+    // 0.48.5.1: the truncated-page hint must not name a flag `gbrain sync` does not have.
+    expect(source).not.toContain('gbrain sync --force');
     expect(source).toContain('gbrain repair-jsonb');
   });
 
@@ -305,7 +425,7 @@ describe('doctor command', () => {
       // the pre-#2375 damage class) and one LEGITIMATE string scalar
       // (persistToolExec binds pre-serialized string payloads as-is).
       await engine.executeRaw(
-        `INSERT INTO minion_jobs (id, name, data, status) VALUES (990001, 'doctor-jsonb-test', '{}'::jsonb, 'completed')`,
+        `INSERT INTO minion_jobs (submission_authority, id, name, data, status) VALUES ('{"version":1,"kind":"application"}'::jsonb, 990001, 'doctor-jsonb-test', '{}'::jsonb, 'completed')`,
       );
       await engine.executeRaw(
         `INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks)
@@ -373,7 +493,7 @@ describe('doctor command', () => {
     const doctorAll = doctorSource();
     expect(doctorAll).toContain('facts_extraction_health');
     // The check must group by source_id, not hardcode 'default'.
-    const doctorTs = doctorFileSource('doctor.ts');
+    const doctorTs = doctorFileSource('doctor/checks/knowledge-health.ts');
     const block = doctorTs.slice(
       doctorTs.indexOf('// 11a-bis-2. facts_extraction_health'),
       doctorTs.indexOf('// 11a-2. effective_date_health'),
@@ -396,7 +516,7 @@ describe('doctor command', () => {
   // These are structural assertions on the source string so a silent revert
   // of the severity or the IN-filter removal fails loudly without a live DB.
   test('RLS check scans ALL public tables (no hardcoded tablename IN list near the RLS block)', async () => {
-    const source = doctorFileSource('doctor.ts');
+    const source = doctorFileSource('doctor/checks/schema-health.ts');
     const rlsBlock = source.slice(
       source.indexOf('// 5. RLS'),
       source.indexOf('// 6. Schema version'),
@@ -410,7 +530,7 @@ describe('doctor command', () => {
   });
 
   test('RLS check raises status=fail with quoted-identifier remediation SQL', async () => {
-    const source = doctorFileSource('doctor.ts');
+    const source = doctorFileSource('doctor/checks/schema-health.ts');
     const rlsBlock = source.slice(
       source.indexOf('// 5. RLS'),
       source.indexOf('// 6. Schema version'),
@@ -424,7 +544,7 @@ describe('doctor command', () => {
   });
 
   test('RLS check skips on PGLite (no PostgREST, not applicable)', async () => {
-    const source = doctorFileSource('doctor.ts');
+    const source = doctorFileSource('doctor/checks/schema-health.ts');
     const rlsBlock = source.slice(
       source.indexOf('// 5. RLS'),
       source.indexOf('// 6. Schema version'),
@@ -434,7 +554,7 @@ describe('doctor command', () => {
   });
 
   test('RLS check reads pg_description and recognizes the GBRAIN:RLS_EXEMPT escape hatch', async () => {
-    const source = doctorFileSource('doctor.ts');
+    const source = doctorFileSource('doctor/checks/schema-health.ts');
     const rlsBlock = source.slice(
       source.indexOf('// 5. RLS'),
       source.indexOf('// 6. Schema version'),
@@ -450,7 +570,7 @@ describe('doctor command', () => {
   // Lives AFTER `// 6. Schema version` so the existing `// 5. RLS` slice
   // tests stay intact (codex correction).
   test('rls_event_trigger check exists, scoped after schema_version, healthy on (O,A) only', async () => {
-    const source = doctorFileSource('doctor.ts');
+    const source = doctorFileSource('doctor/checks/schema-health.ts');
     const idx7 = source.indexOf('// 7. RLS event trigger');
     const idx8 = source.indexOf('// 8. Embedding health');
     expect(idx7).toBeGreaterThan(0);
@@ -487,16 +607,8 @@ describe('doctor command', () => {
     expect(src).not.toContain('gbrain timeline-extract');
   });
 
-  // v0.32 — takes_weight_grid pure-helper export.
-  // Codex review #7 demanded the check be extracted as a pure function so
-  // tests target it directly with stubbed engines instead of running the
-  // full runDoctor pipeline. This block validates the export shape and the
-  // 4 branches (no-takes / fail / warn / ok) behaviorally against PGLite.
-  test('takesWeightGridCheck is exported as a pure function', async () => {
-    const mod = await import('../src/commands/doctor.ts');
-    expect(typeof mod.takesWeightGridCheck).toBe('function');
-  });
-
+  // takes_weight_grid pure helper: the 4 branches (no-takes / fail / warn / ok)
+  // run behaviorally against PGLite.
   test('takes_weight_grid: 0 takes → ok with "No takes yet"', async () => {
     const { PGLiteEngine } = await import('../src/core/pglite-engine.ts');
     const { takesWeightGridCheck } = await import('../src/commands/doctor.ts');
@@ -654,7 +766,7 @@ describe('v0.31.8 — wedge migration force-retry hint (D19)', () => {
     expect(doctorAll).toContain('WEDGED MIGRATION(s)');
     expect(doctorAll).toContain('MINIONS HALF-INSTALLED');
     expect(doctorAll).toContain('--force-retry');
-    const doctorTs = doctorFileSource('doctor.ts');
+    const doctorTs = doctorFileSource('doctor/checks/local-runtime.ts');
     expect(doctorTs).toMatch(/MINIONS HALF-INSTALLED[\s\S]{0,400}--yes/);
   });
 
@@ -1295,7 +1407,8 @@ describe('supervisor crash classifier wiring (v0.35.x)', () => {
   });
 
   test('jobs.ts supervisor status uses summarizeCrashes — same wiring as doctor', async () => {
-    const source = await Bun.file(new URL('../src/commands/jobs.ts', import.meta.url)).text();
+    // W4 jobs: `jobs supervisor status` lives in src/commands/jobs/supervisor.ts.
+    const source = surfaceFileSource('jobs', 'src/commands/jobs/supervisor.ts');
     // Both surfaces MUST go through the shared helper. Without this, the two
     // CLI commands report drifting crash counts (the bug class codex caught
     // during the eng review outside-voice pass).

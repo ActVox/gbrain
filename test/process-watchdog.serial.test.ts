@@ -10,6 +10,8 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { join } from 'node:path';
+import { closeSync, mkdtempSync, openSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const HARNESS = join(import.meta.dir, 'fixtures', 'watchdog-harness.ts');
 
@@ -18,10 +20,11 @@ async function runHarness(
   deadlineMs: number,
   graceMs: number,
   hardCapMs: number,
-): Promise<{ exitCode: number | null; signalled: boolean; elapsedMs: number; stdout: string; stderr: string; killedByTest: boolean }> {
+  stderrFd?: number,
+): Promise<{ exitCode: number | null; signalCode: string | null; signalled: boolean; elapsedMs: number; stdout: string; stderr: string; killedByTest: boolean }> {
   const proc = Bun.spawn(['bun', HARNESS, mode, String(deadlineMs), String(graceMs)], {
     stdout: 'pipe',
-    stderr: 'pipe',
+    stderr: stderrFd ?? 'pipe',
   });
   const start = Date.now();
   let killedByTest = false;
@@ -30,12 +33,38 @@ async function runHarness(
   clearTimeout(cap);
   const elapsedMs = Date.now() - start;
   const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
+  const stderr = typeof proc.stderr === 'number' ? '' : await new Response(proc.stderr).text();
   // Bun surfaces signal death via exitCode === null + signalCode, or a negative
   // exitCode on some platforms. Treat "not a clean 0" as signalled for our purpose.
   const signalled = proc.exitCode !== 0;
-  return { exitCode: proc.exitCode, signalled, elapsedMs, stdout, stderr, killedByTest };
+  return { exitCode: proc.exitCode, signalCode: proc.signalCode, signalled, elapsedMs, stdout, stderr, killedByTest };
 }
+
+describe('watchdog signaling with a stalled stderr consumer', () => {
+  for (const mode of ['starve-stderr-blocked', 'stall-stderr-blocked']) {
+    test.skipIf(process.platform === 'win32')(`${mode}: a full FIFO cannot delay SIGKILL`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'gbrain-watchdog-fifo-'));
+      let fd: number | undefined;
+      try {
+        const fifo = join(dir, 'stderr');
+        expect(Bun.spawnSync(['mkfifo', fifo]).exitCode).toBe(0);
+        // O_RDWR opens the FIFO without waiting for another reader. Never
+        // read it: Bun's usual stderr:'pipe' eagerly drains and masks this bug.
+        fd = openSync(fifo, 'r+');
+        const r = await runHarness(mode, 300, 250, 3000, fd);
+        expect(r.stdout).toContain('FILLING_STDERR');
+        expect(r.stdout).not.toContain('STDERR_WRITE_RETURNED');
+        expect(r.killedByTest).toBe(false);
+        expect(r.signalCode).toBe('SIGKILL');
+        expect(r.elapsedMs).toBeGreaterThanOrEqual(500);
+        expect(r.elapsedMs).toBeLessThan(2000);
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 15000);
+  }
+});
 
 describe('process-watchdog integration (Bun-pinned)', () => {
   test('starved process IS killed by the watchdog around deadline+grace', async () => {
@@ -47,6 +76,9 @@ describe('process-watchdog integration (Bun-pinned)', () => {
     expect(r.signalled).toBe(true);
     // Died well before the harness's 8s self-exit safety net, near deadline+grace.
     expect(r.elapsedMs).toBeLessThan(3000);
+    // Even the first signal's diagnostic must reach the parent pipe before
+    // the default SIGTERM disposition exits this loop-starved process.
+    expect(r.stderr).toContain('[test-wd] deadline reached');
   }, 15000);
 
   test('control: a starved process WITHOUT the watchdog does not self-exit', async () => {
@@ -81,6 +113,7 @@ describe('loop-stall watchdog integration (Bun-pinned, #4281)', () => {
     // The worker latched SIGTERM first, then escalated — both visible in its log.
     expect(r.stderr).toContain('SIGTERM');
     expect(r.stderr).toContain('SIGKILL');
+    expect(r.stderr.indexOf('SIGTERM')).toBeLessThan(r.stderr.indexOf('SIGKILL'));
   }, 15000);
 
   test('healthy petting loop is NEVER killed across multiple stall windows', async () => {

@@ -1,10 +1,11 @@
 /**
  * CI guard: NEITHER embedded schema blob may forward-reference state that
  * its engine's `applyForwardReferenceBootstrap` doesn't know how to create.
- * Two halves: the PGLite checks below guard PGLITE_SCHEMA_SQL against the
- * pglite-engine bootstrap; the #4657 Postgres-blob gate (end of file)
- * guards SCHEMA_SQL against src/core/postgres-engine/
- * forward-reference-bootstrap.ts. A reference covered on one blob is NOT
+ * Both engines run the single implementation in src/core/engine-sql/
+ * bootstrap.ts (refactor wave 1, E1). Two halves: the PGLite checks below
+ * guard PGLITE_SCHEMA_SQL against that file minus its `dialect-only:postgres`
+ * regions; the #4657 Postgres-blob gate (end of file) guards SCHEMA_SQL
+ * against the whole file. A reference covered on one blob is NOT
  * automatically covered on the other (dream_verdicts exists only in the
  * Postgres blob).
  *
@@ -24,9 +25,10 @@
  * `REQUIRED_BOOTSTRAP_COVERAGE`.
  *
  * **When you add a new schema-blob forward reference:**
- *   1. Extend `applyForwardReferenceBootstrap` in pglite-engine.ts and/or
- *      src/core/postgres-engine/forward-reference-bootstrap.ts (whichever
- *      blob(s) carry the reference) to add the new state.
+ *   1. Extend src/core/engine-sql/bootstrap.ts: the probe in
+ *      FORWARD_REFERENCE_PROBES, the gap in `forwardReferenceGaps`, and the
+ *      DDL block. If only one blob carries the reference, gate it on a
+ *      dialect hook and wrap the DDL in `dialect-only:<engine>` markers.
  *   2. Add an entry to `REQUIRED_BOOTSTRAP_COVERAGE` below (PGLite side);
  *      the Postgres-blob gate is parser-driven and needs no registry entry
  *      (an intentional non-probe goes in POSTGRES_INDEX_REF_EXEMPTIONS).
@@ -41,15 +43,28 @@
 
 import { test, expect } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { surfaceFileSource } from './helpers/source-surface.ts';
 
 // Tier 3 opt-out: this file tests the bootstrap coverage contract explicitly,
 // running applyForwardReferenceBootstrap against fresh PGlite instances. A
 // snapshot-loaded engine would skip the bootstrap entirely.
 delete process.env.GBRAIN_PGLITE_SNAPSHOT;
 
-// Single home for the Postgres bootstrap's source path (moved once already,
-// #4477 — keep the three source-pinning tests below on one literal).
-const POSTGRES_BOOTSTRAP_PATH = 'src/core/postgres-engine/forward-reference-bootstrap.ts';
+// Single home for the bootstrap's source path (moved twice: #4477, then E1
+// merged both engines' copies — keep every source-pinning test below on one
+// literal). Read through the A10 single-file positional loader.
+const BOOTSTRAP_PATH = 'src/core/engine-sql/bootstrap.ts';
+const POSTGRES_ONLY_REGION = /\/\/ dialect-only:postgres begin[\s\S]*?\/\/ dialect-only:postgres end/g;
+
+/** The Postgres half's input: the whole bootstrap file. */
+function postgresBootstrapSource(): string {
+  return surfaceFileSource('postgres-engine', BOOTSTRAP_PATH);
+}
+
+/** The PGLite half's input: the bootstrap minus DDL only the Postgres blob needs. */
+function pgliteBootstrapSource(): string {
+  return surfaceFileSource('pglite-engine', BOOTSTRAP_PATH).replace(POSTGRES_ONLY_REGION, '');
+}
 
 // Forward-reference targets that PGLITE_SCHEMA_SQL requires.
 // When you add a new one, extend this list AND the bootstrap.
@@ -139,6 +154,14 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // v121 mask class), so the bootstrap adds them on pre-v127 brains.
   { kind: 'column', table: 'oauth_clients', column: 'surface' },
   { kind: 'column', table: 'oauth_clients', column: 'surface_set_by' },
+  // v147 capability columns are repaired before schema replay, including
+  // partial installations. Numbered migration 147 owns grant policy repair.
+  { kind: 'column', table: 'oauth_clients', column: 'allowed_operations' },
+  { kind: 'column', table: 'oauth_clients', column: 'delegated_slug_prefixes' },
+  { kind: 'column', table: 'oauth_clients', column: 'delegated_namespace' },
+  { kind: 'column', table: 'oauth_clients', column: 'grant_profile' },
+  { kind: 'column', table: 'oauth_clients', column: 'grant_revision' },
+  { kind: 'column', table: 'oauth_clients', column: 'grant_repair_reasons' },
   // v0.26.5 (v34) — promotes archive lifecycle from JSONB config to real
   // columns on sources. CREATE TABLE IF NOT EXISTS is a no-op on existing
   // sources tables, so the visibility filters in search/list_pages that
@@ -205,6 +228,10 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // Token rides the same bootstrap ALTER; registering it guards any FUTURE
   // blob index on it against the same wedge.
   { kind: 'column', table: 'minion_jobs', column: 'private_queue_owner_token' },
+  // v149 queue protocol reads both fields before numbered migrations run.
+  // Authority remains nullable: bootstrap must never authorize historical work.
+  { kind: 'column', table: 'minion_jobs', column: 'submission_authority' },
+  { kind: 'column', table: 'minion_jobs', column: 'claim_generation' },
 ];
 
 test('applyForwardReferenceBootstrap covers every forward reference declared in REQUIRED_BOOTSTRAP_COVERAGE', async () => {
@@ -281,6 +308,12 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       -- must re-add them.
       ALTER TABLE oauth_clients DROP COLUMN IF EXISTS surface;
       ALTER TABLE oauth_clients DROP COLUMN IF EXISTS surface_set_by;
+      ALTER TABLE oauth_clients DROP COLUMN IF EXISTS allowed_operations;
+      ALTER TABLE oauth_clients DROP COLUMN IF EXISTS delegated_slug_prefixes;
+      ALTER TABLE oauth_clients DROP COLUMN IF EXISTS delegated_namespace;
+      ALTER TABLE oauth_clients DROP COLUMN IF EXISTS grant_profile;
+      ALTER TABLE oauth_clients DROP COLUMN IF EXISTS grant_revision;
+      ALTER TABLE oauth_clients DROP COLUMN IF EXISTS grant_repair_reasons;
 
       -- v0.40.3.0 v90 + v91 column strips so applyForwardReferenceBootstrap
       -- has work to do. Only strip pages columns + the trigger; sources
@@ -316,6 +349,8 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE minion_jobs DROP COLUMN IF EXISTS private_queue_owner_job_id;
       ALTER TABLE minion_jobs DROP COLUMN IF EXISTS private_queue_owner_token;
       ALTER TABLE minion_jobs DROP COLUMN IF EXISTS private_queue_lease_until;
+      ALTER TABLE minion_jobs DROP COLUMN IF EXISTS submission_authority;
+      ALTER TABLE minion_jobs DROP COLUMN IF EXISTS claim_generation;
     `);
 
     // Note: we don't strip sources.archived* here because they're inline in the
@@ -418,6 +453,8 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
       ALTER TABLE minion_jobs DROP COLUMN IF EXISTS private_queue_owner_job_id;
       ALTER TABLE minion_jobs DROP COLUMN IF EXISTS private_queue_owner_token;
       ALTER TABLE minion_jobs DROP COLUMN IF EXISTS private_queue_lease_until;
+      ALTER TABLE minion_jobs DROP COLUMN IF EXISTS submission_authority;
+      ALTER TABLE minion_jobs DROP COLUMN IF EXISTS claim_generation;
 
       -- WP4 (v127) strip: surface columns + the wedge-signal index; replay
       -- must succeed from the pre-v127 shape.
@@ -733,8 +770,7 @@ test('every CREATE INDEX column in PGLITE_SCHEMA_SQL is covered by CREATE TABLE 
   // must be either (a) declared in the current CREATE TABLE body AND not
   // added by any migration (see buildIndexRefCoveragePredicate — migration-
   // added columns are forward references even when the CREATE TABLE body has
-  // them), or (b) added by `applyForwardReferenceBootstrap` in
-  // pglite-engine.ts.
+  // them), or (b) added by the PGLite view of engine-sql/bootstrap.ts.
   //
   // Codex outside-voice review caught the 11th wedge: composite-index second
   // columns (`provider_id` in `(job_id, provider_id)`) are forward references
@@ -747,13 +783,10 @@ test('every CREATE INDEX column in PGLITE_SCHEMA_SQL is covered by CREATE TABLE 
   // Self-updating: when a future migration adds a CREATE INDEX in
   // PGLITE_SCHEMA_SQL on a column that bootstrap doesn't yet provide, this
   // test fails loud at PR time. No human required to update an array.
-  const { readFileSync } = await import('fs');
-  const { resolve: resolvePath } = await import('path');
   const { PGLITE_SCHEMA_SQL } = await import('../src/core/pglite-schema.ts');
   const { extractAddedColumnsFromMigrations } = await import('./helpers/extract-added-columns.ts');
 
-  const enginePath = resolvePath(process.cwd(), 'src/core/pglite-engine.ts');
-  const engineSrc = readFileSync(enginePath, 'utf-8');
+  const engineSrc = pgliteBootstrapSource();
 
   const tableColumns = parseBaseTableColumns(PGLITE_SCHEMA_SQL);
   const indexRefs = parseIndexColumnReferences(PGLITE_SCHEMA_SQL);
@@ -789,8 +822,8 @@ test('every CREATE INDEX column in PGLITE_SCHEMA_SQL is covered by CREATE TABLE 
       `PGLITE_SCHEMA_SQL has ${uncovered.length} CREATE INDEX column reference(s) ` +
       `that are not safely covered (in the CREATE TABLE body AND not migration-added, ` +
       `or added by applyForwardReferenceBootstrap):\n${list}\n\n` +
-      `Fix: extend applyForwardReferenceBootstrap in src/core/pglite-engine.ts ` +
-      `(and the matching Postgres engine) with the missing ALTER TABLE ADD COLUMN. ` +
+      `Fix: extend src/core/engine-sql/bootstrap.ts (probe, gap and DDL; both ` +
+      `engines run it) with the missing ALTER TABLE ADD COLUMN. ` +
       `A column that is BOTH in the blob's CREATE TABLE AND added by a migration ` +
       `is a forward reference for pre-existing tables — CREATE TABLE presence ` +
       `does not cover it (that mask shipped the v121 upgrade wedge).`,
@@ -963,16 +996,33 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // Postgres-blob gate test below and the e2e pre-v143 convergence case.
   // This exemption only silences the PGLite column-only check.
   'dream_verdicts.expires_at',
+  // A14 (migration v175) — tag provenance. Column-only and nullable; no index
+  // in either schema blob references it, so the blob replay has no forward
+  // reference to trip on, and every reader treats NULL as an unclaimed legacy
+  // row (never import-deleted).
+  'tags.tag_source',
+  // Migration 178 — writer-version stamps. persistence_requests and
+  // persistence_brain are migration-created on PGLite (absent from
+  // PGLITE_SCHEMA_SQL), so no PGLite-blob forward reference can exist; no
+  // index in either blob references these columns; every reader treats NULL
+  // as an unstamped (older) writer or an unrecorded cutoff.
+  'persistence_requests.admitter_version',
+  'persistence_requests.admitter_host_id',
+  'persistence_requests.consumer_version',
+  'persistence_requests.consumer_host_id',
+  'persistence_requests.published_at',
+  'persistence_brain.writer_version_cutoff',
+  // #5254 (migration v177) — unbound-source page classification. Column-only
+  // and nullable; no index in either schema blob references it, and every
+  // reader treats NULL as an ordinary page.
+  'pages.database_only_reason',
 ]);
 
 test('every ALTER TABLE ADD COLUMN in MIGRATIONS is covered by applyForwardReferenceBootstrap (column-only class)', async () => {
   const { extractAddedColumnsFromMigrations } = await import('./helpers/extract-added-columns.ts');
-  const { readFileSync } = await import('fs');
-  const { resolve: resolvePath } = await import('path');
   const { PGLITE_SCHEMA_SQL } = await import('../src/core/pglite-schema.ts');
 
-  const enginePath = resolvePath(process.cwd(), 'src/core/pglite-engine.ts');
-  const engineSrc = readFileSync(enginePath, 'utf-8');
+  const engineSrc = pgliteBootstrapSource();
   const bootstrapAdds = parseAlterAddColumns(engineSrc);
 
   // Bootstrap's own CREATE TABLE statements (e.g. needsPagesBootstrap inlines
@@ -1017,7 +1067,7 @@ test('every ALTER TABLE ADD COLUMN in MIGRATIONS is covered by applyForwardRefer
       `applyForwardReferenceBootstrap does NOT cover:\n${list}\n\n` +
       `Fix one of:\n` +
       `  1. Add a probe + ALTER TABLE ADD COLUMN in applyForwardReferenceBootstrap ` +
-      `(src/core/pglite-engine.ts AND src/core/postgres-engine.ts), OR\n` +
+      `(src/core/engine-sql/bootstrap.ts, shared by both engines), OR\n` +
       `  2. If the column is intentionally not in the schema blob ` +
       `(transitional / handler-only / later-dropped), add the (table, column) ` +
       `to COLUMN_EXEMPTIONS in test/schema-bootstrap-coverage.test.ts with a ` +
@@ -1088,14 +1138,11 @@ test('extractAlterAddColumnsFromSql handles representative migration SQL shapes'
 // assertion is the local half of the guard; the e2e file is the live half.
 // ─────────────────────────────────────────────────────────────────
 
-test('postgres-engine.ts bootstrap carries the private-queue ALTERs and probes (guard symmetry with pglite-engine.ts)', async () => {
-  const { readFileSync } = await import('fs');
-  const { resolve: resolvePath } = await import('path');
+test('postgres bootstrap carries the private-queue and authority ALTERs and probes (PGLite symmetry)', async () => {
   // #4477 peeled the Postgres forward-reference bootstrap out of the
-  // postgres-engine.ts façade into its module dir; the guard follows the
-  // block to its current home.
-  const enginePath = resolvePath(process.cwd(), POSTGRES_BOOTSTRAP_PATH);
-  const engineSrc = readFileSync(enginePath, 'utf-8');
+  // postgres-engine.ts façade; E1 merged it with the PGLite copy into
+  // engine-sql/bootstrap.ts. The guard follows the block to its current home.
+  const engineSrc = postgresBootstrapSource();
   const normalized = engineSrc.replace(/\s+/g, ' ');
 
   // The exact three ALTERs the PGLite bootstrap applies — same statements,
@@ -1105,6 +1152,8 @@ test('postgres-engine.ts bootstrap carries the private-queue ALTERs and probes (
     'ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_owner_job_id INTEGER REFERENCES minion_jobs(id) ON DELETE SET NULL;',
     'ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_owner_token TEXT;',
     'ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_lease_until TIMESTAMPTZ;',
+    'ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS submission_authority JSONB;',
+    'ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS claim_generation BIGINT NOT NULL DEFAULT 0;',
   ]) {
     expect(normalized).toContain(stmt);
   }
@@ -1116,11 +1165,13 @@ test('postgres-engine.ts bootstrap carries the private-queue ALTERs and probes (
   expect(normalized).toContain('minion_jobs_pq_token_exists');
   expect(normalized).toContain('minion_jobs_pq_owner_exists');
   expect(normalized).toContain('minion_jobs_pq_lease_exists');
+  expect(normalized).toContain('minion_jobs_submission_authority_exists');
+  expect(normalized).toContain('minion_jobs_claim_generation_exists');
 
   // The structural extractor sees the same three ALTERs (keeps this guard
   // aligned with the parser-based coverage machinery above).
   const pgBootstrapAdds = parseAlterAddColumns(engineSrc);
-  for (const column of ['private_queue_owner_job_id', 'private_queue_owner_token', 'private_queue_lease_until']) {
+  for (const column of ['private_queue_owner_job_id', 'private_queue_owner_token', 'private_queue_lease_until', 'submission_authority', 'claim_generation']) {
     expect(pgBootstrapAdds).toContainEqual({ table: 'minion_jobs', column });
   }
 });
@@ -1136,7 +1187,7 @@ test('postgres-engine.ts bootstrap carries the private-queue ALTERs and probes (
 // CREATE INDEX in the embedded Postgres blob (SCHEMA_SQL, generated from
 // src/schema.sql) must be covered by CREATE-TABLE-presence-and-not-
 // migration-added, or by an ALTER/CREATE TABLE in the Postgres bootstrap
-// (src/core/postgres-engine/forward-reference-bootstrap.ts).
+// (src/core/engine-sql/bootstrap.ts, the whole file).
 //
 // Honest scope: CREATE INDEX column references only, on both schema blobs
 // (the PGLite half is the A2 test above). Forward references through
@@ -1151,13 +1202,10 @@ const POSTGRES_INDEX_REF_EXEMPTIONS = new Set<string>([
 ]);
 
 test('every CREATE INDEX column in the Postgres SCHEMA_SQL blob is covered by CREATE TABLE or the Postgres bootstrap (#4657 class closure)', async () => {
-  const { readFileSync } = await import('fs');
-  const { resolve: resolvePath } = await import('path');
   const { SCHEMA_SQL } = await import('../src/core/schema-embedded.generated.ts');
   const { extractAddedColumnsFromMigrations } = await import('./helpers/extract-added-columns.ts');
 
-  const bootstrapPath = resolvePath(process.cwd(), POSTGRES_BOOTSTRAP_PATH);
-  const bootstrapSrc = readFileSync(bootstrapPath, 'utf-8');
+  const bootstrapSrc = postgresBootstrapSource();
 
   const tableColumns = parseBaseTableColumns(SCHEMA_SQL);
   const indexRefs = parseIndexColumnReferences(SCHEMA_SQL);
@@ -1206,7 +1254,7 @@ test('every CREATE INDEX column in the Postgres SCHEMA_SQL blob is covered by CR
       `them, so the blob's CREATE INDEX wedges initSchema before runMigrations can help ` +
       `(the #4657 / v121 wedge class).\n` +
       `Fix: add a probe + column-only ALTER in ` +
-      `src/core/postgres-engine/forward-reference-bootstrap.ts (the migration stays the ` +
+      `src/core/engine-sql/bootstrap.ts (the migration stays the ` +
       `source of truth for backfill/constraints/indexes), or add an exemption with a ` +
       `rationale to POSTGRES_INDEX_REF_EXEMPTIONS.`,
     );
@@ -1217,10 +1265,7 @@ test('postgres bootstrap carries the dream_verdicts.expires_at probe + ALTER (#4
   // Local half of the #4657 pin (the e2e pre-v143 convergence case is the
   // DATABASE_URL-gated live half). Deleting the bootstrap block must break
   // a locally-runnable test.
-  const { readFileSync } = await import('fs');
-  const { resolve: resolvePath } = await import('path');
-  const bootstrapPath = resolvePath(process.cwd(), POSTGRES_BOOTSTRAP_PATH);
-  const normalized = readFileSync(bootstrapPath, 'utf-8').replace(/\s+/g, ' ');
+  const normalized = postgresBootstrapSource().replace(/\s+/g, ' ');
   expect(normalized).toContain('dream_verdicts_expires_at_exists');
   expect(normalized).toContain('ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;');
   // The DEFAULT must be a SEPARATE statement (a one-statement ADD COLUMN
@@ -1233,6 +1278,17 @@ test('postgres bootstrap carries the dream_verdicts.expires_at probe + ALTER (#4
   // otherwise stay green locally and only fail on the DATABASE_URL lane.
   expect(normalized).toContain('&& !needsDreamVerdictsExpiresAt');
   expect(normalized).toContain('if (needsDreamVerdictsExpiresAt)');
+});
+
+test('the PGLite half does not count DDL only the Postgres blob needs (dialect-only regions)', () => {
+  // E1 put both engines' bootstrap in one file. PGLite never probes or ALTERs
+  // dream_verdicts (dialect hook), so its coverage checks must not see that
+  // ALTER either; the Postgres half must.
+  const pgAdds = parseAlterAddColumns(postgresBootstrapSource());
+  const pgliteAdds = parseAlterAddColumns(pgliteBootstrapSource());
+  expect(pgAdds).toContainEqual({ table: 'dream_verdicts', column: 'expires_at' });
+  expect(pgliteAdds).not.toContainEqual({ table: 'dream_verdicts', column: 'expires_at' });
+  expect(pgAdds.length - pgliteAdds.length).toBe(1);
 });
 
 test('planted-bug: simulated unprovided column produces a clear failure message', async () => {

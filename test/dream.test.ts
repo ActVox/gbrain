@@ -26,13 +26,14 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { makeGitFixture, type GitFixture } from './helpers/git-fixture.ts';
 import { runDream } from '../src/commands/dream.ts';
+import { ALL_PHASES, SOURCE_FRESHNESS_PHASES } from '../src/core/cycle.ts';
 
 // ─── Shared fixtures (built once; reset per test) ──────────────────
 
@@ -307,8 +308,17 @@ describe('runDream — output format', () => {
   test('--json emits parsable CycleReport JSON with schema_version', async () => {
     const lines: string[] = [];
     const logSpy = spyOn(console, 'log').mockImplementation((msg: string) => { lines.push(String(msg)); });
-    await runDream(engine, ['--dir', repo, '--phase', 'lint', '--json']);
-    logSpy.mockRestore();
+    // The JSON payload itself goes through console.log (captured above), so a
+    // raw process.stdout.write during the run can only be a progress/summary
+    // leak that would corrupt the payload — progress belongs on stderr.
+    const stdoutSpy = spyOn(process.stdout, 'write').mockReturnValue(true);
+    try {
+      await runDream(engine, ['--dir', repo, '--phase', 'lint', '--json']);
+      expect(stdoutSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+      logSpy.mockRestore();
+    }
     const parsed = JSON.parse(lines.join('\n'));
     expect(parsed.schema_version).toBe('1');
     expect(parsed).toHaveProperty('status');
@@ -341,6 +351,26 @@ describe('runDream — output format', () => {
     expect(parsed.phases[0].phase).toBe('embed');
     // The stale chunk was still counted in the structured report.
     expect(parsed.phases[0].details.would_embed).toBe(1);
+  });
+
+  // The extract phase's `Links: created ...` / `Extract --stale: ...` summaries
+  // must not leak onto stdout ahead of the JSON CycleReport either.
+  test('--phase extract --json emits only JSON when the checkout has pages', async () => {
+    mkdirSync(join(repo, 'concepts'), { recursive: true });
+    writeFileSync(join(repo, 'concepts', 'testing.md'), '# Testing\nSee [[concepts/contracts]].\n');
+    writeFileSync(join(repo, 'concepts', 'contracts.md'), '# Contracts\nStay honest.\n');
+
+    const lines: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation((msg: string) => { lines.push(String(msg)); });
+    await runDream(engine, ['--dir', repo, '--phase', 'extract', '--json']);
+    logSpy.mockRestore();
+
+    const output = lines.join('\n');
+    expect(output.trimStart().startsWith('{')).toBe(true);
+    const parsed = JSON.parse(output);
+    expect(parsed.phases[0].phase).toBe('extract');
+    expect(parsed.phases[0].details.pages_processed).toBe(2);
+    expect(parsed.totals.pages_extracted).toBe(2);
   });
 
   test('human output for clean status mentions "Brain is healthy"', async () => {
@@ -409,6 +439,17 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     if (!s) return null;
     const raw = (s.config as any)?.last_full_cycle_at;
     return typeof raw === 'string' ? raw : null;
+  }
+
+  function phaseByName(report: any, name: string): any {
+    return report?.phases?.find((p: any) => p.phase === name);
+  }
+
+  function expectNoImplicitSourceExclusions(report: any): void {
+    expect(report?.phases.map((p: any) => p.phase)).toEqual(ALL_PHASES);
+    for (const p of report.phases) {
+      expect(p.details?.reason).not.toBe('excluded_from_implicit_source_cycle');
+    }
   }
 
   // ─── parseArgs: --source missing / conflict / repetition ────────────
@@ -521,9 +562,13 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     } catch (e: any) {
       thrown = e.message;
     }
-    // New contract: resolver throws the actionable error (central catch
-    // prints + verdict 1); accept either the throw or the legacy exit path.
-    const errOut = errSpy.mock.calls.flat().join(' ') + ' ' + thrown;
+    // Review fix: assertSourceExists now says "not found or is archived." —
+    // dream's isResolverUserError must match BOTH wordings (like
+    // code-callers/code-callees) so the resolver's user error surfaces as a
+    // clean stderr line + exit 1, never a propagated stack trace.
+    expect(thrown).toBe('EXIT');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errOut = errSpy.mock.calls.flat().join(' ');
     expect(errOut).toMatch(/Source "no-such-source" not found/);
     expect(errOut).toMatch(/gbrain sources list/);
     exitSpy.mockRestore();
@@ -597,6 +642,100 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     expect(await readLastFullCycleAt('beta')).toBeNull();
   }, 300_000);
 
+  // ─── #4700: bare dream against a default-like source runs the FULL cycle ─
+
+  test('bare dream runs the full cycle for a non-default sources.default target (#4700)', async () => {
+    await seedSource('primary');
+    await engine.setConfig('sources.default', 'primary');
+    await engine.setConfig('sync.repo_path', repo);
+
+    const report = await runDream(engine, ['--dry-run', '--json']);
+    expect(report).toBeTruthy();
+    expectNoImplicitSourceExclusions(report);
+  }, 300_000);
+
+  test('bare dream runs the full cycle for the sole non-default source (#4700)', async () => {
+    await seedSource('solo');
+    await engine.setConfig('sync.repo_path', repo);
+
+    const report = await runDream(engine, ['--dry-run', '--json']);
+    expect(report).toBeTruthy();
+    expectNoImplicitSourceExclusions(report);
+  }, 300_000);
+
+  test('bare dream survives a stale sources.default: warns and falls back to the sole non-default source (#4700 review fix)', async () => {
+    await seedSource('solo');
+    // sources.default points at a source that no longer exists (deleted or
+    // never restored) — the tier-5 fail-open posture treats it as absent.
+    await engine.setConfig('sources.default', 'ghost-gone');
+    await engine.setConfig('sync.repo_path', repo);
+
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    let report: any;
+    let errOut = '';
+    try {
+      report = await runDream(engine, ['--dry-run', '--json']);
+      errOut = errSpy.mock.calls.flat().join(' ');
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(report).toBeTruthy();
+    expectNoImplicitSourceExclusions(report); // fell back to 'solo' as the implicit default
+    expect(errOut).toMatch(/ghost-gone/);
+    expect(errOut).toMatch(/sources\.default/);
+  }, 300_000);
+
+  test('explicit --source remains a freshness-only source cycle even when it is sources.default', async () => {
+    await seedSource('primary');
+    await engine.setConfig('sources.default', 'primary');
+
+    const report = await runDream(engine, ['--source', 'primary', '--dry-run', '--json']);
+    expect(report).toBeTruthy();
+    const synthesize = phaseByName(report, 'synthesize');
+    expect(synthesize?.details?.reason).toBe('excluded_from_implicit_source_cycle');
+    for (const phase of SOURCE_FRESHNESS_PHASES) {
+      expect(phaseByName(report, phase)?.details?.reason).not.toBe('excluded_from_implicit_source_cycle');
+    }
+  }, 300_000);
+
+  // ─── #4700 path-derived arm (#4745 ship-review gap): a `--dir` run derives
+  // its source from the checkout; when that source IS the brain's default-like
+  // source the run is still the canonical default cycle (full phase set), and
+  // when it is some OTHER source it stays a freshness-only source cycle.
+  // Two non-default sources with distinct local_paths so sole-non-default
+  // routing cannot be what decides it — only sources.default can.
+
+  test('--dir on the default-like source (sources.default) keeps the FULL implicit cycle', async () => {
+    await seedSource('primary'); // local_path = repo → derived from --dir
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived, created_at)
+       VALUES ('other', 'other', '/somewhere/else', '{}'::jsonb, false, NOW())`,
+    );
+    await engine.setConfig('sources.default', 'primary');
+
+    const report = await runDream(engine, ['--dir', repo, '--dry-run', '--json']);
+    expect(report).toBeTruthy();
+    expectNoImplicitSourceExclusions(report);
+  }, 300_000);
+
+  test('--dir on a NON-default-like source stays freshness-only even though sources.default names another source', async () => {
+    await seedSource('other'); // local_path = repo → derived from --dir
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived, created_at)
+       VALUES ('primary', 'primary', '/somewhere/else', '{}'::jsonb, false, NOW())`,
+    );
+    await engine.setConfig('sources.default', 'primary');
+
+    const report = await runDream(engine, ['--dir', repo, '--dry-run', '--json']);
+    expect(report).toBeTruthy();
+    // Freshness-only: the brain-wide phases are recorded as excluded...
+    expect(phaseByName(report, 'synthesize')?.details?.reason).toBe('excluded_from_implicit_source_cycle');
+    // ...while the per-source freshness phases still run.
+    for (const phase of SOURCE_FRESHNESS_PHASES) {
+      expect(phaseByName(report, phase)?.details?.reason).not.toBe('excluded_from_implicit_source_cycle');
+    }
+  }, 300_000);
+
   // ─── --source-id alias equivalence (D3) ─────────────────────────────
 
   test('--source-id <existing> is equivalent to --source (writes timestamp)', async () => {
@@ -624,17 +763,17 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     // is shared file-wide; a leaked patch breaks every later test's
     // resetPgliteState.
     await seedSource('gamma');
-    const original = (engine as any).executeRaw.bind(engine);
+    const original = (engine as any).executeRaw;
     let restored = false;
     try {
       // Throw a TypeError on the source-lookup SELECT that assertSourceExists runs.
       // Other executeRaw calls (used by engine internals during cycle) keep
       // working so the test exercises ONLY the resolution-path failure.
-      (engine as any).executeRaw = async (sql: string, params?: unknown[]) => {
+      (engine as any).executeRaw = async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
         if (typeof sql === 'string' && /FROM\s+sources\s+WHERE\s+id\s*=/i.test(sql)) {
           throw new TypeError('synthetic-test-bug');
         }
-        return original(sql, params);
+        return original.call(this, sql, params);
       };
       await expect(
         runDream(engine, ['--dir', repo, '--source', 'gamma', '--phase', 'lint', '--json'])
@@ -644,6 +783,146 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
       restored = true;
     }
     expect(restored).toBe(true);
+  });
+});
+
+// ─── #4730: --drain --dry-run --json payload shape ─────────────────────
+//
+// The dry-run preview never runs the drain loop, so it hand-builds the
+// result envelope. It must carry the SAME #4730 keys as a real drain
+// (`failures`, `omitted_failure_count`) so a `--json` consumer can parse
+// both shapes with one schema.
+
+describe('runDream — --drain --dry-run --json payload (#4730)', () => {
+  test('carries failures: [] and omitted_failure_count: 0 alongside the legacy counters', async () => {
+    const lines: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation((msg: string) => { lines.push(String(msg)); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // Empty brain → remaining 0 → no EXIT_DRAIN_INCOMPLETE exit.
+      await runDream(engine, ['--drain', '--dry-run', '--json']);
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+    const line = lines.find(l => l.trim().startsWith('{'));
+    expect(line).toBeDefined();
+    const payload = JSON.parse(line!);
+    expect(payload).toMatchObject({
+      phase: 'extract_atoms',
+      status: 'ok',
+      dry_run: true,
+      extracted: 0,
+      remaining: 0,
+      failure_count: 0,
+      failures: [],
+      omitted_failure_count: 0,
+      last_error: null,
+    });
+    expect(Array.isArray(payload.failures)).toBe(true);
+    expect(payload.failure_count).toBe(payload.failures.length + payload.omitted_failure_count);
+  }, 300_000);
+});
+
+// ─── synthesize targeting flags (--input / --date / --from / --to) ──
+
+async function dreamExit(args: string[]): Promise<{ code: number | undefined; stderr: string }> {
+  let code: number | undefined;
+  const exitSpy = spyOn(process, 'exit').mockImplementation(((c?: number) => { code = c; throw new Error('EXIT'); }) as never);
+  const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await runDream(engine, ['--dir', repo, ...args]);
+  } catch (e: any) {
+    if (e.message !== 'EXIT') throw e;
+  } finally {
+    exitSpy.mockRestore();
+  }
+  const stderr = errSpy.mock.calls.flat().join(' ');
+  errSpy.mockRestore();
+  return { code, stderr };
+}
+
+async function dreamJson(args: string[]) {
+  const lines: string[] = [];
+  const logSpy = spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(' ')); });
+  const exitSpy = spyOn(process, 'exit').mockImplementation(((c?: number) => { throw new Error(`EXIT ${c}`); }) as never);
+  try {
+    await runDream(engine, ['--dir', repo, ...args, '--dry-run', '--json']);
+  } catch (e: any) {
+    if (!String(e.message).startsWith('EXIT')) throw e;
+  } finally {
+    logSpy.mockRestore();
+    exitSpy.mockRestore();
+  }
+  return JSON.parse(lines.join('\n')) as { phases: Array<{ phase: string; status: string; summary: string; details?: Record<string, unknown> }> };
+}
+
+describe('runDream — synthesize targeting flags', () => {
+  test('malformed dates, an inverted range and --input with a date filter exit 2 with the reason', async () => {
+    const cases: Array<[string[], string]> = [
+      [['--date', '2026-4-1'], '--date must be YYYY-MM-DD; got "2026-4-1"'],
+      [['--from', '04/01/2026'], '--from must be YYYY-MM-DD'],
+      [['--to', 'tomorrow'], '--to must be YYYY-MM-DD'],
+      [['--from', '2026-04-25', '--to', '2026-04-01'], '--from (2026-04-25) is after --to (2026-04-01); empty range'],
+      [['--input', '/tmp/gbrain-dream-fixture.txt', '--from', '2026-04-01'], '--input cannot be combined with --date / --from / --to'],
+    ];
+    for (const [args, message] of cases) {
+      const r = await dreamExit(args);
+      expect(r.code, args.join(' ')).toBe(2);
+      expect(r.stderr, args.join(' ')).toContain(message);
+    }
+  });
+
+  test('--input implies --phase synthesize and reaches the phase even with no corpus dir configured', async () => {
+    const missing = join(repo, '..', 'gbrain-dream-missing-transcript.txt');
+    const report = await dreamJson(['--input', missing]);
+    expect(report.phases.map(p => p.phase)).toEqual(['synthesize']);
+    expect(JSON.stringify(report.phases[0])).toContain(`could not read transcript at ${missing}`);
+    const unscoped = await dreamJson(['--phase', 'synthesize']);
+    expect(unscoped.phases[0].details).toMatchObject({ reason: 'not_configured' });
+  });
+
+  test('--date, --from and --to reach the synthesize phase as explicit targets (they bypass the cooldown)', async () => {
+    const corpus = mkdtempSync(join(tmpdir(), 'gbrain-dream-corpus-'));
+    try {
+      await engine.setConfig('dream.synthesize.session_corpus_dir', corpus);
+      await engine.setConfig('dream.synthesize.last_completion_ts', new Date().toISOString());
+      const cooled = await dreamJson(['--phase', 'synthesize']);
+      expect(cooled.phases[0].details).toMatchObject({ reason: 'cooldown_active' });
+      for (const target of [['--date', '2026-04-01'], ['--from', '2026-04-01'], ['--to', '2026-04-25']]) {
+        const report = await dreamJson(['--phase', 'synthesize', ...target]);
+        expect(report.phases[0], target.join(' ')).toMatchObject({ status: 'ok', summary: 'no transcripts to process' });
+      }
+    } finally {
+      rmSync(corpus, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runDream — help and human totals', () => {
+  test('--help documents dry-run synthesis cost and the cycle timezone setting', async () => {
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await runDream(engine, ['--help']);
+      const help = logSpy.mock.calls.flat().join('\n');
+      expect(help).toContain('skips the synthesis subagents');
+      expect(help.toLowerCase()).toContain('zero llm calls');
+      expect(help).toContain('gbrain config set cycle.timezone');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  test('a cycle with work prints the totals line including the synth and patterns counters', async () => {
+    await engine.putPage('notes/lonely-example', { type: 'note', title: 'Lonely', compiled_truth: 'No links here.', timeline: '' });
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await runDream(engine, ['--dir', repo, '--phase', 'orphans']);
+      const totals = logSpy.mock.calls.flat().map(String).find(l => l.includes('totals:'));
+      expect(totals).toMatch(/orphans=[1-9]\d* synth_transcripts=0 synth_pages=0 patterns=0$/);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });
 

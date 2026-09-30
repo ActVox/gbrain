@@ -10,6 +10,9 @@ export type GoogleService = 'gmail' | 'calendar' | 'contacts';
 
 export const ALL_GOOGLE_SERVICES: readonly GoogleService[] = ['gmail', 'calendar', 'contacts'];
 
+/** The account's primary calendar — the Calendar API's own alias, and the default a google source sweeps. */
+export const DEFAULT_CALENDAR_ID = 'primary';
+
 export interface GoogleSourceConfig {
   /** Account email — vault credential pointer in vault mode; identity only
    *  (From/To matching, deep-link authuser) in command/env modes. */
@@ -17,6 +20,10 @@ export interface GoogleSourceConfig {
   services: GoogleService[];
   /** Backfill/reconcile window in days (default 90). */
   historyDays: number;
+  /** Calendar swept by this source (default DEFAULT_CALENDAR_ID). One calendar per
+   *  source so each keeps its own sync token — point a second source at a
+   *  secondary calendar id to ingest it too. */
+  calendarId: string;
   /** Managed dir where pages are materialized. */
   dir: string;
   /**
@@ -53,8 +60,26 @@ export interface GoogleSourceState {
    */
   gmail_fail_counts?: Record<string, number>;
   calendar_sync_token: string | null;
+  /**
+   * Calendar id `calendar_sync_token` was minted for. A token is only valid
+   * against its own calendar: when g_calendar_id changes, the sweep discards
+   * the token and re-lists windowed instead of pairing the new calendar with
+   * the old cursor. Absent on legacy state, which predates secondary
+   * calendars and was therefore always primary's.
+   */
+  calendar_id?: string | null;
   contacts_sync_token: string | null;
   last_full_at: string | null;
+  gmail_attachment_backfill?: {
+    version: 1;
+    account: string;
+    afterPageId: number;
+    throughPageId: number;
+    inspected: number;
+    unavailable?: number;
+    unavailableMessages?: number;
+    complete: boolean;
+  };
 }
 
 /**
@@ -87,8 +112,50 @@ export interface GmailMessageMeta {
   internalDateMs: number;
   labelIds: string[];
   listUnsubscribe: boolean;
+  /**
+   * iCalendar method when the message carries a `text/calendar` part or an
+   * `.ics` attachment — 'REQUEST' | 'REPLY' | 'CANCEL' | 'COUNTER' | '' when a
+   * calendar part is present without an explicit method. `null`/absent means
+   * no calendar part was seen. Google Calendar attaches one to every
+   * invitation, update, response and cancellation, which is what makes this a
+   * structural signal rather than a subject guess.
+   */
+  calendarMethod?: string | null;
   /** Extracted, HTML-stripped, quote-trimmed, capped body text. */
   bodyText: string;
+  attachmentInspection?: GmailAttachmentInspection;
+}
+
+export interface GmailAttachmentReceipt {
+  id: string;
+  account: string;
+  messageId: string;
+  partId: string;
+  filename: string;
+  mimeType: string;
+  size: number | null;
+  attachmentId: string | null;
+  kind: 'document' | 'inline' | 'calendar';
+  fetched: false;
+  indexed: false;
+}
+
+export interface GmailAttachmentInspection {
+  state: 'not_inspected' | 'incomplete' | 'none' | 'present';
+  attachments: GmailAttachmentReceipt[];
+  reason?: 'missing_payload' | 'malformed_part' | 'depth_limit' | 'part_limit' | 'receipt_bytes_limit';
+}
+
+export interface GmailThreadAttachmentReceipts {
+  version: 1;
+  account: string;
+  threadId: string;
+  unavailable?: 'thread_not_found';
+  messages: Array<{
+    messageId: string;
+    inspection: GmailAttachmentInspection;
+    unavailable?: 'thread_not_found' | 'message_not_found';
+  }>;
 }
 
 export interface GmailThreadData {

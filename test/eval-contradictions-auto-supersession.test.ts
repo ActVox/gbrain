@@ -81,7 +81,11 @@ describe('renderResolutionCommand', () => {
   test('dream_synthesize targets the curated entity side', () => {
     const pair = mkCrossSlugPair('openclaw/chat/x', 'companies/acme');
     const cmd = renderResolutionCommand(pair, 'dream_synthesize');
-    expect(cmd).toBe(`gbrain dream --phase synthesize --slug 'companies/acme'`);
+    // `gbrain dream` parses no --slug flag; the real command is rendered and
+    // the curated slug rides in a trailing shell comment (registry-gated by
+    // test/remediation-command-resolution.test.ts).
+    expect(cmd).toBe(`gbrain dream --phase synthesize  # re-synthesize; contradiction on 'companies/acme'`);
+    expect(cmd).not.toContain('--slug');
   });
 
   test('gbrain#4169 — legacy takes_mark_debate rows render a truthful manual-review hint (subcommand does not exist)', () => {
@@ -121,6 +125,41 @@ describe('renderResolutionCommand', () => {
     expect(cmd).not.toContain('arbitrary chunk prose');
   });
 
+  test('B-17 — temporal_supersede with same-day dates never picks a side', () => {
+    const pair: ContradictionPair = {
+      kind: 'intra_page_chunk_take',
+      a: { slug: 'people/alice', chunk_id: null, take_id: 40, take_row_num: 12, source_tier: 'curated', holder: 'garry', text: 't', effective_date: '2026-03-01', effective_date_source: 'frontmatter' },
+      b: { slug: 'people/alice', chunk_id: null, take_id: 41, take_row_num: 13, source_tier: 'curated', holder: 'garry', text: 'u', effective_date: '2026-03-01', effective_date_source: 'frontmatter' },
+      combined_score: 1,
+    };
+    const cmd = renderResolutionCommand(pair, 'temporal_supersede');
+    expect(cmd).not.toContain('gbrain takes supersede');
+    expect(cmd).toContain('date order unclear');
+  });
+
+  test('B-17 — temporal_supersede orders timezone-bearing dates by instant, not by string', () => {
+    // 2026-03-01T23:00-08:00 is 2026-03-02T07:00Z: newer than 2026-03-02 (UTC midnight).
+    const pair: ContradictionPair = {
+      kind: 'intra_page_chunk_take',
+      a: { slug: 'people/alice', chunk_id: null, take_id: 40, take_row_num: 1, source_tier: 'curated', holder: 'garry', text: 'late take', effective_date: '2026-03-01T23:00-08:00', effective_date_source: 'frontmatter' },
+      b: { slug: 'people/alice', chunk_id: null, take_id: 41, take_row_num: 2, source_tier: 'curated', holder: 'garry', text: 'early take', effective_date: '2026-03-02', effective_date_source: 'frontmatter' },
+      combined_score: 1,
+    };
+    const cmd = renderResolutionCommand(pair, 'temporal_supersede');
+    expect(cmd).toContain('--row 2');
+    expect(cmd).toContain(`--claim 'late take'`);
+  });
+
+  test('B-17 — an unparseable date never picks a side', () => {
+    const pair: ContradictionPair = {
+      kind: 'intra_page_chunk_take',
+      a: { slug: 'people/alice', chunk_id: null, take_id: 40, take_row_num: 1, source_tier: 'curated', holder: 'garry', text: 't', effective_date: 'sometime in spring', effective_date_source: 'frontmatter' },
+      b: { slug: 'people/alice', chunk_id: null, take_id: 41, take_row_num: 2, source_tier: 'curated', holder: 'garry', text: 'u', effective_date: '2026-03-02', effective_date_source: 'frontmatter' },
+      combined_score: 1,
+    };
+    expect(renderResolutionCommand(pair, 'temporal_supersede')).toContain('date order unclear');
+  });
+
   test('manual_review emits a no-op comment naming both slugs', () => {
     const pair = mkCrossSlugPair('daily/x', 'openclaw/chat/y');
     const cmd = renderResolutionCommand(pair, 'manual_review');
@@ -148,7 +187,7 @@ describe('proposeResolution (classify + render combined)', () => {
     const pair = mkCrossSlugPair('openclaw/chat/foo', 'companies/acme');
     const p = proposeResolution(pair, null);
     expect(p.resolution_kind).toBe('dream_synthesize');
-    expect(p.resolution_command).toBe(`gbrain dream --phase synthesize --slug 'companies/acme'`);
+    expect(p.resolution_command).toBe(`gbrain dream --phase synthesize  # re-synthesize; contradiction on 'companies/acme'`);
   });
 });
 

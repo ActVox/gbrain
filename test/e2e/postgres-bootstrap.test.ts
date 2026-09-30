@@ -25,23 +25,130 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION } from '../../src/core/migrate.ts';
-import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
+import { readFactsEmbeddingDim } from '../../src/core/embedding-dim-check.ts';
+import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
+import { applyPostgresForwardReferenceBootstrap } from '../../src/core/postgres-engine/forward-reference-bootstrap.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const skip = !DATABASE_URL;
 
 describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => {
   let engine: PostgresEngine;
+  let close: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
-    engine = new PostgresEngine();
-    assertSafeE2eDatabaseUrl(DATABASE_URL!);
-    await engine.connect({ database_url: DATABASE_URL! });
+    const fixture = await isolatedPersistencePostgres(DATABASE_URL!, 'module');
+    engine = fixture.engine;
+    close = fixture.close;
   }, 30_000);
 
   afterAll(async () => {
-    await engine.disconnect();
+    await close?.();
   });
+
+  test('fact embedding identity bootstrap repairs old and partial schemas without inventing provenance', async () => {
+    await engine.initSchema();
+    const { dims } = await readFactsEmbeddingDim(engine);
+    const fact = await engine.insertFact({ fact: 'Synthetic bootstrap claim', source: 'synthetic', embedding: new Float32Array(dims!).fill(0.1) }, { source_id: 'default' });
+    const original = await engine.executeRaw('SELECT id,fact,embedding::text,embedded_at FROM facts WHERE id=$1', [fact.id]);
+    expect(original[0].embedding).not.toBeNull();
+    for (const missing of [['embedding_model', 'embedded_text_hash'], ['embedding_model'], ['embedded_text_hash']]) {
+      const conn = await (engine as any).sql.reserve();
+      try {
+        await conn.unsafe('SELECT pg_advisory_lock(42)');
+        await conn.unsafe("UPDATE facts SET embedding_model='synthetic:original',embedded_text_hash='synthetic-preserved-hash' WHERE id=$1", [fact.id]);
+        for (const column of missing) await conn.unsafe(`ALTER TABLE facts DROP COLUMN ${column}`);
+        await conn.unsafe("UPDATE config SET value='165' WHERE key='version'");
+        await applyPostgresForwardReferenceBootstrap(conn);
+        await applyPostgresForwardReferenceBootstrap(conn);
+        expect((await conn.unsafe("SELECT value FROM config WHERE key='version'"))[0].value).toBe('165');
+        expect(await conn.unsafe(`SELECT column_name,data_type,is_nullable,column_default FROM information_schema.columns
+          WHERE table_schema=current_schema() AND table_name='facts' AND column_name IN ('embedding_model','embedded_text_hash') ORDER BY column_name`)).toEqual([
+          { column_name: 'embedded_text_hash', data_type: 'text', is_nullable: 'YES', column_default: null },
+          { column_name: 'embedding_model', data_type: 'text', is_nullable: 'YES', column_default: null },
+        ]);
+      } finally {
+        await conn.unsafe('SELECT pg_advisory_unlock(42)');
+        conn.release();
+      }
+      const identity = [{
+        embedding_model: missing.includes('embedding_model') ? null : 'synthetic:original',
+        embedded_text_hash: missing.includes('embedded_text_hash') ? null : 'synthetic-preserved-hash',
+      }];
+      expect(await engine.executeRaw('SELECT embedding_model,embedded_text_hash FROM facts WHERE id=$1', [fact.id])).toEqual(identity);
+      for (const column of missing) await engine.executeRaw(`ALTER TABLE facts DROP COLUMN ${column}`);
+      await engine.initSchema();
+      await engine.initSchema();
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      expect(await engine.executeRaw('SELECT embedding_model,embedded_text_hash FROM facts WHERE id=$1', [fact.id])).toEqual(identity);
+      expect(await engine.executeRaw('SELECT id,fact,embedding::text,embedded_at FROM facts WHERE id=$1', [fact.id])).toEqual(original);
+    }
+  }, 60_000);
+
+  test('grant bootstrap repairs a partial installation without changing existing client policy', async () => {
+    await engine.initSchema();
+    const conn = await (engine as any).sql.reserve();
+    try {
+      await conn.unsafe('SELECT pg_advisory_lock(42)');
+      await conn.unsafe(`
+        INSERT INTO oauth_clients (client_id, client_name, scope, grant_revision)
+        VALUES ('fixture-bootstrap-client', 'fixture client', 'read', 4);
+        ALTER TABLE oauth_clients DROP COLUMN grant_profile;
+        ALTER TABLE oauth_clients DROP COLUMN allowed_operations;
+      `);
+      await expect((async () => { await conn.unsafe('SELECT grant_profile FROM oauth_clients LIMIT 1'); })())
+        .rejects.toThrow('does not exist');
+      await applyPostgresForwardReferenceBootstrap(conn);
+      await applyPostgresForwardReferenceBootstrap(conn);
+      expect(await conn.unsafe(`
+        SELECT scope, grant_revision, grant_profile, allowed_operations
+        FROM oauth_clients WHERE client_id = 'fixture-bootstrap-client'
+      `)).toEqual([{ scope: 'read', grant_revision: 4, grant_profile: null, allowed_operations: null }]);
+    } finally {
+      await applyPostgresForwardReferenceBootstrap(conn);
+      await conn.unsafe("DELETE FROM oauth_clients WHERE client_id = 'fixture-bootstrap-client'");
+      await conn.unsafe('SELECT pg_advisory_unlock(42)');
+      conn.release();
+    }
+  }, 30_000);
+
+  test('queue bootstrap preserves historical NULL authority and repairs either missing protocol column', async () => {
+    await engine.initSchema();
+    const conn = await (engine as any).sql.reserve();
+    try {
+      await conn.unsafe('SELECT pg_advisory_lock(42)');
+      await conn.unsafe(`
+        TRUNCATE minion_jobs RESTART IDENTITY CASCADE;
+        DROP TRIGGER IF EXISTS minion_queue_protocol ON minion_jobs;
+        ALTER TABLE minion_jobs DROP COLUMN submission_authority;
+        ALTER TABLE minion_jobs DROP COLUMN claim_generation;
+        INSERT INTO minion_jobs (name, status, data, attempts_made, attempts_started, delay_until)
+        VALUES ('sync', 'delayed', '{"sourceId":"default"}', 1, 2, '2026-09-01T00:00:00Z'),
+               ('lint', 'completed', '{}', 0, 1, NULL);
+      `);
+      const snapshotSql = 'SELECT id, name, status, data, attempts_made, attempts_started, delay_until FROM minion_jobs ORDER BY id';
+      const original = await conn.unsafe(snapshotSql);
+      await applyPostgresForwardReferenceBootstrap(conn);
+      await applyPostgresForwardReferenceBootstrap(conn);
+      expect(await conn.unsafe(snapshotSql)).toEqual(original);
+      expect(await conn.unsafe('SELECT submission_authority, claim_generation::int FROM minion_jobs ORDER BY id'))
+        .toEqual([{ submission_authority: null, claim_generation: 0 }, { submission_authority: null, claim_generation: 0 }]);
+      await conn.unsafe(`ALTER TABLE minion_jobs DROP COLUMN submission_authority;
+        UPDATE minion_jobs SET claim_generation = 7 WHERE name = 'lint';`);
+      await applyPostgresForwardReferenceBootstrap(conn);
+      expect(await conn.unsafe("SELECT submission_authority, claim_generation::int FROM minion_jobs WHERE name = 'lint'"))
+        .toEqual([{ submission_authority: null, claim_generation: 7 }]);
+      await conn.unsafe(`ALTER TABLE minion_jobs DROP COLUMN claim_generation;
+        UPDATE minion_jobs SET submission_authority = '{"version":1,"kind":"application"}' WHERE name = 'lint';`);
+      await applyPostgresForwardReferenceBootstrap(conn);
+      expect(await conn.unsafe("SELECT submission_authority, claim_generation::int FROM minion_jobs WHERE name = 'lint'"))
+        .toEqual([{ submission_authority: { version: 1, kind: 'application' }, claim_generation: 0 }]);
+    } finally {
+      await conn.unsafe('SELECT pg_advisory_unlock(42)');
+      conn.release();
+    }
+    await engine.initSchema();
+  }, 30_000);
 
   test('PostgresEngine.initSchema applies bootstrap → SCHEMA_SQL → migrations on pre-v0.18 brain', async () => {
     // First call: bring the test DB to LATEST shape so we have something to mutate.

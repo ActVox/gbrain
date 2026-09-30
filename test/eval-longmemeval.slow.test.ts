@@ -24,7 +24,7 @@ import {
   createBenchmarkBrain,
   resetTables,
 } from '../src/eval/longmemeval/harness.ts';
-import { haystackToPages, type LongMemEvalQuestion } from '../src/eval/longmemeval/adapter.ts';
+import { haystackToPages, opaqueSessionId, sessionSlug, type LongMemEvalQuestion } from '../src/eval/longmemeval/adapter.ts';
 import { loadResumeSet } from '../src/commands/eval-longmemeval.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { DEFAULT_SOURCE_BOOSTS } from '../src/core/search/source-boost.ts';
@@ -180,12 +180,13 @@ describe('adapter haystackToPages', () => {
     };
     const pages = haystackToPages(q);
     expect(pages.length).toBe(3);
-    expect(pages[0].slug).toBe('chat/sess-1');
-    expect(pages[1].slug).toBe('chat/sess-2');
-    expect(pages[2].slug).toBe('chat/sess-3');
+    expect(pages[0].slug).toBe(sessionSlug('q-shape-1', 'sess-1'));
+    expect(pages[1].slug).toBe(sessionSlug('q-shape-1', 'sess-2'));
+    expect(pages[2].slug).toBe(sessionSlug('q-shape-1', 'sess-3'));
+    expect(new Set(pages.map(p => p.slug)).size).toBe(3);
     expect(pages[0].content).toContain('type: note');
     expect(pages[0].content).toContain('date: 2025-01-15');
-    expect(pages[0].content).toContain('session_id: sess-1');
+    expect(pages[0].content).toContain(`session_id: ${opaqueSessionId('q-shape-1', 'sess-1')}`);
     expect(pages[0].content).toContain('**user:** hi');
     expect(pages[0].content).toContain('**assistant:** hello');
   });
@@ -202,7 +203,7 @@ describe('adapter haystackToPages', () => {
       ],
     };
     const pages = haystackToPages(q);
-    expect(pages[0].content).toContain('session_id: sess-x');
+    expect(pages[0].content).toContain(`session_id: ${opaqueSessionId('q-shape-2', 'sess-x')}`);
     expect(pages[0].content).not.toContain('date:');
   });
 
@@ -228,12 +229,12 @@ describe('adapter haystackToPages', () => {
     };
     const pages = haystackToPages(q);
     expect(pages.length).toBe(2);
-    // Slugs got lowercased + underscores became hyphens (validator-safe).
-    expect(pages[0].slug).toBe('chat/sharegpt-abc-0');
-    expect(pages[1].slug).toBe('chat/sess-def-1');
-    // Frontmatter keeps the ORIGINAL session_id (no sanitization). The
-    // _s ids preserve through the round-trip; only the slug got rewritten.
-    expect(pages[0].content).toContain('session_id: sharegpt_AbC_0');
+    // Slugs are opaque per-question ids (validator-safe, no gold label).
+    expect(pages[0].slug).toBe(sessionSlug('q-s-1', 'sharegpt_AbC_0'));
+    expect(pages[1].slug).toBe(sessionSlug('q-s-1', 'sess_DEF_1'));
+    // Frontmatter carries the same opaque id; the raw id never reaches the page.
+    expect(pages[0].content).toContain(`session_id: ${opaqueSessionId('q-s-1', 'sharegpt_AbC_0')}`);
+    expect(pages[0].content).not.toContain('sharegpt_AbC_0');
     expect(pages[0].content).toContain('date: 2025-01-01');
     expect(pages[0].content).toContain('**user:** hi');
     expect(pages[1].content).toContain('**user:** bye');
@@ -254,7 +255,7 @@ describe('adapter haystackToPages', () => {
     };
     const pages = haystackToPages(q);
     expect(pages.length).toBe(1);
-    expect(pages[0].slug).toBe('chat/lme-q-s-2-0');
+    expect(pages[0].slug).toBe(sessionSlug('q-s-2', 'lme_q-s-2_0'));
   });
 });
 
@@ -359,30 +360,48 @@ describe('loadResumeSet (v0.35.1.0)', () => {
 // buildByTypeSummary (pure function — no PGLite, no LLM)
 // ---------------------------------------------------------------------------
 
-describe('buildByTypeSummary (pure function)', () => {
-  test('populated buckets produce sorted keys + rate math', async () => {
+describe('buildByTypeSummary (pure function, schema v2)', () => {
+  const ctx = {
+    k: 5,
+    excludedAbstention: 1,
+    goldMissingFromHaystack: 0,
+    slugCollisions: 0,
+    runConfig: { mode: 'balanced' },
+  };
+
+  test('populated buckets produce sorted keys + all/any rate math', async () => {
     const { buildByTypeSummary } = await import('../src/commands/eval-longmemeval.ts');
     const summary = buildByTypeSummary({
-      'multi-session': { hit: 10, total: 10 },
-      'single-session-user': { hit: 18, total: 19 },
-    });
+      'multi-session': { total: 10, all_hit: 8, any_hit: 10, legacy_rows: 0 },
+      'single-session-user': { total: 19, all_hit: 18, any_hit: 18, legacy_rows: 0 },
+    }, { ...ctx, distinctSessionsInTopK: [5, 5, 4] });
     expect(summary.kind).toBe('by_type_summary');
-    expect(summary.schema_version).toBe(1);
+    expect(summary.schema_version).toBe(2);
+    expect(summary.metric).toBe('recall_all@k');
+    expect(summary.k).toBe(5);
     // Sorted alphabetically.
     expect(Object.keys(summary.recall_by_type)).toEqual(['multi-session', 'single-session-user']);
-    expect(summary.recall_by_type['multi-session'].rate).toBeCloseTo(1.0, 5);
-    expect(summary.recall_by_type['single-session-user'].rate).toBeCloseTo(18 / 19, 5);
-    expect(summary.aggregate.hit).toBe(28);
+    expect(summary.recall_by_type['multi-session'].all_rate).toBeCloseTo(0.8, 5);
+    expect(summary.recall_by_type['multi-session'].any_rate).toBeCloseTo(1.0, 5);
+    expect(summary.recall_by_type['single-session-user'].all_rate).toBeCloseTo(18 / 19, 5);
+    expect(summary.aggregate.all_hit).toBe(26);
+    expect(summary.aggregate.any_hit).toBe(28);
     expect(summary.aggregate.total).toBe(29);
-    expect(summary.aggregate.rate).toBeCloseTo(28 / 29, 5);
+    expect(summary.aggregate.all_rate).toBeCloseTo(26 / 29, 5);
+    expect(summary.excluded_abstention).toBe(1);
+    expect(summary.mean_distinct_sessions).toBeCloseTo(14 / 3, 5);
+    expect(summary.run_config).toEqual({ mode: 'balanced' });
   });
 
-  test('empty bucket map produces rate:null aggregate, not NaN', async () => {
+  test('empty bucket map produces null rates, not NaN', async () => {
     const { buildByTypeSummary } = await import('../src/commands/eval-longmemeval.ts');
-    const summary = buildByTypeSummary({});
+    const summary = buildByTypeSummary({}, ctx);
     expect(summary.recall_by_type).toEqual({});
-    expect(summary.aggregate.hit).toBe(0);
+    expect(summary.aggregate.all_hit).toBe(0);
+    expect(summary.aggregate.any_hit).toBe(0);
     expect(summary.aggregate.total).toBe(0);
-    expect(summary.aggregate.rate).toBeNull();
+    expect(summary.aggregate.all_rate).toBeNull();
+    expect(summary.aggregate.any_rate).toBeNull();
+    expect(summary.mean_distinct_sessions).toBeUndefined();
   });
 });

@@ -3,7 +3,7 @@
 //
 // Fail-closed diff-based E2E test selector. Reads the working-tree diff vs
 // origin/master plus untracked files, classifies the change set as
-// EMPTY / DOC_ONLY / SRC, and emits the relevant E2E test files on stdout.
+// EMPTY / DOC_ONLY / SRC, and emits one relevant E2E test path per stdout line.
 //
 // CONTRACT (fail-closed):
 //   - When in doubt, run all E2E. The map narrows from "all"; it never widens
@@ -21,7 +21,7 @@
 //      SRC (at least one path is outside doc allowlist):
 //        a. Any escape-hatch path matched -> emit ALL
 //        b. Else union map matches; include directly-modified test/e2e/*.test.ts
-//        c. If still empty -> FAIL-CLOSED -> emit ALL
+//        c. Any non-doc path without coverage -> FAIL-CLOSED -> emit ALL
 //
 // On git command failure: print error to stderr and exit 2 so callers see the
 // failure (xargs -r will run nothing AND the human sees the error).
@@ -35,6 +35,7 @@ import { readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { E2E_TEST_MAP } from "./e2e-test-map.ts";
+import { PERSISTENCE_VALIDATION_OWNED, exclusionNotice } from "./e2e-matrix.ts";
 
 // Doc allowlist (inclusive). A path counts as doc-only ONLY if it matches one
 // of these patterns. Unrecognized paths fall through to SRC, never silently
@@ -78,6 +79,9 @@ const ESCAPE_HATCH_FILES = new Set([
 
 const ESCAPE_HATCH_PREFIXES = [
   "src/commands/migrations/",
+  // Schema migrations split out of src/core/migrate.ts (refactor wave 1)
+  // keep migrate.ts's escape-hatch blast radius: every E2E file boots them.
+  "src/core/schema-migrations/",
   // Operation domain modules peeled out of operations.ts (an escape-hatch
   // file) carry the same blast radius as the contract itself.
   "src/core/ops/",
@@ -174,19 +178,35 @@ export function selectTests(inputs: SelectInputs): string[] {
       result.add(f);
       continue;
     }
+    let covered = false;
     for (const [glob, tests] of Object.entries(map)) {
       if (matchGlob(glob, f)) {
+        if (tests.length > 0) covered = true;
         for (const t of tests) result.add(t);
       }
     }
+    // A covered sibling must not hide an unknown change's blast radius.
+    // Check coverage per changed path, not just whether the union is nonempty.
+    if (!covered) return allSorted;
   }
 
-  // 3c. Fail-closed: if no map entry matched any src/ path AND no test files
-  // were directly modified, run everything.
+  // Defensive fallback for an empty map/selection.
   if (result.size === 0) return allSorted;
 
   // Sort for determinism (helps tests + readability).
   return Array.from(result).sort();
+}
+
+export function persistenceOwnedNotices(changedFiles: string[], map: Record<string, string[]>): string[] {
+  const owned = new Set<string>();
+  for (const f of changedFiles) {
+    if (PERSISTENCE_VALIDATION_OWNED.has(f)) owned.add(f);
+    for (const [glob, tests] of Object.entries(map)) {
+      if (!matchGlob(glob, f)) continue;
+      for (const t of tests) if (PERSISTENCE_VALIDATION_OWNED.has(t)) owned.add(t);
+    }
+  }
+  return Array.from(owned).sort().map(exclusionNotice);
 }
 
 function runGit(args: string[], cwd: string): string {
@@ -243,6 +263,7 @@ if (import.meta.main) {
     map: E2E_TEST_MAP,
   });
 
-  process.stdout.write(tests.join(" "));
+  for (const notice of persistenceOwnedNotices(changedFiles, E2E_TEST_MAP)) process.stderr.write(notice + "\n");
+  process.stdout.write(tests.join("\n"));
   if (tests.length > 0) process.stdout.write("\n");
 }

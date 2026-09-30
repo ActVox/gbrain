@@ -49,12 +49,20 @@ const EXPECTED_EXPORTS: ExpectedExport[] = [
   { subpath: 'gbrain/backoff', canary: [] },
   { subpath: 'gbrain/search/hybrid', canary: ['hybridSearch', 'rrfFusion'] },
   { subpath: 'gbrain/search/expansion', canary: ['expandQuery'] },
+  { subpath: 'gbrain/search/evidence-delivery', canary: ['assembleEvidenceForHits', 'evidenceFingerprint', 'deliverEvidence'] },
+  { subpath: 'gbrain/eval/longmemeval/reader', canary: ['resolveReaderConfig', 'buildReaderRequest', 'readerConfigHash'] },
   { subpath: 'gbrain/think', canary: ['runThink', 'stripGapsSection'] },
   { subpath: 'gbrain/ai/gateway', canary: ['configureGateway', 'embed'] },
+  { subpath: 'gbrain/ai/invocation-guard', canary: ['withAIInvocationGuard', 'invokeAI', 'sdkInvocationUsage'] },
+  { subpath: 'gbrain/core/model-pricing', canary: ['canonicalLookup', 'CANONICAL_PRICING'] },
   { subpath: 'gbrain/extract', canary: [] },
   { subpath: 'gbrain/ingestion', canary: ['INGESTION_SOURCE_API_VERSION', 'validateIngestionEvent', 'computeContentHash'] },
   { subpath: 'gbrain/ingestion/test-harness', canary: ['IngestionTestHarness', 'expectEvent'] },
   { subpath: 'gbrain/core/guardrails', canary: ['registerGuardrailProvider', 'runGuardrails', 'loadGuardrailProvidersFromEnv'] },
+  // 2026-08 fix wave (audit skillopt-cats-11): the surface gbrain-evals
+  // cat30–33 consume, replacing physical node_modules deep imports.
+  { subpath: 'gbrain/core/skillopt', canary: ['runSkillOpt', 'scoreSkillOnTasks', 'loadHeldOut'] },
+  { subpath: 'gbrain/pglite-lock', canary: ['peekLock'] },
 ];
 
 function readPackageExports(): Record<string, string> {
@@ -70,7 +78,8 @@ describe('public exports — package.json exports map', () => {
     // Adding new exports: increment this + add to EXPECTED_EXPORTS below.
     // Removing exports: see CLAUDE.md "Removing any of these is a
     // breaking change going forward" — bump minor and update this count.
-    expect(count).toBe(22);
+    // 23→24 (2026-08 fix wave): ./core/skillopt (audit skillopt-cats-11).
+    expect(count).toBe(28);
   });
 
   test('EXPECTED_EXPORTS list matches the exports map exactly (no drift)', () => {

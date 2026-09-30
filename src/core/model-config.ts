@@ -21,6 +21,7 @@
  */
 
 import type { ConfigReader } from './config-snapshot.ts';
+import { openrouterModelSupportsSubagentLoop } from './ai/openrouter-families.ts';
 import { splitProviderModelId } from './model-id.ts';
 import type { GBrainConfig } from './config.ts';
 import { loadConfig } from './config.ts';
@@ -165,19 +166,39 @@ function realEnv(env: Record<string, string | undefined>): Record<string, string
 }
 
 /**
+ * Explicit tier→file-plane pin key map (utility→expansion_model, everything
+ * else→chat_model): an unmapped future caller mislabeling the warn would be a
+ * silent doc bug with a ternary.
+ */
+const PIN_KEY_BY_TIER: Record<ModelTier, 'expansion_model' | 'chat_model'> = {
+  utility: 'expansion_model', reasoning: 'chat_model', deep: 'chat_model', subagent: 'chat_model',
+};
+
+/**
  * Resolve the default model for a tier, honoring which provider keys are
  * actually present. When `env` is passed it is used EXCLUSIVELY (no config
  * read — hermetic for tests and pre-merged callers); when omitted, the merged
- * env is computed from the file-plane config + process.env.
+ * env is computed from the file-plane config + process.env, and a SERVABLE
+ * file-plane pin for the tier is consulted below the key walk (#3813).
  */
 export function resolveTierDefault(
   tier: ModelTier,
   env?: Record<string, string | undefined>,
 ): string {
-  const merged = env ? realEnv(env) : mergedProviderEnv(throwSafeLoadConfig(), process.env);
+  const fileCfg = env ? null : throwSafeLoadConfig();
+  const merged = env ? realEnv(env) : mergedProviderEnv(fileCfg, process.env);
   for (const entry of PROVIDER_TIER_DEFAULTS) {
     if (merged[entry.envKey]) return entry.tiers(tier);
   }
+  // #3813: no anthropic/openai key. PROVIDER_TIER_DEFAULTS knows only those
+  // two, so a single-provider install (deepseek, openrouter, together, ...)
+  // used to land on the Anthropic floor and every bare-default caller
+  // (extract_atoms, facts classify, page-summary, ...) called a provider with
+  // no key. A servable pin for this tier beats the floor. Sits BELOW the key
+  // walk so keyed installs route byte-for-byte as before.
+  const rawPin = fileCfg?.[PIN_KEY_BY_TIER[tier]]?.trim();
+  const pin = rawPin ? (DEFAULT_ALIASES[rawPin] ?? rawPin) : undefined;
+  if (pin && providerKeyReady(pin, merged)) return pin;
   return TIER_DEFAULTS[tier];
 }
 
@@ -249,11 +270,6 @@ function resolveEffectiveModelForTier(
     if (providerKeyReady(fullPin, merged)) return { model: fullPin, source: 'file_pin' };
     if (!_unservablePinWarningsEmitted.has(fullPin)) {
       _unservablePinWarningsEmitted.add(fullPin);
-      // Explicit tier→config-key map: an unmapped future caller mislabeling
-      // the warn would be a silent doc bug with a ternary.
-      const PIN_KEY_BY_TIER: Record<ModelTier, string> = {
-        utility: 'expansion_model', reasoning: 'chat_model', deep: 'chat_model', subagent: 'chat_model',
-      };
       // A prefix-less pin is a DIFFERENT problem than a missing key — saying
       // "no usable provider key" for `chat_model: "claude-sonnet-4-6"` sends
       // the user hunting for a key problem they may not have.
@@ -324,6 +340,19 @@ export function isOpenRouterAnthropic(modelString: string): boolean {
     && model.toLowerCase().startsWith('anthropic/');
 }
 
+/**
+ * `openrouter:<family>/…` where the family has a live abort/retry pin for the
+ * subagent loop (anthropic/, deepseek/ — see src/core/ai/openrouter-families.ts).
+ * The subagent handler auto-enables the gateway loop for these, because the
+ * legacy Anthropic-direct pin would otherwise refuse them when
+ * `agent.use_gateway_loop` is off.
+ */
+export function isOpenRouterSubagentFamily(modelString: string): boolean {
+  if (!modelString) return false;
+  const { provider, model } = splitProviderModelId(modelString);
+  return provider?.trim().toLowerCase() === 'openrouter' && openrouterModelSupportsSubagentLoop(model);
+}
+
 const _subagentTierWarningsEmitted = new Set<string>();
 
 // Module-level set of deprecated config keys we've already warned about.
@@ -345,6 +374,22 @@ function emitDeprecationWarning(oldKey: string, newKey: string, ignored: boolean
   }
 }
 
+/**
+ * #4575 — the config-key precedence the subagent tier resolves through at
+ * runtime (`resolveModelDetailed` with configKey 'models.subagent' + tier
+ * 'subagent': steps 2 → 4 → 5 below). Doctor's `subagent_capability` check
+ * iterates THIS list so the check and the runtime cannot drift again —
+ * #3873 hoisted `models.tier.<tier>` above `models.default` in the runtime
+ * and the check kept the pre-fix order, producing an unclearable false
+ * positive whose own suggested fix (set models.tier.subagent) was the key
+ * the check read last.
+ */
+export const SUBAGENT_CONFIG_KEY_PRECEDENCE = [
+  'models.subagent',
+  'models.tier.subagent',
+  'models.default',
+] as const;
+
 /** Which step of the resolution chain produced the model. */
 export type ResolveSource =
   | 'cli_flag'
@@ -355,6 +400,42 @@ export type ResolveSource =
   | 'env'
   | 'tier_default'
   | 'fallback';
+
+/**
+ * A resolved model plus the chain step that produced it. When the subagent
+ * capability gate replaced the configured model, `substituted_from` is what
+ * was configured and `substitution_reason` says why (`no_tools`,
+ * `no_subagent_loop`, `unknown_provider`).
+ */
+export interface ResolvedModel {
+  model: string;
+  source: ResolveSource;
+  substituted_from?: string;
+  substitution_reason?: SubagentSubstitutionReason;
+}
+
+export type SubagentSubstitutionReason = 'no_tools' | 'no_subagent_loop' | 'unknown_provider';
+
+/**
+ * Human-facing origin of a resolution step: the flag, config key or env var
+ * that supplied the model (`models.tier.deep`, `models.default`,
+ * `GBRAIN_MODEL`), or `built-in default`. Key names only, never values.
+ */
+export function describeResolveOrigin(
+  source: ResolveSource,
+  opts: Pick<ResolveModelOpts, 'configKey' | 'deprecatedConfigKey' | 'envVar' | 'tier'> & { flag?: string },
+): string {
+  switch (source) {
+    case 'cli_flag': return opts.flag ?? 'flag';
+    case 'config_key': return opts.configKey ?? 'config';
+    case 'deprecated_key': return opts.deprecatedConfigKey ?? 'config';
+    case 'tier_config': return `models.tier.${opts.tier}`;
+    case 'models_default': return 'models.default';
+    case 'env': return opts.envVar ?? 'GBRAIN_MODEL';
+    case 'tier_default':
+    case 'fallback': return 'built-in default';
+  }
+}
 
 /**
  * Resolve a model name through the precedence chain, reporting WHICH step
@@ -368,7 +449,7 @@ export type ResolveSource =
 export async function resolveModelDetailed(
   engine: ConfigReader | null,
   opts: ResolveModelOpts,
-): Promise<{ model: string; source: ResolveSource }> {
+): Promise<ResolvedModel> {
   const envVar = opts.envVar ?? 'GBRAIN_MODEL';
 
   // 1. CLI flag wins
@@ -409,7 +490,7 @@ export async function resolveModelDetailed(
       const tierVal = await engine.getConfig(`models.tier.${opts.tier}`);
       if (tierVal && tierVal.trim()) {
         const resolved = await resolveAlias(engine, tierVal.trim());
-        return { model: enforceSubagentCapable(resolved, opts.tier, `models.tier.${opts.tier}`), source: 'tier_config' };
+        return withSubagentGate(resolved, opts.tier, `models.tier.${opts.tier}`, 'tier_config');
       }
     }
 
@@ -417,7 +498,7 @@ export async function resolveModelDetailed(
     const def = await engine.getConfig('models.default');
     if (def && def.trim()) {
       const resolved = await resolveAlias(engine, def.trim());
-      return { model: enforceSubagentCapable(resolved, opts.tier, 'models.default'), source: 'models_default' };
+      return withSubagentGate(resolved, opts.tier, 'models.default', 'models_default');
     }
   }
 
@@ -425,7 +506,7 @@ export async function resolveModelDetailed(
   const env = process.env[envVar];
   if (env && env.trim()) {
     const resolved = await resolveAlias(engine, env.trim());
-    return { model: enforceSubagentCapable(resolved, opts.tier, `env:${envVar}`), source: 'env' };
+    return withSubagentGate(resolved, opts.tier, `env:${envVar}`, 'env');
   }
 
   // 7. Key-aware tier default — when no override beats us, the tier's
@@ -433,7 +514,7 @@ export async function resolveModelDetailed(
   //    caller-supplied fallback.
   if (opts.tier && TIER_DEFAULTS[opts.tier]) {
     const resolved = await resolveAlias(engine, resolveTierDefault(opts.tier));
-    return { model: enforceSubagentCapable(resolved, opts.tier, 'tier-default'), source: 'tier_default' };
+    return withSubagentGate(resolved, opts.tier, 'tier-default', 'tier_default');
   }
 
   // 8. Hardcoded fallback (caller-supplied)
@@ -483,7 +564,22 @@ export async function resolveModel(
  * suppression key) so doctor + first-call surfaces don't double-warn.
  */
 function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, source: string): string {
-  if (tier !== 'subagent') return resolved;
+  return subagentGate(resolved, tier, source).model;
+}
+
+function withSubagentGate(resolved: string, tier: ModelTier | undefined, sourceLabel: string, source: ResolveSource): ResolvedModel {
+  const gate = subagentGate(resolved, tier, sourceLabel);
+  return gate.reason
+    ? { model: gate.model, source, substituted_from: resolved, substitution_reason: gate.reason }
+    : { model: gate.model, source };
+}
+
+function subagentGate(
+  resolved: string,
+  tier: ModelTier | undefined,
+  source: string,
+): { model: string; reason?: SubagentSubstitutionReason } {
+  if (tier !== 'subagent') return { model: resolved };
 
   // Lazy import keeps capabilities.ts out of model-config's eager-load surface
   // (capabilities → model-resolver → recipes; this would create a cycle if
@@ -501,26 +597,29 @@ function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, s
     // If the import fails (e.g. malformed recipe registry during boot), be
     // permissive and just return the resolved model — surface the underlying
     // issue at gateway call time.
-    return resolved;
+    return { model: resolved };
   }
 
   const key = `${source}:${resolved}`;
   if (verdict === 'unusable:no_tools' || verdict === 'unusable:no_subagent_loop' || verdict === 'unknown') {
+    const reason: SubagentSubstitutionReason = verdict === 'unusable:no_tools'
+      ? 'no_tools'
+      : verdict === 'unusable:no_subagent_loop' ? 'no_subagent_loop' : 'unknown_provider';
     if (!_subagentTierWarningsEmitted.has(key)) {
       _subagentTierWarningsEmitted.add(key);
-      const reason = verdict === 'unusable:no_tools'
+      const prose = reason === 'no_tools'
         ? `lacks tool-calling support`
-        : verdict === 'unusable:no_subagent_loop'
+        : reason === 'no_subagent_loop'
           ? `declares the subagent loop unsupported (supports_subagent_loop: false)`
           : `is an unrecognized provider`;
       process.stderr.write(
-        `[models] tier.subagent resolved to "${resolved}" via "${source}", which ${reason}. ` +
+        `[models] tier.subagent resolved to "${resolved}" via "${source}", which ${prose}. ` +
         `The subagent tool loop cannot run on this model — falling back to ${TIER_DEFAULTS.subagent}. ` +
         `Fix: gbrain config set models.tier.subagent <provider>:<model> ` +
         `(the provider's recipe must declare supports_subagent_loop: true)\n`,
       );
     }
-    return TIER_DEFAULTS.subagent;
+    return { model: TIER_DEFAULTS.subagent, reason };
   }
 
   if (verdict === 'degraded:no_caching') {
@@ -534,7 +633,7 @@ function enforceSubagentCapable(resolved: string, tier: ModelTier | undefined, s
     }
   }
   // degraded:no_parallel and ok return resolved unchanged (no warn).
-  return resolved;
+  return { model: resolved };
 }
 
 /**

@@ -103,8 +103,8 @@ describe('extractFactsFromFenceText — happy path mapping', () => {
     expect(out[1].context).toBeNull();
   });
 
-  test('all five FactKind values pass through', () => {
-    const kinds = ['event', 'preference', 'commitment', 'belief', 'fact'] as const;
+  test('all six FactKind values pass through', () => {
+    const kinds = ['event', 'preference', 'commitment', 'belief', 'fact', 'idea'] as const;
     const facts = kinds.map((k, i) => baseFact({ rowNum: i + 1, kind: k }));
     const out = extractFactsFromFenceText(facts, 'people/alice', 'default', { nowOverride: FROZEN_TODAY });
     expect(out.map(r => r.kind)).toEqual([...kinds]);
@@ -281,6 +281,19 @@ describe('resolveSupersededByRow — reference resolution (#3014)', () => {
     // The warning names the target as struck/inactive, not specifically a
     // chain — a forgotten target is struck too but isn't a supersession chain.
     expect(r.warning).toContain('struck');
+  });
+});
+
+describe('resolveSupersededByRow — supersession chains (B-13)', () => {
+  test('a struck target that is itself superseded resolves', () => {
+    const r = resolveSupersededByRow(1, 2, { id: 7, struck: true }, 'deals/acme', new Map([[2, 3]]));
+    expect(r).toEqual({ superseded_by: 7, warning: null });
+  });
+
+  test('a chain that cycles back to the row is rejected', () => {
+    const r = resolveSupersededByRow(1, 2, { id: 7, struck: true }, 'deals/acme', new Map([[1, 2], [2, 1]]));
+    expect(r.superseded_by).toBeNull();
+    expect(r.warning).toContain('cycle');
   });
 });
 

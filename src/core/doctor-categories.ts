@@ -56,6 +56,11 @@ export type CheckCategory = 'brain' | 'skill' | 'ops' | 'meta';
  */
 export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'abandoned_threads',
+  'atom_provenance_drift',
+  'connector_checkpoints',
+  'derived_visibility',
+  'safe_index_pending',
+  'self_capture',
   'brain_score',
   'calibration_freshness',
   'child_table_orphans',
@@ -72,6 +77,9 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'cycle_freshness',
   'dangling_aliases',
   'effective_date_health',
+  // #4795 — reindex-search-vector marker still set: keyword index split
+  // across two tokenizers until the resumed run finishes.
+  'fts_reindex_incomplete',
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
@@ -88,6 +96,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'facts_health',
   'frontmatter_integrity',
   'malformed_path_pages',
+  'memory_writeback',
   'grade_confidence_drift',
   'graph_coverage',
   'graph_signals_coverage',
@@ -106,12 +115,14 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ocr_health',
   'orphan_ratio',
   'oversized_pages',
+  'parked_effects',
   'pglite_scratch_probe',
   'quarantined_pages',
   'raw_provenance',
   'flagged_pages',
   'salience_health',
   'scraper_junk_pages',
+  'slug_collisions',
   'source_config_shape',
   'source_routing_health',
   'stale_mentions',
@@ -120,7 +131,12 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'sync_freshness',
   'takes_count',
   'takes_weight_grid',
+  'text_projection_readiness',
   'timeline_coverage',
+  'timeline_orphans',
+  'timeline_history',
+  // #5254 — pages written database-only to a source with no canonical owner.
+  'unbound_source',
   'undeclared_db_only_pages',
   'unified_multimodal_coverage',
   'unverified_extractions',
@@ -161,14 +177,17 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'bootstrap_harness_health',
   'bootstrap_hooks_heartbeat',
   'bootstrap_last_verify',
+  'memorable_relay_health',
   'backup_coverage',
   'bootstrap_push_health',
   'bootstrap_durability_job',
   'bootstrap_runbook_skew',
   'bootstrap_serve_lock',
   'batch_retry_health',
+  'canonical_content_writes',
   'brainstorm_health',
   'connectors',
+  'dream_paid_loop',
   'chat_fallback_chain_inert',
   'connection',
   'db_only_collector_collision',
@@ -180,6 +199,9 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'oauth_client_scope_health',
   'oauth_confidential_client_health',
   'orphan_clones',
+  'persistence_capacity',
+  'stale_embedding_effects',
+  'writer_version',
   'pgbouncer_prepare',
   'pglite_data_dir',
   // db-availability loop: engine-fit + repair-recurrence signals.
@@ -187,10 +209,10 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'db_repair_recurrence',
   'pglite_leftovers',
   'pgvector',
+  'postgres_cancellation_driver',
   'plugin_lane_collision',
   'pool_budget',
   'progressive_batch_audit_health',
-  'provider_sunset',
   'queue_health',
   'reranker_health',
   'rls',
@@ -208,7 +230,6 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'wedged_queue',
   'orphaned_private_queue',
   'worker_oom_loop',
-  'ze_embedding_health',
 ]);
 
 /**
@@ -217,7 +238,11 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
  */
 export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'cycle_phase_scope',
+  'default_source_local_path',
   'eval_capture',
+  // #4613 — links_link_source_check CHECK shape: schema coherence healed by
+  // `gbrain apply-migrations` (sibling of pages_upsert_arbiter).
+  'links_link_source_check',
   'minions_migration',
   'multi_source_drift',
   'pack_upgrade_available',

@@ -19,8 +19,10 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const GET_RECENT_SALIENCE_DESCRIPTION =
-  "Returns pages recently touched and ranked by emotional + activity salience " +
-  "(deterministic 0..1 emotional_weight + take density + recency decay). " +
+  "Returns readable pages recently touched and ranked by activity salience and recency. " +
+  "Unrestricted local reads include deterministic 0..1 emotional_weight, take density, and recency decay. " +
+  "Holder-restricted reads count only permitted active takes, use zero emotional_weight, " +
+  "and select recent pages by updated_at; unrestricted local reads retain take-driven touches. " +
   "Use this when the user asks what's been going on, what's notable, what's hot, " +
   "anything crazy happening, or for any open-ended 'current state' question " +
   "about themselves or their work. Do NOT run a semantic search for these — " +
@@ -72,7 +74,9 @@ export const QUERY_DESCRIPTION =
   "default count when `limit` is omitted depends on the configured search " +
   "mode (10 conservative / 25 balanced / 50 tokenmax — see the `limit` param " +
   "description); pass `limit` explicitly for a stable count regardless of " +
-  "mode. For exhaustive enumeration use list_pages; for exact known tokens " +
+  "mode. When the answer needs the surrounding conversation or section, pass " +
+  "`return_unit` ('page' / 'section' / 'window') to get that evidence in one call " +
+  "instead of get_page per hit. For exhaustive enumeration use list_pages; for exact known tokens " +
   "`search` is cheaper (no expansion LLM call). " +
   "For personal/emotional questions ('what's going on with me', 'anything notable', " +
   "'how am I feeling'), prefer get_recent_salience, find_anomalies, or " +
@@ -86,6 +90,7 @@ export const SEARCH_DESCRIPTION =
   "result set is NOT proof of coverage — for concept / synonym / landscape " +
   "questions use `query` (adds multi-query expansion); for exhaustive " +
   "enumeration use list_pages pagination. " +
+  "Pass `return_unit` ('window' / 'section' / 'page') for whole evidence instead of chunks. " +
   "For personal/emotional questions, " +
   "prefer get_recent_salience or find_anomalies — they surface activity bursts " +
   "without needing a search term. " +
@@ -100,13 +105,15 @@ export const SEARCH_DESCRIPTION =
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const FIND_CONTRADICTIONS_DESCRIPTION =
-  "v0.32.6 — return suspected-contradiction findings from the most recent " +
+  "Stored contradiction reports are temporarily available only to trusted local callers without a source filter. " +
+  "Remote or source-scoped callers receive {contradictions: [], note} with an availability note. " +
+  "For eligible local callers, return suspected-contradiction findings from the most recent " +
   "`gbrain eval suspected-contradictions` probe run, optionally filtered by slug " +
   "and/or severity. Use this when the user asks 'what's inconsistent in my " +
   "brain', 'show me contradictions about Acme', 'high-severity issues only', or " +
   "wants to act on the probe's findings without re-running it. Returns " +
   "{contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. " +
-  "Reads the cached run row — does NOT trigger a new probe; users run " +
+  "An eligible read loads the stored run without triggering a new probe; users run " +
   "`gbrain eval suspected-contradictions` for that.";
 
 export const FIND_TRAJECTORY_DESCRIPTION =
@@ -189,9 +196,11 @@ export const LIST_SKILLS_DESCRIPTION =
   "CAN vs CANNOT call given this server + your access). To actually use a skill, " +
   "call get_skill with its name, read the returned prose, and follow it — calling " +
   "the correspondingly-named tools on THIS server. The response also carries an " +
-  "`instructions` envelope explaining this protocol. Reflects the serving repo's " +
-  "skills even when the call targets a mounted brain. Read-scope; published only " +
-  "when the brain owner enabled mcp.publish_skills.";
+  "`instructions` envelope explaining this protocol. On a shared brain, use " +
+  "schema_version:2 for source-qualified identities, immutable revisions, " +
+  "pagination and complete declared requirements. Only authorized sources and " +
+  "owner-approved file classes are visible; pre-migration servers retain their " +
+  "legacy prose catalog. Read-scope; published only when the brain owner enabled mcp.publish_skills.";
 
 export const GET_SKILL_DESCRIPTION =
   "Fetch one skill's full instructions by name. Returns `{name, frontmatter " +
@@ -202,7 +211,10 @@ export const GET_SKILL_DESCRIPTION =
   "instructions plus your tool calls back to this server. Tools listed in " +
   "`unavailable_tools` won't work for you (not exposed here, or beyond your " +
   "access) — adapt accordingly. Size-capped; read-scope; requires the owner to " +
-  "have enabled mcp.publish_skills.";
+  "have enabled mcp.publish_skills. On a shared brain, pass schema_version:2 " +
+  "with qualified_id and revision from discovery to fetch exact instructions " +
+  "and their approved dependency manifest. get_skill_asset retrieves declared " +
+  "files from that revision as data; downloading never grants execution or tool permissions.";
 
 /**
  * The load-bearing `instructions` envelope for list_skills. Pinned so the
@@ -222,6 +234,9 @@ export const SKILL_CATALOG_INSTRUCTIONS = {
       "correspondingly-named MCP tool on THIS server (e.g. search, query, put_page).",
     "Only call tools in this skill's `usable_tools`; tools in `unavailable_tools` " +
       "are not callable by you on this server.",
+    "For host-repository skills, declared `tools` narrow the usable tools. Valid " +
+      "frontmatter without `tools` inherits your available brain tools; `tools: []` permits none. " +
+      "Canonical shared skills use their approved requirements instead.",
   ],
 } as const;
 
@@ -237,6 +252,9 @@ export const SKILL_CLIENT_GUIDANCE = {
     "When the prose names a brain operation (search, store, link, look up), call " +
       "the MCP tool of that name on THIS server.",
     "Do not invent tools — only the tools in `usable_tools` are callable by you.",
+    "For host-repository skills, declared `tools` narrow this list. Valid frontmatter " +
+      "without `tools` inherits your available brain tools; `tools: []` permits none. " +
+      "Canonical shared skills use their approved requirements instead.",
     "If `mutating` is true, this skill writes to the brain; confirm before doing so " +
       "if the user hasn't clearly asked for a write.",
   ],

@@ -1,3 +1,4 @@
+import { assertManagedFilesystemWrite } from './persistence/filesystem-guard.ts';
 /**
  * brain-repo-durability.ts — auto-harden a brain's git working tree (v0.42.44).
  *
@@ -18,7 +19,8 @@
  * Trust boundary (this is gbrain's FIRST push path + FIRST secret storage):
  *  - The hook is LOCAL + untracked so a pulled commit can't rewrite executed
  *    code next to the PAT. Both hook and helper render from ONE bash template
- *    (PUSH_RETRY) — DRY at the TS source level, NOT by the hook sourcing a
+ *    (renderPushRetry; the lock-timeout return code is the sole per-renderer
+ *    knob, #4682) — DRY at the TS source level, NOT by the hook sourcing a
  *    repo-controlled script.
  *  - Credential is repo-scoped (local git config), token redacted everywhere
  *    via shell-redact's exact-value scrubber, store file 0600.
@@ -31,7 +33,7 @@ import {
   existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, statSync, renameSync,
 } from 'fs';
 import { join, dirname, relative, isAbsolute } from 'path';
-import { execFileSync, execSync } from 'child_process';
+import { execFile, execFileSync, execSync } from 'child_process';
 import {
   GIT_ENV, GIT_ENV_AUTH, divergenceSafePull, detectDefaultBranch, pushProbe,
   type PullOutcome, type PushProbeResult,
@@ -156,9 +158,36 @@ export function maintainPushLog(): void {
 // ── Shared bash push-retry template (DRY at the TS source — D7) ──────────────
 // Rendered into BOTH the (committed) helper and the (local, untracked) hook so
 // there is one source of truth without the hook executing repo-controlled code.
-const PUSH_RETRY = `# --- gbrain durability push-retry (generated; one source of truth) ---
+// The ONE rendered divergence is the lock-timeout return code (#4682): the
+// synchronous helper is the fail-loud durability guarantee, so it must NOT
+// claim success when the lock never freed and no push was even attempted
+// (rc 1); the detached post-commit hook is best-effort background work where
+// skipping a push that another holder is already performing is the designed
+// coalescing outcome (rc 0). GBRAIN_PUSH_LOCK_WAIT_SECONDS (default 30) tunes
+// the lock wait — env-only, incident/test escape hatch.
+function renderPushRetry(lockTimeoutRc: 0 | 1): string {
+  return `# --- gbrain durability push-retry (generated; one source of truth) ---
+brain_remote_contains_commit() {
+  local _remote_tip _push_url
+  git check-ref-format "refs/heads/$1" >/dev/null 2>&1 || return 1
+  [ -n "$_push_urls" ] || return 1
+  while IFS= read -r _push_url; do
+    [ -n "$_push_url" ] || return 1
+    [ "$(git ls-remote --get-url -- "$_push_url" 2>/dev/null)" = "$_push_url" ] || return 1
+    _remote_tip="$(git ls-remote --exit-code -- "$_push_url" "refs/heads/$1" 2>/dev/null)" || return 1
+    _remote_tip="\${_remote_tip%%[[:space:]]*}"
+    git fetch --quiet --no-tags --no-write-fetch-head -- "$_push_url" "$_remote_tip" >/dev/null 2>&1 &&
+      git merge-base --is-ancestor "$2" "$_remote_tip" >/dev/null 2>&1 || return 1
+  done <<<"$_push_urls"
+}
+
 brain_push() {
-  _branch="$1"
+  _branch="\${1#refs/heads/}"
+  _managed_git="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+  if [ -e "$_managed_git/gbrain-managed.json" ] || [ -e .gbrain-managed ]; then
+    echo "writer_coordinator_required: managed worktree git effects belong to the persistence outbox" >&2
+    return 1
+  fi
   # CX2-8: GBRAIN_HOME is a PARENT dir (matches config.ts semantics — .gbrain appended)
   _log="\${GBRAIN_HOME:-$HOME}/.gbrain/brain-push.log"
   mkdir -p "$(dirname "$_log")" 2>/dev/null || true
@@ -169,19 +198,35 @@ brain_push() {
   # rebase-retry herd. No-op if flock is unavailable.
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$_gd/gbrain-push.lock"
-    flock -w 30 9 || { echo "$(date -u +%FT%TZ) [push] lock-timeout $_branch" >>"$_log"; return 0; }
+    flock -w "\${GBRAIN_PUSH_LOCK_WAIT_SECONDS:-30}" 9 || { echo "$(date -u +%FT%TZ) [push] lock-timeout $_branch" >>"$_log"; return ${lockTimeoutRc}; }
   fi
-  if git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
-    echo "$(date -u +%FT%TZ) [push] ok $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+  _head="$(git rev-parse HEAD)" || return 1
+  _push_urls="$(git remote get-url --push --all origin 2>/dev/null)" || _push_urls=""
+  if git push origin "$_head:refs/heads/$_branch" >>"$_log" 2>&1; then
+    echo "$(date -u +%FT%TZ) [push] ok $_branch $(git rev-parse --short "$_head" 2>/dev/null)" >>"$_log"; return 0
   fi
-  echo "$(date -u +%FT%TZ) [push] rejected; rebase-pull $_branch" >>"$_log"
-  if git pull --rebase origin "$_branch" >>"$_log" 2>&1 && git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
-    echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+  if brain_remote_contains_commit "$_branch" "$_head"; then
+    echo "$(date -u +%FT%TZ) [push] ok-already-on-remote $_branch $(git rev-parse --short "$_head" 2>/dev/null)" >>"$_log"; return 0
   fi
-  git rebase --abort >/dev/null 2>&1 || true
-  echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short HEAD 2>/dev/null) could not reach origin. Run: gbrain sources pull <id> && git push" >>"$_log"
+  if [ "$(git rev-parse HEAD)" = "$_head" ]; then
+    echo "$(date -u +%FT%TZ) [push] rejected; rebase-pull $_branch" >>"$_log"
+    if git pull --rebase origin "$_branch" >>"$_log" 2>&1; then
+      _head="$(git rev-parse HEAD)" || return 1
+      _push_urls="$(git remote get-url --push --all origin 2>/dev/null)" || _push_urls=""
+      if git push origin "$_head:refs/heads/$_branch" >>"$_log" 2>&1; then
+        echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch $(git rev-parse --short "$_head" 2>/dev/null)" >>"$_log"; return 0
+      fi
+    else
+      git rebase --abort >/dev/null 2>&1 || true
+    fi
+  fi
+  if brain_remote_contains_commit "$_branch" "$_head"; then
+    echo "$(date -u +%FT%TZ) [push] ok-already-on-remote $_branch $(git rev-parse --short "$_head" 2>/dev/null)" >>"$_log"; return 0
+  fi
+  echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short "$_head" 2>/dev/null) could not reach origin. Run: gbrain sources pull <id> && git push" >>"$_log"
   return 1
 }`;
+}
 
 function renderPostCommitHook(): string {
   return `#!/usr/bin/env bash
@@ -197,7 +242,7 @@ if [ "$_branch" = "HEAD" ]; then
   exit 0
 fi
 
-${PUSH_RETRY}
+${renderPushRetry(0)}
 
 # Detach so the commit returns instantly; all output goes to the log.
 ( brain_push "$_branch" ) </dev/null >/dev/null 2>&1 &
@@ -210,14 +255,18 @@ function renderCommitPushHelper(): string {
   return `#!/usr/bin/env bash
 ${HELPER_BANNER}
 # THE DURABILITY GUARANTEE: add -> commit -> push, atomically. Refuses to exit 0
-# without a confirmed push. Usage:
+# without a confirmed push — including on push-lock timeout (#4682). Usage:
 #   scripts/brain-commit-push.sh "message" <path> [path ...]
 #   scripts/brain-commit-push.sh --push-only [branch]
 set -euo pipefail
 
-${PUSH_RETRY}
+${renderPushRetry(1)}
 
 _branch="$(git rev-parse --abbrev-ref HEAD)"
+_managed_git="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+if [ -e "$_managed_git/gbrain-managed.json" ] || [ -e .gbrain-managed ]; then
+  echo "writer_coordinator_required: submit managed changes through persistence" >&2; exit 1
+fi
 if [ "\${1:-}" = "--push-only" ]; then
   brain_push "\${2:-$_branch}"; exit $?
 fi
@@ -425,6 +474,33 @@ export function isDurabilityHardened(repoPath: string): boolean {
   }
 }
 
+/** A git probe that does not block the event loop; a failed probe reads as ''. */
+function gitOutput(repoPath: string, args: string[]): Promise<string> {
+  return new Promise(resolve => {
+    execFile('git', ['-C', repoPath, ...args], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, ...GIT_ENV } },
+      (error, stdout) => resolve(error ? '' : stdout.trim()));
+  });
+}
+
+/**
+ * {@link isDurabilityHardened} for long-running owners: the same two git
+ * probes, run concurrently as child processes the event loop does not wait on.
+ */
+export async function isDurabilityHardenedAsync(repoPath: string): Promise<boolean> {
+  try {
+    const [hooksPath, gitHooks] = await Promise.all([gitOutput(repoPath, ['config', '--get', 'core.hooksPath']),
+      gitOutput(repoPath, ['rev-parse', '--git-path', 'hooks'])]);
+    const reported = hooksPath || gitHooks;
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoPath is a registered local worktree root and the hooks path comes from git itself, resolved exactly as resolveHooksDir/gitDirPath do
+    const dir = !reported ? join(repoPath, '.git', 'hooks') : isAbsolute(reported) ? reported : join(repoPath, reported);
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- fixed hook filename inside the git-reported hooks directory, as in isDurabilityHardened
+    const hookPath = join(dir, 'post-commit');
+    return existsSync(hookPath) && readFileSync(hookPath, 'utf-8').includes(HOOK_BANNER);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * #2426: best-effort commit of a single write-through artifact so DB writes
  * reach git (the post-commit hook then background-pushes). Pre-fix,
@@ -436,14 +512,23 @@ export function isDurabilityHardened(repoPath: string): boolean {
  * never swept into the commit. Never throws; returns false on any failure
  * (index.lock contention, nothing changed, detached states) — the DB row and
  * the on-disk file remain the durable sinks either way.
+ *
+ * `git add -- <path>` stages a removal as readily as an edit, so
+ * `deletePageThrough` reuses this helper with `action: 'delete write-through'`
+ * — same hardening gate, same explicit-path discipline, distinct subject line.
  */
-export function commitWriteThroughFile(repoPath: string, absPath: string, slug: string): boolean {
+export function commitWriteThroughFile(
+  repoPath: string,
+  absPath: string,
+  slug: string,
+  action: 'write-through' | 'delete write-through' = 'write-through',
+): boolean {
   try {
     const rel = relative(repoPath, absPath);
     if (!rel || rel.startsWith('..') || isAbsolute(rel)) return false;
     const gitOpts = { stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV } } as const;
     execFileSync('git', ['-C', repoPath, 'add', '--', rel], gitOpts);
-    execFileSync('git', ['-C', repoPath, 'commit', '-m', `gbrain: write-through ${slug}`, '--', rel], gitOpts);
+    execFileSync('git', ['-C', repoPath, 'commit', '-m', `gbrain: ${action} ${slug}`, '--', rel], gitOpts);
     return true;
   } catch {
     return false;
@@ -461,7 +546,7 @@ export interface PushLogOutcome {
   at?: string;
 }
 
-const PUSH_LOG_OK = /^(\S+) \[push\] (?:ok|ok-after-rebase) (\S+)\b/;
+const PUSH_LOG_OK = /^(\S+) \[push\] (?:ok|ok-after-rebase|ok-already-on-remote) (\S+)\b/;
 const PUSH_LOG_LOCAL_ONLY = /^(\S+) \[push\] LOCAL-ONLY, NEEDS ATTENTION: (\S+) /;
 const PUSH_LOG_LOCK_TIMEOUT = /^(\S+) \[push\] lock-timeout (\S+)\b/;
 
@@ -866,6 +951,7 @@ function pullDetail(o: PullOutcome): { status: StepStatus; detail: string } {
  * already-hardened repo produces all ok/skipped and NO new commit.
  */
 export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityReport> {
+  if (!opts.dryRun) assertManagedFilesystemWrite(opts.repoPath);
   const { sourceId } = opts;
   const dryRun = !!opts.dryRun;
   const installCron = opts.installCron !== false;
