@@ -245,13 +245,23 @@ async function buildRetrievalResponseMeta(
 /**
  * #3985: normalize the `types` param. MCP passes a real array; the CLI
  * passes `--types person,company` as one string. Rejects non-string entries
- * and an all-empty list loudly (invalid_params) instead of silently
- * dropping the filter. The SQL-level plumbing (SearchOpts.types → both
- * engines' keyword/title/vector legs) has existed since v0.33 (whoknows);
- * this just exposes it on the public search/query ops.
+ * and a non-empty list whose entries trim/filter to nothing loudly
+ * (invalid_params) instead of silently dropping the filter.
+ *
+ * #5390: a structurally empty array (`[]`) carries no user intent — it is
+ * what OpenAI-family MCP clients send when an LLM over-fills every optional
+ * parameter with a type-zero value. Treat it as absent (no filter applied)
+ * rather than throwing, so the search still runs unfiltered. A non-empty
+ * list that filters to nothing (`['']`, `',,'`) still throws, so a CLI
+ * `--types ,` typo is still loud. The SQL-level plumbing (SearchOpts.types
+ * → both engines' keyword/title/vector legs) has existed since v0.33
+ * (whoknows); this just exposes it on the public search/query ops.
  */
 function normalizeTypesParam(raw: unknown): string[] | undefined {
   if (raw === undefined || raw === null) return undefined;
+  // #5390: structurally empty array is treated as absent, not as a request
+  // for an impossible filter. The CLI typo guard below still catches `',,'`.
+  if (Array.isArray(raw) && raw.length === 0) return undefined;
   const arr = Array.isArray(raw)
     ? raw
     : typeof raw === 'string'
