@@ -13,11 +13,13 @@ const unit = loadWorkflow('test.yml');
 const e2e = loadWorkflow('e2e.yml');
 
 const fullProfile = "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full_corpus)";
-function aggregate(workflow: Workflow, name: string, event: string, results: Record<string, string>, fullCorpus = false) {
+const paidProfile = "(github.event_name == 'workflow_dispatch' && inputs.run_paid_e2e) || vars.GBRAIN_PAID_E2E == '1'";
+function aggregate(workflow: Workflow, name: string, event: string, results: Record<string, string>, fullCorpus = false, paidE2e = false) {
   const step = workflow.jobs[name].steps.find(step => step.name === 'Aggregate result')!;
   const render = (value: string) => value
-    .replace(/\$\{\{ needs\.([\w-]+)\.result \}\}/g, (_, job) => results[job] ?? 'success')
+    .replace(/\$\{\{ needs\.([\w-]+)\.result \}\}/g, (_, job) => results[job] ?? (job === 'tier2' && !paidE2e ? 'skipped' : 'success'))
     .replaceAll('${{ ' + fullProfile + ' }}', String(event === 'schedule' || (event === 'workflow_dispatch' && fullCorpus)))
+    .replaceAll('${{ ' + paidProfile + ' }}', String(paidE2e))
     .replace(/\$\{\{ github.event_name \}\}/g, event);
   const script = render(step.run!);
   const env = Object.fromEntries(Object.entries(step.env ?? {}).map(([key, value]) => [key, render(value)]));
@@ -40,7 +42,7 @@ describe('CI execution evidence', () => {
       expect(unit.jobs[name].if).toBe("${{ github.event_name != 'workflow_dispatch' || inputs.native_only != true }}");
     }
     expect(e2e.jobs.tier2.needs).toBe('jsonb-parity');
-    expect(e2e.jobs.tier2.if).toBeUndefined();
+    expect(e2e.jobs.tier2.if).toBe(paidProfile);
   });
 
   test('the verify job runs `bun run verify`, which dispatches through run-verify-parallel.sh', () => {
@@ -73,13 +75,23 @@ describe('CI execution evidence', () => {
       expect(aggregate(e2e, 'e2e-status', event, Object.fromEntries(nightly.map(job => [job, 'skipped'])))).toBe(0);
     }
     expect(aggregate(e2e, 'e2e-status', 'schedule', {})).toBe(0);
-    for (const job of needs) {
+    for (const job of needs.filter(job => job !== 'tier2')) {
       for (const result of ['failure', 'cancelled', 'skipped']) {
         expect(aggregate(e2e, 'e2e-status', 'schedule', { [job]: result }), `${job}: ${result}`).toBe(1);
         expect(aggregate(e2e, 'e2e-status', 'workflow_dispatch', { [job]: result }, true), `manual full ${job}: ${result}`).toBe(1);
       }
     }
     expect(aggregate(e2e, 'e2e-status', 'workflow_dispatch', {}, true)).toBe(0);
+    // Free coverage remains mandatory. Paid coverage is allowed to skip only
+    // when it was not requested; opted-in failure/cancellation/skip stays red.
+    for (const result of ['failure', 'cancelled', 'skipped']) {
+      expect(aggregate(e2e, 'e2e-status', 'schedule', { tier2: result }, true, true), `paid ${result}`).toBe(1);
+    }
+    for (const result of ['success', 'failure', 'cancelled']) {
+      expect(aggregate(e2e, 'e2e-status', 'pull_request', { tier2: result }), `unrequested paid ${result}`).toBe(1);
+    }
+    expect(aggregate(e2e, 'e2e-status', 'schedule', {}, true, true)).toBe(0);
+    expect(aggregate(e2e, 'e2e-status', 'workflow_dispatch', {}, true, true)).toBe(0);
   });
 
   test('admin manifest changes trigger the security scan and CI installs are frozen', () => {
