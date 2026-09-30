@@ -57,6 +57,8 @@ Hermes and OpenClaw on other machines have independent application lifecycles. A
 
 Keep the fork current through a pinned upstream commit and a separate integration branch. Preserve the patch classes above, run the complete gates, and record the upstream commit with the released fork version. Native agent applications are a separate update scope.
 
+For an exact-release integration, verify the upstream release tag resolves to the pinned second parent, then mirror that exact tag to the fork without force. Stop on a conflicting existing tag. The Semgrep baseline selector requires this provenance and blocks when it is missing; mirroring a tag does not mark the fork release deployed.
+
 Hosted builds pin Bun 1.4.2 and suppress root install lifecycle scripts. Database migrations belong in the coordinated cutover, never in a build that can overlap an older running service. Build the application explicitly after dependency installation.
 
 Keep automatic deployment disabled on all four services. Promote the same reviewed commit through a coordinated rollout; merging production code must not independently restart one old/new writer pair. Preserve the live nine-source roster and sync/embed schedule. A runtime update does not enable additional enrichment jobs or repeat initial bulk indexing.

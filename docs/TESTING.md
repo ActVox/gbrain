@@ -54,7 +54,10 @@ The `changes` job classifies a pull request's changed files with
 `scripts/ci-native-scope.sh`: native lock sources, the native toolchain, IPC,
 persistence, publication, backup, export and sync sources, their native tests,
 `package.json`, `bun.lock` and the workflow files select every target. An
-unreadable file list selects every target too. Skipped cells never report a
+unreadable file list selects every target too. The planner also selects every
+target when the PR count is unknown, reaches GitHub's 3,000-file API cap, or
+disagrees with the returned list; large complete lists are consumed fully.
+Skipped cells never report a
 failure: `test-status` needs the `native-locks` and `persistence-validation`
 workflow calls, which succeed when their remaining cells do, so the required
 check names are unchanged. `test/scripts/ci-pr-scope.test.ts` pins every scope.
