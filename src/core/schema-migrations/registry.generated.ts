@@ -188,6 +188,7 @@ import { v184 } from './v184-decision-receipts.ts';
 import { v185 } from './v185-decide-calibrations.ts';
 import { v186 } from './v186-decide-proposals.ts';
 import { v187 } from './v187-fact-relink-attempts.ts';
+import { v188 } from './v188-facts-ontology-stint-dedup.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -374,4 +375,5 @@ export const MIGRATIONS: Migration[] = [
   v185,
   v186,
   v187,
+  v188,
 ];

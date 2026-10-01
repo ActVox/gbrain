@@ -2282,11 +2282,19 @@ export class PGLiteEngine implements BrainEngine {
     const current = cur.rows[0] as { id: number; value_hash: string; valid_from: string | null } | undefined;
 
     if (current && current.value_hash === vh && !isBackdatedObservation(validFrom, current.valid_from)) {
+      // This provenance already observed the value during the current stint.
+      const seen = await this.db.query(
+        `SELECT 1 FROM facts
+          WHERE source_id = $1 AND entity_slug = $2 AND dimension = $3 AND value_hash = $4 AND source_markdown_slug = $5
+            AND COALESCE(valid_from,'-infinity'::timestamptz) >= COALESCE($6::timestamptz,'-infinity'::timestamptz) LIMIT 1`,
+        [sourceId, obs.entitySlug, dimension, vh, obs.source, current.valid_from],
+      );
+      if (seen.rows.length) return { action: 'noop', factId: null, supersededId: null };
       const ins = await this.db.query(
         `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, dimension, value, value_hash, dim_status,
                             confidence, source, source_markdown_slug, valid_from, valid_until, expired_at, consolidated_into)
          VALUES ($1,$2,$3,'fact',$4,$5,$6,$7,$8,$9,$10,$10,COALESCE($11::timestamptz, now()),$12, now(), $13)
-         ON CONFLICT (source_id, entity_slug, dimension, value_hash, source_markdown_slug) WHERE dimension IS NOT NULL
+         ON CONFLICT (source_id, entity_slug, dimension, value_hash, source_markdown_slug, valid_from) WHERE dimension IS NOT NULL
          DO NOTHING RETURNING id`,
         [sourceId, obs.entitySlug, factText, visibility, dimension, obs.value, vh, status, conf, obs.source, validFrom, validUntil, current.id],
       );
@@ -2299,7 +2307,7 @@ export class PGLiteEngine implements BrainEngine {
       `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, dimension, value, value_hash, dim_status,
                           confidence, source, source_markdown_slug, valid_from, valid_until)
        VALUES ($1,$2,$3,'fact',$4,$5,$6,$7,$8,$9,$10,$10,COALESCE($11::timestamptz, now()),$12)
-       ON CONFLICT (source_id, entity_slug, dimension, value_hash, source_markdown_slug) WHERE dimension IS NOT NULL
+       ON CONFLICT (source_id, entity_slug, dimension, value_hash, source_markdown_slug, valid_from) WHERE dimension IS NOT NULL
        DO NOTHING RETURNING id`,
       [sourceId, obs.entitySlug, factText, visibility, dimension, obs.value, vh, status, conf, obs.source, validFrom, validUntil],
     );
@@ -2332,12 +2340,14 @@ export class PGLiteEngine implements BrainEngine {
     // Page-visibility gate on the provenance page, applied BEFORE DISTINCT ON
     // so the untrusted caller resolves the newest value they may see.
     const privacy = opts?.excludePrivate ? `AND ${privateProvenanceFilterFragment('facts')}` : '';
+    params.push(opts?.visibility ?? null);
+    const visibility = `AND ($${params.length}::text[] IS NULL OR visibility = ANY($${params.length}::text[]))`;
     const r = await this.db.query(
       `SELECT DISTINCT ON (dimension) dimension, value, confidence,
          source_markdown_slug AS source, valid_from, valid_until AS valid_to,
          COALESCE(dim_status,'active') AS status, id AS fact_id
        FROM facts
-       WHERE entity_slug = $1 AND dimension IS NOT NULL AND expired_at IS NULL ${scope} ${privacy}
+       WHERE entity_slug = $1 AND dimension IS NOT NULL AND expired_at IS NULL ${scope} ${privacy} ${visibility}
          AND COALESCE(valid_from,'-infinity'::timestamptz) <= COALESCE($2::timestamptz, now())
          AND COALESCE(valid_until,'infinity'::timestamptz) > COALESCE($2::timestamptz, now())
          AND confidence >= $3
@@ -2365,7 +2375,7 @@ export class PGLiteEngine implements BrainEngine {
     });
   }
 
-  async findOntologyConflicts(opts?: PageReadScope & { minConfidence?: number }): Promise<OntologyConflict[]> {
+  async findOntologyConflicts(opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts['visibility'] }): Promise<OntologyConflict[]> {
     const minConf = opts?.minConfidence ?? 0;
     const params: unknown[] = [minConf];
     let scope: string;
@@ -2374,11 +2384,13 @@ export class PGLiteEngine implements BrainEngine {
     // Same provenance-page gate as getOntology, inside the CTE so a conflict
     // that only exists because of a hidden provenance is never reported.
     const privacy = opts?.excludePrivate ? `AND ${privateProvenanceFilterFragment('facts')}` : '';
+    params.push(opts?.visibility ?? null);
+    const visibility = `AND ($${params.length}::text[] IS NULL OR visibility = ANY($${params.length}::text[]))`;
     const r = await this.db.query(
       `WITH cur AS (
          SELECT entity_slug, dimension, value, source_markdown_slug AS source, confidence, id AS fact_id
          FROM facts WHERE dimension IS NOT NULL AND expired_at IS NULL AND valid_until IS NULL
-           AND (dim_status IS NULL OR dim_status = 'active') AND confidence >= $1 ${scope} ${privacy}
+           AND (dim_status IS NULL OR dim_status = 'active') AND confidence >= $1 ${scope} ${privacy} ${visibility}
        )
        SELECT entity_slug, dimension,
               json_agg(json_build_object('value', value, 'source', source, 'confidence', confidence, 'fact_id', fact_id)) AS values

@@ -38,7 +38,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // Fix wave 5 #5401: projection drain CLI and the budgeted resident drain.
   "src/commands/projections.ts": ["test/e2e/projection-drain-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/core/persistence/consumer.ts": ["test/e2e/projection-drain-postgres.test.ts"],
-  "src/core/persistence/journal.ts": ["test/e2e/projection-drain-postgres.test.ts"],
+  "src/core/persistence/journal.ts": ["test/e2e/projection-drain-postgres.test.ts", "test/e2e/withdrawal-followup-writes-postgres.test.ts"],
   // Fix wave 5 (#5731): the extractor-facts restore and its doctor check.
   "src/core/repair/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/commands/doctor/checks/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts"],
@@ -426,7 +426,16 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/ops/chronicle.ts": [
     "test/e2e/ontology-merge-parity.test.ts",
     "test/e2e/chronicle-event-projection-parity.test.ts",
+    "test/e2e/managed-ontology-propose-postgres.test.ts",
   ],
+  // Eval-category wave lane C: coordinated database-only writes (manual links,
+  // ontology observations) and the per-stint ontology dedup key.
+  "src/core/persistence/database-write.ts": ["test/e2e/managed-ontology-propose-postgres.test.ts", "test/e2e/managed-writers-w3.test.ts"],
+  "src/core/schema-migrations/v188-facts-ontology-stint-dedup.ts": ["test/e2e/ontology-merge-parity.test.ts", "test/e2e/schema-drift.test.ts"],
+  "src/core/persistence/memory-mutations.ts": ["test/e2e/withdrawal-followup-writes-postgres.test.ts"],
+  "src/core/persistence/coordinator.ts": ["test/e2e/withdrawal-followup-writes-postgres.test.ts"],
+  "src/core/facts/meta-hook.ts": ["test/e2e/hot-memory-invalidation-postgres.test.ts", "test/e2e/facts-context-injection-postgres.test.ts", "test/e2e/serve-http-meta.test.ts"],
+  "src/mcp/dispatch.ts": ["test/e2e/hot-memory-invalidation-postgres.test.ts"],
   // Schema source of truth: any change must pass the cross-engine drift gate.
   "src/schema.sql": ["test/e2e/schema-drift.test.ts", "test/e2e/schema-catalog-golden.test.ts"],
   "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts", "test/e2e/schema-catalog-golden.test.ts"],
