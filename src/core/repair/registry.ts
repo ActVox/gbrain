@@ -96,8 +96,10 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'retry_queued for its owner (paid; a consumed retry allowance gets one new bounded cycle per explicit run) or blocked with the reason. Never drops an obligation.',
   },
   'stale-atoms': {
-    handler: staleAtomsRepair, embeds: 'none', checks: [], explicit_only: true,
-    summary: 'Retire managed atoms whose source page changed or was deleted (#5770). Not implemented in this build.',
+    handler: staleAtomsRepair, embeds: 'none', checks: ['atom_provenance_drift'], explicit_only: true,
+    summary: 'Retire, by soft delete, page-bound atoms whose source page is gone, or whose source page changed after its current text was already extracted (#5770). '
+      + 'Preview-bound: --apply --expect <hash> retires exactly the previewed set; an atom that changed since reports changed_since_preview and is kept. '
+      + 'A later extraction that produces a retired atom again restores it. Never touches imported or file-bound atoms.',
   },
   'extractor-facts': {
     handler: extractorFactsRepair, embeds: 'none', checks: ['extractor_facts_expired'], explicit_only: true,

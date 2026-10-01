@@ -252,6 +252,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/managed-extract-atoms.test.ts",
     "test/e2e/managed-atom-regressions.test.ts",
     "test/e2e/managed-atom-compaction.test.ts",
+    "test/e2e/repair-stale-atoms-postgres.test.ts",
+    "test/e2e/journey-atoms-sync-race-postgres.test.ts",
     "test/e2e/managed-maintenance.test.ts",
     "test/e2e/managed-writers-w3.test.ts",
     "test/e2e/managed-facts-writers.test.ts",
@@ -274,6 +276,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/derived-visibility-repair.test.ts",
     "test/e2e/repair-command.test.ts",
     "test/e2e/w5-persistence-postgres.test.ts",
+    "test/e2e/persistence-large-manifest-postgres.test.ts",
+    "test/e2e/persistence-large-manifest-50k.test.ts",
   ],
   "src/core/brain-score-recommendations.ts": ["test/e2e/w5-persistence-postgres.test.ts"],
   "src/core/repair/**": ["test/e2e/repair-command.test.ts", "test/e2e/derived-visibility-repair.test.ts", "test/e2e/safe-chunk-reseal.test.ts", "test/e2e/recovery-layer.test.ts", "test/e2e/repair-contextual-mode-5621-postgres.test.ts", "test/e2e/fix-wave-3-integration.test.ts"],
@@ -532,6 +536,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/connectors/connector-text.ts": ["test/e2e/connector-holds.test.ts"],
   "src/commands/sources-retry-held.ts": ["test/e2e/connector-holds.test.ts"],
   "src/core/repair/connector-fences.ts": ["test/e2e/connector-holds.test.ts"],
+  // Fix wave 5 (#5770): stale-atoms repair and its #5777 cross-lane journey.
+  "src/core/repair/stale-atoms.ts": ["test/e2e/repair-stale-atoms-postgres.test.ts", "test/e2e/journey-atoms-sync-race-postgres.test.ts", "test/e2e/managed-extract-atoms.test.ts"],
   // Fix wave 3 lane A: connector identity, account pin, no-op kernel, pending set and migration 176.
   "src/core/take-proposals.ts": ["test/e2e/takes-propose-accept-managed.test.ts"],
   "src/core/persistence/connector-sync.ts": ["test/e2e/connector-wave3.test.ts", "test/e2e/connector-holds.test.ts"],

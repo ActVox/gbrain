@@ -360,4 +360,20 @@ describe('computeAtomProvenanceDriftCheck', () => {
     expect(c.message).toContain('0 whose source page is gone');
     expect(c.message).toContain('30 slug-unbound');
   }, 60_000);
+
+  it('counts a managed atom by its stripped provisional hash and names the stale-atoms repair (#5770)', async () => {
+    await seedSource('src-managed', 'original body');
+    const original = await hashOf('src-managed');
+    for (let i = 0; i < 30; i++) {
+      await engine.putPage(`atoms/2026-01-01/managed-${String(i).padStart(6, '0')}`, { type: 'atom', title: `managed ${i}`, compiled_truth: 'claim body',
+        frontmatter: { type: 'atom', source_slug: 'src-managed', source_hash: `pending:${original}`, managed_extraction: true, extracted_at: new Date().toISOString() } });
+    }
+    const healthy = await computeAtomProvenanceDriftCheck(engine);
+    expect(healthy.details).toMatchObject({ total_atoms: 30, drifted: 0 });
+    await seedSource('src-managed', 'edited body');
+    const c = await computeAtomProvenanceDriftCheck(engine);
+    expect(c.status).toBe('warn');
+    expect(c.details).toMatchObject({ drifted: 30, source_changed: 30 });
+    expect(c.message).toContain('gbrain repair stale-atoms');
+  }, 60_000);
 });

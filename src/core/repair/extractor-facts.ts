@@ -40,7 +40,8 @@
  * `row_num` above every row of its page, so it never looks like an unfenced
  * legacy row. A resumed apply skips pages whose request already committed (or
  * whose facts are already active), so a crash after publication restores no
- * new candidate. A page already passed by this set's cursor is not retried,
+ * new candidate. A page already passed by this set's cursor (keyed by its
+ * approval hash) is not retried,
  * whatever its outcome, so a `--limit` run always advances.
  */
 import type { BrainEngine } from '../engine.ts';
@@ -58,7 +59,7 @@ import { waitForWrite, writeResponse } from '../persistence/service.ts';
 import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { compareWriterVersions, recentWriterVersions, writerVersionLabel } from '../persistence/writer-versions.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
-import type { RepairHandler, RepairItem, RepairItemOutcome, RepairListing, RepairPlan, RepairScope } from './core.ts';
+import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
 
 export const EXTRACTOR_FACTS_INTENT = 'managed_maintenance_restore_extractor_facts';
 export const EXTRACTOR_FACTS_SOURCE_PREFIX = 'cli:extract-conversation-facts';
@@ -236,11 +237,8 @@ async function hashParts(engine: BrainEngine, scope: RepairScope, includeAmbiguo
   return { kind: 'extractor-facts-v1', brain_id: scope.brain_id, sources, selection: { source_ids: scope.source_ids, include_ambiguous: includeAmbiguous }, facts };
 }
 
-/** Cursor phase naming one approved set, so a cursor left by another preview never skips this set's pages. */
-const hashPhase = (hash: string) => Number.parseInt(hash.slice(0, 12), 16) || 0;
-
 function pageItem(page: ExtractorFactsPage, hash: string, index: number, last: boolean): PageItem {
-  return { cursor: { phase: hashPhase(hash), id: index + 1 }, source_id: page.source_id, slug: page.slug, chars: 0,
+  return { cursor: { phase: 0, id: index + 1 }, source_id: page.source_id, slug: page.slug, chars: 0,
     action: `restore ${page.facts.length} extractor fact(s)`, page, hash, last };
 }
 
@@ -300,11 +298,11 @@ export const extractorFactsRepair: RepairHandler = {
     if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous || JSON.stringify(page.scope) !== scopeKey)) {
       throw previewChangedError(opts.expect, command);
     }
-    // Resume: skip pages this set's cursor already passed (any outcome) and pages whose restore already finished.
+    // Resume: skip pages the set's cursor (keyed by its approval hash in runRepair) already passed,
+    // whatever their outcome, and pages whose restore already finished.
     const done = await finishedPages(engine, opts.expect, approved.items);
-    const passed = after && after.phase === hashPhase(opts.expect) ? after.id : 0;
     const items = approved.items.map((page, index) => pageItem(page, opts.expect!, index, index === approved.items.length - 1))
-      .filter(item => item.cursor.id > passed && !done.has(`${item.source_id}\u0000${item.slug}`));
+      .filter(item => afterCursor(item.cursor, after) && !done.has(`${item.source_id}\u0000${item.slug}`));
     if (!items.length) await clearApprovedSet(engine, { command: 'extractor-facts', hash: opts.expect });
     return { items, preview_hash: opts.expect, residuals: { already_restored_pages: approved.items.length - items.length } };
   },
