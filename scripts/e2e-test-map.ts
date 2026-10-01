@@ -29,6 +29,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/migration-orchestration-lock.ts": ["test/e2e/apply-migrations-orchestration-lock.test.ts"],
   "src/core/source-delete.ts": ["test/e2e/sources-remove-bindings.test.ts"],
   "src/core/persistence/orphan-bindings.ts": ["test/e2e/sources-remove-bindings.test.ts"],
+  // Fix wave 5 shared commit: preview-bound approved sets in op_checkpoints.
+  "src/core/persistence/preview-approval.ts": ["test/e2e/preview-approval-postgres.test.ts"],
   "src/core/persistence/deactivation.ts": ["test/e2e/persistence-deactivate-race.test.ts", "test/e2e/fix-wave-4-integration.test.ts"],
   // SkillOpt orchestrator, outcome/resume, models plan + strict mode, spend ledger.
   "src/core/skillopt/**": [
