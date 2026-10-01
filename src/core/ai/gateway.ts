@@ -1621,6 +1621,27 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
 }
 
 /**
+ * Embedding providers whose own documentation says a rejected request is not
+ * billed. Only for these does a permanent request-shaped rejection (HTTP 400,
+ * 413 or 422; never 401/403/429) release its invocation reservation instead of
+ * keeping the maximum debit. Verified per provider:
+ *   - google: "If your request fails with a 400 or 500 error, you won't be
+ *     charged for the tokens used." (ai.google.dev/gemini-api/docs/billing,
+ *     "Am I charged for failed requests?", checked 2026-10-01)
+ * OpenAI, Voyage and the other embedding recipes publish no such statement, so
+ * their rejections keep the debit (token-limit rejections are handled above).
+ */
+const UNBILLED_REJECTION_PROVIDERS: ReadonlySet<string> = new Set(['google']);
+
+/** @internal exported for tests; not part of the public gateway API. */
+export function isUnbilledEmbeddingRejection(recipeId: string, err: unknown): boolean {
+  if (!UNBILLED_REJECTION_PROVIDERS.has(recipeId)) return false;
+  const e = err as { statusCode?: unknown; status?: unknown } | null;
+  const status = typeof e?.statusCode === 'number' ? e.statusCode : typeof e?.status === 'number' ? e.status : undefined;
+  return status === 400 || status === 413 || status === 422;
+}
+
+/**
  * Returns true if the error looks like a provider batch-token-limit error.
  *
  * @internal exported for tests; not part of the public gateway API.
@@ -1710,7 +1731,7 @@ async function embedSubBatch(
       // deadline) — shorter wins.
       abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
       ...(hasAIInvocationGuard() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
-    }), sdkInvocationUsage, err => isTokenLimitError(err) ? { inputTokens: 0, outputTokens: 0 } : null);
+    }), sdkInvocationUsage, err => isTokenLimitError(err) || isUnbilledEmbeddingRejection(recipe.id, err) ? { inputTokens: 0, outputTokens: 0 } : null);
     // Carry the threaded input_type across the SDK boundary via
     // __embedInputTypeStore (the adapter strips it from providerOptions —
     // see the store's doc comment). Populated only when dimsProviderOptions
