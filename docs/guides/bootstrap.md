@@ -42,7 +42,7 @@ follows is `BOOTSTRAP_FOR_AGENTS.md` at the repo root, fetched at the
 **What session start shows:** the SessionStart hook prints your
 allowlisted MEMORY.md sections, push status and hook health, plus a warm
 context pack. It never shows another session's activity. Releases before
-v0.60.27.0 printed a `Last session activity` line from the newest session
+v0.60.28.0 printed a `Last session activity` line from the newest session
 buffer on the machine, whichever agent or session wrote it (#5558). That line
 and the stop-hook buffer behind it are gone, and there is deliberately no
 opt-in to bring them back. Buffers an older release left in

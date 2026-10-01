@@ -578,9 +578,9 @@ A line that says `Unknown:` means the check could not run; it is not a clean
 result. Ask the brain host's operator to run the steps above.
 
 <a id="fix-wave-5"></a>
-### Upgrading to v0.60.27.0 (fix wave 5)
+### Upgrading to v0.60.28.0 (fix wave 5)
 
-**Say to your agent:** *"We upgraded gbrain to v0.60.27.0. Restart everything
+**Say to your agent:** *"We upgraded gbrain to v0.60.28.0. Restart everything
 that runs it, then walk me through what doctor finds, in order, before
 changing anything."*
 
@@ -597,7 +597,7 @@ older `gbrain serve` never shows up there. Restart in this order:
 3. Upgrade each host: `gbrain upgrade`.
 4. Run `gbrain --version` through each launcher's own binary path (the path in
    the service definition, the harness MCP command, the hook commands) and
-   confirm it prints `0.60.27.0`.
+   confirm it prints `0.60.28.0`.
 5. Restart services, harnesses, workers and autopilot.
 6. Make one write from each host, then confirm a fresh `last_seen` for that
    host in `gbrain sources writer status --json` (`writer_versions[]`).

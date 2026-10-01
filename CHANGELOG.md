@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.27.0] - 2026-10-01
+## [0.60.28.0] - 2026-10-01
 
 **Fix wave 5: session start stops showing another session's text, big brain repos onboard again, old queued jobs stop wedging synthesize, and the cleanups promised last wave ship.**
 
@@ -31,7 +31,7 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
 | Resident projection rebuild | 2 pages per tick | up to 100 pages per pass |
 | An exported key that differs from your config key | silently wins | still wins, with one warning naming both |
 
-## To take advantage of v0.60.27.0
+## To take advantage of v0.60.28.0
 
 `gbrain upgrade` installs the binary. There is no schema migration. Most fixes take effect only in a process that runs the new binary, so restart everything that runs gbrain.
 
@@ -60,7 +60,7 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
    gbrain doctor
    ```
 4. **Several brains on one host:** re-run `gbrain autopilot --install` for each non-default brain (`GBRAIN_HOME=<brain parent>`), then for the default brain.
-5. **Your agent reads `skills/migrations/v0.60.27.0.md`** the next time you talk to it. The full symptom table is in [Recover after upgrading](docs/guides/repair.md#fix-wave-5).
+5. **Your agent reads `skills/migrations/v0.60.28.0.md`** the next time you talk to it. The full symptom table is in [Recover after upgrading](docs/guides/repair.md#fix-wave-5).
 6. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
 
 **Say to your agent:** *"We upgraded gbrain. Restart what runs it, then walk me through what doctor finds, in order, before changing anything."* or *"Preview the stale atoms in my brain and tell me what you'd retire."*
