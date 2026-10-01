@@ -3,7 +3,8 @@ import type { OperationContext } from '../ops/contract.ts';
 import { OperationError, verbError } from '../ops/contract.ts';
 import { enforceClientSlugFence, enforceSubagentSlugFence, validatePageSlug } from '../ops/context.ts';
 import { isNullLikeEntity } from '../facts/write-single.ts';
-import { recordFactWithdrawal } from '../facts/withdrawal.ts';
+import { recordFactWithdrawal, type WithdrawalCommit } from '../facts/withdrawal.ts';
+import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { initializeLocalPersistence, requestPrincipalForContext } from './page-mutations.ts';
 import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
 import { admitWrite, admitWriteInTransaction, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
@@ -107,7 +108,9 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
     `No fact with id "${rawId}".`, 'Pass the fact id returned by remember or recall.');
   // Retry the whole withdrawal, so source/principal guards and the connection
   // are released before backoff. Admission must not retry a nested savepoint.
+  let withdrawn: WithdrawalCommit['pages'] = [];
   const done = await retryWriteAdmission(requestId, remaining => ctx.engine.transaction(async tx => {
+    withdrawn = [];
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
       [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
     // Source -> current grant -> counters/request -> sorted page keys -> facts.
@@ -136,7 +139,7 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
     return withCoordinatedWrite(tx, [sourceId], async () => {
       // Even an expired legacy fact acquires a ledger so a stale import cannot
       // reactivate it. Internal affected-page identities never enter the receipt.
-      await recordFactWithdrawal(tx, id, sourceId, ctx.remote !== false, { requestId: row.id });
+      withdrawn = (await recordFactWithdrawal(tx, id, sourceId, ctx.remote !== false, { requestId: row.id })).pages;
       if (reason) await tx.executeRaw(`UPDATE facts SET context=concat_ws(' | ',NULLIF(context,''),$3::text)
         WHERE id=$1 AND source_id=$2`, [id, sourceId, `forgotten: ${reason}`]);
       if (operation === 'forget_fact' && fact.expired_at !== null) {
@@ -148,5 +151,12 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
       return completeWrite(tx, row, 'committed', { ...outcome, persistence: { mode: 'database' } });
     });
   }));
+  // The commit removed the withdrawn pages' chunks. Rebuild them before
+  // acknowledging: a CLI process exits without a resident projection worker.
+  // A failed rebuild stays queued as durable projection work.
+  const slugs = withdrawn.map(page => page.slug);
+  for (let start = 0; start < slugs.length; start += 100) {
+    await rebuildPendingPageProjections(ctx.engine, 100, { pages: { sourceId, slugs: slugs.slice(start, start + 100) } }).catch(() => undefined);
+  }
   return writeResponse(done);
 }
