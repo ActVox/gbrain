@@ -2369,6 +2369,10 @@ export async function runCycle(
                 ...(synthesizeWrittenSlugs ?? []),
               ]
             : undefined;
+        // #5833: a real signal (cycleSignal can be the raw duck-typed
+        // opts.signal) so a timeout or lock steal stops the phase at its next
+        // item instead of extracting on after the race below has returned.
+        const xaSignal = cycleSignal ? anyAbortSignal([cycleSignal]) : null;
         const { result, duration_ms } = await racedTimePhase(() => runPhaseExtractAtoms(engine, {
           brainDir: brainDir ?? undefined,
           sourceId: xaSourceId,
@@ -2379,7 +2383,8 @@ export async function runCycle(
           // v0.41.19.0 (T4): pass same reporter (not a child — cycle.ts
           // owns start/finish; phase only ticks).
           progress,
-        }), 'extract_atoms');
+          signal: xaSignal?.signal,
+        }), 'extract_atoms').finally(() => xaSignal?.dispose());
         result.duration_ms = duration_ms;
         phaseResults.push(result);
         progress.finish();
