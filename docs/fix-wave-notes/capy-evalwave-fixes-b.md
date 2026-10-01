@@ -87,6 +87,40 @@ and by `extract --stale` for pages stamped between the old and new watermark).
 - Module-size ratchet raised: `src/commands/extract.ts` +2,
   `src/core/link-extraction.ts` +10.
 
-## Eval before/after (copied overlays, fix-wave-5 head `31021a06` vs this branch)
+## Eval before/after
 
-See the lane report for the numbers; summary filled in below.
+Copied overlays (gbrain-evals `.gbrain-overlays/`, verified tree, not
+symlinked) of fix-wave-5 head `31021a06` (before) and `49acbc3b` (this
+lane's fix commit, after). Measured, not tuned: no number below informed a
+code change.
+
+- **gbrain-evals repros.** `repro-relational-edges.ts`: before, all five typed
+  edges point page -> target and both "Who attended" questions report
+  `fired: false, seeds_resolved: 0`; after, all five point subject -> page,
+  "Who invested in Gamma Example?" fans out to Bob, and both attendance
+  questions fire (`seeds_resolved: 1, candidates: 2`). `n12-7` repro: legacy
+  pack attended `[alice, bob]` before, `[alice]` after (matches v2).
+- **N9 hermetic (keyword path, 3 seeds).** Composed strict all-hit unchanged
+  (10/375 canonical, 5/375 paraphrase; arm fired 0/750). One-hop: the only
+  changed number is the template funnel's `seed_resolved`, 240 -> 390 (all
+  150 attendance runs now resolve the meeting); runs fired stay 174, recall
+  and hit@1 are identical (template recall@5 0.719 -> 0.755 on, both
+  commits; attendance recall@5 0.456 both arms, both commits).
+- **N9 paid (OpenAI hybrid).** Identical before and after on every reported
+  number.
+- **relational-ab paid (145 questions x 3 seeds).** Identical before and
+  after: template recall@5 0.7368 -> 0.7632 off -> on, hit@1 27.6% -> 42.8%,
+  174 fired; paraphrase recall@5 0.4109 -> 0.5368, hit@1 4.8% -> 16.6%, 99
+  fired; attendance rows unchanged (template recall@5 0.38, paraphrase 0.355,
+  0 fired).
+
+Why attendance retrieval did not move on world-v1: its meeting pages state
+attendance only in prose ("[Chris Jackson](people/chris-jackson-91) dialed in
+from Singapore"), with no attendee list or `attendees:` frontmatter. Before the
+fix the legacy pack typed all 131 person links on meeting pages as attended,
+stored meeting -> person, which the incoming "Who attended" traversal could
+not use; after, the evidence gate types the same 131 links `mentions`. The
+seed now resolves, but there are no canonical attendance edges to walk. A
+corpus with explicit attendee lists (the documented format) fires, as the
+repro shows. Paid spend: $0.258 of the $2 cap (budget run
+`evalwave-fixes-b-2026-10-01T20-31-25-960Z-57117001`, closed).
