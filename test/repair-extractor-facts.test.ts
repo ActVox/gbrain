@@ -255,6 +255,23 @@ for (const backend of testBackends()) {
       }, { databaseUrl, setup: async ({ engine, root }) => { ids = await conversation(engine, 'conversations/edited', ['Alice sends the deck', 'Alice books the venue'], root); } });
     }, 120_000);
 
+    test('within a duplicate group the evidenced row is restored, not an older ambiguous one (Codex review)', async () => {
+      let ids: number[] = [];
+      await managedBrain(async ({ engine, ctx }) => {
+        await prefixExpire(engine, ctx, 'conversations/dupes', { transaction: 'separate' });
+        const [{ id: later }] = await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw<{ id: number }>(
+          `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, row_num, source_markdown_slug)
+           VALUES ('default', $1, 'Alice sends the deck', 'commitment', 'private', $2, 5, 'conversations/dupes') RETURNING id::int AS id`, [ENTITY, EXTRACTOR])));
+        await prefixExpire(engine, ctx, 'conversations/dupes', { ids: [Number(later)] });
+        const preview = await repair(engine, null, []);
+        expect(preview.results[0].listing!.map(entry => [Number(entry.item.split('#')[1]), entry.class])).toEqual([
+          [ids[0], 'excluded:duplicate_candidate'], [Number(later), 'evidenced']]);
+        const applied = await repair(engine, null, ['--apply', '--expect', hashOf(preview)]);
+        expect(applied.results[0].outcomes).toEqual({ restored: 1 });
+        expect(await activeIds(engine, [ids[0], Number(later)])).toEqual([Number(later)]);
+      }, { databaseUrl, setup: async ({ engine, root }) => { ids = await conversation(engine, 'conversations/dupes', ['Alice sends the deck'], root); } });
+    }, 120_000);
+
     test('crash after a publication, before the cursor: the resumed apply replays its receipt and restores no new candidate (ENG-O8)', async () => {
       const seeded: Record<string, number[]> = {};
       await managedBrain(async ({ engine, ctx }) => {

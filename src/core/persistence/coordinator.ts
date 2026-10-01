@@ -23,6 +23,7 @@ import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFil
 import { assertMutationProtocol, assertSharedSkillPersistence, declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertBundleRecoveryBinding, bundleFileHash, prepareBundleRecovery, publishStagedBundleFile, stageBundleFile, type MutationFile } from './bundle-files.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
+import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -209,6 +210,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
       }
       await prepared.validate?.(tx);
+      // #5409: a file target prepared before the source became a read-only mirror is never published.
+      if (!skill && prepared.file && await sourceMirrorReadOnly(tx, row.source_id, true)) {
+        throw new OperationError('source_changed', 'The source became a read-only mirror after this write was prepared; nothing was written to its checkout.',
+          'Retry the write with a new request_id; it is now stored database-only.');
+      }
       if (recovery) {
         const records = recoveryFiles(recovery);
         for (const record of records) if ((skill ? bundleFileHash(record) : fileHash(record.path)) !== record.beforeHash) {

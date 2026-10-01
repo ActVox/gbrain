@@ -8,8 +8,9 @@
  */
 import type { SqlEngine } from './model.ts';
 
-export async function sourceMirrorReadOnly(engine: SqlEngine, sourceId: string): Promise<boolean> {
+/** `lock`: inside a publication, hold the source row so a concurrent mode change waits for this write. */
+export async function sourceMirrorReadOnly(engine: SqlEngine, sourceId: string, lock = false): Promise<boolean> {
   const [row] = await engine.executeRaw<{ read_only: boolean }>(
-    "SELECT COALESCE(config->>'mirror_read_only','false')='true' AS read_only FROM sources WHERE id=$1", [sourceId]);
+    `SELECT COALESCE(config->>'mirror_read_only','false')='true' AS read_only FROM sources WHERE id=$1${lock ? ' FOR SHARE' : ''}`, [sourceId]);
   return row?.read_only === true;
 }

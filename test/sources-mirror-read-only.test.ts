@@ -19,7 +19,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { claimWorktree } from '../src/core/persistence/ownership.ts';
+import { acquireWorktree, claimWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
+import { claimNextWrite } from '../src/core/persistence/journal.ts';
+import { localHostId } from '../src/core/persistence/identity.ts';
+import { preparePageMutation } from '../src/core/persistence/page-prepare.ts';
+import { publishMutation } from '../src/core/persistence/coordinator.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -138,6 +142,27 @@ for (const backend of testBackends()) {
           expect(existsSync(join(m.root, 'notes/agent-note.md'))).toBe(true);
         }
       }
+    }), 120_000);
+
+    test('a file target prepared before the source became a read-only mirror is refused at publication (Codex review)', () => withEnv({ GBRAIN_HOME: home }, async () => {
+      const m = await mirror(false);
+      const binding = (await getWorktreeBinding(engine, m.id))!;
+      const lock = (await acquireWorktree(binding, 5000))!;
+      try {
+        await expect(submitPageMutation(ctx(m.id), { operation: 'put_page', params: { slug: 'notes/racing', request_id: randomUUID(),
+          content: '---\ntitle: Racing\ntype: note\n---\nPrepared before the flag.\n' } })).rejects.toMatchObject({ code: 'write_pending' });
+        await disposePersistenceConsumer(engine);
+      } finally { await lock.release(); }
+      const row = (await claimNextWrite(engine, localHostId()))!;
+      expect(row.slug).toBe('notes/racing');
+      const prepared = await preparePageMutation(engine, row, { engine: engine.kind, embedding_disabled: true });
+      expect(prepared.file).toBeDefined();
+      const outcome = await publishMutation(engine, row, prepared, localHostId(), { boundary: async name => {
+        if (name === 'prepared') await cli(['mirror-readonly', m.id]);
+      } });
+      expect(outcome).toMatchObject({ state: 'conflict', error_code: 'source_changed' });
+      expect(existsSync(join(m.root, 'notes/racing.md'))).toBe(false);
+      expect(await engine.getPage('notes/racing', { sourceId: m.id })).toBeNull();
     }), 120_000);
   });
 }

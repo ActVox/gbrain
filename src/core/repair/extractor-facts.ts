@@ -14,8 +14,9 @@
  *   - excluded (listed, never restored): the page is missing or deleted; the
  *     fact was superseded (`superseded_by`, E-T5); its claim was withdrawn
  *     (`fact_withdrawals`); an active fact with the same text and entity already
- *     sits on the page (a fence row or another extractor row); or an earlier
- *     candidate of the page carries the same text and entity.
+ *     sits on the page (a fence row or another extractor row); or another
+ *     candidate of the page with the same text and entity is restored instead
+ *     (the first evidenced one, else the first ambiguous one).
  *   - ambiguous (restored only with `--include-ambiguous` and the hash of that
  *     preview): an unmanaged brain (no receipts); no committed write receipt of
  *     the page completed at the exact expiry instant (`completed_at =
@@ -153,12 +154,17 @@ export async function classifyExtractorFacts(db: BrainEngine, sourceIds: string[
       LEFT JOIN receipts r ON r.source_id=c.source_id AND r.slug=c.slug AND r.completed_at=c.expired
       LEFT JOIN fenced ON fenced.source_id=c.source_id AND fenced.slug=c.slug
      ORDER BY c.source_id, c.slug, c.id`, [sourceIds, opts.slug ?? null]);
-  const seen = new Set<string>();
-  return rows.map(row => {
+  // One representative per (page, visibility, entity, text): the first evidenced row, else the first ambiguous one.
+  const key = (row: CandidateRow) => JSON.stringify([row.source_id, row.slug, row.visibility, row.entity_slug, row.fingerprint]);
+  const base = rows.map(row => classify(row, false, opts.managed));
+  const representative = new Map<string, number>();
+  for (const klass of ['evidenced', 'ambiguous'] as const) {
+    rows.forEach((row, i) => { if (base[i][0] === klass && !representative.has(key(row))) representative.set(key(row), i); });
+  }
+  return rows.map((row, i) => {
     const id = Number(row.id);
-    const key = JSON.stringify([row.source_id, row.slug, row.visibility, row.entity_slug, row.fingerprint]);
-    const [klass, reason] = classify(row, seen.has(key), opts.managed);
-    if (klass !== 'excluded') seen.add(key);
+    const duplicate = base[i][0] !== 'excluded' && representative.get(key(row)) !== i;
+    const [klass, reason] = duplicate ? classify(row, true, opts.managed) : base[i];
     return { id, source_id: row.source_id, slug: row.slug, class: klass, reason, expired_at: row.expired_at,
       receipt: row.receipt, receipt_consumer: row.receipt === null ? null : row.receipt_consumer,
       fact_hash: digest([row.fact, row.visibility, row.entity_slug]) };
@@ -184,7 +190,7 @@ const DETAILS: Record<string, string> = {
   superseded: 'a newer fact superseded it',
   withdrawn: 'its claim was withdrawn (forget)',
   active_duplicate: 'an active fact with the same text and entity is already on the page',
-  duplicate_candidate: 'an earlier candidate of the page has the same text and entity',
+  duplicate_candidate: 'another candidate of the page with the same text and entity is restored instead',
   unmanaged_brain: 'unmanaged brain: no write receipt can prove the expiry',
   no_same_transaction_receipt: 'no committed write of the page completed at the exact expiry instant',
   post_fix_consumer: 'expired by a write published by a fixed consumer (a fence row may have taken its position)',
