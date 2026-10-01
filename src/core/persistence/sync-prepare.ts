@@ -204,6 +204,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     // working tree before its Git effect lands. When the newer working-tree bytes are the
     // current page itself, there is nothing to import and nothing to protect; the commit that
     // carries them is imported as a no-op by a later run.
+    // The checkpoint may advance past the pinned commit's bytes because the working tree wins, as for any local edit.
     const working = renamed ? null : readSyncFile(root, p.path);
     if (!working || sha256(working) !== p.rawHash
       || !sameCanonicalImport(base, parseMarkdown(working.toString('utf8'), row.slug, { activePack }))) {
