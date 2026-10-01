@@ -167,7 +167,9 @@ negation_artifact`), and `pages.effective_date` is threaded into the judge
 prompt so the probe doesn't cry wolf on facts that simply changed. Only
 content dates (frontmatter or filename) count; a page whose date is the
 recorded-time `fallback` reaches the judge as `(date unknown)` and leaves
-the text-date pre-filter in charge.
+the text-date pre-filter in charge. A temporal verdict needs two different
+times: same-date or undated value conflicts are contradictions. Claims about
+two entities whose names merely look alike are never contradictions.
 
 The trajectory substrate builds on the same signal:
 `gbrain eval trajectory <entity>` shows the chronological typed-claim
