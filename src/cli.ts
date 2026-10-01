@@ -57,6 +57,7 @@ import {
   findCliCommand,
   type CliDispatchContext,
 } from './cli/command-table.ts';
+import { formatRememberResult } from './cli/remember-format.ts';
 
 // db-availability loop: best-effort brain-id for the GBRAIN_DB_ACCESS marker,
 // so a MOUNT's DB failure reads as `brain=<id>` instead of masquerading as a
@@ -1758,13 +1759,7 @@ export function formatResult(
     // flag, so the argv probe is safe).
     case 'remember': {
       if (process.argv.includes('--json')) break;
-      const r = result as any;
-      if (r.dry_run) return `[dry-run] would remember: ${r.fact}\n`;
-      const lines = [r.status_text || `${r.status} (fact #${r.id})`];
-      if (r.entity_slug) lines.push(`  entity: ${r.entity_slug}`);
-      if (r.valid_until) lines.push(`  expires: ${r.valid_until}`);
-      if (r.degraded_dedup) lines.push('  note: no embedding provider — duplicate detection degraded');
-      return lines.join('\n') + '\n';
+      return formatRememberResult(result as Record<string, any>);
     }
     case 'entity': {
       if (process.argv.includes('--json')) break;
