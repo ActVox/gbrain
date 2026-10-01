@@ -55,7 +55,13 @@ import {
   autopilotPauseReason,
   autopilotDisableStrikesPath,
   autopilotLaunchdLabel,
+  autopilotWrapperOwner,
+  resolveAutopilotJob,
+  DEFAULT_AUTOPILOT_LAUNCHD_LABEL,
+  DEFAULT_AUTOPILOT_SYSTEMD_UNIT,
+  type AutopilotJob,
 } from '../core/autopilot-paths.ts';
+import { errorFor } from '../core/errors.ts';
 export { autopilotLockPath, autopilotDisabledMarkerPath, autopilotPausedMarkerPath, autopilotLaunchdLabel };
 export { relativeSourceLocalPathSkipWarning as relativeLocalPathSkipWarning };
 
@@ -137,7 +143,7 @@ export function logError(phase: string, e: unknown) {
   const line = `[${ts}] [${phase}] ERROR: ${msg}`;
   console.error(line);
   try {
-    const logDir = join(process.env.HOME || '', '.gbrain');
+    const logDir = gbrainHomePath();
     mkdirSync(logDir, { recursive: true });
     appendFileSync(join(logDir, 'autopilot.log'), line + '\n');
   } catch { /* best-effort */ }
@@ -615,16 +621,84 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
 
 // --- Install/Uninstall ---
 
-function plistPath(): string {
-  return join(process.env.HOME || '', 'Library', 'LaunchAgents', `${autopilotLaunchdLabel()}.plist`);
+function plistPath(label: string): string {
+  return join(process.env.HOME || '', 'Library', 'LaunchAgents', `${label}.plist`);
 }
 
-function systemdUnitPath(): string {
-  return join(process.env.HOME || '', '.config', 'systemd', 'user', AUTOPILOT_SYSTEMD_UNIT);
+function systemdUnitPath(unit: string = DEFAULT_AUTOPILOT_SYSTEMD_UNIT): string {
+  return join(process.env.HOME || '', '.config', 'systemd', 'user', unit);
 }
 
-function ephemeralStartScriptPath(): string {
+/** The pre-#5195 shared start script, which every brain used to overwrite. */
+function legacyStartScriptPath(): string {
   return join(process.env.HOME || '', '.gbrain', 'start-autopilot.sh');
+}
+
+const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+const unshellQuote = (s: string) => s.replace(/'\\''/g, "'");
+
+/** The wrapper a launchd plist runs (its first ProgramArguments entry). */
+export function plistWrapperPath(plist: string): string | null {
+  const m = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(plist);
+  if (!m) return null;
+  return m[1].replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+}
+
+/** The wrapper a systemd unit runs. */
+export function unitWrapperPath(unit: string): string | null {
+  return /^ExecStart=(.+)$/m.exec(unit)?.[1].trim() || null;
+}
+
+/** The autopilot wrapper a crontab line or start script names, if any. */
+export function scriptWrapperPath(text: string): string | null {
+  const quoted = /'((?:[^']|'\\'')*autopilot-run\.sh)'/.exec(text);
+  if (quoted) return unshellQuote(quoted[1]);
+  return /(\S*autopilot-run\.sh)/.exec(text)?.[1] ?? null;
+}
+
+/**
+ * #5195: does this crontab line belong to this brain's job? A marked line
+ * (`# gbrain-autopilot:<suffix>`) belongs to the brain with that suffix. An
+ * unmarked line predates per-brain names: it belongs to the brain whose
+ * wrapper it names, and to the default brain when it names none.
+ */
+export function cronLineBelongsToBrain(line: string, job: AutopilotJob): boolean {
+  if (!crontabIndicatesAutopilotInstall(line)) return false;
+  const marker = /#\s*gbrain-autopilot:([A-Za-z0-9]+)\s*$/.exec(line);
+  if (marker) return job.suffix !== null && marker[1] === job.suffix;
+  const wrapper = scriptWrapperPath(line);
+  if (!wrapper) return job.kind === 'default';
+  return autopilotWrapperOwner(wrapper, job.homeDir).owner === 'own';
+}
+
+/** `GBRAIN_HOME=<parent> gbrain autopilot <verb>` for the brain whose home is `brainHome`. */
+function brainCommand(brainHome: string, verb: string): string {
+  const parent = dirname(brainHome);
+  const defaultHome = join(process.env.HOME || '', '.gbrain');
+  return resolvePath(brainHome) === resolvePath(defaultHome)
+    ? `gbrain autopilot ${verb}`
+    : `GBRAIN_HOME=${shellQuote(parent)} gbrain autopilot ${verb}`;
+}
+
+/**
+ * ENG-O11: before replacing a job, make sure its wrapper names this brain. A
+ * job whose wrapper belongs to another live brain is that brain's supervision;
+ * replacing it would silently stop it (the #5195 failure).
+ */
+function refuseForeignJob(jobName: string, wrapperPath: string | null, job: AutopilotJob): void {
+  const owner = autopilotWrapperOwner(wrapperPath, job.homeDir);
+  if (owner.owner !== 'other') return;
+  throw errorFor({
+    class: 'AutopilotJobOwnedByOtherBrain',
+    code: 'autopilot_job_owned_by_other_brain',
+    message: `The autopilot job ${jobName} runs the brain at ${owner.home}, not this brain at ${job.homeDir}.`,
+    hint: `Give that brain its own job first: ${brainCommand(owner.home, '--install')}; then re-run: ${brainCommand(job.homeDir, '--install')}`,
+    docs_url: 'docs/guides/live-sync.md#several-brains-on-one-host',
+  });
+}
+
+function readIfExists(path: string): string | null {
+  try { return readFileSync(path, 'utf-8'); } catch { return null; }
 }
 
 export type InstallTarget = 'macos' | 'linux-systemd' | 'ephemeral-container' | 'linux-cron';
@@ -679,7 +753,7 @@ function detectOpenClaw(): { detected: boolean; bootstrapCandidates: string[] } 
 /** systemd unit name. The launchd label lives in `autopilotLaunchdLabel()`
  *  (core/autopilot-paths.ts) so installer, uninstaller, status, and the
  *  wrapper's self-disable can never name different jobs. */
-export const AUTOPILOT_SYSTEMD_UNIT = 'gbrain-autopilot.service';
+export const AUTOPILOT_SYSTEMD_UNIT = DEFAULT_AUTOPILOT_SYSTEMD_UNIT;
 
 
 /**
@@ -707,14 +781,14 @@ export const AUTOPILOT_SYSTEMD_UNIT = 'gbrain-autopilot.service';
  * Exported pure so tests can assert the emitted shape per target without
  * installing a daemon.
  */
-export function generateSelfDisableGuard(repoPath: string, target: InstallTarget): string {
+export function generateSelfDisableGuard(repoPath: string, target: InstallTarget, job: AutopilotJob = resolveAutopilotJob()): string {
   const q = (s: string) => s.replace(/'/g, "'\\''");
   const marker = autopilotDisabledMarkerPath();
   const disableCmd =
     target === 'macos'
-      ? `  launchctl bootout "gui/$(id -u)/${autopilotLaunchdLabel()}" 2>/dev/null || true\n`
+      ? `  launchctl bootout "gui/$(id -u)/${job.launchdLabel}" 2>/dev/null || true\n`
       : target === 'linux-systemd'
-        ? `  systemctl --user disable --now ${AUTOPILOT_SYSTEMD_UNIT} 2>/dev/null || true\n`
+        ? `  systemctl --user disable --now ${job.systemdUnit} 2>/dev/null || true\n`
         : '';
   const strikes = autopilotDisableStrikesPath();
   return `# Self-disable if the captured checkout is gone (rename / relocation / deletion).
@@ -772,7 +846,7 @@ const GBRAIN_ENV_TEMPLATE = `# gbrain daemon environment — sourced by autopilo
 # daemon's home from this file's own location.
 `;
 
-export function writeWrapperScript(repoPath: string, target: InstallTarget): string {
+export function writeWrapperScript(repoPath: string, target: InstallTarget, job: AutopilotJob = resolveAutopilotJob()): string {
   // gbrainHomePath, not raw $HOME: the daemon writes its lock/markers through
   // it and the status command reads through it, so a GBRAIN_HOME install must
   // keep its wrapper (and the start-script detection that looks for it) in
@@ -855,7 +929,7 @@ export function writeWrapperScript(repoPath: string, target: InstallTarget): str
 # or which init file the OS loaded.
 export PATH=${runtimePathPrefix}"$HOME/.bun/bin:$PATH"
 ${process.env.GBRAIN_HOME ? `# Baked at install: the supervisor does not pass the installer's env, and\n# without this the daemon would read/write a different home than the\n# install that configured it.\nexport GBRAIN_HOME='${(process.env.GBRAIN_HOME).replace(/'/g, "'\\''")}'\n` : ''}
-${generateSelfDisableGuard(repoPath, target)}# #3696: daemon cwd = the repo, so any legacy RELATIVE sources.local_path /
+${generateSelfDisableGuard(repoPath, target, job)}# #3696: daemon cwd = the repo, so any legacy RELATIVE sources.local_path /
 # sync.repo_path row resolves against it instead of a phantom path under the
 # supervisor's cwd. Done HERE — after the guard has proven the repo exists —
 # and NOT via launchd's plist WorkingDirectory: launchd chdir()s before exec,
@@ -917,7 +991,20 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
   const injectBootstrap = args.includes('--inject-bootstrap');
   const noInject = args.includes('--no-inject');
 
-  const wrapperPath = writeWrapperScript(repoPath, target);
+  // #5195: every name this brain's job uses (minting the install id on a
+  // non-default brain's first install), and a refusal before anything is
+  // written when the job under that name runs another live brain.
+  const job = resolveAutopilotJob({ mint: true });
+  try {
+    if (target === 'macos') refuseForeignJob(job.launchdLabel, plistWrapperPath(readIfExists(plistPath(job.launchdLabel)) ?? ''), job);
+    if (target === 'linux-systemd') refuseForeignJob(job.systemdUnit, unitWrapperPath(readIfExists(systemdUnitPath(job.systemdUnit)) ?? ''), job);
+    if (target === 'ephemeral-container') refuseForeignJob(job.startScriptPath, scriptWrapperPath(readIfExists(job.startScriptPath) ?? ''), job);
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+
+  const wrapperPath = writeWrapperScript(repoPath, target, job);
   // #2608: tell the operator about the deterministic key channel — launchd/
   // systemd don't inherit the login shell env, and rc-file interactive guards
   // routinely swallow exports, so "it works in my terminal" keys often never
@@ -936,16 +1023,16 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
 
   switch (target) {
     case 'macos':
-      installLaunchd(wrapperPath, home, repoPath);
+      installLaunchd(wrapperPath, home, repoPath, job);
       break;
     case 'linux-systemd':
-      installSystemd(wrapperPath, repoPath);
+      installSystemd(wrapperPath, repoPath, job);
       break;
     case 'ephemeral-container':
-      installEphemeralContainer(wrapperPath, home, repoPath, { injectBootstrap, noInject });
+      installEphemeralContainer(wrapperPath, home, repoPath, { injectBootstrap, noInject }, job);
       break;
     case 'linux-cron':
-      installCrontab(wrapperPath, home);
+      installCrontab(wrapperPath, home, job);
       break;
     default: {
       console.error(`Unknown --target "${forcedTarget}". Allowed: macos, linux-systemd, ephemeral-container, linux-cron.`);
@@ -988,12 +1075,14 @@ export function pgliteDaemonGuardMessage(engineKind: string, force: boolean): st
 // proven it exists (writeWrapperScript), which is what makes legacy
 // RELATIVE sources.local_path / sync.repo_path rows resolve against the
 // repo instead of a phantom path.
-export function generateLaunchdPlist(wrapperPath: string, home: string): string {
+export function generateLaunchdPlist(wrapperPath: string, home: string, job?: AutopilotJob): string {
+  const logPath = job?.logPath ?? `${home}/.gbrain/autopilot.log`;
+  const errPath = job?.errPath ?? `${home}/.gbrain/autopilot.err`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${escapeXml(autopilotLaunchdLabel())}</string>
+  <key>Label</key><string>${escapeXml(job?.launchdLabel ?? autopilotLaunchdLabel())}</string>
   <key>ProgramArguments</key><array>
     <string>${escapeXml(wrapperPath)}</string>
   </array>
@@ -1010,36 +1099,37 @@ export function generateLaunchdPlist(wrapperPath: string, home: string): string 
     floor; launchd would have applied a default of 10s if unset.
   -->
   <key>ThrottleInterval</key><integer>60</integer>
-  <key>StandardOutPath</key><string>${escapeXml(home)}/.gbrain/autopilot.log</string>
-  <key>StandardErrorPath</key><string>${escapeXml(home)}/.gbrain/autopilot.err</string>
+  <key>StandardOutPath</key><string>${escapeXml(logPath)}</string>
+  <key>StandardErrorPath</key><string>${escapeXml(errPath)}</string>
 </dict>
 </plist>`;
 }
 
-function installLaunchd(wrapperPath: string, home: string, repoPath: string) {
-  const plist = generateLaunchdPlist(wrapperPath, home);
+function installLaunchd(wrapperPath: string, home: string, repoPath: string, job: AutopilotJob) {
+  const plist = generateLaunchdPlist(wrapperPath, home, job);
 
   try {
     const agentsDir = join(home, 'Library', 'LaunchAgents');
     mkdirSync(agentsDir, { recursive: true });
-    writeFileSync(plistPath(), plist, { mode: 0o644 });
+    replaceLegacySharedJob(job, 'macos');
+    writeFileSync(plistPath(job.launchdLabel), plist, { mode: 0o644 });
     // launchd rejects group/world-writable agent plists: bootstrap/load fails
     // with the opaque "Bootstrap failed: 5: Input/output error" and the login
     // scan skips the file silently. writeFileSync's mode only applies on
     // create — a reinstall over an existing plist keeps the old bits (a 0666
     // plist written under an umask-0 parent stays 0666 forever) — so
     // normalize unconditionally.
-    chmodSync(plistPath(), 0o644);
+    chmodSync(plistPath(job.launchdLabel), 0o644);
     // Unload-before-load (same pattern as uninstall): bare `launchctl load`
     // on an already-loaded agent errors and aborted every reinstall — and a
     // running daemon must be relaunched anyway to pick up a regenerated
     // wrapper / env file (#2608: the boot warning tells users to re-run
     // --install to reload; this line is what makes that true on macOS).
-    execSync(`launchctl unload "${plistPath()}" 2>/dev/null || true`, { stdio: 'pipe' });
-    execSync(`launchctl load "${plistPath()}"`, { stdio: 'pipe' });
-    console.log(`Installed launchd service: ${autopilotLaunchdLabel()}`);
+    execSync(`launchctl unload "${plistPath(job.launchdLabel)}" 2>/dev/null || true`, { stdio: 'pipe' });
+    execSync(`launchctl load "${plistPath(job.launchdLabel)}"`, { stdio: 'pipe' });
+    console.log(`Installed launchd service: ${job.launchdLabel}`);
     console.log(`  Repo: ${repoPath}`);
-    console.log(`  Log: ~/.gbrain/autopilot.log`);
+    console.log(`  Log: ${job.logPath}`);
     console.log('  Uninstall: gbrain autopilot --uninstall');
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1065,7 +1155,9 @@ function installLaunchd(wrapperPath: string, home: string, repoPath: string) {
  * Exported so the v0.42 migration can recognize the prior generated shape and
  * rewrite existing `on-failure` units in place.
  */
-export function generateSystemdUnit(wrapperPath: string): string {
+export function generateSystemdUnit(wrapperPath: string, job?: AutopilotJob): string {
+  const logPath = job && job.kind !== 'default' ? job.logPath : '%h/.gbrain/autopilot.log';
+  const errPath = job && job.kind !== 'default' ? job.errPath : '%h/.gbrain/autopilot.err';
   return `[Unit]
 Description=GBrain Autopilot
 After=network-online.target
@@ -1077,8 +1169,8 @@ Type=simple
 ExecStart=${wrapperPath}
 Restart=always
 RestartSec=30
-StandardOutput=append:%h/.gbrain/autopilot.log
-StandardError=append:%h/.gbrain/autopilot.err
+StandardOutput=append:${logPath}
+StandardError=append:${errPath}
 
 [Install]
 WantedBy=default.target
@@ -1141,27 +1233,28 @@ export function migrateSystemdUnitToRestartAlways(): { rewritten: boolean; reaso
   }
 }
 
-function installSystemd(wrapperPath: string, repoPath: string) {
-  const unit = generateSystemdUnit(wrapperPath);
+function installSystemd(wrapperPath: string, repoPath: string, job: AutopilotJob) {
+  const unit = generateSystemdUnit(wrapperPath, job);
   try {
-    const unitPath = systemdUnitPath();
+    const unitPath = systemdUnitPath(job.systemdUnit);
     mkdirSync(join(process.env.HOME || '', '.config', 'systemd', 'user'), { recursive: true });
+    replaceLegacySharedJob(job, 'linux-systemd');
     writeFileSync(unitPath, unit, { mode: 0o644 });
     // Same umask-0 hardening as the launchd path (systemd warns on
     // world-writable units); mode only applies on create, so normalize.
     chmodSync(unitPath, 0o644);
     execSync('systemctl --user daemon-reload', { stdio: 'pipe', timeout: 10_000 });
-    execSync(`systemctl --user enable --now ${AUTOPILOT_SYSTEMD_UNIT}`, { stdio: 'pipe', timeout: 15_000 });
+    execSync(`systemctl --user enable --now ${job.systemdUnit}`, { stdio: 'pipe', timeout: 15_000 });
     // enable --now does NOT restart an already-active unit, so a reinstall
     // over a running daemon would keep the old process (and its stale env)
     // alive indefinitely (#2608: the boot warning tells users to re-run
     // --install to reload; this line is what makes that true on systemd).
     // try-restart only bounces a running unit — a fresh install just started
     // above is restarted at worst, never left stopped.
-    execSync(`systemctl --user try-restart ${AUTOPILOT_SYSTEMD_UNIT}`, { stdio: 'pipe', timeout: 15_000 });
-    console.log(`Installed systemd user service: ${AUTOPILOT_SYSTEMD_UNIT}`);
+    execSync(`systemctl --user try-restart ${job.systemdUnit}`, { stdio: 'pipe', timeout: 15_000 });
+    console.log(`Installed systemd user service: ${job.systemdUnit}`);
     console.log(`  Repo: ${repoPath}`);
-    console.log('  Log: ~/.gbrain/autopilot.log');
+    console.log(`  Log: ${job.logPath}`);
     console.log('  Uninstall: gbrain autopilot --uninstall');
   } catch (e: unknown) {
     console.error(`Failed to install systemd unit: ${e instanceof Error ? e.message : e}`);
@@ -1175,18 +1268,20 @@ function installEphemeralContainer(
   home: string,
   repoPath: string,
   opts: { injectBootstrap: boolean; noInject: boolean },
+  job: AutopilotJob,
 ) {
   // Write a start script the agent's bootstrap can source on every container start.
-  const safeWrapperPath = wrapperPath.replace(/'/g, "'\\''");
+  const pidPath = join(job.homeDir, 'autopilot.pid');
   const script = `#!/bin/bash
 # Auto-generated by gbrain autopilot --install (ephemeral-container target)
 # Ephemeral filesystems lose crontab on every deploy; source this from
 # your agent's bootstrap instead.
-nohup '${safeWrapperPath}' > ~/.gbrain/autopilot.log 2>&1 &
-echo \$! > ~/.gbrain/autopilot.pid
+nohup ${shellQuote(wrapperPath)} > ${shellQuote(job.logPath)} 2>&1 &
+echo \$! > ${shellQuote(pidPath)}
 `;
-  const scriptPath = ephemeralStartScriptPath();
-  mkdirSync(join(home, '.gbrain'), { recursive: true });
+  const scriptPath = job.startScriptPath;
+  mkdirSync(job.homeDir, { recursive: true });
+  replaceLegacySharedJob(job, 'ephemeral-container');
   writeFileSync(scriptPath, script, { mode: 0o755 });
 
   console.log('Ephemeral container detected (Render / Railway / Fly / Docker).');
@@ -1196,7 +1291,7 @@ echo \$! > ~/.gbrain/autopilot.pid
   // from it — that process keeps its old environment until the container
   // restarts. Never auto-kill; say how (#2608, same honesty as the cron path).
   console.log('  An already-running autopilot keeps its old environment until the container');
-  console.log('  restarts (or: kill $(cat ~/.gbrain/autopilot.pid), then re-run the start script).');
+  console.log(`  restarts (or: kill $(cat ${shellQuote(pidPath)}), then re-run the start script).`);
   console.log('');
   console.log('Crontab is unreliable here (wiped on deploy). Add ONE LINE to your');
   console.log('agent bootstrap to launch autopilot on every start:');
@@ -1225,8 +1320,8 @@ echo \$! > ~/.gbrain/autopilot.pid
     for (const candidate of bootstrapCandidates) {
       try {
         const existing = readFileSync(candidate, 'utf-8');
-        const marker = '# gbrain:autopilot v0.11.0';
-        if (existing.includes(marker)) {
+        const marker = BOOTSTRAP_MARKER;
+        if (existing.includes(`${marker}\nbash ${scriptPath}`)) {
           console.log(`  [skip] ${candidate} already has the gbrain marker`);
           continue;
         }
@@ -1245,13 +1340,23 @@ echo \$! > ~/.gbrain/autopilot.pid
   console.log('  Uninstall: gbrain autopilot --uninstall');
 }
 
-function installCrontab(wrapperPath: string, home: string) {
+function installCrontab(wrapperPath: string, home: string, job: AutopilotJob) {
   // Linux/WSL without systemd — crontab runs the wrapper every 5 minutes.
-  const safeWrapperPath = wrapperPath.replace(/'/g, "'\\''");
-  const cronLine = `*/5 * * * * '${safeWrapperPath}' >> '${home.replace(/'/g, "'\\''")}/.gbrain/autopilot.log' 2>&1`;
+  // #5195: a non-default brain's line carries its marker; the default brain's
+  // line is unchanged.
+  const cronLine = `*/5 * * * * ${shellQuote(wrapperPath)} >> ${shellQuote(job.logPath)} 2>&1${job.cronMarker ? ` ${job.cronMarker}` : ''}`;
   try {
-    const existing = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-    if (existing.includes('gbrain autopilot') || existing.includes('autopilot-run.sh')) {
+    let existing = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
+    // A line of this brain is stale when it predates the brain's marker (a
+    // pre-#5195 shared line) or runs a wrapper that is not this brain's
+    // current one (the brain moved): either is replaced, never duplicated.
+    const ownLines = existing.split('\n').filter(l => cronLineBelongsToBrain(l, job));
+    const staleLines = ownLines.filter(l =>
+      (job.cronMarker !== null && !l.includes(job.cronMarker)) || (scriptWrapperPath(l) !== null && scriptWrapperPath(l) !== wrapperPath));
+    if (staleLines.length > 0) {
+      existing = existing.split('\n').filter(l => !staleLines.includes(l)).join('\n');
+      console.log(`Replacing ${staleLines.length} crontab line(s) that ran this brain from an older install with its current line.`);
+    } else if (ownLines.length > 0) {
       console.log('Crontab entry already exists. Remove with: gbrain autopilot --uninstall');
       // The wrapper (and env template) were regenerated above, but cron
       // cannot reload a loop that is already running — it keeps its old
@@ -1263,7 +1368,8 @@ function installCrontab(wrapperPath: string, home: string) {
       return;
     }
     // Use a temp file instead of echo pipe to avoid shell escaping issues (#1)
-    const tmpFile = join(home, '.gbrain', 'crontab.tmp');
+    const tmpFile = join(job.homeDir, 'crontab.tmp');
+    mkdirSync(job.homeDir, { recursive: true });
     writeFileSync(tmpFile, existing.trimEnd() + '\n' + cronLine + '\n');
     execSync(`crontab '${tmpFile.replace(/'/g, "'\\''")}'`, { stdio: 'pipe' });
     try { unlinkSync(tmpFile); } catch { /* best-effort */ }
@@ -1293,64 +1399,25 @@ export function runAutopilotStatus(args: string[]): void {
   showStatus(args.includes('--json'), Number.isFinite(rawInterval) && rawInterval > 0 ? rawInterval : 300);
 }
 
-export function uninstallDaemon() {
-  const home = process.env.HOME || '';
-  // Same resolution as writeWrapperScript — a GBRAIN_HOME install must
-  // uninstall the wrapper it actually wrote, not a sibling under raw $HOME.
-  const wrapperPath = join(gbrainHomePath(), 'autopilot-run.sh');
+const BOOTSTRAP_MARKER = '# gbrain:autopilot v0.11.0';
 
-  // Always try all four targets — the user might have run `--install` under
-  // one target earlier and moved hosts (e.g. macOS laptop → Linux server).
-  // Each path is idempotent (missing files = skip silently).
-
+/**
+ * Remove the bootstrap lines that launch `scriptPath` (the marker line and the
+ * `bash <script>` line after it) from every OpenClaw bootstrap candidate.
+ * Another brain's injected lines name its own script and are left alone.
+ */
+function stripBootstrapLines(scriptPath: string): number {
   let removed = 0;
-
-  // macOS launchd
-  if (existsSync(plistPath())) {
-    try {
-      execSync(`launchctl unload "${plistPath()}" 2>/dev/null || true`, { stdio: 'pipe' });
-      unlinkSync(plistPath());
-      console.log(`Removed launchd service: ${autopilotLaunchdLabel()}`);
-      removed++;
-    } catch (e) {
-      console.error(`  [warn] launchd: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  // Linux systemd user unit
-  if (existsSync(systemdUnitPath())) {
-    try {
-      execSync(`systemctl --user disable --now ${AUTOPILOT_SYSTEMD_UNIT} 2>/dev/null || true`, { stdio: 'pipe', timeout: 10_000 });
-      unlinkSync(systemdUnitPath());
-      try { execSync('systemctl --user daemon-reload', { stdio: 'pipe', timeout: 5_000 }); } catch { /* best-effort */ }
-      console.log('Removed systemd user service: gbrain-autopilot.service');
-      removed++;
-    } catch (e) {
-      console.error(`  [warn] systemd: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  // Ephemeral container start script + bootstrap marker injection
-  if (existsSync(ephemeralStartScriptPath())) {
-    try {
-      unlinkSync(ephemeralStartScriptPath());
-      console.log('Removed ephemeral start script: ~/.gbrain/start-autopilot.sh');
-      removed++;
-    } catch (e) {
-      console.error(`  [warn] start script: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-  // Remove marker-line from any OpenClaw bootstrap we previously injected.
   try {
     const { bootstrapCandidates } = detectOpenClaw();
     for (const candidate of bootstrapCandidates) {
       try {
         const content = readFileSync(candidate, 'utf-8');
-        if (!content.includes('# gbrain:autopilot v0.11.0')) continue;
+        if (!content.includes(`${BOOTSTRAP_MARKER}\nbash ${scriptPath}`)) continue;
         const lines = content.split('\n');
         const cleaned: string[] = [];
         for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes('# gbrain:autopilot v0.11.0')) {
+          if (lines[i].includes(BOOTSTRAP_MARKER) && lines[i + 1] === `bash ${scriptPath}`) {
             // Skip this marker line AND the next line (the bash start-script call).
             i++;
             continue;
@@ -1368,18 +1435,131 @@ export function uninstallDaemon() {
       }
     }
   } catch { /* OpenClaw detection best-effort */ }
+  return removed;
+}
+
+/**
+ * #5195: a non-default brain installed by an older gbrain ran under the shared
+ * job name. Installing it again on the same target removes that shared job —
+ * only when its wrapper names this brain — before the brain's own job is
+ * written, and says so. Crontab lines are handled by installCrontab.
+ */
+function replaceLegacySharedJob(job: AutopilotJob, target: InstallTarget): void {
+  if (job.kind === 'default') return;
+  const own = (wrapper: string | null) => autopilotWrapperOwner(wrapper, job.homeDir).owner === 'own';
+  if (target === 'macos') {
+    const legacyLabel = autopilotLaunchdLabel(null);
+    const path = plistPath(legacyLabel);
+    if (legacyLabel === job.launchdLabel || !own(plistWrapperPath(readIfExists(path) ?? ''))) return;
+    execSync(`launchctl unload "${path}" 2>/dev/null || true`, { stdio: 'pipe' });
+    unlinkSync(path);
+    console.log(`Replaced the shared launchd job ${legacyLabel}, which ran this brain, with ${job.launchdLabel}.`);
+  } else if (target === 'linux-systemd') {
+    const path = systemdUnitPath(DEFAULT_AUTOPILOT_SYSTEMD_UNIT);
+    if (!own(unitWrapperPath(readIfExists(path) ?? ''))) return;
+    execSync(`systemctl --user disable --now ${DEFAULT_AUTOPILOT_SYSTEMD_UNIT} 2>/dev/null || true`, { stdio: 'pipe', timeout: 10_000 });
+    unlinkSync(path);
+    console.log(`Replaced the shared systemd unit ${DEFAULT_AUTOPILOT_SYSTEMD_UNIT}, which ran this brain, with ${job.systemdUnit}.`);
+  } else if (target === 'ephemeral-container') {
+    const path = legacyStartScriptPath();
+    if (path === job.startScriptPath || !own(scriptWrapperPath(readIfExists(path) ?? ''))) return;
+    unlinkSync(path);
+    stripBootstrapLines(path);
+    console.log(`Replaced the shared start script ${path}, which ran this brain, with ${job.startScriptPath}.`);
+    console.log(`  Update any bootstrap line that runs \`bash ${path}\` to run \`bash ${job.startScriptPath}\`.`);
+  }
+}
+
+export function uninstallDaemon() {
+  // #5195: only this brain's job is removed — its own named job (checked to
+  // run this brain's wrapper before removal), plus, for a non-default brain,
+  // a pre-#5195 shared-name job whose wrapper names this brain. A shared job
+  // that runs another live brain is left alone and named.
+  const job = resolveAutopilotJob();
+  const wrapperPath = job.wrapperPath;
+  const ownsDefinition = (name: string, wrapper: string | null): boolean => {
+    const owner = autopilotWrapperOwner(wrapper, job.homeDir);
+    if (owner.owner !== 'other') return true;
+    console.log(`Left ${name} in place: it runs the brain at ${owner.home}. To remove it: ${brainCommand(owner.home, '--uninstall')}`);
+    return false;
+  };
+  const legacyOnly = (wrapper: string | null) => autopilotWrapperOwner(wrapper, job.homeDir).owner === 'own';
+  const assigned = job.kind !== 'unassigned';
+
+  // Always try all four targets — the user might have run `--install` under
+  // one target earlier and moved hosts (e.g. macOS laptop → Linux server).
+  // Each path is idempotent (missing files = skip silently).
+
+  let removed = 0;
+
+  // macOS launchd
+  const labels: Array<{ label: string; legacy: boolean }> = [];
+  if (assigned) labels.push({ label: job.launchdLabel, legacy: false });
+  if (job.kind !== 'default' && autopilotLaunchdLabel(null) !== job.launchdLabel) labels.push({ label: autopilotLaunchdLabel(null), legacy: true });
+  for (const { label, legacy } of labels) {
+    const path = plistPath(label);
+    if (!existsSync(path)) continue;
+    const wrapper = plistWrapperPath(readIfExists(path) ?? '');
+    if (legacy ? !legacyOnly(wrapper) : !ownsDefinition(label, wrapper)) continue;
+    try {
+      execSync(`launchctl unload "${path}" 2>/dev/null || true`, { stdio: 'pipe' });
+      unlinkSync(path);
+      console.log(`Removed launchd service: ${label}`);
+      removed++;
+    } catch (e) {
+      console.error(`  [warn] launchd: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // Linux systemd user unit
+  const units: Array<{ unit: string; legacy: boolean }> = [];
+  if (assigned) units.push({ unit: job.systemdUnit, legacy: false });
+  if (job.kind !== 'default') units.push({ unit: DEFAULT_AUTOPILOT_SYSTEMD_UNIT, legacy: true });
+  for (const { unit, legacy } of units) {
+    const path = systemdUnitPath(unit);
+    if (!existsSync(path)) continue;
+    const wrapper = unitWrapperPath(readIfExists(path) ?? '');
+    if (legacy ? !legacyOnly(wrapper) : !ownsDefinition(unit, wrapper)) continue;
+    try {
+      execSync(`systemctl --user disable --now ${unit} 2>/dev/null || true`, { stdio: 'pipe', timeout: 10_000 });
+      unlinkSync(path);
+      try { execSync('systemctl --user daemon-reload', { stdio: 'pipe', timeout: 5_000 }); } catch { /* best-effort */ }
+      console.log(`Removed systemd user service: ${unit}`);
+      removed++;
+    } catch (e) {
+      console.error(`  [warn] systemd: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // Ephemeral container start script + bootstrap marker injection
+  const scripts: Array<{ path: string; legacy: boolean }> = [];
+  if (assigned) scripts.push({ path: job.startScriptPath, legacy: false });
+  if (job.kind !== 'default') scripts.push({ path: legacyStartScriptPath(), legacy: true });
+  for (const { path, legacy } of scripts) {
+    if (!existsSync(path)) continue;
+    const wrapper = scriptWrapperPath(readIfExists(path) ?? '');
+    if (legacy ? !legacyOnly(wrapper) : !ownsDefinition(path, wrapper)) continue;
+    try {
+      unlinkSync(path);
+      console.log(`Removed ephemeral start script: ${path}`);
+      removed++;
+    } catch (e) {
+      console.error(`  [warn] start script: ${e instanceof Error ? e.message : e}`);
+    }
+    // Remove marker-lines from any OpenClaw bootstrap we previously injected.
+    removed += stripBootstrapLines(path);
+  }
 
   // Linux crontab (don't gate on platform — the user may have run `--install
   // --target linux-cron` on a different machine that now has the crontab).
   try {
     const existing = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-    if (existing.includes('gbrain autopilot') || existing.includes('autopilot-run.sh')) {
-      const filtered = existing.split('\n').filter(l =>
-        !l.includes('gbrain autopilot') && !l.includes('autopilot-run.sh'),
-      ).join('\n');
-      const tmpFile = join(home, '.gbrain', 'crontab.tmp');
-      mkdirSync(join(home, '.gbrain'), { recursive: true });
-      writeFileSync(tmpFile, filtered);
+    const lines = existing.split('\n');
+    const filtered = lines.filter(l => !cronLineBelongsToBrain(l, job));
+    if (filtered.length !== lines.length) {
+      const tmpFile = join(job.homeDir, 'crontab.tmp');
+      mkdirSync(job.homeDir, { recursive: true });
+      writeFileSync(tmpFile, filtered.join('\n'));
       execSync(`crontab '${tmpFile.replace(/'/g, "'\\''")}' 2>/dev/null || true`, { stdio: 'pipe' });
       try { unlinkSync(tmpFile); } catch { /* best-effort */ }
       console.log('Removed crontab entry for gbrain autopilot');
@@ -1397,7 +1577,7 @@ export function uninstallDaemon() {
   }
 
   if (removed === 0) {
-    console.log('No autopilot install found on this host. Nothing to uninstall.');
+    console.log('No autopilot install found for this brain. Nothing to uninstall.');
   }
 
   // A deliberate uninstall ends the disabled/paused story: without this, a
@@ -1506,25 +1686,65 @@ export function classifyAutopilotStatus(input: {
   };
 }
 
+interface InstalledJob {
+  target: InstallTarget;
+  /** launchd label, systemd unit, start-script path, or the crontab marker. */
+  name: string;
+  wrapperPath: string | null;
+  /** A pre-#5195 shared-name job that runs this non-default brain. */
+  legacy: boolean;
+}
+
 /**
- * Which supervisor, if any, currently holds an autopilot install.
+ * Which supervisor, if any, currently holds THIS brain's autopilot job (#5195).
  *
  * Checks every target `installDaemon` can produce. The prior version grepped
  * crontab ONLY on non-darwin, so systemd-user and ephemeral-container installs
  * read as "not installed" — cosmetic while status always exited 0, but a hard
- * false failure once the exit code became load-bearing.
+ * false failure once the exit code became load-bearing. A shared job whose
+ * wrapper runs another live brain is reported separately, never as this
+ * brain's install.
  */
-function detectInstalledTarget(): InstallTarget | null {
-  if (process.platform === 'darwin' && existsSync(plistPath())) return 'macos';
-  if (existsSync(systemdUnitPath())) return 'linux-systemd';
-  if (existsSync(join(gbrainHomePath(), 'start-autopilot.sh'))) return 'ephemeral-container';
-  try {
-    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-    if (crontabIndicatesAutopilotInstall(crontab)) {
-      return 'linux-cron';
+function detectInstalledJob(job: AutopilotJob): { installed: InstalledJob | null; foreign: { name: string; home: string } | null } {
+  let foreign: { name: string; home: string } | null = null;
+  const assigned = job.kind !== 'unassigned';
+  const consider = (target: InstallTarget, name: string, text: string | null, wrapperOf: (t: string) => string | null, legacy: boolean): InstalledJob | null => {
+    if (text === null) return null;
+    const wrapperPath = wrapperOf(text);
+    const owner = autopilotWrapperOwner(wrapperPath, job.homeDir);
+    if (legacy) return owner.owner === 'own' ? { target, name, wrapperPath, legacy } : null;
+    if (owner.owner === 'other') {
+      foreign ??= { name, home: owner.home };
+      return null;
     }
-  } catch { /* no crontab */ }
-  return null;
+    return { target, name, wrapperPath, legacy };
+  };
+  const candidates: Array<() => InstalledJob | null> = [];
+  if (process.platform === 'darwin') {
+    if (assigned) candidates.push(() => consider('macos', job.launchdLabel, readIfExists(plistPath(job.launchdLabel)), plistWrapperPath, false));
+    if (job.kind !== 'default' && autopilotLaunchdLabel(null) !== job.launchdLabel) {
+      candidates.push(() => consider('macos', autopilotLaunchdLabel(null), readIfExists(plistPath(autopilotLaunchdLabel(null))), plistWrapperPath, true));
+    }
+  }
+  if (assigned) candidates.push(() => consider('linux-systemd', job.systemdUnit, readIfExists(systemdUnitPath(job.systemdUnit)), unitWrapperPath, false));
+  if (job.kind !== 'default') candidates.push(() => consider('linux-systemd', DEFAULT_AUTOPILOT_SYSTEMD_UNIT, readIfExists(systemdUnitPath(DEFAULT_AUTOPILOT_SYSTEMD_UNIT)), unitWrapperPath, true));
+  if (assigned) candidates.push(() => consider('ephemeral-container', job.startScriptPath, readIfExists(job.startScriptPath), scriptWrapperPath, false));
+  if (job.kind !== 'default') candidates.push(() => consider('ephemeral-container', legacyStartScriptPath(), readIfExists(legacyStartScriptPath()), scriptWrapperPath, true));
+  candidates.push(() => {
+    try {
+      const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
+      if (!crontabIndicatesAutopilotInstall(crontab)) return null;
+      const line = crontab.split('\n').find(l => cronLineBelongsToBrain(l, job));
+      if (!line) return null;
+      const legacy = job.cronMarker !== null && !line.includes(job.cronMarker);
+      return { target: 'linux-cron', name: job.cronMarker ?? 'crontab entry', wrapperPath: scriptWrapperPath(line), legacy };
+    } catch { return null; /* no crontab */ }
+  });
+  for (const candidate of candidates) {
+    const installed = candidate();
+    if (installed) return { installed, foreign };
+  }
+  return { installed: null, foreign };
 }
 
 /**
@@ -1547,16 +1767,15 @@ function showStatus(json: boolean, intervalSeconds: number) {
   // gbrainHomePath, not raw HOME: the daemon writes its lock through
   // gbrainHomePath() (#1226), so a GBRAIN_HOME install had status reading one
   // directory while the daemon wrote another — a permanent false "stale".
-  const home = gbrainHomePath();
+  // #5195: every log sink writes under the brain's own home, so the log is
+  // read only there (a raw-$HOME fallback would show another brain's log).
+  const job = resolveAutopilotJob();
   let lastLine = '';
-  for (const logPath of [join(home, 'autopilot.log'), join(process.env.HOME || '', '.gbrain', 'autopilot.log')]) {
-    try {
-      const content = readFileSync(logPath, 'utf-8');
-      const lines = content.trim().split('\n');
-      lastLine = lines[lines.length - 1] || '';
-      break;
-    } catch { /* try the next home; supervisor log redirects bake raw $HOME */ }
-  }
+  try {
+    const content = readFileSync(job.logPath, 'utf-8');
+    const lines = content.trim().split('\n');
+    lastLine = lines[lines.length - 1] || '';
+  } catch { /* no log yet */ }
 
   let disabledReason: string | null = null;
   try {
@@ -1571,7 +1790,28 @@ function showStatus(json: boolean, intervalSeconds: number) {
     heartbeatAgeSeconds = Math.max(0, Math.floor((Date.now() - mtimeMs) / 1000));
   } catch { /* never ran, or already cleaned up */ }
 
-  const installTarget = detectInstalledTarget();
+  const { installed, foreign } = detectInstalledJob(job);
+  const installTarget = installed?.target ?? null;
+  const wrapperMissing = installed?.wrapperPath ? !existsSync(installed.wrapperPath) : false;
+  const needsReinstall = installed?.legacy
+    ? 'legacy_shared_job'
+    : wrapperMissing ? 'wrapper_missing' : null;
+  const jobReport = {
+    kind: job.kind,
+    suffix: job.suffix,
+    launchd_label: job.kind === 'unassigned' ? null : job.launchdLabel,
+    systemd_unit: job.kind === 'unassigned' ? null : job.systemdUnit,
+    start_script: job.kind === 'unassigned' ? null : job.startScriptPath,
+    cron_marker: job.cronMarker,
+    install_id_path: job.installIdPath,
+    wrapper_path: job.wrapperPath,
+    log_path: job.logPath,
+    installed_definition: installed
+      ? { target: installed.target, name: installed.name, wrapper_path: installed.wrapperPath, wrapper_exists: !wrapperMissing, legacy_shared_name: installed.legacy }
+      : null,
+    needs_reinstall: needsReinstall,
+    shared_job_of_other_brain: foreign,
+  };
   const report = classifyAutopilotStatus({
     installed: installTarget !== null,
     installTarget,
@@ -1584,7 +1824,7 @@ function showStatus(json: boolean, intervalSeconds: number) {
   const processing = readAutopilotProcessingStatus();
 
   if (json) {
-    console.log(JSON.stringify({ ...report, ...processing }));
+    console.log(JSON.stringify({ ...report, ...processing, job: jobReport }));
   } else {
     switch (report.state) {
       case 'not_installed':
@@ -1622,6 +1862,17 @@ function showStatus(json: boolean, intervalSeconds: number) {
       console.log(`Stage: ${processing.processing_stage}${processing.retry_at ? `; next retry ${processing.retry_at}` : ''}`);
       if (processing.processing_state === 'configuration_blocked') console.log('Repair the worker and selected child installation, then explicitly restart autopilot.');
     }
+    const jobName = installed?.name ?? (job.kind === 'unassigned' ? null : `${job.launchdLabel} (launchd) / ${job.systemdUnit} (systemd)`);
+    if (jobName) console.log(`Job: ${jobName}${job.suffix ? ` (suffix ${job.suffix})` : ''}`);
+    if (job.installIdPath) console.log(`Install id: ${job.installIdPath}`);
+    console.log(`Wrapper: ${installed?.wrapperPath ?? job.wrapperPath}`);
+    console.log(`Log: ${job.logPath}`);
+    if (needsReinstall === 'legacy_shared_job') {
+      console.log(`  This brain runs under the shared job ${installed!.name} from an older gbrain. Give it its own job: ${brainCommand(job.homeDir, '--install')}`);
+    } else if (needsReinstall === 'wrapper_missing') {
+      console.log(`  The job runs ${installed!.wrapperPath}, which no longer exists (the brain moved?). Reinstall: ${brainCommand(job.homeDir, '--install')}`);
+    }
+    if (foreign) console.log(`  ${foreign.name} runs the brain at ${foreign.home}, not this one.`);
     if (lastLine) console.log(`Last log: ${lastLine}`);
   }
 
