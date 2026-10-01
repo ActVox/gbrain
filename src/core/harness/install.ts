@@ -79,6 +79,8 @@ function assertEntryOwned(entry: unknown, prior: Record<string, any>) {
 
 /** Install only in the current environment. Foreign entries are never adopted. */
 export async function installHarnessConnection(c: HarnessCredentials, opts: InstallOptions) {
+  // A cached unexpired token may be the invalidated one; every later step (config and shared skills) uses the new token.
+  if (opts.freshToken && !opts.remove) c = { ...c, access_token: await credentialAccessToken({ ...c, access_token: undefined }), expires_at: undefined };
   const adapter = harnessAdapter(opts.harness);
   const name = opts.name ?? 'gbrain';
   if (!isValidName(name)) throw new Error('Invalid connection name');
@@ -116,7 +118,7 @@ export async function installHarnessConnection(c: HarnessCredentials, opts: Inst
       const sibling = opencodeGlobalSiblingPath(configPath);
       if (sibling && nativeEntry(sibling, adapter.connection, name) !== undefined) throw new Error('configuration_conflict: same-name entry in sibling opencode config; preserve it and choose one explicit configuration before installing');
     }
-    const token = opts.remove ? '' : await credentialAccessToken(opts.freshToken ? { ...c, access_token: undefined } : c);
+    const token = opts.remove ? '' : await credentialAccessToken(c);
     const entry = adapter.connection === 'codex-toml' ? { url: c.mcp_url, http_headers: { Authorization: `Bearer ${token}` } }
       : adapter.connection === 'opencode-json' ? { type: 'remote', url: c.mcp_url, headers: { Authorization: `Bearer ${token}` }, enabled: true }
         : { type: 'http', url: c.mcp_url, headers: { Authorization: `Bearer ${token}` } };

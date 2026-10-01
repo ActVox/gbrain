@@ -95,4 +95,29 @@ describe('inline bearer token receipt (#5775)', () => {
     expect(stdout + stderr).not.toContain(TOKEN);
     expect(readFileSync(configPath, 'utf8')).toContain(TOKEN);
   }, 60_000);
+
+  test('connect --install --fresh-token is accepted by the CLI and installs a newly exchanged token', async () => {
+    const dir = temp(), handoff = join(dir, 'handoff.json');
+    const issued = 'fixture-fresh-token-value-0002';
+    let exchanges = 0;
+    const server = Bun.serve({ port: 0, fetch: () => { exchanges++; return Response.json({ access_token: issued, token_type: 'Bearer', expires_in: 3600 }); } });
+    try {
+      const origin = `http://127.0.0.1:${server.port}`;
+      writeCredentials(handoff, { ...creds(), harness: 'codex', issuer_url: origin, mcp_url: `${origin}/mcp` });
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+      for (const key of ['DATABASE_URL', 'GBRAIN_DATABASE_URL']) delete env[key];
+      Object.assign(env, { HOME: dir, GBRAIN_HOME: dir, CODEX_HOME: join(dir, '.codex'), GBRAIN_SELF_UPGRADE_MODE: 'off', GBRAIN_SKIP_STARTUP_HOOKS: '1' });
+      const proc = Bun.spawn(['bun', 'run', join(REPO_ROOT, 'src', 'cli.ts'), 'connect', `${origin}/mcp`, '--harness', 'codex', '--credentials-file', handoff, '--install', '--fresh-token', '--json'],
+        { cwd: dir, env, stdout: 'pipe', stderr: 'pipe' });
+      const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect({ code, stderr }).toMatchObject({ code: 0 });
+      expect(JSON.parse(stdout)).toMatchObject({ status: 'installed', token_storage: 'inline' });
+      expect(exchanges).toBe(1);
+      const config = readFileSync(join(dir, '.codex', 'config.toml'), 'utf8');
+      expect(config).toContain(issued);
+      expect(config).not.toContain(TOKEN);
+      expect(stdout + stderr).not.toContain(issued);
+    } finally { server.stop(true); }
+  }, 60_000);
 });
