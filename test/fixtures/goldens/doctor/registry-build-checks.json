@@ -467,6 +467,10 @@
       },
       {
         "category": "ops",
+        "name": "legacy_job_authority"
+      },
+      {
+        "category": "ops",
         "name": "index_audit"
       },
       {

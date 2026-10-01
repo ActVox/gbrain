@@ -807,6 +807,23 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "active_ids": [],
+            "authorizable": {},
+            "authorizable_total": 0,
+            "docs": "docs/guides/repair.md#legacy-job-authority",
+            "live": 0,
+            "terminal_keyed": {},
+            "terminal_keyed_total": 0,
+            "unsupported": 0,
+            "unsupported_ids": []
+          },
+          "message": "No queued job predates submission authority.",
+          "name": "legacy_job_authority",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "message": "No image assets indexed yet",
           "name": "image_assets",

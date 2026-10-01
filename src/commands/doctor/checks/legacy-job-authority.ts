@@ -76,10 +76,17 @@ export async function legacyJobAuthorityCheck(engine: BrainEngine): Promise<Chec
   };
 }
 
+async function runLegacyJobAuthority(ctx: DoctorContext): Promise<Check[]> {
+  const checks: Check[] = [];
+  const { status, message, details } = await legacyJobAuthorityCheck(connectedEngine(ctx));
+  checks.push({ name: 'legacy_job_authority', status, message, details });
+  return checks;
+}
+
 export const legacyJobAuthorityEntry: DoctorEntry = {
   name: 'legacy_job_authority',
   emits: ['legacy_job_authority'],
-  run: async (ctx: DoctorContext) => [await legacyJobAuthorityCheck(connectedEngine(ctx))],
+  run: runLegacyJobAuthority,
 };
 
 /** `gbrain post-upgrade` banner line when live legacy rows block workers (read-only commands only). */
