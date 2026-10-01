@@ -83,10 +83,11 @@ export const STOP_PRODUCERS = 'Stop producers (gbrain serve, gbrain autopilot) a
  * and workers, cancel active jobs, preview with the filled `--select`, apply
  * with the printed hash, restart.
  */
-export function legacyRecoveryHint(statuses: Iterable<string>, names: string[] = []): string {
+export function legacyRecoveryHint(statuses: Iterable<string>, names: string[] = [], activeIds: readonly number[] = []): string {
   const reviewable = [...new Set(statuses)].filter(status => SELECT_STATUSES['authorize-legacy'].includes(status));
   const preview = selectCommand('authorize-legacy', { statuses: reviewable.length ? reviewable : ['waiting'], names });
-  return `${STOP_PRODUCERS}, cancel active jobs (gbrain jobs cancel <id>), preview with ${preview}, apply with the printed --expect <hash> --yes, then restart them.`;
+  const cancels = activeIds.length ? activeIds.slice(0, 10).map(id => `gbrain jobs cancel ${id}`).join('; ') : 'gbrain jobs cancel <id>';
+  return `${STOP_PRODUCERS}, cancel active jobs (${cancels}), preview with ${preview}, apply with the printed --expect <hash> --yes, then restart them.`;
 }
 
 /** `legacy_jobs_active`: legacy rows are reviewed only with nothing active. Lists up to 10 ids to cancel. */

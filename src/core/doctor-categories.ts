@@ -220,6 +220,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'pool_budget',
   'progressive_batch_audit_health',
   'queue_health',
+  // #5157: queued jobs from before the v0.50 authority cutover block every worker.
+  'legacy_job_authority',
   'reranker_health',
   'rls',
   'rls_event_trigger',
