@@ -1,7 +1,7 @@
 import { isEmbedSkipped } from '../embed-skip.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { Page, PageVersion } from '../types.ts';
@@ -28,7 +28,7 @@ import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { prepareAutomaticLinks } from './links-preparation.ts';
 import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories } from './page-advisories.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
-import { nativeFileTarget } from './native-file-target.ts';
+import { colonSlugWindowsRefusal, isWindowsColonTarget, nativeFileTarget } from './native-file-target.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
 import { DERIVE_PHASE_DB_ONLY_DEFAULTS } from '../storage-config.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
@@ -71,6 +71,14 @@ function putProvenance(row: WriteRequest, snapshot: PageSnapshot | null, parsed:
 function isNeverFiledDerivedPage(slug: string, page: { source_path?: string | null; source_uri?: string | null }): boolean {
   return !page.source_path && !page.source_uri && DERIVE_PHASE_DB_ONLY_DEFAULTS.some(prefix => slug.startsWith(prefix));
 }
+/**
+ * A live page whose canonical file is absent publishes to the database only
+ * when its slug is a declared db_only path or a never-filed derive-phase page.
+ */
+export function publishesDatabaseOnly(root: string, slug: string, snapshot: PageSnapshot | null): boolean {
+  if (!snapshot || snapshot.page.deleted_at) return false;
+  return isSourceDbOnlySlug(root, slug, 'refuse') || isNeverFiledDerivedPage(slug, snapshot.page);
+}
 export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'>, snapshot: PageSnapshot | null,
   content: string | null, hostId?: string, options: { allowMissing?: boolean; capture?: { path: string; hash: string } } = {}): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
@@ -84,20 +92,24 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   // #5622: a new page captured from a file inside the source is published to that file.
   const capturedPath = !snapshot && options.capture ? options.capture.path : recordedPathFromFileUri(snapshot?.page.source_uri, root);
   const mode = snapshot?.page.source_path ? await scannerSlugRootMode(engine, row.source_id, root) : undefined;
-  const path = nativeFileTarget(root, resolveSourceLocalFilePath(root, snapshot?.page.source_path, row.slug, mode)
-    ?? (capturedPath ? join(root, capturedPath) : join(root, `${row.slug}.md`)));
+  const candidate = resolveSourceLocalFilePath(root, snapshot?.page.source_path, row.slug, mode)
+    ?? (capturedPath ? join(root, capturedPath) : join(root, `${row.slug}.md`));
+  if (isWindowsColonTarget(relative(root, candidate))) {
+    if (!options.allowMissing && publishesDatabaseOnly(root, row.slug, snapshot)) return undefined;
+    throw colonSlugWindowsRefusal(row.slug, row.source_id);
+  }
+  const path = nativeFileTarget(root, candidate);
   if (!isWriteTargetContained(path, root)) throw new OperationError('source_changed', 'The canonical file target is outside its registered source.');
   const before = existsSync(path) ? readFileSync(path) : null;
   if (!before && snapshot && !snapshot.page.deleted_at && !options.allowMissing) {
     // A declared db_only page has no canonical file by design and publishes to
     // the database only. gbrain.yml is consulted only here, where the write
     // would otherwise refuse, so an invalid config can only change the refusal.
-    if (isSourceDbOnlySlug(root, row.slug, 'refuse')) return undefined;
     // Derive-phase output (atoms/, concepts/, ...) is database-only by design and
     // deliberately never declared in gbrain.yml. A page there that never recorded a
     // canonical file publishes to the database only; a recorded file that went
     // missing still refuses below.
-    if (isNeverFiledDerivedPage(row.slug, snapshot.page)) return undefined;
+    if (publishesDatabaseOnly(root, row.slug, snapshot)) return undefined;
     throw new OperationError('source_changed', 'The canonical file was removed outside coordinated publication.',
       'Import the local deletion or recover the canonical file before editing this page.');
   }

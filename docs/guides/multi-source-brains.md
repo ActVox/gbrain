@@ -115,6 +115,27 @@ behave as you'd expect — every page appears in search.
 
 Flip later with `gbrain sources federate <id>` / `unfederate <id>`.
 
+### Explicit reads from a bound agent connection
+
+An agent connection started with `GBRAIN_SOURCE=<id>` (or inside a
+directory pinned by `.gbrain-source`) is bound to that source. Its
+unqualified reads stay on the bound source. It may still name another
+source in an explicit `source_id` read (`search`, `query`, `get_page`,
+`list_pages`, `resolve_slugs`, `recall`) when that source is
+`federated=true`; the result holds only the named source's rows. Writes
+still go to the bound source only.
+
+| Refusal hint | Why | Fix (on the brain host) |
+|--------------|-----|-------------------------|
+| `<id> is not federated` | The named source is not federated. | `gbrain sources federate <id>`, or start the connection without the binding. |
+| `<id> opted out of federation` | The named source was unfederated. | `gbrain sources federate <id>` if it should be readable from other sources. |
+| `<bound> opted out of federation …, so it reads no other source` | The bound source itself is isolated (`federated=false`), so it never reads another source. | `gbrain sources federate <bound>`, or start the connection without the binding. |
+| `Your token is not granted <id>` | An HTTP token or OAuth client whose grant does not include the source. | `gbrain auth rescope-client <client_id> --federated-read <ids>` for an OAuth client. |
+
+`search_by_image`, `open_loops` and the code-intel tools keep their stricter
+rule: an explicit `source_id` must be inside the connection's own source or
+grant.
+
 ## Commands
 
 The most-used subcommands (run `gbrain sources --help` for the full,
