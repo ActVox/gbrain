@@ -255,6 +255,29 @@ for (const kind of testBackends()) {
       }
     }, 60_000);
 
+    test('managed: an atom whose file holds an uncoordinated edit reports file_conflict, and a fresh apply retires it once the file is fixed', async () => {
+      const sourceId = `stale-f-${randomUUID().slice(0, 8)}`;
+      const f = await managedFixture(sourceId);
+      try {
+        expect((await f.extract()).status).toBe('ok');
+        await f.unmanaged(() => engine.softDeletePage(f.slug, { sourceId }));
+        const [first] = await f.atoms();
+        writeFileSync(join(f.root, `${first.slug}.md`), 'Uncoordinated operator content.');
+        const preview = await repair(['--source', sourceId]);
+        const blocked = await repair(['--source', sourceId, '--apply', '--expect', hashOf(preview)]);
+        expect(blocked.results[0].outcomes).toEqual({ file_conflict: 1, retired: 1 });
+        expect((await atom(sourceId, first.slug)).deleted).toBe(false);
+        rmSync(join(f.root, `${first.slug}.md`));
+        const again = await repair(['--source', sourceId]);
+        expect(again.results[0].listing!.map(entry => entry.item)).toEqual([`${sourceId}:${first.slug}`]);
+        expect((await repair(['--source', sourceId, '--apply', '--expect', hashOf(again)])).results[0].outcomes).toEqual({ retired: 1 });
+        expect((await atom(sourceId, first.slug))).toMatchObject({ deleted: true, frontmatter: { retired_by: 'stale-atoms' } });
+      } finally {
+        await disposePersistenceConsumer(engine);
+        await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      }
+    }, 60_000);
+
     test('managed: atoms of an edited page are stale only once its current text completed an extraction', async () => {
       const sourceId = `stale-c-${randomUUID().slice(0, 8)}`;
       const f = await managedFixture(sourceId);

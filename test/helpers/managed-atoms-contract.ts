@@ -443,6 +443,8 @@ export async function exerciseManagedAtomRetirement(engine: BrainEngine, scenari
         expect((await atom('patience-compounds'))?.deleted).toBe(true);
         rmSync(join(root, `${queued.slug}.md`));
         await disposePersistenceConsumer(engine);
+        await extract();
+        expect(calls).toBe(3);
         await edit(bodies[1], ['Patience compounds', 'Queue patiently', 'Hire slowly']);
         expect((await discoverExtractablePages(engine, sourceId)).map(item => item.slug)).toEqual([slug]);
         expect((await extract()).status).toBe('ok');

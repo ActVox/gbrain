@@ -26,14 +26,14 @@ import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
-import { OperationError } from '../ops/contract.ts';
+import { OperationError, type OperationContext } from '../ops/contract.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { preparePageMutation } from '../persistence/page-prepare.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { bumpAtomGeneration, managedAtomCompletedSql } from '../persistence/atom-maintenance.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
-import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
+import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
 export const STALE_ATOMS_RETIRED_BY = 'stale-atoms';
 export const STALE_ATOMS_INTENT = 'managed_maintenance_retire_stale_atoms';
@@ -152,21 +152,24 @@ export const staleAtomsRepair: RepairHandler = {
   },
   async apply(ctx, entry): Promise<RepairItemOutcome> {
     const { atom, hash, last } = entry as StaleAtomItem;
-    const outcome = await retireStaleAtom(ctx.engine, atom);
+    const outcome = await retireStaleAtom(ctx, atom);
     if (last) await clearApprovedSet(ctx.engine, { command: 'stale-atoms', hash });
     return outcome;
   },
 };
 
-async function retireStaleAtom(engine: BrainEngine, atom: StaleAtom): Promise<RepairItemOutcome> {
+async function retireStaleAtom(ctx: OperationContext, atom: StaleAtom): Promise<RepairItemOutcome> {
+  const engine = ctx.engine;
   const changed = (reason: string): RepairItemOutcome => ({ applied: false, outcome: 'changed_since_preview', reason });
   if (!sameAtom((await staleAtoms(engine, [atom.source_id], atom.id))[0], atom)) return changed('the atom or its source page changed');
   if (await managedPersistenceEnabled(engine)) {
     const authority = (await maintenancePreflight(engine, atom.source_id))!;
     try {
-      await submitMaintenanceIntent(engine, authority, atom.slug, { kind: STALE_ATOMS_INTENT, expected_revision: atom.revision, atom });
+      await submitMaintenanceIntent(engine, authority, atom.slug, { kind: STALE_ATOMS_INTENT, expected_revision: atom.revision, atom },
+        await repairRequestId(ctx, 'stale-atoms', atom, atom.revision));
     } catch (error) {
       if (error instanceof OperationError && ['revision_conflict', 'page_not_found', 'page_identity_changed'].includes(error.code)) return changed(error.message);
+      if (error instanceof OperationError && error.code === 'source_changed') return { applied: false, outcome: 'file_conflict', reason: error.message };
       throw error;
     }
     return { applied: true, outcome: 'retired' };
