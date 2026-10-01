@@ -8,14 +8,14 @@
  *   await queue.prune({ olderThan: new Date(Date.now() - 30 * 86400000) });
  */
 
-import { APPLICATION_AUTHORITY, LEGACY_AUTHORITY_COLUMN, coalesceDecision, assertNoUnreviewedJobs, authorizeJobExecution, currentSubmissionAuthority, parseSubmissionAuthority, type SubmissionAuthority } from './submission-authority.ts';
+import { APPLICATION_AUTHORITY, LEGACY_AUTHORITY_COLUMN, assertNoUnreviewedJobs, authorizeJobExecution, currentSubmissionAuthority, parseSubmissionAuthority, type SubmissionAuthority } from './submission-authority.ts';
 import type { BrainEngine } from '../engine.ts';
 import type {
   MinionJob, MinionJobInput, MinionJobStatus, InboxMessage, TokenUpdate,
   MinionQueueOpts, ChildDoneMessage, ChildOutcome, Attachment, AttachmentInput,
 } from './types.ts';
 import { rowToMinionJob, rowToInboxMessage, rowToAttachment } from './types.ts';
-import { coalesceOnIdempotencyKey, insertOrCoalesce } from './idempotency-coalesce.ts';
+import { coalesceOnIdempotencyKey, decideCoalesce, insertOrCoalesce } from './idempotency-coalesce.ts';
 import { validateAttachment } from './attachments.ts';
 import { isProtectedJobName } from './protected-names.ts';
 import { assertEmbedBackfillQueueAdmission } from './embed-backfill-admission.ts';
@@ -163,13 +163,14 @@ type CoalesceAuditEvent = {
  *  audit append is filesystem I/O, and doing it while holding the advisory
  *  lock + a pool connection would let a hung audit volume serialize every
  *  submission for the scope (adversarial-review finding). */
-function coalesceReturn(
+async function coalesceReturn(
+  tx: BrainEngine,
   row: Record<string, unknown>,
   audit: Omit<CoalesceAuditEvent, 'returned_job_id'>,
   sink: (ev: CoalesceAuditEvent) => void,
   authority: SubmissionAuthority,
-): MinionJob {
-  if (coalesceDecision(row, authority) !== 'coalesce') throw new Error(`job ${String(row.id)} is ${String(row.status)} and cannot be a coalesce target`);
+): Promise<MinionJob> {
+  if (await decideCoalesce(tx, row, authority) !== 'coalesce') throw new Error(`job ${String(row.id)} is ${String(row.status)} and cannot be a coalesce target`);
   const coalesced = rowToMinionJob(row);
   coalesced.coalesced = true;
   sink({ ...audit, returned_job_id: coalesced.id });
@@ -387,7 +388,7 @@ export class MinionQueue {
           matchParams
         );
         if (match.length > 0) {
-          return coalesceReturn(match[0], {
+          return coalesceReturn(tx, match[0], {
             queue: admissionQueue,
             name: jobName,
             param_hash: paramHash,
@@ -496,7 +497,7 @@ export class MinionQueue {
               [jobName, backpressureQueue, bpSourceId]
             );
             if (existingPending.length > 0) {
-              return coalesceReturn(existingPending[0], {
+              return coalesceReturn(tx, existingPending[0], {
                 queue: backpressureQueue,
                 name: jobName,
                 pending_count: pendingCount,
@@ -526,7 +527,7 @@ export class MinionQueue {
               [jobName, backpressureQueue, bpSourceId]
             );
             if (existingWaiting.length > 0) {
-              return coalesceReturn(existingWaiting[0], {
+              return coalesceReturn(tx, existingWaiting[0], {
                 queue: backpressureQueue,
                 name: jobName,
                 waiting_count: waitingCount,

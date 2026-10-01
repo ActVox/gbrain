@@ -287,7 +287,7 @@ export const UNREVIEWED_LIVE_JOBS_SQL = `SELECT id, name, status, submission_aut
 export const LEGACY_AUTHORITY_COLUMN = 'submission_authority IS NULL AS legacy_authority_is_null';
 
 /** `permission_denied` for a job row whose SQL NULL authority predates the v0.50 cutover. */
-export function legacyJobAuthorityError(row: Record<string, unknown>): OperationError {
+export function legacyJobAuthorityError(row: Record<string, unknown>, activeIds: readonly number[] = []): OperationError {
   const id = String(row.id), name = String(row.name), status = String(row.status);
   const what = `Queued job authorization: job ${id} (${name}, ${status}) has no submission authority because it predates the upgrade, so it cannot be reused until it is reviewed.`;
   if (status === 'completed' || status === 'failed') {
@@ -297,7 +297,8 @@ export function legacyJobAuthorityError(row: Record<string, unknown>): Operation
   if (status === 'active') {
     return catalogueError('legacy_job_authority', what, `${STOP_PRODUCERS}, then cancel it: gbrain jobs cancel ${id}; run gbrain doctor to review the rest.`);
   }
-  return catalogueError('legacy_job_authority', what, legacyRecoveryHint([status], [name]));
+  // Name every reviewable live status: one preview and apply then clears the whole SQL NULL population the claim gate blocks on.
+  return catalogueError('legacy_job_authority', what, legacyRecoveryHint(LIVE_JOB_STATUSES, [], activeIds));
 }
 
 const RELEASABLE = new Set(['dead', 'cancelled']);

@@ -5,8 +5,24 @@
  * SQL NULL authority stays distinguishable from JSONB null.
  */
 import type { BrainEngine } from '../engine.ts';
-import { LEGACY_AUTHORITY_COLUMN, coalesceDecision, type SubmissionAuthority } from './submission-authority.ts';
+import { ERROR_CATALOGUE } from '../error-catalogue.ts';
+import { OperationError } from '../ops/contract.ts';
+import { LEGACY_AUTHORITY_COLUMN, coalesceDecision, legacyJobAuthorityError, type SubmissionAuthority } from './submission-authority.ts';
 import { rowToMinionJob, type MinionJob } from './types.ts';
+
+/**
+ * `coalesceDecision`, with a legacy refusal's hint naming the active job ids
+ * to cancel first, so the printed recovery runs verbatim.
+ */
+export async function decideCoalesce(tx: BrainEngine, row: Record<string, unknown>, authority: SubmissionAuthority): Promise<'coalesce' | 'release'> {
+  try {
+    return coalesceDecision(row, authority);
+  } catch (error) {
+    if (!(error instanceof OperationError) || error.docs !== ERROR_CATALOGUE.legacy_job_authority.docs) throw error;
+    const active = await tx.executeRaw<{ id: number }>("SELECT id FROM minion_jobs WHERE status = 'active' ORDER BY id LIMIT 10");
+    throw legacyJobAuthorityError(row, active.map(job => Number(job.id)));
+  }
+}
 
 const KEYED_ROW_SQL = `SELECT *, ${LEGACY_AUTHORITY_COLUMN} FROM minion_jobs WHERE idempotency_key = $1`;
 
@@ -36,7 +52,7 @@ async function releaseIdempotencyKey(tx: BrainEngine, row: Record<string, unknow
 export async function coalesceOnIdempotencyKey(tx: BrainEngine, key: string, authority: SubmissionAuthority): Promise<MinionJob | null> {
   const [existing] = await tx.executeRaw<Record<string, unknown>>(KEYED_ROW_SQL, [key]);
   if (!existing) return null;
-  if (coalesceDecision(existing, authority) === 'coalesce') return coalescedJob(existing);
+  if (await decideCoalesce(tx, existing, authority) === 'coalesce') return coalescedJob(existing);
   await releaseIdempotencyKey(tx, existing, key);
   return null;
 }
@@ -53,7 +69,7 @@ export async function insertOrCoalesce(
   for (let retried = false; !inserted && key; retried = true) {
     const [winner] = await tx.executeRaw<Record<string, unknown>>(KEYED_ROW_SQL, [key]);
     if (!winner) throw new Error(`idempotency_key ${key} insert returned no row and no existing row found`);
-    if (coalesceDecision(winner, authority) === 'coalesce') return { coalesced: coalescedJob(winner) };
+    if (await decideCoalesce(tx, winner, authority) === 'coalesce') return { coalesced: coalescedJob(winner) };
     if (retried) throw new Error(`idempotency_key ${key} was released but the retried insert still conflicted`);
     await releaseIdempotencyKey(tx, winner, key);
     [inserted] = await tx.executeRaw<Record<string, unknown>>(insertSql, params);
