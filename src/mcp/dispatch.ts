@@ -29,6 +29,7 @@ import {
 import { backupCheckDisabled, backupNagGate, backupNoticeText, loadBackupStatus } from '../core/backup/status-file.ts';
 import { maybeRefreshBackupStatusInProcess } from '../core/backup/coverage.ts';
 import { operationScopesAllowed } from '../core/scope.ts';
+import { invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
 import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
 
 // WP3: normalization + validation moved to validate-params.ts (direct unit
@@ -706,6 +707,10 @@ export async function dispatchToolCall(
         return op.handler(ctx, safeParams);
       })
       : await op.handler(ctx, safeParams);
+    // A committed write (forget, remember, any fact or page mutation) must not
+    // be answered from hot memory built before it, on this response or later.
+    // Every MCP transport dispatches here.
+    if (op.mutating) invalidateHotMemoryForEngine(engine);
     // [E4] verb success metrics: budget drops + entity hit/miss when present.
     {
       const r = result as { dropped_count?: number; found?: boolean; status?: string } | null;
@@ -766,6 +771,8 @@ export async function dispatchToolCall(
     return out;
   } catch (e: unknown) {
     logVerb(false);
+    // A refused or failed write may still have committed part of its work.
+    if (op.mutating) invalidateHotMemoryForEngine(engine);
     if (e instanceof OperationError) {
       return { content: [{ type: 'text', text: JSON.stringify(e.toJSON(), null, 2) }], isError: true };
     }
