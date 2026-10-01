@@ -95,6 +95,8 @@ export interface ExtractorFactsPage {
   page_id: number;
   request_id: string;
   include_ambiguous: boolean;
+  /** The preview's source scope; an apply under another scope refuses. */
+  scope: string[];
   facts: ExtractorFactCandidate[];
 }
 
@@ -269,7 +271,7 @@ export const extractorFactsRepair: RepairHandler = {
         if (fact.class === 'excluded' || fact.class === 'ambiguous' && !includeAmbiguous) continue;
         const key = `${fact.source_id}\u0000${fact.slug}`;
         const page = pages.get(key) ?? { source_id: fact.source_id, slug: fact.slug, page_id: pageIds.get(key)!,
-          request_id: requestIdFor(hash, fact, 0), include_ambiguous: includeAmbiguous, facts: [] };
+          request_id: requestIdFor(hash, fact, 0), include_ambiguous: includeAmbiguous, scope: scope.source_ids, facts: [] };
         page.facts.push(fact);
         pages.set(key, page);
       }
@@ -289,7 +291,10 @@ export const extractorFactsRepair: RepairHandler = {
         'docs/guides/repair.md#explicit-only-repair-kinds');
     }
     const approved = await loadApprovedSet<ExtractorFactsPage>(engine, { command: 'extractor-facts', hash: opts.expect, previewCommand: command });
-    if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous)) throw previewChangedError(opts.expect, command);
+    const scopeKey = JSON.stringify(scope.source_ids);
+    if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous || JSON.stringify(page.scope) !== scopeKey)) {
+      throw previewChangedError(opts.expect, command);
+    }
     const done = await finishedPages(engine, opts.expect, approved.items);
     const pending = approved.items.filter(page => !done.has(`${page.source_id}\u0000${page.slug}`));
     if (!pending.length) await clearApprovedSet(engine, { command: 'extractor-facts', hash: opts.expect });

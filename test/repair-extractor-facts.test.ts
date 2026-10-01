@@ -403,6 +403,8 @@ for (const backend of testBackends()) {
       expect((await refusal(() => repair(engine, home, ['--source', sourceId, '--apply', '--expect', hashOf(preview)]))).code).toBe('preview_changed');
       const wide = await repair(engine, home, ['--source', sourceId, '--include-ambiguous']);
       expect(wide.results[0].affected).toBe(1);
+      // The hash is bound to the preview's source scope: applying it brain-wide refuses (Codex review).
+      expect((await refusal(() => repair(engine, home, ['--include-ambiguous', '--apply', '--expect', hashOf(wide)]))).code).toBe('preview_changed');
       const applied = await repair(engine, home, ['--source', sourceId, '--include-ambiguous', '--apply', '--expect', hashOf(wide)]);
       expect(applied.results[0].outcomes).toEqual({ restored: 1 });
       expect(await factState(engine, [...ids, superseded])).toEqual([
