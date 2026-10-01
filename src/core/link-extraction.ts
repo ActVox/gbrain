@@ -25,7 +25,7 @@ import { isIdentityEntity, sameEntityName } from './entities/resolve.ts';
 // #3190: pack-aware link typing. link-inference imports only manifest-v1
 // (zod) + redos-guard (node:vm) — no cycle back into this module.
 import type { SchemaPackManifest } from './schema-pack/manifest-v1.ts';
-import { inferLinkTypeFromPack, frontmatterLinkTypeFromPack } from './schema-pack/link-inference.ts';
+import { inferLinkTypeFromPack, frontmatterLinkTypeFromPack, ownsAttendanceInference } from './schema-pack/link-inference.ts';
 import { PageRegexBudget } from './schema-pack/redos-guard.ts';
 
 /**
@@ -617,17 +617,6 @@ export interface PageLinksResult {
   candidates: LinkCandidate[];
   unresolved: UnresolvedFrontmatterRef[];
   attendanceComplete: boolean;
-}
-
-/**
- * True when a pack decides meeting attendance itself: one of its `attended`
- * rules matches a phrase regex. A rule bound only to the meeting page type
- * (and optionally a person target), as gbrain-base and company-brain ship,
- * mirrors the in-code meeting prior, so meeting links follow canonical
- * evidence-gated attendance (person -> meeting) instead.
- */
-export function ownsAttendanceInference(pack: Pick<LinkExtractionPack, 'link_types'> | null | undefined): boolean {
-  return !!pack?.link_types.some(lt => lt.name === 'attended' && lt.inference?.regex);
 }
 
 /**

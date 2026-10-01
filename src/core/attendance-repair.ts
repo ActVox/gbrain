@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { extractPageLinks, extractEntityRefs, attendanceEvidenceRanges, hasAttendanceEvidence,
-  resolvedLinkCandidate, normalizeBasename, ownsAttendanceInference, LINK_EXTRACTOR_VERSION_TS,
+  resolvedLinkCandidate, normalizeBasename, LINK_EXTRACTOR_VERSION_TS,
   type LinkExtractionPack, type SlugResolver } from './link-extraction.ts';
 import { slugifyPath } from './sync.ts';
 import { isValidSourceId } from './source-id.ts';
 import { loadActivePackForEngine, approvedSchemaIdentity } from './schema-pack/engine-resolution.ts';
 import { invalidatePackCache } from './schema-pack/registry.ts';
+import { ownsAttendanceInference } from './schema-pack/link-inference.ts';
 import { executeRawJsonb } from './sql-query.ts';
 import { applyAttendanceDelta } from './derived-links.ts';
 
