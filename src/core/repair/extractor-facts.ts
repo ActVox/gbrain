@@ -40,7 +40,8 @@
  * `row_num` above every row of its page, so it never looks like an unfenced
  * legacy row. A resumed apply skips pages whose request already committed (or
  * whose facts are already active), so a crash after publication restores no
- * new candidate.
+ * new candidate. A page already passed by this set's cursor is not retried,
+ * whatever its outcome, so a `--limit` run always advances.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
@@ -235,8 +236,11 @@ async function hashParts(engine: BrainEngine, scope: RepairScope, includeAmbiguo
   return { kind: 'extractor-facts-v1', brain_id: scope.brain_id, sources, selection: { source_ids: scope.source_ids, include_ambiguous: includeAmbiguous }, facts };
 }
 
-function pageItem(page: ExtractorFactsPage, hash: string, last: boolean): PageItem {
-  return { cursor: { phase: 0, id: page.page_id }, source_id: page.source_id, slug: page.slug, chars: 0,
+/** Cursor phase naming one approved set, so a cursor left by another preview never skips this set's pages. */
+const hashPhase = (hash: string) => Number.parseInt(hash.slice(0, 12), 16) || 0;
+
+function pageItem(page: ExtractorFactsPage, hash: string, index: number, last: boolean): PageItem {
+  return { cursor: { phase: hashPhase(hash), id: index + 1 }, source_id: page.source_id, slug: page.slug, chars: 0,
     action: `restore ${page.facts.length} extractor fact(s)`, page, hash, last };
 }
 
@@ -258,7 +262,7 @@ async function finishedPages(engine: BrainEngine, hash: string, pages: Extractor
 export const extractorFactsRepair: RepairHandler = {
   kind: 'extractor-facts',
   embeds: false,
-  async plan(engine, scope, _after, opts): Promise<RepairPlan> {
+  async plan(engine, scope, after, opts): Promise<RepairPlan> {
     const includeAmbiguous = opts?.includeAmbiguous === true;
     if (!opts?.apply) {
       const managed = await managedPersistenceEnabled(engine);
@@ -281,7 +285,7 @@ export const extractorFactsRepair: RepairHandler = {
       const count = (klass: ExtractorFactClass) => facts.filter(f => f.class === klass).length;
       const listing: RepairListing[] = facts.map(fact => ({ item: `${fact.source_id}:${fact.slug}#${fact.id}`,
         class: fact.class === 'excluded' ? `excluded:${fact.reason}` : fact.class, detail: detail(fact) }));
-      return { items: approved.map((page, index) => pageItem(page, hash, index === approved.length - 1)), preview_hash: hash,
+      return { items: approved.map((page, index) => pageItem(page, hash, index, index === approved.length - 1)), preview_hash: hash,
         residuals: { evidenced: count('evidenced'), ambiguous: count('ambiguous'), excluded: count('excluded') },
         listing, warnings: await mixedVersionWarnings(engine) };
     }
@@ -296,11 +300,13 @@ export const extractorFactsRepair: RepairHandler = {
     if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous || JSON.stringify(page.scope) !== scopeKey)) {
       throw previewChangedError(opts.expect, command);
     }
+    // Resume: skip pages this set's cursor already passed (any outcome) and pages whose restore already finished.
     const done = await finishedPages(engine, opts.expect, approved.items);
-    const pending = approved.items.filter(page => !done.has(`${page.source_id}\u0000${page.slug}`));
-    if (!pending.length) await clearApprovedSet(engine, { command: 'extractor-facts', hash: opts.expect });
-    return { items: pending.map((page, index) => pageItem(page, opts.expect!, index === pending.length - 1)), preview_hash: opts.expect,
-      residuals: { already_restored_pages: approved.items.length - pending.length } };
+    const passed = after && after.phase === hashPhase(opts.expect) ? after.id : 0;
+    const items = approved.items.map((page, index) => pageItem(page, opts.expect!, index, index === approved.items.length - 1))
+      .filter(item => item.cursor.id > passed && !done.has(`${item.source_id}\u0000${item.slug}`));
+    if (!items.length) await clearApprovedSet(engine, { command: 'extractor-facts', hash: opts.expect });
+    return { items, preview_hash: opts.expect, residuals: { already_restored_pages: approved.items.length - items.length } };
   },
   async apply(ctx, entry): Promise<RepairItemOutcome> {
     const { page, hash, last } = entry as PageItem;

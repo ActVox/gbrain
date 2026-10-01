@@ -416,5 +416,21 @@ for (const backend of testBackends()) {
         { id: ids[2], active: true, row_num: 3 }]);
       expect((await repair(engine, home, ['--source', sourceId])).results[0].residuals).toEqual({ evidenced: 0, ambiguous: 0, excluded: 1 });
     }, 60_000);
+
+    test('a --limit run always advances: a partially restored page is not retried by the next run (Codex review)', async () => {
+      const sourceId = `ef-l-${randomUUID().slice(0, 8)}`;
+      await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+      const first = await conversation(engine, 'conversations/limit-a', ['Alice sends the deck', 'Alice books the venue'], undefined, sourceId);
+      const second = await conversation(engine, 'conversations/limit-b', ['Bob reviews the budget'], undefined, sourceId);
+      await engine.executeRaw('UPDATE facts SET expired_at=now(), row_num=NULL WHERE source_id=$1', [sourceId]);
+      const wide = await repair(engine, home, ['--source', sourceId, '--include-ambiguous']);
+      await engine.executeRaw("UPDATE facts SET fact='Alice sends the revised deck' WHERE id=$1", [first[1]]);
+      const apply = ['--source', sourceId, '--include-ambiguous', '--apply', '--expect', hashOf(wide), '--limit', '1'];
+      expect((await repair(engine, home, apply)).results[0].outcomes).toEqual({ partially_restored: 1 });
+      const next = await repair(engine, home, apply);
+      expect(next.results[0]).toMatchObject({ affected: 1, outcomes: { restored: 1 } });
+      expect(await activeIds(engine, [...first, ...second])).toEqual([first[0], second[0]]);
+      expect((await refusal(() => repair(engine, home, apply))).code).toBe('preview_changed');
+    }, 60_000);
   });
 }
