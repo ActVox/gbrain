@@ -24,6 +24,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, lst
 import { join, resolve, dirname } from 'path';
 import { execSync } from 'child_process';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
+import { gbrainChildCommand } from './in-process.ts';
 import { savePreferences, loadPreferences } from '../../core/preferences.ts';
 import { loadConfig, configPath, gbrainPath } from '../../core/config.ts';
 // Bug 3 — appendCompletedMigration moved to the runner (apply-migrations.ts).
@@ -84,7 +85,7 @@ async function phaseASchema(opts: OrchestratorOpts): Promise<OrchestratorPhaseRe
 function phaseBSmoke(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'smoke', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync('gbrain jobs smoke', { stdio: 'inherit', timeout: 30_000, env: process.env });
+    execSync(gbrainChildCommand('gbrain jobs smoke'), { stdio: 'inherit', timeout: 30_000, env: process.env });
     return { name: 'smoke', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -408,7 +409,7 @@ function phaseFInstall(opts: OrchestratorOpts): OrchestratorPhaseResult {
     if (loadConfig()?.engine === 'pglite') {
       return { name: 'install', status: 'skipped', detail: 'PGLite is single-writer; use gbrain serve for background maintenance' };
     }
-    execSync('gbrain autopilot --install --yes', { stdio: 'inherit', timeout: 60_000, env: process.env });
+    execSync(gbrainChildCommand('gbrain autopilot --install --yes'), { stdio: 'inherit', timeout: 60_000, env: process.env });
     return { name: 'install', status: 'complete' };
   } catch (e) {
     return { name: 'install', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
