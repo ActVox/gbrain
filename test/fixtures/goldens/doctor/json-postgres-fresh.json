@@ -664,6 +664,20 @@
         {
           "category": "ops",
           "details": {
+            "column": "embedding",
+            "column_type": "vector(1024)",
+            "docs": "docs/guides/troubleshooting.md#hybrid-search-returns-only-keyword-hits",
+            "embedded_chunks_estimate": 0,
+            "outcome": "skipped",
+            "reason": "small_brain"
+          },
+          "message": "Skipped: about 0 embedded chunk(s) in embedding; below 10000 a sequential scan is the right plan.",
+          "name": "vector_plan",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
             "command": "gbrain repair embedding-effects",
             "count": "exact",
             "docs": "docs/guides/repair.md#stale-queued-embedding-effects",

@@ -35,6 +35,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/commands/jobs/authorize-legacy.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
   "src/commands/jobs/cancel.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
   "src/commands/doctor/checks/legacy-job-authority.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
+  // #5824: the vector-plan doctor check EXPLAINs the real searchVector statement.
+  "src/commands/doctor/checks/vector-plan.ts": ["test/e2e/vector-plan-real-column-postgres.test.ts", "test/e2e/doctor-json-golden.test.ts"],
   // Fix wave 5 #5401: projection drain CLI and the budgeted resident drain.
   "src/commands/projections.ts": ["test/e2e/projection-drain-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/core/persistence/consumer.ts": ["test/e2e/projection-drain-postgres.test.ts"],
@@ -112,6 +114,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/projection-statistics-postgres.test.ts",
     "test/e2e/search-query-contract-postgres.test.ts",
     "test/e2e/vector-candidate-safety-postgres.test.ts",
+    "test/e2e/vector-plan-real-column-postgres.test.ts",
     "test/e2e/projection-readiness-currency.test.ts",
     "test/e2e/chunk-canonical-text-privacy.test.ts",
     "test/e2e/engine-content-privacy.test.ts",
@@ -349,6 +352,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/postgres-engine-disconnect-idempotency.test.ts",
     "test/e2e/db-singleton-shared-recovery.test.ts",
     "test/e2e/postgres-reconnect-singleton.test.ts",
+    // #5824: searchVector + explainVectorSearch plan proof.
+    "test/e2e/vector-candidate-safety-postgres.test.ts",
+    "test/e2e/vector-plan-real-column-postgres.test.ts",
   ],
   // PGLite bootstrap path + parity guard.
   "src/core/pglite-engine.ts": [
