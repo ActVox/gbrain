@@ -36,17 +36,17 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/commands/jobs/cancel.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
   "src/commands/doctor/checks/legacy-job-authority.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
   // Fix wave 5 #5401: projection drain CLI and the budgeted resident drain.
-  "src/commands/projections.ts": ["test/e2e/projection-drain-postgres.test.ts"],
+  "src/commands/projections.ts": ["test/e2e/projection-drain-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/core/persistence/consumer.ts": ["test/e2e/projection-drain-postgres.test.ts"],
   "src/core/persistence/journal.ts": ["test/e2e/projection-drain-postgres.test.ts"],
   // Fix wave 5 (#5731): the extractor-facts restore and its doctor check.
-  "src/core/repair/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts"],
+  "src/core/repair/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/commands/doctor/checks/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts"],
   // Fix wave 5: managed writeSingleFact keeps an absent entity's fallback slug (attribute_fallback).
-  "src/core/facts/write-single.ts": ["test/e2e/managed-write-single-attribution-postgres.test.ts", "test/e2e/managed-facts-writers.test.ts"],
+  "src/core/facts/write-single.ts": ["test/e2e/managed-write-single-attribution-postgres.test.ts", "test/e2e/managed-facts-writers.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/core/facts/managed-fact-write.ts": ["test/e2e/managed-write-single-attribution-postgres.test.ts", "test/e2e/managed-facts-writers.test.ts"],
   // Fix wave 5 (#5409): read-only mirror sources.
-  "src/core/persistence/mirror-read-only.ts": ["test/e2e/sources-mirror-read-only-postgres.test.ts"],
+  "src/core/persistence/mirror-read-only.ts": ["test/e2e/sources-mirror-read-only-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   "src/commands/sources-mirror.ts": ["test/e2e/sources-mirror-read-only-postgres.test.ts"],
   "src/core/persistence/deactivation.ts": ["test/e2e/persistence-deactivate-race.test.ts", "test/e2e/fix-wave-4-integration.test.ts"],
   // SkillOpt orchestrator, outcome/resume, models plan + strict mode, spend ledger.
@@ -490,7 +490,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/derived-links.ts": ["test/e2e/attendance-retrieval-postgres.test.ts", "test/e2e/attendance-repair-postgres.test.ts"],
   "src/core/link-reconciliation.ts": ["test/e2e/attendance-retrieval-postgres.test.ts"],
   "src/core/persistence/links-preparation.ts": ["test/e2e/attendance-retrieval-postgres.test.ts"],
-  "src/core/sweep.ts": ["test/e2e/attendance-retrieval-postgres.test.ts"],
+  "src/core/sweep.ts": ["test/e2e/attendance-retrieval-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   // v0.38 ingestion substrate. POST /ingest lives inside serve-http.ts
   // (per the plan-eng-review E1 decision); the daemon + built-in sources
   // + ingest_capture Minion handler all feed the in-process roundtrip
@@ -552,7 +552,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/commands/sources-retry-held.ts": ["test/e2e/connector-holds.test.ts"],
   "src/core/repair/connector-fences.ts": ["test/e2e/connector-holds.test.ts"],
   // Fix wave 5 (#5770): stale-atoms repair and its #5777 cross-lane journey.
-  "src/core/repair/stale-atoms.ts": ["test/e2e/repair-stale-atoms-postgres.test.ts", "test/e2e/journey-atoms-sync-race-postgres.test.ts", "test/e2e/managed-extract-atoms.test.ts"],
+  "src/core/repair/stale-atoms.ts": ["test/e2e/repair-stale-atoms-postgres.test.ts", "test/e2e/journey-atoms-sync-race-postgres.test.ts", "test/e2e/managed-extract-atoms.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
   // Fix wave 3 lane A: connector identity, account pin, no-op kernel, pending set and migration 176.
   "src/core/take-proposals.ts": ["test/e2e/takes-propose-accept-managed.test.ts"],
   "src/core/persistence/connector-sync.ts": ["test/e2e/connector-wave3.test.ts", "test/e2e/connector-holds.test.ts"],

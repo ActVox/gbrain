@@ -24,6 +24,8 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { computeAtomProvenanceDriftCheck } from '../src/commands/doctor.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { doctorFileSource } from './helpers/doctor-source.ts';
+import { WAVE_CHECKS, checkHealthUnknown } from '../src/commands/doctor/wave-checks.ts';
+import { bannerFindingLine } from '../src/commands/doctor/upgrade-banner.ts';
 
 let engine: PGLiteEngine;
 
@@ -199,6 +201,10 @@ describe('computeAtomProvenanceDriftCheck', () => {
     expect(c.status).toBe('warn');
     expect(c.message).toContain('atom_provenance_drift check failed');
     expect(c.message).toContain('relation "pages" does not exist');
+    // As a wave check, a failed inspection is unknown health, never a stale-atoms finding with a zero count.
+    expect(checkHealthUnknown(c)).toBe(true);
+    const spec = WAVE_CHECKS.find(s => s.id === 'atom_provenance_drift')!;
+    expect(bannerFindingLine({ spec, check: c, state: 'unknown' })).toBe('[AGENT]   atom_provenance_drift: could not be checked (health unknown)');
   });
 
   it('does not count transcript-minted (file-bound) atoms as drift (#4806)', async () => {
