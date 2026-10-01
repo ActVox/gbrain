@@ -5382,6 +5382,7 @@
           "explicitReadBinding?: ExplicitReadBinding | undefined",
           "jobId?: number | undefined",
           "localFederatedSourceIds?: string[] | undefined",
+          "localSourceImplicit?: boolean | undefined",
           "logger: Logger",
           "remote: boolean",
           "sessionId?: string | undefined",
