@@ -85,6 +85,17 @@ export function shouldForceExitAfterMain(
   return !DAEMON_COMMANDS.has(command);
 }
 
+/** #5079: is this `serve --http`, whose stdout/stderr are log streams only? */
+export function isHttpServeInvocation(argv: string[] = process.argv.slice(2)): boolean {
+  let rest: string[];
+  try {
+    rest = parseGlobalFlags(argv).rest;
+  } catch {
+    rest = argv;
+  }
+  return rest[0] === 'serve' && rest.includes('--http');
+}
+
 /** Floor for the computed backstop deadline (the historical hard deadline). */
 export const TEARDOWN_DEADLINE_FLOOR_MS = 10_000;
 /** Allowance for the facts sink's awaited abort() (shutdown of an in-flight job). */

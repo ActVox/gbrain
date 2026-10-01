@@ -34,7 +34,7 @@ import { operations, OperationError } from './core/operations.ts';
 import { resolveSourceIdEngineFree } from './core/source-resolver.ts';
 import { formatVolunteeredPage } from './core/context/volunteer.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
-import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict, writeStdoutFinal, installStdoutPipeDelivery } from './core/cli-force-exit.ts';
+import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict, writeStdoutFinal, installStdoutPipeDelivery, isHttpServeInvocation } from './core/cli-force-exit.ts';
 import { serializeMarkdown } from './core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
 import { runCliPreflight } from './core/cli-preflight.ts';
@@ -3108,7 +3108,7 @@ if (import.meta.main) {
   // SIGTERM→exit(143) handler into any process that merely IMPORTS this module
   // (bun test runners died mid-suite when a test emitted a synthetic SIGTERM).
   // Spawned/compiled CLI processes are entrypoints, so they still install.
-  installCleanupSignalHandlers();
+  installCleanupSignalHandlers({ keepServingOnLogEpipe: isHttpServeInvocation() });
   // #4383: CLI_ONLY payloads (console.log / bare process.stdout.write) get
   // delivery-exact serialized writes; `serve` keeps native streaming stdout.
   if (shouldForceExitAfterMain()) installStdoutPipeDelivery();
