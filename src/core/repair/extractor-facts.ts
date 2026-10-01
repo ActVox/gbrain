@@ -13,9 +13,9 @@
  * classified, in this order:
  *   - excluded (listed, never restored): the page is missing or deleted; the
  *     fact was superseded (`superseded_by`, E-T5); its claim was withdrawn
- *     (`fact_withdrawals`); an active fact with the same text already sits on
- *     the page (a fence row or another extractor row); or an earlier candidate
- *     of the page carries the same text.
+ *     (`fact_withdrawals`); an active fact with the same text and entity already
+ *     sits on the page (a fence row or another extractor row); or an earlier
+ *     candidate of the page carries the same text and entity.
  *   - ambiguous (restored only with `--include-ambiguous` and the hash of that
  *     preview): an unmanaged brain (no receipts); no committed write receipt of
  *     the page completed at the exact expiry instant (`completed_at =
@@ -142,7 +142,8 @@ export async function classifyExtractorFacts(db: BrainEngine, sourceIds: string[
              AND w.fact_hash IN (gbrain_fact_fingerprint(c.fact), gbrain_fact_fingerprint_v1(c.fact))
              AND (w.subject='*' OR w.subject=c.entity_slug)) AS withdrawn,
            EXISTS (SELECT 1 FROM facts a WHERE a.source_id=c.source_id AND a.visibility=c.visibility
-             AND gbrain_fact_fingerprint(a.fact)=c.fingerprint AND a.source_markdown_slug=c.slug AND a.expired_at IS NULL) AS active_duplicate,
+             AND gbrain_fact_fingerprint(a.fact)=c.fingerprint AND a.source_markdown_slug=c.slug AND a.expired_at IS NULL
+             AND a.entity_slug IS NOT DISTINCT FROM c.entity_slug) AS active_duplicate,
            fenced.slug IS NOT NULL AS fence_history,
            r.request_id AS receipt, r.consumer_version AS receipt_consumer
       FROM cand c
@@ -153,7 +154,7 @@ export async function classifyExtractorFacts(db: BrainEngine, sourceIds: string[
   const seen = new Set<string>();
   return rows.map(row => {
     const id = Number(row.id);
-    const key = JSON.stringify([row.source_id, row.slug, row.visibility, row.fingerprint]);
+    const key = JSON.stringify([row.source_id, row.slug, row.visibility, row.entity_slug, row.fingerprint]);
     const [klass, reason] = classify(row, seen.has(key), opts.managed);
     if (klass !== 'excluded') seen.add(key);
     return { id, source_id: row.source_id, slug: row.slug, class: klass, reason, expired_at: row.expired_at,
@@ -180,8 +181,8 @@ const DETAILS: Record<string, string> = {
   page_missing: 'its conversation page is missing or deleted',
   superseded: 'a newer fact superseded it',
   withdrawn: 'its claim was withdrawn (forget)',
-  active_duplicate: 'an active fact with the same text is already on the page',
-  duplicate_candidate: 'an earlier candidate of the page has the same text',
+  active_duplicate: 'an active fact with the same text and entity is already on the page',
+  duplicate_candidate: 'an earlier candidate of the page has the same text and entity',
   unmanaged_brain: 'unmanaged brain: no write receipt can prove the expiry',
   no_same_transaction_receipt: 'no committed write of the page completed at the exact expiry instant',
   post_fix_consumer: 'expired by a write published by a fixed consumer (a fence row may have taken its position)',

@@ -394,10 +394,14 @@ for (const backend of testBackends()) {
       await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
       const ids = await conversation(engine, 'conversations/unmanaged', ['Alice sends the deck', 'Alice books the venue'], undefined, sourceId);
       const superseded = (await conversation(engine, 'conversations/unmanaged-2', ['Alice hires a designer'], undefined, sourceId))[0];
+      // The same claim about another entity on the same page is a distinct fact, not a duplicate (Codex review).
+      const [{ id: bobs }] = await engine.executeRaw<{ id: number }>(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, row_num, source_markdown_slug)
+        VALUES ($1, 'people/bob-example', 'Alice sends the deck', 'commitment', 'private', $2, 3, 'conversations/unmanaged') RETURNING id::int AS id`, [sourceId, EXTRACTOR]);
+      ids.push(Number(bobs));
       await engine.executeRaw("UPDATE facts SET expired_at=now(), row_num=NULL WHERE source_id=$1", [sourceId]);
       await engine.executeRaw('UPDATE facts SET superseded_by=$1 WHERE id=$2', [ids[0], superseded]);
       const preview = await repair(engine, home, ['--source', sourceId]);
-      expect(preview.results[0].residuals).toEqual({ evidenced: 0, ambiguous: 2, excluded: 1 });
+      expect(preview.results[0].residuals).toEqual({ evidenced: 0, ambiguous: 3, excluded: 1 });
       expect(preview.results[0].affected).toBe(0);
       expect(preview.results[0].listing!.map(entry => entry.detail)).toContain('unmanaged brain: no write receipt can prove the expiry');
       expect((await refusal(() => repair(engine, home, ['--source', sourceId, '--apply', '--expect', hashOf(preview)]))).code).toBe('preview_changed');
@@ -408,7 +412,8 @@ for (const backend of testBackends()) {
       const applied = await repair(engine, home, ['--source', sourceId, '--include-ambiguous', '--apply', '--expect', hashOf(wide)]);
       expect(applied.results[0].outcomes).toEqual({ restored: 1 });
       expect(await factState(engine, [...ids, superseded])).toEqual([
-        { id: ids[0], active: true, row_num: 1 }, { id: ids[1], active: true, row_num: 2 }, { id: superseded, active: false, row_num: null }]);
+        { id: ids[0], active: true, row_num: 1 }, { id: ids[1], active: true, row_num: 2 }, { id: superseded, active: false, row_num: null },
+        { id: ids[2], active: true, row_num: 3 }]);
       expect((await repair(engine, home, ['--source', sourceId])).results[0].residuals).toEqual({ evidenced: 0, ambiguous: 0, excluded: 1 });
     }, 60_000);
   });
