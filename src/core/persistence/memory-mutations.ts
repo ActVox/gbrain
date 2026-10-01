@@ -11,8 +11,8 @@ import { initializeLocalPersistence, requestPrincipalForContext } from './page-m
 import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
 import { admitWrite, admitWriteInTransaction, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
 import { assertPersistenceAccepting, registerMutationPreparer, waitForWrite, writeResponse } from './service.ts';
-import { claimWorktree, getWorktreeBinding } from './ownership.ts';
-import { isConnectorSourceKind } from './connector-identity.ts';
+import { claimWorktree } from './ownership.ts';
+import { resolveFactWriteTarget } from './fact-write-target.ts';
 import { WRITER_INSPECTION_HINT } from './admin-intent.ts';
 import { parseMutationPrecondition } from './preconditions.ts';
 import { withCoordinatedWrite } from './context.ts';
@@ -76,20 +76,19 @@ async function planRememberTarget(ctx: OperationContext, sourceId: string, sourc
   // Preserve the stub guard: a fallback name remains DB-only until a real
   // entity page exists. No placeholder page is created by remember.
   const fence = entitySlug !== null && snapshot !== null;
-  let binding = fence ? await getWorktreeBinding(ctx.engine, sourceId) : null;
   const sandbox = ctx.viaSubagent === true && !(ctx.allowedSlugPrefixes?.length);
   const configuredWriteThrough = !/^(false|0|off|no)$/i.test(await ctx.engine.getConfig('sync.write_through') ?? 'true');
   const writeThrough = configuredWriteThrough && !sandbox;
   if (sandbox) authority.databaseOnlyReason = 'subagent_sandbox';
   else if (!configuredWriteThrough) authority.databaseOnlyReason = 'disabled_by_config';
-  const root = source.local_path || (sourceId === 'default' ? await ctx.engine.getConfig('sync.repo_path') : null);
-  // An unbound connector source is database-only by design; never claim it for a fence write.
-  if (fence && writeThrough && root && !binding && isConnectorSourceKind(source.kind)) authority.databaseOnlyReason = 'connector_database';
-  else if (fence && writeThrough && root && !binding) {
+  const target = fence ? await resolveFactWriteTarget(ctx.engine, sourceId, source, { sandbox }) : null;
+  let binding = target?.kind === 'publish' ? target.binding : null;
+  if (target?.kind === 'publish' && target.databaseOnlyReason) authority.databaseOnlyReason = target.databaseOnlyReason;
+  if (target?.kind === 'unbound') {
     // An inferred link never designates an owner or reports a missing one.
     if (inferred) throw new InferredTargetRejected('ENTITY_LINK_FAILED');
     if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', WRITER_INSPECTION_HINT);
-    binding = await claimWorktree(ctx.engine, sourceId, root, undefined, undefined, { automatic: true });
+    binding = await claimWorktree(ctx.engine, sourceId, target.root, undefined, undefined, { automatic: true });
   }
   return { slug, authority, snapshot, fence, binding, writeThrough };
 }

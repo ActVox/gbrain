@@ -22,6 +22,7 @@ import type { FactsBackstopCtx } from './backstop.ts';
 import type { ExtractedFact } from './extract.ts';
 import type { ManagedFactsSession } from '../persistence/facts-maintenance.ts';
 import { inferFactSubject, isEntityInferenceEnabled, type InferredVia } from './subject-infer.ts';
+import { isNullLikeEntity } from './write-single.ts';
 
 /** The context note an inferred link carries, in the DB row and the fence cell alike. */
 export function inferenceNote(via: InferredVia): string {
@@ -33,15 +34,15 @@ export async function inferMissingSubjects(ctx: FactsBackstopCtx, facts: Extract
   const engine = ctx.engine;
   if (!facts.length || !(await isEntityInferenceEnabled(engine))) return facts;
   if (!managed && await writesDatabaseOnly(engine, ctx.sourceId)) return facts;
-  const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
   const { excludesPrivateWrites } = await import('../persistence/page-visibility.ts');
   const remote = managed ? managed.authority.remote : (ctx.operationContext?.remote ?? ctx.remote) !== false;
   const excludePrivate = managed?.authority.excludePrivate === true || await excludesPrivateWrites(engine, remote);
   const fromPage = remote ? pageSlug : ctx.sourceSlug ?? pageSlug;
   const out: ExtractedFact[] = [];
   for (const f of facts) {
-    const named = f.entity_slug ? await resolveEntitySlugWithSource(engine, ctx.sourceId, f.entity_slug) : null;
-    if (named && named.source !== 'fallback_slugify') { out.push(f); continue; }
+    // An extractor-named entity is kept even when it has no page: that name
+    // competes with any page the text mentions, so inference never overrides it.
+    if (!isNullLikeEntity(f.entity_slug)) { out.push(f); continue; }
     const inferred = await inferFactSubject(engine, ctx.sourceId, { fact: f.fact, pageSlug: fromPage, mode: 'write', excludePrivate });
     if (inferred.slug !== null && await linkAllowed(ctx, inferred.slug, f.fact, visibility, remote, managed)) {
       out.push({ ...f, entity_slug: inferred.slug, entity_inferred: inferred.via });
