@@ -105,6 +105,7 @@ export function parseRepairArgs(args: string[]): RepairArgs {
 
 function human(result: RepairResult): string {
   const lines = [`${result.kind}: ${result.affected} item(s) ${result.mode === 'apply' ? 'pending before this run' : 'to repair'}`];
+  for (const warning of result.warnings ?? []) lines.push(`  WARNING: ${warning}`);
   if (result.sample.length) lines.push(`  e.g. ${result.sample.join(', ')}`);
   const residuals = Object.entries(result.residuals).map(([k, v]) => `${k}=${v}`).join(', ');
   if (residuals) lines.push(`  ${residuals}`);
@@ -114,6 +115,8 @@ function human(result: RepairResult): string {
   if (result.resumed_from) lines.push(`  resuming after item ${result.resumed_from.phase}:${result.resumed_from.id}`);
   if (result.mode === 'apply') lines.push(`  applied ${result.applied}, skipped ${result.skipped}${result.complete ? ', complete' : ''}`);
   if (result.stopped) lines.push(`  STOPPED: ${result.stopped.message}`);
+  for (const entry of result.listing ?? []) lines.push(`  ${entry.class}: ${entry.item}${entry.detail ? ` (${entry.detail})` : ''}`);
+  if (result.mode === 'apply' && result.outcomes) lines.push(`  outcomes: ${Object.entries(result.outcomes).map(([k, v]) => `${k}=${v}`).join(', ')}`);
   if (result.mode === 'dry_run' && result.affected) lines.push(`  apply: ${result.apply_command}`);
   return lines.join('\n');
 }

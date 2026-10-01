@@ -38,12 +38,18 @@ export interface RepairItem {
 }
 
 export interface RepairPlan {
+  /** Operator warnings the preview prints before its items (for example an older writer that can undo the repair). */
+  warnings?: string[];
   items: RepairItem[];
   /** Counts of rows the kind keeps and reports instead of repairing. */
   residuals: Record<string, number>;
   /** Preview-bound kinds: the `previewHash` an apply must pass back with `--expect`. */
   preview_hash?: string;
+  /** Preview-bound kinds: every previewed item with its class, all of which the hash covers. */
+  listing?: RepairListing[];
 }
+
+export interface RepairListing { item: string; class: string; detail?: string }
 
 /** What the run was asked to do; preview-bound (explicit-only) kinds read `expect` and `includeAmbiguous`. */
 export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmbiguous?: boolean }
@@ -70,6 +76,7 @@ export interface RepairItemOutcome { applied: boolean; outcome: string; reason?:
 export interface RepairResult {
   kind: RepairKind;
   mode: 'dry_run' | 'apply';
+  warnings?: string[];
   scope: RepairScope;
   affected: number;
   sample: string[];
@@ -82,6 +89,8 @@ export interface RepairResult {
   complete: boolean;
   stopped?: { reason: string; message: string };
   apply_command: string;
+  /** Preview-bound kinds' dry run: every item the preview hash covers. */
+  listing?: RepairListing[];
   /** Per-outcome counts and the first items, for kinds that name outcomes. */
   outcomes?: Record<string, number>;
   outcome_items?: Array<{ item: string; outcome: string; reason?: string }>;
@@ -186,11 +195,12 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
     cost: { lifetime_ids: admits, receipt_bytes: admits * RECEIPT_BYTES, embedding_pages: handler.embeds === false ? 0 : pending.length,
       embedding_usd: embeddingUsd(pending.reduce((sum, item) => sum + item.chars, 0), opts.embeddingModel) },
     capacity: counters.map(({ scope: key, resource, used, limit, stop_at }) => ({ scope: key, resource, used, limit, stop_at })),
-    resumed_from: resumed, applied: 0, skipped: 0, complete: false,
+    resumed_from: resumed, applied: 0, skipped: 0, complete: false, ...(plan.warnings?.length ? { warnings: plan.warnings } : {}),
     apply_command: `gbrain repair ${handler.kind}${opts.sourceFlag ? ` --source ${opts.sourceFlag}` : ''}${(opts.applyArgs ?? []).map(arg => ` ${arg}`).join('')}`
       + `${opts.includeAmbiguous ? ' --include-ambiguous' : ''} --apply${plan.preview_hash ? ` --expect ${plan.preview_hash}` : ''}`,
   };
   if (!opts.apply) {
+    if (plan.listing) result.listing = plan.listing;
     result.complete = pending.length === plan.items.length;
     return result;
   }

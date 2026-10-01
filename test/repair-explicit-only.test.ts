@@ -120,10 +120,10 @@ describe('surfaces that list instead of run', () => {
     expect(currentExitCode()).toBe(0);
   });
 
-  test('naming an explicit kind runs it (here: the stub refusal) instead of explicit_kind_required', async () => {
-    const error = await refusal(() => withEnv({ GBRAIN_HOME: home }, () => runRepairCommand(engine, ['extractor-facts'])));
-    expect(error.code).toBe('unavailable');
-    expect(error.suggestion).toContain('gbrain repair extractor-facts');
+  test('naming an explicit kind runs it (here: the extractor-facts preview) instead of explicit_kind_required', async () => {
+    const out = JSON.parse(await captured(['extractor-facts', '--json'])) as { results: Array<{ kind: string; mode: string; affected: number }>; explicit_kinds?: unknown };
+    expect(out.results).toMatchObject([{ kind: 'extractor-facts', mode: 'dry_run', affected: 0 }]);
+    expect(out.explicit_kinds).toBeUndefined();
   });
 
   test('help marks explicit kinds with their preview and keeps them out of the --all list; --expect is accepted only for them', () => {
