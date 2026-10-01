@@ -313,7 +313,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/cycle/concept-publication.ts": ["test/e2e/managed-writers-w3.test.ts"],
   "src/core/chronicle/extract-events.ts": ["test/e2e/managed-writers-w3.test.ts"],
   "src/commands/enrich.ts": ["test/e2e/managed-writers-w3.test.ts"],
-  "src/core/ops/links.ts": ["test/e2e/managed-writers-w3.test.ts"],
+  // #5827: link-op source scope (remote federated, local per-source merge).
+  "src/core/ops/links.ts": ["test/e2e/managed-writers-w3.test.ts", "test/e2e/federated-link-reads-postgres.test.ts"],
   "src/core/cycle/extract-atoms-page-state.ts": ["test/e2e/extract-atoms-page-state.test.ts", "test/e2e/reconcile-crash.test.ts", "test/e2e/reconcile-crash-unactivated.test.ts", "test/e2e/reconcile-pgbouncer.test.ts"],
   "src/commands/migrations/v0_13_1.ts": ["test/e2e/grandfather-projection-postgres.test.ts", "test/e2e/persistence-git-coalescing-5530-postgres.test.ts"],
   "src/commands/migrations/v0_32_2.ts": ["test/e2e/migrations-v0_32_2-managed.test.ts"],
@@ -614,4 +615,4 @@ E2E_TEST_MAP["src/core/engine-sql/dialect-*.ts"] = ENGINE_SQL_EXECUTOR_E2E;
 E2E_TEST_MAP["src/core/engine-sql/normalize.ts"] = ["test/e2e/engine-sql-normalize-parity.test.ts"];
 E2E_TEST_MAP["src/core/engine-sql/brands.ts"] = ["test/e2e/engine-sql-rls-scope.test.ts"];
 E2E_TEST_MAP["src/core/engine-sql/chunks.ts"] = ["test/e2e/evidence-delivery-leak.test.ts", "test/e2e/evidence-delivery-parity.test.ts"];
-E2E_TEST_MAP["src/core/engine-sql/links.ts"] = ["test/e2e/links-read-order.test.ts", "test/e2e/attendance-retrieval-postgres.test.ts"];
+E2E_TEST_MAP["src/core/engine-sql/links.ts"] = ["test/e2e/links-read-order.test.ts", "test/e2e/attendance-retrieval-postgres.test.ts", "test/e2e/federated-link-reads-postgres.test.ts"];

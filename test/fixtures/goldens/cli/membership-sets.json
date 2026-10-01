@@ -1,6 +1,7 @@
 {
   "golden": {
     "aliases": {
+      "get_links": "get_links",
       "link-add": "add_link",
       "link-rm": "remove_link"
     },

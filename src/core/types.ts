@@ -1463,6 +1463,8 @@ export interface Link {
 
 export interface GraphNode {
   slug: string;
+  /** Source holding this page; the same slug in two sources is two nodes. */
+  source_id: string;
   title: string;
   type: PageType;
   depth: number;
@@ -1476,7 +1478,9 @@ export interface GraphNode {
  */
 export interface GraphPath {
   from_slug: string;
+  from_source_id: string;
   to_slug: string;
+  to_source_id: string;
   link_type: string;
   context: string;
   /** Depth of `to_slug` from the root (1 for direct neighbors). */

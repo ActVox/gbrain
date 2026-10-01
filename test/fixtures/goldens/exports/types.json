@@ -633,6 +633,7 @@
           "depth: number",
           "links: { to_slug: string; link_type: string; }[]",
           "slug: string",
+          "source_id: string",
           "title: string",
           "type: string"
         ],
@@ -644,8 +645,10 @@
           "context: string",
           "depth: number",
           "from_slug: string",
+          "from_source_id: string",
           "link_type: string",
-          "to_slug: string"
+          "to_slug: string",
+          "to_source_id: string"
         ],
         "name": "GraphPath"
       },
@@ -5450,7 +5453,7 @@
         "kind": "function",
         "name": "linkReadScopeOpts",
         "signature": [
-          "(ctx: OperationContext) => { sourceId?: string; sourceIds?: string[]; }"
+          "(ctx: OperationContext, scope?: { sourceId?: string; sourceIds?: string[]; }) => { sourceId?: string; sourceIds?: string[]; }"
         ]
       },
       {
@@ -7451,6 +7454,7 @@
           "depth: number",
           "links: { to_slug: string; link_type: string; }[]",
           "slug: string",
+          "source_id: string",
           "title: string",
           "type: string"
         ],
@@ -7462,8 +7466,10 @@
           "context: string",
           "depth: number",
           "from_slug: string",
+          "from_source_id: string",
           "link_type: string",
-          "to_slug: string"
+          "to_slug: string",
+          "to_source_id: string"
         ],
         "name": "GraphPath"
       },
