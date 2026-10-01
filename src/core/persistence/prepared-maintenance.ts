@@ -282,6 +282,7 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
   if (row.intent?.kind === 'managed_maintenance_adopt_fact_fence') return prepareFactFenceAdoption(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_phantom_merge') return (await import('../cycle/phantom-redirect-managed.ts')).preparePhantomMerge(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_phantom_delete') return (await import('../cycle/phantom-redirect-managed.ts')).preparePhantomDelete(engine, row, config);
+  if (row.intent?.kind === 'managed_maintenance_retire_stale_atoms') return (await import('../repair/stale-atoms.ts')).prepareStaleAtomRetirement(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw new OperationError('invalid_params', 'Unsupported maintenance request.');
   const p = row.intent;
   const facts = p.facts as FactSnapshot[];
