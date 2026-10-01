@@ -49,7 +49,7 @@ import { readAllSourceHolds } from '../src/core/connectors/item-holds-store.ts';
 import { retryHeld } from '../src/commands/sources-retry-held.ts';
 import { planRepairSteps } from '../src/core/remediation/repairs.ts';
 import { runRemediate } from '../src/commands/doctor/remediate.ts';
-import { REPAIR_REGISTRY } from '../src/core/repair/registry.ts';
+import { AUTO_REPAIR_REGISTRY } from '../src/core/repair/registry.ts';
 import { capture } from './helpers/wave-scenarios.ts';
 import { createConnectorFixture, contact, json, options, withGoogleAccount } from './helpers/connector-fixture.ts';
 import { addThread, fakeGmail, gmailFetch } from './helpers/connector-holds-fixture.ts';
@@ -207,7 +207,7 @@ test('X6: deactivate refuses while a connector item is held (classic mode cannot
 
 test('X11: the remediation run reaches every new repair kind, runs the free ones under --max-usd 0 and clears their doctor findings', async () => withEnv(env, async () => {
   for (const engine of engines) {
-    expect(REPAIR_REGISTRY.map(spec => spec.kind)).toEqual(['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints',
+    expect(AUTO_REPAIR_REGISTRY.map(spec => spec.kind)).toEqual(['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints',
       'request-indexes', 'connector-fences', 'orphan-bindings', 'embedding-effects']);
     // Pending work for Lane A (a dropped index) and Lane D (an orphan binding of a removed source).
     await engine.executeRaw('DROP INDEX IF EXISTS persistence_requests_sync_run_open');
