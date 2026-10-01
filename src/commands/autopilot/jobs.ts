@@ -219,7 +219,7 @@ export function detectInstalledJob(job: AutopilotJob): { installed: InstalledJob
   const candidates: Array<() => InstalledJob | null> = [];
   if (process.platform === 'darwin') {
     if (assigned) candidates.push(() => consider('macos', job.launchdLabel, readIfExists(plistPath(job.launchdLabel)), plistWrapperPath, false));
-    if (job.kind !== 'default' && autopilotLaunchdLabel(null) !== job.launchdLabel) {
+    if (job.kind !== 'default' && (!assigned || autopilotLaunchdLabel(null) !== job.launchdLabel)) {
       candidates.push(() => consider('macos', autopilotLaunchdLabel(null), readIfExists(plistPath(autopilotLaunchdLabel(null))), plistWrapperPath, true));
     }
   }

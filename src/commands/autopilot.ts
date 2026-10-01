@@ -1347,7 +1347,7 @@ export function uninstallDaemon() {
   // macOS launchd
   const labels: Array<{ label: string; legacy: boolean }> = [];
   if (assigned) labels.push({ label: job.launchdLabel, legacy: false });
-  if (job.kind !== 'default' && autopilotLaunchdLabel(null) !== job.launchdLabel) labels.push({ label: autopilotLaunchdLabel(null), legacy: true });
+  if (job.kind !== 'default' && (!assigned || autopilotLaunchdLabel(null) !== job.launchdLabel)) labels.push({ label: autopilotLaunchdLabel(null), legacy: true });
   for (const { label, legacy } of labels) {
     const path = plistPath(label);
     if (!existsSync(path)) continue;

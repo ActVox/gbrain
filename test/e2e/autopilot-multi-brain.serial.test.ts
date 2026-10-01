@@ -255,6 +255,22 @@ describe('#5195 legacy shared-name jobs and moved brains', () => {
     expect(run(brainC, ['--uninstall']).status).toBe(0);
   }, 240_000);
 
+  test('a pre-upgrade brain with no install id still sees and removes its legacy shared launchd job', () => {
+    const brainD = join(root, 'brain-d');
+    seedBrain(brainD);
+    writeFileSync(join(brainD, '.gbrain', 'autopilot-run.sh'), '#!/bin/sh\n', { mode: 0o755 });
+    mkdirSync(agentsDir(), { recursive: true });
+    const plist = join(agentsDir(), 'com.gbrain.autopilot.plist');
+    writeFileSync(plist, `<plist><dict><key>Label</key><string>com.gbrain.autopilot</string><key>ProgramArguments</key><array>\n    <string>${brainD}/.gbrain/autopilot-run.sh</string>\n  </array></dict></plist>`);
+    expect(existsSync(join(brainD, '.gbrain', 'autopilot-install-id'))).toBe(false);
+    rmSync(launchctlLog, { force: true });
+    const r = run(brainD, ['--uninstall']);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain('Removed launchd service: com.gbrain.autopilot');
+    expect(existsSync(plist)).toBe(false);
+    expect(lines(launchctlLog)).toContain(`unload ${plist}`);
+  }, 120_000);
+
   test('an unmarked legacy crontab line naming this brain is replaced by its marked line', () => {
     const legacy = `*/5 * * * * '${brainC}/.gbrain/autopilot-run.sh' >> '${home}/.gbrain/autopilot.log' 2>&1`;
     writeFileSync(cronState, FOREIGN + legacy + '\n');
