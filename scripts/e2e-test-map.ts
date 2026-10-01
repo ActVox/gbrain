@@ -31,6 +31,10 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/persistence/orphan-bindings.ts": ["test/e2e/sources-remove-bindings.test.ts"],
   // Fix wave 5 shared commit: preview-bound approved sets in op_checkpoints.
   "src/core/persistence/preview-approval.ts": ["test/e2e/preview-approval-postgres.test.ts"],
+  // Fix wave 5 #5401: projection drain CLI and the budgeted resident drain.
+  "src/commands/projections.ts": ["test/e2e/projection-drain-postgres.test.ts"],
+  "src/core/persistence/consumer.ts": ["test/e2e/projection-drain-postgres.test.ts"],
+  "src/core/persistence/journal.ts": ["test/e2e/projection-drain-postgres.test.ts"],
   "src/core/persistence/deactivation.ts": ["test/e2e/persistence-deactivate-race.test.ts", "test/e2e/fix-wave-4-integration.test.ts"],
   // SkillOpt orchestrator, outcome/resume, models plan + strict mode, spend ledger.
   "src/core/skillopt/**": [
@@ -103,7 +107,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/search-exclude.test.ts",
     "test/e2e/search-swamp.test.ts",
   ],
-  "src/core/page-state/**": ["test/e2e/projection-recovery-parity.test.ts", "test/e2e/projection-readiness-currency.test.ts", "test/e2e/projection-embedding-input-hash.test.ts", "test/e2e/safe-chunk-reseal.test.ts", ...MIGRATION_WAVE_TESTS],
+  "src/core/page-state/**": ["test/e2e/projection-recovery-parity.test.ts", "test/e2e/projection-drain-postgres.test.ts", "test/e2e/projection-readiness-currency.test.ts", "test/e2e/projection-embedding-input-hash.test.ts", "test/e2e/safe-chunk-reseal.test.ts", ...MIGRATION_WAVE_TESTS],
   "src/core/embedding-input-hash.ts": ["test/e2e/projection-embedding-input-hash.test.ts"],
   // Evidence delivery (return_unit): the release-gate leak canaries and the
   // engine / product-path parity suite.
