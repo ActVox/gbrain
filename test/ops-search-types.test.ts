@@ -109,6 +109,23 @@ describe('search op — types param (#3985)', () => {
       searchOp.handler(ctxOf(), { query: 'zebra telescope', types: [''] }),
     ).rejects.toThrow(/no usable page-type/i);
   });
+
+  test('empty and whitespace-only strings are treated as no filter (#5390)', async () => {
+    for (const types of ['', '  ']) {
+      const out = await searchOp.handler(ctxOf(), { query: 'zebra telescope', types });
+      expect(slugsOf(out)).toEqual([
+        'companies/acme-example',
+        'notes/telescope-note',
+        'people/alice-example',
+      ]);
+    }
+  });
+
+  test('a comma-only string still rejects as invalid_params (#5390)', async () => {
+    await expect(
+      searchOp.handler(ctxOf(), { query: 'zebra telescope', types: ',,' }),
+    ).rejects.toThrow(/no usable page-type/i);
+  });
 });
 
 describe('query op — types param (#3985)', () => {
@@ -134,5 +151,17 @@ describe('query op — types param (#3985)', () => {
     await expect(
       queryOp.handler(ctxOf(), { query: 'zebra telescope', types: { person: true } }),
     ).rejects.toThrow(/types.*must be an array/i);
+  });
+
+  test('types: [], "" and "  " run unfiltered; [\'\'] still rejects (#5390)', async () => {
+    await withEnv({ OPENAI_API_KEY: undefined }, async () => {
+      for (const types of [[], '', '  ']) {
+        const out = await queryOp.handler(ctxOf(), { query: 'zebra telescope', expand: false, types });
+        expect(slugsOf(out)).toEqual(['companies/acme-example', 'notes/telescope-note', 'people/alice-example']);
+      }
+      await expect(
+        queryOp.handler(ctxOf(), { query: 'zebra telescope', expand: false, types: [''] }),
+      ).rejects.toThrow(/no usable page-type/i);
+    });
   });
 });

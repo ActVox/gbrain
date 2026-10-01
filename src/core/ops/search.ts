@@ -248,7 +248,8 @@ async function buildRetrievalResponseMeta(
  * and a non-empty list whose entries trim/filter to nothing loudly
  * (invalid_params) instead of silently dropping the filter.
  *
- * #5390: a structurally empty array (`[]`) carries no user intent — it is
+ * #5390: a structurally empty array (`[]`), `""` or a whitespace-only string
+ * carries no user intent — it is
  * what OpenAI-family MCP clients send when an LLM over-fills every optional
  * parameter with a type-zero value. Treat it as absent (no filter applied)
  * rather than throwing, so the search still runs unfiltered. A non-empty
@@ -259,9 +260,11 @@ async function buildRetrievalResponseMeta(
  */
 function normalizeTypesParam(raw: unknown): string[] | undefined {
   if (raw === undefined || raw === null) return undefined;
-  // #5390: structurally empty array is treated as absent, not as a request
-  // for an impossible filter. The CLI typo guard below still catches `',,'`.
+  // #5390: a structurally empty array, an empty string or a whitespace-only
+  // string is treated as absent, not as a request for an impossible filter.
+  // The CLI typo guard below still catches `',,'`, `' , '` and `['']`.
   if (Array.isArray(raw) && raw.length === 0) return undefined;
+  if (typeof raw === 'string' && raw.trim() === '') return undefined;
   const arr = Array.isArray(raw)
     ? raw
     : typeof raw === 'string'
