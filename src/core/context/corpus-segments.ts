@@ -353,6 +353,13 @@ export function writebackOffSidecarJson(): string {
   return JSON.stringify({ ingested_at: new Date().toISOString(), skipped: 'writeback_off' }) + '\n';
 }
 
+/** The TERMINAL self_capture `.ingested` sidecar payload (#5413/#5820) —
+ * written identically by the serve harvest and the sweep, so neither retries
+ * a corpus file captured from gbrain's own claude-cli session. */
+export function selfCaptureSidecarJson(): string {
+  return JSON.stringify({ ingested_at: new Date().toISOString(), skipped: 'self_capture' }) + '\n';
+}
+
 /**
  * Bank one gated user turn as a writeback corpus file: redacted render
  * (NEVER written unscanned — scanner unavailable is a typed skip, matching

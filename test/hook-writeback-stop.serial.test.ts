@@ -14,6 +14,7 @@ import type net from 'node:net';
 
 import { runHook } from '../src/commands/hook.ts';
 import { readHeartbeatTail } from '../src/core/context/hook-heartbeat.ts';
+import { CLAUDE_CLI_CWD_PREFIX } from '../src/core/ai/providers/claude-cli-scratch.ts';
 import { startResolveIpcServer, ensureIpcSecret, resolveSocketPath, type ContextPackRequest, } from '../src/core/context/resolve-ipc.ts';
 import type { TurnContextResult } from '../src/core/context/turn-context.ts';
 
@@ -333,5 +334,27 @@ describe('hook stop — pasted content (#5812)', () => {
     expect(await runHook(['stop'], { ...io, transcriptRoot: t.root, stdin: JSON.stringify({ session_id: 's-wb', transcript_path: t.path }) })).toBe(0);
     expect(bankedTexts()).toEqual([]);
     expect((await wbHeartbeats())[0]?.reason).toBe('no_user_turn');
+  });
+});
+
+describe('hook stop — gbrain claude-cli self-capture (#5820)', () => {
+  const PROMPT = 'Extract the facts from the following page and return them as JSON objects.';
+
+  test('a Stop payload from a claude-cli scratch session banks nothing: by-design self_capture', async () => {
+    writeConfig({ writeback: 'salient' });
+    const t = writeTurns([{ role: 'user', text: PROMPT }, { role: 'assistant', text: '{"facts":[]}' }], `-tmp-${CLAUDE_CLI_CWD_PREFIX}4242`);
+    expect(await runHook(['stop'], { ...io, transcriptRoot: t.root, stdin: JSON.stringify({ session_id: 's-wb', transcript_path: t.path }) })).toBe(0);
+    expect(bankedTexts()).toEqual([]);
+    const hb = await wbHeartbeats();
+    expect(hb.map((e) => [e.reason, e.outcome])).toEqual([['self_capture', 'ok']]);
+  });
+
+  test('the payload cwd fingerprint alone is enough', async () => {
+    writeConfig({ writeback: 'salient' });
+    const t = writeTurns([{ role: 'user', text: PROMPT }, { role: 'assistant', text: '{"facts":[]}' }]);
+    const cwd = join(tmpdir(), `${CLAUDE_CLI_CWD_PREFIX}4242`);
+    expect(await runHook(['stop'], { ...io, transcriptRoot: t.root, stdin: JSON.stringify({ session_id: 's-wb', transcript_path: t.path, cwd }) })).toBe(0);
+    expect(bankedTexts()).toEqual([]);
+    expect((await wbHeartbeats())[0]?.reason).toBe('self_capture');
   });
 });
