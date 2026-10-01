@@ -28,7 +28,8 @@ import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 
 export type InferredVia = 'page' | 'mention';
 export type InferMissReason = 'ambiguous' | 'unverified_match' | 'no_mention' | 'no_page';
-export type InferResult = { slug: string; via: InferredVia } | { slug: null; reason: InferMissReason };
+/** A miss carries the distinct entities the text did resolve to, so a later tier can stay within them. */
+export type InferResult = { slug: string; via: InferredVia } | { slug: null; reason: InferMissReason; resolved: string[] };
 
 export interface InferSubjectInput {
   fact: string;
@@ -87,6 +88,25 @@ const ROLE_AND_TERM_TOKENS = new Set([
   'pr', 'ui', 'ux', 'q1', 'q2', 'q3', 'q4', 'h1', 'h2', 'fy', 'eod', 'eow', 'asap', 'faq', 'tbd', 'n/a',
 ]);
 
+/**
+ * Words that commonly open a note or memory line without naming anyone. Only
+ * these may be ignored at the start of a sentence; any other unresolved
+ * capitalized opener ("Blake joined Acme Example") is treated as a name that
+ * competes with the match.
+ */
+const SENTENCE_OPENERS = new Set([
+  'met', 'meeting', 'talked', 'spoke', 'called', 'emailed', 'texted', 'messaged', 'asked', 'told', 'said', 'says', 'heard',
+  'raised', 'closed', 'signed', 'hired', 'fired', 'lost', 'won', 'launched', 'shipped', 'released', 'announced', 'opened',
+  'moved', 'booked', 'bought', 'sold', 'sent', 'paid', 'got', 'had', 'has', 'have', 'went', 'came', 'saw', 'ate', 'ran', 'slept',
+  'started', 'finished', 'stopped', 'decided', 'agreed', 'declined', 'approved', 'rejected', 'scheduled', 'cancelled', 'canceled',
+  'need', 'needs', 'want', 'wants', 'prefer', 'prefers', 'likes', 'loves', 'hates', 'dislikes', 'thinks', 'believes', 'plans',
+  'remember', 'remind', 'reminder', 'note', 'todo', 'follow', 'followup', 'introduced', 'intro', 'invested', 'joined', 'left',
+  'currently', 'recently', 'previously', 'usually', 'always', 'never', 'often', 'sometimes', 'probably', 'apparently',
+  'not', 'no', 'yes', 'after', 'before', 'during', 'since', 'until', 'while', 'per', 'via', 're', 'fyi', 'update', 'updated',
+  'lunch', 'dinner', 'breakfast', 'coffee', 'drinks', 'call', 'sync', 'standup', 'interview', 'demo', 'pitch', 'board',
+  'favorite', 'favourite', 'birthday', 'anniversary', 'allergic', 'vegetarian', 'vegan', 'lives', 'lived', 'works', 'worked',
+]);
+
 /** Slugs written verbatim in the fact text ("people/alice-example owns the checklist"). */
 const SLUG_IN_TEXT_RE = /(?<![\w/-])[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)+(?![\w/-])/g;
 
@@ -96,7 +116,7 @@ const DISTINCT_ENTITY_LIMIT = 2;
 export async function inferFactSubject(engine: BrainEngine, sourceId: string, input: InferSubjectInput): Promise<InferResult> {
   const candidates: Array<{ query: string; sentenceStart?: true }> = [
     ...[...new Set(input.fact.match(SLUG_IN_TEXT_RE) ?? [])].map(query => ({ query })),
-    ...extractCandidates(input.fact).filter(c => !c.weak),
+    ...extractCandidates(input.fact).filter(c => !c.weak).map(shedOpener),
   ];
   const resolved = new Set<string>();
   const misses: Array<Exclude<StrictResolution, { slug: string }>['miss']> = [];
@@ -112,7 +132,7 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     }
     if (r.slug !== null) {
       resolved.add(r.slug);
-      if (resolved.size >= DISTINCT_ENTITY_LIMIT) return { slug: null, reason: 'ambiguous' };
+      if (resolved.size >= DISTINCT_ENTITY_LIMIT) return { slug: null, reason: 'ambiguous', resolved: [...resolved] };
       continue;
     }
     misses.push(r.miss);
@@ -120,20 +140,27 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     // capitalized sentence opener with no page ("Met", "Raised") is no name
     // evidence; anything else unresolved is a real competing reference.
     if (r.miss === 'not_entity') continue;
-    if (r.miss === 'no_page' && (candidate.sentenceStart || isNonName(candidate.query))) continue;
+    if (r.miss === 'no_page' && (isNonName(candidate.query) || (candidate.sentenceStart && SENTENCE_OPENERS.has(candidate.query.toLowerCase())))) continue;
     vetoed = true;
   }
 
   const page = input.pageSlug ? await liveFactEntityPage(engine, sourceId, input.pageSlug, input.excludePrivate) : null;
   if (page) {
-    if (vetoed || (resolved.size === 1 && !resolved.has(page))) return { slug: null, reason: 'ambiguous' };
+    if (vetoed || (resolved.size === 1 && !resolved.has(page))) return { slug: null, reason: 'ambiguous', resolved: [...resolved] };
     return { slug: page, via: 'page' };
   }
   if (resolved.size === 1 && !vetoed) return { slug: [...resolved][0]!, via: 'mention' };
-  if (resolved.size > 0 || misses.includes('ambiguous')) return { slug: null, reason: 'ambiguous' };
-  if (misses.includes('unverified')) return { slug: null, reason: 'unverified_match' };
-  if (misses.some(m => m === 'no_page')) return { slug: null, reason: vetoed ? 'no_page' : 'no_mention' };
-  return { slug: null, reason: 'no_mention' };
+  const miss = (reason: InferMissReason): InferResult => ({ slug: null, reason, resolved: [...resolved] });
+  if (resolved.size > 0 || misses.includes('ambiguous')) return miss('ambiguous');
+  if (misses.includes('unverified')) return miss('unverified_match');
+  if (misses.some(m => m === 'no_page')) return miss(vetoed ? 'no_page' : 'no_mention');
+  return miss('no_mention');
+}
+
+/** "Joined Acme Example" glues the opener into the name run; resolve the name without it. */
+function shedOpener<T extends { query: string }>(c: T): T {
+  const [first, ...rest] = c.query.split(/\s+/);
+  return rest.length && SENTENCE_OPENERS.has(first!.toLowerCase()) ? { ...c, query: rest.join(' ') } : c;
 }
 
 function isNonName(query: string): boolean {

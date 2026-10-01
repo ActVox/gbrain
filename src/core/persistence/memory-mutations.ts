@@ -90,6 +90,19 @@ async function planRememberTarget(ctx: OperationContext, sourceId: string, sourc
     if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', WRITER_INSPECTION_HINT);
     binding = await claimWorktree(ctx.engine, sourceId, target.root, undefined, undefined, { automatic: true });
   }
+  // An inferred link is optional: a canonical file it could not publish (missing,
+  // or carrying an uncoordinated edit) falls back to the unattributed save
+  // instead of failing the whole remember at preparation.
+  if (inferred && binding && snapshot) {
+    const { prepareFileTarget } = await import('./page-prepare.ts');
+    const { serializePageToMarkdown } = await import('../markdown.ts');
+    try {
+      await prepareFileTarget(ctx.engine, { source_id: sourceId, worktree_id: binding.worktree_id, slug }, snapshot,
+        serializePageToMarkdown(snapshot.page, snapshot.tags));
+    } catch {
+      throw new InferredTargetRejected('ENTITY_LINK_FAILED');
+    }
+  }
   return { slug, authority, snapshot, fence, binding, writeThrough };
 }
 

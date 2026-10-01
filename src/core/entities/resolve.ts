@@ -370,8 +370,10 @@ export async function resolveStrictEntityReference(
       if (!isMissingTrigramError(err)) throw err;
     }
   }
-  if (isBareName(trimmed) && token && (await findPrefixCandidates(engine, source_id, token)).length > 0) {
-    return { slug: null, miss: 'unverified' };
+  if (isBareName(trimmed) && token) {
+    const prefixed = (await findPrefixCandidates(engine, source_id, token)).map(c => c.slug);
+    // Readable scope applies here too, so a private namesake never changes a remote outcome.
+    if ((opts.excludePrivate ? await live(prefixed) : prefixed).length > 0) return { slug: null, miss: 'unverified' };
   }
   return { slug: null, miss: 'no_page' };
 }

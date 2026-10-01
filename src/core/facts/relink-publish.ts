@@ -43,7 +43,7 @@ export interface RelinkIntent { kind: 'relink_facts'; run_id: string; queue_conf
 export interface RelinkGroupOutcome {
   linked: Array<{ id: number; row_num: number }>;
   deduped: Array<{ id: number; duplicate_of: number }>;
-  skipped: Array<{ id: number; reason: 'revision_conflict' | 'withdrawn' }>;
+  skipped: Array<{ id: number; reason: RelinkSkipReason }>;
   queued: number;
 }
 
@@ -52,10 +52,40 @@ export function relinkFactHash(snapshot: FactSnapshot): string {
   return digest(snapshot.value);
 }
 
+export type RelinkSkipReason = 'revision_conflict' | 'withdrawn' | 'claim_unfenceable' | 'visibility_conflict';
+
 type Classified =
   | { id: number; action: 'link'; value: Record<string, unknown> }
   | { id: number; action: 'retire'; duplicateOf: number }
-  | { id: number; action: 'skip'; reason: 'revision_conflict' | 'withdrawn' };
+  | { id: number; action: 'skip'; reason: RelinkSkipReason };
+
+/** The fence cell a relinked row renders as. */
+function fenceRow(v: Record<string, unknown>, rowNum: number, context: string) {
+  return {
+    rowNum, claim: String(v.fact), kind: v.kind as never, confidence: Number(v.confidence ?? 1),
+    visibility: v.visibility as never, notability: (v.notability ?? 'medium') as never,
+    validFrom: formatFenceDate(new Date(String(v.valid_from))),
+    validUntil: v.valid_until ? formatFenceDate(new Date(String(v.valid_until))) : undefined,
+    source: v.source == null ? undefined : String(v.source),
+    context,
+    ...(v.claim_metric ? { claimMetric: String(v.claim_metric) } : {}),
+    ...(v.claim_value != null ? { claimValue: Number(v.claim_value) } : {}),
+    ...(v.claim_unit ? { claimUnit: String(v.claim_unit) } : {}),
+    ...(v.claim_period ? { claimPeriod: String(v.claim_period) } : {}),
+  };
+}
+
+/**
+ * A claim the fence cannot carry unchanged (wrapped in ~~, or otherwise not
+ * parsing back to the same active claim and visibility) would be expired and
+ * re-inserted as a different fact by the page projection, so it is never moved.
+ */
+function roundTrips(v: Record<string, unknown>, context: string): boolean {
+  const parsed = parseFactsFence(upsertFactRow('', fenceRow(v, 1, context)).body);
+  const cell = parsed.facts[0];
+  return parsed.warnings.length === 0 && parsed.facts.length === 1 && cell!.active && cell!.claim === String(v.fact)
+    && cell!.visibility === v.visibility && (cell!.context ?? '') === context;
+}
 
 function isActiveUnlinked(v: Record<string, unknown>, now: number): boolean {
   return v.entity_slug === null && v.row_num === null && v.source_markdown_slug === null && v.expired_at === null
@@ -65,7 +95,7 @@ function isActiveUnlinked(v: Record<string, unknown>, now: number): boolean {
 async function classify(db: BrainEngine, row: WriteRequest, intent: RelinkIntent, lock: boolean): Promise<Classified[]> {
   const current = await readFacts(db, row.source_id, intent.facts.map(f => f.id), lock);
   const now = Date.now();
-  const seen = new Map<string, number>();
+  const seen = new Map<string, { id: number; visibility: string }>();
   const out: Classified[] = [];
   for (const f of intent.facts) {
     const snap = current.find(c => c.id === f.id);
@@ -75,8 +105,23 @@ async function classify(db: BrainEngine, row: WriteRequest, intent: RelinkIntent
     }
     const v = snap.value;
     const visibility = v.visibility as 'private' | 'world';
+    if (!roundTrips(v, appendContextNote(v.context as string | null, f.note))) {
+      out.push({ id: f.id, action: 'skip', reason: 'claim_unfenceable' });
+      continue;
+    }
     if (await isFactWithdrawn(db, row.source_id, visibility, String(v.fact), row.slug)) {
       out.push({ id: f.id, action: 'skip', reason: 'withdrawn' });
+      continue;
+    }
+    // The page projection indexes one active fence row per (claim, source), whatever
+    // its visibility; a second one would be expired right after it was linked.
+    const [same] = await db.executeRaw<{ id: number | string; visibility: string }>(
+      `SELECT id, visibility FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND row_num IS NOT NULL
+         AND expired_at IS NULL AND fact=$3 AND source IS NOT DISTINCT FROM $4 ORDER BY id LIMIT 1`,
+      [row.source_id, row.slug, String(v.fact), v.source ?? null]);
+    if (same) {
+      out.push(same.visibility === visibility ? { id: f.id, action: 'retire', duplicateOf: Number(same.id) }
+        : { id: f.id, action: 'skip', reason: 'visibility_conflict' });
       continue;
     }
     const exact = await decideSingleFact(db, row.source_id,
@@ -85,13 +130,14 @@ async function classify(db: BrainEngine, row: WriteRequest, intent: RelinkIntent
       out.push({ id: f.id, action: 'retire', duplicateOf: Number(exact.candidate.id) });
       continue;
     }
-    const key = JSON.stringify([String(v.fact).replace(/\s+/g, ' ').trim().toLowerCase(), visibility]);
+    const key = JSON.stringify([String(v.fact), v.source ?? null]);
     const earlier = seen.get(key);
     if (earlier !== undefined) {
-      out.push({ id: f.id, action: 'retire', duplicateOf: earlier });
+      out.push(earlier.visibility === visibility ? { id: f.id, action: 'retire', duplicateOf: earlier.id }
+        : { id: f.id, action: 'skip', reason: 'visibility_conflict' });
       continue;
     }
-    seen.set(key, f.id);
+    seen.set(key, { id: f.id, visibility });
     out.push({ id: f.id, action: 'link', value: v });
   }
   return out;
@@ -124,18 +170,7 @@ export async function prepareRelinkMutation(engine: BrainEngine, row: WriteReque
       const v = link.value;
       const rowNum = next++;
       rowNums.set(link.id, rowNum);
-      body = upsertFactRow(body, {
-        rowNum, claim: String(v.fact), kind: v.kind as never, confidence: Number(v.confidence ?? 1),
-        visibility: v.visibility as never, notability: (v.notability ?? 'medium') as never,
-        validFrom: formatFenceDate(new Date(String(v.valid_from))),
-        validUntil: v.valid_until ? formatFenceDate(new Date(String(v.valid_until))) : undefined,
-        source: v.source == null ? undefined : String(v.source),
-        context: appendContextNote(v.context as string | null, byId.get(link.id)!.note),
-        ...(v.claim_metric ? { claimMetric: String(v.claim_metric) } : {}),
-        ...(v.claim_value != null ? { claimValue: Number(v.claim_value) } : {}),
-        ...(v.claim_unit ? { claimUnit: String(v.claim_unit) } : {}),
-        ...(v.claim_period ? { claimPeriod: String(v.claim_period) } : {}),
-      }).body;
+      body = upsertFactRow(body, fenceRow(v, rowNum, appendContextNote(v.context as string | null, byId.get(link.id)!.note))).body;
     }
   }
   const page = links.length ? await (await import('../persistence/page-prepare.ts')).preparePageMutation(engine, { ...row, intent: {

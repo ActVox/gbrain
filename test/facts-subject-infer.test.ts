@@ -65,6 +65,9 @@ const WRITE_CASES: Case[] = [
   { fact: "Northstar Example copied Acme Example's pricing", expect: null },
   { fact: 'Acme Example lost the deal to Bluebird Labs', expect: null },
   { fact: 'Charlie Example and Morgan Example cofounded a fund', expect: null },
+  // An unknown name opening the sentence competes like any other name.
+  { fact: 'Blake joined Acme Example last month', expect: null },
+  { fact: 'Joined Acme Example as head of sales', expect: 'companies/acme-example' },
   // Bare first names are never guessed, and veto a real match.
   { fact: 'Bob said the demo went well', expect: null },
   { fact: 'Bob joined Acme Example last month', expect: null },
@@ -138,19 +141,19 @@ describe('inferFactSubject precision fixture', () => {
 describe('inferFactSubject reasons', () => {
   test('veto by a name with no page reports ambiguous', async () => {
     expect(await inferFactSubject(engine, 'default', { fact: "Northstar Example copied Acme Example's pricing", mode: 'write' }))
-      .toEqual({ slug: null, reason: 'ambiguous' });
+      .toMatchObject({ slug: null, reason: 'ambiguous' });
   });
   test('a bare first name with a prefix candidate reports unverified_match', async () => {
     expect(await inferFactSubject(engine, 'default', { fact: 'Bob said the demo went well', mode: 'write' }))
-      .toEqual({ slug: null, reason: 'unverified_match' });
+      .toMatchObject({ slug: null, reason: 'unverified_match' });
   });
   test('a real name with no page reports no_page', async () => {
     expect(await inferFactSubject(engine, 'default', { fact: 'Bluebird Labs raised a seed round', mode: 'write' }))
-      .toEqual({ slug: null, reason: 'no_page' });
+      .toMatchObject({ slug: null, reason: 'no_page' });
   });
   test('no names reports no_mention', async () => {
     expect(await inferFactSubject(engine, 'default', { fact: 'slept 7 hours', mode: 'write' }))
-      .toEqual({ slug: null, reason: 'no_mention' });
+      .toMatchObject({ slug: null, reason: 'no_mention' });
   });
   test('mention and page tiers are labeled', async () => {
     expect(await inferFactSubject(engine, 'default', { fact: 'Acme Example raised a seed round', mode: 'write' }))
@@ -174,9 +177,23 @@ describe('inferFactSubject scope', () => {
       const remote = await inferFactSubject(engine, 'default', { fact: 'Charlie Example wants weekly check-ins', mode: 'write', excludePrivate: true });
       expect(remote).toEqual({ slug: 'people/charlie-example', via: 'mention' });
       const local = await inferFactSubject(engine, 'default', { fact: 'Charlie Example wants weekly check-ins', mode: 'write' });
-      expect(local).toEqual({ slug: null, reason: 'ambiguous' });
+      expect(local).toMatchObject({ slug: null, reason: 'ambiguous' });
     } finally {
       await engine.executeRaw(`DELETE FROM pages WHERE slug = 'companies/charlie-example'`);
+    }
+  });
+
+  test('a private bare-name namesake does not change the remote outcome', async () => {
+    await page('people/secret-example', 'Secret Example', 'person', 'visibility: private\n');
+    try {
+      const remote = await inferFactSubject(engine, 'default', { fact: 'Secret said Acme Example is hiring', mode: 'write', excludePrivate: true });
+      const local = await inferFactSubject(engine, 'default', { fact: 'Secret said Acme Example is hiring', mode: 'write' });
+      expect(local).toMatchObject({ slug: null, reason: 'ambiguous' });
+      await engine.executeRaw(`DELETE FROM pages WHERE slug = 'people/secret-example'`);
+      const without = await inferFactSubject(engine, 'default', { fact: 'Secret said Acme Example is hiring', mode: 'write', excludePrivate: true });
+      expect(remote).toEqual(without);
+    } finally {
+      await engine.executeRaw(`DELETE FROM pages WHERE slug = 'people/secret-example'`);
     }
   });
 

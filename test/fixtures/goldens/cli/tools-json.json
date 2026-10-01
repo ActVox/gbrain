@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 200378,
-    "stdoutSha256": "c23df35de49ce6ca01006bf4db2ce92fb57d2f37f089f82fef292c047982b00e",
+    "stdoutBytes": 200684,
+    "stdoutSha256": "a64cb8975202a47167ce7df170900e3567b69b914ff4843a013a811bac025822",
     "toolNames": [
       "remember",
       "entity",
@@ -168,6 +168,7 @@
           "expected_revision": "string?",
           "fact": "string",
           "force": "boolean?",
+          "infer_entity": "boolean?",
           "kind": "string?",
           "provenance": "string",
           "request_id": "string?",
@@ -191,6 +192,10 @@
             },
             "force": {
               "description": "Explicitly overwrite the current revision. Mutually exclusive with expected_revision; does not bypass authorization or the empty-content guard.",
+              "type": "boolean"
+            },
+            "infer_entity": {
+              "description": "Default true. When `entity` is omitted, link the fact to the one entity page the text names exactly (response `entity_inferred: \"mention\"`); pass false to save it unattributed.",
               "type": "boolean"
             },
             "kind": {

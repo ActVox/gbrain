@@ -127,12 +127,12 @@ export async function runFactsRelink(engine: BrainEngine, opts: RelinkOptions): 
 
   // Free tiers.
   const planned: Planned[] = [];
-  const leftovers: Array<Candidate & { freeReason: RelinkReason }> = [];
+  const leftovers: Array<Candidate & { freeReason: RelinkReason; resolved: string[] }> = [];
   for (const [i, c] of rows.entries()) {
     opts.signal?.throwIfAborted();
     const r = await inferFactSubject(engine, opts.sourceId, { fact: c.fact, pageSlug: recordedPageSlug(c.context, c.source), mode: 'relink' });
     if (r.slug !== null) planned.push({ id: c.id, slug: r.slug, tier: r.via, model: null });
-    else leftovers.push({ ...c, freeReason: r.reason });
+    else leftovers.push({ ...c, freeReason: r.reason, resolved: r.resolved });
     opts.onProgress?.(i + 1, rows.length);
   }
 
@@ -193,7 +193,7 @@ export async function runFactsRelink(engine: BrainEngine, opts: RelinkOptions): 
 }
 
 async function runModelTier(engine: BrainEngine, opts: RelinkOptions, report: RelinkReport,
-  leftovers: Array<Candidate & { freeReason: RelinkReason }>, planned: Planned[],
+  leftovers: Array<Candidate & { freeReason: RelinkReason; resolved: string[] }>, planned: Planned[],
   skip: (reason: RelinkReason, c: Candidate) => void): Promise<void> {
   if (opts.llm === false || leftovers.length === 0) {
     for (const c of leftovers) skip(c.freeReason, c);
@@ -204,6 +204,8 @@ async function runModelTier(engine: BrainEngine, opts: RelinkOptions, report: Re
   for (const c of leftovers) {
     const prior = memo.get(c.id);
     if (prior) skip(prior as RelinkReason, c);
+    // Two entities resolved in the text is real ambiguity; the model would only be picking one.
+    else if (c.resolved.length > 1) skip(c.freeReason, c);
     else if (c.visibility === 'private' && !opts.includePrivate) { report.private_excluded_from_model += 1; skip(c.freeReason, c); }
     else eligible.push(c);
   }
@@ -226,9 +228,10 @@ async function runModelTier(engine: BrainEngine, opts: RelinkOptions, report: Re
   opts.onModelStart?.(`model tier: ${eligible.length} fact(s) to ${model}, estimated $${(report.estimated_model_cost_usd ?? 0).toFixed(4)}` +
     `${opts.maxUsd == null ? ' (uncapped)' : `, cap $${opts.maxUsd.toFixed(2)}`}`);
 
-  const { BudgetTracker, BudgetExhausted } = await import('../budget/budget-tracker.ts');
+  const { BudgetTracker, BudgetExhausted, loadPricingOverrides } = await import('../budget/budget-tracker.ts');
   const { withBudgetTracker } = await import('../ai/gateway.ts');
-  const tracker = new BudgetTracker({ label: 'facts:relink', ...(opts.maxUsd == null ? {} : { maxCostUsd: opts.maxUsd }) });
+  const tracker = new BudgetTracker({ label: 'facts:relink', pricingOverrides: await loadPricingOverrides(engine),
+    ...(opts.maxUsd == null ? {} : { maxCostUsd: opts.maxUsd }) });
   const verdicts: ModelVerdict[] = [];
   let i = 0;
   try {
@@ -253,6 +256,9 @@ async function runModelTier(engine: BrainEngine, opts: RelinkOptions, report: Re
     for (const c of eligible.slice(i)) if (!judged.has(c.id)) skip('budget_exhausted', c);
   }
   report.spend_usd = Number(tracker.totalSpent.toFixed(6));
+  // The gateway records a call's real cost after it returns; a last call that
+  // went over the cap surfaces here rather than at a next reservation.
+  if (opts.maxUsd != null && tracker.totalSpent > opts.maxUsd) report.stopped ??= 'budget_exhausted';
   const byId = new Map(eligible.map(c => [c.id, c]));
   for (const v of verdicts) {
     if (v.slug !== null) { planned.push({ id: v.id, slug: v.slug, tier: 'model', model }); continue; }

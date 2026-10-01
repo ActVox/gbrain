@@ -97,6 +97,19 @@ test(`${backend}: a bound write-through source writes the canonical file`, async
   expect(file.find(f => f.rowNum === rowNum)?.claim).toBe('Acme Example raised a seed round');
 }));
 
+test(`${backend}: remember falls back when the inferred entity's canonical file is missing`, async () => withEnv({ GBRAIN_HOME: home }, async () => {
+  await seedEntity('companies/quartz-example', 'Quartz Example', true);
+  const { rmSync: rm } = await import('node:fs');
+  rm(join(repo, 'companies/quartz-example.md'));
+  const { operations } = await import('../src/core/operations.ts');
+  const rememberOp = operations.find(o => o.name === 'remember')!;
+  const ctx = { engine, config: { engine: engine.kind }, logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote: false, sourceId: 'default' } as any;
+  const saved = await rememberOp.handler(ctx, { fact: 'Quartz Example renewed its contract', provenance: 'chat' }) as Record<string, any>;
+  const outcome = saved.write_request?.outcome ?? saved;
+  expect(outcome.entity_slug ?? null).toBeNull();
+  expect(outcome.warnings).toEqual(['ENTITY_LINK_FAILED']);
+}));
+
 test(`${backend}: a managed brain publishes the same way through the coordinator`, async () => withEnv({ GBRAIN_HOME: home }, async () => {
   await seedEntity('companies/basalt-example', 'Basalt Example', true);
   await registerLocalWriter(engine, 'cli');

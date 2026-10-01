@@ -66,6 +66,11 @@ function parseSubjects(text: string, size: number): Map<number, string | null> |
   }
 }
 
+function quotesWholeName(fact: string, subject: string): boolean {
+  const escaped = subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(fact);
+}
+
 /** Rough pre-call estimate for dry runs and the provider line: ~4 chars per token plus the prompt. */
 export function estimateModelTokens(facts: Array<{ fact: string }>): { input: number; output: number } {
   const chars = facts.reduce((n, f) => n + f.fact.length + 20, 0);
@@ -79,7 +84,7 @@ export function estimateModelTokens(facts: Array<{ fact: string }>): { input: nu
  * output becomes `model_unparseable` for the whole batch.
  */
 export async function judgeBatch(engine: BrainEngine, sourceId: string, model: string,
-  batch: Array<{ id: number; fact: string }>, signal?: AbortSignal): Promise<ModelVerdict[]> {
+  batch: Array<{ id: number; fact: string; resolved?: string[] }>, signal?: AbortSignal): Promise<ModelVerdict[]> {
   const { chat } = await import('../ai/gateway.ts');
   const result = await chat({
     model, system: SYSTEM, messages: [{ role: 'user', content: render(batch) }],
@@ -93,9 +98,12 @@ export async function judgeBatch(engine: BrainEngine, sourceId: string, model: s
     const subject = subjects.get(i);
     if (!subject) { out.push({ id: f.id, slug: null, reason: 'no_subject' }); continue; }
     // The answer must quote the fact: an injected or invented name never links.
-    if (!f.fact.toLowerCase().includes(subject.toLowerCase())) { out.push({ id: f.id, slug: null, reason: 'unverified_match' }); continue; }
+    if (!quotesWholeName(f.fact, subject)) { out.push({ id: f.id, slug: null, reason: 'unverified_match' }); continue; }
     const r = await resolveStrictEntityReference(engine, sourceId, subject, { sameName: true });
-    if (r.slug !== null) out.push({ id: f.id, slug: r.slug });
+    // When the free tiers already resolved an entity in the text, the model may
+    // only confirm it: it never picks an entity the deterministic veto did not see.
+    if (r.slug !== null && f.resolved?.length && !f.resolved.includes(r.slug)) out.push({ id: f.id, slug: null, reason: 'ambiguous' });
+    else if (r.slug !== null) out.push({ id: f.id, slug: r.slug });
     else out.push({ id: f.id, slug: null, reason: r.miss === 'ambiguous' ? 'ambiguous' : r.miss === 'no_page' ? 'no_page' : 'unverified_match' });
   }
   return out;
