@@ -38,6 +38,8 @@ export interface RepairItem {
 }
 
 export interface RepairPlan {
+  /** Operator warnings the preview prints before its items (for example an older writer that can undo the repair). */
+  warnings?: string[];
   items: RepairItem[];
   /** Counts of rows the kind keeps and reports instead of repairing. */
   residuals: Record<string, number>;
@@ -74,6 +76,7 @@ export interface RepairItemOutcome { applied: boolean; outcome: string; reason?:
 export interface RepairResult {
   kind: RepairKind;
   mode: 'dry_run' | 'apply';
+  warnings?: string[];
   scope: RepairScope;
   affected: number;
   sample: string[];
@@ -193,7 +196,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
     cost: { lifetime_ids: admits, receipt_bytes: admits * RECEIPT_BYTES, embedding_pages: handler.embeds === false ? 0 : pending.length,
       embedding_usd: embeddingUsd(pending.reduce((sum, item) => sum + item.chars, 0), opts.embeddingModel) },
     capacity: counters.map(({ scope: key, resource, used, limit, stop_at }) => ({ scope: key, resource, used, limit, stop_at })),
-    resumed_from: resumed, applied: 0, skipped: 0, complete: false,
+    resumed_from: resumed, applied: 0, skipped: 0, complete: false, ...(plan.warnings?.length ? { warnings: plan.warnings } : {}),
     apply_command: `gbrain repair ${handler.kind}${opts.sourceFlag ? ` --source ${opts.sourceFlag}` : ''}${(opts.applyArgs ?? []).map(arg => ` ${arg}`).join('')}`
       + `${opts.includeAmbiguous ? ' --include-ambiguous' : ''} --apply${plan.preview_hash ? ` --expect ${plan.preview_hash}` : ''}`,
   };

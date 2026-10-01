@@ -147,6 +147,12 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     count: d => Number(d.stale_effects ?? 0),
     impact: 'A committed write still has a stale queued or failed embedding effect that blocks compaction and activation',
     run: async (engine, scope) => (await import('./checks/stale-embedding-effects.ts')).staleEmbeddingEffectsCheck(engine, scope.sourceIds),
+  },  {
+    id: 'extractor_facts_expired', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Restoring expired extractor facts is a host-side, explicit-only repair.',
+    count: d => Number(d.evidenced ?? 0) + Number(d.ambiguous ?? 0),
+    impact: 'Some conversation-extractor facts were expired by the pre-v0.60.11.0 canonical projection and recall no longer returns them',
+    run: async (engine, scope) => (await import('./checks/extractor-facts.ts')).extractorFactsCheck(engine, scope.sourceIds),
   },
 ];
 

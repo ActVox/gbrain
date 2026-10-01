@@ -39,6 +39,15 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/commands/projections.ts": ["test/e2e/projection-drain-postgres.test.ts"],
   "src/core/persistence/consumer.ts": ["test/e2e/projection-drain-postgres.test.ts"],
   "src/core/persistence/journal.ts": ["test/e2e/projection-drain-postgres.test.ts"],
+  // Fix wave 5 (#5731): the extractor-facts restore and its doctor check.
+  "src/core/repair/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts"],
+  "src/commands/doctor/checks/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts"],
+  // Fix wave 5: managed writeSingleFact keeps an absent entity's fallback slug (attribute_fallback).
+  "src/core/facts/write-single.ts": ["test/e2e/managed-write-single-attribution-postgres.test.ts", "test/e2e/managed-facts-writers.test.ts"],
+  "src/core/facts/managed-fact-write.ts": ["test/e2e/managed-write-single-attribution-postgres.test.ts", "test/e2e/managed-facts-writers.test.ts"],
+  // Fix wave 5 (#5409): read-only mirror sources.
+  "src/core/persistence/mirror-read-only.ts": ["test/e2e/sources-mirror-read-only-postgres.test.ts"],
+  "src/commands/sources-mirror.ts": ["test/e2e/sources-mirror-read-only-postgres.test.ts"],
   "src/core/persistence/deactivation.ts": ["test/e2e/persistence-deactivate-race.test.ts", "test/e2e/fix-wave-4-integration.test.ts"],
   // SkillOpt orchestrator, outcome/resume, models plan + strict mode, spend ledger.
   "src/core/skillopt/**": [

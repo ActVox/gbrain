@@ -169,7 +169,30 @@ gbrain sources attach <id>     Write .gbrain-source in CWD (like kubectl context
 gbrain sources detach          Remove .gbrain-source from CWD.
 gbrain sources federate <id>
 gbrain sources unfederate <id>
+gbrain sources mirror-readonly <id>
+gbrain sources mirror-writable <id>
 ```
+
+### Read-only mirror sources
+
+A source whose Git remote is the source of truth (a code or docs repository
+you keep current with `git pull --ff-only`) can be marked a read-only mirror:
+
+```bash
+gbrain sources mirror-readonly <id>
+```
+
+On a managed brain, sync then imports canonical metadata (a default title,
+type, tags kept in the brain) into the database only and never writes a file
+back into that checkout, so `git status` stays clean and the next fast-forward
+pull succeeds. A page write into the source (`put_page`, a timeline entry, a
+maintenance write) is stored database-only too; its receipt says
+`storage: "database_only"` with `write_through.skipped: "mirror_read_only"`.
+`gbrain sources list --json` shows `mirror_read_only` per source. Undo it with
+`gbrain sources mirror-writable <id>`; files are written again from the next
+write on, except for pages created while the source was a mirror: those have
+no file in the checkout and stay database-only. Git effects of a mirror's
+writes (for example a `forget`) complete as skipped. The flag is off by default.
 
 ## The git requirement for --path sources
 

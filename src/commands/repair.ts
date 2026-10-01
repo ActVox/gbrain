@@ -105,6 +105,7 @@ export function parseRepairArgs(args: string[]): RepairArgs {
 
 function human(result: RepairResult): string {
   const lines = [`${result.kind}: ${result.affected} item(s) ${result.mode === 'apply' ? 'pending before this run' : 'to repair'}`];
+  for (const warning of result.warnings ?? []) lines.push(`  WARNING: ${warning}`);
   if (result.sample.length) lines.push(`  e.g. ${result.sample.join(', ')}`);
   const residuals = Object.entries(result.residuals).map(([k, v]) => `${k}=${v}`).join(', ');
   if (residuals) lines.push(`  ${residuals}`);

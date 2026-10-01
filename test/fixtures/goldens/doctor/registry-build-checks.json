@@ -198,12 +198,20 @@
         "name": "orphan_clones"
       },
       {
+        "category": "brain",
+        "name": "embedding_key_source"
+      },
+      {
         "category": "ops",
         "name": "pglite_data_dir"
       },
       {
         "category": "brain",
         "name": "pglite_scratch_probe"
+      },
+      {
+        "category": "brain",
+        "name": "text_projection_readiness"
       },
       {
         "category": "ops",
@@ -228,10 +236,6 @@
       {
         "category": "meta",
         "name": "pages_upsert_arbiter"
-      },
-      {
-        "category": "brain",
-        "name": "text_projection_readiness"
       },
       {
         "category": "ops",
@@ -364,6 +368,10 @@
       {
         "category": "ops",
         "name": "stale_embedding_effects"
+      },
+      {
+        "category": "brain",
+        "name": "extractor_facts_expired"
       },
       {
         "category": "brain",

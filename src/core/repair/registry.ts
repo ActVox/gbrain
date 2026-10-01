@@ -102,8 +102,11 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'A later extraction that produces a retired atom again restores it. Never touches imported or file-bound atoms.',
   },
   'extractor-facts': {
-    handler: extractorFactsRepair, embeds: 'none', checks: [], explicit_only: true,
-    summary: 'Restore extractor facts expired by the pre-fix re-extraction (#5731). Not implemented in this build.',
+    handler: extractorFactsRepair, embeds: 'none', checks: ['extractor_facts_expired'], explicit_only: true,
+    summary: 'Restore conversation-extractor facts that the pre-v0.60.11.0 canonical projection expired (#5731). Restores only facts with receipt evidence '
+      + '(a committed write of the page completed in the same transaction, by an older consumer); --include-ambiguous widens the hashed set to facts '
+      + 'without that evidence. Preview-bound: --apply --expect <hash> restores exactly the previewed set; a fact that changed since reports '
+      + 'changed_since_preview and stays expired. Superseded, withdrawn and duplicated facts are never restored. Database-only; no page is rewritten.',
   },
 };
 

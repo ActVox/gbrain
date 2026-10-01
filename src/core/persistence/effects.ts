@@ -35,6 +35,7 @@ import { SYNC_SKIP_FILES } from '../sync.ts';
 import { recoveryStagingFile } from './staging.ts';
 import { selectEffectRecoveries } from './effect-recovery-scan.ts';
 import { nativeFileTarget } from './native-file-target.ts';
+import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 export interface EffectWorkerOptions {
   hostId: string;
@@ -174,6 +175,8 @@ async function singleFileGitTarget(engine: BrainEngine, effect: PersistenceEffec
 async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: WorktreeBinding | null, opts: EffectWorkerOptions,
   attempt: EffectAttempt, hardened: boolean | undefined): Promise<void> {
   if (!binding?.local_path) { await completeEffect(engine, effect, { git: 'skipped', reason: 'no_repo_configured' }); return; }
+  // #5409: a read-only mirror's checkout is never committed to; its publications wrote no file.
+  if (await sourceMirrorReadOnly(engine, effect.source_id)) { await completeEffect(engine, effect, { git: 'skipped', reason: 'mirror_read_only' }); return; }
   const root = binding.local_path;
   if (!targetedWithdrawalEffect(effect) && !effect.data.source_scan) {
     const target = await singleFileGitTarget(engine, effect, { ...binding, local_path: root }, attempt);

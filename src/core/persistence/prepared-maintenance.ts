@@ -122,6 +122,16 @@ export async function submitMaintenanceIntent(engine: BrainEngine, authority: Ma
   return submitMaintenance(engine, authority, slug, intent, requestId ?? maintenanceRequestId({ authority: authority.writer, slug, intent }));
 }
 
+/**
+ * A database-only maintenance request under a caller-chosen request id: a
+ * preview-approved item (`gbrain repair extractor-facts`) replays its own id
+ * after a crash. No worktree is bound, so no file is staged.
+ */
+export async function submitDatabaseMaintenanceIntent(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
+  intent: Record<string, unknown> & { kind: string; expected_revision: string | null }, requestId: string): Promise<Record<string, unknown>> {
+  return submitMaintenance(engine, authority, slug, intent, requestId, false);
+}
+
 export async function stampMaintenancePage(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
   cycleDate: string, rawSource?: string): Promise<void> {
   const snapshot = await engine.readPageSnapshot(slug, { sourceId: authority.writer.sourceId });
@@ -263,6 +273,7 @@ async function prepareFactFenceAdoption(engine: BrainEngine, row: WriteRequest, 
 
 export async function prepareMaintenanceMutation(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   if (row.authority.remote) throw new OperationError('permission_denied', 'Remote maintenance publication is not supported.');
+  if (row.intent?.kind === 'managed_maintenance_restore_extractor_facts') return (await import('../repair/extractor-facts.ts')).prepareExtractorFactsRestore(engine, row);
   if (row.intent?.kind === 'managed_maintenance_page') {
     const prepared = await preparePageMutation(engine, row.intent.expected_revision === null
       ? { ...row, intent: { ...row.intent, expected_revision: undefined } } : row, config);
