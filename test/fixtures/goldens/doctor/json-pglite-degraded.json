@@ -387,7 +387,7 @@
         },
         {
           "category": "meta",
-          "message": "812 column(s) verified against live schema",
+          "message": "810 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
