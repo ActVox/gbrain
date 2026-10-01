@@ -64,5 +64,5 @@ src/core/sources-ops.ts	addSource	317	seed: W5 baseline, refactor wave 1 (decomp
 src/core/think/index.ts	runThink	450	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/transcripts/ingest.ts	runTranscriptsIngest	317	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/workspace-push.ts	workspacePush	312	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
-src/mcp/dispatch.ts	dispatchToolCall	322	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
+src/mcp/dispatch.ts	dispatchToolCall	325	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +3 eval wave N5-1: hot-memory invalidation after mutating ops (success and failure paths)
 src/mcp/http-transport.ts	startHttpTransport	408	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)

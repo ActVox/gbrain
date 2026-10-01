@@ -707,9 +707,7 @@ export async function dispatchToolCall(
         return op.handler(ctx, safeParams);
       })
       : await op.handler(ctx, safeParams);
-    // A committed write (forget, remember, any fact or page mutation) must not
-    // be answered from hot memory built before it, on this response or later.
-    // Every MCP transport dispatches here.
+    // Hot memory built before a write (forget, remember, …) is never served after it, on every transport.
     if (op.mutating) invalidateHotMemoryForEngine(engine);
     // [E4] verb success metrics: budget drops + entity hit/miss when present.
     {
@@ -771,8 +769,7 @@ export async function dispatchToolCall(
     return out;
   } catch (e: unknown) {
     logVerb(false);
-    // A refused or failed write may still have committed part of its work.
-    if (op.mutating) invalidateHotMemoryForEngine(engine);
+    if (op.mutating) invalidateHotMemoryForEngine(engine); // a failed write may have committed part of its work
     if (e instanceof OperationError) {
       return { content: [{ type: 'text', text: JSON.stringify(e.toJSON(), null, 2) }], isError: true };
     }
