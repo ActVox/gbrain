@@ -69,6 +69,7 @@ import { importFromContent } from '../import-file.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
 import { corpusTextForExtraction } from '../context/corpus-segments.ts';
+import { claudeCliSelfSessionIds } from '../ai/providers/claude-cli-scratch.ts';
 import { BudgetExhausted, BudgetTracker, loadPricingOverrides } from '../budget/budget-tracker.ts';
 import { resolveExtractAtomsCostGate, resolveEmbedModelForCostGate } from './extract-atoms-cost-gate.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
@@ -690,7 +691,7 @@ export async function runPhaseExtractAtoms(
       if (corpusDir !== undefined) {
         const discovered = discoverTranscripts({
           corpusDir,
-          meetingTranscriptsDir: meetingDir,
+          meetingTranscriptsDir: meetingDir, selfCaptureSessionIds: claudeCliSelfSessionIds(), // #5820, as synthesize
         });
         transcripts = discovered.map((d) => ({
           filePath: d.filePath,
