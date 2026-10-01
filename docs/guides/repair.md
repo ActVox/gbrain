@@ -828,12 +828,11 @@ whether or not the drain failed:
 | autopilot, systemd | `systemctl --user stop gbrain-autopilot.service && { gbrain projections drain; systemctl --user start gbrain-autopilot.service; }` |
 | a manual `gbrain serve` | stop it (`kill <pid>`), run `gbrain projections drain`, then start `gbrain serve` again |
 
-The refusal prints these commands filled in (with `--brain <id>` for a mounted
-brain). The autopilot launchd label follows `GBRAIN_AUTOPILOT_LABEL` when set.
-The autopilot rows name the default brain's job: for a brain under another
-`GBRAIN_HOME`, take its job names from
-`GBRAIN_HOME=<brain parent> gbrain autopilot --status --json` (`launchd_label`,
-`systemd_unit`) instead.
+The rows above show the default brain's names. The refusal prints these
+commands filled in: with `--brain <id>` for a mounted brain, and with this
+brain's own autopilot job (or the shared job an older install still runs it
+from) for a brain under another `GBRAIN_HOME`. The autopilot launchd label
+follows `GBRAIN_AUTOPILOT_LABEL` when set.
 
 ## Related
 
