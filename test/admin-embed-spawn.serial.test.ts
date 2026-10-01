@@ -158,10 +158,10 @@ describe('admin embed E2E — /admin served from embedded manifest (v0.36.1.x #1
     });
     expect(res.status).toBe(200);
     const html = await res.text();
-    // The actual admin/dist/index.html declares <title>GBrain Admin</title>
+    // The actual admin/dist/index.html declares <title>ActVox · Team brain</title>
     // and mounts the SPA on <div id="root">. Both must be present, otherwise
     // we're not serving the embedded asset.
-    expect(html).toContain('GBrain Admin');
+    expect(html).toContain('ActVox · Team brain');
     expect(html).toContain('<div id="root">');
     // Content-Type is text/html, not application/octet-stream (which would
     // mean the mime lookup in ADMIN_ASSETS regressed).
@@ -185,7 +185,7 @@ describe('admin embed E2E — /admin served from embedded manifest (v0.36.1.x #1
     });
     expect(followed.status).toBe(200);
     const html = await followed.text();
-    expect(html).toContain('GBrain Admin');
+    expect(html).toContain('ActVox · Team brain');
     expect(html).toContain('<div id="root">');
   }, 90_000);
 
@@ -195,7 +195,7 @@ describe('admin embed E2E — /admin served from embedded manifest (v0.36.1.x #1
     });
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain('GBrain Admin');
+    expect(html).toContain('ActVox · Team brain');
   }, 90_000);
 
   test('GET /admin/agents (SPA-routed deep link) falls back to index.html', async () => {
@@ -206,8 +206,24 @@ describe('admin embed E2E — /admin served from embedded manifest (v0.36.1.x #1
     const html = await res.text();
     // SPA fallback: any unmatched /admin/* path serves index.html so
     // client-side routing takes over.
-    expect(html).toContain('GBrain Admin');
+    expect(html).toContain('ActVox · Team brain');
     expect(html).toContain('<div id="root">');
+  }, 90_000);
+
+  test('brand icons are embedded image assets rather than the SPA fallback', async () => {
+    for (const [name, mime, signature] of [
+      ['favicon.ico', 'image/x-icon', [0, 0, 1, 0]],
+      ['apple-touch-icon.png', 'image/png', [137, 80, 78, 71]],
+    ] as const) {
+      const response = await fetch(`http://127.0.0.1:${server.port}/admin/brand/${name}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain(mime);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      expect(Array.from(bytes.slice(0, 4))).toEqual([...signature]);
+      expect(bytes.byteLength).toBeGreaterThan(100);
+    }
   }, 90_000);
 
   test('GET /admin/api/stats (API route) is NOT swallowed by the SPA fallback — returns auth challenge', async () => {

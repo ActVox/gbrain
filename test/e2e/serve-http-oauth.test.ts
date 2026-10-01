@@ -619,14 +619,14 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
   test('admin dashboard serves SPA index.html (not Express error)', async () => {
     const res = await fetch(`${BASE}/admin/`);
     const html = await res.text();
-    expect(html).toContain('GBrain Admin');
+    expect(html).toContain('ActVox · Team brain');
     expect(html).not.toContain('<pre>Cannot GET');
   });
 
   test('admin sub-routes serve SPA fallback', async () => {
     const res = await fetch(`${BASE}/admin/agents`);
     const html = await res.text();
-    expect(html).toContain('GBrain Admin');
+    expect(html).toContain('ActVox · Team brain');
   });
 
   test('admin source access APIs enumerate sources and rescope an OAuth client', async () => {

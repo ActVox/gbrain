@@ -1,6 +1,6 @@
 import { test as base, expect, type Page } from '@playwright/test';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type AddressInfo } from 'node:net';
@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 interface BrainFixture { url: string; ownerToken: string; loginLink: (oauthRequest?: string) => Promise<string> }
 export const test = base.extend<{}, { brain: BrainFixture }>({
   brain: [async ({}, use) => {
-    const directory = await mkdtemp(join(tmpdir(), 'gbrain-admin-browser-'));
+    // macOS exposes TMPDIR through /var -> /private/var. Production credential
+    // delivery rejects symlink ancestors; use the actual isolated fixture path.
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'gbrain-admin-browser-')));
     const listener = createServer();
     await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
     const port = (listener.address() as AddressInfo).port;
