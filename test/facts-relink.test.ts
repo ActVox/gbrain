@@ -5,7 +5,7 @@
  * runs write nothing, and the model tier is memoized, capped and verified.
  * PGLite, database-only source (no repo). Synthetic data only.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { runFactsRelink } from '../src/core/facts/relink.ts';
@@ -14,6 +14,7 @@ import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
 import { readFacts } from '../src/core/persistence/prepared-maintenance.ts';
 import { relinkFactHash, submitRelinkGroup } from '../src/core/facts/relink-publish.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { __setChatTransportForTests, configureGateway, resetGateway, type ChatOpts, type ChatResult } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
@@ -27,19 +28,26 @@ async function unlinked(fact: string, extra: Record<string, unknown> = {}): Prom
 const row = async (id: number) => (await engine.executeRaw<Record<string, unknown>>('SELECT * FROM facts WHERE id = $1', [id]))[0]!;
 const relink = (extra: Record<string, unknown> = {}) => runFactsRelink(engine, { sourceId: 'default', config, llm: false, ...extra });
 
-beforeEach(async () => {
+beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+}, 120_000);
+
+afterAll(async () => {
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
   await engine.setConfig('decide.slots.conflict.mode', 'off');
   await importFromContent(engine, 'companies/acme-example', '---\ntitle: Acme Example\ntype: company\n---\n\n# Acme Example\n\nA company.\n', { noEmbed: true });
   await importFromContent(engine, 'people/alice-example', '---\ntitle: Alice Example\ntype: person\n---\n\n# Alice Example\n', { noEmbed: true });
 });
 
-afterEach(async () => {
+afterEach(() => {
   __setChatTransportForTests(null);
   resetGateway();
-  await engine.disconnect();
 });
 
 describe('relink free tiers', () => {
