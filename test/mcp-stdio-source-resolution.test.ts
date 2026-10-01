@@ -52,7 +52,13 @@ describe('stdio MCP source resolution', () => {
         dir,
       );
 
-      expect(scope).toEqual({ sourceId: 'team-alpha', tier: 'dotfile' });
+      // #5081: an explicit tier carries the explicit-read binding; no source
+      // in this fixture is federated, so it admits only the bound source.
+      expect(scope).toEqual({
+        sourceId: 'team-alpha',
+        tier: 'dotfile',
+        explicitReadBinding: { sourceId: 'team-alpha', via: '.gbrain-source', sourceIds: ['team-alpha'], optedOut: [] },
+      });
     });
   });
 
@@ -67,7 +73,11 @@ describe('stdio MCP source resolution', () => {
         dir,
       );
 
-      expect(scope).toEqual({ sourceId: 'env-source', tier: 'env' });
+      expect(scope).toEqual({
+        sourceId: 'env-source',
+        tier: 'env',
+        explicitReadBinding: { sourceId: 'env-source', via: 'GBRAIN_SOURCE', sourceIds: ['env-source'], optedOut: [] },
+      });
     });
   });
 });
