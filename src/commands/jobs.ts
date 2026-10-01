@@ -167,6 +167,7 @@ USAGE
   gbrain jobs list [--status S] [--queue Q] [--limit N] [--json]
   gbrain jobs get <id> [--json]
   gbrain jobs cancel <id>
+  gbrain jobs cancel --select "status=waiting|paused,name=synthesize" [--expect <hash> --yes] [--json]
   gbrain jobs retry <id>
   gbrain jobs prune [--older-than 30d] [--dry-run]
   gbrain jobs delete <id>
@@ -387,6 +388,21 @@ completed, failed) and name, each taking | alternatives. The --select preview li
 counts by job name and status, the first 20 ids and the preview hash, and the apply
 authorizes exactly the previewed set. Dependencies are shown but never implicitly
 authorized. IDs, data, schedule and retries persist.
+`,
+  cancel: `gbrain jobs cancel — cancel a job, or preview-bound bulk cancel of legacy jobs
+
+USAGE
+  gbrain jobs cancel <id>
+  gbrain jobs cancel --select "status=waiting|paused,name=synthesize" [--json]
+  gbrain jobs cancel --select "status=waiting|paused,name=synthesize" --expect <hash> --yes
+
+--select picks live jobs whose submission authority is missing or unsupported
+(the rows that block workers after an upgrade across v0.50). Keys: status
+(waiting, delayed, waiting-children, paused) and name, each taking | alternatives.
+Without --yes it only previews: counts by job name and status, the first 20 ids,
+parents that return to waiting, and the preview hash. The apply cancels exactly
+the previewed set; a selection that would cascade to a job outside it refuses.
+Stop producers and workers and cancel active jobs (gbrain jobs cancel <id>) first.
 `,
   prune: `gbrain jobs prune — delete old terminal jobs
 
