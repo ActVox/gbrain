@@ -180,8 +180,7 @@ export async function resolveEntitiesToPointers(
   const maxPointers = opts.maxPointers ?? DEFAULT_MAX_POINTERS;
   const priorLc = (opts.priorContextText ?? '').toLowerCase();
 
-  // v0.46.15 identity wave: the two new lexical arms (weak-alias + surname)
-  // share one kill switch. Default ON; `false` reproduces pre-wave behavior.
+  // v0.46.15: weak-alias + surname arms share one kill switch (default ON).
   const lexicalArms = opts.lexicalArms !== false;
   const privacySql = opts.excludePrivate === false ? '' : `AND ${privatePagesFilterFragment('p')}`;
 

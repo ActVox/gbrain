@@ -20,7 +20,7 @@
 
 import { chunkText as recursiveChunk } from './recursive.ts';
 import { buildQualifiedName } from './qualified-names.ts';
-import { MERGE_PROTECTED_SYMBOL_TYPES } from './def-types.ts';
+import { MERGE_PROTECTED_SYMBOL_TYPES, declaresFunctionValue } from './def-types.ts';
 import { estimateTokens, estimateEmbedTokens, estimateEmbedTokensCeiling, DEFAULT_MAX_CHUNK_TOKENS } from './token-estimate.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import {
@@ -140,11 +140,7 @@ import G_ZIG from '../../assets/wasm/grammars/tree-sitter-zig.wasm' with { type:
 // top-level defs indexed to ZERO symbols). Chunk boundaries change for every
 // previously-merged file, so the bump forces a re-chunk that recovers the
 // erased symbols.
-//
-// v8 (gbrain-evals N13-1): short `const f = () => …` / `let g = function …`
-// definitions no longer fold into anonymous merged chunks (code-def missed 9
-// of 50 pathe functions). The bump re-chunks files whose merged runs held
-// function-valued declarations.
+// v8 (N13-1): `const f = () => …` definitions keep their own named chunk.
 export const CHUNKER_VERSION = 8;
 
 // Lazy-loaded tree-sitter module (v0.22.x API: Parser is default export)
@@ -189,12 +185,7 @@ export interface CodeChunkMetadata {
    * Null when symbolName is missing (merged chunks, module-level fallback).
    */
   symbolNameQualified?: string | null;
-  /**
-   * gbrain-evals N13-1: set on a const/let/var declaration whose value is a
-   * function (`const f = () => …`, `let g = function () {…}`). Its symbol
-   * type is a mergeable run form, but it is a named function definition, so
-   * mergeSmallSiblings must keep it (and its symbol_name) on its own chunk.
-   */
+  /** N13-1: a const/let/var whose value is a function — merge-protected (def-types.ts). */
   definesFunction?: boolean;
 }
 
@@ -1471,20 +1462,6 @@ function extractSymbolName(node: any): string | null {
     }
   }
   return null;
-}
-
-const FUNCTION_VALUE_TYPES = new Set(['arrow_function', 'function_expression', 'function', 'generator_function']);
-
-/**
- * N13-1: a TS/JS `lexical_declaration` / `variable_declaration` whose
- * declarator value is a function — a named function definition wearing a
- * mergeable run type (see CodeChunkMetadata.definesFunction).
- */
-function declaresFunctionValue(node: any): boolean {
-  if (node.type !== 'lexical_declaration' && node.type !== 'variable_declaration') return false;
-  return node.namedChildren.some(
-    (child: any) => child.type === 'variable_declarator' && FUNCTION_VALUE_TYPES.has(child.childForFieldName('value')?.type),
-  );
 }
 
 // See the wrapper dive in extractSymbolName (#3789).

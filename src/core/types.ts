@@ -1411,11 +1411,9 @@ export interface CodeEdgeInput {
 
 /**
  * v0.20.0 Cathedral II: result row from code edge queries (getCallersOf,
- * getCalleesOf, getEdgesByChunk). `resolved=true` means the target chunk is
- * known: the row came from code_edges_chunk (to_chunk_id set), or it is a
- * code_edges_symbol row the resolver stamped with
- * edge_metadata.resolved_chunk_id (to_chunk_id stays null). `resolved=false`
- * means an unresolved code_edges_symbol row.
+ * getCalleesOf, getEdgesByChunk). `resolved=true`: a code_edges_chunk row, or a
+ * code_edges_symbol row stamped with edge_metadata.resolved_chunk_id (N13-2).
+ * `resolved=false`: an unresolved code_edges_symbol row (to_chunk_id null).
  */
 export interface CodeEdgeResult {
   id: number;
