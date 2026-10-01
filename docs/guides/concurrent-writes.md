@@ -311,6 +311,15 @@ bytes, revisions, chunks and embedding signatures remain unchanged. Managed
 withdrawals retain a versioned target manifest for the mirror, Git and embedding
 workers; each worker checkpoints one affected page at a time.
 
+A withdrawal mirror or Git scan no longer parks on a page whose file is a
+sync-skip metafile (`RESOLVER.md`, which carries the managed durability block
+by design) or whose file holds an uncoordinated local edit (#5396): the
+withdrawal is recorded in the database, the page is listed in the effect's
+`data.skipped` with reason `metafile` or `file_database_drift`, and the
+request's Git and embedding effects proceed. Reconcile a `file_database_drift`
+page as described in
+[Repair a file/database disagreement](#repair-a-filedatabase-disagreement).
+
 Stop older mutation workers before upgrading the owner and restarting work. Older
 binaries do not understand the target manifest and must not share the brain with
 the upgraded worker. This is a quiesced upgrade, not a mixed-version rollout.
