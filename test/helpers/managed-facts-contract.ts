@@ -36,6 +36,9 @@ export async function exerciseManagedFacts(engine: BrainEngine, scenario: Case):
       await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
       await engine.setConfig('version', '162');
       await engine.setConfig('facts.default_visibility', 'private');
+      // The unparented case pins the fallback-entity -> NULL path; its fixture text names a
+      // registered entity, which #5836 write-time inference would otherwise link.
+      if (scenario === 'unparented') await engine.setConfig('facts.entity_inference', 'off');
       await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
       const firstSlug = 'people/alice-example', secondSlug = 'companies/acme-example';
       const oldBody = upsertFactRow('A registered entity.', { claim: 'An older retained fact.', kind: 'fact', confidence: 1, visibility: 'private', notability: 'medium', source: 'fixture' }).body;
@@ -184,5 +187,5 @@ export async function exerciseManagedFacts(engine: BrainEngine, scenario: Case):
       expect(afterVector.vector).toBe(beforeVector.vector);
       if (scenario === 'unparented') expect(await engine.executeRaw('SELECT id FROM facts WHERE source_id=$1 AND entity_slug IS NULL', [sourceId])).toHaveLength(1);
     });
-  } finally { await disposePersistenceConsumer(engine); await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); __setChatTransportForTests(null); __setEmbedTransportForTests(null); resetGateway(); rmSync(home, { recursive: true, force: true }); }
+  } finally { await disposePersistenceConsumer(engine); await engine.unsetConfig('facts.entity_inference'); await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); __setChatTransportForTests(null); __setEmbedTransportForTests(null); resetGateway(); rmSync(home, { recursive: true, force: true }); }
 }
