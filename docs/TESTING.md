@@ -152,6 +152,16 @@ Search reliability has real-planner and transport regressions in
 `test/search-readiness-http.test.ts`. The statistics tests include owner,
 restricted-reader and FORCE-RLS roles; the candidate tests distinguish natural
 plans from forced-HNSW controls and prove server cancellation of exact fallback.
+`test/e2e/vector-plan-real-column-postgres.test.ts` is the #5824 plan proof on
+the real `embedding` column: in a dedicated 64-dim database (it needs CREATEDB
+and `CREATE EXTENSION vector`, so it runs under `bun run ci:local`) it first
+shows the legacy-guard statement seq-scans on its fixture, then that the
+emitted statement uses `idx_chunks_embedding` across a filter matrix incl. RLS
+scope binding, then the stale-heavy escalation, exact-fallback and short-window
+cases and every doctor `vector_plan` outcome. The PGLite side is
+`test/search/vector-freshness.test.ts`; the SQL shape and lockstep are
+`test/search/vector-statement.test.ts`. The opt-in reporter-scale bench is
+`scripts/bench/vector-plan-5824.ts`.
 `test/e2e/projection-recovery-parity.test.ts` runs the shared Markdown/code
 recovery, graph-edge preservation and migration-origin contracts against
 PostgreSQL; their root suites cover PGLite in the unit lane. PGLite work caps never
