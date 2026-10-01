@@ -32,14 +32,15 @@ export function makeExtractAtomsDrainHandler(engine: BrainEngine): MinionHandler
     const { UnrecoverableError } = await import('../errors.ts');
     // #5809: at or past the job's deadline the worker dead-letters the row
     // anyway; a retry would hold the cycle lock for another full timeout.
-    const pastDeadline = () => job.deadlineAtMs != null && Date.now() >= job.deadlineAtMs;
+    const { deadlineAtMs } = job;
+    const pastDeadline = () => deadlineAtMs != null && Date.now() >= deadlineAtMs;
     try {
       const result = await runExtractAtomsDrainForSource(engine, {
         sourceId,
         windowSeconds,
         brainDir: repoPath,
         signal: job.signal,
-        deadlineAtMs: job.deadlineAtMs,
+        deadlineAtMs,
       });
       const counts = `batches=${result.batches}, extracted=${result.extracted}, remaining=${result.remaining ?? '?'}`;
       if (result.stopped === 'deadline') {
