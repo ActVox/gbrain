@@ -22,7 +22,8 @@ export async function runJobsAuthorizeLegacy({ args, engine }: JobsCommandContex
     const selection = parseLegacyJobSelection(select, 'authorize-legacy');
     const expected = parseFlag(args, '--expect');
     const yes = args.includes('--yes');
-    if (expected !== undefined || yes) {
+    // --dry-run always previews, even next to --expect/--yes, matching the --ids path.
+    if (!args.includes('--dry-run') && (expected !== undefined || yes)) {
       const result = await applyLegacySelection(engine, selection, expected, yes);
       if (json) { console.log(JSON.stringify(result, null, 2)); return; }
       console.log(`Authorized ${result.authorized} legacy job(s) matching ${result.selection}. Restart producers and workers now.`);

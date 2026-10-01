@@ -297,8 +297,7 @@ export function legacyJobAuthorityError(row: Record<string, unknown>, activeIds:
   if (status === 'active') {
     return catalogueError('legacy_job_authority', what, `${STOP_PRODUCERS}, then cancel it: gbrain jobs cancel ${id}; run gbrain doctor to review the rest.`);
   }
-  // Name every reviewable live status: one preview and apply then clears the whole SQL NULL population the claim gate blocks on.
-  return catalogueError('legacy_job_authority', what, legacyRecoveryHint(LIVE_JOB_STATUSES, [], activeIds));
+  return catalogueError('legacy_job_authority', what, legacyRecoveryHint(activeIds));
 }
 
 const RELEASABLE = new Set(['dead', 'cancelled']);
@@ -334,6 +333,6 @@ export async function assertNoUnreviewedJobs(engine: BrainEngine): Promise<void>
   const unsupported = invalid.filter(row => row.legacy_authority_is_null !== true).length;
   throw catalogueError('legacy_job_authority',
     `Queued job authorization: ${invalid.length} legacy jobs have missing or unsupported authority, so workers cannot start until they are reviewed.`,
-    `${legacyRecoveryHint(invalid.filter(row => row.legacy_authority_is_null === true).map(row => row.status))}${unsupported
+    `${legacyRecoveryHint()}${unsupported
       ? ` ${unsupported} job(s) carry unsupported non-NULL authority: run matching application and database versions, or cancel them with gbrain jobs cancel <id> (gbrain doctor lists them).` : ''}`);
 }

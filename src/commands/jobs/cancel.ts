@@ -11,7 +11,8 @@ async function runLegacyCancel({ args, engine }: JobsCommandContext): Promise<vo
     const selection = parseLegacyJobSelection(parseFlag(args, '--select'), 'cancel');
     const expected = parseFlag(args, '--expect');
     const yes = args.includes('--yes');
-    if (expected !== undefined || yes) {
+    // --dry-run always previews, even next to --expect/--yes, matching the --ids path.
+    if (!args.includes('--dry-run') && (expected !== undefined || yes)) {
       const result = await applyLegacyCancel(engine, selection, expected, yes);
       if (json) { console.log(JSON.stringify(result, null, 2)); return; }
       console.log(`Cancelled ${result.cancelled_ids.length} legacy job(s) matching ${result.selection}.`);

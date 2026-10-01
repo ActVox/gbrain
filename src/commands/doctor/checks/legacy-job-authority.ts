@@ -10,7 +10,7 @@
  */
 import type { BrainEngine } from '../../../core/engine.ts';
 import { ERROR_CATALOGUE } from '../../../core/error-catalogue.ts';
-import { legacyRecoveryHint } from '../../../core/minions/legacy-selection.ts';
+import { LIVE_LEGACY_PREVIEW, legacyRecoveryHint } from '../../../core/minions/legacy-selection.ts';
 import { UNREVIEWED_LIVE_JOBS_SQL, parseSubmissionAuthority } from '../../../core/minions/submission-authority.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
@@ -70,7 +70,7 @@ export async function legacyJobAuthorityCheck(engine: BrainEngine): Promise<Chec
   return {
     name: 'legacy_job_authority', status: 'fail', details,
     message: `${live} queued job(s) predate submission authority and block every worker (${authorizable} authorizable with SQL NULL authority, ${state.unsupported} unsupported). `
-      + `${legacyRecoveryHint(Object.keys(state.authorizable), [], state.active_ids)}${unsupported} See ${ERROR_CATALOGUE.legacy_job_authority.docs}.`,
+      + `${legacyRecoveryHint(state.active_ids)}${unsupported} See ${ERROR_CATALOGUE.legacy_job_authority.docs}.`,
   };
 }
 
@@ -85,9 +85,7 @@ export async function legacyJobAuthorityBannerNote(engine: BrainEngine): Promise
   const state = await readLegacyJobAuthority(engine);
   const authorizable = sum(state.authorizable);
   if (!authorizable && !state.unsupported) return null;
-  const statuses = Object.keys(state.authorizable).filter(status => status !== 'active');
-  const preview = `gbrain jobs authorize-legacy --select "status=${(statuses.length ? statuses : ['waiting']).join('|')}"`;
   return `legacy_job_authority: ${authorizable + state.unsupported} queued job(s) from before v0.50 block every worker. `
-    + `Stop producers (gbrain serve, gbrain autopilot) and workers, cancel active jobs, then preview with: ${preview}`
+    + `Stop producers (gbrain serve, gbrain autopilot) and workers, cancel active jobs, then preview with: ${LIVE_LEGACY_PREVIEW}`
     + `${state.unsupported ? `; ${state.unsupported} unsupported row(s) need matching versions or gbrain jobs cancel <id>` : ''}. Recipe: ${ERROR_CATALOGUE.legacy_job_authority.docs}`;
 }

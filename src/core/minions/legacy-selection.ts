@@ -78,16 +78,22 @@ export function parseLegacyJobSelection(raw: string | undefined, command: Legacy
 /** Shared stop instruction for every legacy-job refusal (ENG-O4: active jobs are cancelled, never finished). */
 export const STOP_PRODUCERS = 'Stop producers (gbrain serve, gbrain autopilot) and workers';
 
+/** Every live status a legacy review can authorize: one preview then covers what a required cancellation leaves behind. */
+export const REVIEWABLE_LIVE_STATUSES = ['waiting', 'delayed', 'waiting-children', 'paused'] as const;
+
+/** The filled preview that reviews every live SQL NULL row the claim gate blocks on. */
+export const LIVE_LEGACY_PREVIEW = selectCommand('authorize-legacy', { statuses: [...REVIEWABLE_LIVE_STATUSES], names: [] });
+
 /**
  * The recovery order every legacy refusal names (DX-O3(b)): stop producers
- * and workers, cancel active jobs, preview with the filled `--select`, apply
- * with the printed hash, restart.
+ * and workers, cancel active jobs, preview every reviewable live status (a
+ * cancellation can move a parent from waiting-children to waiting, so a
+ * filter built from today's statuses could miss it), apply with the printed
+ * hash, restart.
  */
-export function legacyRecoveryHint(statuses: Iterable<string>, names: string[] = [], activeIds: readonly number[] = []): string {
-  const reviewable = [...new Set(statuses)].filter(status => SELECT_STATUSES['authorize-legacy'].includes(status));
-  const preview = selectCommand('authorize-legacy', { statuses: reviewable.length ? reviewable : ['waiting'], names });
+export function legacyRecoveryHint(activeIds: readonly number[] = []): string {
   const cancels = activeIds.length ? activeIds.slice(0, 10).map(id => `gbrain jobs cancel ${id}`).join('; ') : 'gbrain jobs cancel <id>';
-  return `${STOP_PRODUCERS}, cancel active jobs (${cancels}), preview with ${preview}, apply with the printed --expect <hash> --yes, then restart them.`;
+  return `${STOP_PRODUCERS}, cancel active jobs (${cancels}), preview with ${LIVE_LEGACY_PREVIEW}, apply with the printed --expect <hash> --yes, then restart them.`;
 }
 
 /** `legacy_jobs_active`: legacy rows are reviewed only with nothing active. Lists up to 10 ids to cancel. */

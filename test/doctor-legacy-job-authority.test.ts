@@ -78,7 +78,7 @@ describe('legacy_job_authority doctor check', () => {
     expect(check.message).toContain('6 queued job(s) predate submission authority and block every worker (4 authorizable with SQL NULL authority, 2 unsupported)');
     expect(check.message).toContain('Stop producers (gbrain serve, gbrain autopilot) and workers');
     expect(check.message).toContain(`cancel active jobs (gbrain jobs cancel ${active})`);
-    expect(check.message).toContain('preview with gbrain jobs authorize-legacy --select "status=waiting|paused"');
+    expect(check.message).toContain('preview with gbrain jobs authorize-legacy --select "status=waiting|delayed|waiting-children|paused"');
     expect(check.message).toContain('apply with the printed --expect <hash> --yes, then restart them');
     expect(check.message).toContain(`gbrain jobs cancel ${jsonbNull}; gbrain jobs cancel ${future}`);
     expect(check.message).toContain('docs/guides/repair.md#legacy-job-authority');
@@ -92,7 +92,7 @@ describe('legacy_job_authority doctor check', () => {
     const lines = await postUpgradeRecoveryBanner(engine, 'host (pglite, id test-brain)');
     const text = lines.join('\n');
     expect(text).toContain('[AGENT]   legacy_job_authority: 2 queued job(s) from before v0.50 block every worker.');
-    expect(text).toContain('preview with: gbrain jobs authorize-legacy --select "status=waiting"');
+    expect(text).toContain('preview with: gbrain jobs authorize-legacy --select "status=waiting|delayed|waiting-children|paused"');
     expect(text).toContain('1 unsupported row(s) need matching versions or gbrain jobs cancel <id>');
     expect(text).not.toContain('--yes');
     expect(text).not.toContain('--apply');

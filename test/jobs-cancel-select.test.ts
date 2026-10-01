@@ -138,6 +138,10 @@ describe('jobs cancel --select', () => {
       const preview = JSON.parse(out.join('\n'));
       expect(preview.rows.map((r: { id: number }) => r.id)).toEqual([a]);
       out.length = 0;
+      await runJobs(engine, ['cancel', '--select', 'status=waiting', '--expect', preview.preview_hash, '--yes', '--dry-run']);
+      expect(out.join('\n')).toContain('Nothing was changed.');
+      expect((await statuses())[a]).toBe('waiting');
+      out.length = 0;
       await runJobs(engine, ['cancel', '--select', 'status=waiting', '--expect', preview.preview_hash, '--yes']);
       expect(out.join('\n')).toBe('Cancelled 1 legacy job(s) matching status=waiting.');
       out.length = 0;

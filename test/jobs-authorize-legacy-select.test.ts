@@ -16,6 +16,7 @@ import { OperationError } from '../src/core/ops/contract.ts';
 import { operations } from '../src/core/operations.ts';
 import { runJobs } from '../src/commands/jobs.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
+import { argv } from './helpers/legacy-journey.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -195,6 +196,26 @@ describe('CLI transport (ENG-O12) and CLI-only pin (ENG-O13)', () => {
     expect(json.paid_job_names).toEqual(['synthesize']);
     const applied = await cli(['authorize-legacy', '--select', 'status=waiting|paused', '--expect', json.snapshot_digest, '--yes']);
     expect(applied.out).toContain('Authorized 2 legacy job(s) matching status=waiting|paused.');
+  });
+
+  test('--dry-run next to --expect/--yes previews and authorizes nothing (Codex review)', async () => {
+    const a = await legacy('synthesize');
+    const json = JSON.parse((await cli(['authorize-legacy', '--select', 'status=waiting', '--json'])).out);
+    const dry = await cli(['authorize-legacy', '--select', 'status=waiting', '--expect', json.snapshot_digest, '--yes', '--dry-run']);
+    expect(dry.out).toContain('Nothing was changed.');
+    expect((await authorities())[a]).toBeNull();
+  });
+
+  test('the printed recovery still selects a parent that a required cancel moved to waiting (Codex review)', async () => {
+    const parent = await legacy('fanout', 'waiting');
+    const child = await queue.add('busy', {}, { parent_job_id: parent });
+    await engine.executeRaw(`UPDATE minion_jobs SET status = 'active', lock_token = 't', lock_until = now() + interval '1 hour', claim_generation = claim_generation + 1 WHERE id = $1`, [child.id]);
+    const gate = await refusal(() => assertNoUnreviewedJobs(engine));
+    const preview = /preview with (gbrain jobs authorize-legacy --select "[^"]+")/.exec(gate.suggestion!)![1]!;
+    await queue.cancelJob(child.id);
+    expect((await queue.getJob(parent))?.status).toBe('waiting');
+    const printed = await cli(argv(preview).slice(2));
+    expect(printed.out).toContain('(SQL NULL authority, authorizable): 1');
   });
 
   test('a refusal prints the toJSON envelope with --json and exits 1', async () => {
