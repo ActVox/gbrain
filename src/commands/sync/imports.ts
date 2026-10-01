@@ -25,6 +25,7 @@ import {
 import { isPathSafe } from '../../core/sync-git.ts';
 import { resolveStallAbortSeconds, composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { sanitizePathForDisplay } from '../../core/sync.ts';
+import { isWindowsColonTarget } from '../../core/persistence/native-file-target.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
 import { partial, markCompleted, noteTypeWarning, maybeYield } from './sync-run.ts';
 import type { SyncPlan, SyncProgress, SyncRun } from './sync-run.ts';
@@ -245,6 +246,16 @@ async function importOnePath(run: SyncRun, ctx: ImportContext, eng: BrainEngine,
   const { opts, company, gitContextRoot, syncRepoPath, syncActivePack, noEmbed, pacer, progressAt, progress } = ctx;
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- `path` is a git-diff path from the synced repo (repo content can be hostile), but the joined path is checked by isPathSafe(filePath, gitContextRoot) realpath containment below before any read
   const filePath = join(syncRepoPath, path);
+  // #5032: Windows cannot store ':' in a file name (it names an alternate data
+  // stream), so the file cannot be in this checkout; a named per-file refusal
+  // instead of the silent "deleted after the pin" skip below.
+  if (isWindowsColonTarget(path)) {
+    failedFiles.push({ path, error: `colon_slug_windows_write_through: ${path} has a ':' in its name, which Windows cannot store. `
+      + `Rename it without ':' on a macOS or Linux checkout and commit, then re-run gbrain sync (docs/guides/write-refusals.md#colon_slug_windows_write_through).` });
+    progressAt.last = Date.now();
+    progress.tick(1, `skip:${path}`);
+    return;
+  }
   if (!company && !existsSync(filePath)) {
     // v0.42.x (#1794, Codex #3): the diff is against the PINNED target, but
     // importFile reads the live working tree. A file added in lastCommit..pin

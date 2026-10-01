@@ -51,3 +51,21 @@ export function nativeFileTarget(root: string, target: string, code?: string): s
     throw inaccessible();
   }
 }
+
+/**
+ * #5032: `:` is not a legal NTFS file-name character (Windows reads it as an
+ * alternate data stream), so a page whose canonical file name would contain
+ * one has no file on Windows. Refused rather than mangled; database-only
+ * writes of the same slug are unaffected.
+ */
+export function colonSlugWindowsRefusal(slug: string, sourceId: string): OperationError {
+  return new OperationError('colon_slug_windows_write_through',
+    `Page ${slug} has a ':' in its file name, which Windows cannot store.`,
+    `Use a slug without ':' (for example ${slug.replaceAll(':', '-')}), or write ${slug} from a macOS or Linux host that owns source ${sourceId}.`,
+    'docs/guides/write-refusals.md#colon_slug_windows_write_through');
+}
+
+/** #5032: true when this process is on Windows and the relative file target contains `:`. */
+export function isWindowsColonTarget(relativeTarget: string): boolean {
+  return process.platform === 'win32' && relativeTarget.includes(':');
+}
