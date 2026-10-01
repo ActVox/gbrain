@@ -100,6 +100,59 @@ one provenance collided with the first Lisbon row and Porto stayed current.
   fresh write, the race), PGLite and Postgres via
   `test/e2e/hot-memory-invalidation-postgres.test.ts`.
 
+## N5-3 — first remember after a forget refused as stale bytes (PGLite CLI)
+
+The forget commits, queues its `withdrawal-mirror` effect and exits; a CLI
+process has no resident consumer. The next process (the remember) starts a
+consumer whose effect worker and request worker run in the same tick
+(`consumer.ts` `doTick`). The mirror rewrites the page file after the remember
+captured `expectedBeforeHash` and before it publishes, at an unchanged page
+revision, so publication refused with `source_changed` → `raw_file_changed`.
+Postgres and the servers hid it by timing.
+
+- `CLAIMABLE_WRITE_SQL` (`journal.ts`): a file write is not claimed while a
+  queued or running withdrawal mirror targets its page (an untargeted legacy
+  mirror blocks its whole worktree). Writes to other pages are unaffected.
+- `publishMutation` (`coordinator.ts`): changed bytes **and** a moved page
+  revision (a forget committed while the write was preparing) throw
+  `revision_conflict`, so semantic writes reprepare; changed bytes at an
+  unchanged revision still refuse as `raw_file_changed`.
+- Tests: `test/withdrawal-followup-writes.test.ts` (PGLite and Postgres via
+  `test/e2e/withdrawal-followup-writes-postgres.test.ts`).
+
+## N5-2 — forget under concurrent CLI writes on PGLite
+
+Two independent causes. The ledger said the `owner_unavailable` forgets had
+committed; they had not (refused before sending, fact still active).
+
+- **Missing chunks.** `recordFactWithdrawal` deletes the withdrawn pages'
+  chunks in the commit and leaves the rebuild to the resident projection
+  worker, which a CLI forget never runs. It reproduced without concurrency
+  (forget, then search). `submitForgetMutation` now rebuilds those pages'
+  text projections after the commit and before answering
+  (`rebuildPendingPageProjections` gained a `pages` filter). A failed rebuild
+  stays queued as durable projection work and does not turn a committed
+  forget into an error.
+- **`owner_unavailable`.** `maybeDelegateLocalOperation` treated any PGLite
+  lock holder as a resident owner; when the holder was another CLI call
+  there was no owner socket, so concurrent CLI writes (forgets and remembers)
+  got `owner_unavailable` with `submission_status: not_sent`. A holder that
+  is not a serve and answers no owner socket now falls through to the engine
+  path, which already waits up to 30 s for the lock. A serve holder, or a
+  socket that answered, still makes every failure final.
+  `maybeDelegateLocalAdministration` is unchanged.
+- Behavior change to call out: concurrent CLI calls on one PGLite brain now
+  take turns on the lock instead of failing fast; behind a long-running
+  non-serve holder (e.g. a jobs daemon) a CLI write waits and then fails
+  lock-busy rather than answering `owner_unavailable` immediately.
+- `test/persistence-memory-mutations.test.ts` "forget commits offline" used
+  to assert the chunks were empty after a forget (the N5-2 behavior); it now
+  asserts the chunks keep the retained text and drop the withdrawn claim.
+- Tests: `test/withdrawal-followup-writes.test.ts` (retained fact in chunks
+  and keyword search after an acknowledged forget),
+  `test/persistence-local-client.test.ts` (non-serve holder falls through;
+  serve holder without a socket still throws).
+
 ## Repros (gbrain-evals `capy/wave-n1-n5`, run against this checkout)
 
 | Repro | Before (a551d84b) | After |
@@ -108,3 +161,5 @@ one provenance collided with the first Lisbon row and Porto stayed current.
 | N1-2 | third write `noop`; current Porto | third write `superseded_prior`; current Lisbon |
 | N1-3 | remote sees `decision_style=deliberate, risk_tolerance=high (private marker)` | remote sees `decision_style=deliberate` |
 | N5-1 | `context_pack` and `get_page` `_meta` right after forget carry the fact | both `false` |
+| N5-2 | rounds lose chunks after `forget ok` (search false) or answer `owner_unavailable` (2/5 each) | 10/10 rounds over two runs: forget ok, retained neighbor in recall and search |
+| N5-3 | first remember `scope_denied: The source file bytes changed after this request was accepted.`; retry ok | first remember ok |

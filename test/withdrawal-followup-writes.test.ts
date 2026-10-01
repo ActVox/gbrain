@@ -27,6 +27,7 @@ import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
 import { prepareMemoryMutation, submitForgetMutation, submitRememberMutation } from '../src/core/persistence/memory-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { testBackends } from './helpers/test-backends.ts';
 
 const engines: BrainEngine[] = [];
 const roots: string[] = [];
@@ -36,16 +37,18 @@ const context = (engine: BrainEngine, sourceId: string): OperationContext => ({ 
   config: { engine: engine.kind, embedding_disabled: true }, logger: { info() {}, warn() {}, error() {} } });
 
 beforeAll(async () => {
-  const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
-  if (process.env.DATABASE_URL) {
-    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL);
+  const backends = testBackends();
+  if (backends.includes('pglite')) { const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite); }
+  if (backends.includes('postgres')) {
+    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
     engines.push(pg.engine); closePostgres = pg.close;
   }
   for (const engine of engines) await registerLocalWriter(engine, 'cli');
 }, 120_000);
 afterAll(async () => {
   for (const engine of engines) await disposePersistenceConsumer(engine);
-  await engines[0]?.disconnect(); await closePostgres?.();
+  for (const engine of engines) if (engine instanceof PGLiteEngine) await engine.disconnect();
+  await closePostgres?.();
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
