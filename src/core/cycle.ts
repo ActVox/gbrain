@@ -55,8 +55,10 @@ import { isManagedBrain } from './cycle/phase-table.ts';
 import { assertValidSourceId } from './source-id.ts';
 import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 import { assertEmbedNotStalled } from './embed-stall.ts';
+import { anyAbortSignal } from './abort-signals.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
+export { anyAbortSignal } from './abort-signals.ts';
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -791,49 +793,6 @@ function acquireFileLock(lockPath = getLockFilePathDefault()): LockHandle | null
  * Returns `undefined` when there's no lock AND no outer hook so phases
  * short-circuit via their `if (!opts.yieldDuringPhase) return;` guard.
  */
-/**
- * W0 fix-wave: combine abort signals (external caller signal + the internal
- * lock-steal controller) into one REAL AbortSignal.
- *
- * Deliberately NOT AbortSignal.any: CycleOpts.signal has always been duck-
- * typed in practice (test stubs pass `{ aborted: false }` and flip the flag;
- * pre-W0 the raw object flowed straight into checkAborted, which only reads
- * `.aborted`/`.reason`). AbortSignal.any throws ERR_INVALID_ARG_TYPE on
- * those. Manual fan-in: real signals propagate via listener; listener-less
- * stubs are polled at 50ms — semantically the flip is seen within a tick,
- * and the RETURNED signal is a genuine AbortSignal so phases can hand it to
- * fetch/timers safely.
- *
- * ALWAYS call dispose() when the consuming scope ends (runCycle's finally):
- * the forward listeners live on the CALLER's signals, and long-lived callers
- * (the autopilot daemon passes its daemon-lifetime shutdown signal into
- * every cycle tick) would otherwise accumulate one listener + captured
- * controller per invocation forever (ship-review perf catch).
- */
-export function anyAbortSignal(signals: AbortSignal[]): { signal: AbortSignal; dispose: () => void } {
-  const c = new AbortController();
-  const cleanups: Array<() => void> = [];
-  const forward = (s: AbortSignal) => { if (!c.signal.aborted) c.abort(s.reason); };
-  for (const s of signals) {
-    if (!s) continue;
-    if (s.aborted) { forward(s); break; }
-    if (typeof (s as Partial<AbortSignal>).addEventListener === 'function') {
-      const listener = () => forward(s);
-      s.addEventListener('abort', listener, { once: true });
-      cleanups.push(() => s.removeEventListener('abort', listener));
-    } else {
-      const t = setInterval(() => { if (s.aborted) { forward(s); clearInterval(t); } }, 50);
-      (t as unknown as { unref?: () => void }).unref?.();
-      c.signal.addEventListener('abort', () => clearInterval(t), { once: true });
-      cleanups.push(() => clearInterval(t));
-    }
-  }
-  return {
-    signal: c.signal,
-    dispose: () => { for (const fn of cleanups) { try { fn(); } catch { /* best effort */ } } },
-  };
-}
-
 export function buildYieldDuringPhase(
   lock: LockHandle | null,
   outer?: () => Promise<void>,
@@ -978,7 +937,7 @@ function resolveCycleLockRefreshMs(): number {
  * throw-out contract even if a steal races it.
  *
  * Takes minimal structural types rather than AbortSignal so it stays callable
- * with the duck-typed stubs this file already documents (see anyAbortSignal)
+ * with the duck-typed stubs this file already documents (see anyAbortSignal in abort-signals.ts)
  * — and so the reason-dropped case is reachable in a test at all, since
  * `abort()` / `abort(undefined)` both yield a DOMException, never `undefined`.
  */
