@@ -4,11 +4,10 @@
  * fresh-install DDL.
  *
  * fact_relink_attempts keeps one row per fact: the latest relink outcome
- * (a model verdict memo, a `linked`/`deduped` record, or a `pending` journal
- * entry the unmanaged path writes before it touches the fence file). Like
+ * (`linked`/`deduped`, written in the publishing transaction, or a model
+ * verdict memo that stops reruns from paying for the same fact). Like
  * decide_sweep_deferred it carries no foreign key (facts is created by
- * migrations after this DDL); readers join facts. `journal` is text, not
- * JSONB, so no code path can double-encode it.
+ * migrations after this DDL); readers join facts.
  */
 
 const rls = (table: string) => `DO $rls$ BEGIN
@@ -26,8 +25,6 @@ CREATE TABLE IF NOT EXISTS fact_relink_attempts (
   tier            TEXT,
   model           TEXT,
   target_slug     TEXT,
-  planned_row_num INTEGER,
-  journal         TEXT,
   run_id          TEXT,
   attempted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, fact_id)

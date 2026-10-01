@@ -1722,8 +1722,6 @@ CREATE TABLE IF NOT EXISTS fact_relink_attempts (
   tier            TEXT,
   model           TEXT,
   target_slug     TEXT,
-  planned_row_num INTEGER,
-  journal         TEXT,
   run_id          TEXT,
   attempted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, fact_id)

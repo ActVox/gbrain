@@ -127,6 +127,21 @@ export async function deferFact(engine: BrainEngine, sourceId: string, factId: n
   );
 }
 
+/**
+ * Queue relinked facts for the conflict sweep (#5836): due now, zero attempts,
+ * and never touching a row that is already queued. Moving a fact by id keeps
+ * an id the sweep watermark has already passed, so this is how it gets judged.
+ */
+export async function enqueueRelinked(engine: BrainEngine, sourceId: string, factIds: readonly number[]): Promise<void> {
+  if (factIds.length === 0) return;
+  await engine.executeRaw(
+    `INSERT INTO decide_sweep_deferred (source_id, fact_id, slot, reason, attempts, next_attempt_at)
+     SELECT $1, id, 'conflict', 'relinked', 0, now() FROM unnest($2::bigint[]) AS t(id)
+     ON CONFLICT (slot, source_id, fact_id) DO NOTHING`,
+    [sourceId, [...factIds]],
+  );
+}
+
 export async function clearDeferred(engine: BrainEngine, sourceId: string, factId: number): Promise<void> {
   await engine.executeRaw(`DELETE FROM decide_sweep_deferred WHERE slot = 'conflict' AND source_id = $1 AND fact_id = $2`, [sourceId, factId]);
 }

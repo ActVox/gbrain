@@ -1864,6 +1864,7 @@ const THIN_CLIENT_REFUSE_HINTS: Record<string, string> = {
   sweep: 'sweep runs the serve-resident maintenance passes against the LOCAL engine. Run it on the host (the serve process also runs it automatically).',
   'compile-context': 'compile-context compiles from the local brain; run it on the host install.',
   decide: '`gbrain decide` runs on the brain host; run it there.',
+  facts: '`gbrain facts relink` runs on the brain host (it writes the entity pages there): run `gbrain facts relink --source <id> --dry-run` on that machine.',
   // v0.32 audit additions
   pages: '`pages purge-deleted` is admin+localOnly (hard-deletes from the local DB). Run on the host.',
   files: '`files list` and `files url` MCP ops are localOnly (paths live on the host filesystem). Use `gbrain files` on the host machine.',
@@ -2986,6 +2987,7 @@ TOOLS
   compile-context --target <t>       Compile a deterministic, scanned, budgeted context
         [--budget N] [--check]       file (claude-code | codex | openclaw)
   decide <status|probe|enable|...>   System One decision support (Jev); every slot off by default
+  facts relink [--dry-run]           Link facts saved without an entity to the entity they name
   check-resolvable [--json] [--fix]  Validate skill tree (reachability/MECE/DRY)
   report --type <name> --content ... Save timestamped report to brain/reports/
 
