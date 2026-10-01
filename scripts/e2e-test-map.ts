@@ -30,7 +30,11 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/source-delete.ts": ["test/e2e/sources-remove-bindings.test.ts"],
   "src/core/persistence/orphan-bindings.ts": ["test/e2e/sources-remove-bindings.test.ts"],
   // Fix wave 5 shared commit: preview-bound approved sets in op_checkpoints.
-  "src/core/persistence/preview-approval.ts": ["test/e2e/preview-approval-postgres.test.ts"],
+  "src/core/persistence/preview-approval.ts": ["test/e2e/preview-approval-postgres.test.ts", "test/e2e/minions-legacy-journey-postgres.test.ts"],
+  // #5157: the legacy recovery commands and doctor check.
+  "src/commands/jobs/authorize-legacy.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
+  "src/commands/jobs/cancel.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
+  "src/commands/doctor/checks/legacy-job-authority.ts": ["test/e2e/minions-legacy-journey-postgres.test.ts"],
   "src/core/persistence/deactivation.ts": ["test/e2e/persistence-deactivate-race.test.ts", "test/e2e/fix-wave-4-integration.test.ts"],
   // SkillOpt orchestrator, outcome/resume, models plan + strict mode, spend ledger.
   "src/core/skillopt/**": [
@@ -193,6 +197,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // Any minions queue/worker/handler change exercises all minion E2E.
   "src/core/minions/**": [
     "test/e2e/minions-legacy-coalesce-postgres.test.ts",
+    "test/e2e/minions-legacy-journey-postgres.test.ts",
     "test/e2e/worker-readiness-cli.test.ts",
     "test/e2e/worker-configuration-release.test.ts",
     "test/e2e/delegated-grants-withdrawal.test.ts",
@@ -485,7 +490,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/commands/serve-http-admin-api.ts": ["test/e2e/serve-http-consent.test.ts", "test/e2e/serve-http-oauth.test.ts"],
   "src/commands/serve-http-metrics.ts": ["test/e2e/serve-http-oauth.test.ts"],
   "src/commands/serve-http-spa.ts": ["test/e2e/serve-http-consent.test.ts"],
-  "src/commands/serve-http-webhooks.ts": ["test/e2e/serve-http-ingest-webhook.test.ts"],
+  "src/commands/serve-http-webhooks.ts": ["test/e2e/serve-http-ingest-webhook.test.ts", "test/e2e/minions-legacy-journey-postgres.test.ts"],
   "src/commands/serve-http-mcp.ts": [
     "test/e2e/serve-http-oauth.test.ts",
     "test/e2e/harness-access.test.ts",
