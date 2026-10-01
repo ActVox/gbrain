@@ -46,6 +46,7 @@ describe('#5183 embed concurrency never exceeds the Postgres pool', () => {
   });
 
   test('both embed loops use the clamped value', () => {
+    // test-reads-source-ok[structural]: both embed loops must take the clamped value; the loops need a live Postgres pool to observe.
     const src = readFileSync(resolve(import.meta.dir, '..', 'src', 'commands', 'embed.ts'), 'utf-8');
     expect(src.match(/const CONCURRENCY = resolveEmbedConcurrency\(engine\.kind, staleOpts\?\.paceMaxConcurrency\);/g)).toHaveLength(2);
     expect(src).not.toMatch(/parseInt\(process\.env\.GBRAIN_EMBED_CONCURRENCY/);

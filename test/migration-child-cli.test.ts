@@ -68,6 +68,7 @@ describe('#5184 no migration spawns a name-resolved gbrain', () => {
     const dir = join(REPO, 'src', 'commands', 'migrations');
     const offenders: string[] = [];
     for (const file of readdirSync(dir).filter(f => f.endsWith('.ts'))) {
+      // test-reads-source-ok[structural]: every migration spawn site, including ones only reachable mid-upgrade, must use the resolved CLI.
       const src = readFileSync(join(dir, file), 'utf-8');
       const lines = src.split('\n');
       lines.forEach((line, i) => {
