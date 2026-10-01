@@ -55,11 +55,11 @@ function committingGitTree(path: string): string | null {
 /** Where an installed bearer token lives and how to replace it, never the token itself (#5775). */
 export function inlineTokenReceipt(c: HarnessCredentials, harness: string, name: string, configPath: string, reload: string, credentialsFile?: string) {
   const renew = ['gbrain connect', shellQuote(c.mcp_url), '--harness', shellQuote(harness), '--credentials-file',
-    credentialsFile ? shellQuote(credentialsFile) : '<private-handoff-file>', ...(name === 'gbrain' ? [] : ['--name', shellQuote(name)]), '--install'].join(' ');
+    credentialsFile ? shellQuote(credentialsFile) : '<private-handoff-file>', ...(name === 'gbrain' ? [] : ['--name', shellQuote(name)]), '--install', ...(c.client_secret ? ['--fresh-token'] : [])].join(' ');
   const invalidate = (apply: string) => `gbrain mcp admin invalidate-tokens ${shellQuote(c.client_id)}${apply} --url ${shellQuote(c.mcp_url)} --admin-token-file <owner-admin-token-file> --json`;
   const tree = committingGitTree(configPath);
-  // A cached unexpired handoff token is the invalidated one, so recovery must exchange a new token.
-  const replace = c.client_secret ? `Write a freshly exchanged token here: ${renew} --fresh-token`
+  // A cached unexpired handoff token may be the invalidated one, so renewal always exchanges a new token.
+  const replace = c.client_secret ? `Write a freshly exchanged token here: ${renew}`
     : `This handoff cannot exchange a new token; get a new private handoff from the brain owner (gbrain mcp grant on the brain host), then run: ${renew}`;
   return {
     token_storage: 'inline' as const, config_path: configPath, renew_command: renew,

@@ -21,13 +21,13 @@ describe('inline bearer token receipt (#5775)', () => {
   for (const harness of ['codex', 'claude-code', 'opencode'] as const) test(`${harness} receipt names storage, renewal and exposure recovery without the token`, async () => {
     const dir = temp(), configPath = join(dir, CONFIG[harness]), handoff = join(dir, 'handoff.json');
     const receipt = await installHarnessConnection(creds(), { harness, configPath, credentialsFile: handoff, name: 'example-brain' }) as Record<string, any>;
-    const renew = `gbrain connect https://brain.example.com/mcp --harness ${harness} --credentials-file ${handoff} --name example-brain --install`;
+    const renew = `gbrain connect https://brain.example.com/mcp --harness ${harness} --credentials-file ${handoff} --name example-brain --install --fresh-token`;
     expect(receipt).toMatchObject({ status: 'installed', token_storage: 'inline', config_path: configPath, renew_command: renew });
     expect(receipt.if_exposed).toEqual({
       steps: [
         'On the brain host, preview: gbrain mcp admin invalidate-tokens gbrain_cl_fixture --url https://brain.example.com/mcp --admin-token-file <owner-admin-token-file> --json',
         'Apply with the previewed revision: gbrain mcp admin invalidate-tokens gbrain_cl_fixture --yes --if-version <revision> --url https://brain.example.com/mcp --admin-token-file <owner-admin-token-file> --json',
-        `Write a freshly exchanged token here: ${renew} --fresh-token`,
+        `Write a freshly exchanged token here: ${renew}`,
         RELOAD[harness],
       ],
       docs_url: 'docs/mcp/ADMIN.md#invalidate-tokens-revoke-or-delete',
@@ -68,7 +68,7 @@ describe('inline bearer token receipt (#5775)', () => {
     execFileSync('git', ['init', '--quiet', repo]);
     mkdirSync(join(repo, '.codex'));
     const first = await installHarnessConnection(creds(), { harness: 'codex', configPath }) as Record<string, any>;
-    expect(first.renew_command).toBe('gbrain connect https://brain.example.com/mcp --harness codex --credentials-file <private-handoff-file> --install');
+    expect(first.renew_command).toBe('gbrain connect https://brain.example.com/mcp --harness codex --credentials-file <private-handoff-file> --install --fresh-token');
     expect(first.token_warning).toBe(`${configPath} is inside the Git working tree ${execFileSync('git', ['-C', repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()}, `
       + "so committing there would publish this bearer token. Add .codex/config.toml to that repository's .gitignore or move the configuration; if it was already committed, follow if_exposed.");
     writeFileSync(join(repo, '.gitignore'), '.codex/config.toml\n');
@@ -89,7 +89,7 @@ describe('inline bearer token receipt (#5775)', () => {
     expect(code).toBe(0);
     const configPath = join(dir, '.codex', 'config.toml');
     expect(JSON.parse(stdout)).toMatchObject({ status: 'installed', token_storage: 'inline', config_path: configPath });
-    expect(stderr).toContain(`The bearer token is stored inline in ${configPath}; this output never prints it. Renew it with: gbrain connect https://brain.example.com/mcp --harness codex --credentials-file ${handoff} --install`);
+    expect(stderr).toContain(`The bearer token is stored inline in ${configPath}; this output never prints it. Renew it with: gbrain connect https://brain.example.com/mcp --harness codex --credentials-file ${handoff} --install --fresh-token`);
     expect(stderr).toContain('If it was exposed: On the brain host, preview: gbrain mcp admin invalidate-tokens gbrain_cl_fixture');
     expect(stderr).toContain('docs/mcp/ADMIN.md#invalidate-tokens-revoke-or-delete');
     expect(stdout + stderr).not.toContain(TOKEN);
