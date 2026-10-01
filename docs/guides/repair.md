@@ -491,6 +491,46 @@ covers the whole retry budget each grant authorizes. A resumed run replays the
 grant it already made instead of granting another cycle. A signature-mismatched
 vector is never reconciled; it is re-embedded.
 
+## Wave 5 refusal codes
+
+Each heading below is the `docs` anchor a refusal carries. The full recovery
+steps land with the fix that raises each code.
+
+### Explicit-only repair kinds
+
+`stale-atoms` and `extractor-facts` run only when named:
+`gbrain repair <kind>` previews, and `gbrain repair <kind> --apply --expect <hash>`
+applies exactly the previewed set. `gbrain repair --all`, the remediation plan
+and `gbrain doctor --remediate --include-repairs` list them with their preview
+command (`explicit_kind_required`) and never run them. A build without the
+kind refuses with `unavailable`.
+
+### Preview changed
+
+`preview_changed`: the hash passed with `--expect` names no saved preview, or a
+preview older than 7 days. Nothing was applied. Re-run the printed preview
+command and apply with the new hash.
+
+### Legacy job authority
+
+`permission_denied` for a job row with SQL NULL submission authority left by an
+upgrade across v0.50.
+
+### Legacy jobs active
+
+`legacy_jobs_active`: a legacy-job preview found active jobs. Stop producers
+and workers and cancel the listed jobs first.
+
+### Legacy job selection invalid
+
+`legacy_job_selection_invalid`: `--select` named an unknown key or value. The
+message lists the valid ones.
+
+### Projection owner resident
+
+`projection_owner_resident`: a projection drain was refused because a resident
+owner holds the PGLite datastore.
+
 ## Related
 
 - [Write refusal reasons](write-refusals.md) — what a refused write means and the recovery command
