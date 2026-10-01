@@ -43,12 +43,17 @@ export function warnShadowedProviderKeys(fileCfg: GBrainConfig | null = loadConf
   } catch { /* an invalid GBRAIN_HOME is reported by the command itself */ }
 }
 
-export interface AuthFailedProvider { id: string; name: string; auth_env?: { required: readonly string[] } }
+export interface AuthFailedProvider { id: string; name: string; auth_env?: { required: readonly string[]; optional?: readonly string[] } }
+
+/** The env variable holding a recipe's API key, which need not be required (Azure, LiteLLM) or first. */
+export function credentialEnvName(authEnv: AuthFailedProvider['auth_env']): string | undefined {
+  return [...authEnv?.required ?? [], ...authEnv?.optional ?? []].find(name => /_API_KEY$/.test(name));
+}
 
 /** DX-O8: names the key source in effect and the fixes for it. */
 export function embeddingAuthFailedError(provider: AuthFailedProvider, status: number,
   fileCfg: GBrainConfig | null = loadConfigFileOnly(), env: Env = process.env, file = configPath()): OperationError {
-  const name = provider.auth_env?.required[0];
+  const name = credentialEnvName(provider.auth_env);
   const rejected = `The ${provider.name} embedding provider rejected its key (HTTP ${status})`;
   const backfill = 'Then run `gbrain embed --stale` to embed what was saved while the key was rejected.';
   if (!name) return catalogueError('embedding_auth_failed', `${rejected}.`, `Check the ${provider.name} credentials, restart the process that reported this, then run \`gbrain embed --stale\`.`);
@@ -59,7 +64,7 @@ export function embeddingAuthFailedError(provider: AuthFailedProvider, status: n
       `Run \`gbrain config set ${source.config_key} <valid key>\` and restart any daemon that uses it. ${backfill}`);
   }
   if (source.kind === 'missing') {
-    return catalogueError('embedding_auth_failed', `${rejected}; ${source.variable} is not set in this process, so the key came from the caller's gateway configuration.`,
+    return catalogueError('embedding_auth_failed', `${rejected}; no API key is set in this process (${source.variable}${source.config_key ? ` or ${source.config_key}` : ''}), so it authenticated another way (an injected gateway environment or a token such as Azure Entra).`,
       `${source.config_key ? `Run \`gbrain config set ${source.config_key} <valid key>\`` : `Set ${source.variable} to a valid key in the environment of the process that reported this`}, restart that process, then run \`gbrain embed --stale\`.`);
   }
   const differs = source.shadows_config && source.config_key ? `, which differs from ${source.config_key} in ${file}` : '';

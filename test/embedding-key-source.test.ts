@@ -10,7 +10,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mergedProviderEnv, providerKeyShadows, providerKeySource } from '../src/core/ai/provider-env.ts';
-import { _setKeyWarningSinkForTests, embeddingAuthFailedError, warnShadowedProviderKeys } from '../src/core/ai/key-warnings.ts';
+import { _setKeyWarningSinkForTests, credentialEnvName, embeddingAuthFailedError, warnShadowedProviderKeys } from '../src/core/ai/key-warnings.ts';
+import { getRecipe } from '../src/core/ai/recipes/index.ts';
 import { redactProviderKeys } from '../src/core/ai/key-redact.ts';
 import { configureGateway, embed, resetGateway } from '../src/core/ai/gateway.ts';
 import { embeddingKeySource } from '../src/commands/doctor/checks/embedding-health.ts';
@@ -83,6 +84,18 @@ describe('doctor embedding_key_source', () => {
     expect(check.details).toMatchObject({ shadows: [{ variable: 'OPENAI_API_KEY', config_key: 'openai_api_key', in_effect: 'env' }],
       embedding_key: { kind: 'env', variable: 'OPENAI_API_KEY', config_key: 'openai_api_key' }, docs: 'docs/guides/repair.md#embedding-key-source' });
     expect(leaks(JSON.stringify(check))).toEqual([]);
+  });
+
+  test('names the real credential for Azure and LiteLLM, and follows GBRAIN_EMBEDDING_MODEL over the file model', () => {
+    expect(credentialEnvName(getRecipe('azure-openai')?.auth_env)).toBe('AZURE_OPENAI_API_KEY');
+    expect(credentialEnvName(getRecipe('litellm')?.auth_env)).toBe('LITELLM_API_KEY');
+    const check = embeddingKeySource(cfg({ embedding_model: 'openai:text-embedding-3-small' }),
+      { GBRAIN_EMBEDDING_MODEL: 'voyage:voyage-4', VOYAGE_API_KEY: ENV_KEY }, '/home/example/.gbrain/config.json');
+    expect(check.message).toContain('The embedding key in effect is VOYAGE_API_KEY from this environment.');
+    expect(check.details).toMatchObject({ embedding_model: 'voyage:voyage-4' });
+    const azure = embeddingAuthFailedError(getRecipe('azure-openai')!, 401, cfg({ azure_openai_api_key: CONFIG_KEY } as Partial<GBrainConfig>), {}, '/home/example/.gbrain/config.json');
+    expect(azure.message).toContain('the key in effect is azure_openai_api_key in /home/example/.gbrain/config.json (AZURE_OPENAI_API_KEY is not set)');
+    expect(azure.message).not.toContain('AZURE_OPENAI_ENDPOINT');
   });
 
   test('is ok without a shadow and reports a config-plane embedding key', () => {

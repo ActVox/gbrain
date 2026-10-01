@@ -12,7 +12,7 @@ import { checkEmbeddingEnvOverride, checkEmbeddingMigrationState } from './searc
 import type { GBrainConfig } from '../../../core/config.ts';
 import { DEFAULT_EMBEDDING_MODEL } from '../../../core/ai/defaults.ts';
 import { providerKeyShadows, providerKeySource } from '../../../core/ai/provider-env.ts';
-import { keyShadowWarning } from '../../../core/ai/key-warnings.ts';
+import { credentialEnvName, keyShadowWarning } from '../../../core/ai/key-warnings.ts';
 import { getRecipe } from '../../../core/ai/recipes/index.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
@@ -451,8 +451,8 @@ const KEY_SOURCE_SCOPE = 'This check sees only the environment `gbrain doctor` r
 
 export function embeddingKeySource(fileCfg: GBrainConfig | null, env: Record<string, string | undefined>, file: string): Pick<Check, 'status' | 'message' | 'details'> {
   const shadows = providerKeyShadows(fileCfg, env);
-  const model = fileCfg?.embedding_model ?? DEFAULT_EMBEDDING_MODEL;
-  const variable = getRecipe(model.split(':')[0] ?? '')?.auth_env?.required[0];
+  const model = env.GBRAIN_EMBEDDING_MODEL || fileCfg?.embedding_model || DEFAULT_EMBEDDING_MODEL;
+  const variable = credentialEnvName(getRecipe(model.split(':')[0] ?? '')?.auth_env);
   const source = variable ? providerKeySource(fileCfg, env, variable) : null;
   const inEffect = !source ? `The embedding model ${model} reads no API key.`
     : source.kind === 'env' ? `The embedding key in effect is ${source.variable} from this environment.`
