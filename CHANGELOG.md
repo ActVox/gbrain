@@ -12,9 +12,11 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.28.0] - 2026-10-01
 
-**Fix wave 5: session start stops showing another session's text, big brain repos onboard again, old queued jobs stop wedging synthesize, and the cleanups promised last wave ship.**
+**Fix wave 5: session start stops showing another session's text, private pages stay out of ambient recall, big brain repos onboard again, old queued jobs stop wedging synthesize, and the cleanups promised last wave ship.**
 
 Session start used to print a "Last session activity" line taken from whichever session on the machine wrote last. On a host where several agents or people share one machine, that could put one session's private text in front of another. The line is gone, along with the buffer behind it, and nothing turns it back on.
+
+A second privacy leak: `volunteer_context`, the per-turn hook block and `gbrain compile-context` could surface a `visibility: private` page's title and synopsis, including to remote MCP callers. Ambient recall now hides private pages the same way remote search does.
 
 Brain repos with more than about 10,000 files could not be added, claimed or moved: every attempt failed with a "1 MiB" error. That limit is gone. A 50,000-file repo now adds in under a second on our test machine.
 
@@ -25,6 +27,7 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
 | After upgrading | Before | After |
 | --- | --- | --- |
 | Session start on a shared machine | could show another session's last message | shows only this workspace's own notes |
+| A private page in `volunteer_context`, the turn block or `compile-context` | title and synopsis shown | hidden (local CLI `volunteer_context` still sees it) |
 | `sources add` on a 50,000-file repo | `request_too_large` | under 1 s (PGLite and Postgres) |
 | A capture that hits a pre-v0.50 job | HTTP 500 | 202, or 409 with the recovery command |
 | Search atoms of deleted or rewritten pages | stay searchable | retired by `gbrain repair stale-atoms` after you review them |
@@ -59,15 +62,18 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
    gbrain repair extractor-facts --apply --expect <hash>
    gbrain doctor
    ```
-4. **Several brains on one host:** re-run `gbrain autopilot --install` for each non-default brain (`GBRAIN_HOME=<brain parent>`), then for the default brain.
-5. **Your agent reads `skills/migrations/v0.60.28.0.md`** the next time you talk to it. The full symptom table is in [Recover after upgrading](docs/guides/repair.md#fix-wave-5).
-6. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
+4. **Code indexes re-chunk once.** `CHUNKER_VERSION` moves 7 → 8 so short `const f = () =>` functions keep their own named chunk; the next sync or `gbrain embed --stale` re-chunks code pages once.
+5. **Several brains on one host:** re-run `gbrain autopilot --install` for each non-default brain (`GBRAIN_HOME=<brain parent>`), then for the default brain.
+6. **Your agent reads `skills/migrations/v0.60.28.0.md`** the next time you talk to it. The full symptom table is in [Recover after upgrading](docs/guides/repair.md#fix-wave-5).
+7. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
 
 **Say to your agent:** *"We upgraded gbrain. Restart what runs it, then walk me through what doctor finds, in order, before changing anything."* or *"Preview the stale atoms in my brain and tell me what you'd retire."*
 
 ### Behavior changes
 
 - Session start never shows another session's activity. The `Last session activity` line and the stop-hook buffer behind it are removed, with deliberately no opt-in to restore them (#5558). Buffers an older release left in `~/.gbrain/transcripts/live/` are deleted by the stop hook after 7 days.
+- `volunteer_context` (for remote callers, honoring `search.remote_private_pages` like search), the per-turn hook block, the serve IPC `resolve` handler and `gbrain compile-context` exclude private pages, including derived-private atoms and concepts. The trusted local CLI still sees them in `volunteer_context`.
+- `CHUNKER_VERSION` 7 → 8: code pages re-chunk once.
 - `POST /ingest` returns 409 `{error: "permission_denied", message, hint, docs_url}` instead of 500 when a capture's key (or waiting cap) lands on a job row from before v0.50; completed legacy keys are reused (202) and dead or cancelled ones released.
 - Resubmitting over a job key from before v0.50 no longer fails: dead or cancelled keys are released, completed or failed rows are reused by local producers, and remote `submit_job` callers are refused over terminal legacy keys and resubmit with a new key.
 - `gbrain repair --all`, `gbrain repair` with no kind, the remediation plan and `gbrain doctor --remediate` exclude the explicit-only kinds `stale-atoms` and `extractor-facts`: they are listed with their preview command (`explicit_kind_required`) and never run. A finding only they clear does not fail `--remediate`'s exit status.
@@ -139,6 +145,15 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
 - **`embed --stale` no longer waits on itself (#5183)** when `GBRAIN_EMBED_CONCURRENCY` exceeds the Postgres pool.
 - **`sources writer deactivate` carries held connector items** into classic mode instead of refusing.
 - **An autopilot cycle no longer stales a `sources reconcile` preview:** the reconcile policy digest ignores the cycle stamps.
+
+#### Ambient recall, transcripts and code intelligence (from the eval-category wave)
+
+- **Private pages stay out of ambient recall (N8).** `resolveEntitiesToPointers` applies the remote-search private-page predicate on every arm (title, slug, surname, alias, CJK), so `volunteer_context` and the turn block no longer return a private page's title or synopsis; `compile-context` no longer writes private titles and excerpts into `.claude/gbrain-context.md` or `AGENTS.md`.
+- **Open-loop nudges measure grace from the oldest unanswered message (N7).** A run that started days ago is no longer hidden by a fresh follow-up; CC-only mail does not start the clock.
+- **Bold labels are not a conversation (N12).** A body with three or more `**Name**` turns where no speaker speaks twice no longer parses as a chat.
+- **Offset timestamps import on the right day (N12).** Transcript render and the Claude export, Claude Code, Codex and OpenClaw adapters normalize offset-bearing timestamps to UTC; UTC strings pass through unchanged.
+- **Short arrow functions keep their names in code search (N13).** `const f = () =>` and function-expression declarations keep a named chunk instead of merging into a const run.
+- **Code intelligence reports resolved edges as resolved, and a walk ignores other languages' namesakes (N13).**
 
 #### Models, skills and summaries
 
