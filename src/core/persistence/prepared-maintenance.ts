@@ -118,8 +118,8 @@ export async function publishMaintenancePage(engine: BrainEngine, authority: Mai
 
 /** A maintenance request with its own intent kind, keyed by the intent (a retry replays its receipt). */
 export async function submitMaintenanceIntent(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
-  intent: Record<string, unknown> & { kind: string; expected_revision: string | null }): Promise<Record<string, unknown>> {
-  return submitMaintenance(engine, authority, slug, intent, maintenanceRequestId({ authority: authority.writer, slug, intent }));
+  intent: Record<string, unknown> & { kind: string; expected_revision: string | null }, requestId?: string): Promise<Record<string, unknown>> {
+  return submitMaintenance(engine, authority, slug, intent, requestId ?? maintenanceRequestId({ authority: authority.writer, slug, intent }));
 }
 
 export async function stampMaintenancePage(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
@@ -282,6 +282,7 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
   if (row.intent?.kind === 'managed_maintenance_adopt_fact_fence') return prepareFactFenceAdoption(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_phantom_merge') return (await import('../cycle/phantom-redirect-managed.ts')).preparePhantomMerge(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_phantom_delete') return (await import('../cycle/phantom-redirect-managed.ts')).preparePhantomDelete(engine, row, config);
+  if (row.intent?.kind === 'managed_maintenance_retire_stale_atoms') return (await import('../repair/stale-atoms.ts')).prepareStaleAtomRetirement(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw new OperationError('invalid_params', 'Unsupported maintenance request.');
   const p = row.intent;
   const facts = p.facts as FactSnapshot[];

@@ -71,14 +71,14 @@ describe('registry', () => {
 });
 
 describe('execution-time enforcement', () => {
-  test('runRepair refuses an explicit-only handler that was not named, then reaches the stub refusal when named', async () => {
+  test('runRepair refuses an explicit-only handler that was not named, then previews it when named', async () => {
     const scope = await resolveRepairScope(engine);
     const ctx = { engine, config: { engine: 'pglite' }, logger: { info() {}, warn() {}, error() {} }, dryRun: true, remote: false } as unknown as OperationContext;
     const unnamed = await refusal(() => runRepair(ctx, staleAtomsRepair, scope, { apply: false }));
     expect(unnamed.toJSON()).toMatchObject({ error: 'explicit_kind_required', suggestion: 'Preview it on the brain host: gbrain repair stale-atoms',
       docs: 'docs/guides/repair.md#explicit-only-repair-kinds' });
-    const named = await refusal(() => runRepair(ctx, staleAtomsRepair, scope, { apply: false, explicit: true }));
-    expect(named.toJSON()).toMatchObject({ error: 'unavailable', message: 'gbrain repair stale-atoms is not implemented in this build.' });
+    const named = await runRepair(ctx, staleAtomsRepair, scope, { apply: false, explicit: true });
+    expect(named).toMatchObject({ kind: 'stale-atoms', mode: 'dry_run', affected: 0 });
   });
 
   test('the shared runner refuses an unnamed explicit-only kind', async () => {
