@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, mkdirSync, lstatSync, unlinkSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { atomicWriteTextFile } from '../bootstrap/atomic-write.ts';
 import { acquireBootstrapLock } from '../bootstrap/lock.ts';
@@ -11,6 +12,7 @@ import { renderAgentLauncher } from '../agent-install/launcher.ts';
 import { isValidName, shellQuote } from '../mcp-registration.ts';
 import { GBRAIN_MCP_INSTRUCTIONS } from '../../mcp/instructions.ts';
 import { harnessAdapter } from './registry.ts';
+import { GIT_ENV } from '../git-remote.ts';
 import { credentialAccessToken, credentialReceipt, type HarnessCredentials } from './credentials.ts';
 import { assertNoSymlinks, checkedRoot, confinedPath, sha256, privateWrite } from '../agent-install/state.ts';
 import { installSharedSkillsConnection } from './shared-skills.ts';
@@ -18,7 +20,7 @@ import type { SharedSkillsToolCaller } from '../shared-skills/adapter.ts';
 import { harnessSharedSkillsRoot } from './status.ts';
 
 export interface InstallOptions { harness: string; name?: string; root?: string; configPath?: string; remove?: boolean;
-  sharedSkills?: HarnessCredentials['shared_skills']; toolCaller?: SharedSkillsToolCaller; nativeSkillsDir?: string }
+  sharedSkills?: HarnessCredentials['shared_skills']; toolCaller?: SharedSkillsToolCaller; nativeSkillsDir?: string; credentialsFile?: string }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const readJson = (path: string): Record<string, any> => {
   assertNoSymlinks(path);
@@ -39,6 +41,33 @@ function nativeEntry(path: string, format: string, name: string): unknown {
   const entries = parsed[format === 'codex-toml' ? 'mcp_servers' : format === 'opencode-json' ? 'mcp' : 'mcpServers'] as Record<string, unknown> | undefined;
   if (format === 'codex-toml' && text.includes(CODEX_TOML_BLOCK_BEGIN) && entries?.[name] === undefined) throw new Error('configuration_conflict: managed Codex block belongs to another connection');
   return entries?.[name];
+}
+
+/** The Git working tree whose next commit would include `path`, or null when it is ignored or outside every tree. */
+function committingGitTree(path: string): string | null {
+  const git = (args: string[]) => execFileSync('git', ['-C', dirname(path), ...args],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV } }).trim();
+  let tree: string;
+  try { tree = git(['rev-parse', '--show-toplevel']); } catch { return null; }
+  try { git(['check-ignore', '-q', '--', path]); return null; } catch { return tree; }
+}
+
+/** Where an installed bearer token lives and how to replace it, never the token itself (#5775). */
+export function inlineTokenReceipt(c: HarnessCredentials, harness: string, name: string, configPath: string, reload: string, credentialsFile?: string) {
+  const renew = ['gbrain connect', shellQuote(c.mcp_url), '--harness', shellQuote(harness), '--credentials-file',
+    credentialsFile ? shellQuote(credentialsFile) : '<private-handoff-file>', ...(name === 'gbrain' ? [] : ['--name', shellQuote(name)]), '--install'].join(' ');
+  const invalidate = (apply: string) => `gbrain mcp admin invalidate-tokens ${shellQuote(c.client_id)}${apply} --url ${shellQuote(c.mcp_url)} --admin-token-file <owner-admin-token-file> --json`;
+  const tree = committingGitTree(configPath);
+  return {
+    token_storage: 'inline' as const, config_path: configPath, renew_command: renew,
+    if_exposed: {
+      steps: [`On the brain host, preview: ${invalidate('')}`, `Apply with the previewed revision: ${invalidate(' --yes --if-version <revision>')}`,
+        `Write a fresh token here: ${renew}`, reload],
+      docs_url: 'docs/mcp/ADMIN.md#invalidate-tokens-revoke-or-delete',
+    },
+    ...(tree ? { token_warning: `${configPath} is inside the Git working tree ${tree}, so committing there would publish this bearer token. `
+      + `Add ${relative(tree, configPath).split('\\').join('/')} to that repository's .gitignore or move the configuration; if it was already committed, follow if_exposed.` } : {}),
+  };
 }
 
 function assertEntryOwned(entry: unknown, prior: Record<string, any>) {
@@ -116,7 +145,8 @@ export async function installHarnessConnection(c: HarnessCredentials, opts: Inst
         next_action: pending ? 'Local configuration and unchanged owned skills were removed. Remote membership deactivation remains pending; retry when host authority is available.'
           : 'The client configuration was removed. Revoke the grant on the brain host if access should end.' };
     }
-    const nextReceipt = { ...common, entry_hash: hash(nativeEntry(configPath, adapter.connection, name)), status: 'installed', config_path: configPath };
+    const nextReceipt = { ...common, entry_hash: hash(nativeEntry(configPath, adapter.connection, name)), status: 'installed',
+      ...inlineTokenReceipt(c, adapter.id, name, configPath, adapter.reload, opts.credentialsFile) };
     atomicWriteTextFile(receiptPath, `${JSON.stringify(nextReceipt, null, 2)}\n`, { forceMode: 0o600 });
     const shared_skills = deactivated ?? await installSharedSkillsConnection(c, { ...opts, root: join(dirname(configPath), `.gbrain-${adapter.id}-${name}`) });
     return { ...nextReceipt, shared_skills, remote_membership_pending: 'remote_membership_pending' in shared_skills && shared_skills.remote_membership_pending === true };
