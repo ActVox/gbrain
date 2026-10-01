@@ -18,7 +18,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -37,7 +37,9 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const NATIVE_WINDOWS = process.platform === 'win32';
-const home = mkdtempSync(join(tmpdir(), 'gbrain-5032-'));
+// The Windows runner's TEMP is an 8.3 short path (RUNNER~1); git reports the long
+// form, so the fixture starts from the native realpath to keep the two comparable.
+const home = mkdtempSync(join(realpathSync.native(tmpdir()), 'gbrain-5032-'));
 const engines: BrainEngine[] = [];
 let closePostgres: (() => Promise<void>) | undefined;
 const putPage = operations.find((op) => op.name === 'put_page')!;
