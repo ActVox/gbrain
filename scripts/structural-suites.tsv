@@ -59,6 +59,7 @@ test/check-update.test.ts	check-update CLI	3	source-surface-helper
 test/child-worker-supervisor.test.ts	issue #1801 — restartCurrentChild + killChild liveness fix	3	readFileSync
 test/chronicle-extract.test.ts	runChronicleExtract	9	readFileSync
 test/ci-local-empty-mounts.test.ts	(file-level)	2	readFileSync
+test/claude-cli-recipe.test.ts	claude-cli LanguageModel — CLI too old for the provider flags	2	readFileSync
 test/claude-cli-recipe.test.ts	claude-cli LanguageModel — abort + error envelopes	13	readFileSync
 test/claude-cli-recipe.test.ts	claude-cli LanguageModel — context isolation	2	readFileSync
 test/claude-cli-recipe.test.ts	claude-cli LanguageModel — text-only round trip	4	readFileSync
