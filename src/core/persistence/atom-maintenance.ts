@@ -26,6 +26,7 @@ export interface AtomOrigin {
   pageId: number | null;
   revision: string | null;
   visibility: 'private' | 'world';
+  generation?: number;
 }
 export interface ManagedAtomSession {
   sourceId: string;
@@ -119,8 +120,34 @@ export async function readAtomOrigin(engine: BrainEngine, session: ManagedAtomSe
   if (!snapshot || snapshot.sourceIncarnation !== session.incarnation || snapshot.page.content_hash !== item.contentHash || snapshot.page.compiled_truth !== item.content) {
     throw new OperationError('revision_conflict', 'The atom input changed before extraction.');
   }
+  const generation = await atomGeneration(engine, snapshot.page.id);
   return { kind: item.kind, locator: item.slug, contentHash: item.contentHash, textHash: sha256(item.content), pageId: snapshot.page.id,
-    revision: snapshot.revision, visibility: effectiveVisibility({ kind: 'page', page: snapshot.page }) };
+    revision: snapshot.revision, visibility: effectiveVisibility({ kind: 'page', page: snapshot.page }), ...(generation > 0 ? { generation } : {}) };
+}
+
+export const ATOM_GENERATION_OP = 'managed-atoms-generation';
+export const ATOM_RETIRED_BY_REEXTRACT = 'managed-reextract';
+
+async function atomGeneration(engine: BrainEngine, pageId: number): Promise<number> {
+  const [row] = await engine.executeRaw<{ generation: string | null }>(
+    `SELECT completed_keys->0->>'generation' AS generation FROM op_checkpoints WHERE op='${ATOM_GENERATION_OP}' AND fingerprint=$1`, [String(pageId)]);
+  return Number(row?.generation ?? 0);
+}
+
+/**
+ * Retiring an origin page's atoms invalidates its earlier completed extractions: the generation
+ * changes the run key, so a retained receipt is not replayed, and discovery offers the page again.
+ * State for `keepContentHash` (the extraction completing in this transaction) is kept.
+ */
+export async function bumpAtomGeneration(tx: BrainEngine, sourceId: string, incarnation: string, pageId: number, keepContentHash: string | null): Promise<void> {
+  await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES('${ATOM_GENERATION_OP}',$1,'[{"generation":1}]'::jsonb)
+    ON CONFLICT(op,fingerprint) DO UPDATE SET updated_at=now(), completed_keys=jsonb_build_array(jsonb_build_object('generation',
+      COALESCE((op_checkpoints.completed_keys->0->>'generation')::integer,0)+1))`, [String(pageId)]);
+  await tx.executeRaw('DELETE FROM extract_atoms_page_state WHERE source_incarnation=$1::uuid AND page_id=$2 AND content_hash IS DISTINCT FROM $3::text',
+    [incarnation, pageId, keepContentHash]);
+  await tx.executeRaw(`DELETE FROM op_checkpoints WHERE op='managed-atoms' AND completed_keys->0->>'sourceId'=$1
+    AND completed_keys->0->>'kind'='page' AND completed_keys->0->>'pageId'=$2 AND completed_keys->0->>'contentHash' IS DISTINCT FROM $3::text`,
+  [sourceId, String(pageId), keepContentHash]);
 }
 
 /**
@@ -129,7 +156,8 @@ export async function readAtomOrigin(engine: BrainEngine, session: ManagedAtomSe
  * the drain and for an explicit retry (#5699).
  */
 function atomInputKey(session: ManagedAtomSession, origin: AtomOrigin): string {
-  return digest(['managed-atoms-v1', session.incarnation, origin.kind, origin.locator, origin.pageId, origin.contentHash]);
+  return digest(['managed-atoms-v1', session.incarnation, origin.kind, origin.locator, origin.pageId, origin.contentHash,
+    ...(origin.generation ? [origin.generation] : [])]);
 }
 
 /** The retry check adds the extracted text's hash: a transcript retry reads the current file under the retained content hash. */
@@ -218,7 +246,7 @@ export async function publishManagedAtoms(engine: BrainEngine, session: ManagedA
   for (const atom of atoms) {
     await authorizeWrite(engine, session.authority, 'put_page', atom.slug);
     const snapshot = await engine.readPageSnapshot(atom.slug, { sourceId: session.sourceId, includeDeleted: true });
-    if (snapshot && (snapshot.page.deleted_at || snapshot.page.type !== 'atom' ||
+    if (snapshot && ((snapshot.page.deleted_at && !snapshot.page.frontmatter.retired_by) || snapshot.page.type !== 'atom' ||
       (origin.kind === 'page' ? snapshot.page.frontmatter.source_slug !== origin.locator : snapshot.page.frontmatter.source_path !== origin.locator))) {
       throw new OperationError('page_identity_changed', 'The atom target belongs to another origin or was removed.');
     }
@@ -304,7 +332,14 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
       await validate(tx);
       await authorizeWrite(tx, row.authority, 'delete_page', row.slug);
       await prepared.validate?.(tx);
-    }, apply: async tx => ({ ...await prepared.apply(tx), atom_run_key: p.runKey, atom_kind: p.kind }) };
+    }, apply: async tx => {
+      const result = await prepared.apply(tx);
+      if (!prepared.noop) {
+        await tx.executeRaw(`UPDATE pages SET frontmatter=frontmatter||jsonb_build_object('retired_by',$1::text,'retired_at',$2::text)
+          WHERE id=$3 AND source_id=$4 AND deleted_at IS NOT NULL`, [ATOM_RETIRED_BY_REEXTRACT, new Date().toISOString(), row.page_id, row.source_id]);
+      }
+      return { ...result, atom_run_key: p.runKey, atom_kind: p.kind };
+    } };
   }
   if (p.kind === 'managed_atom_complete') {
     const targets = await engine.executeRaw<{ slug: string }>('SELECT slug FROM persistence_requests WHERE id=ANY($1::uuid[]) AND source_incarnation=$2::uuid',
@@ -340,9 +375,13 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
         [p.checkpointKey, checkpoint, p.expectedCheckpoint === null ? null : JSON.stringify(p.expectedCheckpoint)]);
         if (!advanced.length) throw new OperationError('revision_conflict', 'The reviewed atom retry checkpoint changed.');
       }
+      const retired = committed.filter(child => child.kind === 'managed_atom_delete').length;
+      if (retired && p.origin.kind === 'page' && p.origin.pageId !== null) {
+        await bumpAtomGeneration(tx, row.source_id, row.source_incarnation, p.origin.pageId, p.origin.contentHash);
+      }
       return { status: p.failure ? 'failed' : 'completed',
         atoms: committed.filter(child => child.kind === 'managed_atom_page').length,
-        retired: committed.filter(child => child.kind === 'managed_atom_delete').length,
+        retired,
         ...(p.failure ? { failure: p.failure } : {}) };
     } };
   }
