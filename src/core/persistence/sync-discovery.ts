@@ -139,44 +139,66 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const renamedFrom = new Map<string, string>();
   // #5032: a ':' path has no file on Windows. Each eligible one gets a named
   // refusal and takes no part in this run, including the origin checks below.
+  // A deletion or rename touching one is refused on both sides, so the page
+  // keeps its identity until the change is synced from macOS or Linux.
   const refused = new Map<string, SyncFileRefusal>();
-  const refuse = (path: string) => {
-    if (!isWindowsColonTarget(path)) return false;
-    if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through',
-      message: `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+  const refusalMessages = {
+    import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+    delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.`,
+  };
+  const record = (path: string, message: string) => {
+    if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through', message,
       suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
       docs: ERROR_CATALOGUE.colon_slug_windows_write_through.docs });
+  };
+  const refuse = (path: string, action: SyncEntry['action'] = 'import') => {
+    if (!isWindowsColonTarget(path)) return false;
+    record(path, refusalMessages[action](path));
     return true;
   };
   const storable = <T extends { source_path: string | null }>(page: T) => page.source_path === null || !isWindowsColonTarget(page.source_path);
   const put = (path: string, action: SyncEntry['action'], working = false) => {
     if (process.platform === 'win32' && path.includes('\\')) throw new OperationError('page_identity_changed', 'Git paths containing literal backslashes are not safe Windows sync targets.');
-    if (refuse(path)) return;
+    if (refuse(path, action)) return;
     if (eligible(path)) entries.set(path, { path: relative(nativeRoot, join(nativeGitRoot, path)).split(sep).join('/'), sourcePath: sourcePath(path), action, working });
+  };
+  const putRename = (rename: { from: string; to: string }, working = false) => {
+    if (isWindowsColonTarget(rename.from) || isWindowsColonTarget(rename.to)) {
+      for (const path of [rename.from, rename.to]) {
+        record(path, `${path} is one side of the rename ${rename.from} -> ${rename.to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.`);
+      }
+      return;
+    }
+    put(rename.from, 'delete', working); put(rename.to, 'import', working); renamedFrom.set(rename.to, rename.from);
   };
   if (delta?.status === 'ok') {
     for (const path of [...delta.manifest.added, ...delta.manifest.modified]) put(path, 'import');
     for (const path of delta.manifest.deleted) put(path, 'delete');
-    for (const rename of delta.manifest.renamed) { put(rename.from, 'delete'); put(rename.to, 'import'); renamedFrom.set(rename.to, rename.from); }
+    for (const rename of delta.manifest.renamed) putRename(rename);
   } else {
-    const paths = syncGit(gitRoot, ['ls-tree', '-r', '--name-only', '-z', target]).split('\0')
-      .filter(path => path && (!scope || path.startsWith(`${scope}/`)) && !refuse(path));
+    const listed = syncGit(gitRoot, ['ls-tree', '-r', '--name-only', '-z', target]).split('\0')
+      .filter(path => path && (!scope || path.startsWith(`${scope}/`)));
+    const paths = listed.filter(path => !refuse(path));
     assertDistinctSyncOrigins(paths);
     const present = new Set(paths.map(path => syncOriginPath(sourcePath(path))));
     for (const path of paths) put(path, 'import');
-    const pages = (await engine.executeRaw<{ slug: string; source_path: string }>('SELECT slug,source_path FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND source_path IS NOT NULL', [sourceId])).filter(storable);
+    const livePages = await engine.executeRaw<{ slug: string; source_path: string }>('SELECT slug,source_path FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND source_path IS NOT NULL', [sourceId]);
+    const gitPathOf = (origin: string) => slugMode === 'source-root' && scope ? `${scope}/${origin}` : origin;
+    const listedSet = new Set(listed);
+    for (const page of livePages) if (!storable(page) && !listedSet.has(gitPathOf(page.source_path))) refuse(gitPathOf(page.source_path), 'delete');
+    const pages = livePages.filter(storable);
     assertDistinctSyncOrigins([...present, ...pages.map(page => page.source_path)]);
     for (const page of pages) {
       const origin = syncOriginPath(page.source_path);
       const stripped = slugMode === 'source-root' && scope && origin.startsWith(`${scope}/`) ? origin.slice(scope.length + 1) : null;
       if (present.has(origin) || stripped !== null && present.has(stripped) && sameSyncOrigin(origin, stripped, originScope, page.slug)) continue;
-      put(slugMode === 'source-root' && scope ? `${scope}/${origin}` : origin, 'delete');
+      put(gitPathOf(origin), 'delete');
     }
   }
   if (working) {
     for (const path of [...dirty.added, ...dirty.modified]) put(path, 'import', true);
     for (const path of dirty.deleted) put(path, 'delete', true);
-    for (const rename of dirty.renamed) { put(rename.from, 'delete', true); put(rename.to, 'import', true); renamedFrom.set(rename.to, rename.from); }
+    for (const rename of dirty.renamed) putRename(rename, true);
   }
   if (company) {
     entries.clear();

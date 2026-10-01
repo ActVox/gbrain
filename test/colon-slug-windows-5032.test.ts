@@ -182,6 +182,35 @@ describe('#5032 managed sync of committed colon files on Windows', () => {
   }), 180_000);
 });
 
+describe('#5032 managed sync of a rename away from a colon file on Windows', () => {
+  // The colon page was imported by a macOS or Linux owner; that first sync
+  // cannot run on a native Windows runner, so this case is POSIX-only.
+  test.skipIf(NATIVE_WINDOWS)('both sides are refused and the page keeps its identity; no duplicate page appears', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      const root = join(home, `rename-${randomUUID()}`); mkdirSync(join(root, 'notes'), { recursive: true });
+      git(root, 'init', '-q');
+      writeFileSync(join(root, 'notes', 'calendar:abc.md'), CONTENT);
+      git(root, 'add', '-A');
+      git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'colon');
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      const sourceId = await addSource(engine, root);
+      await claimWorktree(engine, sourceId, root);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      expect((await performManagedSync(engine, { sourceId, noPull: true })).status).toBe('first_sync');
+      const [before] = await engine.executeRaw<{ id: number; slug: string }>(
+        "SELECT id,slug FROM pages WHERE source_id=$1 AND source_path='notes/calendar:abc.md' AND deleted_at IS NULL", [sourceId]);
+      expect(before).toBeDefined();
+
+      git(root, 'mv', 'notes/calendar:abc.md', 'notes/calendar-abc.md');
+      git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'rename');
+      const result = await asWindows(() => performManagedSync(engine, { sourceId, noPull: true }));
+      expect(result.fileRefusals?.map((refusal) => refusal.path).sort()).toEqual(['notes/calendar-abc.md', 'notes/calendar:abc.md']);
+      const live = await engine.executeRaw<{ id: number; slug: string }>('SELECT id,slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL', [sourceId]);
+      expect(live).toEqual([{ id: before.id, slug: before.slug }]);
+    }
+  }), 180_000);
+});
+
 describe('#5032 unmanaged incremental sync of a committed colon file on Windows', () => {
   test('the colon file is a named per-file failure; the other files import', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
     const engine = engines[0];
