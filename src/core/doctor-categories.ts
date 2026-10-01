@@ -138,6 +138,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'sync_freshness',
   'takes_count',
   'takes_weight_grid',
+  // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
+  'unlinked_facts',
   'text_projection_readiness',
   'timeline_coverage',
   'timeline_orphans',

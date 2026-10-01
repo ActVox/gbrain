@@ -187,6 +187,10 @@
       },
       {
         "category": "brain",
+        "name": "unlinked_facts"
+      },
+      {
+        "category": "brain",
         "name": "timeline_history"
       },
       {

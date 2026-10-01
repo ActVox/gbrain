@@ -184,8 +184,7 @@ export async function prepareRelinkMutation(engine: BrainEngine, row: WriteReque
     }
     if (intent.queue_conflict && outcome.linked.length) {
       const { enqueueRelinked } = await import('../ai/decide/proposals-store.ts');
-      await enqueueRelinked(tx, row.source_id, outcome.linked.map(l => l.id));
-      outcome.queued = outcome.linked.length;
+      outcome.queued = await enqueueRelinked(tx, row.source_id, outcome.linked.map(l => l.id));
     }
     return { ...published, status: 'relinked', slug: row.slug, ...outcome };
   };

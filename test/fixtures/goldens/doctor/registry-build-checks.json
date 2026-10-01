@@ -538,6 +538,10 @@
         "name": "decide_health"
       },
       {
+        "category": "brain",
+        "name": "unlinked_facts"
+      },
+      {
         "category": "ops",
         "name": "chat_fallback_chain_inert"
       },
