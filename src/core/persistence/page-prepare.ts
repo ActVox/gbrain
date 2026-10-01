@@ -30,7 +30,7 @@ import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories } from './pag
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { nativeFileTarget } from './native-file-target.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { sourceMirrorReadOnly } from './mirror-read-only.ts';
+import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { DERIVE_PHASE_DB_ONLY_DEFAULTS } from '../storage-config.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
 import { readSlugRootMode } from '../sync-anchor.ts';
@@ -77,6 +77,7 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   if (!row.worktree_id) return undefined;
   // #5409: a read-only mirror's checkout belongs to its Git remote; nothing is written or removed there.
   if (await sourceMirrorReadOnly(engine, row.source_id)) return undefined;
+  if (snapshot && !snapshot.page.source_path && await isMirrorOnlyPage(engine, row.source_id, row.slug)) return undefined;
   // #5254: a page written while its source was unbound stays database-only in
   // every state (live, tombstone, restore, revert, delete, purge); any file at
   // its derived path is not its canonical file and is neither written nor removed.
@@ -139,7 +140,9 @@ export function databaseOnlyPublication(row: Pick<WriteRequest, 'worktree_id'>, 
 }
 async function pageDatabaseOnlyPublication(engine: SqlEngine, row: WriteRequest, file: PreparedMutation['file']): Promise<Pick<PreparedMutation, 'databaseOnlyReason'>> {
   const reason = databaseOnlyPublication(row, file);
-  if (reason.databaseOnlyReason && await sourceMirrorReadOnly(engine, row.source_id)) return { databaseOnlyReason: 'mirror_read_only' };
+  if (reason.databaseOnlyReason && (await sourceMirrorReadOnly(engine, row.source_id) || await isMirrorOnlyPage(engine, row.source_id, row.slug))) {
+    return { databaseOnlyReason: 'mirror_read_only' };
+  }
   return reason.databaseOnlyReason && await isUnboundSourcePage(engine, row.source_id, row.slug) ? { databaseOnlyReason: 'unbound_source' } : reason;
 }
 

@@ -23,7 +23,7 @@ import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFil
 import { assertMutationProtocol, assertSharedSkillPersistence, declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertBundleRecoveryBinding, bundleFileHash, prepareBundleRecovery, publishStagedBundleFile, stageBundleFile, type MutationFile } from './bundle-files.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
-import { sourceMirrorReadOnly } from './mirror-read-only.ts';
+import { classifyMirrorPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -241,6 +241,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       }
       const outcome = await withCoordinatedWrite(tx, [row.source_id], () => prepared.apply(tx));
       if (!skill) await classifyUnboundPage(tx, row);
+      if (prepared.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
       const final = skill ? null : await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
       if (final) outcome.revision = final.revision;
       outcome.persistence = { mode: files.length ? 'filesystem' : 'database', ...(files.length ? { file_written: !prepared.noop } : {}), ...(skill ? { git_state: 'not_requested' } : {}) };

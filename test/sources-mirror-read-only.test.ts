@@ -28,6 +28,7 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { submitForgetMutation } from '../src/core/persistence/memory-mutations.ts';
 import { runSources } from '../src/commands/sources.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -163,6 +164,38 @@ for (const backend of testBackends()) {
       expect(outcome).toMatchObject({ state: 'conflict', error_code: 'source_changed' });
       expect(existsSync(join(m.root, 'notes/racing.md'))).toBe(false);
       expect(await engine.getPage('notes/racing', { sourceId: m.id })).toBeNull();
+    }), 120_000);
+
+    test('a page created while read-only stays database-only after mirror-writable and can still be edited (Codex review)', () => withEnv({ GBRAIN_HOME: home }, async () => {
+      const m = await mirror(true);
+      const put = (body: string, extra: Record<string, unknown> = {}) => submitPageMutation(ctx(m.id), { operation: 'put_page', params: { slug: 'notes/brain-only',
+        request_id: randomUUID(), content: `---\ntitle: Brain only\ntype: note\n---\n${body}\n`, ...extra } }) as Promise<Record<string, unknown>>;
+      await put('Created while the source was a read-only mirror.');
+      await cli(['mirror-writable', m.id]);
+      const prior = (await engine.readPageSnapshot('notes/brain-only', { sourceId: m.id }))!;
+      const edited = await put('Edited after mirror-writable.', { expected_revision: prior.revision });
+      expect(edited).toMatchObject({ storage: 'database_only', write_through: { written: false, skipped: 'mirror_read_only' } });
+      expect((await engine.getPage('notes/brain-only', { sourceId: m.id }))?.compiled_truth).toContain('Edited after mirror-writable.');
+      expect(existsSync(join(m.root, 'notes/brain-only.md'))).toBe(false);
+    }), 120_000);
+
+    test('a fact withdrawal in a read-only mirror settles its Git effect as skipped, never failed (Codex review)', () => withEnv({ GBRAIN_HOME: home }, async () => {
+      const m = await mirror(true);
+      await submitPageMutation(ctx(m.id), { operation: 'put_page', params: { slug: 'people/alice-example', request_id: randomUUID(),
+        content: '---\ntitle: Alice Example\ntype: person\n---\n# Alice Example\n' } });
+      const [{ id }] = await engine.transaction(tx => withCoordinatedWrite(tx, [m.id], () => tx.executeRaw<{ id: number }>(
+        `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source) VALUES ($1, 'people/alice-example', 'Alice prefers mornings', 'preference', 'private', 'test')
+         RETURNING id::int AS id`, [m.id])));
+      const forgot = await submitForgetMutation(ctx(m.id), 'forget', { id: Number(id), request_id: randomUUID() }) as { request_id: string };
+      let effects: Array<{ kind: string; state: string; outcome: Record<string, unknown> | null }> = [];
+      for (let i = 0; i < 100; i++) {
+        effects = await engine.executeRaw(`SELECT e.kind, e.state, e.outcome FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
+          WHERE r.request_id=$1::uuid AND e.kind='git'`, [forgot.request_id]);
+        if (effects.length && effects.every(e => e.state !== 'queued' && e.state !== 'running')) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      expect(effects).toEqual([expect.objectContaining({ kind: 'git', state: 'committed', outcome: expect.objectContaining({ git: 'skipped', reason: 'mirror_read_only' }) })]);
+      expect(tracked(m.root)).toBe('');
     }), 120_000);
   });
 }

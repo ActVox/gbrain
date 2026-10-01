@@ -169,7 +169,9 @@ maintenance write) is stored database-only too; its receipt says
 `storage: "database_only"` with `write_through.skipped: "mirror_read_only"`.
 `gbrain sources list --json` shows `mirror_read_only` per source. Undo it with
 `gbrain sources mirror-writable <id>`; files are written again from the next
-write on. The flag is off by default.
+write on, except for pages created while the source was a mirror: those have
+no file in the checkout and stay database-only. Git effects of a mirror's
+writes (for example a `forget`) complete as skipped. The flag is off by default.
 
 ## The git requirement for --path sources
 
