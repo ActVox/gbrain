@@ -6,6 +6,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { AuthInfo, OperationContext } from '../ops/contract.ts';
 import { OperationError } from '../ops/contract.ts';
 import { catalogueError } from '../error-catalogue.ts';
+import { STOP_PRODUCERS, legacyRecoveryHint, selectCommand } from './legacy-selection.ts';
 import { normalizeSlugPrefix } from '../ops/context.ts';
 import { hasScope } from '../scope.ts';
 import { coerceLegacyPermissions, normalizeTokenScopes, parseLegacyTokenScope } from '../legacy-token-scope.ts';
@@ -285,25 +286,18 @@ export const UNREVIEWED_LIVE_JOBS_SQL = `SELECT id, name, status, submission_aut
 /** Select-list column every coalesce read adds so SQL NULL stays distinguishable from JSONB null. */
 export const LEGACY_AUTHORITY_COLUMN = 'submission_authority IS NULL AS legacy_authority_is_null';
 
-/** The filled `--select` preview that reviews one legacy row's name and status. */
-export function legacyAuthorizeCommand(name: string, status: string): string {
-  return `gbrain jobs authorize-legacy --select "status=${status},name=${name}"`;
-}
-
 /** `permission_denied` for a job row whose SQL NULL authority predates the v0.50 cutover. */
 export function legacyJobAuthorityError(row: Record<string, unknown>): OperationError {
   const id = String(row.id), name = String(row.name), status = String(row.status);
   const what = `Queued job authorization: job ${id} (${name}, ${status}) has no submission authority because it predates the upgrade, so it cannot be reused until it is reviewed.`;
   if (status === 'completed' || status === 'failed') {
     return catalogueError('legacy_job_authority', what,
-      `Resubmit with a new idempotency key; a local operator can review the old row with ${legacyAuthorizeCommand(name, status)}.`);
+      `Resubmit with a new idempotency key; a local operator can review the old row with ${selectCommand('authorize-legacy', { statuses: [status], names: [name] })}.`);
   }
   if (status === 'active') {
-    return catalogueError('legacy_job_authority', what,
-      `Stop producers (gbrain serve, gbrain autopilot) and workers, then cancel it: gbrain jobs cancel ${id}; run gbrain doctor to review the rest.`);
+    return catalogueError('legacy_job_authority', what, `${STOP_PRODUCERS}, then cancel it: gbrain jobs cancel ${id}; run gbrain doctor to review the rest.`);
   }
-  return catalogueError('legacy_job_authority', what,
-    `Stop producers (gbrain serve, gbrain autopilot) and workers, cancel active jobs (gbrain jobs cancel <id>), preview with ${legacyAuthorizeCommand(name, status)}, apply with the printed --expect <hash> --yes, then restart them.`);
+  return catalogueError('legacy_job_authority', what, legacyRecoveryHint([status], [name]));
 }
 
 const RELEASABLE = new Set(['dead', 'cancelled']);
@@ -333,7 +327,12 @@ export function coalesceDecision(row: Record<string, unknown>, authority: Submis
 
 /** Startup and claim gate: do not let sweeps silently destroy unresolved legacy dependency graphs. */
 export async function assertNoUnreviewedJobs(engine: BrainEngine): Promise<void> {
-  const rows = await engine.executeRaw<{ id: number; submission_authority: unknown }>(UNREVIEWED_LIVE_JOBS_SQL);
+  const rows = await engine.executeRaw<{ id: number; status: string; submission_authority: unknown; legacy_authority_is_null: boolean }>(UNREVIEWED_LIVE_JOBS_SQL);
   const invalid = rows.filter(row => !parseSubmissionAuthority(row.submission_authority));
-  if (invalid.length) deny(`${invalid.length} legacy jobs have missing or unsupported authority; stop producers/workers. Review SQL NULL rows with jobs authorize-legacy --ids ...; unsupported non-NULL authority requires matching application/database versions or explicit local cancellation before workers start`);
+  if (!invalid.length) return;
+  const unsupported = invalid.filter(row => row.legacy_authority_is_null !== true).length;
+  throw catalogueError('legacy_job_authority',
+    `Queued job authorization: ${invalid.length} legacy jobs have missing or unsupported authority, so workers cannot start until they are reviewed.`,
+    `${legacyRecoveryHint(invalid.filter(row => row.legacy_authority_is_null === true).map(row => row.status))}${unsupported
+      ? ` ${unsupported} job(s) carry unsupported non-NULL authority: run matching application and database versions, or cancel them with gbrain jobs cancel <id> (gbrain doctor lists them).` : ''}`);
 }

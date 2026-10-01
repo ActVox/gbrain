@@ -99,7 +99,7 @@ export async function refreshGatewayForJob(engine: BrainEngine): Promise<void> {
 // pins this set against the registerBuiltinJob call sites — a gateway-using
 // handler registered via bare worker.register() runs with a stale gateway
 // (the #3387 chronicle_extract silent-no_events class).
-const GATEWAY_REFRESH_JOB_NAMES = new Set([
+export const GATEWAY_REFRESH_JOB_NAMES = new Set([
   'embed',
   'extract-conversation-facts',
   'enrich',
@@ -154,6 +154,7 @@ const JOBS_HELP = `gbrain jobs — Minions job queue
 
 USAGE
   gbrain jobs authorize-legacy --ids 12,34 [--expect <snapshot_digest> --yes] [--json]
+  gbrain jobs authorize-legacy --select "status=waiting|paused,name=synthesize" [--expect <hash> --yes] [--json]
   gbrain jobs submit <name> [--params JSON] [--follow] [--priority N]
                             [--delay Nms] [--max-attempts N] [--max-stalled N]
                             [--max-waiting N]
@@ -376,10 +377,16 @@ OPTIONS
 USAGE
   gbrain jobs authorize-legacy --ids 12,34 --json
   gbrain jobs authorize-legacy --ids 12,34 --expect <snapshot_digest> --yes --json
+  gbrain jobs authorize-legacy --select "status=waiting|paused,name=synthesize|ingest_capture" [--json]
+  gbrain jobs authorize-legacy --select "status=waiting|paused,name=synthesize|ingest_capture" --expect <hash> --yes
 
-Stop producers and workers and drain active jobs first. The first command only
-previews; apply requires the exact reviewed snapshot digest and --yes. Dependencies
-are shown but never implicitly authorized. IDs, data, schedule and retries persist.
+Stop producers (gbrain serve, gbrain autopilot) and workers and cancel active jobs
+first. A command without --yes only previews; apply requires the exact reviewed hash
+and --yes. --select keys: status (waiting, delayed, waiting-children, paused,
+completed, failed) and name, each taking | alternatives. The --select preview lists
+counts by job name and status, the first 20 ids and the preview hash, and the apply
+authorizes exactly the previewed set. Dependencies are shown but never implicitly
+authorized. IDs, data, schedule and retries persist.
 `,
   prune: `gbrain jobs prune — delete old terminal jobs
 
