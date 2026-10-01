@@ -27,7 +27,7 @@ describe('inline bearer token receipt (#5775)', () => {
       steps: [
         'On the brain host, preview: gbrain mcp admin invalidate-tokens gbrain_cl_fixture --url https://brain.example.com/mcp --admin-token-file <owner-admin-token-file> --json',
         'Apply with the previewed revision: gbrain mcp admin invalidate-tokens gbrain_cl_fixture --yes --if-version <revision> --url https://brain.example.com/mcp --admin-token-file <owner-admin-token-file> --json',
-        `Write a fresh token here: ${renew}`,
+        `Write a freshly exchanged token here: ${renew} --fresh-token`,
         RELOAD[harness],
       ],
       docs_url: 'docs/mcp/ADMIN.md#invalidate-tokens-revoke-or-delete',
@@ -36,6 +36,31 @@ describe('inline bearer token receipt (#5775)', () => {
     expect(readFileSync(configPath, 'utf8')).toContain(TOKEN);
     expect(JSON.stringify(receipt)).not.toContain(TOKEN);
     expect(readFileSync(join(dir, `.gbrain-connection-${harness}-example-brain.json`), 'utf8')).not.toContain(TOKEN);
+  });
+
+  test('exposure recovery exchanges a new token instead of reinstalling the cached one', async () => {
+    const dir = temp(), configPath = join(dir, 'config.toml');
+    const issued = 'fixture-fresh-token-value-0001';
+    let exchanges = 0;
+    const server = Bun.serve({ port: 0, fetch: () => { exchanges++; return Response.json({ access_token: issued, token_type: 'Bearer', expires_in: 3600 }); } });
+    try {
+      const c = { ...creds(), issuer_url: `http://127.0.0.1:${server.port}` };
+      await installHarnessConnection(c, { harness: 'codex', configPath });
+      expect(exchanges).toBe(0);
+      expect(readFileSync(configPath, 'utf8')).toContain(TOKEN);
+      await installHarnessConnection(c, { harness: 'codex', configPath, freshToken: true });
+      expect(exchanges).toBe(1);
+      expect(readFileSync(configPath, 'utf8')).toContain(issued);
+      expect(readFileSync(configPath, 'utf8')).not.toContain(TOKEN);
+    } finally { server.stop(true); }
+  });
+
+  test('a handoff without a client secret points recovery at a new handoff', async () => {
+    const dir = temp(), configPath = join(dir, 'config.toml');
+    const { client_secret: _secret, ...staticCreds } = creds();
+    const receipt = await installHarnessConnection(staticCreds, { harness: 'codex', configPath }) as Record<string, any>;
+    expect(receipt.if_exposed.steps[2]).toBe('This handoff cannot exchange a new token; get a new private handoff from the brain owner (gbrain mcp grant on the brain host), then run: '
+      + 'gbrain connect https://brain.example.com/mcp --harness codex --credentials-file <private-handoff-file> --install');
   });
 
   test('a configuration inside a Git working tree warns with the fix until it is ignored', async () => {

@@ -20,7 +20,7 @@ import type { SharedSkillsToolCaller } from '../shared-skills/adapter.ts';
 import { harnessSharedSkillsRoot } from './status.ts';
 
 export interface InstallOptions { harness: string; name?: string; root?: string; configPath?: string; remove?: boolean;
-  sharedSkills?: HarnessCredentials['shared_skills']; toolCaller?: SharedSkillsToolCaller; nativeSkillsDir?: string; credentialsFile?: string }
+  sharedSkills?: HarnessCredentials['shared_skills']; toolCaller?: SharedSkillsToolCaller; nativeSkillsDir?: string; credentialsFile?: string; freshToken?: boolean }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const readJson = (path: string): Record<string, any> => {
   assertNoSymlinks(path);
@@ -58,11 +58,14 @@ export function inlineTokenReceipt(c: HarnessCredentials, harness: string, name:
     credentialsFile ? shellQuote(credentialsFile) : '<private-handoff-file>', ...(name === 'gbrain' ? [] : ['--name', shellQuote(name)]), '--install'].join(' ');
   const invalidate = (apply: string) => `gbrain mcp admin invalidate-tokens ${shellQuote(c.client_id)}${apply} --url ${shellQuote(c.mcp_url)} --admin-token-file <owner-admin-token-file> --json`;
   const tree = committingGitTree(configPath);
+  // A cached unexpired handoff token is the invalidated one, so recovery must exchange a new token.
+  const replace = c.client_secret ? `Write a freshly exchanged token here: ${renew} --fresh-token`
+    : `This handoff cannot exchange a new token; get a new private handoff from the brain owner (gbrain mcp grant on the brain host), then run: ${renew}`;
   return {
     token_storage: 'inline' as const, config_path: configPath, renew_command: renew,
     if_exposed: {
       steps: [`On the brain host, preview: ${invalidate('')}`, `Apply with the previewed revision: ${invalidate(' --yes --if-version <revision>')}`,
-        `Write a fresh token here: ${renew}`, reload],
+        replace, reload],
       docs_url: 'docs/mcp/ADMIN.md#invalidate-tokens-revoke-or-delete',
     },
     ...(tree ? { token_warning: `${configPath} is inside the Git working tree ${tree}, so committing there would publish this bearer token. `
@@ -113,7 +116,7 @@ export async function installHarnessConnection(c: HarnessCredentials, opts: Inst
       const sibling = opencodeGlobalSiblingPath(configPath);
       if (sibling && nativeEntry(sibling, adapter.connection, name) !== undefined) throw new Error('configuration_conflict: same-name entry in sibling opencode config; preserve it and choose one explicit configuration before installing');
     }
-    const token = opts.remove ? '' : await credentialAccessToken(c);
+    const token = opts.remove ? '' : await credentialAccessToken(opts.freshToken ? { ...c, access_token: undefined } : c);
     const entry = adapter.connection === 'codex-toml' ? { url: c.mcp_url, http_headers: { Authorization: `Bearer ${token}` } }
       : adapter.connection === 'opencode-json' ? { type: 'remote', url: c.mcp_url, headers: { Authorization: `Bearer ${token}` }, enabled: true }
         : { type: 'http', url: c.mcp_url, headers: { Authorization: `Bearer ${token}` } };

@@ -10,6 +10,7 @@ import { startPersistenceConsumer, assertPersistenceAccepting } from './service.
 import { isWriteErrorCode, isWriteReceipt } from './types.ts';
 import type { PersistenceIpcProvider } from './ipc.ts';
 import { runPersistenceAdministration } from './administration.ts';
+export { residentPersistenceConfig } from './local-client.ts';
 
 /** Resident lifecycle owns the consumer; each connection proves its own durable registration. */
 export async function createPersistenceIpcProvider(engine: BrainEngine, config: GBrainConfig): Promise<PersistenceIpcProvider> {

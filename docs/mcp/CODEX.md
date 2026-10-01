@@ -103,8 +103,10 @@ config diffs, agents inspecting MCP entries) can see a live token. The
 `--harness codex --install` receipt says so: `token_storage: "inline"`,
 `config_path`, the `renew_command` that writes a fresh token, and `if_exposed`,
 which lists the [token invalidation](ADMIN.md#invalidate-tokens-revoke-or-delete)
-preview and apply commands for the brain host, then the renew command and the
-Codex reload. When the config file sits in a Git working tree that does not
+preview and apply commands for the brain host, then the renew command with
+`--fresh-token` (an unexpired cached handoff token is the invalidated one, so
+the install must exchange a new one; a handoff without a client secret needs a
+new handoff from the owner instead), then the Codex reload. When the config file sits in a Git working tree that does not
 ignore it, the receipt adds `token_warning`: add the file to that repository's
 `.gitignore` or move the config, and follow `if_exposed` if it was already
 committed. Rotating a client secret does not invalidate access tokens already
