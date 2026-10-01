@@ -23,7 +23,7 @@ import { getWriteRequest } from '../persistence/journal.ts';
 import { initializeLocalPersistence, requestPrincipalForContext } from '../persistence/page-mutations.ts';
 import { lookupEmbeddingPrice, estimateCostFromChars } from '../embedding-pricing.ts';
 
-export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'orphan-bindings', 'embedding-effects'] as const;
+export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'orphan-bindings', 'embedding-effects', 'stale-atoms', 'extractor-facts'] as const;
 export type RepairKind = typeof REPAIR_KINDS[number];
 
 export interface RepairScope { brain_id: string; source_ids: string[] }
@@ -41,7 +41,12 @@ export interface RepairPlan {
   items: RepairItem[];
   /** Counts of rows the kind keeps and reports instead of repairing. */
   residuals: Record<string, number>;
+  /** Preview-bound kinds: the `previewHash` an apply must pass back with `--expect`. */
+  preview_hash?: string;
 }
+
+/** What the run was asked to do; preview-bound (explicit-only) kinds read `expect` and `includeAmbiguous`. */
+export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmbiguous?: boolean }
 
 export interface RepairHandler {
   kind: RepairKind;
@@ -50,7 +55,7 @@ export interface RepairHandler {
   /** False for kinds whose items are bookkeeping rows, not pages: no embedding cost. */
   embeds?: boolean;
   /** Pending items after `after`, in cursor order. */
-  plan(engine: BrainEngine, scope: RepairScope, after: RepairCursor | null): Promise<RepairPlan>;
+  plan(engine: BrainEngine, scope: RepairScope, after: RepairCursor | null, opts?: RepairPlanOptions): Promise<RepairPlan>;
   /**
    * Apply one item; `false` when it no longer needs repair. `embed` is false
    * under --no-embed. `runId` identifies this repair run and survives a resume.
@@ -159,11 +164,19 @@ function writerHeld(error: unknown): error is OperationError {
   return error instanceof OperationError && ['owner_unavailable', 'writer_lock_unavailable', 'writer_busy'].includes(error.code);
 }
 
+/**
+ * `explicit`: the operator named this kind on the command line. An
+ * explicit-only kind (registry `explicit_only`) refuses without it, so no
+ * `--all` loop or supplied remediation step can run one.
+ */
 export async function runRepair(ctx: OperationContext, handler: RepairHandler, scope: RepairScope,
-  opts: { apply: boolean; limit?: number; embeddingModel?: string; sourceFlag?: string; embed?: boolean; applyArgs?: string[] }): Promise<RepairResult> {
+  opts: { apply: boolean; limit?: number; embeddingModel?: string; sourceFlag?: string; embed?: boolean; applyArgs?: string[];
+    explicit?: boolean; expect?: string; includeAmbiguous?: boolean }): Promise<RepairResult> {
+  const { repairSpec, explicitKindRequired } = await import('./registry.ts');
+  if (repairSpec(handler.kind)?.explicit_only && opts.explicit !== true) throw explicitKindRequired(handler.kind);
   if (opts.apply) await initializeLocalPersistence(ctx);
   const { cursor: resumed, runId: storedRunId } = await readCursor(ctx.engine, handler.kind, scope);
-  const plan = await handler.plan(ctx.engine, scope, resumed);
+  const plan = await handler.plan(ctx.engine, scope, resumed, { apply: opts.apply, expect: opts.expect, includeAmbiguous: opts.includeAmbiguous });
   const pending = opts.limit !== undefined ? plan.items.slice(0, opts.limit) : plan.items;
   const counters = await capacity(ctx);
   const admits = (handler.publication ?? 'coordinated') === 'coordinated' ? pending.length : 0;
@@ -174,7 +187,8 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
       embedding_usd: embeddingUsd(pending.reduce((sum, item) => sum + item.chars, 0), opts.embeddingModel) },
     capacity: counters.map(({ scope: key, resource, used, limit, stop_at }) => ({ scope: key, resource, used, limit, stop_at })),
     resumed_from: resumed, applied: 0, skipped: 0, complete: false,
-    apply_command: `gbrain repair ${handler.kind}${opts.sourceFlag ? ` --source ${opts.sourceFlag}` : ''}${(opts.applyArgs ?? []).map(arg => ` ${arg}`).join('')} --apply`,
+    apply_command: `gbrain repair ${handler.kind}${opts.sourceFlag ? ` --source ${opts.sourceFlag}` : ''}${(opts.applyArgs ?? []).map(arg => ` ${arg}`).join('')}`
+      + `${opts.includeAmbiguous ? ' --include-ambiguous' : ''} --apply${plan.preview_hash ? ` --expect ${plan.preview_hash}` : ''}`,
   };
   if (!opts.apply) {
     result.complete = pending.length === plan.items.length;

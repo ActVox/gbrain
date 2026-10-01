@@ -11,6 +11,12 @@
  * page write whose embedding effect the persistence consumer runs (outside
  * this process, not affected by `--no-embed`); `inline` kinds embed in this
  * process unless `--no-embed` is given.
+ *
+ * `explicit_only` kinds run only when the operator names them
+ * (`gbrain repair <kind>`): `--all`, the remediation plan and run, and the
+ * post-upgrade banner list them with their preview command
+ * (`explicit_kind_required`) but never run them, and `runRepair` refuses one
+ * that was not named, so a supplied remediation step cannot run it either.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../ops/contract.ts';
@@ -25,6 +31,10 @@ import { requestIndexesRepair } from './request-indexes.ts';
 import { connectorFencesRepair } from './connector-fences.ts';
 import { orphanBindingsRepair } from './orphan-bindings.ts';
 import { embeddingEffectsRepair } from './embedding-effects.ts';
+import { staleAtomsRepair } from './stale-atoms.ts';
+import { extractorFactsRepair } from './extractor-facts.ts';
+import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
+import type { OperationError } from '../ops/contract.ts';
 
 export interface RepairKindSpec {
   kind: RepairKind;
@@ -35,6 +45,8 @@ export interface RepairKindSpec {
   embeds: 'effect' | 'inline' | 'none';
   /** Doctor check ids whose findings this kind clears. */
   checks: string[];
+  /** Runs only when named on the command line; never from `--all`, the remediation plan or a supplied step. */
+  explicit_only?: true;
 }
 
 const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
@@ -83,6 +95,14 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'Each effect is reconciled (current vectors pass the effect verifier), superseded (page deleted, or a newer revision owns its own effect), '
       + 'retry_queued for its owner (paid; a consumed retry allowance gets one new bounded cycle per explicit run) or blocked with the reason. Never drops an obligation.',
   },
+  'stale-atoms': {
+    handler: staleAtomsRepair, embeds: 'none', checks: [], explicit_only: true,
+    summary: 'Retire managed atoms whose source page changed or was deleted (#5770). Not implemented in this build.',
+  },
+  'extractor-facts': {
+    handler: extractorFactsRepair, embeds: 'none', checks: [], explicit_only: true,
+    summary: 'Restore extractor facts expired by the pre-fix re-extraction (#5731). Not implemented in this build.',
+  },
 };
 
 export const REPAIR_REGISTRY: readonly RepairKindSpec[] = REPAIR_KINDS.map(kind => ({ kind, ...SPECS[kind] }));
@@ -92,8 +112,33 @@ export function repairMaySpend(spec: RepairKindSpec, noEmbed?: boolean): boolean
   return spec.embeds === 'effect' || (spec.embeds === 'inline' && !noEmbed);
 }
 
+/** The kinds `--all`, the remediation plan and `gbrain repair` with no kind run, in dependency order. */
+export const AUTO_REPAIR_REGISTRY: readonly RepairKindSpec[] = REPAIR_REGISTRY.filter(spec => !spec.explicit_only);
+
+/** The explicit-only kinds, listed by those surfaces with their preview command but never run by them. */
+export const EXPLICIT_REPAIR_REGISTRY: readonly RepairKindSpec[] = REPAIR_REGISTRY.filter(spec => spec.explicit_only);
+
 export function repairSpec(kind: RepairKind): RepairKindSpec {
   return REPAIR_REGISTRY.find(spec => spec.kind === kind)!;
+}
+
+/** `gbrain repair <kind> [--source <id>]`, the read-only preview of one kind. */
+export function repairPreviewCommand(kind: RepairKind, opts: { source?: string } = {}): string {
+  return `gbrain repair ${kind}${opts.source ? ` --source ${opts.source}` : ''}`;
+}
+
+/** How `--all`, the remediation plan and the banner report an explicit-only kind instead of running it. */
+export interface ExplicitRepairNotice { kind: RepairKind; code: 'explicit_kind_required'; preview_command: string; docs: string }
+
+export function explicitRepairNotices(opts: { source?: string } = {}): ExplicitRepairNotice[] {
+  return EXPLICIT_REPAIR_REGISTRY.map(spec => ({ kind: spec.kind, code: 'explicit_kind_required' as const,
+    preview_command: repairPreviewCommand(spec.kind, opts), docs: ERROR_CATALOGUE.explicit_kind_required.docs }));
+}
+
+/** `explicit_kind_required`: an explicit-only kind reached a runner without being named. */
+export function explicitKindRequired(kind: RepairKind): OperationError {
+  return catalogueError('explicit_kind_required', `gbrain repair ${kind} is explicit-only and runs only when named, never from --all or a remediation step.`,
+    `Preview it on the brain host: ${repairPreviewCommand(kind)}`);
 }
 
 /** The registered kind that clears a doctor check's findings, if any. */
@@ -118,11 +163,13 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
   const logger = opts.logger ?? { info: console.error, warn: console.error, error: console.error };
   return {
     embeddingModel,
-    async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string } = {}): Promise<RepairResult> {
+    /** `explicit`: the operator named `kind`; required for explicit-only kinds. */
+    async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0] } as OperationContext;
       const spec = repairSpec(kind);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag,
-        embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : [] });
+        embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : [],
+        explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous });
     },
   };
 }
