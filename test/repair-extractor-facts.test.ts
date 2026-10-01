@@ -432,5 +432,18 @@ for (const backend of testBackends()) {
       expect(await activeIds(engine, [...first, ...second])).toEqual([first[0], second[0]]);
       expect((await refusal(() => repair(engine, home, apply))).code).toBe('preview_changed');
     }, 60_000);
+
+    test('a page deleted and recreated at the same slug since the preview restores nothing (Codex review)', async () => {
+      const sourceId = `ef-r-${randomUUID().slice(0, 8)}`;
+      await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+      const ids = await conversation(engine, 'conversations/recreated', ['Alice sends the deck'], undefined, sourceId);
+      await engine.executeRaw('UPDATE facts SET expired_at=now(), row_num=NULL WHERE source_id=$1', [sourceId]);
+      const wide = await repair(engine, home, ['--source', sourceId, '--include-ambiguous']);
+      await engine.deletePage('conversations/recreated', { sourceId });
+      await engine.putPage('conversations/recreated', { type: 'note', title: 'Another page', compiled_truth: 'Unrelated.' }, { sourceId });
+      const applied = await repair(engine, home, ['--source', sourceId, '--include-ambiguous', '--apply', '--expect', hashOf(wide)]);
+      expect(applied.results[0].outcomes).toEqual({ changed_since_preview: 1 });
+      expect(await activeIds(engine, ids)).toEqual([]);
+    }, 60_000);
   });
 }

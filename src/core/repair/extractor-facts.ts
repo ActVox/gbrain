@@ -359,9 +359,11 @@ async function restorePageFacts(tx: BrainEngine, page: ExtractorFactsPage, manag
   const ids = page.facts.map(f => f.id);
   await tx.executeRaw('SELECT id FROM facts WHERE source_id=$1 AND id=ANY($2::bigint[]) FOR UPDATE', [page.source_id, ids]);
   const live = new Map((await classifyExtractorFacts(tx, [page.source_id], { managed, slug: page.slug })).map(f => [f.id, f]));
-  const [snapshot] = await tx.executeRaw<{ compiled_truth: string | null; max_row: number | string | null }>(
-    `SELECT p.compiled_truth, (SELECT MAX(row_num) FROM facts WHERE source_id=$1 AND source_markdown_slug=$2) AS max_row
+  const [live_page] = await tx.executeRaw<{ id: number | string; compiled_truth: string | null; max_row: number | string | null }>(
+    `SELECT p.id, p.compiled_truth, (SELECT MAX(row_num) FROM facts WHERE source_id=$1 AND source_markdown_slug=$2) AS max_row
        FROM pages p WHERE p.source_id=$1 AND p.slug=$2 AND p.deleted_at IS NULL`, [page.source_id, page.slug]);
+  // A page deleted and recreated at the same slug since the preview is another page.
+  const snapshot = live_page && Number(live_page.id) === page.page_id ? live_page : undefined;
   const fenceRows = parseFactsFence(snapshot?.compiled_truth ?? '').facts.map(f => f.rowNum);
   let next = Math.max(Number(snapshot?.max_row ?? 0), ...fenceRows, 0) + 1;
   const result: RestoreResult = { restored: [], changed: [] };
