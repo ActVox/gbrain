@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { extractPageLinks, extractEntityRefs, attendanceEvidenceRanges, hasAttendanceEvidence,
-  resolvedLinkCandidate, normalizeBasename, LINK_EXTRACTOR_VERSION_TS,
+  resolvedLinkCandidate, normalizeBasename, ownsAttendanceInference, LINK_EXTRACTOR_VERSION_TS,
   type LinkExtractionPack, type SlugResolver } from './link-extraction.ts';
 import { slugifyPath } from './sync.ts';
 import { isValidSourceId } from './source-id.ts';
@@ -112,9 +112,7 @@ async function ontology(engine: BrainEngine, sourceId: string) {
     invalidatePackCache(resolved.manifest.name);
     resolved = await loadActivePackForEngine(engine, { remote: false, sourceId });
     const pack = resolved.manifest;
-    const overridden = pack.link_types.some(link => link.name === 'attended' && link.inference)
-      || pack.frontmatter_links.some(mapping => mapping.page_type === 'meeting'
-        && (mapping.link_type === 'attended' || mapping.fields.includes('attendees')));
+    const overridden = ownsAttendanceInference(pack);
     return { hash: attendanceRepairHash([bindings, approvedSchemaIdentity(resolved)]), name: pack.name,
       direction: overridden ? 'pack_semantics_preserved' as const : 'person_to_meeting' as const, pack };
   } catch {
