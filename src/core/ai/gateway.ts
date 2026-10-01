@@ -57,7 +57,7 @@ import { parseLlmJson } from '../llm-json.ts';
 import type { BrainEngine } from '../engine.ts';
 import { dimsProviderOptions } from './dims.ts';
 import { hasAnthropicKey, stashGatewayAnthropicKeyFromEnv } from './anthropic-key.ts';
-import { AIConfigError, AITransientError, isStructuredOutputRejection, normalizeAIError } from './errors.ts';
+import { AIConfigError, AITransientError, isStructuredOutputRejection, isUnbilledEmbeddingRejection, normalizeAIError } from './errors.ts';
 import { isEmbeddingZeroNormError, screenAlignedEmbeddings, screenEmbeddings, sendableEmbeddingInputs } from './embedding-guard.ts';
 import { getProviderCapabilities } from './capabilities.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
@@ -1710,7 +1710,7 @@ async function embedSubBatch(
       // deadline) — shorter wins.
       abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
       ...(hasAIInvocationGuard() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
-    }), sdkInvocationUsage, err => isTokenLimitError(err) ? { inputTokens: 0, outputTokens: 0 } : null);
+    }), sdkInvocationUsage, err => isTokenLimitError(err) || isUnbilledEmbeddingRejection(recipe.id, err) ? { inputTokens: 0, outputTokens: 0 } : null);
     // Carry the threaded input_type across the SDK boundary via
     // __embedInputTypeStore (the adapter strips it from providerOptions —
     // see the store's doc comment). Populated only when dimsProviderOptions

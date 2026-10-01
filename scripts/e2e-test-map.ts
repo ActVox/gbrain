@@ -455,7 +455,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   ],
   // Autopilot linux install/uninstall lifecycle (PATH-shimmed crontab +
   // systemctl; the ubuntu CI runner's only behavioral pin on those arms).
-  "src/commands/autopilot.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/worker-readiness-cli.test.ts"],
+  "src/commands/autopilot.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/autopilot-multi-brain.serial.test.ts", "test/e2e/worker-readiness-cli.test.ts"],
+  "src/commands/autopilot/jobs.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/autopilot-multi-brain.serial.test.ts"],
+  "src/core/autopilot-paths.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/autopilot-multi-brain.serial.test.ts"],
   "src/commands/autopilot-daemon.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/worker-readiness-cli.test.ts"],
   "src/commands/autopilot-dispatch.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/worker-readiness-cli.test.ts"],
   "src/commands/autopilot-probes.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts", "test/e2e/worker-readiness-cli.test.ts"],

@@ -4,7 +4,7 @@ import { affectsRecall } from './core/types.ts';
 import { deliveryVersionSkewWarning } from './core/search/evidence-delivery.ts';
 import { installSigchldHandler } from './core/zombie-reap.ts';
 installSigchldHandler();
-import { installSignalHandlers as installCleanupSignalHandlers } from './core/process-cleanup.ts';
+import { installCleanupSignalHandlers } from './core/serve-invocation.ts';
 
 import { readFileSync, existsSync, unlinkSync, fstatSync } from 'fs';
 import { spawn } from 'child_process';
