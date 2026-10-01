@@ -27,7 +27,7 @@ current MCP connection; it does not upgrade that connection's authority.
 If you are only the connecting client, give the owner this next action:
 
 > In the harness that administers the running server, follow
-> https://raw.githubusercontent.com/garrytan/gbrain/master/docs/mcp/ADMIN.md.
+> https://raw.githubusercontent.com/ActVox/gbrain/master/docs/mcp/ADMIN.md.
 > Use the server's configured URL and protected owner credential to register my
 > client or issue a login link. My MCP access token is not an owner credential.
 
@@ -85,6 +85,17 @@ Deliver the returned `url` privately to the requesting owner. The link is
 single-use and expires after five minutes. **Do not fetch, preview, or open it
 to test it.** Doing so can consume it before the owner arrives. A plain `/admin/`
 URL opens the login page; it does not authenticate the browser.
+
+The ActVox dashboard offers light/dark themes, a branded favicon, and mobile
+navigation. Statistics refresh every 30 seconds; failed refreshes retain an
+explicitly marked stale snapshot. Registered clients are OAuth registrations,
+not live connections. Request activity shows the latest 50 events received
+since this Dashboard page was opened: filter by result, search by agent or
+operation, and open View for event details. Navigating away or reloading clears
+that list; use Request Log for history. Transient stream failures retry
+normally; press Refresh to restart a disconnected stream. If owner access has
+expired, sign in again. Reconnection does not replay missed events. Cabinet
+Grotesk and Switzer make a request to Fontshare; system fonts are the fallback.
 
 During native OAuth connection, the browser may already show a URL containing
 `oauth_request`. Preserve that opaque request ID:

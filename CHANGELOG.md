@@ -11,6 +11,22 @@ identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
 
+## [0.60.17.0] - 2026-10-01
+
+**The Team brain dashboard gains ActVox branding, light and dark themes, and clearer request monitoring on desktop and mobile.**
+
+### Added
+- ActVox logos, browser favicon, and touch icon identify the Team brain. The theme initially matches your system preference, then remembers the stored theme and any choice you make.
+- Filter incoming requests by result, search by agent or operation, and inspect a request without leaving the dashboard. Mobile navigation keeps every admin page accessible.
+
+### Fixed
+- The live activity stream retries transient interruptions. Refresh restarts a disconnected stream; leaving the dashboard closes its connection.
+- Unavailable statistics show an explicit error instead of healthy-looking zeroes. Failed refreshes retain the last successful snapshot with a stale-data notice.
+- Metric labels distinguish registered clients from live connections and describe rolling 24-hour request counts and token expiry.
+
+### To take advantage of v0.60.17.0
+Deploy this ActVox fork release and reload `/admin/`. The UI adds no database migration or permission changes. Cabinet Grotesk and Switzer load through Fontshare's hosted CSS; system fonts remain available when that service is unreachable.
+
 ## [0.60.16.0] - 2026-09-30
 
 **Team brains gain the current upstream memory and permission safeguards while keeping source-specific extraction and operational search policies.**

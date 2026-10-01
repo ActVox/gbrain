@@ -8,6 +8,7 @@ import { JobsWatchPage } from './pages/JobsWatch';
 import { OAuthConsentPage } from './pages/OAuthConsent';
 import { pendingOAuthRequest } from './lib/oauth-request';
 import { api } from './api';
+import { ThemeToggle } from './components/ThemeToggle';
 
 type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'oauth-consent';
 
@@ -33,7 +34,7 @@ export function App() {
   };
 
   if (page === 'login') {
-    return <LoginPage onLogin={() => navigate(pendingOAuthRequest() ? 'oauth-consent' : 'dashboard')} />;
+    return <><div className="login-theme"><ThemeToggle /></div><LoginPage onLogin={() => navigate(pendingOAuthRequest() ? 'oauth-consent' : 'dashboard')} /></>;
   }
 
   const handleSignOutEverywhere = async () => {
@@ -50,21 +51,23 @@ export function App() {
 
   return (
     <div className="app">
-      <nav className="sidebar">
-        <div className="sidebar-logo">GBrain</div>
+      <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>Skip to main content</a>
+      <nav className="sidebar" aria-label="Team brain">
+        <div className="sidebar-logo"><img src="/admin/brand/logo-black.png" className="logo-light" alt="" /><img src="/admin/brand/logo-white.png" className="logo-dark" alt="" /><div>ActVox<small>Team brain · GBrain</small></div></div>
         <div className="sidebar-nav">
-          <a className={`nav-item ${page === 'dashboard' ? 'active' : ''}`}
+          <a href="#dashboard" aria-current={page === 'dashboard' ? 'page' : undefined} className={`nav-item ${page === 'dashboard' ? 'active' : ''}`}
              onClick={() => navigate('dashboard')}>Dashboard</a>
-          <a className={`nav-item ${page === 'agents' ? 'active' : ''}`}
+          <a href="#agents" aria-current={page === 'agents' ? 'page' : undefined} className={`nav-item ${page === 'agents' ? 'active' : ''}`}
              onClick={() => navigate('agents')}>Agents</a>
-          <a className={`nav-item ${page === 'log' ? 'active' : ''}`}
+          <a href="#log" aria-current={page === 'log' ? 'page' : undefined} className={`nav-item ${page === 'log' ? 'active' : ''}`}
              onClick={() => navigate('log')}>Request Log</a>
-          <a className={`nav-item ${page === 'calibration' ? 'active' : ''}`}
+          <a href="#calibration" aria-current={page === 'calibration' ? 'page' : undefined} className={`nav-item ${page === 'calibration' ? 'active' : ''}`}
              onClick={() => navigate('calibration')}>Calibration</a>
-          <a className={`nav-item ${page === 'jobs' ? 'active' : ''}`}
+          <a href="#jobs" aria-current={page === 'jobs' ? 'page' : undefined} className={`nav-item ${page === 'jobs' ? 'active' : ''}`}
              onClick={() => navigate('jobs')}>Jobs Watch</a>
         </div>
         <div style={{ marginTop: 'auto', padding: '16px 12px', borderTop: '1px solid var(--border)' }}>
+          <div className="theme-control"><ThemeToggle /></div>
           <button
             onClick={handleSignOutEverywhere}
             style={{
@@ -83,7 +86,7 @@ export function App() {
           </button>
         </div>
       </nav>
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1}>
         {page === 'dashboard' && <DashboardPage />}
         {page === 'agents' && <AgentsPage />}
         {page === 'log' && <RequestLogPage />}
