@@ -53,7 +53,9 @@ import {
   embeddingQueryPrefixEntry,
   embeddingColumnRegistryEntry,
   embeddingEnvOverrideEntry,
+  embeddingKeySourceEntry,
 } from './checks/embedding-health.ts';
+import { projectionResidentEntry } from './checks/projection-readiness.ts';
 import {
   graphCoverageEntry,
   orphanRatioEntry,
@@ -95,7 +97,9 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   extractionBacklogsEntry,
   homeDirInWorktreeEntry,
   defaultSourcePathEntry,
+  embeddingKeySourceEntry,
   pgliteDataDirEntry,
+  projectionResidentEntry,
   offlineConnectionEntry,
   dbChecksGateEntry,
   connectionEntry,

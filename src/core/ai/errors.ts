@@ -65,7 +65,31 @@ function carryStatusFields(from: unknown, to: AIServiceError): AIServiceError {
   return to;
 }
 
-export function normalizeAIError(err: unknown, context?: string): AIServiceError {
+/**
+ * Scrub upstream text in place along a wrapped error's cause chain (message,
+ * stack, the SDK's responseBody and parsed data), keeping status, headers and
+ * shape, so `.cause` walkers still classify it and nothing serialized or
+ * printed later carries what `redact` removes.
+ */
+function scrubErrorChain(err: unknown, redact: (text: string) => string): void {
+  let cur = err;
+  for (let depth = 0; depth < 4 && cur && typeof cur === 'object'; depth++) {
+    const node = cur as Record<string, unknown>;
+    for (const key of ['message', 'stack', 'responseBody']) {
+      if (typeof node[key] === 'string') try { node[key] = redact(node[key] as string); } catch { /* read-only field */ }
+    }
+    if (node.data && typeof node.data === 'object') try { node.data = JSON.parse(redact(JSON.stringify(node.data))); } catch { /* not plain data */ }
+    cur = node.cause;
+  }
+}
+
+/**
+ * `redact` scrubs upstream text before it becomes the message, and in the
+ * wrapped error (#5137: the gateway passes its provider-key redactor, since
+ * auth errors echo keys).
+ */
+export function normalizeAIError(err: unknown, context?: string, redact?: (text: string) => string): AIServiceError {
+  if (redact) scrubErrorChain(err, redact);
   if (err instanceof AIServiceError) return err;
 
   const anyErr = err as {
@@ -84,7 +108,8 @@ export function normalizeAIError(err: unknown, context?: string): AIServiceError
     anyErr?.statusCode ??
     (typeof anyErr?.apiErrorStatus === 'number' ? anyErr.apiErrorStatus : undefined);
   const name = anyErr?.name ?? '';
-  const msg = anyErr?.message ?? String(err);
+  const raw = anyErr?.message ?? String(err);
+  const msg = redact ? redact(raw) : raw;
   const ctxPrefix = context ? `[${context}] ` : '';
 
   // 4xx (except 429) = config-level, non-retryable

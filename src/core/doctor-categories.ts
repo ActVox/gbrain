@@ -85,6 +85,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
+  // #5137: an env provider key shadowing a different config key.
+  'embedding_key_source',
   'embedding_migration_state',
   'embedding_provider',
   // #5691: query-instruction advisory for instruction-style embedding models.
