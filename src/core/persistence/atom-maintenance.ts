@@ -155,14 +155,21 @@ export async function bumpAtomGeneration(tx: BrainEngine, sourceId: string, inca
  * revision-only source change (a tag, a timeline row) is the same input for
  * the drain and for an explicit retry (#5699).
  */
-function atomInputKey(session: ManagedAtomSession, origin: AtomOrigin): string {
-  return digest(['managed-atoms-v1', session.incarnation, origin.kind, origin.locator, origin.pageId, origin.contentHash,
-    ...(origin.generation ? [origin.generation] : [])]);
+function atomInput(session: ManagedAtomSession, origin: AtomOrigin): unknown[] {
+  return ['managed-atoms-v1', session.incarnation, origin.kind, origin.locator, origin.pageId, origin.contentHash];
 }
 
-/** The retry check adds the extracted text's hash: a transcript retry reads the current file under the retained content hash. */
+/** A retirement's regeneration generation enters the drain's key above 0, so earlier receipts are not replayed. */
+function atomInputKey(session: ManagedAtomSession, origin: AtomOrigin): string {
+  return digest([...atomInput(session, origin), ...(origin.generation ? [origin.generation] : [])]);
+}
+
+/**
+ * The retry check adds the extracted text's hash: a transcript retry reads the current file under the retained content hash.
+ * It leaves the generation out: a retirement the reviewed batch itself committed must not invalidate its own retry.
+ */
 export function atomRetryInputKey(session: ManagedAtomSession, origin: AtomOrigin): string {
-  return digest([atomInputKey(session, origin), origin.textHash]);
+  return digest([digest(atomInput(session, origin)), origin.textHash]);
 }
 
 function runKey(session: ManagedAtomSession, origin: AtomOrigin): string {
@@ -265,7 +272,8 @@ export async function publishManagedAtoms(engine: BrainEngine, session: ManagedA
         AND frontmatter->>'${originKey}'=$2
         AND COALESCE(frontmatter->>'source_hash','')<>$3
         AND NULLIF(frontmatter->>'imported_from','') IS NULL
-        AND NOT (slug=ANY($4::text[]))`,
+        AND NOT (slug=ANY($4::text[]))
+      ORDER BY slug`,
     [session.sourceId, origin.locator, origin.contentHash.slice(0, 16), atoms.map(atom => atom.slug)],
   );
   for (const retirement of retirements) {
@@ -337,6 +345,9 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
       if (!prepared.noop) {
         await tx.executeRaw(`UPDATE pages SET frontmatter=frontmatter||jsonb_build_object('retired_by',$1::text,'retired_at',$2::text)
           WHERE id=$3 AND source_id=$4 AND deleted_at IS NOT NULL`, [ATOM_RETIRED_BY_REEXTRACT, new Date().toISOString(), row.page_id, row.source_id]);
+        if (p.origin.kind === 'page' && p.origin.pageId !== null) {
+          await bumpAtomGeneration(tx, row.source_id, row.source_incarnation, p.origin.pageId, p.origin.contentHash);
+        }
       }
       return { ...result, atom_run_key: p.runKey, atom_kind: p.kind };
     } };
@@ -375,13 +386,9 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
         [p.checkpointKey, checkpoint, p.expectedCheckpoint === null ? null : JSON.stringify(p.expectedCheckpoint)]);
         if (!advanced.length) throw new OperationError('revision_conflict', 'The reviewed atom retry checkpoint changed.');
       }
-      const retired = committed.filter(child => child.kind === 'managed_atom_delete').length;
-      if (retired && p.origin.kind === 'page' && p.origin.pageId !== null) {
-        await bumpAtomGeneration(tx, row.source_id, row.source_incarnation, p.origin.pageId, p.origin.contentHash);
-      }
       return { status: p.failure ? 'failed' : 'completed',
         atoms: committed.filter(child => child.kind === 'managed_atom_page').length,
-        retired,
+        retired: committed.filter(child => child.kind === 'managed_atom_delete').length,
         ...(p.failure ? { failure: p.failure } : {}) };
     } };
   }

@@ -294,7 +294,7 @@ export async function exerciseManagedAtomReconciliation(engine: BrainEngine): Pr
   }
 }
 
-export const atomRetirementCases = ['marker_and_republish', 'edit_back', 'user_deleted', 'prefix_pin', 'generation_key_and_purge', 'partial_retry'] as const;
+export const atomRetirementCases = ['marker_and_republish', 'edit_back', 'user_deleted', 'prefix_pin', 'generation_key_and_purge', 'partial_retry', 'partial_then_revert'] as const;
 
 /** #5770 / ENG-O7: retirement markers, republication of retired slugs, the regeneration generation and its purge exclusion. */
 export async function exerciseManagedAtomRetirement(engine: BrainEngine, scenario: typeof atomRetirementCases[number]): Promise<void> {
@@ -340,6 +340,14 @@ export async function exerciseManagedAtomRetirement(engine: BrainEngine, scenari
       const edit = async (body: string, next: string[]) => { page = await unmanaged(() => writeSource(body)); titles = next; };
       expect((await extract()).status).toBe('ok');
       const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]);
+      const settledState = async (requestId: string) => {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          const [row] = await engine.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [requestId]);
+          if (row && !['queued', 'running', 'recovering'].includes(row.state)) return row.state;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        throw new Error(`request ${requestId} did not settle`);
+      };
       const generation = async () => (await engine.executeRaw<{ generation: string }>(
         "SELECT completed_keys->0->>'generation' AS generation FROM op_checkpoints WHERE op='managed-atoms-generation' AND fingerprint=$1", [String(page.id)]))[0]?.generation;
 
@@ -411,16 +419,36 @@ export async function exerciseManagedAtomRetirement(engine: BrainEngine, scenari
         await edit(bodies[2], ['Patience compounds over years', 'Hire slowly']);
         writeFileSync(join(root, `${queued.slug}.md`), 'Uncoordinated operator content.');
         const failed = await extract();
-        expect(failed.status).toBe('warn');
+        const completion = (failed.details?.write_requests as Array<{ request_id: string }>).at(-1)!;
+        expect(await settledState(completion.request_id)).not.toBe('committed');
         expect((await atom('patience-compounds'))).toMatchObject({ deleted: true, frontmatter: { retired_by: 'managed-reextract' } });
         expect((await atom('queue-patiently'))?.deleted).toBe(false);
-        const completion = (failed.details?.write_requests as Array<{ request_id: string }>).at(-1)!;
         rmSync(join(root, `${queued.slug}.md`));
         await disposePersistenceConsumer(engine);
         expect(await retryManagedAtomBatch(engine, sourceId, completion.request_id, 'reviewed-retirement')).toMatchObject({ status: 'completed', model_rerun: false });
+        expect(await retryManagedAtomBatch(engine, sourceId, completion.request_id, 'reviewed-retirement')).toMatchObject({ status: 'completed', replayed: true, model_rerun: false });
         expect(calls).toBe(3);
         expect((await atom('queue-patiently'))).toMatchObject({ deleted: true, frontmatter: { retired_by: 'managed-reextract' } });
         expect((await atom('patience-compounds'))?.deleted).toBe(true);
+      }
+
+      if (scenario === 'partial_then_revert') {
+        await edit(bodies[1], ['Patience compounds', 'Queue patiently', 'Hire slowly']);
+        expect((await extract()).status).toBe('ok');
+        const queued = (await atom('queue-patiently'))!;
+        await edit(bodies[2], ['Patience compounds over years', 'Hire slowly']);
+        writeFileSync(join(root, `${queued.slug}.md`), 'Uncoordinated operator content.');
+        const failed = await extract();
+        expect(await settledState((failed.details?.write_requests as Array<{ request_id: string }>).at(-1)!.request_id)).not.toBe('committed');
+        expect((await atom('patience-compounds'))?.deleted).toBe(true);
+        rmSync(join(root, `${queued.slug}.md`));
+        await disposePersistenceConsumer(engine);
+        await edit(bodies[1], ['Patience compounds', 'Queue patiently', 'Hire slowly']);
+        expect((await discoverExtractablePages(engine, sourceId)).map(item => item.slug)).toEqual([slug]);
+        expect((await extract()).status).toBe('ok');
+        expect(calls).toBe(4);
+        expect((await atom('patience-compounds'))?.deleted).toBe(false);
+        expect((await atom('patience-compounds-over-years'))?.deleted).toBe(true);
       }
 
       if (scenario === 'generation_key_and_purge') {
