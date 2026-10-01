@@ -55,7 +55,9 @@ export async function resolveMcpStdioSourceScope(
     const { resolveSourceWithTier, localFederatedSourceIds, explicitReadBinding } = await import('../core/source-resolver.ts');
     const resolved = await resolveSourceWithTier(engine, null, cwd);
     const federated = await localFederatedSourceIds(engine, resolved.source_id, resolved.tier);
-    const binding = await explicitReadBinding(engine, resolved.source_id, resolved.tier);
+    // #5081: the admission set is optional; a failed lookup must not discard
+    // the resolved binding (the catch below would fall back to 'default').
+    const binding = await explicitReadBinding(engine, resolved.source_id, resolved.tier).catch(() => undefined);
     return {
       sourceId: resolved.source_id,
       ...(federated ? { localFederatedSourceIds: federated } : {}),

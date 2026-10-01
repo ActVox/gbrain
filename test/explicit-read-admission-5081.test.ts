@@ -29,6 +29,7 @@ import { requireWritablePage, resolveCodeIntelScope } from '../src/core/ops/cont
 import { dispatchToolCall, buildOperationContext, type DispatchOpts } from '../src/mcp/dispatch.ts';
 import { resolveMcpStdioSourceScope } from '../src/mcp/server.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { encodeDeepResearchId } from '../src/core/deep-research-id.ts';
 
 let engine: PGLiteEngine;
 let outsideCwd: string;
@@ -152,6 +153,15 @@ describe('#5081 — explicit reads from a GBRAIN_SOURCE-bound stdio connection',
       );
     });
   }
+
+  test('fetch accepts the id of an admitted explicit search result and hides an unadmitted one', async () => {
+    const { body: results } = await call(await bound(), 'search', { query: MARKER, source_id: 'notes' });
+    const fetched = await call(await bound(), 'fetch', { id: results[0].id });
+    expect(fetched.isError).toBe(false);
+    expect(fetched.body.metadata.source_id).toBe('notes');
+    const hidden = await call(await bound(), 'fetch', { id: encodeDeepResearchId('private', 'topics/private-topic') });
+    expect(hidden.body.error).toBe('page_not_found');
+  });
 
   test('denials carry the docs anchor', async () => {
     const { body } = await call(await bound(), 'search', { query: MARKER, source_id: 'private' });

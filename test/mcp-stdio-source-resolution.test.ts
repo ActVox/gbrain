@@ -62,6 +62,24 @@ describe('stdio MCP source resolution', () => {
     });
   });
 
+  test('#5081: a failed admission lookup keeps the resolved pin instead of falling back to default', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-mcp-source-'));
+    scratchDirs.push(dir);
+    writeSourceDotfile(dir, 'team-alpha');
+    const base = makeEngine(['default', 'team-alpha']);
+    const failing = {
+      ...base,
+      executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+        if (/SELECT id, config/.test(sql)) throw new Error('sources table unavailable');
+        return base.executeRaw<T>(sql, params);
+      },
+    } as unknown as BrainEngine;
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      expect(await resolveMcpStdioSourceScope(failing, dir)).toEqual({ sourceId: 'team-alpha', tier: 'dotfile' });
+    });
+  });
+
   test('GBRAIN_SOURCE wins over .gbrain-source', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-mcp-source-'));
     scratchDirs.push(dir);

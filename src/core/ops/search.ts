@@ -786,15 +786,9 @@ const query: Operation = {
             relationalRetrieval: true,
             autocut: false, decide: { remote: ctx.remote !== false, rerankOnly: true }, // System One: S2-S5 off on the re-run
             detail,
-            // Preserve the caller's #3985 type filter on the re-run (raw
-            // pass-through; the base call already rejected malformed input).
-            ...(Array.isArray(p.types) || typeof p.types === 'string'
-              ? {
-                  types: (Array.isArray(p.types) ? (p.types as string[]) : (p.types as string).split(','))
-                    .map((t) => t.trim())
-                    .filter(Boolean),
-                }
-              : {}),
+            // Preserve the caller's #3985 type filter on the re-run, as
+            // normalized for the base call (#5390: [] and "" stay absent).
+            ...(types ? { types } : {}),
             language: (p.lang as string) || undefined,
             symbolKind: (p.symbol_kind as string) || undefined,
             // Preserve the caller's symbol-proximity constraints too — an
