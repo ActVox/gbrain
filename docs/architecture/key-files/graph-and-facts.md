@@ -7,7 +7,12 @@ Current behavior and load-bearing invariants; history belongs in Git and CHANGEL
 
 The shared and filesystem extractors recognize canonical attendance only from
 supported explicit lists and uniquely resolved person targets when no pack owns
-the relationship. Callers resolve source identities before
+the relationship. A pack owns it only when an `attended` rule has a phrase
+regex (`ownsAttendanceInference`); the shipped page-type-bound rule in
+`gbrain-base` and `company-brain` mirrors the in-code meeting prior and gets
+canonical attendance. Pack `frontmatter_links` take their direction from the
+verb's `FRONTMATTER_LINK_MAP` counterpart for the page type (outgoing when it
+has none), so pack meeting `attendees` are canonical person -> meeting too. Callers resolve source identities before
 `resolvedLinkCandidate` orients a Markdown or uniquely resolved bare-wikilink claim as person-to-meeting with the
 meeting as its origin.
 Only parsed link targets can make canonical body claims; display-label slugs stay
