@@ -13,6 +13,7 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { runWaveChecks, waveRepairKind, type WaveFinding } from './wave-checks.ts';
 import { repairPreviewCommand, repairSpec } from '../../core/repair/registry.ts';
 import { readConnectorSourceStatuses } from '../../core/persistence/connector-status.ts';
+import { legacyJobAuthorityBannerNote } from './checks/legacy-job-authority.ts';
 
 /** #5686: connector sources that re-walk their window once, or resumed from a pre-upgrade checkpoint. */
 async function connectorRewalkNote(engine: BrainEngine): Promise<string | null> {
@@ -29,7 +30,7 @@ async function connectorRewalkNote(engine: BrainEngine): Promise<string | null> 
  * of connector sources that will re-walk once after a checkpoint migration).
  * Each returns null when it has nothing to say.
  */
-export const POST_UPGRADE_NOTES: Array<(engine: BrainEngine) => Promise<string | null>> = [connectorRewalkNote];
+export const POST_UPGRADE_NOTES: Array<(engine: BrainEngine) => Promise<string | null>> = [connectorRewalkNote, legacyJobAuthorityBannerNote];
 
 /** One banner line for a non-ok wave finding. */
 export function bannerFindingLine({ spec, check, state }: WaveFinding): string {
