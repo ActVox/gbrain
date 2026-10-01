@@ -13,6 +13,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 
 let engine: PGLiteEngine;
 const ALICE = 'people/alice-example';
@@ -73,5 +74,15 @@ describe('ontology reads hide private observations from untrusted callers', () =
     expect(values(remote.ontologies[BOB])).toEqual(['role=advisor']);
     const local = await run('volunteer_chronicle', false, { entities: ALICE }) as { ontologies: Record<string, unknown> };
     expect(JSON.stringify(local.ontologies)).toContain('privmarker');
+  });
+
+  test('MCP dispatch: the remote transport tier gets world rows only, the local tier every tier', async () => {
+    const viaDispatch = async (remote: boolean) => {
+      const r = await dispatchToolCall(engine, 'ontology_get', { entity: ALICE }, { remote, sourceId: 'default', transport: remote ? 'stdio' : undefined });
+      expect(r.isError).toBeFalsy();
+      return values(JSON.parse(r.content[0].text));
+    };
+    expect(await viaDispatch(true)).toEqual(['decision_style=deliberate']);
+    expect(await viaDispatch(false)).toEqual(['decision_style=deliberate', 'risk_tolerance=high privmarker']);
   });
 });
