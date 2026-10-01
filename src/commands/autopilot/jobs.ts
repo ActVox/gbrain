@@ -18,10 +18,12 @@ import { errorFor } from '../../core/errors.ts';
 import type { InstallTarget } from '../autopilot.ts';
 
 export function plistPath(label: string): string {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- label is grammar-checked by autopilotLaunchdLabel(); HOME is the operator's own
   return join(process.env.HOME || '', 'Library', 'LaunchAgents', `${label}.plist`);
 }
 
 export function systemdUnitPath(unit: string = DEFAULT_AUTOPILOT_SYSTEMD_UNIT): string {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- unit is a constant or derived from the hex install id
   return join(process.env.HOME || '', '.config', 'systemd', 'user', unit);
 }
 
@@ -71,6 +73,7 @@ export function cronLineBelongsToBrain(line: string, job: AutopilotJob): boolean
 export function brainCommand(brainHome: string, verb: string): string {
   const parent = dirname(brainHome);
   const defaultHome = join(process.env.HOME || '', '.gbrain');
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- path comparison only, no fs access
   return resolvePath(brainHome) === resolvePath(defaultHome)
     ? `gbrain autopilot ${verb}`
     : `GBRAIN_HOME=${shellQuote(parent)} gbrain autopilot ${verb}`;

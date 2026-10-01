@@ -128,6 +128,7 @@ export function gbrainChildCommand(
  */
 export function runGbrainSubprocess(cmd: string, opts?: { timeoutMs?: number }): string {
   try {
+    // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- cmd is a fixed migration subcommand string from the orchestrators; gbrainChildCommand prefixes the running CLI (#5184)
     const out = execSync(gbrainChildCommand(cmd), {
       stdio: ['inherit', 'pipe', 'pipe'],
       timeout: opts?.timeoutMs ?? MIGRATE_ONLY_TIMEOUT_MS,

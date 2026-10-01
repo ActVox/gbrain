@@ -320,6 +320,7 @@ export function resolveBunGlobalRoot(): string {
  */
 export function bunGlobalExactTagPin(globalRoot: string): string | null {
   try {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- globalRoot is resolveBunGlobalRoot(): Bun's own global install dir from BUN_INSTALL or HOME
     const pkg = JSON.parse(readFileSync(join(globalRoot, 'package.json'), 'utf-8')) as { dependencies?: Record<string, string> };
     const spec = pkg.dependencies?.gbrain;
     if (typeof spec !== 'string') return null;
