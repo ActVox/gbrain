@@ -277,3 +277,13 @@ describe('relink model tier', () => {
     expect(calls.length).toBe(0);
   });
 });
+
+describe('relink reasons', () => {
+  test('the guide reason table matches RELINK_REASONS exactly', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { RELINK_REASONS } = await import('../src/core/facts/relink-reasons.ts');
+    const guide = readFileSync(new URL('../docs/guides/facts-relink.md', import.meta.url), 'utf8');
+    const rows = [...guide.matchAll(/^\| `(\w+)` \| (yes|no) \| (.+) \|$/gm)].map(m => [m[1], m[2] === 'yes', m[3]]);
+    expect(rows).toEqual(Object.entries(RELINK_REASONS).map(([code, r]) => [code, r.memoized, r.fix]));
+  });
+});
