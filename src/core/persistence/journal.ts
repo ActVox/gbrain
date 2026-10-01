@@ -197,9 +197,9 @@ export const CLAIMABLE_WRITE_SQL = `r.state='queued' AND (r.worktree_id IS NULL 
         AND earlier.sequence<r.sequence AND earlier.state IN ('queued','running','recovering'))`;
 
 /** #5401: whether `claimNextWrite` would find a row now. Read-only: no lock and no claim. */
-export async function hasClaimableWrite(engine: SqlEngine, hostId: string, excludeRoots: string[] = []): Promise<boolean> {
+export async function hasClaimableWrite(engine: SqlEngine, hostId: string, excludeRoots: string[] = [], signal?: AbortSignal): Promise<boolean> {
   const [row] = await engine.executeRaw<{ claimable: boolean }>(`SELECT EXISTS (SELECT 1 FROM persistence_requests r
-      LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id WHERE ${CLAIMABLE_WRITE_SQL} LIMIT 1) AS claimable`, [hostId, excludeRoots]);
+      LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id WHERE ${CLAIMABLE_WRITE_SQL} LIMIT 1) AS claimable`, [hostId, excludeRoots], { signal });
   return row?.claimable === true;
 }
 

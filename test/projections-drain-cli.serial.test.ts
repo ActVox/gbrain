@@ -95,7 +95,7 @@ describe('gbrain projections drain', () => {
       expect(human.stderr).toContain('Error [projection_owner_resident]');
       expect(human.stderr).toContain(`(pid ${process.pid}), so the drain did not run.`);
       expect(human.stderr).toContain('watch the pending count with `gbrain doctor` (text_projection_readiness)');
-      expect(human.stderr).toContain('systemctl --user stop gbrain-serve.service && gbrain projections drain && systemctl --user start gbrain-serve.service');
+      expect(human.stderr).toContain('systemctl --user stop gbrain-serve.service && { gbrain projections drain; systemctl --user start gbrain-serve.service; }');
       const json = await runCli(['projections', 'drain', '--json'], { home: healthyHome, timeoutMs: 30_000 });
       expect(json.exitCode).toBe(2);
       expect(JSON.parse(json.stdout)).toMatchObject({ error: 'projection_owner_resident', docs: 'docs/guides/repair.md#projection-owner-resident' });
@@ -108,6 +108,8 @@ describe('gbrain projections drain', () => {
       const refused = await runCli(['projections', 'drain', '--brain', 'team-a'], { home: mountedHome, timeoutMs: 30_000 });
       expect(refused.exitCode).toBe(2);
       expect(refused.stderr).toContain(`The PGLite brain at ${join(mountedHome, 'team-a.pglite')} is held by`);
+      expect(refused.stderr).toContain('`gbrain doctor --brain team-a`');
+      expect(refused.stderr).toContain('systemctl --user stop gbrain-serve.service && { gbrain projections drain --brain team-a; systemctl --user start gbrain-serve.service; }');
     } finally { await releaseLock(lock); }
   }, 120_000);
 });

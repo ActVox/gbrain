@@ -63,8 +63,9 @@ async function runProjectionResident(ctx: DoctorContext): Promise<Check[]> {
   const { persistenceSocketPathForConfig, requestPersistenceProjectionStatus } = await import('../../../core/persistence/ipc.ts');
   const { residentDrainSteps } = await import('../../projections.ts');
   let config: ReturnType<typeof persistenceConfigForBrain>;
+  let brainId: string;
   try {
-    const brainId = resolveBrainId(getCliOptions().brain, process.cwd());
+    brainId = resolveBrainId(getCliOptions().brain, process.cwd());
     config = persistenceConfigForBrain(loadConfig(), brainId, brainId === 'host' ? [] : loadMounts());
   } catch { return checks; }
   if (config?.engine !== 'pglite' || !config.database_path || config.database_url) return checks;
@@ -75,7 +76,7 @@ async function runProjectionResident(ctx: DoctorContext): Promise<Check[]> {
   if (socketPath) {
     try { status = await requestPersistenceProjectionStatus(socketPath); } catch { /* an older resident, or none listening */ }
   }
-  checks.push({ name: 'text_projection_readiness', ...residentProjectionReadiness(holder.pid, status, residentDrainSteps(holder.pid)) });
+  checks.push({ name: 'text_projection_readiness', ...residentProjectionReadiness(holder.pid, status, residentDrainSteps(holder.pid, brainId)) });
   return checks;
 }
 

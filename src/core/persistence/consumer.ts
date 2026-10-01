@@ -21,8 +21,11 @@ export const RESIDENT_PROJECTION_PAGES = 100;
 export const RESIDENT_PROJECTION_BUDGET_MS = 250;
 export const WRITE_WAITING_PROJECTION_PAGES = 2;
 
-export async function runResidentProjectionInvocation(engine: BrainEngine, hostId: string, excludeRoots: string[], now: () => number = Date.now) {
-  const writesWaiting = publicationConcurrency(engine) > 0 && await hasClaimableWrite(engine, hostId, excludeRoots);
+export async function runResidentProjectionInvocation(engine: BrainEngine, hostId: string, excludeRoots: string[],
+  now: () => number = Date.now, signal?: AbortSignal) {
+  // Advisory and bounded by the caller's signal: a probe that cannot answer
+  // (for example behind a table lock) counts as a waiting write.
+  const writesWaiting = publicationConcurrency(engine) > 0 && await hasClaimableWrite(engine, hostId, excludeRoots, signal).catch(() => true);
   return rebuildPendingPageProjections(engine, writesWaiting ? WRITE_WAITING_PROJECTION_PAGES : RESIDENT_PROJECTION_PAGES,
     { deadlineMs: RESIDENT_PROJECTION_BUDGET_MS, now, retryCooldown: true });
 }
@@ -257,7 +260,8 @@ export class PersistenceConsumer {
         .finally(() => { this.maintenanceWorker = undefined; });
     }
     if (!this.projectionWorker) this.projectionWorker = runResidentProjectionInvocation(this.engine, this.hostId,
-      [...this.activeRoots, ...this.rootRetryAfter.keys()])
+      [...this.activeRoots, ...this.rootRetryAfter.keys()], Date.now, this.engine.kind === 'postgres'
+        ? AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.opts.phaseMs ?? 5000)]) : undefined)
       .catch(error => this.report(error)).finally(() => { this.projectionWorker = undefined; });
     // Recover only our owner roots. Kernel exclusion, not elapsed heartbeat,
     // proves that a previous process can no longer be publishing this root.

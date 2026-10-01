@@ -91,26 +91,32 @@ export function projectionFailureNextAction(failure: ProjectionRebuildFailure): 
   return 'run `gbrain doctor`; the page stays queued and `gbrain projections drain` tries it again on its next run';
 }
 
-/** Stop, drain and restart commands for each way a resident owner can run. */
-export function residentDrainSteps(pid: number | undefined): string {
+/**
+ * Stop, drain and restart commands for each way a resident owner can run. The
+ * restart runs whether or not a page failed, so a drain exit of 1 never leaves
+ * the owner stopped. `brain` keeps a mounted brain selected in every command.
+ */
+export function residentDrainSteps(pid: number | undefined, brain = 'host'): string {
   const uid = '$(id -u)';
+  const drain = `gbrain projections drain${brain === 'host' ? '' : ` --brain ${brain}`}`;
+  const cycle = (stop: string, start: string) => `${stop} && { ${drain}; ${start}; }`;
   return [
     `To drain faster, stop the owner, drain, then restart it:`,
-    `  gbrain serve service (launchd): launchctl bootout gui/${uid}/${SERVE_LAUNCHD_LABEL} && gbrain projections drain && launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${SERVE_LAUNCHD_LABEL}.plist`,
-    `  gbrain serve service (systemd): systemctl --user stop ${SERVE_SYSTEMD_UNIT} && gbrain projections drain && systemctl --user start ${SERVE_SYSTEMD_UNIT}`,
-    `  autopilot (launchd): launchctl bootout gui/${uid}/${autopilotLaunchdLabel()} && gbrain projections drain && launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${autopilotLaunchdLabel()}.plist`,
-    `  autopilot (systemd): systemctl --user stop ${AUTOPILOT_SYSTEMD_UNIT} && gbrain projections drain && systemctl --user start ${AUTOPILOT_SYSTEMD_UNIT}`,
-    `  a manual gbrain serve: stop it${pid ? ` (kill ${pid})` : ''}, run gbrain projections drain, then start gbrain serve again`,
+    `  serve service (launchd): ${cycle(`launchctl bootout gui/${uid}/${SERVE_LAUNCHD_LABEL}`, `launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${SERVE_LAUNCHD_LABEL}.plist`)}`,
+    `  serve service (systemd): ${cycle(`systemctl --user stop ${SERVE_SYSTEMD_UNIT}`, `systemctl --user start ${SERVE_SYSTEMD_UNIT}`)}`,
+    `  autopilot (launchd): ${cycle(`launchctl bootout gui/${uid}/${autopilotLaunchdLabel()}`, `launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${autopilotLaunchdLabel()}.plist`)}`,
+    `  autopilot (systemd): ${cycle(`systemctl --user stop ${AUTOPILOT_SYSTEMD_UNIT}`, `systemctl --user start ${AUTOPILOT_SYSTEMD_UNIT}`)}`,
+    `  a manual gbrain serve: stop it${pid ? ` (kill ${pid})` : ''}, run ${drain}, then start gbrain serve again`,
   ].join('\n');
 }
 
 /** DX-O5 refusal: the drain did not run because a resident process holds this PGLite brain. */
-export function projectionOwnerResidentError(holder: LockHolderInfo, dataDir: string): OperationError {
+export function projectionOwnerResidentError(holder: LockHolderInfo, dataDir: string, brain = 'host'): OperationError {
   const owner = `${holder.subcommand ? `gbrain ${holder.subcommand}` : 'a gbrain process'}${holder.pid ? ` (pid ${holder.pid})` : ''}`;
   return catalogueError('projection_owner_resident',
     `The PGLite brain at ${dataDir} is held by ${owner}, so the drain did not run.`,
     [
-      `The upgraded resident drains queued projections itself (up to 100 pages per pass, fewer while writes wait); watch the pending count with \`gbrain doctor\` (text_projection_readiness).`,
-      residentDrainSteps(holder.pid),
+      `The upgraded resident drains queued projections itself (up to 100 pages per pass, fewer while writes wait); watch the pending count with \`gbrain doctor${brain === 'host' ? '' : ` --brain ${brain}`}\` (text_projection_readiness).`,
+      residentDrainSteps(holder.pid, brain),
     ].join('\n'));
 }

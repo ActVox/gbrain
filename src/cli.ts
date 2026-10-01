@@ -1880,6 +1880,7 @@ const THIN_CLIENT_REFUSE_HINTS: Record<string, string> = {
   search: '`search modes|stats|tune` route to the brain host automatically (search_modes / search_stats / search_tune MCP ops). The modes reset form, modes with the source flag (the reset dry-run), and tune apply mutate or preview host config, and `diagnose` runs live retrieval — run those on the host.',
   cache: '`cache stats` routes to the brain host automatically (cache_stats MCP op). clear/prune mutate the host cache — run those on the host.',
   repair: 'repair runs on the brain host (it publishes coordinated page writes against the local engine). Run `gbrain repair` on the brain host.',
+  projections: 'projections drain rebuilds text projections against the local engine. Run `gbrain projections drain` on the brain host.',
   quarantine: '`quarantine list` routes to the brain host automatically (quarantine_list MCP op). scan/clear are host-bound (bulk re-import; the clear trust decision) — run those on the host.',
 };
 

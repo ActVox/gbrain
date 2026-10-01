@@ -45,7 +45,7 @@ export async function run(args: string[], ctx: CliDispatchContext): Promise<void
   const config = persistenceConfigForBrain(loadConfig(), brainId, brainId === 'host' ? [] : loadMounts());
   if (config?.engine === 'pglite' && config.database_path && !config.database_url) {
     const holder = inspectLockHolder(config.database_path);
-    if (holder.held) { await refuse(projections.projectionOwnerResidentError(holder, config.database_path)); return; }
+    if (holder.held) { await refuse(projections.projectionOwnerResidentError(holder, config.database_path, brainId)); return; }
   }
 
   const { createProgress } = await import('../../core/progress.ts');
