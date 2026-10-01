@@ -83,9 +83,10 @@ describe('#5426 think --save persists into the think source', () => {
   });
 
   test('all three callers pass their scope', () => {
+    // test-reads-source-ok[structural]: the three callers need a live LLM synthesis to observe end to end; persistSynthesis itself is tested above.
     const read = (p: string) => readFileSync(resolve(import.meta.dir, '..', p), 'utf-8');
     expect(read('src/commands/think.ts')).toContain('persistSynthesis(engine, result, { sourceId, allowedSources })');
-    expect(read('src/core/ops/takes.ts')).toMatch(/persistSynthesis\(ctx\.engine, result, \{\s*sourceId: ctx\.sourceId/);
+    expect(read('src/core/ops/takes.ts')).toMatch(/persistSynthesis\(ctx\.engine, result, \{[\s\S]*?sourceId: ctx\.sourceId === ALL_SOURCES \? undefined : ctx\.sourceId/);
     expect(read('src/core/cycle/auto-think.ts')).toContain('persistSynthesis(engine, result, opts.sourceId ? { sourceId: opts.sourceId } : {})');
   });
 });

@@ -37,7 +37,7 @@ import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots } from '.
 import { recordTopologyChange } from './topology-receipts.ts';
 import { lockTopologyPrincipal, topologyPrincipal } from './topology-locks.ts';
 import { canonicalFilesystemPath } from './root-registry.ts';
-import { carryHoldsToClassicState, planHoldCarry, type HoldCarry } from '../connectors/item-holds-store.ts';
+import { carryHoldsToClassicState, holdCarryBlocked, planHoldCarry, type HoldCarry } from '../connectors/item-holds-store.ts';
 import { PHYSICAL_ROOT_MARKER, physicalRootReservationPath } from './physical-root-record.ts';
 
 export const DEACTIVATE_DOCS = 'docs/architecture/topologies.md#deactivate-runbook';
@@ -117,14 +117,18 @@ export async function deactivationBlockers(engine: BrainEngine): Promise<Deactiv
   }
   // Managed connector holds live in the managed checkpoint, which classic mode does not read. Deactivation copies
   // them into each source's classic state file; only a source whose holds have nowhere to go blocks it.
-  for (const carry of await planHoldCarry(engine)) {
-    if (carry.state_file && !carry.unreadable) continue;
+  for (const carry of await planHoldCarry(engine, existingLocalHostId())) {
+    if (!holdCarryBlocked(carry)) continue;
     const resolve = `gbrain sources status ${carry.source_id} names each item's error; fix its cause, then gbrain sources retry-held ${carry.source_id} and gbrain sync --source ${carry.source_id} (a successful re-attempt clears the hold)`;
     blockers.push({ kind: 'connector_holds', id: carry.source_id, source_id: carry.source_id,
-      detail: carry.state_file
-        ? `${carry.items} held item(s); the classic state file ${carry.state_file} does not parse (${carry.unreadable})`
-        : `${carry.items} held item(s) and no classic state directory to carry them into`,
-      exit: carry.state_file ? `move ${carry.state_file} aside, then rerun deactivate; or ${resolve}` : resolve });
+      detail: carry.owner_host
+        ? `${carry.items} held item(s) on a worktree owned by host ${carry.owner_host}; deactivate cannot write that host's classic state`
+        : carry.state_file
+          ? `${carry.items} held item(s); the classic state file ${carry.state_file} does not parse (${carry.unreadable})`
+          : `${carry.items} held item(s) and no classic state directory to carry them into`,
+      exit: carry.owner_host
+        ? `run deactivate on host ${carry.owner_host}; or ${resolve}`
+        : carry.state_file ? `move ${carry.state_file} aside, then rerun deactivate; or ${resolve}` : resolve });
   }
   const leases = await engine.executeRaw<{ id: string; holder_host: string; holder_pid: number }>(
     'SELECT id, holder_host, holder_pid FROM gbrain_cycle_locks WHERE ttl_expires_at > now() ORDER BY id');
@@ -172,7 +176,7 @@ export async function deactivatePersistence(engine: BrainEngine, opts: { dryRun?
   }
   const blockers = await deactivationBlockers(engine);
   if (opts.dryRun) {
-    const carried_holds = (await planHoldCarry(engine)).filter(c => c.state_file && !c.unreadable);
+    const carried_holds = (await planHoldCarry(engine, existingLocalHostId())).filter(c => c.items > 0 && !holdCarryBlocked(c));
     return { ...base, mode: 'managed', deactivated: false, mode_epoch: Number(brain.mode_epoch), blockers, carried_holds };
   }
   if (blockers.length) throw blockedError(blockers);
@@ -207,7 +211,7 @@ export async function deactivatePersistence(engine: BrainEngine, opts: { dryRun?
       const inside = await deactivationBlockers(tx);
       if (inside.length) throw blockedError(inside);
       // Written before commit: if the transaction then fails, the brain stays managed and ignores these files.
-      const carried_holds = await carryHoldsToClassicState(tx);
+      const carried_holds = await carryHoldsToClassicState(tx, hostId);
       const retired = await retiredTopology(tx);
       const [epoch] = await tx.executeRaw<{ mode_epoch: string }>(
         'UPDATE persistence_brain SET enabled=false, mode_epoch=mode_epoch+1 WHERE singleton=1 RETURNING mode_epoch::text');

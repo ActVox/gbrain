@@ -20,7 +20,7 @@
  * because that is where the daemon itself writes; a `GBRAIN_HOME` install
  * otherwise has readers looking in a different directory than the writer.
  */
-import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { randomBytes } from 'crypto';
@@ -153,32 +153,56 @@ function replaceRecord(path: string, rec: InstallIdRecord): void {
 }
 
 /**
+ * One installer at a time decides a move or a copy: without it two installers
+ * of a freshly copied brain could each mint an id, and the one whose record
+ * lost would leave a job nobody can find. A crashed holder's lock is broken
+ * after 30 seconds.
+ */
+function withInstallIdLock<T>(fn: () => T): T {
+  const lock = `${autopilotInstallIdPath()}.lock`;
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      try { if (Date.now() - statSync(lock).mtimeMs > 30_000) { rmdirSync(lock); continue; } } catch { continue; }
+      if (Date.now() > deadline) throw new Error(`another autopilot install holds ${lock}; retry when it finishes`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try { return fn(); } finally { try { rmdirSync(lock); } catch { /* already gone */ } }
+}
+
+/**
  * The install id for this brain, minting or re-homing it as ENG-O11 describes.
  * The first record is created exclusively, so concurrent first installs agree on
  * one id; a move keeps the id and records the new directory; a copy mints its
- * own id so the original brain's job is never taken over.
+ * own id so the original brain's job is never taken over. Moves and copies are
+ * decided under a lock, so concurrent installers settle on one id.
  */
 export function ensureAutopilotInstallId(): string {
   mkdirSync(configDir(), { recursive: true });
   const path = autopilotInstallIdPath();
   const here = canonicalDir(configDir());
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const current = resolveAutopilotInstallId();
-    if (current.relation === 'same') return current.id;
-    if (current.relation === 'moved') {
-      replaceRecord(path, { id: current.id, realpath: here, created_at: readInstallIdRecord()?.created_at || new Date().toISOString() });
-    } else {
-      const fresh = { id: randomBytes(16).toString('hex'), realpath: here, created_at: new Date().toISOString() };
-      if (current.relation === 'none') {
-        if (writeRecordExclusive(path, fresh)) return fresh.id;
-        continue;
-      }
-      replaceRecord(path, fresh);
-    }
-    const settled = readInstallIdRecord();
-    if (settled && settled.realpath === here) return settled.id;
+  const current = resolveAutopilotInstallId();
+  if (current.relation === 'same') return current.id;
+  if (current.relation === 'none') {
+    const fresh = { id: randomBytes(16).toString('hex'), realpath: here, created_at: new Date().toISOString() };
+    if (writeRecordExclusive(path, fresh)) return fresh.id;
   }
-  throw new Error(`could not settle the autopilot install id at ${path}`);
+  return withInstallIdLock(() => {
+    const locked = resolveAutopilotInstallId();
+    if (locked.relation === 'same') return locked.id;
+    if (locked.relation === 'moved') {
+      replaceRecord(path, { id: locked.id, realpath: here, created_at: readInstallIdRecord()?.created_at || new Date().toISOString() });
+      return locked.id;
+    }
+    const fresh = { id: randomBytes(16).toString('hex'), realpath: here, created_at: new Date().toISOString() };
+    replaceRecord(path, fresh);
+    return fresh.id;
+  });
 }
 
 /**

@@ -187,6 +187,29 @@ describe('#5195 non-default brains get their own names from the install id', () 
     });
   }, 60_000);
 
+  test('concurrent installs of a freshly copied brain settle on one new id', async () => {
+    await withHosts(async (root) => {
+      const original = await withEnv({ GBRAIN_HOME: join(root, 'brain-a') }, () => ensureAutopilotInstallId());
+      cpSync(join(root, 'brain-a'), join(root, 'brain-copy'), { recursive: true });
+      const script = `import { ensureAutopilotInstallId } from ${JSON.stringify(join(REPO, 'src/core/autopilot-paths.ts'))};\nprocess.stdout.write(ensureAutopilotInstallId());\n`;
+      const scriptPath = join(root, 'race-copy.ts');
+      writeFileSync(scriptPath, script);
+      const ids = await Promise.all(Array.from({ length: 6 }, () => new Promise<string>((done, fail) => {
+        const child = spawn(process.execPath, [scriptPath], { env: { ...process.env, GBRAIN_HOME: join(root, 'brain-copy'), HOME: join(root, 'home') } });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', (d) => { out += d; });
+        child.stderr.on('data', (d) => { err += d; });
+        child.on('close', (code) => (code === 0 ? done(out.trim()) : fail(new Error(`exit ${code}: ${err}`))));
+      })));
+      expect(new Set(ids).size).toBe(1);
+      expect(ids[0]).not.toBe(original);
+      const recorded = JSON.parse(readFileSync(join(root, 'brain-copy', '.gbrain', 'autopilot-install-id'), 'utf-8'));
+      expect(recorded.id).toBe(ids[0]);
+      expect(existsSync(join(root, 'brain-copy', '.gbrain', 'autopilot-install-id.lock'))).toBe(false);
+    });
+  }, 60_000);
+
   test('the GBRAIN_AUTOPILOT_LABEL test seam still wins over the suffix', async () => {
     await withHosts(async (root) => {
       await withEnv({ GBRAIN_HOME: join(root, 'brain-a'), GBRAIN_AUTOPILOT_LABEL: 'com.gbrain.autopilot.test.seam' }, () => {
