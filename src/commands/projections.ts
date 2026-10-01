@@ -18,8 +18,8 @@ import {
   projectionBacklog, rebuildPendingPageProjections, type ProjectionRebuildFailure,
 } from '../core/page-state/projections.ts';
 import { SERVE_LAUNCHD_LABEL, SERVE_SYSTEMD_UNIT } from '../core/serve-service.ts';
-import { AUTOPILOT_SYSTEMD_UNIT } from './autopilot.ts';
-import { autopilotLaunchdLabel } from '../core/autopilot-paths.ts';
+import { resolveAutopilotJob } from '../core/autopilot-paths.ts';
+import { detectInstalledJob } from './autopilot/jobs.ts';
 
 export const PROJECTION_DRAIN_DOCS = 'docs/guides/repair.md#projection-drain';
 const BATCH = 100;
@@ -98,14 +98,19 @@ export function projectionFailureNextAction(failure: ProjectionRebuildFailure): 
  */
 export function residentDrainSteps(pid: number | undefined, brain = 'host'): string {
   const uid = '$(id -u)';
+  // #5195: this brain's own autopilot job, or the shared job an older install still runs it from.
+  const job = resolveAutopilotJob();
+  const installed = detectInstalledJob(job).installed;
+  const launchd = installed?.target === 'macos' ? installed.name : job.launchdLabel;
+  const systemd = installed?.target === 'linux-systemd' ? installed.name : job.systemdUnit;
   const drain = `gbrain projections drain${brain === 'host' ? '' : ` --brain ${brain}`}`;
   const cycle = (stop: string, start: string) => `${stop} && { ${drain}; ${start}; }`;
   return [
     `To drain faster, stop the owner, drain, then restart it:`,
     `  serve service (launchd): ${cycle(`launchctl bootout gui/${uid}/${SERVE_LAUNCHD_LABEL}`, `launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${SERVE_LAUNCHD_LABEL}.plist`)}`,
     `  serve service (systemd): ${cycle(`systemctl --user stop ${SERVE_SYSTEMD_UNIT}`, `systemctl --user start ${SERVE_SYSTEMD_UNIT}`)}`,
-    `  autopilot (launchd): ${cycle(`launchctl bootout gui/${uid}/${autopilotLaunchdLabel()}`, `launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${autopilotLaunchdLabel()}.plist`)}`,
-    `  autopilot (systemd): ${cycle(`systemctl --user stop ${AUTOPILOT_SYSTEMD_UNIT}`, `systemctl --user start ${AUTOPILOT_SYSTEMD_UNIT}`)}`,
+    `  autopilot (launchd): ${cycle(`launchctl bootout gui/${uid}/${launchd}`, `launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/${launchd}.plist`)}`,
+    `  autopilot (systemd): ${cycle(`systemctl --user stop ${systemd}`, `systemctl --user start ${systemd}`)}`,
     `  a manual gbrain serve: stop it${pid ? ` (kill ${pid})` : ''}, run ${drain}, then start gbrain serve again`,
   ].join('\n');
 }
