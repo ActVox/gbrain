@@ -204,6 +204,16 @@ jobs:
       # default regardless of per-test third-arg timeouts. Runs directly
       # (not via verify's CHECKS array) to avoid a package.json edit.
       - run: bash scripts/check-bun-test-timeout.sh
+      # #5810: every tracked *.sh must parse under bash 3.2 (macOS /bin/bash).
+      # The real parser runs in the digest-pinned bash:3.2 image; REQUIRE
+      # turns a missing Docker into a failure instead of a skip, and makes the
+      # test's real-parser fixture cases mandatory.
+      - name: Shell scripts parse under bash 3.2
+        env:
+          GBRAIN_BASH32_REQUIRE: '1'
+        run: |
+          bun run check:bash32
+          bun test --timeout 60000 test/scripts/check-bash32.test.ts
 
   serial-tests:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.native_only != true }}

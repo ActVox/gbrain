@@ -43,6 +43,7 @@ import { conceptNudge } from './core/search/query-intent.ts';
 import { redactRetrievalOutput } from './core/search/output-redaction.ts';
 import type { CliOptions } from './core/cli-options.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult, extractResponseMeta } from './core/mcp-client.ts';
+import { assertSingleSourceScopeFlag, checkHostHonoredParams, hintAmbientNarrowing, type AmbientSourceBinding } from './cli/source-scope.ts';
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { CLI_FLAG_REGISTRY } from './core/cli-flag-registry.generated.ts';
 import { migrationCliArgumentError } from './core/embedding-migration-cli.ts';
@@ -573,14 +574,24 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
     // #2098: the local path resolves --source / GBRAIN_SOURCE / .gbrain-source
     // inside makeContext (ctx.sourceId), which this route never reaches — so
     // scope must be mapped onto the op's source_id wire param before the call.
+    let ambientScope: AmbientSourceBinding | null;
     try {
-      applyThinClientSourceScope(op, params);
+      ambientScope = applyThinClientSourceScope(op, params);
     } catch (e: unknown) {
       console.error(e instanceof Error ? e.message : String(e));
       process.exit(1);
     }
-    await runThinClientRouted(op, params, cfgPre!, cliOpts);
+    await runThinClientRouted(op, params, cfgPre!, cliOpts, ambientScope);
     return;
+  }
+
+  // Locally --source reaches the op through makeContext (ctx.sourceId); a
+  // per-call --source-id / --all-sources would silently win over it.
+  try {
+    assertSingleSourceScopeFlag(op, params);
+  } catch (e: unknown) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
   }
 
   // The live PGLite owner exposes canonical operations over a dedicated
@@ -741,6 +752,7 @@ async function runThinClientRouted(
   params: Record<string, unknown>,
   cfg: GBrainConfig,
   cliOpts: CliOptions,
+  ambientScope: AmbientSourceBinding | null = null,
 ): Promise<void> {
   // ENG-4: per-op timeout default; user override wins.
   const defaultTimeoutMs = op.name === 'think' ? 180_000 : 30_000;
@@ -769,7 +781,9 @@ async function runThinClientRouted(
     // unpacking (old servers lack _meta — capture is simply skipped).
     const envelopeMeta = extractResponseMeta(raw);
     if (envelopeMeta?.retrieval) captureRetrievalMeta('retrieval', envelopeMeta.retrieval);
+    checkHostHonoredParams(op, params, raw);
     const result = unpackToolResult(raw);
+    hintAmbientNarrowing(op, params, result, ambientScope);
     const skew = deliveryVersionSkewWarning(op.name, params, envelopeMeta?.retrieval as Record<string, unknown> | undefined, result);
     if (skew) process.stderr.write(skew + '\n');
     const output = formatResult(op.name, result, params);
@@ -1211,25 +1225,26 @@ export async function readStdinBounded(): Promise<string | null> {
 // these; an explicit --source-id still passes through untouched above.
 const NON_SCOPE_SOURCE_ID_OPS = new Set(['get_skill']);
 
+/**
+ * Returns the ambient binding (GBRAIN_SOURCE / .gbrain-source) that was mapped
+ * onto `source_id`, so an empty result can say what narrowed it; null when the
+ * scope came from a flag or nothing was mapped.
+ */
 export function applyThinClientSourceScope(
   op: Operation,
   params: Record<string, unknown>,
   cwd?: string,
-): void {
-  if ('source' in op.params) return; // the op owns --source; not a scope flag
+): AmbientSourceBinding | null {
+  if ('source' in op.params) return null; // the op owns --source; not a scope flag
+  assertSingleSourceScopeFlag(op, params);
   const explicit = typeof params.source === 'string' && params.source.length > 0
     ? (params.source as string)
     : null;
   delete params.source; // never a wire param on these ops — don't leak it
   // Explicit per-call scope already on the wire wins over ambient tiers.
-  if (params.source_id !== undefined || params.all_sources === true) {
-    if (explicit) {
-      throw new Error('Pass either --source or --source-id/--all-sources, not both.');
-    }
-    return;
-  }
+  if (params.source_id !== undefined || params.all_sources === true) return null;
   const resolved = resolveSourceIdEngineFree(explicit, cwd);
-  if (!resolved) return;
+  if (!resolved) return null;
   if (!('source_id' in op.params) || NON_SCOPE_SOURCE_ID_OPS.has(op.name)) {
     if (explicit) {
       const hint = NON_SCOPE_SOURCE_ID_OPS.has(op.name)
@@ -1239,9 +1254,12 @@ export function applyThinClientSourceScope(
         `gbrain ${op.cliHints?.name || op.name} does not accept --source on a thin-client install ${hint}.`,
       );
     }
-    return; // ambient env/dotfile scope with nowhere to send it
+    return null; // ambient env/dotfile scope with nowhere to send it
   }
   params.source_id = resolved;
+  if (explicit) return null;
+  const env = process.env.GBRAIN_SOURCE;
+  return { sourceId: resolved, via: env && env.length > 0 ? 'GBRAIN_SOURCE' : '.gbrain-source' };
 }
 
 // Exported for tests (same import-safety contract as applyThinClientSourceScope).
@@ -1430,8 +1448,9 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
   // #2561: when the source resolved via a NON-explicit tier (path-match /
   // brain default / sole-non-default / seed default), unqualified search-shaped
   // reads span every `config.federated = true` source. Computed here (the
-  // trusted local boundary) and consumed by federatedSearchScope in
-  // operations.ts, which additionally gates on ctx.remote === false.
+  // trusted local boundary) and consumed by federatedSearchScope
+  // (src/core/ops/context.ts), which widens only an unqualified read with no
+  // OAuth grant; remote transports compute the same field for no-grant tokens.
   let localFederated: string[] | undefined;
   let sourceImplicit = true;
   // params.source is set when a CLI flag was parsed for the op (rare; most
@@ -2857,6 +2876,25 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
   return engine;
 }
 
+/** CLI-only usage examples appended to `gbrain <command> --help`. */
+const OP_HELP_EXAMPLES: Record<string, string[]> = {
+  get_links: [
+    'gbrain links people/alice-example                    # resolved source (every federated source when unpinned)',
+    'gbrain links people/alice-example --source business  # one source',
+    'gbrain links people/alice-example --all-sources      # every source',
+  ],
+  get_backlinks: [
+    'gbrain backlinks companies/acme-example',
+    'gbrain backlinks companies/acme-example --source-id business',
+    'gbrain backlinks companies/acme-example --all-sources --json',
+  ],
+  traverse_graph: [
+    'gbrain graph people/alice-example --depth 2',
+    'gbrain graph people/alice-example --source business --direction both',
+    'gbrain graph people/alice-example --all-sources   # same slug in two sources stays two nodes (source_id)',
+  ],
+};
+
 export function printOpHelp(op: Operation, invokedName?: string) {
   const positional = (op.cliHints?.positional || []).map(p => `<${p}>`).join(' ');
   // v114 (#1941): when invoked via an alias (e.g. `gbrain link-add --help`),
@@ -2879,6 +2917,8 @@ export function printOpHelp(op: Operation, invokedName?: string) {
       console.log(`${prefix.padEnd(28)} ${def.description || ''}${req}`);
     }
   }
+  const examples = OP_HELP_EXAMPLES[op.name];
+  if (examples) console.log(`\nExamples:\n${examples.map((line) => `  ${line}`).join('\n')}`);
 }
 
 function printHelp() {

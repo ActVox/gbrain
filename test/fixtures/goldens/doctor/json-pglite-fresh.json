@@ -658,6 +658,16 @@
         {
           "category": "ops",
           "details": {
+            "outcome": "skipped",
+            "reason": "pglite"
+          },
+          "message": "Skipped: PGLite runs vector search in-process; the plan check applies to Postgres brains.",
+          "name": "vector_plan",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
             "command": "gbrain repair embedding-effects",
             "count": "exact",
             "docs": "docs/guides/repair.md#stale-queued-embedding-effects",

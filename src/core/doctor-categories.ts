@@ -212,6 +212,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'persistence_request_growth',
   'persistence_request_indexes',
   'stale_embedding_effects',
+  'vector_plan',
   'writer_version',
   'pgbouncer_prepare',
   'pglite_data_dir',
