@@ -330,6 +330,8 @@ async function main() {
     const { maybeEmitBackupNag } = await import('./core/backup/status-file.ts');
     maybeEmitBackupNag(command, { quiet: getCliOptions().quiet === true });
   }
+  // #5137: once per process, when an env key shadows a different config key; never from hook commands.
+  if (command !== 'hook') (await import('./core/ai/key-warnings.ts')).warnShadowedProviderKeys();
 
   const subArgs = args.slice(1);
 
