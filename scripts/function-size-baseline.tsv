@@ -13,7 +13,7 @@ src/commands/doctor/bootstrap-checks.ts	bootstrapDoctorChecks	476	seed: W5 basel
 src/commands/doctor/checks/extraction-sync.ts	checkSyncFreshness	333	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/commands/doctor/report-remote.ts	doctorReportRemote	416	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/commands/dream-retriage.ts	runDreamRetriage	524	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
-src/commands/embed.ts	embedAllStale	551	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
+src/commands/embed.ts	embedAllStale	560	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +9 #5804: a null projection snapshot is a counted failure (archived sources left to reportArchived) with one end-of-run batch summary
 src/commands/embed.ts	runEmbedCore	376	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/commands/eval-longmemeval.ts	runEvalLongMemEval	740	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/commands/extract-conversation-facts.ts	processPage	307	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
