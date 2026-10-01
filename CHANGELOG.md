@@ -82,7 +82,7 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
 - Migration children (backfills, smoke tests, autopilot install) run the CLI that runs the migration instead of the `gbrain` on PATH.
 - `sources writer deactivate` no longer refuses on held Google or GitHub items: it copies them into each source's classic state file (`carried_holds`).
 - `gbrain connect --install` for Codex, Claude Code and opencode prints where the token lives and how to replace it.
-- `search` and `query` treat `types: []`, `""` and whitespace-only strings as no type filter.
+- `search` and `query` treat `types: []` as no type filter (over MCP and the CLI); the CLI also accepts `""` and whitespace-only strings. Over MCP, `types` must still be an array, so omit it or pass `[]`.
 - Colon slugs such as `calendar:abc` are writable again; on Windows a write whose file name would contain `:` is refused with `colon_slug_windows_write_through`.
 - Every host and resident `gbrain serve` must be restarted for these to apply.
 
@@ -118,7 +118,7 @@ And the leftovers. `gbrain repair stale-atoms` cleans up search atoms that quote
 #### Search and projections
 
 - **New `gbrain projections drain [--limit n] [--json]` (#5401)** rebuilds queued text projections now (exit 0, 1 when pages failed, 2 when it did not run). On PGLite with a resident owner it refuses with `projection_owner_resident` and prints the stop, drain and restart commands, naming this brain's own autopilot job. Doctor `text_projection_readiness` names the drain, or reports the resident's pending count.
-- **`search` and `query` accept an empty type filter (#5390).** `types: []`, `""` and whitespace-only strings mean no filter instead of `invalid_params`; `['']`, `' , '` and `',,'` still fail. Contributed by @RerankerGuo (PR #5781).
+- **`search` and `query` accept an empty type filter (#5390).** `types: []` means no filter instead of `invalid_params`, and the CLI also accepts `""` and whitespace-only strings (MCP still requires an array, so omit `types` or pass `[]`); `['']`, `' , '` and `',,'` still fail. Contributed by @RerankerGuo (PR #5781).
 - **Provider key source (#5137).** The shadow warning and doctor check `embedding_key_source` say which key is in effect; see the behavior changes above.
 
 #### Sources and agents
