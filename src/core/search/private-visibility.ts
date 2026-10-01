@@ -25,28 +25,118 @@ import type { BrainEngine } from '../engine.ts';
 export const REMOTE_PRIVATE_PAGES_KEY = 'search.remote_private_pages';
 
 /**
+ * #5525 — extracted atoms and synthesized concept pages are derived from
+ * other pages or from private transcripts, so a missing `visibility` field on
+ * them means "origin unknown", not "world". They fail closed; every other page
+ * keeps the documented default (absent visibility is world).
+ */
+function derivedPageSql(pageAlias: string): string {
+  return `(${pageAlias}.type = 'atom' OR (${pageAlias}.type = 'concept' AND ${pageAlias}.frontmatter->>'synthesized_by' IS NOT NULL))`;
+}
+
+/**
  * Raw SQL predicate hiding `visibility: private` pages (absent visibility
- * defaults to 'world'). Single source of truth for the fragment — consumed by
+ * defaults to 'world', except on derived atoms and concepts where it defaults
+ * to 'private'). Single source of truth for the fragment — consumed by
  * buildVisibilityClause (search paths), both engines' listPages, the
  * relational-arm hydrate, and get_page's fuzzy-candidate filter. `pageAlias`
  * is a code-provided literal, never user input.
  */
 export function privatePagesFilterFragment(pageAlias: string): string {
-  return `COALESCE(${pageAlias}.frontmatter->>'visibility', 'world') <> 'private'`;
+  return `(${privateSnapshotFilterFragment(pageAlias)}
+    AND NOT ${derivedOriginPrivateSql(pageAlias)})`;
+}
+
+/**
+ * The same rule on a row's own `type`/`frontmatter` only, for snapshots such
+ * as `page_versions` that have no page identity to follow to an origin. Callers
+ * pair it with privatePagesFilterFragment on the live page.
+ */
+export function privateSnapshotFilterFragment(alias: string): string {
+  return `COALESCE(${alias}.frontmatter->>'visibility', CASE WHEN ${derivedPageSql(alias)} THEN 'private' ELSE 'world' END) <> 'private'`;
+}
+
+/**
+ * #5525 — a later private flip of an origin page reaches its derived pages
+ * before any repair runs: an atom whose origin page is explicitly private, and
+ * a synthesized concept with a private input atom (or an input atom whose
+ * origin is private), are private whatever their own field says.
+ * `gbrain repair visibility` then stamps the stricter value on the rows.
+ */
+function derivedOriginPrivateSql(p: string): string {
+  const privateOrigin = (atom: string, alias: string) => `EXISTS (SELECT 1 FROM pages ${alias} WHERE ${alias}.source_id = ${atom}.source_id
+      AND ${alias}.slug = ${atom}.frontmatter->>'source_slug' AND ${alias}.frontmatter->>'visibility' = 'private')`;
+  return `(CASE WHEN ${p}.type = 'atom' THEN ${privateOrigin(p, 'derived_origin')}
+    WHEN ${derivedPageSql(p)} THEN EXISTS (SELECT 1 FROM links derived_input_link
+      JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id
+      WHERE derived_input_link.from_page_id = ${p}.id AND derived_input_link.link_source = 'concept-provenance'
+        AND derived_input_link.link_type = 'synthesized_from'
+        AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private'
+          OR ${privateOrigin('derived_input', 'derived_input_origin')}))
+    ELSE false END)`;
+}
+
+export type Visibility = 'private' | 'world';
+
+/**
+ * #5525 — the visibility a derived page takes from its origin under the
+ * read-side rule: transcripts and missing origins are private, and a page
+ * origin is private exactly when remote readers cannot see it.
+ */
+export function effectiveVisibility(origin: { kind: 'transcript' } | { kind: 'page'; page: { type?: string | null; frontmatter?: unknown } | null }): Visibility {
+  if (origin.kind === 'transcript' || !origin.page) return 'private';
+  return isPrivatePage(origin.page) ? 'private' : 'world';
+}
+
+/** Derived outputs take the strictest visibility of their inputs. */
+export function strictestVisibility(values: Iterable<Visibility>): Visibility {
+  for (const value of values) if (value === 'private') return 'private';
+  return 'world';
+}
+
+/** Check the actual origin, independently of joins that redact its source. */
+export function privateLinkOriginFilterFragment(linkAlias: string): string {
+  return `(${linkAlias}.origin_page_id IS NULL OR EXISTS (
+    SELECT 1 FROM pages origin_private
+    WHERE origin_private.id = ${linkAlias}.origin_page_id
+      AND ${privatePagesFilterFragment('origin_private')}
+  ))`;
+}
+
+/** A projection's private event must stay hidden even when its join is source-redacted. */
+export function privateTimelineEventFilterFragment(timelineAlias: string): string {
+  return `(${timelineAlias}.event_page_id IS NULL OR EXISTS (
+    SELECT 1 FROM pages event_private
+    WHERE event_private.id = ${timelineAlias}.event_page_id
+      AND ${privatePagesFilterFragment('event_private')}
+  ))`;
+}
+
+/**
+ * Fact-row twin for ontology provenance: hide an observation whose provenance
+ * page (`source_markdown_slug`, looked up in the fact's own source) is
+ * private. Non-page provenance (e.g. `manual`) has no page row and passes;
+ * deleted page rows still count (fail-closed). Keys on (facts.source_id, slug),
+ * so a provenance page living in a DIFFERENT source than the fact is not
+ * consulted — fail-open for cross-source provenance, acceptable under source
+ * isolation because ontology_propose stamps the fact with ctx.sourceId.
+ */
+export function privateProvenanceFilterFragment(factAlias: string): string {
+  return `NOT EXISTS (SELECT 1 FROM pages pp WHERE pp.source_id = ${factAlias}.source_id ` +
+    `AND pp.slug = ${factAlias}.source_markdown_slug AND NOT (${privatePagesFilterFragment('pp')}))`;
 }
 
 /**
  * Row-side twin of privatePagesFilterFragment for pages already fetched
  * (get_page / fetch read one row by slug; re-querying just to filter would
- * be a second round-trip). Same semantics: only the exact string 'private'
- * hides a page; absent/other values default to world-visible.
+ * be a second round-trip). Same semantics: an explicit 'private' hides a
+ * page, and an absent value hides only derived atoms and concepts.
  */
-export function isPrivatePage(frontmatter: unknown): boolean {
-  return (
-    typeof frontmatter === 'object' &&
-    frontmatter !== null &&
-    (frontmatter as Record<string, unknown>).visibility === 'private'
-  );
+export function isPrivatePage(page: { type?: string | null; frontmatter?: unknown }): boolean {
+  const frontmatter = typeof page.frontmatter === 'object' && page.frontmatter !== null
+    ? page.frontmatter as Record<string, unknown> : {};
+  const derived = page.type === 'atom' || (page.type === 'concept' && frontmatter.synthesized_by != null);
+  return (frontmatter.visibility ?? (derived ? 'private' : 'world')) === 'private';
 }
 
 /**
@@ -54,9 +144,9 @@ export function isPrivatePage(frontmatter: unknown): boolean {
  * for the slug is `visibility: private`. A slug with at least one non-private
  * in-scope page stays visible (multi-source: private in one source, world in
  * another). Slugs with no page row at all (dangling link endpoints) are not
- * returned — they reveal nothing private. Shared by the #4352 read-op gates
- * (get_page fuzzy candidates, resolve_slugs, link/graph endpoint filtering,
- * and the content-op probes via slugHiddenFromCaller). `scope` follows the
+ * returned — they reveal nothing private. Used only for get_page's fuzzy
+ * candidate enumeration; data-bearing reads authorize concrete rows in the
+ * engine instead of treating a visible namesake as authorization. `scope` follows the
  * canonical precedence (federated array > scalar > nothing); with
  * `includeDeleted` unset, only live rows are considered.
  */
@@ -86,26 +176,6 @@ export async function findPrivateOnlySlugs(
     params,
   );
   return new Set(rows.map(r => r.slug));
-}
-
-/**
- * One-slug trust + probe combo for the sibling content ops (#4352
- * remediation: get_chunks / get_versions / get_timeline / get_raw_data).
- * True ⇒ the caller's read of `slug` must behave exactly like a missing
- * page (no existence oracle). Trusted local + the operator opt-outs resolve
- * to false via resolveExcludePrivatePages before any query runs. The probe
- * considers DELETED rows too (fail-closed: a soft-deleted private page's
- * history/timeline/raw data stays hidden).
- */
-export async function slugHiddenFromCaller(
-  engine: BrainEngine,
-  remote: boolean | undefined,
-  slug: string,
-  scope: { sourceId?: string; sourceIds?: string[] } = {},
-): Promise<boolean> {
-  if (!(await resolveExcludePrivatePages(engine, remote))) return false;
-  const hidden = await findPrivateOnlySlugs(engine, [slug], scope, { includeDeleted: true });
-  return hidden.has(slug);
 }
 
 const CACHE_TTL_MS = 30_000;
@@ -142,66 +212,4 @@ export async function resolveExcludePrivatePages(
     cache.set(engine, { at: Date.now(), expose });
   }
   return !expose;
-}
-
-/**
- * KEEP-list inverse of findPrivateOnlySlugs: of the given slugs, which have
- * at least one world-visible page row (deleted rows considered — see
- * findWorldVisibleSlugs' consumers for why)? Fail-closed by construction: a
- * slug with NO page row at all (e.g. hard-purged between a caller's list
- * read and this probe) is simply absent from the keep-set, so a
- * keep-list consumer drops it instead of serving it — the drop-list shape
- * fails OPEN on exactly that TOCTOU window.
- */
-export async function findWorldVisibleSlugs(
-  engine: BrainEngine,
-  slugs: string[],
-  scope: { sourceId?: string; sourceIds?: string[] } = {},
-): Promise<Set<string>> {
-  if (slugs.length === 0) return new Set();
-  const params: unknown[] = [slugs];
-  let scopeClause = '';
-  if (scope.sourceIds && scope.sourceIds.length > 0) {
-    params.push(scope.sourceIds);
-    scopeClause = `AND p.source_id = ANY($${params.length}::text[])`;
-  } else if (scope.sourceId) {
-    params.push(scope.sourceId);
-    scopeClause = `AND p.source_id = $${params.length}`;
-  }
-  const rows = await engine.executeRaw<{ slug: string }>(
-    `SELECT p.slug FROM pages p
-      WHERE p.slug = ANY($1::text[])
-        ${scopeClause}
-      GROUP BY p.slug
-      HAVING bool_or(${privatePagesFilterFragment('p')})`,
-    params,
-  );
-  return new Set(rows.map(r => r.slug));
-}
-
-/**
- * Shared post-filter for list-shaped read ops (find_orphans,
- * get_recent_salience, find_experts): one gate read + one batched KEEP-list
- * probe, keeping only rows whose slug has a world-visible page row.
- *
- * Deleted rows are considered by the probe on purpose: some callers' raw
- * list queries carry no `deleted_at` predicate, so a soft-deleted private
- * page can still be IN the rows — a live-rows-only probe would never see
- * it and the filter would fail open (same fail-closed reasoning as
- * slugHiddenFromCaller above). And the keep-list shape means a slug whose
- * page row vanished entirely (concurrent purge) drops out too, instead of
- * being served because "no row" looked like "not private".
- */
-export async function dropPrivateOnlyRows<T>(
-  engine: BrainEngine,
-  remote: boolean | undefined,
-  rows: T[],
-  slugOf: (row: T) => string,
-  scope: { sourceId?: string; sourceIds?: string[] } = {},
-): Promise<T[]> {
-  if (rows.length === 0) return rows;
-  if (!(await resolveExcludePrivatePages(engine, remote))) return rows;
-  const keep = await findWorldVisibleSlugs(engine, rows.map(slugOf), scope);
-  if (keep.size === rows.length) return rows;
-  return rows.filter(r => keep.has(slugOf(r)));
 }

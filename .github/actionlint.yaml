@@ -1,0 +1,3 @@
+# ActVox uses GitHub-hosted labels only; reject unprovisioned custom runners.
+self-hosted-runner:
+  labels: []

@@ -27,7 +27,14 @@ while IFS= read -r merge_commit; do
   fi
 
   upstream_parent=${parents[1]}
-  release_tag=$(git tag --points-at "$upstream_parent" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+  # Fork releases own v<VERSION>. Prefer a separate upstream namespace so
+  # the same version number can identify different fork/upstream commits.
+  # Historical integrations used bare tags; retain that compatibility.
+  release_tag=$(git tag --points-at "$upstream_parent" | awk '
+    /^upstream\/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { if (!namespaced) namespaced=$0 }
+    /^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { if (!legacy) legacy=$0 }
+    END { if (namespaced) print namespaced; else if (legacy) print legacy }
+  ')
   if [[ -z "$release_tag" ]]; then
     printf 'Semgrep baseline error: integration merge %s has no mirrored exact release tag on second parent %s\n' \
       "$merge_commit" "$upstream_parent" >&2

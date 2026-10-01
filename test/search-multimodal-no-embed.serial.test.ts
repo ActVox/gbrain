@@ -16,6 +16,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { installFixtureChunks } from './helpers/page-projection.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { hybridSearch } from '../src/core/search/hybrid.ts';
 
@@ -99,7 +100,7 @@ describe('multimodal-only install: no-embedding early-return is multimodal-aware
       compiled_truth: '',
       timeline: '',
     });
-    await engine.upsertChunks('photos/voyage-both-retained', [{
+    await installFixtureChunks(engine, 'photos/voyage-both-retained', [{
       chunk_index: 0,
       chunk_text: 'opaque-asset-123',
       chunk_source: 'image_asset',

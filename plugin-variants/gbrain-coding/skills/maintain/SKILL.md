@@ -53,26 +53,51 @@ This skill guarantees:
 
 ## Phases
 
+### Ownership failures are an inspection boundary
+
+Routine maintenance, startup checks, `doctor --fix`, and a request to "fix what's
+broken" do not authorize writer topology changes. On `owner_unavailable` or a
+writer coordination refusal, inspect `gbrain sources writer status --brain <id>
+--json` on the selected host first and report the owner, epoch, enabled state and
+blocked recovery to the operator. Do not claim a checkout, activate managed mode,
+transfer an owner, replace identities, or remove ownership markers as a repair.
+Deliberate administration requires a separately approved topology change and the
+action-specific intent plus reviewed state precondition described in
+`docs/architecture/topologies.md`. Neither a TTY nor `--yes` nor
+`--confirm-quiesced` substitutes for that decision. Remote credentials remain
+ineligible for local writer administration.
+
 ### Autonomous path (v0.36.4.0) — when you want to reach a target score
 
-If the user asks "get my brain to 90/100" or "fix what's broken", prefer the
-one-command loop over walking each dimension by hand:
+If the user asks "get my brain to 90/100" or "fix what's broken", preview first
+and ask before applying anything:
 
 ```bash
-gbrain doctor --remediation-plan --json              # preview what would run
-gbrain doctor --remediate --yes --target-score 90 --max-usd 5
+gbrain doctor --remediation-plan --json              # preview: job steps + repair steps
+# Show the user the repair steps (each "requires user agreement") and the cost.
+# Only after the user agrees:
+gbrain doctor --remediate --yes --include-repairs --target-score 90 --max-usd 5
 ```
 
-`--remediation-plan` prints a dependency-ordered list (sync before extract,
-embed after consolidate, etc.) with per-step `est_seconds` and `est_usd_cost`.
-`--remediate` walks the plan, submitting each step as a Minion job, re-checking
-score between every step. `--max-usd N` is a hard cost cap — submission refuses
-when the plan would exceed the cap (prevents synthesize loops from burning
-Anthropic credits unattended).
+`--remediation-plan` prints a dependency-ordered list of job steps (sync before
+extract, embed after consolidate, etc.) with per-step `est_seconds` and
+`est_usd_cost`, and, independent of the score target, the PROTECTED repair steps
+for every `gbrain repair` kind with pending items. Each step carries the exact
+command that applies it, and the plan ends with one combined command.
+`--remediate` runs the repair steps only with `--include-repairs` (the user's
+agreement; without it they are listed as skipped), then walks the job plan,
+submitting each step as a Minion job and re-checking score between steps.
+`--max-usd N` is a cumulative cost cap across the run and every `--resume`: a
+paid step that would exceed it is not started, free steps still run, and the run
+stops with a resume command that keeps the cap and the agreement.
 
 When the target score is unreachable for the brain (empty brain with no entity
 pages → `graph_coverage` caps at 70; unconfigured embedding key → caps at 60),
-the command bails with a list of what's missing rather than looping.
+job steps stop with a list of what's missing rather than looping; included repair
+steps still run. `--json` classifies each finding `cleared`, `pending`,
+`consent_required`, `operator_required` (follow its instruction) or
+`unsupported` (report it; nothing clears it yet). After an upgrade, follow the
+recipe in `docs/guides/repair.md#recover-after-upgrading-to-this-release`.
 
 Use the per-dimension walk below (Phase 2 onward) when:
 - The user explicitly asks for a dimension-by-dimension audit
@@ -133,10 +158,18 @@ utility-tier judge (`models.dream.triage`) scores every new file 0–1 for
 salience and pre-extracts candidate quotes + entities, cached in
 `dream_verdicts` with the judging model + prompt version (bounded per cycle
 by `dream.triage.max_ms`, default 5 min — deferred files retry next cycle,
-never silently rejected). Only files scoring
-at or above `dream.triage.threshold` (default 0.5 — applied at read time, so
-retuning the threshold re-gates with zero new LLM calls) fan out one synthesis
-subagent per transcript chunk, each primed with the triage map. By default
+never silently rejected). A file passes the gate two ways: it scores at or
+above `dream.triage.threshold` (default 0.5), OR the **verified-segment
+rescue** fires — a score in `[dream.triage.rescue_floor, threshold)` still
+passes when at least `dream.triage.rescue_min_segments` (default 2; `0`
+disables) of the judge's own quoted segments verify as substrings of the
+transcript AND the content type is in `dream.triage.rescue_content_types`
+(default `mixed,reflection,idea,strategy,people` — never routine/technical).
+The rescue costs nothing (no extra LLM calls, it re-reads the cached verdict)
+and it is what recovers real signal buried in an otherwise mundane transcript.
+The whole gate is applied at READ time, so retuning the threshold or the
+rescue knobs re-gates with zero new LLM calls. Files that pass fan out one
+synthesis subagent per transcript chunk, each primed with the triage map. By default
 each child runs in oneshot mode (`dream.synthesize.mode`, default `oneshot`):
 ONE tool-less completion against a prompt carrying a pre-retrieved LINK
 CANDIDATES manifest (`dream.synthesize.link_manifest`, default on) and the
@@ -149,23 +182,54 @@ falls back to the classic agentic loop in the same job, where the
 people timeline entries are written only on the agentic path (fallback or
 `mode agentic`), where the child has the `add_timeline_entry` tool. The orchestrator collects the slugs from
 `subagent_tool_executions` (NOT `pages.updated_at` — that would pick up
-unrelated writes) and reverse-renders each new page from DB → markdown on
-disk. To re-apply the gate after retuning the threshold or drain a queued
+unrelated writes), runs the quote verify pass over them (below), and
+reverse-renders each new page from DB → markdown on disk. To re-apply the
+gate after retuning the threshold or the rescue knobs, or to drain a queued
 backlog, run `gbrain dream retriage --dry-run` (zero LLM calls, cached
 scores only) then `gbrain dream retriage --reconcile-queue`; `--force`
-re-judges everything from scratch.
+re-judges everything from scratch. Retriage reads the SAME gate the cycle
+does, so a reconcile sweep never cancels a job the rescue admitted.
+
+**Claim verification (post-write, zero LLM):** after slug collection and
+before the reverse-write, `dream.synthesize.quote_verify` (default on) checks
+every page this phase's children wrote against the transcripts that produced
+it. Pages created this run are checked whole; pages that already existed are
+checked only on the sentences this run added. An exact quote is kept; a quote
+that differs only in whitespace, curly quotes, dashes, or case, or a close
+paraphrase inside one speaker's turn, is replaced with the verbatim transcript
+slice. A sentence is quarantined when a quote grounds nowhere or only across
+two speakers, when it attributes a real quote to the wrong speaker, or when it
+states a number or date the transcript lacks. Quarantined sentences leave the
+page body (and the timeline, facts and links derived from it) and are kept
+verbatim in frontmatter `unverified_claims`, which `get_page` shows but search,
+recall and think do not read. Grounded quotes record their source span and
+speaker in `grounding.quotes`. Nothing is ever fabricated. Telemetry lands in
+`details.synthesis.quote_verify`; the config key is the incident off switch.
 
 **Patterns phase:** runs after `extract` (so the graph state is fresh).
 Reads recent reflections within `dream.patterns.lookback_days` (default 30),
 runs a single Sonnet pass to surface recurring themes, and writes pattern
 pages to `wiki/personal/patterns/<theme>` when ≥`dream.patterns.min_evidence`
-(default 3) reflections support a pattern.
+(default 3) reflections support a pattern. A completed run records the newest
+reflection it consumed (`dream.patterns.last_evidence_ts`); until a reflection
+in the window is newer than that, re-runs skip with `no_new_evidence` instead
+of paying for another model pass — `gbrain dream --phase patterns --once`
+forces one.
 
 **Quality bar (Iron Law for synthesis):**
-1. Quote the user verbatim. Do not paraphrase memorable phrasings.
+1. Quote the user verbatim. Quotation marks are ONLY for spans reproducible
+   EXACTLY from the transcript — if you cannot reproduce a span exactly,
+   paraphrase it WITHOUT quotation marks. Do not paraphrase memorable
+   phrasings you can quote exactly. (The quote verify pass enforces this
+   mechanically after the write.)
 2. Cross-reference compulsively: every new page MUST have at least one wikilink.
 3. Slug discipline: lowercase alphanumeric and hyphens only. NO underscores, NO file extensions.
 4. Edited transcripts produce NEW slugs (content-hash suffix changes) — never silently overwrite.
+5. Preserve concrete facts: carry the specific numbers, dates, dollar amounts,
+   names, and who-decided-what of the salient content, exactly as the
+   transcript states them. Do not pad with routine logistics.
+6. Ground every claim in the transcript. Attribute speculation as speculation,
+   and never state a completion state or outcome the transcript does not show.
 
 **Trust boundary (`allowed_slug_prefixes`):** the synthesis subagent runs with an
 explicit allow-list of write paths sourced from `_brain-filing-rules.json`'s

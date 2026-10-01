@@ -10,9 +10,11 @@
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pruneDir } from '../sync.ts';
+import { realpathOrResolve, resolvedPrefixContained } from '../path-confine.ts';
+import { corpusFileSessionId } from '../context/corpus-segments.ts';
 
 export interface DiscoveredTranscript {
   /** Absolute path to the transcript file. */
@@ -48,6 +50,20 @@ export interface DiscoverOpts {
    * that would let any caller silently re-trigger the loop bug.
    */
   bypassGuard?: boolean;
+  /**
+   * #5471: absolute directories the dream phases write their outputs into
+   * (reflections, originals, patterns, cycle summaries under the brain
+   * checkout). A file whose resolved path sits inside one is skipped whatever
+   * its frontmatter says, so an output left unmarked by a failed postprocess
+   * is never re-synthesized. Matched on resolved paths, never on content.
+   */
+  excludeDirs?: string[];
+  /**
+   * #5413: session ids of gbrain's own claude-cli subprocess sessions
+   * (`claudeCliSelfSessionIds`). A `.txt` corpus file of one of these
+   * sessions (`corpusFileSessionId`) is a self-capture and is skipped.
+   */
+  selfCaptureSessionIds?: ReadonlySet<string>;
 }
 
 const DATE_RE = /^(\d{4}-\d{2}-\d{2})/;
@@ -127,19 +143,27 @@ export function isDreamOutput(content: string, bypass = false): boolean {
  */
 export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = ['medical', 'therapy'];
 
+/** One compiled exclude pattern plus the configured string it came from. */
+interface CompiledExclude {
+  re: RegExp;
+  /** The pattern as the operator wrote it (`medical`, `^therapy:`), used for reporting. */
+  label: string;
+}
+
 /**
  * Auto-wrap bare-word patterns in `\b<word>\b`. Power users can pass full
  * regex (e.g. `^therapy:`) which we honor verbatim. Heuristic: any input
  * that's purely alphanumeric+hyphen+underscore is treated as a bare word.
  */
-export function compileExcludePatterns(patterns: string[] | undefined): RegExp[] {
+function compileLabeledExcludePatterns(patterns: string[] | undefined): CompiledExclude[] {
   if (!patterns || patterns.length === 0) return [];
-  const out: RegExp[] = [];
+  const out: CompiledExclude[] = [];
   for (const p of patterns) {
     if (!p) continue;
     try {
       const src = WORD_BOUNDARY_HEURISTIC.test(p) ? `\\b${p}\\b` : p;
-      out.push(new RegExp(src, 'i'));
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- patterns come from the operator's own local config (dream.synthesize.exclude_patterns), never from remote or page content; a malformed pattern is caught below and skipped
+      out.push({ re: new RegExp(src, 'i'), label: p });
     } catch (e) {
       // Bad regex from user config — skip with stderr warning, don't crash.
       const msg = e instanceof Error ? e.message : String(e);
@@ -147,6 +171,39 @@ export function compileExcludePatterns(patterns: string[] | undefined): RegExp[]
     }
   }
   return out;
+}
+
+/** Compiled regexes only; see `compileLabeledExcludePatterns` for the labeled form. */
+export function compileExcludePatterns(patterns: string[] | undefined): RegExp[] {
+  return compileLabeledExcludePatterns(patterns).map(c => c.re);
+}
+
+/**
+ * Per-run tally of exclude_patterns hits, reported as ONE stderr line at the
+ * end of discovery so an operator can see WHY a transcript was not
+ * synthesised (before this, an excluded transcript vanished without a
+ * trace and the run just said "no transcripts to process"). The line names
+ * the count and the pattern labels that fired, never a path, basename, or
+ * any transcript content: the patterns exist precisely because the matching
+ * files are sensitive.
+ */
+class ExcludeTally {
+  private excluded = 0;
+  private readonly byLabel = new Map<string, number>();
+
+  record(labels: string[]): void {
+    this.excluded += 1;
+    for (const label of labels) this.byLabel.set(label, (this.byLabel.get(label) ?? 0) + 1);
+  }
+
+  report(): void {
+    if (this.excluded === 0) return;
+    const detail = [...this.byLabel.entries()].map(([label, n]) => `${label}: ${n}`).join(', ');
+    process.stderr.write(
+      `[dream] excluded ${this.excluded} transcript(s) matching exclude_patterns (${detail}); ` +
+      `set dream.synthesize.exclude_patterns to change\n`,
+    );
+  }
 }
 
 function hashContent(text: string): string {
@@ -162,11 +219,13 @@ function isInDateRange(date: string | null, opts: DiscoverOpts): boolean {
   return true;
 }
 
-function matchesAnyExclude(text: string, patterns: RegExp[]): boolean {
-  for (const re of patterns) {
-    if (re.test(text)) return true;
+/** Labels of every compiled pattern that matches `text` (empty when none). */
+function matchingExcludeLabels(text: string, patterns: CompiledExclude[]): string[] {
+  const hits: string[] = [];
+  for (const { re, label } of patterns) {
+    if (re.test(text)) hits.push(label);
   }
-  return false;
+  return hits;
 }
 
 function listTextFiles(dir: string): string[] {
@@ -214,18 +273,26 @@ function listTextFiles(dir: string): string[] {
  *  - aren't `.txt`
  *  - have date-prefixed basenames outside the requested window
  *  - have content shorter than `minChars`
+ *  - are gbrain claude-cli self-captures (`selfCaptureSessionIds`) or sit under a
+ *    dream output directory (`excludeDirs`); each class is counted in one stderr line
  *  - carry the `dream_generated: true` self-consumption marker (unless `bypassGuard`)
- *  - match any compiled exclude pattern (case-insensitive word-boundary by default)
+ *  - match any compiled exclude pattern (case-insensitive word-boundary by default);
+ *    these are summarised in ONE stderr line at the end (count + pattern labels,
+ *    never the files)
  *
  * Returns sorted by filePath so re-runs are deterministic.
  */
 export function discoverTranscripts(opts: DiscoverOpts): DiscoveredTranscript[] {
   const minChars = opts.minChars ?? 2000;
   const bypass = opts.bypassGuard === true;
-  const excludeRes = compileExcludePatterns(opts.excludePatterns);
+  const excludes = compileLabeledExcludePatterns(opts.excludePatterns);
+  const tally = new ExcludeTally();
   const dirs = [opts.corpusDir, opts.meetingTranscriptsDir].filter(
     (d): d is string => typeof d === 'string' && d.length > 0,
   );
+  const outputDirs = (opts.excludeDirs ?? []).map(realpathOrResolve);
+  let outputSkips = 0;
+  let selfCaptureSkips = 0;
 
   const results: DiscoveredTranscript[] = [];
   for (const dir of dirs) {
@@ -235,6 +302,17 @@ export function discoverTranscripts(opts: DiscoverOpts): DiscoveredTranscript[] 
       const dateMatch = DATE_RE.exec(baseName);
       const inferredDate = dateMatch ? dateMatch[1] : null;
       if (!isInDateRange(inferredDate, opts)) continue;
+      if (ext === '.txt' && opts.selfCaptureSessionIds?.has(corpusFileSessionId(basename(filePath)))) {
+        selfCaptureSkips += 1;
+        continue;
+      }
+      if (outputDirs.length > 0) {
+        const resolved = realpathOrResolve(filePath);
+        if (outputDirs.some(d => resolvedPrefixContained(resolved, d, sep))) {
+          outputSkips += 1;
+          continue;
+        }
+      }
 
       let content: string;
       try {
@@ -247,7 +325,11 @@ export function discoverTranscripts(opts: DiscoverOpts): DiscoveredTranscript[] 
         process.stderr.write(`[dream] skipped ${baseName}: dream_generated marker (self-consumption guard)\n`);
         continue;
       }
-      if (matchesAnyExclude(content, excludeRes)) continue;
+      const excludeHits = matchingExcludeLabels(content, excludes);
+      if (excludeHits.length > 0) {
+        tally.record(excludeHits);
+        continue;
+      }
 
       results.push({
         filePath,
@@ -259,6 +341,13 @@ export function discoverTranscripts(opts: DiscoverOpts): DiscoveredTranscript[] 
     }
   }
 
+  tally.report();
+  if (selfCaptureSkips > 0) {
+    process.stderr.write(`[dream] skipped ${selfCaptureSkips} corpus file(s) captured from gbrain's own claude-cli sessions\n`);
+  }
+  if (outputSkips > 0) {
+    process.stderr.write(`[dream] skipped ${outputSkips} file(s) under dream output directories (self-consumption guard)\n`);
+  }
   return results.sort((a, b) => a.filePath.localeCompare(b.filePath));
 }
 
@@ -274,7 +363,7 @@ export function readSingleTranscript(
 ): DiscoveredTranscript | null {
   const minChars = opts.minChars ?? 2000;
   const bypass = opts.bypassGuard === true;
-  const excludeRes = compileExcludePatterns(opts.excludePatterns);
+  const excludes = compileLabeledExcludePatterns(opts.excludePatterns);
   let content: string;
   try {
     content = readFileSync(filePath, 'utf8');
@@ -289,7 +378,13 @@ export function readSingleTranscript(
     process.stderr.write(`[dream] readSingleTranscript skipped ${baseName}: dream_generated marker (self-consumption guard)\n`);
     return null;
   }
-  if (matchesAnyExclude(content, excludeRes)) return null;
+  const excludeHits = matchingExcludeLabels(content, excludes);
+  if (excludeHits.length > 0) {
+    const tally = new ExcludeTally();
+    tally.record(excludeHits);
+    tally.report();
+    return null;
+  }
   const ext = filePath.endsWith('.md') ? '.md' : '.txt';
       const baseName = basename(filePath, ext);
   const dateMatch = DATE_RE.exec(baseName);

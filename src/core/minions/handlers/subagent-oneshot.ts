@@ -31,6 +31,7 @@
  * a completed result.
  */
 
+import { retainToolWriteRequestId, assertToolWriteCommitted, isPendingToolWrite } from '../tool-write-identity.ts';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../engine.ts';
 import type { MinionJobContext, SubagentHandlerData, SubagentResult, ToolDef, ContentBlock, OneshotFallbackReason } from '../types.ts';
@@ -39,6 +40,7 @@ import { parseLlmJson } from '../../llm-json.ts';
 import { PAGE_SLUG_SEG } from '../../cjk.ts';
 import { matchesSlugAllowList } from '../../ops/context.ts';
 import { autoLinkWrittenPage } from '../../ops/pages.ts';
+import { snapshotFromJob, effectiveDelegation, DelegationDeniedError } from '../delegated-policy.ts';
 import { serializeMarkdown } from '../../markdown.ts';
 import type { PageType } from '../../types.ts';
 import { LINK_CANDIDATES_HEADER } from '../../cycle/link-manifest.ts';
@@ -81,6 +83,19 @@ const ONESHOT_CALL_BUDGET_MS = 300_000;
  * per-write id template, and subagent.ts's accounting scope prefix.
  */
 export const ONESHOT_TOOL_USE_ID_PREFIX = 'oneshot-';
+/** #5590: ledger id suffix of a banked oneshot skip (`oneshot-<inv8>-skip`); write rows end `-p<i>`. */
+const ONESHOT_SKIP_SUFFIX = '-skip';
+
+function oneshotSkipText(reason: string | null): string {
+  return `oneshot: nothing met the bar — ${reason ?? 'no reason given'}`;
+}
+
+function oneshotSkipResult(reason: string | null, tokens: SubagentResult['tokens']): SubagentResult {
+  return {
+    result: oneshotSkipText(reason), turns_count: 1, stop_reason: 'end_turn', tokens,
+    synth_mode_used: 'oneshot', oneshot_skipped: true, written_refs: [],
+  };
+}
 
 /**
  * Static system contract — deliberately free of per-job content so the
@@ -99,7 +114,7 @@ export const ONESHOT_SYSTEM = `You are a knowledge-synthesis engine. You have NO
 If nothing in the transcript meets the bar (Task D), respond with:
 {"pages": [], "skipped": true, "skip_reason": "<one line>"}
 
-Hard rules: at most ${MAX_PAGES_PER_RESPONSE} pages; slugs are lowercase, hyphen-separated, slash-delimited, no underscores, no file extensions; never invent wikilink targets that are not in LINK CANDIDATES or this response.`;
+Hard rules: at most ${MAX_PAGES_PER_RESPONSE} pages; slugs are lowercase, hyphen-separated, slash-delimited, no underscores, no file extensions; never invent wikilink targets that are not in LINK CANDIDATES or this response. Every field, especially body, must be a valid JSON string: escape quotes, backslashes, and line breaks; never place unescaped quotes or literal newlines inside a string.`;
 
 export interface OneshotPage {
   slug: string;
@@ -222,11 +237,12 @@ function isAbortShaped(e: unknown): boolean {
   return isAbortError(e) || (e instanceof Error && /\babort|\btimed?[ _-]?out/i.test(e.message));
 }
 
-interface LedgerRow { tool_use_id: string; ordinal: number | null; status: string; slug: string | null; content: string | null }
+interface LedgerRow { tool_use_id: string; ordinal: number | null; status: string; slug: string | null; content: string | null; request_id: string | null; skip_reason: string | null }
 
 async function loadOneshotLedger(engine: BrainEngine, jobId: number): Promise<LedgerRow[]> {
   return engine.executeRaw<LedgerRow>(
-    `SELECT tool_use_id, ordinal, status, input->>'slug' AS slug, input->>'content' AS content
+    `SELECT tool_use_id, ordinal, status, input->>'slug' AS slug, input->>'content' AS content, input->>'request_id' AS request_id,
+            input->>'skip_reason' AS skip_reason
        FROM subagent_tool_executions
       WHERE job_id = $1 AND tool_use_id LIKE $2
       ORDER BY id`,
@@ -237,22 +253,36 @@ async function loadOneshotLedger(engine: BrainEngine, jobId: number): Promise<Le
 export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutcome> {
   const { engine, ctx, data, model } = args;
   const chat = args._chat ?? gatewayChat;
+  const submitted = snapshotFromJob(ctx.data);
+  const checkCurrentWrite = async (slug?: string): Promise<void> => {
+    if (!submitted) return;
+    const effective = await effectiveDelegation(engine, submitted, ctx.id);
+    if (slug !== undefined && (!effective.tools.includes('put_page') || !matchesSlugAllowList(slug, effective.slugPrefixes))) {
+      throw new DelegationDeniedError(['delegated_write_withdrawn']);
+    }
+  };
+  await checkCurrentWrite();
 
   // ── OV-4: ledger-first recovery ─────────────────────────────────────────
   // A prior invocation of this job already reached the write stage. Never
   // re-call the model (nondeterministic output would double-write different
   // pages); the completed rows ARE the writes.
   const priorLedger = await loadOneshotLedger(engine, ctx.id);
+  const bankedSkip = priorLedger.find(r => r.tool_use_id.endsWith(ONESHOT_SKIP_SUFFIX) && r.status === 'complete');
+  if (bankedSkip) {
+    return { kind: 'done', result: oneshotSkipResult(bankedSkip.skip_reason, { in: 0, out: 0, cache_read: 0, cache_create: 0 }) };
+  }
   if (priorLedger.length > 0) {
     // Settle any PENDING rows first (crash between the pending bank and
-    // the settle write). The ledger stores the exact input, and put_page is
-    // an upsert, so re-executing is idempotent. Without this, a pending-only
+    // the settle write). The ledger stores the exact input and request UUID;
+    // re-executing returns the same durable receipt. Without this, a pending-only
     // ledger would finalize 'completed' with zero pages — the exact
     // completed-means-zero-pages class #4217 exists to kill (flagged
     // independently by two ship reviewers).
     for (const row of priorLedger) {
       if (row.status !== 'pending') continue;
-      const input = { slug: row.slug ?? '', content: row.content ?? '' };
+      const input = { slug: row.slug ?? '', content: row.content ?? '', ...(row.request_id ? { request_id: row.request_id } : {}) };
+      retainToolWriteRequestId(input, ctx.id, 1, row.ordinal ?? 0, row.tool_use_id, 'brain_put_page');
       if (!args.putPageTool || !input.slug || !input.content) {
         await persistToolExecFailed(engine, ctx.id, 1, row.ordinal ?? 0, row.tool_use_id, 'brain_put_page', input,
           'oneshot recovery: pending write could not be re-executed (missing tool or ledger input)');
@@ -261,6 +291,7 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
       }
       try {
         const output = await args.putPageTool.execute(input, { engine, jobId: ctx.id, remote: true, signal: ctx.signal });
+        assertToolWriteCommitted(output, 'brain_put_page');
         await persistToolExecComplete(engine, ctx.id, 1, row.ordinal ?? 0, row.tool_use_id, output);
         row.status = 'complete';
       } catch (e) {
@@ -268,7 +299,7 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
         // errors are NOT write verdicts — rethrow and leave the row pending
         // so the next retry re-executes it, instead of freezing a permanent
         // 'failed' that could dead-letter perfectly writable content.
-        if (ctx.signal?.aborted || isAbortError(e) || isRetryableConnError(e)) throw e;
+        if (ctx.signal?.aborted || isAbortError(e) || isRetryableConnError(e) || isPendingToolWrite(e)) throw e;
         await persistToolExecFailed(engine, ctx.id, 1, row.ordinal ?? 0, row.tool_use_id, 'brain_put_page', input,
           e instanceof Error ? e.message : String(e));
         row.status = 'failed';
@@ -287,7 +318,8 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
       if (row.status !== 'complete' || !row.slug || !row.content) continue;
       const targets = extractWikilinkTargets(row.content);
       if (!targets.some(t => recoveredSlugs.has(t) && t !== row.slug)) continue;
-      await autoLinkWrittenPage(engine, row.slug, { sourceId: data.source_id ?? 'default' });
+      await checkCurrentWrite(row.slug);
+      if (!submitted) await autoLinkWrittenPage(engine, row.slug, { sourceId: data.source_id ?? 'default' });
     }
     const recoveredText = `oneshot recovery: finalized from a prior invocation's ledger (${writtenRefs.filter(r => r.status === 'complete').length} completed write(s))`;
     await persistOneshotTranscript(engine, ctx.id, data.prompt, recoveredText, model);
@@ -401,23 +433,29 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
   }
 
   const parsed = parseOneshotResponse(chatResult.text ?? '');
-  if (!parsed) return fb('unparseable');
+  if (!parsed) {
+    // Some providers normalize an output-cap stop to end/other. Usage at the
+    // requested ceiling is the provider-neutral truncation signal (same
+    // heuristic as subagent.ts replayTerminalStopReason), but only for
+    // invalid JSON — a complete valid response at the cap still succeeds.
+    return fb(chatResult.usage.output_tokens >= args.maxOutputTokens ? 'length' : 'unparseable');
+  }
   if (parsed.pages.length === 0) {
     if (!parsed.skipped) return fb('empty_no_skip');
-    // Task-D skip: a legitimate zero-write completion.
-    const skipText = `oneshot: nothing met the bar — ${parsed.skip_reason ?? 'no reason given'}`;
-    await persistOneshotTranscript(engine, ctx.id, data.prompt, chatResult.text ?? skipText, model, tokens);
-    return {
-      kind: 'done',
-      result: {
-        result: skipText,
-        turns_count: 1,
-        stop_reason: 'end_turn',
-        tokens,
-        synth_mode_used: 'oneshot',
-        written_refs: [],
-      },
-    };
+    // Task-D skip: a legitimate zero-write completion. #5590: the skip is
+    // banked as a oneshot ledger row BEFORE the transcript, so a retry of this
+    // job (accounting failure, crash, lost outcome write) takes ledger-first
+    // recovery and completes as the same skip instead of replaying a
+    // marker-less transcript that require_writes would dead-letter.
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions (job_id, message_idx, tool_use_id, tool_name, input, status, ordinal)
+       VALUES ($1, 1, $2, 'oneshot_skip', $3::text::jsonb, 'complete', 0)
+       ON CONFLICT (job_id, message_idx, ordinal) DO NOTHING`,
+      [ctx.id, `${ONESHOT_TOOL_USE_ID_PREFIX}${randomUUID().replace(/-/g, '').slice(0, 8)}${ONESHOT_SKIP_SUFFIX}`,
+        JSON.stringify({ skip_reason: parsed.skip_reason })],
+    );
+    await persistOneshotTranscript(engine, ctx.id, data.prompt, chatResult.text ?? oneshotSkipText(parsed.skip_reason), model, tokens);
+    return { kind: 'done', result: oneshotSkipResult(parsed.skip_reason, tokens) };
   }
   if (parsed.pages.length > MAX_PAGES_PER_RESPONSE) return fb('too_many_pages');
 
@@ -436,11 +474,14 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
   // (getAllSlugs is a full-table scan per job; wikilink targets are few).
   // Reads are scoped to the WRITE's source (source_id ?? 'default' — mirrors
   // putPage's schema default) so validation universe == write universe.
+  await checkCurrentWrite();
   const writeSourceId = data.source_id ?? 'default';
   const allTargets = [...new Set(parsed.pages.flatMap(p => extractWikilinkTargets(p.body)))];
-  let existingSlugs: Set<string>;
+  let existingSlugs = new Set<string>();
   let pageSample = 0;
-  try {
+  // Remote-owned jobs do not resolve or count hidden targets. Their links
+  // remain literal text, matching remote put_page's disabled auto-link hook.
+  if (!submitted) try {
     const rows = allTargets.length > 0
       ? await engine.executeRaw<{ slug: string }>(
           `SELECT slug FROM pages WHERE slug = ANY($1) AND source_id = $2 AND deleted_at IS NULL`,
@@ -460,7 +501,7 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
   // CEO-5 cold-brain relaxation: no manifest was offered AND the brain has
   // almost no pages — a resolving wikilink is impossible; accept syntactic
   // presence (content-first; the edge materializes once targets exist).
-  const coldBrain = pageSample < 5 && !data.prompt.includes(LINK_CANDIDATES_HEADER);
+  const coldBrain = submitted !== null || (pageSample < 5 && !data.prompt.includes(LINK_CANDIDATES_HEADER));
 
   for (const page of parsed.pages) {
     if (!SLUG_RE.test(page.slug)) return fb('bad_slug');
@@ -490,7 +531,10 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
     // frontmatter was stripped at parse time (R3-1), so no body can smuggle
     // its own keys past normalization.
     const content = serializeMarkdown({}, page.body, '', { type: page.type as PageType, title: page.title, tags: [] });
-    return { toolUseId: `${ONESHOT_TOOL_USE_ID_PREFIX}${inv8}-p${i}`, input: { slug: page.slug, content } };
+    const toolUseId = `${ONESHOT_TOOL_USE_ID_PREFIX}${inv8}-p${i}`;
+    const input = { slug: page.slug, content };
+    retainToolWriteRequestId(input, ctx.id, 1, i, toolUseId, 'brain_put_page');
+    return { toolUseId, input };
   });
   // Bank the WHOLE batch as pending in ONE transaction BEFORE the first
   // write executes. Interleaved pending/execute would let a crash mid-batch
@@ -530,10 +574,11 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
         remote: true,
         signal: ctx.signal,
       });
+      assertToolWriteCommitted(output, 'brain_put_page');
     } catch (e) {
       // Abort/transient-conn errors are not write verdicts (same rule as
       // recovery): rethrow, row stays pending, retry re-executes.
-      if (ctx.signal?.aborted || isAbortError(e) || isRetryableConnError(e)) throw e;
+      if (ctx.signal?.aborted || isAbortError(e) || isRetryableConnError(e) || isPendingToolWrite(e)) throw e;
       const msg = e instanceof Error ? e.message : String(e);
       await persistToolExecFailed(engine, ctx.id, 1, i, toolUseId, 'brain_put_page', input, msg);
       writtenRefs.push({ slug: page.slug, status: 'failed' });
@@ -562,7 +607,8 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
     if (!ref || ref.status !== 'complete') continue;
     const targets = extractWikilinkTargets(parsed.pages[i].body);
     if (!targets.some(t => inBatch.has(t) && t !== parsed.pages[i].slug)) continue;
-    await autoLinkWrittenPage(engine, ref.slug, { sourceId: writeSourceId });
+    await checkCurrentWrite(ref.slug);
+    if (!submitted) await autoLinkWrittenPage(engine, ref.slug, { sourceId: writeSourceId });
   }
 
   const written = writtenRefs.filter(r => r.status === 'complete');

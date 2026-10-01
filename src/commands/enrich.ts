@@ -29,9 +29,13 @@
  * fans out one job per source when --source is omitted.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../core/engine.ts';
 import type { EnrichCandidate, PageType } from '../core/types.ts';
-import { operations } from '../core/operations.ts';
+import { operations, OperationError } from '../core/operations.ts';
+import { maintenancePreflight, publishMaintenancePage, type MaintenanceAuthority } from '../core/persistence/prepared-maintenance.ts';
+import { preserveCanonicalFences } from '../core/cycle/concept-publication.ts';
+import type { WriteReceipt } from '../core/persistence/types.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { configureGatewayIfUninitialized, isAvailable, chat, getChatModel, withBudgetTracker } from '../core/ai/gateway.ts';
 import { BudgetTracker, BudgetExhausted, loadPricingOverrides, type BudgetReason } from '../core/budget/budget-tracker.ts';
@@ -167,6 +171,8 @@ export interface EnrichResult {
   /** #2504 — first pool failure ('slug: message'), so pages_failed > 0 always
    *  carries a WHY (pool.failures was previously write-only). */
   first_failure?: string;
+  /** Accepted publication IDs remain inspectable after a pending or failed run. */
+  write_requests?: WriteReceipt[];
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +273,7 @@ async function retrieveEvidence(
     const rows = await engine.executeRaw<{ fact: string; context: string | null }>(
       `SELECT fact, context FROM facts
         WHERE source_id = $1 AND entity_slug = $2 AND expired_at IS NULL
+          AND (valid_until IS NULL OR valid_until > now())
         ORDER BY confidence DESC, id DESC
         LIMIT $3`,
       [sourceId, slug, FACT_LIMIT],
@@ -334,6 +341,8 @@ interface EnrichOneCtx {
   done: Set<string>;
   signal?: AbortSignal;
   config: ReturnType<typeof loadConfig>;
+  /** Managed brains publish through the maintenance coordinator (#5280); null when unmanaged. */
+  maintenance: MaintenanceAuthority | null;
 }
 
 async function enrichOne(ctx: EnrichOneCtx, candidate: EnrichCandidate): Promise<void> {
@@ -361,11 +370,13 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
   const { engine, sourceId } = ctx;
   const slug = candidate.slug;
 
-  const page = await engine.getPage(slug, { sourceId });
-  if (!page) {
+  const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+  if (!snapshot) {
     ctx.result.pages_skipped_disappeared++;
     return;
   }
+  const page = snapshot.page;
+  const requestId = randomUUID();
 
   const kind = inferEnrichKind(page.type, slug);
   const evidence = await retrieveEvidence(engine, sourceId, slug, page.title || slug);
@@ -423,7 +434,7 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
   // auto-link + disk write-through fire, exactly like `gbrain capture`. The
   // retrieved context was sanitized in buildEnrichPrompt; the synthesized body
   // is the model's grounded output.
-  const tags = await engine.getTags(slug, { sourceId }).catch(() => [] as string[]);
+  const tags = snapshot.tags;
   const newFrontmatter: Record<string, unknown> = {
     ...page.frontmatter,
     // Provenance survives write-through (it only overrides ingested_via /
@@ -431,12 +442,20 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
     enriched_at: new Date().toISOString(),
     enriched_by: ENRICHED_BY,
   };
-  const content = serializeMarkdown(newFrontmatter, parsed.body, page.timeline ?? '', {
+  // The model owns the prose only: the page's facts/takes fences are carried
+  // over verbatim so publication never expires fence facts or deletes takes.
+  const content = serializeMarkdown(newFrontmatter, preserveCanonicalFences(page, parsed.body), page.timeline ?? '', {
     type: page.type,
     title: page.title,
     tags,
   });
 
+  if (ctx.maintenance) {
+    await publishMaintenancePage(engine, ctx.maintenance, slug, content, { expectedRevision: snapshot.revision });
+    ctx.result.pages_enriched++;
+    ctx.done.add(completedKey(sourceId, slug));
+    return;
+  }
   const putPageOp = operations.find((o) => o.name === 'put_page');
   if (!putPageOp) throw new Error('put_page operation missing (gbrain build issue)');
   const opCtx: OperationContext = {
@@ -451,7 +470,7 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
     remote: false,
     sourceId,
   };
-  await putPageOp.handler(opCtx, { slug, content });
+  await putPageOp.handler(opCtx, { slug, content, expected_revision: snapshot.revision, request_id: requestId });
 
   ctx.result.pages_enriched++;
   ctx.done.add(completedKey(sourceId, slug));
@@ -535,6 +554,9 @@ export async function runEnrichCore(
   // permanent instead of decaying (the intended retry channel; --force is
   // the immediate one).
   if (pending.length === 0) return result;
+  // #5280: a managed brain publishes through the maintenance coordinator; the
+  // preflight refuses a missing canonical owner before any model spend.
+  const maintenance = opts.dryRun ? null : await maintenancePreflight(engine, opts.sourceId);
 
   const body = async () => {
     const oneCtx: EnrichOneCtx = {
@@ -548,6 +570,7 @@ export async function runEnrichCore(
       done,
       signal,
       config,
+      maintenance,
     };
 
     let lastFlush = 0;
@@ -579,6 +602,11 @@ export async function runEnrichCore(
     }
 
     result.pages_failed = pool.errored;
+    const writeRequests = pool.failures.flatMap(f => f.error instanceof OperationError && f.error.writeRequest ? [f.error.writeRequest] : []);
+    if (writeRequests.length) {
+      result.write_requests = writeRequests;
+      for (const receipt of writeRequests) process.stderr.write(`[enrich:${sourceId}] Write request ${receipt.request_id}: ${receipt.state}; inspect get_write_request before repeating enrichment.\n`);
+    }
 
     // #2504 — pool.failures used to be write-only: an operator saw
     // pages_failed:N with zero reason anywhere (the pricing hard-fail looked
@@ -884,6 +912,7 @@ function addInto(agg: EnrichResult, r: EnrichResult): void {
   if (r.first_failure && agg.first_failure === undefined) {
     agg.first_failure = r.first_failure;
   }
+  if (r.write_requests?.length) (agg.write_requests ??= []).push(...r.write_requests);
 }
 
 /**

@@ -7,11 +7,20 @@
  * flags; this script derives them from the source instead of a hand-typed
  * list that would rot.
  *
- * How: parse handleCliOnly's top-level `case 'X': {` blocks out of src/cli.ts,
- * collect every `import('./commands/Y.ts')` inside each block, then scan the
- * case-block text plus each imported module (plus one level of that module's
- * ./relative same-directory imports) for `--flag` string literals — including
- * help text, which deliberately over-includes: accepting a flag the handler
+ * How: per CLI_ONLY command (one record in src/cli/command-table.ts), gather
+ * its dispatch text: the record's module under src/cli/commands/ (the former
+ * `case 'X':` / plain `if (command === 'X')` body, moved verbatim in refactor
+ * wave 1) plus every block of the explicit handleCliOnly pipeline in
+ * src/cli.ts (handleCliOnly and its @cliPipelineStage functions, see
+ * scripts/lib/cli-pipeline.ts) segmented on its dispatch markers — every
+ * `if (command === 'X' …)` head, plain or compound, and `case 'X':` labels (see
+ * segmentDispatchBlocks). Collect every `import('…/commands/Y.ts')` in that
+ * text, then scan the text plus each imported module (plus one level of that
+ * module's ./relative same-directory imports) for `--flag` string literals. `//` and
+ * `/* *\/` comments are stripped at EVERY depth before the scan (prose is not
+ * consumption; see stripComments) — a helper's doc comment must not legalise a
+ * flag for a command that merely imports one function from it. String
+ * literals include help text, which deliberately over-includes: accepting a flag the handler
  * ignores is the pre-#2185 status quo for that flag, while missing a real
  * flag would break working invocations on upgrade.
  *
@@ -23,8 +32,9 @@
  * one-level scan (add with a comment naming the deep module).
  */
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'fs';
-import { dirname, resolve as resolvePath, join } from 'path';
+import { dirname, resolve as resolvePath, join, sep } from 'path';
 import { fileURLToPath } from 'url';
+import { flattenCliPipeline, parseSource, readCommandModule, readTableRecords } from './lib/cli-pipeline.ts';
 
 /** Read source with CRLF normalized to LF: the parser's block-boundary and
  *  comment-strip regexes are LF-anchored (`\n}\n`, `//[^\n]*`), so Windows
@@ -42,6 +52,8 @@ const EXTRA_FLAGS: Record<string, string[]> = {
   embed: ['--pace', '--pace-max-concurrency'],
   // sync shares the same pace surface via env/config plus CLI passthrough.
   sync: ['--pace', '--pace-max-concurrency'],
+  // Deferred persistence routing reaches runForget in recall.ts two levels deep.
+  forget: ['--reason', '--request-id'],
 };
 
 /**
@@ -49,9 +61,13 @@ const EXTRA_FLAGS: Record<string, string[]> = {
  * its flag literals belong to the commands it routes (takes/search/jobs/cache/
  * quarantine), and each of those declares its own flags in its own case block;
  * scanning the router bleeds takes/quarantine flags into jobs (whose case
- * block imports it for the `jobs stats` thin-client route).
+ * block imports it for the `jobs stats` thin-client route). job-isolation.ts
+ * builds the INTERNAL `jobs run-child` argv (`--job-id`, `--allow-shell-jobs`):
+ * those literals are what a worker passes to its child, not flags an importer
+ * parses — autopilot imports it only to resolve the child CLI, and `jobs`
+ * declares both flags in its own source.
  */
-const EXCLUDED_MODULES = ['thin-client-routing.ts'];
+const EXCLUDED_MODULES = ['thin-client-routing.ts', 'persistence-delegate.ts', 'job-isolation.ts'];
 
 function isExcludedModule(p: string): boolean {
   // Basename comparison is path-separator agnostic: on Windows p ends in
@@ -116,7 +132,23 @@ function facadeExpansion(p: string): string[] {
     return out;
   };
   if (rel === 'src/core/operations.ts') return collect(join(ROOT, 'src/core/ops'));
+  if (rel === 'src/commands/migrate-embeddings.ts') return [join(ROOT, 'src/core/embedding-migration-cli.ts')];
+  if (rel === 'src/commands/mcp.ts') return [
+    join(ROOT, 'src/commands/mcp-admin.ts'),
+    join(ROOT, 'src/commands/mcp-admin-http.ts'),
+  ];
   if (rel === 'src/commands/doctor.ts') return collect(join(ROOT, 'src/commands/doctor'));
+  // Refactor wave 1 (W4 serve-http) peeled runServeHttp into flat
+  // serve-http-<area>.ts modules; their text (e.g. the expired-magic-link
+  // page's `--url` / `--oauth-request` hint) used to live in serve-http.ts.
+  if (rel === 'src/commands/serve-http.ts') {
+    return ['oauth', 'metrics', 'admin-api', 'spa', 'mcp', 'webhooks']
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
+      .map(m => join(ROOT, `src/commands/serve-http-${m}.ts`))
+      .filter(p => existsSync(p));
+  }
+  // Refactor wave 1 (W3): the MIGRATIONS array moved to one file per migration.
+  if (rel === 'src/core/migrate.ts') return collect(join(ROOT, 'src/core/schema-migrations'));
   if (rel === 'src/commands/skillpack.ts') return collect(join(ROOT, 'src/commands/skillpack'));
   // connectors is a peeled command dir (index.ts dispatches to auth/sync/status);
   // scan the whole dir at module depth so a safety flag consumed in a subcommand
@@ -134,38 +166,151 @@ function facadeExpansion(p: string): string[] {
       'sync-reconcile.ts',
       'sync-status-report.ts',
     ];
-    return peeled.map(f => join(ROOT, 'src/core', f)).filter(p => existsSync(p));
+    // Refactor wave 1 moves sync's phases into src/commands/sync/; that dir's
+    // text is sync.ts's own text, so it joins the surface from its first file.
+    return [
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
+      ...peeled.map(f => join(ROOT, 'src/core', f)).filter(p => existsSync(p)),
+      ...collect(join(ROOT, 'src/commands/sync')),
+    ];
+  }
+  // Refactor wave 1 subcommand tables for jobs/autopilot (cut-line) land in
+  // same-named command dirs; empty until those peels happen.
+  if (rel === 'src/commands/jobs.ts') {
+    // The built-in handler bodies registerBuiltinHandlers used to hold inline
+    // moved to src/core/minions/handlers/ (W4 jobs). Only those modules: the
+    // directory's pre-existing handlers (shell, subagent, ...) were always
+    // ordinary deps, so globbing it would widen jobs' surface.
+    const peeledHandlers = [
+      'autopilot-cycle.ts', 'autopilot-global-maintenance.ts', 'backlinks.ts', 'chronicle-extract.ts',
+      'cycle-phase.ts', 'embed-catch-up.ts', 'embed.ts', 'enrich.ts', 'extract-atoms-drain.ts',
+      'extract-conversation-facts.ts', 'extract-ner.ts', 'extract-takes-from-pages.ts',
+      'extract-timeline-from-meetings.ts', 'extract.ts', 'facts-absorb.ts', 'import.ts',
+      'integrity-auto.ts', 'integrity.ts', 'job-pull.ts', 'lint-fix.ts', 'lint.ts', 'loops-extract.ts',
+      'orphans.ts', 'purge.ts', 'reindex.ts', 'repair-jsonb.ts', 'sync-retry-failed.ts', 'sync.ts',
+      'unify-types.ts',
+    ];
+    return [
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
+      ...peeledHandlers.map(f => join(ROOT, 'src/core/minions/handlers', f)).filter(p => existsSync(p)),
+      ...collect(join(ROOT, 'src/commands/jobs')),
+    ];
+  }
+  if (rel === 'src/commands/autopilot.ts') {
+    // W4 autopilot split runAutopilot's daemon into flat autopilot-*.ts
+    // siblings (the existing autopilot-fanout/-pause convention). Only the
+    // modules peeled out of autopilot.ts: pre-existing siblings were always
+    // ordinary deps, so a glob would widen the surface.
+    const peeled = ['autopilot-daemon.ts', 'autopilot-dispatch.ts', 'autopilot-probes.ts'];
+    return [
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
+      ...peeled.map(f => join(ROOT, 'src/commands', f)).filter(p => existsSync(p)),
+      ...collect(join(ROOT, 'src/commands/autopilot')),
+    ];
   }
   return [];
 }
 
-export function buildFlagRegistry(): Record<string, string[]> {
-  const cliSource = readSrc(join(ROOT, 'src/cli.ts'));
+/**
+ * A block-level `import('./commands/X.ts')` whose destructured bindings are
+ * ALL SCREAMING_CASE constants borrows a value (a message string), not a
+ * handler — `const { THIN_CLIENT_REGISTER_MESSAGE } = await import(
+ * './commands/agent-register.ts')` in the agent-register pre-connect guard.
+ * Promoting such a module to depth zero scans its one-level deps
+ * (sources-ops / config / auth / oauth-provider …) as if the command owned
+ * them: that handed the agent row 38 phantom flags (--confirm-destructive,
+ * --force, --remove, …). The handler proper (`const { runX } = …`) still
+ * reaches the module through its own import walk, so no real flag is lost.
+ */
+export function isValueOnlyImport(block: string, importIndex: number): boolean {
+  const lineStart = block.lastIndexOf('\n', importIndex) + 1;
+  const head = block.slice(lineStart, importIndex);
+  const m = head.match(/const\s*\{([^}]*)\}\s*=\s*await\s*$/);
+  if (!m) return false;
+  const bindings = m[1].split(',').map(b => b.trim()).filter(b => b.length > 0);
+  return bindings.length > 0 && bindings.every(b => /^[A-Z][A-Z0-9_]*$/.test(b));
+}
 
-  // CLI_ONLY membership (the single source of truth in src/cli.ts). Strip
-  // line comments first — the set literal carries commentary whose quoted
-  // words ('Unknown command', 'pages') must not parse as members.
-  const onlyMatch = cliSource.match(/const CLI_ONLY = new Set(?:<string>)?\(\[([\s\S]*?)\]\)/);
-  if (!onlyMatch) throw new Error('CLI_ONLY set not found in src/cli.ts');
-  const onlyBody = onlyMatch[1].replace(/\/\/[^\n]*/g, '');
-  const commands = [...onlyBody.matchAll(/'([^']+)'/g)].map(m => m[1]);
+/**
+ * Segment handleCliOnly's body into per-command text blocks.
+ *
+ * handleCliOnly dispatches through TWO styles: an `if (command === 'X')`
+ * chain (DB-free commands like init/auth/schema) and a switch with
+ * `case 'X':` labels. Segment on BOTH marker kinds; the text between a
+ * marker and the next marker belongs to that label. Repeated labels
+ * (fall-through cases, a command with several `if` branches) union their
+ * blocks.
+ *
+ * The `if` chain has THREE shapes, and every one is a marker for X:
+ *   if (command === 'X') {                        plain
+ *   if (command === 'X' && args[0] === 'sub') {   compound — the sub-owned
+ *                                                 no-DB bypasses (eval
+ *                                                 longmemeval / brainbench /
+ *                                                 …), the `<cmd> --help`
+ *                                                 pre-engine branches, agent
+ *                                                 register
+ *   if (\n    command === 'X' &&\n    (...)       multi-line compound
+ * Invariant: ownership follows the `command === 'X'` head, never the
+ * condition's tail. Pre-fix only the plain shape matched, so a compound
+ * block's text was attributed to the PRECEDING marker: every `eval <sub>`
+ * bypass landed on `dream`, every `<cmd> --help` bypass on `status`, and the
+ * eval row lacked --retrieval-only/--by-type/--no-trajectory/--keyword-only —
+ * the documented `gbrain eval longmemeval` invocation exited 1 as an unknown
+ * flag. `[ \t]*` (not `\s*`) keeps the marker anchored to its own line; `\(\s*`
+ * lets the multi-line shape's newline through. A bare `command === 'X'` inside
+ * a non-`if` expression (the serve `degradable` const) is deliberately NOT a
+ * marker.
+ */
+/**
+ * Strip `//` line comments and `/* … *\/` block comments from a block's
+ * text, preserving newlines (so line-anchored scans such as isValueOnlyImport
+ * still see the same line structure) and leaving string / template literals
+ * intact (a `'https://…'` literal is not a comment). Prose in a comment is not
+ * evidence a command reads a flag: cli.ts's `reindex --help` comment ("…the
+ * --multimodal flags the dispatcher parses") handed the PRECEDING marker
+ * (storage) a phantom --multimodal because the comment sat between the two
+ * markers. Regex literals are not modelled — `//` inside one would truncate
+ * that line — which is acceptable for dispatch-block text (none there today).
+ */
+export function stripComments(src: string): string {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === '/' && next === '/') {
+      while (i < n && src[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const stop = end < 0 ? n : end + 2;
+      // Keep the newlines the comment spanned so line structure survives.
+      out += src.slice(i, stop).replace(/[^\n]/g, '');
+      i = stop;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      let j = i + 1;
+      while (j < n && src[j] !== quote) {
+        if (src[j] === '\\') j++;
+        else if (quote !== '`' && src[j] === '\n') break; // unterminated: stop at EOL
+        j++;
+      }
+      out += src.slice(i, Math.min(n, j + 1));
+      i = j + 1;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
 
-  // handleCliOnly body — bounded at the function's closing brace (column 0).
-  // Unbounded, the LAST case block absorbed every --flag literal in the rest
-  // of cli.ts (printHelp's full flag surface included), handing whichever
-  // command sits last in the switch a ~100-flag junk allowlist that made
-  // strict validation a no-op for it.
-  const fnStart = cliSource.indexOf('async function handleCliOnly');
-  if (fnStart < 0) throw new Error('handleCliOnly not found in src/cli.ts');
-  const fnTail = cliSource.slice(fnStart);
-  const fnEndRel = fnTail.search(/\n\}\n/);
-  const fnSrc = fnEndRel > 0 ? fnTail.slice(0, fnEndRel) : fnTail;
-
-  // handleCliOnly dispatches through TWO styles: an `if (command === 'X')`
-  // chain (DB-free commands like init/auth/schema) and a switch with
-  // `case 'X':` labels. Segment on BOTH marker kinds; the text between a
-  // marker and the next marker belongs to that label.
-  const markRe = /(?:^\s*if \(command === '([a-z0-9-]+)'\)|^      case '([a-z0-9-]+)':)/gm;
+export function segmentDispatchBlocks(fnSrc: string): Map<string, string> {
+  const markRe = /(?:^[ \t]*if \(\s*command === '([a-z0-9-]+)'|^      case '([a-z0-9-]+)':)/gm;
   const marks: Array<{ label: string; start: number }> = [];
   let m: RegExpExecArray | null;
   while ((m = markRe.exec(fnSrc)) !== null) {
@@ -175,9 +320,42 @@ export function buildFlagRegistry(): Record<string, string[]> {
   const blocks = new Map<string, string>();
   for (let i = 0; i < marks.length; i++) {
     const end = i + 1 < marks.length ? marks[i + 1].start : fnSrc.length;
-    const body = fnSrc.slice(marks[i].start, end);
+    // Comments are prose, not consumption: strip them before any flag scan.
+    const body = stripComments(fnSrc.slice(marks[i].start, end));
     // Fall-through labels share the following block.
     blocks.set(marks[i].label, (blocks.get(marks[i].label) ?? '') + body);
+  }
+  return blocks;
+}
+
+/** @param root repository root; a fixture tree in tests (test/cli-synthetic-command.test.ts). */
+export function buildFlagRegistry(root: string = ROOT): Record<string, string[]> {
+  // CLI_ONLY membership: one record per command in the command table
+  // (src/cli/command-table.ts), read by AST so the generator never executes
+  // the table.
+  const records = readTableRecords(root);
+  const commands = records.map(r => r.name);
+
+  // Dispatch text per command, from two sources (refactor wave 1, W4 cli):
+  //  1. the explicit handleCliOnly pipeline in src/cli.ts: handleCliOnly and
+  //     every @cliPipelineStage function it calls, each segmented on its own
+  //     (bounded at the function, so no function's tail bleeds into the next;
+  //     unbounded, the LAST block once absorbed every --flag literal in the
+  //     rest of cli.ts, printHelp included, a ~100-flag junk allowlist);
+  //  2. each record's module under src/cli/commands/ (the former plain
+  //     `if (command === 'x')` branch or switch case, moved verbatim).
+  // Import specifiers resolve relative to the file the text came from.
+  const blocks = new Map<string, Array<{ text: string; dir: string }>>();
+  const addBlock = (label: string, text: string, dir: string) => blocks.set(label, [...(blocks.get(label) ?? []), { text, dir }]);
+  const pipeline = flattenCliPipeline(parseSource(root, 'src/cli.ts'));
+  for (const fn of [pipeline.entry, ...pipeline.stages]) {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
+    for (const [label, text] of segmentDispatchBlocks(fn.getText())) addBlock(label, text, join(root, 'src'));
+  }
+  for (const record of records) {
+    const mod = record.loadSpecifier ? readCommandModule(root, record.loadSpecifier) : null;
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- mod.path comes from the repo's own command table literal import specifiers; build-time only
+    if (mod) addBlock(record.name, stripComments(readSrc(join(root, mod.path))), dirname(join(root, mod.path)));
   }
 
   // Safety flags carry destructive-bypass semantics: allowlisting one that
@@ -203,17 +381,30 @@ export function buildFlagRegistry(): Record<string, string[]> {
 
   const registry: Record<string, string[]> = {};
   for (const command of commands) {
-    const block = blocks.get(command) ?? '';
+    const parts = blocks.get(command) ?? [];
     const flags = new Set<string>(UNIVERSAL_FLAGS);
     const depthZero = new Set<string>();
-    let depthZeroText = block;
-    for (const f of flagsInText(block)) { flags.add(f); depthZero.add(f); }
+    let depthZeroText = parts.map(p => p.text).join('');
+    for (const f of flagsInText(depthZeroText)) { flags.add(f); depthZero.add(f); }
 
-    // Modules imported inside the case block, plus one level of each module's
-    // own ./relative imports.
-    const commandModules = [...block.matchAll(/import\('(\.\/[^']+\.ts)'\)/g)]
-      .map(mm => resolvePath(join(ROOT, 'src'), mm[1]))
-      .filter(p => existsSync(p) && !isExcludedModule(p));
+    // COMMAND modules imported inside the case block (`./commands/*.ts`
+    // only), plus one level of each module's own ./relative imports. Core
+    // helpers a dispatch block reaches for directly (`./core/bootstrap/
+    // uninstall.ts` in the agent-register pre-connect guard, `./core/
+    // doctor-remote.ts`, `./core/ai/gateway.ts`, …) are NOT command modules:
+    // scanning them as one handed the agent row ~45 phantom flags from the
+    // uninstall command's surface (--delete-brain, --confirm-destructive,
+    // --break-lock, --force, --remove) the moment the compound
+    // `command === 'agent' && args[0] === 'register'` head became a marker.
+    // A flag a block consumes through a core helper is already a literal in
+    // the block's own text (depth zero); the helper's prose adds nothing.
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
+    const commandsDir = join(root, 'src', 'commands');
+    const commandModules = parts.flatMap(({ text, dir }) => [...text.matchAll(/import\('(\.\.?\/[^']+\.ts)'\)/g)]
+      .filter(mm => !isValueOnlyImport(text, mm.index ?? 0))
+// nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- resolves literal relative import specifiers found in this repo's own source; results are filtered to src/commands below
+      .map(mm => resolvePath(dir, mm[1])))
+      .filter(p => p.startsWith(commandsDir + sep) && existsSync(p) && !isExcludedModule(p));
     for (const modPath of commandModules) {
       // A command module that IS a peeled façade counts its module files as
       // part of itself: their text scans at module depth and THEIR relative
@@ -221,10 +412,17 @@ export function buildFlagRegistry(): Record<string, string[]> {
       const surface = [modPath, ...facadeExpansion(modPath)];
       for (const sfPath of surface) {
         const sfSrc = readSrc(sfPath);
-        depthZeroText += sfSrc;
-        for (const f of flagsInText(sfSrc)) { flags.add(f); depthZero.add(f); }
+        // Comments are prose at every depth, not just in the dispatch block:
+        // a helper's doc comment ("Used by --fresh + after manual reset" in
+        // backfill-base.ts) handed reindex-search-vector a --fresh it never
+        // parses the moment the command imported one function from it.
+        // Consumed flags are always string literals, so stripping can only
+        // remove phantoms.
+        const sfCode = stripComments(sfSrc);
+        depthZeroText += sfCode;
+        for (const f of flagsInText(sfCode)) { flags.add(f); depthZero.add(f); }
         for (const dep of relativeImports(sfSrc, dirname(sfPath))) {
-          for (const f of flagsInText(readSrc(dep))) flags.add(f);
+          for (const f of flagsInText(stripComments(readSrc(dep)))) flags.add(f);
         }
       }
     }

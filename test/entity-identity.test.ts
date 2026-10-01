@@ -109,6 +109,34 @@ describe('identity helpers — (source_id, slug) is the key', () => {
     expect(moved[0]!.slug).toBe('people/alice');
   });
 
+  test('B-19: re-linking the canonical member without `canonical` keeps it canonical', async () => {
+    await seedTwoSourceAlice();
+    await linkEntityIdentity(engine, { entityId: 'alice-chen', slug: 'people/alice', sourceId: 'default', canonical: true });
+    await linkEntityIdentity(engine, { entityId: 'alice-chen', slug: 'people/alice', sourceId: 'default', confidence: 0.6 });
+    const [me] = (await listEntityIdentities(engine, { entityId: 'alice-chen' })).filter(m => m.slug === 'people/alice');
+    expect(me).toMatchObject({ canonical: true, confidence: 0.6 });
+    // An explicit canonical:false still demotes.
+    await linkEntityIdentity(engine, { entityId: 'alice-chen', slug: 'people/alice', sourceId: 'default', canonical: false });
+    expect((await listEntityIdentities(engine, { entityId: 'alice-chen' })).some(m => m.canonical)).toBe(false);
+  });
+
+  test('B-19: a failed canonical link leaves the previous canonical in place', async () => {
+    await seedTwoSourceAlice();
+    await linkEntityIdentity(engine, { entityId: 'alice-chen', slug: 'people/alice', sourceId: 'default', canonical: true });
+    await engine.executeRaw(`CREATE OR REPLACE FUNCTION test_reject_identity() RETURNS trigger LANGUAGE plpgsql AS $fn$
+      BEGIN RAISE EXCEPTION 'identity insert rejected'; END $fn$`);
+    await engine.executeRaw('CREATE TRIGGER test_reject_identity BEFORE INSERT ON entity_identities FOR EACH ROW EXECUTE FUNCTION test_reject_identity()');
+    try {
+      await expect(linkEntityIdentity(engine, {
+        entityId: 'alice-chen', slug: 'people/alice-chen', sourceId: 'team-brain', canonical: true,
+      })).rejects.toThrow('identity insert rejected');
+    } finally {
+      await engine.executeRaw('DROP TRIGGER IF EXISTS test_reject_identity ON entity_identities');
+    }
+    const members = await listEntityIdentities(engine, { entityId: 'alice-chen' });
+    expect(members.filter(m => m.canonical).map(m => m.slug)).toEqual(['people/alice']);
+  });
+
   test('a new canonical demotes the previous one (at most one per group)', async () => {
     await linkEntityIdentity(engine, { entityId: 'alice-chen', slug: 'people/alice', sourceId: 'default', canonical: true });
     await linkEntityIdentity(engine, { entityId: 'alice-chen', slug: 'people/alice-chen', sourceId: 'team-brain', canonical: true });
@@ -297,15 +325,21 @@ describe('#4224 review — the identity key is (source_id, slug) in the union to
     // shares the slug but is a REAL co-member — pre-fix `m.slug !== slug`
     // dropped it and its edges never merged.
     const base = await engine.getLinks('people/alice', { sourceId: 'default' });
-    const out = await unionLinksAcrossIdentity(engine, 'people/alice', base, 'out', { sourceId: 'default' });
+    const out = await unionLinksAcrossIdentity(engine, 'people/alice', base, 'out', {
+      sourceId: 'default', allowedSources: ['default', 'team-brain'],
+    });
     expect(out.some(l => l.to_slug === 'companies/acme')).toBe(true);
     expect(out.some(l => l.to_slug === 'companies/widget-co')).toBe(true);
+    const scalar = await unionLinksAcrossIdentity(engine, 'people/alice', base, 'out', {
+      sourceId: 'default', allowedSources: [],
+    });
+    expect(scalar).toEqual(base);
 
-    // Op-level: the scalar ctx scope threads through as the base source.
+    // Op-level: a scalar ctx scope is also the member visibility floor.
     const links = await operationsByName.get_links!.handler(
       localCtx({ sourceId: 'default' }), { slug: 'people/alice' },
     ) as Array<{ to_slug: string }>;
-    expect(links.some(l => l.to_slug === 'companies/widget-co')).toBe(true);
+    expect(links.some(l => l.to_slug === 'companies/widget-co')).toBe(false);
   });
 
   test('NON-member base page with a same-slug member elsewhere is NOT unioned', async () => {

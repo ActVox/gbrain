@@ -21,11 +21,11 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { withEnv, emptyHome } from './helpers/with-env.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runJobs } from '../src/commands/jobs.ts';
+import { surfaceFileSource } from './helpers/source-surface.ts';
 
 let engine: PGLiteEngine;
 
@@ -45,8 +45,8 @@ beforeEach(async () => {
 
 async function seedJob(name: string): Promise<number> {
   const rows = await engine.executeRaw<{ id: number }>(
-    `INSERT INTO minion_jobs (name, queue, status, data, started_at, finished_at)
-     VALUES ($1, 'default', 'completed', '{}'::jsonb,
+    `INSERT INTO minion_jobs (submission_authority, name, queue, status, data, started_at, finished_at)
+     VALUES ('{"version":1,"kind":"application"}'::jsonb, $1, 'default', 'completed', '{}'::jsonb,
              now() - interval '10 minutes', now() - interval '5 minutes')
      RETURNING id`,
     [name],
@@ -92,7 +92,7 @@ describe('jobs list/get --json (#3685)', () => {
     await seedJob('sync');
     await seedJob('sync');
     await engine.executeRaw(
-      `INSERT INTO minion_jobs (name, queue, status, data) VALUES ('sync', 'default', 'waiting', '{}'::jsonb)`,
+      `INSERT INTO minion_jobs (submission_authority, name, queue, status, data) VALUES ('{"version":1,"kind":"application"}'::jsonb, 'sync', 'default', 'waiting', '{}'::jsonb)`,
       [],
     );
     const out = await captureJobs(['list', '--json', '--status', 'completed', '--limit', '1']);
@@ -143,7 +143,7 @@ describe('help advertises --json on list/get/stats (#3685)', () => {
   });
 
   test('cli.ts JOBS summary lines carry [--json] (source audit)', () => {
-    const src = readFileSync(join(import.meta.dir, '..', 'src', 'cli.ts'), 'utf8');
+    const src = surfaceFileSource('cli', 'src/cli.ts');
     const jobsListLine = src.split('\n').find((l) => /^\s*jobs list /.test(l));
     const jobsGetLine = src.split('\n').find((l) => /^\s*jobs get /.test(l));
     const jobsStatsLine = src.split('\n').find((l) => /^\s*jobs stats/.test(l));

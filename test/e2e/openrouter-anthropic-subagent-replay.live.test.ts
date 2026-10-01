@@ -10,9 +10,9 @@
  * isError blocks). Abort is therefore the job AbortSignal after the first
  * successful observation — not a throw from execute.
  *
- * Run (keep-keys required — unit preload strips OPENROUTER_API_KEY):
- *   GBRAIN_TEST_KEEP_PROVIDER_KEYS=1 OPENROUTER_API_KEY=... \
- *     bun test test/e2e/openrouter-anthropic-subagent-replay.live.test.ts
+ * No CI job provides OPENROUTER_API_KEY, so scripts/run-e2e.sh leaves this
+ * file out of its default glob. Run it by name (the runner keeps provider keys):
+ *   OPENROUTER_API_KEY=... bash scripts/run-e2e.sh test/e2e/openrouter-anthropic-subagent-replay.live.test.ts
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
@@ -79,8 +79,8 @@ function makeCtx(
 
 async function makeJob(prompt: string): Promise<{ jobId: number }> {
   const rows = await engine.executeRaw<{ id: number }>(
-    `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
-     VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
+    `INSERT INTO minion_jobs (submission_authority, name, status, data, queue, priority, created_at)
+     VALUES ('{"version":1,"kind":"application"}'::jsonb, 'subagent', 'active', $1::jsonb, 'default', 0, now())
      RETURNING id`,
     [JSON.stringify({ prompt, model: MODEL, max_turns: 4, system: SYSTEM })],
   );

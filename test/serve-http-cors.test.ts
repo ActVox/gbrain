@@ -17,6 +17,8 @@ import { describe, test, expect } from 'bun:test';
 import express from 'express';
 import cors from 'cors';
 import type { Server } from 'http';
+import { mountOAuth } from '../src/commands/serve-http-oauth.ts';
+import type { ServeHttpContext } from '../src/commands/serve-http.ts';
 import {
   isOAuthCorsRequestAllowed,
   mountOAuthCorsGate,
@@ -94,6 +96,51 @@ describe('isOAuthCorsRequestAllowed', () => {
     const allowlist = new Set(['https://claude.ai']);
     expect(isOAuthCorsRequestAllowed('https://claude.ai', allowlist)).toBe(true);
     expect(isOAuthCorsRequestAllowed('https://evil.example', allowlist)).toBe(false);
+  });
+});
+
+describe('mounted OAuth request gate', () => {
+  test('denied simple POSTs cannot bypass the gate through Express path aliases', async () => {
+    await withEnv({ GBRAIN_HTTP_CORS_ORIGIN: 'https://allowed.example' }, async () => {
+      const app = express();
+      const ccRateLimiter: express.RequestHandler = (_req, _res, next) => next();
+      mountOAuth(app, {
+        bind: '127.0.0.1', enableDcr: false,
+        oauthProvider: { clientsStore: { getClient: async () => undefined } },
+        ccRateLimiter,
+        issuerUrl: new URL('http://127.0.0.1'),
+        mcpResourceUrl: new URL('http://127.0.0.1/mcp'),
+        resourceMetadataUrl: 'http://127.0.0.1/.well-known/oauth-protected-resource/mcp',
+      } as unknown as ServeHttpContext);
+      const server: Server = app.listen(0, '127.0.0.1');
+      await new Promise<void>(resolve => server.once('listening', resolve));
+      const address = server.address();
+      const base = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+      try {
+        for (const path of ['/mcp', '/token', '/authorize', '/register', '/revoke']) {
+          for (const alias of [path, `${path}/`, path.toUpperCase()]) {
+            const response = await fetch(`${base}${alias}`, {
+              method: 'POST',
+              headers: { Origin: 'https://denied.example', 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: 'grant_type=refresh_token&client_id=synthetic&refresh_token=synthetic',
+            });
+            expect(response.status).toBe(403);
+            expect(response.headers.get('access-control-allow-origin')).toBeNull();
+            expect(await response.json()).toEqual({ error: 'cors_forbidden' });
+          }
+        }
+        // The same alias still routes to the real SDK when the origin is allowed.
+        const allowed = await fetch(`${base}/TOKEN/`, {
+          method: 'POST',
+          headers: { Origin: 'https://allowed.example', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'grant_type=refresh_token&client_id=synthetic&refresh_token=synthetic',
+        });
+        expect(allowed.status).toBe(400);
+        expect((await allowed.json()).error).toBe('invalid_client');
+      } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    });
   });
 });
 

@@ -47,14 +47,22 @@ These are intentional and should not be discarded during upstream sync:
 
 Before deleting a patch, prove it is either upstream-equivalent or no longer used in production.
 
-## OpenClaw equivalent policy
+## Agent host boundary
 
-Use the same conceptual split for OpenClaw, but not the same mechanics unless ActVox actually runs from a source fork.
+A local GBrain CLI can be a thin client of the team server; verify the endpoint, credential and source before treating it as a separate private brain. Deduplicate aliases only when both endpoint and authorization identity match. Keep private knowledge separate and promote sanitized shared notes deliberately.
 
-Current production OpenClaw on Konstantin's host is the stable npm/global package, not a Render-style source deploy. Therefore:
+Hermes and OpenClaw on other machines have independent application lifecycles. A Team GBrain upgrade does not update those applications or prove native integration. Inspect and maintain those hosts only when they are included in the maintenance scope.
 
-- default path: `npm openclaw latest` → global stable package → LaunchAgent `ai.openclaw.gateway`;
-- only keep an ActVox fork branch when we carry real source patches;
-- if ActVox starts deploying OpenClaw from source, then use the same model: `upstream/main` → `ActVox/openclaw:main` → production runtime, with ActVox patches documented and guarded.
+## Controlled maintenance
 
-Do not leave a stale fork branch pretending to be production when the running system is actually the npm package.
+Keep the fork current through a pinned upstream commit and a separate integration branch. Preserve the patch classes above, run the complete gates, and record the upstream commit with the released fork version. Native agent applications are a separate update scope.
+
+For an exact-release integration, verify the upstream release tag resolves to the pinned second parent, then mirror it to the fork as `upstream/v<VERSION>` without force. Reserve bare `v<VERSION>` tags for fork releases so identical version numbers cannot collide. Stop on a conflicting existing namespaced tag. The Semgrep baseline selector requires exact-parent provenance and blocks when it is missing; historical bare upstream tags remain compatible. Mirroring a tag does not mark the fork release deployed.
+
+Hosted builds pin Bun 1.4.2 and suppress root install lifecycle scripts. Database migrations belong in the coordinated cutover, never in a build that can overlap an older running service. Build the application explicitly after dependency installation.
+
+Keep automatic deployment disabled on all four services. Promote the same reviewed commit through a coordinated rollout; merging production code must not independently restart one old/new writer pair. Preserve the live nine-source roster and sync/embed schedule. A runtime update does not enable additional enrichment jobs or repeat initial bulk indexing.
+
+Before a schema or writer-authority upgrade, verify a private PostgreSQL restore and a managed-file archive, stop all old writers and job producers, then run the new schema migration once. Resume only the matched server, worker and cron release. Do not blindly replay legacy jobs, overwrite source ownership, or use an executable-only rollback after a schema change.
+
+The upstream CLI self-updater is not a fork integration tool: its release and attestation endpoints belong to upstream. Use the reviewed ActVox maintenance branch for this deployment and keep the previous binaries plus a compatible database recovery point.

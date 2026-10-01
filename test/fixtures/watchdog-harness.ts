@@ -25,10 +25,25 @@
  * Safety net: the busy loop self-exits after 8s so a failed test kill can't hang CI.
  */
 import { installProcessWatchdog, installLoopStallWatchdog } from '../../src/core/process-watchdog.ts';
+import { writeSync } from 'node:fs';
 
 const mode = process.argv[2] ?? 'starve-with';
 const deadlineMs = Number(process.argv[3] ?? 300);
 const graceMs = Number(process.argv[4] ?? 150);
+const blockedStderr = mode.endsWith('-stderr-blocked');
+
+function fillStderr(): void {
+  if (!blockedStderr) return;
+  writeSync(1, 'FILLING_STDERR\n');
+  // The parent supplies an undrained FIFO. This bounded buffer fills it and
+  // blocks the main thread; only the watchdog (or parent's cap) can end us.
+  const bytes = Buffer.alloc(1024 * 1024, 120);
+  let offset = 0;
+  // SIGTERM may interrupt the syscall after a partial write. Finish the same
+  // bounded payload so the FIFO stays full throughout the grace window.
+  while (offset < bytes.length) offset += writeSync(2, bytes, offset, bytes.length - offset);
+  writeSync(1, 'STDERR_WRITE_RETURNED\n');
+}
 
 if (mode.startsWith('stall-')) {
   const installStall = () => installLoopStallWatchdog({
@@ -67,13 +82,15 @@ if (mode.startsWith('stall-')) {
   // the loop is starved (the #1633 premise), so death must come from SIGKILL.
   process.on('SIGTERM', () => { /* starved loop never runs this */ });
   installStall();
+  fillStderr();
   const t0 = Date.now();
   while (Date.now() - t0 < 8000) { /* spin — no await, no yield */ }
   process.stdout.write('SURVIVED\n'); // must NOT print under stall-with
   process.exit(0);
 }
 
-if (mode === 'starve-with' || mode === 'clean-dispose') {
+if (mode === 'starve-with' || mode === 'clean-dispose' || blockedStderr) {
+  if (blockedStderr) process.on('SIGTERM', () => { /* blocked main thread never runs this */ });
   const handle = installProcessWatchdog({ deadlineMs, graceMs, label: 'test-wd' });
   if (mode === 'clean-dispose') {
     handle.dispose();
@@ -82,6 +99,7 @@ if (mode === 'starve-with' || mode === 'clean-dispose') {
   }
 }
 
+fillStderr();
 // Starve the main event loop with a synchronous busy loop (simulates ReDoS).
 const start = Date.now();
 while (Date.now() - start < 8000) { /* spin — no await, no yield */ }

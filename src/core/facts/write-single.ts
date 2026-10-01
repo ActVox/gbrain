@@ -28,6 +28,26 @@ import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
 const DEDUP_THRESHOLD = 0.95;
 const DEDUP_CANDIDATE_LIMIT = 5;
 
+/**
+ * #4755: null-like entity tokens LLM extractors emit for subjectless
+ * statements. A caller passing the STRING "null" means what JSON `null`
+ * means — no entity. Without this filter the token sails past the
+ * non-empty check, fails resolution, falls back to itself as the slug,
+ * and the facts land unreachable under entity_slug='null' (the stub
+ * guard rightly refuses to create the page, so no page renders them and
+ * no entity lookup can reach them).
+ */
+const NULL_LIKE_ENTITY_TOKENS: ReadonlySet<string> = new Set([
+  'null', 'undefined', 'none', 'n/a', 'nil', '-',
+]);
+
+/** True when an entity ref is absent or a null-like placeholder token. */
+export function isNullLikeEntity(entity: string | null | undefined): boolean {
+  if (entity == null) return true;
+  const t = entity.trim().toLowerCase();
+  return t === '' || NULL_LIKE_ENTITY_TOKENS.has(t);
+}
+
 export interface SingleFactInput {
   fact: string;
   /** Free-text attribution, stored verbatim as the fact's `source`. */
@@ -56,31 +76,48 @@ export async function writeSingleFact(
   sourceId: string,
   input: SingleFactInput,
 ): Promise<SingleFactResult> {
+  const { managedPersistenceEnabled } = await import('../persistence/ownership.ts');
+  const managed = await managedPersistenceEnabled(engine);
+
   const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
   const { cosineSimilarity } = await import('./classify.ts');
   const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
-  const { isAvailable, embedOne } = await import('../ai/gateway.ts');
+  const { isAvailable, embedOne, getEmbeddingModel } = await import('../ai/gateway.ts');
 
   const factText = input.fact.trim();
   const kind = input.kind ?? 'fact';
   const visibility = input.visibility ?? 'private';
   const validUntil = input.validUntil ?? null;
-
-  const resolved = input.entity
-    ? await resolveEntitySlugWithSource(engine, sourceId, input.entity)
+  // #4755: normalize null-like entity refs to ABSENT before resolution so
+  // the `resolved?.slug ?? entityRef` fallback can never adopt "null" as a
+  // slug. Applied here (not only at the verb boundary) so every
+  // writeSingleFact caller (google/loops-extract, future verbs) gets the
+  // same guard.
+  const entityRef = isNullLikeEntity(input.entity) ? null : input.entity!.trim();
+  const resolved = entityRef
+    ? await resolveEntitySlugWithSource(engine, sourceId, entityRef)
     : null;
-  const resolvedSlug = input.entity ? (resolved?.slug ?? input.entity) : null;
+  const resolvedSlug = entityRef ? (resolved?.slug ?? entityRef) : null;
   // #4108: provenance for the fence writer's stub guard. Null when the
   // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
 
+  const { isFactWithdrawn } = await import('./withdrawal.ts');
+  if (await isFactWithdrawn(engine, sourceId, visibility, factText, resolvedSlug)) {
+    const { verbError } = await import('../ops/contract.ts');
+    throw verbError('invalid_params', 'fact_withdrawn: this exact claim was explicitly forgotten in this source and visibility.',
+      'Remember a corrected claim. Repeating the old claim does not restore withdrawn memory.');
+  }
+
   // Embedding (NOT an LLM call): powers dedup + downstream recall. Fail-soft —
   // a missing/failing provider degrades dedup, never the write.
   let embedding: Float32Array | null = null;
+  let embeddingModel: string | null = null;
   let degradedDedup = false;
   if (isAvailable('embedding')) {
     try {
-      embedding = await embedOne(factText);
+      embeddingModel = getEmbeddingModel();
+      embedding = await embedOne(factText, { embeddingModel, inputType: 'document' });
     } catch {
       degradedDedup = true;
     }
@@ -88,11 +125,24 @@ export async function writeSingleFact(
     degradedDedup = true;
   }
 
+  if (managed) {
+    // The coordinator's fact intent owns dedup, supersession, the fence row and
+    // the file on a managed brain; the legacy direct writes stay unmanaged.
+    const { publishManagedEntityFacts } = await import('./managed-fact-write.ts');
+    const written = await publishManagedEntityFacts(engine, sourceId, resolvedSlug, [{ fact: factText, kind, notability: 'medium',
+      source: input.provenance, visibility, confidence: input.confidence ?? 1.0, validFrom: new Date(), validUntil,
+      embedding, embedding_model: embeddingModel, sessionId: input.sessionId ?? null }], { supersede: true });
+    const [stored] = await engine.executeRaw<{ entity_slug: string | null }>('SELECT entity_slug FROM facts WHERE id=$1', [written.ids[0]]);
+    return { id: written.ids[0], status: written.superseded ? 'superseded' : written.inserted ? 'inserted' : 'duplicate', entity_slug: stored?.entity_slug ?? null,
+      valid_until: validUntil, degraded_dedup: degradedDedup };
+  }
+
   // Dedup + supersession decision (same candidates + threshold as the pipeline).
   let supersedeId: number | null = null;
   if (resolvedSlug && embedding) {
     const candidates = await engine.findCandidateDuplicates(sourceId, resolvedSlug, factText, {
       embedding,
+      embeddingModel,
       k: DEDUP_CANDIDATE_LIMIT,
     });
     let top: (typeof candidates)[number] | null = null;
@@ -131,6 +181,7 @@ export async function writeSingleFact(
     confidence: input.confidence ?? 1.0,
     valid_until: validUntil,
     embedding,
+    embedding_model: embedding ? embeddingModel : null,
   };
 
   // Fence-first write (markdown durability — same policy as the pipeline):
@@ -156,6 +207,7 @@ export async function writeSingleFact(
           validFrom: new Date(),
           validUntil,
           embedding,
+          embedding_model: embedding ? embeddingModel : null,
           sessionId: input.sessionId ?? null,
         },
       ],
@@ -208,23 +260,32 @@ export async function writeSingleFact(
 }
 
 /**
- * Fence-path supersession bookkeeping: expire the old row through the fence
- * (strikethrough + valid_until, the same surface `forget` uses) and link
- * `superseded_by` for the audit trail. Both steps best-effort — the new fact
- * is already durably written; a partial supersede is an audit gap, not data
- * loss.
+ * Fence-path supersession bookkeeping: strike the old row in the fence with a
+ * `superseded by #N` reference (strikethrough + valid_until) and link
+ * `superseded_by` for the audit trail. A supersession is an update, never a
+ * durable withdrawal: the old claim stays rememberable and no other page is
+ * invalidated. Both steps best-effort — the new fact is already durably
+ * written; a partial supersede is an audit gap, not data loss — but a
+ * failure is logged with both ids, never swallowed.
  */
 async function expireSuperseded(engine: BrainEngine, oldId: number, newId: number): Promise<void> {
+  const report = (step: string, err: unknown) => console.warn(
+    `[facts.supersede] FACTS_SUPERSEDE_BOOKKEEPING_FAILED: ${step} for fact ${oldId} -> ${newId}: ${err instanceof Error ? err.message : String(err)}`,
+  );
   try {
     const { forgetFactInFence } = await import('./forget.ts');
-    await forgetFactInFence(engine, oldId, { reason: `superseded by fact #${newId}` });
-  } catch {
-    /* best-effort */
+    const [replacement] = await engine.executeRaw<{ row_num: number | null; same_page: boolean }>(
+      `SELECT n.row_num, n.source_markdown_slug IS NOT DISTINCT FROM o.source_markdown_slug AS same_page
+         FROM facts n, facts o WHERE n.id = $1 AND o.id = $2`, [newId, oldId]);
+    const rowNum = replacement?.same_page && replacement.row_num !== null ? Number(replacement.row_num) : null;
+    await forgetFactInFence(engine, oldId, { supersededBy: { rowNum } });
+  } catch (err) {
+    report('fence strike', err);
   }
   try {
     await engine.executeRaw(`UPDATE facts SET superseded_by = $1 WHERE id = $2`, [newId, oldId]);
-  } catch {
-    /* best-effort */
+  } catch (err) {
+    report('superseded_by link', err);
   }
 }
 

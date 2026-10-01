@@ -57,7 +57,7 @@ export const FACTS_FENCE_END   = '<!--- gbrain:facts:end -->';
 // the fence parser has zero engine dependencies — it must run in pure-
 // markdown contexts (the chunker strip, the CI invariant check) where
 // importing engine.ts pulls a large DB-shaped transitive graph.
-export type FactKind = 'event' | 'preference' | 'commitment' | 'belief' | 'fact';
+export type FactKind = 'event' | 'preference' | 'commitment' | 'belief' | 'fact' | 'idea';
 
 // Mirror src/core/engine.ts FactVisibility ('private' | 'world'). Binary
 // gate per the existing takes D21 contract — drives the chunker strip
@@ -67,7 +67,7 @@ export type FactVisibility = 'private' | 'world';
 export type FactNotability = 'high' | 'medium' | 'low';
 
 const KIND_VALUES: ReadonlySet<string> = new Set([
-  'event', 'preference', 'commitment', 'belief', 'fact',
+  'event', 'preference', 'commitment', 'belief', 'fact', 'idea',
 ]);
 const VISIBILITY_VALUES: ReadonlySet<string> = new Set(['private', 'world']);
 const NOTABILITY_VALUES: ReadonlySet<string> = new Set(['high', 'medium', 'low']);
@@ -77,7 +77,7 @@ export interface ParsedFact {
   rowNum: number;
   claim: string;          // strikethrough markers stripped on parse
   kind: FactKind;
-  confidence: number;     // 0..1 (clamp/normalize happens in the engine layer)
+  confidence: number;     // 0..1; out-of-range cells are FACTS_TABLE_MALFORMED
   visibility: FactVisibility;
   notability: FactNotability;
   validFrom?: string;     // ISO date 'YYYY-MM-DD' (or empty)
@@ -108,7 +108,8 @@ export interface ParsedFact {
    *   - `claimMetric`: lowercase snake_case after normalization
    *     (`mrr`, `arr`, `team_size`, …). Free-text labels accepted; the
    *     parser does not enforce the seed-map allow-list.
-   *   - `claimValue`: numeric, finite. Empty cell → undefined.
+   *   - `claimValue`: numeric, finite. Empty cell → undefined; `2.5M` /
+   *     `900k` / `$1.2B` scale; an unparseable cell is a malformed row.
    *   - `claimUnit`: free-form unit string (`USD`, `people`, `pct`, …).
    *   - `claimPeriod`: free-form period string (`monthly`, `annual`, …)
    *     or undefined for non-periodic metrics.
@@ -124,25 +125,34 @@ export interface FactsFenceParseResult {
   warnings: string[];
 }
 
+const PLAIN_NUMBER_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+
 function parseConfidenceCell(raw: string): number | undefined {
   const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const n = parseFloat(trimmed);
+  if (!PLAIN_NUMBER_RE.test(trimmed)) return undefined;
+  const n = Number(trimmed);
   return Number.isFinite(n) ? n : undefined;
 }
 
 /**
- * v0.35.4 — parse a free-form numeric cell for typed-claim values.
- * Empty / non-numeric → undefined (caller decides whether to drop or warn).
- * Tolerates plain numbers and standard scientific notation. Locale-dependent
- * thousand separators (`,`) are stripped so `50,000` parses to `50000`.
+ * Strict numeric cell for typed-claim values: a plain or scientific number,
+ * comma thousands separators only in the `1,234,567` shape, an optional
+ * leading currency symbol, and an optional k / M / B magnitude suffix
+ * (`2.5M` is 2,500,000). Empty → undefined; any other shape → null, which
+ * the parser reports as FACTS_TABLE_MALFORMED rather than storing a wrong
+ * numeric prefix (`1,5` → 15, `0.9abc` → 0.9).
  */
-function parseNumericCell(raw: string): number | undefined {
+const NUMERIC_CELL_RE = /^([+-]?)[$€£]?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)((?:[eE][+-]?\d+)?)\s*([kmb]?)$/i;
+const MAGNITUDE: Record<string, number> = { '': 1, k: 1e3, m: 1e6, b: 1e9 };
+
+function parseNumericCell(raw: string): number | undefined | null {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  const stripped = trimmed.replace(/,/g, '');
-  const n = parseFloat(stripped);
-  return Number.isFinite(n) ? n : undefined;
+  const m = NUMERIC_CELL_RE.exec(trimmed);
+  if (!m) return null;
+  const [, sign, digits, exponent, suffix] = m;
+  const n = Number(`${sign}${digits.replace(/,/g, '')}${exponent}`) * MAGNITUDE[suffix.toLowerCase()];
+  return Number.isFinite(n) ? n : null;
 }
 
 function parseSupersededByFromContext(context: string | undefined): number | undefined {
@@ -244,7 +254,7 @@ export function parseFactsFence(body: string): FactsFenceParseResult {
 
     const kind = kindRaw.trim().toLowerCase();
     if (!KIND_VALUES.has(kind)) {
-      warnings.push(`FACTS_TABLE_MALFORMED: unknown kind "${kindRaw}" (expected event|preference|commitment|belief|fact)`);
+      warnings.push(`FACTS_TABLE_MALFORMED: unknown kind "${kindRaw}" (expected event|preference|commitment|belief|fact|idea)`);
       continue;
     }
 
@@ -263,6 +273,16 @@ export function parseFactsFence(body: string): FactsFenceParseResult {
     const confidence = parseConfidenceCell(confidenceRaw);
     if (confidence === undefined) {
       warnings.push(`FACTS_TABLE_MALFORMED: non-numeric confidence "${confidenceRaw}" in row ${rowNumStr}`);
+      continue;
+    }
+    if (confidence < 0 || confidence > 1) {
+      warnings.push(`FACTS_TABLE_MALFORMED: confidence "${confidenceRaw}" in row ${rowNumStr} is outside 0..1`);
+      continue;
+    }
+
+    const claimValue = parseNumericCell(claimValueRaw);
+    if (claimValue === null) {
+      warnings.push(`FACTS_TABLE_MALFORMED: non-numeric claim_value "${claimValueRaw.trim()}" in row ${rowNumStr} (expected a number, optionally 1,234 separators or a k/M/B suffix)`);
       continue;
     }
 
@@ -287,7 +307,7 @@ export function parseFactsFence(body: string): FactsFenceParseResult {
       forgotten: struck ? forgotten : false,
       // v0.35.4 — typed-claim fields, all optional.
       claimMetric: parseStringCell(claimMetricRaw),
-      claimValue:  parseNumericCell(claimValueRaw),
+      claimValue,
       claimUnit:   parseStringCell(claimUnitRaw),
       claimPeriod: parseStringCell(claimPeriodRaw),
     });
@@ -298,6 +318,20 @@ export function parseFactsFence(body: string): FactsFenceParseResult {
   }
 
   return { facts, warnings };
+}
+
+/**
+ * Render an instant for a `valid_from` / `valid_until` cell. A UTC-midnight
+ * value keeps the `YYYY-MM-DD` shape (date-only cells never churn); any other
+ * instant is written as a UTC timestamp to the second, so a TTL or a default
+ * "now" valid_from survives a re-read of the fence instead of being truncated
+ * to the UTC date (which expired same-day TTLs and stamped evening writes west
+ * of UTC with tomorrow's date). The parser already accepts both shapes.
+ */
+export function formatFenceDate(d: Date): string {
+  const iso = d.toISOString();
+  if (iso.endsWith('T00:00:00.000Z')) return iso.slice(0, 10);
+  return iso.replace(/\.\d{3}Z$/, 'Z');
 }
 
 function formatConfidence(c: number): string {
@@ -340,7 +374,12 @@ export function renderFactsTable(facts: ParsedFact[]): string {
     const valueCell = f.claimValue === undefined ? '' : String(f.claimValue);
     return `${base} ${escapeFenceCell(f.claimMetric ?? '')} | ${escapeFenceCell(valueCell)} | ${escapeFenceCell(f.claimUnit ?? '')} | ${escapeFenceCell(f.claimPeriod ?? '')} |`;
   });
-  const inner = ['', header, separator, ...rows, ''].join('\n');
+  // #4615: the leading double-'' emits a BLANK LINE between the begin marker
+  // and the header. The marker is an HTML block; with only one newline after
+  // it, GFM parsers (Obsidian 1.3.2+, GitHub, VS Code) treat the pipe rows as
+  // a paragraph continuation and show raw pipes instead of a table. The
+  // parser skips blank lines, so this is round-trip safe.
+  const inner = ['', '', header, separator, ...rows, ''].join('\n');
   return `${FACTS_FENCE_BEGIN}${inner}${FACTS_FENCE_END}`;
 }
 
@@ -500,18 +539,82 @@ export function upsertFactRow(
     },
   ];
 
-  const newFence = renderFactsTable(allRows);
+  return { body: replaceOrInsertFactsFence(body, renderFactsTable(allRows)), rowNum: nextRowNum };
+}
 
+/**
+ * The ONE fence-placement rule, shared by every writer that materializes a
+ * fence into a page body (upsertFactRow, the phantom-redirect canonical
+ * append, the importer's hidden-row merge). Replaces an existing fence in
+ * place; otherwise inserts a fresh `## Facts` section carrying `fenceBlock`.
+ *
+ * #4756: the FIRST fence must land in compiled_truth — ABOVE the timeline
+ * sentinel. splitBody() files everything below the sentinel into
+ * page.timeline, where extract_facts refuses to reconcile it
+ * (FACTS_FENCE_BELOW_SENTINEL) — a blind EOF append on any page that already
+ * had a timeline froze the fence permanently. No sentinel → EOF append.
+ */
+export function replaceOrInsertFactsFence(body: string, fenceBlock: string): string {
   const beginIdx = body.indexOf(FACTS_FENCE_BEGIN);
   const endIdx   = body.indexOf(FACTS_FENCE_END, beginIdx + FACTS_FENCE_BEGIN.length);
-  let out: string;
   if (beginIdx !== -1 && endIdx !== -1) {
-    out = body.slice(0, beginIdx) + newFence + body.slice(endIdx + FACTS_FENCE_END.length);
-  } else {
-    const sep = body.endsWith('\n') ? '\n' : '\n\n';
-    out = `${body}${sep}## Facts\n\n${newFence}\n`;
+    return body.slice(0, beginIdx) + fenceBlock + body.slice(endIdx + FACTS_FENCE_END.length);
   }
-  return { body: out, rowNum: nextRowNum };
+  const section = `## Facts\n\n${fenceBlock}\n`;
+  const sentinelAt = timelineSentinelOffset(body);
+  if (sentinelAt !== -1) {
+    const head = body.slice(0, sentinelAt);
+    const sep = head === '' ? '' : head.endsWith('\n\n') ? '' : head.endsWith('\n') ? '\n' : '\n\n';
+    return `${head}${sep}${section}\n${body.slice(sentinelAt)}`;
+  }
+  const sep = body.endsWith('\n') ? '\n' : '\n\n';
+  return `${body}${sep}${section}`;
+}
+
+/**
+ * Char offset of the line start of the first timeline sentinel in `body`,
+ * or -1 when none is present. Mirrors every sentinel form
+ * `markdown.ts:findTimelineSplitIndex` honours (#4756): `<!-- timeline -->` /
+ * `<!--timeline-->` (what serializeMarkdown emits), the decorated
+ * `--- timeline ---`, and the legacy bare `---` whose next non-empty line is
+ * `## Timeline` / `## History` — the shape the recommended page templates
+ * emit. upsertFactRow receives RAW on-disk text, so a leading YAML
+ * frontmatter block is skipped first (same skip as
+ * timeline-write-through.ts) and its `---` delimiters can't false-positive
+ * the bare-`---` rule. Local rather than imported because this module must
+ * stay free of markdown.ts's transitive dependency graph (see the FactKind
+ * comment at the top of the file).
+ */
+function timelineSentinelOffset(body: string): number {
+  const lines = body.split('\n');
+  let start = 0;
+  if (lines[0]?.trim() === '---') {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === '---') { start = i + 1; break; }
+    }
+  }
+  let offset = 0;
+  for (let i = 0; i < start; i++) offset += lines[i].length + 1;
+  for (let i = start; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (
+      trimmed === '<!-- timeline -->' ||
+      trimmed === '<!--timeline-->' ||
+      /^---\s+timeline\s+---$/i.test(trimmed)
+    ) {
+      return offset;
+    }
+    if (trimmed === '---' && lines.slice(start, i).join('\n').trim().length > 0) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j].trim();
+        if (next.length === 0) continue;
+        if (/^##\s+(timeline|history)\s*$/i.test(next)) return offset;
+        break;
+      }
+    }
+    offset += lines[i].length + 1;
+  }
+  return -1;
 }
 
 export interface StripFactsFenceOpts {

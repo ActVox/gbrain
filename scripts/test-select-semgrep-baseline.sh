@@ -35,6 +35,15 @@ integration=$(git -C "$repo" rev-parse HEAD)
 actual=$(cd "$repo" && bash "$selector" "$base" "$integration")
 [[ "$actual" == "$upstream" ]]
 
+# The fork can release the same number at a different commit without
+# overwriting either identity. Only the exact second-parent tag qualifies.
+git -C "$repo" tag "upstream/v0.47.7.0" "$upstream"
+git -C "$repo" tag -d v0.47.7.0 >/dev/null
+git -C "$repo" tag v0.47.7.0 "$ordinary"
+actual=$(cd "$repo" && bash "$selector" "$base" "$integration")
+[[ "$actual" == "$upstream" ]]
+[[ "$(git -C "$repo" rev-parse v0.47.7.0)" == "$ordinary" ]]
+
 git -C "$repo" switch -q -c untagged "$base"
 printf 'untagged\n' >"$repo/untagged.txt"
 git -C "$repo" add untagged.txt
@@ -46,6 +55,7 @@ git -C "$repo" add fork.txt
 git -C "$repo" commit -q -m 'fix: fork overlay'
 git -C "$repo" merge -q --no-ff "$untagged_parent" -m 'chore: integrate GBrain untagged candidate'
 untagged_merge=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" tag upstream/v0.47.8.0 "$base"
 if (cd "$repo" && bash "$selector" "$base" "$untagged_merge" >/dev/null 2>&1); then
   printf 'selector accepted an untagged integration merge\n' >&2
   exit 1

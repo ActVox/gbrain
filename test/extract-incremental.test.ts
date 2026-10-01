@@ -182,12 +182,20 @@ describe('runExtractCore — incremental cycle path (#417)', () => {
       return originalAddTimeline(...args);
     };
 
-    await runExtractCore(engine as unknown as BrainEngine, {
-      mode: 'all',
-      dir: tempDir,
-      slugs: ['people/alice-example'],
-      dryRun: true,
-    });
+    try {
+      await runExtractCore(engine as unknown as BrainEngine, {
+        mode: 'all',
+        dir: tempDir,
+        slugs: ['people/alice-example'],
+        dryRun: true,
+      });
+    } finally {
+      // Restore the shared engine's prototype methods: a wrapper bound to
+      // `engine` would run a later test's in-transaction batch insert outside
+      // its transaction.
+      delete (engine as unknown as { addLinksBatch?: unknown }).addLinksBatch;
+      delete (engine as unknown as { addTimelineEntriesBatch?: unknown }).addTimelineEntriesBatch;
+    }
 
     expect(linksBatchCalled).toBe(false);
     expect(timelineBatchCalled).toBe(false);
@@ -268,5 +276,78 @@ describe('runExtractCore — incremental frontmatter gate (includeFrontmatter)',
     // Same page, gate on → the `source:` frontmatter edge is now extracted.
     expect(result.pages_processed).toBe(1);
     expect(result.links_created).toBeGreaterThan(0);
+  });
+});
+
+// ─── wave review: `quiet` is its own knob, not a side effect of jsonMode ──
+describe('runExtractCore — quiet vs jsonMode on the incremental path', () => {
+  function captureStdout(): { lines: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const saved = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+    return { lines, restore: () => { console.log = saved; } };
+  }
+
+  test('quiet: true suppresses the human summary line while jsonMode stays false (human stderr channel)', async () => {
+    // The cycle used `jsonMode: true` as a stand-in for "quiet": it hid the
+    // summary, but it ALSO flipped batch errors to JSON events on stderr in a
+    // plain `gbrain dream`. Embedded callers own the report — they say so.
+    await seedPage('people/alice', 'Alice knows [[companies/acme]].');
+    await seedPage('companies/acme', 'Acme.');
+    const out = captureStdout();
+    try {
+      await runExtractCore(engine, { mode: 'all', dir: tempDir, slugs: ['people/alice'], jsonMode: false, quiet: true });
+    } finally {
+      out.restore();
+    }
+    expect(out.lines.filter((l) => l.includes('Incremental extract'))).toEqual([]);
+  });
+
+  test('without quiet the human summary line still prints (CLI behaviour unchanged)', async () => {
+    await seedPage('people/alice', 'Alice knows [[companies/acme]].');
+    await seedPage('companies/acme', 'Acme.');
+    const out = captureStdout();
+    try {
+      await runExtractCore(engine, { mode: 'all', dir: tempDir, slugs: ['people/alice'], jsonMode: false });
+    } finally {
+      out.restore();
+    }
+    expect(out.lines.some((l) => l.startsWith('Incremental extract: created'))).toBe(true);
+  });
+
+  test('a filename that does not round-trip through slugification is still read', async () => {
+    // `Widget Co.md` slugs to `companies/widget-co` — the space becomes a
+    // hyphen and the capitals drop. Rebuilding the disk path from the slug
+    // looks for `companies/widget-co.md`, which is not there, so the page was
+    // treated as deleted and skipped without a word.
+    await engine.putPage('companies/widget-co', {
+      type: 'company', title: 'Widget Co',
+      compiled_truth: 'Widget Co knows [[companies/acme]].',
+      timeline: '', frontmatter: {}, content_hash: 'h',
+    });
+    writeFileSync(join(tempDir, 'companies/Widget Co.md'), 'Widget Co knows [[companies/acme]].');
+    await seedPage('companies/acme', '# acme');
+
+    const result = await runExtractCore(engine as unknown as BrainEngine, {
+      mode: 'all', dir: tempDir, slugs: ['companies/widget-co'],
+    });
+    expect(result.pages_processed).toBe(1);
+    const links = await engine.getLinks('companies/widget-co');
+    expect(links.some(l => l.to_slug === 'companies/acme')).toBe(true);
+  });
+
+  test('when two filenames slug the same, the file named exactly the slug wins', async () => {
+    const { buildSlugPathIndex } = await import('../src/commands/extract.ts');
+    // `Acme!.md` and `acme.md` both slug to `companies/acme` (the `!` is not a
+    // legal slug char). The walker does not sort, so a plain last-one-wins map
+    // would resolve the slug differently depending on directory-read order —
+    // and thus differently across filesystems. The exact-slug spelling is what
+    // the old reconstructed path found, so it stays the winner either way.
+    const files = [
+      { relPath: 'companies/acme.md' },
+      { relPath: 'companies/Acme!.md' },
+    ];
+    expect(buildSlugPathIndex(files).get('companies/acme')).toBe('companies/acme.md');
+    expect(buildSlugPathIndex([...files].reverse()).get('companies/acme')).toBe('companies/acme.md');
   });
 });

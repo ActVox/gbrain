@@ -27,8 +27,7 @@ The key is registered explicitly, so neither command needs `--force`.
 Values other than the exact string `true` leave the fallback disabled.
 
 The setting affects conversation fact extraction. It does not make the
-synchronous `conversation-parser scan` command call a model, and it does not
-enable the separate LLM polish scaffold.
+synchronous `conversation-parser scan` command call a model.
 
 ## Select the utility model and run a canary
 
@@ -164,8 +163,8 @@ Successful fallback results use the shared conversation-parser cache:
 - the `conversation_parser_llm_cache` table for repeat calls across processes.
 
 Each chunk's cache key includes the call shape, resolved model, page date
-metadata, and chunk content hash. A cached response is still validated before
-it originally enters the cache.
+metadata, and chunk content hash. A response is validated before it first
+enters the cache.
 
 Once fallback messages produce extractable segments, the ordinary per-page
 checkpoint advances to the newest segment timestamp. A later run can read the
