@@ -57,7 +57,7 @@ import { parseLlmJson } from '../llm-json.ts';
 import type { BrainEngine } from '../engine.ts';
 import { dimsProviderOptions } from './dims.ts';
 import { hasAnthropicKey, stashGatewayAnthropicKeyFromEnv } from './anthropic-key.ts';
-import { AIConfigError, AITransientError, isStructuredOutputRejection, normalizeAIError } from './errors.ts';
+import { AIConfigError, AITransientError, isStructuredOutputRejection, isUnbilledEmbeddingRejection, normalizeAIError } from './errors.ts';
 import { isEmbeddingZeroNormError, screenAlignedEmbeddings, screenEmbeddings, sendableEmbeddingInputs } from './embedding-guard.ts';
 import { getProviderCapabilities } from './capabilities.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
@@ -1618,27 +1618,6 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
       });
     }
   }
-}
-
-/**
- * Embedding providers whose own documentation says a rejected request is not
- * billed. Only for these does a permanent request-shaped rejection (HTTP 400,
- * 413 or 422; never 401/403/429) release its invocation reservation instead of
- * keeping the maximum debit. Verified per provider:
- *   - google: "If your request fails with a 400 or 500 error, you won't be
- *     charged for the tokens used." (ai.google.dev/gemini-api/docs/billing,
- *     "Am I charged for failed requests?", checked 2026-10-01)
- * OpenAI, Voyage and the other embedding recipes publish no such statement, so
- * their rejections keep the debit (token-limit rejections are handled above).
- */
-const UNBILLED_REJECTION_PROVIDERS: ReadonlySet<string> = new Set(['google']);
-
-/** @internal exported for tests; not part of the public gateway API. */
-export function isUnbilledEmbeddingRejection(recipeId: string, err: unknown): boolean {
-  if (!UNBILLED_REJECTION_PROVIDERS.has(recipeId)) return false;
-  const e = err as { statusCode?: unknown; status?: unknown } | null;
-  const status = typeof e?.statusCode === 'number' ? e.statusCode : typeof e?.status === 'number' ? e.status : undefined;
-  return status === 400 || status === 413 || status === 422;
 }
 
 /**

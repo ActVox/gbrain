@@ -6,8 +6,9 @@
  * now drops the write and keeps serving; stdio `serve` and every other
  * command still exit, since there a broken stdout means the reader left.
  *
- * The broken pipe is real: a child installs the handlers, keeps logging on a
- * timer, and the parent destroys the child's stdout/stderr pipes.
+ * The broken pipe is real: a child installs the handlers through the same
+ * entrypoint cli.ts uses, keeps logging on a timer, and the parent destroys
+ * the child's stdout/stderr pipes.
  */
 
 import { describe, test, expect } from 'bun:test';
@@ -16,19 +17,19 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 
-import { isHttpServeInvocation } from '../src/core/cli-force-exit.ts';
+import { isHttpServeInvocation } from '../src/core/serve-invocation.ts';
 
-const CLEANUP = resolve(import.meta.dir, '..', 'src', 'core', 'process-cleanup.ts');
+const ENTRY = resolve(import.meta.dir, '..', 'src', 'core', 'serve-invocation.ts');
 
-async function logThroughClosedPipe(keepServing: boolean): Promise<{ exit: number | string | null; ticksAfterClose: number }> {
+async function logThroughClosedPipe(argv: string[]): Promise<{ exit: number | string | null; ticksAfterClose: number }> {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-5079-'));
   try {
     const marker = join(dir, 'ticks.log');
     const script = join(dir, 'child.ts');
     writeFileSync(script, `
-const { installSignalHandlers } = await import(${JSON.stringify(CLEANUP)});
+const { installCleanupSignalHandlers } = await import(${JSON.stringify(ENTRY)});
 const { appendFileSync } = await import('fs');
-installSignalHandlers({ keepServingOnLogEpipe: ${keepServing} });
+installCleanupSignalHandlers(${JSON.stringify(argv)});
 let n = 0;
 setInterval(() => {
   n++;
@@ -55,15 +56,14 @@ setInterval(() => {
 }
 
 describe('#5079 serve --http survives a closed log pipe', () => {
-  test('with the serve --http setting the process keeps running and logging', async () => {
-    const r = await logThroughClosedPipe(true);
+  test('serve --http keeps running and logging', async () => {
+    const r = await logThroughClosedPipe(['serve', '--http', '--port', '3131']);
     expect(r.exit).toBe('alive');
     expect(r.ticksAfterClose).toBeGreaterThan(5);
   }, 30_000);
 
-  test('every other command (stdio serve included) still exits on a broken pipe', async () => {
-    const r = await logThroughClosedPipe(false);
-    expect(r.exit).not.toBe('alive');
+  test('stdio serve and other commands still exit on a broken pipe', async () => {
+    for (const argv of [['serve'], ['sync']]) expect((await logThroughClosedPipe(argv)).exit).not.toBe('alive');
   }, 30_000);
 
   test('only `serve --http` gets the setting', () => {

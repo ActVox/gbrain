@@ -14,7 +14,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { configureGateway, embed, resetGateway, __setEmbedTransportForTests, isUnbilledEmbeddingRejection } from '../src/core/ai/gateway.ts';
+import { configureGateway, embed, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
+import { isUnbilledEmbeddingRejection } from '../src/core/ai/errors.ts';
 import { planEmbeddingMigration, readMigrationState, runSchemaTransition } from '../src/core/embedding-migration.ts';
 import { authorizeMigrationBudget } from '../src/core/embedding-migration-budget.ts';
 import { withAIInvocationGuard, type AIInvocation } from '../src/core/ai/invocation-guard.ts';
