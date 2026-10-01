@@ -76,6 +76,7 @@ export function autopilotLaunchdLabel(suffix: string | null = null): string {
 
 /** realpath, or `resolve` for a directory that does not exist yet (ENG-O11). */
 export function canonicalDir(path: string): string {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- canonicalizes the operator's own brain home for the install-id record; no fs write
   try { return realpathSync(path); } catch { return resolve(path); }
 }
 

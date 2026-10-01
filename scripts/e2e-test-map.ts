@@ -407,7 +407,10 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // stays in its engine module dir); both key the cross-engine read-parity
   // suite directly. (The ** globs match these files too; the selector unions
   // the entries.)
-  "src/core/engine-sql/code-edges.ts": ["test/e2e/code-edges-read-parity.test.ts"],
+  "src/core/engine-sql/code-edges.ts": ["test/e2e/code-edges-read-parity.test.ts", "test/e2e/code-intel-n13-postgres.test.ts"],
+  // Eval-category wave lane A (folded into fix wave 5): N13 code-intel walk and N8 private-page reflex filter.
+  "src/core/code-intel/recursive-walk.ts": ["test/e2e/code-intel-n13-postgres.test.ts"],
+  "src/core/context/retrieval-reflex.ts": ["test/e2e/reflex-private-visibility-postgres.test.ts"],
   "src/core/pglite-engine/code-edges.ts": ["test/e2e/code-edges-read-parity.test.ts"],
   // D7 parity batch: chronicle ontology merge (mergeOntologyFact helpers in
   // chronicle/ontology.ts) + event projection (only production caller:
