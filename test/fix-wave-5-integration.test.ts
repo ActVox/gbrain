@@ -120,15 +120,20 @@ for (const backend of testBackends()) {
         const recalled = async () => (await recall.handler(ctx, { entity: ENTITY }) as { facts: Array<{ fact_id: string }> }).facts.map(f => Number(f.fact_id));
         expect(await recalled()).not.toContain(original.id);
 
-        // The upgrade across v0.51 left every page's text projection queued (the protocol activation backlog).
+        // The upgrade across v0.51 left every page's text projection queued (the protocol activation backlog); half of it the
+        // resident last failed, so it waits out the resident's 30-second retry cooldown and only the drain takes it now.
+        await disposePersistenceConsumer(engine);
         await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => {
           await tx.executeRaw("UPDATE pages SET text_projection_revision=NULL WHERE source_id='default'");
           await tx.executeRaw(`INSERT INTO page_projection_jobs(source_incarnation,slug,revision,reason)
-            SELECT s.incarnation,p.slug,p.knowledge_revision,'protocol_activation' FROM pages p JOIN sources s ON s.id=p.source_id
-            WHERE p.source_id='default' AND p.deleted_at IS NULL ON CONFLICT(source_incarnation,slug) DO UPDATE SET revision=EXCLUDED.revision`);
+            SELECT s.incarnation,p.slug,p.knowledge_revision,CASE WHEN p.slug LIKE 'notes/backlog-%' AND right(p.slug,1) IN ('0','2','4','6','8') THEN 'rebuild_failed' ELSE 'protocol_activation' END
+            FROM pages p JOIN sources s ON s.id=p.source_id
+            WHERE p.source_id='default' AND p.deleted_at IS NULL ON CONFLICT(source_incarnation,slug) DO UPDATE SET revision=EXCLUDED.revision,reason=EXCLUDED.reason`);
         }));
         const queued = (await projectionBacklog(engine)).pending;
-        expect(queued).toBeGreaterThanOrEqual(152);
+        expect(queued).toBe(152);
+        const cooling = (await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM page_projection_jobs WHERE reason='rebuild_failed'"))[0].n;
+        expect(cooling).toBe(75);
         const before = await checkProjectionReadiness(engine);
         expect(before.status).toBe('warn');
         expect(before.message).toContain('Run `gbrain projections drain`');
@@ -141,6 +146,7 @@ for (const backend of testBackends()) {
         // The repair CLI exits; its in-process owner may have rebuilt part of the backlog while idle. The drain takes the rest.
         await disposePersistenceConsumer(engine);
         const left = (await projectionBacklog(engine)).pending;
+        expect(left).toBeGreaterThanOrEqual(cooling);
         const drained = await drainProjections(engine);
         expect(drained).toMatchObject({ failed: [], remaining: 0 });
         expect(drained.rebuilt + drained.superseded).toBe(left);
@@ -249,7 +255,7 @@ for (const backend of testBackends()) {
           const outputs: Record<string, string> = {};
           const hook = async (event: string, sessionId: string, extra: Record<string, unknown> = {}) => {
             let out = '';
-            const code = await runHook([event], { write: (s: string) => { out += s; }, cwd: ws, spawnPush: () => {}, transcriptRoot: projects,
+            const code = await runHook([event], { write: (s: string) => { out += s; }, cwd: ws, spawnPush: () => {}, spawnBackupCheck: () => {}, transcriptRoot: projects,
               stdin: JSON.stringify({ session_id: sessionId, cwd: ws, transcript_path: sessions[sessionId as keyof typeof sessions], source: 'resume', ...extra }) });
             expect(code).toBe(0);
             outputs[`${event}:${sessionId}`] = (outputs[`${event}:${sessionId}`] ?? '') + out;

@@ -891,7 +891,7 @@ export async function computeAtomProvenanceDriftCheck(
       [],
     );
     const r = rows?.[0];
-    if (!r) return { name, status: 'warn', message: 'atom provenance query returned no rows' };
+    if (!r) return { name, status: 'warn', message: 'atom provenance query returned no rows', details: { health: 'unknown' } };
 
     const num = (v: string | number | null | undefined) => (v == null ? 0 : Number(v));
     const total = num(r.total);
@@ -945,7 +945,7 @@ export async function computeAtomProvenanceDriftCheck(
       details,
     };
   } catch (err) {
-    return { name, status: 'warn', message: `atom_provenance_drift check failed: ${(err as Error).message}` };
+    return { name, status: 'warn', message: `atom_provenance_drift check failed: ${(err as Error).message}`, details: { health: 'unknown' } };
   }
 }
 

@@ -86,8 +86,11 @@ async function stopServe() {
 
 async function cli(args: string[], extra: Record<string, string> = {}) {
   const proc = Bun.spawn(['bun', 'run', CLI, ...args], { cwd: project, env: { ...env(), ...extra }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  return { stdout, stderr, exitCode };
+  const timer = setTimeout(() => proc.kill('SIGKILL'), 120_000);
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    return { stdout, stderr, exitCode };
+  } finally { clearTimeout(timer); }
 }
 
 /** Runs a printed `gbrain …` command verbatim from the project. */

@@ -208,6 +208,9 @@
       "status": "ok"
     },
     {
+      "details": {
+        "health": "unknown"
+      },
       "message": "atom provenance query returned no rows",
       "name": "atom_provenance_drift",
       "status": "warn"
