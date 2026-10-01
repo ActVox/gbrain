@@ -1,6 +1,6 @@
 /**
  * legacy_job_authority (#5157, DX-O3(a)): the claim gate's population, read
- * with the gate's own query (`UNREVIEWED_LIVE_JOBS_SQL`) so the two counts
+ * with the gate's own predicate (`UNREVIEWED_LIVE_JOBS_WHERE`) so the two counts
  * never drift. Live rows whose authority is SQL NULL (authorizable with
  * `gbrain jobs authorize-legacy --select`) or unsupported non-NULL block
  * every worker, so the check fails and names the recovery order. Terminal
@@ -11,7 +11,7 @@
 import type { BrainEngine } from '../../../core/engine.ts';
 import { ERROR_CATALOGUE } from '../../../core/error-catalogue.ts';
 import { LIVE_LEGACY_PREVIEW, legacyRecoveryHint } from '../../../core/minions/legacy-selection.ts';
-import { UNREVIEWED_LIVE_JOBS_SQL, parseSubmissionAuthority } from '../../../core/minions/submission-authority.ts';
+import { UNREVIEWED_LIVE_JOBS_WHERE, parseSubmissionAuthority } from '../../../core/minions/submission-authority.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
@@ -28,7 +28,9 @@ export interface LegacyJobAuthorityState {
 }
 
 export async function readLegacyJobAuthority(engine: BrainEngine): Promise<LegacyJobAuthorityState> {
-  const live = (await engine.executeRaw<{ id: number; status: string; submission_authority: unknown; legacy_authority_is_null: boolean }>(UNREVIEWED_LIVE_JOBS_SQL))
+  const live = (await engine.executeRaw<{ id: number; status: string; submission_authority: unknown; legacy_authority_is_null: boolean }>(
+    `SELECT id, status, submission_authority, submission_authority IS NULL AS legacy_authority_is_null
+       FROM minion_jobs WHERE ${UNREVIEWED_LIVE_JOBS_WHERE} ORDER BY id`))
     .filter(row => !parseSubmissionAuthority(row.submission_authority));
   const authorizable: Record<string, number> = {};
   for (const row of live) if (row.legacy_authority_is_null === true) authorizable[row.status] = (authorizable[row.status] ?? 0) + 1;
