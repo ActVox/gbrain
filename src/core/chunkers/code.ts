@@ -140,7 +140,12 @@ import G_ZIG from '../../assets/wasm/grammars/tree-sitter-zig.wasm' with { type:
 // top-level defs indexed to ZERO symbols). Chunk boundaries change for every
 // previously-merged file, so the bump forces a re-chunk that recovers the
 // erased symbols.
-export const CHUNKER_VERSION = 7;
+//
+// v8 (gbrain-evals N13-1): short `const f = () => …` / `let g = function …`
+// definitions no longer fold into anonymous merged chunks (code-def missed 9
+// of 50 pathe functions). The bump re-chunks files whose merged runs held
+// function-valued declarations.
+export const CHUNKER_VERSION = 8;
 
 // Lazy-loaded tree-sitter module (v0.22.x API: Parser is default export)
 let Parser: typeof import('web-tree-sitter') | null = null;
@@ -184,6 +189,13 @@ export interface CodeChunkMetadata {
    * Null when symbolName is missing (merged chunks, module-level fallback).
    */
   symbolNameQualified?: string | null;
+  /**
+   * gbrain-evals N13-1: set on a const/let/var declaration whose value is a
+   * function (`const f = () => …`, `let g = function () {…}`). Its symbol
+   * type is a mergeable run form, but it is a named function definition, so
+   * mergeSmallSiblings must keep it (and its symbol_name) on its own chunk.
+   */
+  definesFunction?: boolean;
 }
 
 export interface CodeChunk {
@@ -835,13 +847,15 @@ async function chunkParsedLanguage(
       }
 
       if (estimateTokens(nodeText) <= largeThreshold) {
-        chunks.push(buildChunk({
+        const chunk = buildChunk({
           body: nodeText, filePath, language, symbolName, symbolType,
           startLine: node.startPosition.row + 1,
           endLine: endNode.endPosition.row + 1,
           index: chunks.length,
           parentSymbolPath: [],
-        }));
+        });
+        if (declaresFunctionValue(typeNode)) chunk.metadata.definesFunction = true;
+        chunks.push(chunk);
         continue;
       }
 
@@ -947,7 +961,8 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
   // accumulated into one. The set is a derived view of code-def's DEF_TYPES
   // (def-types.ts), so the lookup allowlist and this guard cannot drift.
   const isDefChunk = (c: CodeChunk): boolean =>
-    c.metadata.symbolName != null && MERGE_PROTECTED_SYMBOL_TYPES.has(c.metadata.symbolType);
+    c.metadata.symbolName != null &&
+    (MERGE_PROTECTED_SYMBOL_TYPES.has(c.metadata.symbolType) || c.metadata.definesFunction === true);
   const merged: CodeChunk[] = [];
   let i = 0;
   while (i < chunks.length) {
@@ -1456,6 +1471,20 @@ function extractSymbolName(node: any): string | null {
     }
   }
   return null;
+}
+
+const FUNCTION_VALUE_TYPES = new Set(['arrow_function', 'function_expression', 'function', 'generator_function']);
+
+/**
+ * N13-1: a TS/JS `lexical_declaration` / `variable_declaration` whose
+ * declarator value is a function — a named function definition wearing a
+ * mergeable run type (see CodeChunkMetadata.definesFunction).
+ */
+function declaresFunctionValue(node: any): boolean {
+  if (node.type !== 'lexical_declaration' && node.type !== 'variable_declaration') return false;
+  return node.namedChildren.some(
+    (child: any) => child.type === 'variable_declarator' && FUNCTION_VALUE_TYPES.has(child.childForFieldName('value')?.type),
+  );
 }
 
 // See the wrapper dive in extractSymbolName (#3789).
