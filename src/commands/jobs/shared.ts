@@ -241,7 +241,7 @@ export function reportJobsError(error: OperationError, json: boolean): void {
 }
 
 /** Handlers outside the gateway-refresh set that can still spend: embedding by default, or the subagent and optimizer loops. */
-const OTHER_PAID_JOB_NAMES = new Set(['subagent', 'skillopt', 'import', 'reindex', 'sync']);
+const OTHER_PAID_JOB_NAMES = new Set(['subagent', 'skillopt', 'import', 'reindex', 'sync', 'ingest_capture']);
 
 /** Job names whose handlers can make paid model-provider calls (DX-O3(d) marks them in a legacy preview). */
 export async function paidJobNames(names: Iterable<string>): Promise<string[]> {

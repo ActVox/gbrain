@@ -194,19 +194,21 @@ describe('coded refusals on the --ids path (DX-O2)', () => {
 describe('CLI transport (ENG-O12) and CLI-only pin (ENG-O13)', () => {
   test('human preview summarizes and marks paid job names; --json carries the full rows', async () => {
     const a = await legacy('synthesize');
+    await legacy('lint', 'paused');
     await legacy('ingest_capture', 'paused');
     const human = await cli(['authorize-legacy', '--select', 'status=waiting|paused']);
     expect(human.exit).toBe(0);
-    expect(human.out).toContain('Legacy jobs matching status=waiting|paused (SQL NULL authority, authorizable): 2');
+    expect(human.out).toContain('Legacy jobs matching status=waiting|paused (SQL NULL authority, authorizable): 3');
     expect(human.out).toContain('  synthesize: waiting 1  [may make paid provider calls]');
-    expect(human.out).toContain('  ingest_capture: paused 1');
-    expect(human.out).not.toContain('ingest_capture: paused 1  [may');
+    expect(human.out).toContain('  ingest_capture: paused 1  [may make paid provider calls]');
+    expect(human.out).toContain('  lint: paused 1');
+    expect(human.out).not.toContain('lint: paused 1  [may');
     expect(human.out).toMatch(/Apply exactly this set: gbrain jobs authorize-legacy --select "status=waiting\|paused" --expect [a-f0-9]{64} --yes/);
     const json = JSON.parse((await cli(['authorize-legacy', '--select', 'status=waiting|paused', '--json'])).out);
     expect(json.snapshot.jobs.map((job: { id: number }) => job.id)).toContain(a);
-    expect(json.paid_job_names).toEqual(['synthesize']);
+    expect(json.paid_job_names).toEqual(['ingest_capture', 'synthesize']);
     const applied = await cli(['authorize-legacy', '--select', 'status=waiting|paused', '--expect', json.preview_hash, '--yes']);
-    expect(applied.out).toContain('Authorized 2 legacy job(s) matching status=waiting|paused.');
+    expect(applied.out).toContain('Authorized 3 legacy job(s) matching status=waiting|paused.');
   });
 
   test('--dry-run next to --expect/--yes previews and authorizes nothing (Codex review)', async () => {
