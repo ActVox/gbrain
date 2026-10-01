@@ -206,7 +206,10 @@ for (const kind of backends) {
         } });
         await engine.executeRaw('UPDATE pages SET chunker_version=1 WHERE source_id=$1', [sourceId]);
         const scope = await resolveRepairScope(engine, sourceId);
-        const { safeChunksRepair } = await import('../src/core/repair/safe-chunks.ts');
+        const safeChunksModule = await import('../src/core/repair/safe-chunks.ts');
+        const { safeChunksRepair } = safeChunksModule;
+        // Retired (wave 5): the pending count lives only in the doctor check.
+        expect('safeChunkUpgradeAdvisory' in safeChunksModule).toBe(false);
         const { safeIndexPendingCheck } = await import('../src/commands/doctor/checks/safe-index.ts');
         const pending = await safeIndexPendingCheck(engine);
         expect(pending).toMatchObject({ status: 'warn', details: { pages_pending: 3, repair: 'safe-chunks' } });
