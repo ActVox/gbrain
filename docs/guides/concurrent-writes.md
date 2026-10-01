@@ -620,6 +620,20 @@ source; a stale remote is never accepted as recovery. Incomplete directory
 replacement blocks that root until its recorded recovery finishes. Neither
 recovery nor lifecycle administration reverses a committed fact withdrawal.
 
+Large worktrees have no file-count bound. The stored manifest records the
+content digest and `file_count`, not a per-file map, so `sources add`, `claim`,
+`rebind`, `archive`, `remove`, clone, reclone and writer transfer work the same
+at 50,000 files as at 50. Rows written by older releases, which also carry a
+per-file map, stay valid and are compacted on their next rewrite. Every command
+still hashes each file once while holding the root's native lock and before it
+opens a database transaction; in human output it reports `files hashed of total`
+on stderr for worktrees above 5,000 files. Measured on a 4-vCPU cloud machine
+with a 50,000-file, 3.4 MB worktree: `sources add`, `claim` and transfer
+prepare and accept each took under one second on PGLite and Postgres, with
+peak RSS growth of about 100 MB on Postgres and 325 MB on PGLite
+(`test/e2e/persistence-large-manifest-50k.test.ts`). Hashing time grows with
+total bytes, not only file count.
+
 Physical checkout identity lives in private durable markers in and beside the
 root. Copies, replaced directories, and competing homes cannot claim that same
 path as separate worktrees. Keep those markers: removing them does not grant

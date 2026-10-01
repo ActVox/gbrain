@@ -266,6 +266,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/derived-visibility-repair.test.ts",
     "test/e2e/repair-command.test.ts",
     "test/e2e/w5-persistence-postgres.test.ts",
+    "test/e2e/persistence-large-manifest-postgres.test.ts",
+    "test/e2e/persistence-large-manifest-50k.test.ts",
   ],
   "src/core/brain-score-recommendations.ts": ["test/e2e/w5-persistence-postgres.test.ts"],
   "src/core/repair/**": ["test/e2e/repair-command.test.ts", "test/e2e/derived-visibility-repair.test.ts", "test/e2e/safe-chunk-reseal.test.ts", "test/e2e/recovery-layer.test.ts", "test/e2e/repair-contextual-mode-5621-postgres.test.ts", "test/e2e/fix-wave-3-integration.test.ts"],
