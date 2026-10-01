@@ -240,16 +240,19 @@ export function reportJobsError(error: OperationError, json: boolean): void {
   setCliExitVerdict(1);
 }
 
-/** Job names whose handlers call a paid model provider (the gateway-refresh set plus the subagent loop). */
+/** Handlers outside the gateway-refresh set that can still spend: embedding by default, or the subagent and optimizer loops. */
+const OTHER_PAID_JOB_NAMES = new Set(['subagent', 'skillopt', 'import', 'reindex', 'sync']);
+
+/** Job names whose handlers can make paid model-provider calls (DX-O3(d) marks them in a legacy preview). */
 export async function paidJobNames(names: Iterable<string>): Promise<string[]> {
   const { GATEWAY_REFRESH_JOB_NAMES } = await import('../jobs.ts');
-  return [...new Set(names)].filter(name => GATEWAY_REFRESH_JOB_NAMES.has(name) || name === 'subagent').sort();
+  return [...new Set(names)].filter(name => GATEWAY_REFRESH_JOB_NAMES.has(name) || OTHER_PAID_JOB_NAMES.has(name)).sort();
 }
 
 /** DX-O3(d) human preview lines: counts by job name and status, the first 20 ids, paid markers. */
 export function selectionSummaryLines(summary: SelectionSummary, paid: readonly string[]): string[] {
   const lines = Object.entries(summary.by_name).sort(([a], [b]) => a.localeCompare(b)).map(([name, counts]) =>
-    `  ${name}: ${Object.entries(counts).map(([status, n]) => `${status} ${n}`).join(', ')}${paid.includes(name) ? '  [paid provider calls]' : ''}`);
+    `  ${name}: ${Object.entries(counts).map(([status, n]) => `${status} ${n}`).join(', ')}${paid.includes(name) ? '  [may make paid provider calls]' : ''}`);
   if (summary.total) lines.push(`  First ${summary.first_ids.length} ids: ${summary.first_ids.join(', ')}${summary.total > summary.first_ids.length ? ' …' : ''}`);
   return lines;
 }

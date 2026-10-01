@@ -37,9 +37,9 @@ export async function runJobsAuthorizeLegacy({ args, engine }: JobsCommandContex
     if (preview.unsupported_ids.length) {
       console.log(`Unsupported non-NULL authority (not authorizable; cancel locally): ${preview.unsupported_ids.slice(0, 20).join(', ')}${preview.unsupported_ids.length > 20 ? ' …' : ''}`);
     }
-    if (!preview.snapshot_digest) { console.log('Nothing to authorize.'); return; }
+    if (!preview.preview_hash) { console.log('Nothing to authorize.'); return; }
     console.log(`Startup-blocking dependencies outside the selection: ${preview.startup_blocking_dependency_count}`);
-    console.log(`Preview hash: ${preview.snapshot_digest}`);
+    console.log(`Preview hash: ${preview.preview_hash}`);
     console.log(`Apply exactly this set: ${preview.apply_command}`);
     console.log('Full rows: re-run with --json. Nothing was changed.');
   } catch (error) {

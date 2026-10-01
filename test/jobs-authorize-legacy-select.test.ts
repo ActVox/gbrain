@@ -87,8 +87,8 @@ describe('authorize-legacy --select preview and apply', () => {
     const preview = await previewLegacySelection(engine, parseLegacyJobSelection('status=waiting|paused,name=synthesize', 'authorize-legacy'));
     expect(preview.summary).toEqual({ total: 2, by_name: { synthesize: { waiting: 1, paused: 1 } }, first_ids: [a, b] });
     expect(preview.unsupported_ids).toEqual([unsupported]);
-    expect(preview.snapshot_digest).toMatch(/^[a-f0-9]{64}$/);
-    expect(preview.apply_command).toBe(`gbrain jobs authorize-legacy --select "status=waiting|paused,name=synthesize" --expect ${preview.snapshot_digest} --yes`);
+    expect(preview.preview_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(preview.apply_command).toBe(`gbrain jobs authorize-legacy --select "status=waiting|paused,name=synthesize" --expect ${preview.preview_hash} --yes`);
     expect(await authorities()).toEqual(before);
     expect(c).toBeGreaterThan(0);
   });
@@ -98,13 +98,13 @@ describe('authorize-legacy --select preview and apply', () => {
     const selection = parseLegacyJobSelection('status=waiting', 'authorize-legacy');
     const preview = await previewLegacySelection(engine, selection);
     const late = await legacy('synthesize');
-    const result = await applyLegacySelection(engine, selection, preview.snapshot_digest!, true);
+    const result = await applyLegacySelection(engine, selection, preview.preview_hash!, true);
     expect(result.authorized_ids).toEqual([a]);
     const now = await authorities();
     expect(now[a]).toEqual({ version: 1, kind: 'application' });
     expect(now[late]).toBeNull();
     // The approved set is consumed: replaying the same hash refuses.
-    expect((await refusal(() => applyLegacySelection(engine, selection, preview.snapshot_digest!, true))).code).toBe('preview_changed');
+    expect((await refusal(() => applyLegacySelection(engine, selection, preview.preview_hash!, true))).code).toBe('preview_changed');
   });
 
   test('a stale or unknown hash refuses with preview_changed and authorizes nothing', async () => {
@@ -112,9 +112,9 @@ describe('authorize-legacy --select preview and apply', () => {
     const selection = parseLegacyJobSelection('status=waiting', 'authorize-legacy');
     const preview = await previewLegacySelection(engine, selection);
     await engine.executeRaw('UPDATE minion_jobs SET priority = priority + 1 WHERE id = $1', [a]);
-    const stale = await refusal(() => applyLegacySelection(engine, selection, preview.snapshot_digest!, true));
+    const stale = await refusal(() => applyLegacySelection(engine, selection, preview.preview_hash!, true));
     expect(stale.code).toBe('preview_changed');
-    expect(stale.message).toContain(preview.snapshot_digest!);
+    expect(stale.message).toContain(preview.preview_hash!);
     expect(stale.suggestion).toBe('Re-run the preview: gbrain jobs authorize-legacy --select "status=waiting"');
     expect(stale.docs).toBe('docs/guides/repair.md#preview-changed');
     const unknown = await refusal(() => applyLegacySelection(engine, selection, 'b'.repeat(64), true));
@@ -122,8 +122,19 @@ describe('authorize-legacy --select preview and apply', () => {
     // A hash previewed for another filter does not apply under this one.
     const other = parseLegacyJobSelection('status=waiting,name=synthesize', 'authorize-legacy');
     const otherPreview = await previewLegacySelection(engine, other);
-    expect((await refusal(() => applyLegacySelection(engine, selection, otherPreview.snapshot_digest!, true))).code).toBe('preview_changed');
+    expect((await refusal(() => applyLegacySelection(engine, selection, otherPreview.preview_hash!, true))).code).toBe('preview_changed');
     expect((await authorities())[a]).toBeNull();
+  });
+
+  test('two filters that select the same rows keep separate approvals (Codex review)', async () => {
+    const a = await legacy('example-job');
+    const broad = parseLegacyJobSelection('status=waiting', 'authorize-legacy');
+    const narrow = parseLegacyJobSelection('status=waiting,name=example-job', 'authorize-legacy');
+    const first = await previewLegacySelection(engine, broad);
+    const second = await previewLegacySelection(engine, narrow);
+    expect(first.snapshot!.snapshot_digest).toBe(second.snapshot!.snapshot_digest);
+    expect(first.preview_hash).not.toBe(second.preview_hash);
+    expect((await applyLegacySelection(engine, broad, first.preview_hash!, true)).authorized_ids).toEqual([a]);
   });
 
   test('active jobs refuse with legacy_jobs_active listing up to 10 cancel commands', async () => {
@@ -155,7 +166,7 @@ describe('authorize-legacy --select preview and apply', () => {
     expect(preview.summary.by_name).toEqual({ synthesize: { waiting: 16020 }, ingest_capture: { waiting: 1780 } });
     expect(preview.summary.first_ids).toHaveLength(20);
     await expect(assertNoUnreviewedJobs(engine)).rejects.toThrow('legacy jobs');
-    const result = await applyLegacySelection(engine, selection, preview.snapshot_digest!, true);
+    const result = await applyLegacySelection(engine, selection, preview.preview_hash!, true);
     expect(result.authorized).toBe(17800);
     await assertNoUnreviewedJobs(engine);
   }, 120_000);
@@ -187,21 +198,21 @@ describe('CLI transport (ENG-O12) and CLI-only pin (ENG-O13)', () => {
     const human = await cli(['authorize-legacy', '--select', 'status=waiting|paused']);
     expect(human.exit).toBe(0);
     expect(human.out).toContain('Legacy jobs matching status=waiting|paused (SQL NULL authority, authorizable): 2');
-    expect(human.out).toContain('  synthesize: waiting 1  [paid provider calls]');
+    expect(human.out).toContain('  synthesize: waiting 1  [may make paid provider calls]');
     expect(human.out).toContain('  ingest_capture: paused 1');
-    expect(human.out).not.toContain('ingest_capture: paused 1  [paid');
+    expect(human.out).not.toContain('ingest_capture: paused 1  [may');
     expect(human.out).toMatch(/Apply exactly this set: gbrain jobs authorize-legacy --select "status=waiting\|paused" --expect [a-f0-9]{64} --yes/);
     const json = JSON.parse((await cli(['authorize-legacy', '--select', 'status=waiting|paused', '--json'])).out);
     expect(json.snapshot.jobs.map((job: { id: number }) => job.id)).toContain(a);
     expect(json.paid_job_names).toEqual(['synthesize']);
-    const applied = await cli(['authorize-legacy', '--select', 'status=waiting|paused', '--expect', json.snapshot_digest, '--yes']);
+    const applied = await cli(['authorize-legacy', '--select', 'status=waiting|paused', '--expect', json.preview_hash, '--yes']);
     expect(applied.out).toContain('Authorized 2 legacy job(s) matching status=waiting|paused.');
   });
 
   test('--dry-run next to --expect/--yes previews and authorizes nothing (Codex review)', async () => {
     const a = await legacy('synthesize');
     const json = JSON.parse((await cli(['authorize-legacy', '--select', 'status=waiting', '--json'])).out);
-    const dry = await cli(['authorize-legacy', '--select', 'status=waiting', '--expect', json.snapshot_digest, '--yes', '--dry-run']);
+    const dry = await cli(['authorize-legacy', '--select', 'status=waiting', '--expect', json.preview_hash, '--yes', '--dry-run']);
     expect(dry.out).toContain('Nothing was changed.');
     expect((await authorities())[a]).toBeNull();
   });

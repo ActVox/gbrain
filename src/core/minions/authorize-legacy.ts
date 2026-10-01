@@ -1,6 +1,7 @@
 /** Local-only, explicit preview/CAS authorization of pre-cutover job rows. */
 import type { BrainEngine } from '../engine.ts';
 import { catalogueError } from '../error-catalogue.ts';
+import { OperationError } from '../ops/contract.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { APPLICATION_AUTHORITY, parseSubmissionAuthority } from './submission-authority.ts';
 import {
@@ -108,7 +109,7 @@ export async function authorizeLegacyJobs(engine: BrainEngine, ids: number[], ex
   });
 }
 
-interface ApprovedLegacySelection { selection: string; ids: number[] }
+interface ApprovedLegacySelection { selection: string; ids: number[]; snapshot_digest: string }
 
 export interface LegacySelectionPreview {
   selection: string;
@@ -117,7 +118,8 @@ export interface LegacySelectionPreview {
   summary: SelectionSummary;
   /** Matching live rows whose non-NULL authority is unsupported; never authorizable. */
   unsupported_ids: number[];
-  snapshot_digest: string | null;
+  /** The hash `--expect` takes: the filter plus the snapshot digest the apply re-checks. */
+  preview_hash: string | null;
   apply_command: string | null;
   startup_blocking_dependency_count: number;
   snapshot: Awaited<ReturnType<typeof snapshot>> | null;
@@ -140,12 +142,15 @@ export async function previewLegacySelection(engine: BrainEngine, selection: Leg
   const legacy = rows.filter(row => row.legacy_authority_is_null === true);
   const unsupported_ids = rows.filter(row => row.legacy_authority_is_null !== true && !parseSubmissionAuthority(row.submission_authority)).map(row => Number(row.id));
   const base = { selection: formatSelection(selection), preview_command: previewCommand, summary: summarizeSelection(legacy), unsupported_ids, applied: false as const };
-  if (!legacy.length) return { ...base, snapshot_digest: null, apply_command: null, startup_blocking_dependency_count: 0, snapshot: null };
+  if (!legacy.length) return { ...base, preview_hash: null, apply_command: null, startup_blocking_dependency_count: 0, snapshot: null };
   const ids = legacy.map(row => Number(row.id));
   const preview = await snapshot(engine, ids, false, previewCommand);
-  await saveApprovedSet<ApprovedLegacySelection>(engine, { command: 'authorize-legacy', hash: preview.snapshot_digest }, [{ selection: base.selection, ids }]);
+  // The approval hash binds the filter as well as the snapshot, so two filters
+  // that happen to select the same rows never overwrite each other's set.
+  const hash = previewHash({ selection: base.selection, snapshot_digest: preview.snapshot_digest });
+  await saveApprovedSet<ApprovedLegacySelection>(engine, { command: 'authorize-legacy', hash }, [{ selection: base.selection, ids, snapshot_digest: preview.snapshot_digest }]);
   return {
-    ...base, snapshot_digest: preview.snapshot_digest, apply_command: selectCommand('authorize-legacy', selection, preview.snapshot_digest),
+    ...base, preview_hash: hash, apply_command: selectCommand('authorize-legacy', selection, hash),
     startup_blocking_dependency_count: preview.effects.startup_blocking_dependency_ids.length, snapshot: preview,
   };
 }
@@ -159,8 +164,14 @@ export async function applyLegacySelection(engine: BrainEngine, selection: Legac
   }
   const approved = await loadApprovedSet<ApprovedLegacySelection>(engine, { command: 'authorize-legacy', hash: expected, previewCommand });
   const [item] = approved.items;
-  if (!item || item.selection !== formatSelection(selection) || !item.ids.length) throw previewChangedError(expected, previewCommand);
-  const result = await authorizeLegacyJobs(engine, item.ids, expected, true, previewCommand);
+  if (!item || item.selection !== formatSelection(selection) || !item.ids.length || !item.snapshot_digest) throw previewChangedError(expected, previewCommand);
+  let result;
+  try {
+    result = await authorizeLegacyJobs(engine, item.ids, item.snapshot_digest, true, previewCommand);
+  } catch (error) {
+    if (error instanceof OperationError && error.code === 'preview_changed') throw previewChangedError(expected, previewCommand);
+    throw error;
+  }
   await clearApprovedSet(engine, { command: 'authorize-legacy', hash: expected });
   return { selection: item.selection, authorized_ids: item.ids, ...result };
 }
