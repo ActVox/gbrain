@@ -49,7 +49,7 @@ import { gbrainPath } from './config.ts';
 import type { BrainEngine } from './engine.ts';
 import { createProgress, type ProgressReporter } from './progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from './cli-options.ts';
-import { tryAcquireDbLock, reapDeadHolderLocks, LockStolenError, type DbLockHandle } from './db-lock.ts';
+import { tryAcquireDbLock, reapDeadHolderLocks, inspectLock, LockStolenError, type DbLockHandle } from './db-lock.ts';
 import { timeContainedPhase } from './cycle/phase-containment.ts';
 import { isManagedBrain } from './cycle/phase-table.ts';
 import { assertValidSourceId } from './source-id.ts';
@@ -385,6 +385,8 @@ export interface CycleReport {
   status: CycleStatus;
   /** Present when status = 'skipped'. E.g., 'cycle_already_running' or 'no_database'. Also 'aborted' when the cycle was cancelled mid-flight (#1972), or 'stamp_write_failed' (#3504). */
   reason?: string;
+  /** `cycle_already_running` on the DB lock: who holds it and for how long (best effort). */
+  lock_holder?: { id: string; holder_pid: number; holder_host: string; age_ms: number };
   /**
    * #3504: the cycle ran, but persisting `last_source_cycle_at` /
    * `last_full_cycle_at` threw. Set ONLY on a real write error — never for a
@@ -1956,12 +1958,14 @@ export async function runCycle(
         if (pgliteFileLock) {
           try { await pgliteFileLock.release(); } catch { /* best effort */ }
         }
+        const holder = await inspectLock(engine, cycleLockIdFor(opts.sourceId)).catch(() => null);
         return {
           schema_version: '1',
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'skipped',
           reason: 'cycle_already_running',
+          ...(holder ? { lock_holder: { id: holder.id, holder_pid: holder.holder_pid, holder_host: holder.holder_host, age_ms: holder.age_ms } } : {}),
           brain_dir: opts.brainDir,
           phases: [],
           totals: emptyTotals(),
