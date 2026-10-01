@@ -30,7 +30,7 @@ src/core/ai/gateway.ts	chat	311	seed: W5 baseline, refactor wave 1 (decompositio
 src/core/bootstrap/harness.ts	applyHarness	1167	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/brainstorm/orchestrator.ts	_runBrainstormInner	412	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/check-resolvable.ts	checkResolvable	419	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
-src/core/config.ts	loadConfigWithEngine	360	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
+src/core/config.ts	loadConfigWithEngine	362	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +2 #5824: search.vector_legacy_guard DB-plane merge
 src/core/context-engine.ts	createGBrainContextEngine	519	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/context/retrieval-reflex.ts	resolveEntitiesToPointers	355	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/cycle.ts	runCycle	1229	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)

@@ -1131,6 +1131,8 @@ export interface SearchOpts extends PageReadPolicy {
    * call, only when bounded work ended before exhaustion could be proved.
    */
   onVectorPoolMeta?: (m: VectorPoolMeta) => void;
+  /** #5824 rollback: keep the freshness guard inside the HNSW candidate CTE. Latched by the caller (search/vector-legacy-guard.ts). */
+  vectorLegacyGuard?: boolean;
   /**
    * v0.42 — intent-aware adaptive return-sizing. `true` enables with config/
    * default caps; an object overrides caps per-call; omitted/`false` = off
