@@ -106,25 +106,26 @@ export async function resolveRepairScope(engine: BrainEngine, source?: string): 
   return { brain_id: brain?.brain_id ?? 'host', source_ids: rows.map(row => row.id) };
 }
 
-function fingerprint(kind: RepairKind, scope: RepairScope): string {
-  return digest(['repair-v1', kind, scope.brain_id, scope.source_ids]);
+/** A preview-bound apply keeps its cursor under its approval hash, so a new preview never resumes an older set's cursor. */
+function fingerprint(kind: RepairKind, scope: RepairScope, approval?: string): string {
+  return digest(['repair-v1', kind, scope.brain_id, scope.source_ids, ...(approval ? [approval] : [])]);
 }
 
-async function readCursor(engine: BrainEngine, kind: RepairKind, scope: RepairScope): Promise<{ cursor: RepairCursor | null; runId: string | null }> {
+async function readCursor(engine: BrainEngine, kind: RepairKind, scope: RepairScope, approval?: string): Promise<{ cursor: RepairCursor | null; runId: string | null }> {
   const [row] = await engine.executeRaw<{ completed_keys: Array<{ cursor?: RepairCursor | null; run_id?: string }> }>(
-    "SELECT completed_keys FROM op_checkpoints WHERE op='repair' AND fingerprint=$1", [fingerprint(kind, scope)]);
+    "SELECT completed_keys FROM op_checkpoints WHERE op='repair' AND fingerprint=$1", [fingerprint(kind, scope, approval)]);
   return { cursor: row?.completed_keys[0]?.cursor ?? null, runId: row?.completed_keys[0]?.run_id ?? null };
 }
 
 /** Stores the run's cursor and id; with neither, the run is finished and the row is cleared. */
-async function writeCursor(engine: BrainEngine, kind: RepairKind, scope: RepairScope, cursor: RepairCursor | null, runId: string | null): Promise<void> {
+async function writeCursor(engine: BrainEngine, kind: RepairKind, scope: RepairScope, cursor: RepairCursor | null, runId: string | null, approval?: string): Promise<void> {
   if (!cursor && !runId) {
-    await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='repair' AND fingerprint=$1", [fingerprint(kind, scope)]);
+    await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='repair' AND fingerprint=$1", [fingerprint(kind, scope, approval)]);
     return;
   }
   await engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES('repair',$1,$2::text::jsonb)
     ON CONFLICT(op,fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys,updated_at=now()`,
-  [fingerprint(kind, scope), JSON.stringify([{ kind, scope, cursor, run_id: runId }])]);
+  [fingerprint(kind, scope, approval), JSON.stringify([{ kind, scope, cursor, run_id: runId }])]);
 }
 
 /** Cumulative journal counters this repair's admissions consume, with their 90% stop line. */
@@ -181,7 +182,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   const { repairSpec, explicitKindRequired } = await import('./registry.ts');
   if (repairSpec(handler.kind)?.explicit_only && opts.explicit !== true) throw explicitKindRequired(handler.kind);
   if (opts.apply) await initializeLocalPersistence(ctx);
-  const { cursor: resumed, runId: storedRunId } = await readCursor(ctx.engine, handler.kind, scope);
+  const { cursor: resumed, runId: storedRunId } = await readCursor(ctx.engine, handler.kind, scope, opts.apply ? opts.expect : undefined);
   const plan = await handler.plan(ctx.engine, scope, resumed, { apply: opts.apply, expect: opts.expect, includeAmbiguous: opts.includeAmbiguous });
   const pending = opts.limit !== undefined ? plan.items.slice(0, opts.limit) : plan.items;
   const counters = await capacity(ctx);
@@ -203,7 +204,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   }
   // A resumed run keeps its id, so work it authorized is replayed, not authorized twice.
   const runId = storedRunId ?? randomUUID();
-  if (!storedRunId) await writeCursor(ctx.engine, handler.kind, scope, resumed, runId);
+  if (!storedRunId) await writeCursor(ctx.engine, handler.kind, scope, resumed, runId, opts.expect);
   for (const [index, item] of pending.entries()) {
     const remaining = pending.length - index;
     const full = admits ? (await capacity(ctx)).find(c => c.used + (c.resource === 'lifetime_ids' ? 1 : RECEIPT_BYTES) > c.stop_at) : undefined;
@@ -237,10 +238,10 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
         + `Inspect it with: gbrain sources writer status ${item.source_id} — then rerun \`${result.apply_command}\` to resume.` };
       return result;
     }
-    await writeCursor(ctx.engine, handler.kind, scope, item.cursor, runId);
+    await writeCursor(ctx.engine, handler.kind, scope, item.cursor, runId, opts.expect);
   }
   result.complete = pending.length === plan.items.length;
-  if (result.complete) await writeCursor(ctx.engine, handler.kind, scope, null, null);
+  if (result.complete) await writeCursor(ctx.engine, handler.kind, scope, null, null, opts.expect);
   return result;
 }
 

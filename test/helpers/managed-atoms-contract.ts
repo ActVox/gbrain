@@ -294,7 +294,7 @@ export async function exerciseManagedAtomReconciliation(engine: BrainEngine): Pr
   }
 }
 
-export const atomRetirementCases = ['marker_and_republish', 'edit_back', 'user_deleted', 'prefix_pin', 'generation_key_and_purge'] as const;
+export const atomRetirementCases = ['marker_and_republish', 'edit_back', 'user_deleted', 'prefix_pin', 'generation_key_and_purge', 'partial_retry'] as const;
 
 /** #5770 / ENG-O7: retirement markers, republication of retired slugs, the regeneration generation and its purge exclusion. */
 export async function exerciseManagedAtomRetirement(engine: BrainEngine, scenario: typeof atomRetirementCases[number]): Promise<void> {
@@ -402,6 +402,25 @@ export async function exerciseManagedAtomRetirement(engine: BrainEngine, scenari
         expect((await extract()).status).toBe('ok');
         expect((await atomsOf()).find(row => row.slug.endsWith('/legacy-prefix'))?.deleted).toBe(false);
         expect((await atomsOf()).find(row => row.slug.endsWith('/legacy-full'))?.deleted).toBe(true);
+      }
+
+      if (scenario === 'partial_retry') {
+        await edit(bodies[1], ['Patience compounds', 'Queue patiently', 'Hire slowly']);
+        expect((await extract()).status).toBe('ok');
+        const queued = (await atom('queue-patiently'))!;
+        await edit(bodies[2], ['Patience compounds over years', 'Hire slowly']);
+        writeFileSync(join(root, `${queued.slug}.md`), 'Uncoordinated operator content.');
+        const failed = await extract();
+        expect(failed.status).toBe('warn');
+        expect((await atom('patience-compounds'))).toMatchObject({ deleted: true, frontmatter: { retired_by: 'managed-reextract' } });
+        expect((await atom('queue-patiently'))?.deleted).toBe(false);
+        const completion = (failed.details?.write_requests as Array<{ request_id: string }>).at(-1)!;
+        rmSync(join(root, `${queued.slug}.md`));
+        await disposePersistenceConsumer(engine);
+        expect(await retryManagedAtomBatch(engine, sourceId, completion.request_id, 'reviewed-retirement')).toMatchObject({ status: 'completed', model_rerun: false });
+        expect(calls).toBe(3);
+        expect((await atom('queue-patiently'))).toMatchObject({ deleted: true, frontmatter: { retired_by: 'managed-reextract' } });
+        expect((await atom('patience-compounds'))?.deleted).toBe(true);
       }
 
       if (scenario === 'generation_key_and_purge') {

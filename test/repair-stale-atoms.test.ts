@@ -156,6 +156,33 @@ for (const kind of testBackends()) {
       expect(Number((before.details as Record<string, number>).source_gone) - Number((after.details as Record<string, number>).source_gone)).toBe(30);
     }, 60_000);
 
+    test('an approved set applies only under the source selection it was previewed with', async () => {
+      const sourceId = await unmanagedFixture();
+      const hash = hashOf(await repair(['--source', sourceId]));
+      const refused = await refusal(() => repair(['--apply', '--expect', hash]));
+      expect(refused.toJSON()).toMatchObject({ error: 'preview_changed', docs: 'docs/guides/repair.md#preview-changed' });
+      expect((await atom(sourceId, 'atoms/2026-01-01/gone')).deleted).toBe(false);
+    }, 60_000);
+
+    test('a new preview never resumes the cursor an interrupted apply of an older preview left', async () => {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      const sourceId = `stale-r-${randomUUID().slice(0, 8)}`;
+      await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+      const edited = await engine.putPage('notes/edited', { type: 'note', title: 'Edited', compiled_truth: 'The current text.' }, { sourceId });
+      await putAtom(sourceId, 'atoms/2026-01-01/current', { source_slug: 'notes/edited', source_hash: edited.content_hash!.slice(0, 16) });
+      await putAtom(sourceId, 'atoms/2026-01-01/old-1', { source_slug: 'notes/edited', source_hash: 'aaaaaaaaaaaaaaaa' });
+      await putAtom(sourceId, 'atoms/2026-01-01/old-2', { source_slug: 'notes/edited', source_hash: 'aaaaaaaaaaaaaaaa' });
+      const first = hashOf(await repair(['--source', sourceId]));
+      expect((await repair(['--source', sourceId, '--apply', '--expect', first, '--limit', '1'])).results[0].outcomes).toEqual({ retired: 1 });
+      await engine.putPage('notes/gone', { type: 'note', title: 'Gone', compiled_truth: 'Deleted later.' }, { sourceId });
+      await putAtom(sourceId, 'atoms/2026-01-01/gone', { source_slug: 'notes/gone', source_hash: 'cccccccccccccccc' });
+      await engine.softDeletePage('notes/gone', { sourceId });
+      const second = await repair(['--source', sourceId]);
+      expect(second.results[0].listing!.map(entry => entry.class)).toEqual(['origin_gone', 'origin_changed']);
+      expect((await repair(['--source', sourceId, '--apply', '--expect', hashOf(second)])).results[0].outcomes).toEqual({ retired: 2 });
+      expect((await atom(sourceId, 'atoms/2026-01-01/gone')).deleted).toBe(true);
+    }, 60_000);
+
     async function managedFixture(sourceId: string) {
       const root = join(home, sourceId);
       const slug = 'notes/example';

@@ -32,7 +32,7 @@ import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { preparePageMutation } from '../persistence/page-prepare.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { bumpAtomGeneration, managedAtomCompletedSql } from '../persistence/atom-maintenance.ts';
-import { clearApprovedSet, loadApprovedSet, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
+import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
 export const STALE_ATOMS_RETIRED_BY = 'stale-atoms';
@@ -44,6 +44,8 @@ export type StaleAtomClass = 'origin_gone' | 'origin_changed';
 export interface StaleAtom {
   id: number;
   source_id: string;
+  /** The source incarnation the preview saw; a re-created source is a different atom. */
+  incarnation: string;
   slug: string;
   revision: string;
   class: StaleAtomClass;
@@ -57,11 +59,15 @@ export interface StaleAtom {
 
 interface StaleAtomItem extends RepairItem { atom: StaleAtom; hash: string; last: boolean }
 
+/** An approved atom carries the preview's source selection, so an apply under another `--source` refuses. */
+interface ApprovedStaleAtom extends StaleAtom { selection: string[] }
+
 /** Live stale atoms of these sources, in (class, id) order; `atomId` narrows to one atom for the apply recheck. */
 async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number): Promise<Array<StaleAtom & { chars: number }>> {
   const rows = await db.executeRaw<StaleAtom & { chars: number }>(`
     WITH atom AS (
-      SELECT a.id, a.source_id, a.slug, a.knowledge_revision::text AS revision,
+      SELECT a.id, a.source_id, (SELECT s.incarnation::text FROM sources s WHERE s.id=a.source_id) AS incarnation,
+             a.slug, a.knowledge_revision::text AS revision,
              a.frontmatter->>'source_slug' AS origin_slug,
              COALESCE(a.frontmatter->>'managed_extraction','')='true' AS managed,
              regexp_replace(COALESCE(a.frontmatter->>'source_hash',''),'^pending:','') AS atom_hash,
@@ -87,7 +93,7 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
         END AS completion
         FROM atom
     )
-    SELECT id, source_id, slug, revision, class, managed, origin_slug,
+    SELECT id, source_id, incarnation, slug, revision, class, managed, origin_slug,
            origin_page_id,
            CASE WHEN class='origin_gone' THEN NULL ELSE origin_hash END AS origin_hash,
            CASE WHEN class='origin_gone' THEN NULL ELSE completion END AS evidence, chars
@@ -99,7 +105,7 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
 }
 
 function sameAtom(live: StaleAtom | undefined, approved: StaleAtom): boolean {
-  return !!live && (['id', 'source_id', 'slug', 'revision', 'class', 'managed', 'origin_slug', 'origin_page_id', 'origin_hash', 'evidence'] as const)
+  return !!live && (['id', 'source_id', 'incarnation', 'slug', 'revision', 'class', 'managed', 'origin_slug', 'origin_page_id', 'origin_hash', 'evidence'] as const)
     .every(field => live[field] === approved[field]);
 }
 
@@ -126,7 +132,7 @@ export const staleAtomsRepair: RepairHandler = {
     if (!opts?.apply) {
       const atoms = (await staleAtoms(engine, scope.source_ids)).map(({ chars: _chars, ...atom }) => atom);
       const hash = previewHash(await hashParts(engine, scope, atoms));
-      if (atoms.length) await saveApprovedSet(engine, { command: 'stale-atoms', hash }, atoms);
+      if (atoms.length) await saveApprovedSet<ApprovedStaleAtom>(engine, { command: 'stale-atoms', hash }, atoms.map(atom => ({ ...atom, selection: scope.source_ids })));
       return { items: atoms.map((atom, index) => item(atom, hash, index === atoms.length - 1)), preview_hash: hash,
         residuals: { origin_gone: atoms.filter(atom => atom.class === 'origin_gone').length,
           origin_changed: atoms.filter(atom => atom.class === 'origin_changed').length },
@@ -139,8 +145,9 @@ export const staleAtomsRepair: RepairHandler = {
         `Preview first: ${command} — then run the apply command it prints: ${command} --apply --expect <preview-hash>`,
         'docs/guides/repair.md#explicit-only-repair-kinds');
     }
-    const approved = await loadApprovedSet<StaleAtom>(engine, { command: 'stale-atoms', hash: opts.expect, previewCommand: command });
-    const items = approved.items.map((atom, index) => item(atom, opts.expect!, index === approved.items.length - 1));
+    const approved = await loadApprovedSet<ApprovedStaleAtom>(engine, { command: 'stale-atoms', hash: opts.expect, previewCommand: command });
+    if (approved.items.some(atom => JSON.stringify(atom.selection) !== JSON.stringify(scope.source_ids))) throw previewChangedError(opts.expect, command);
+    const items = approved.items.map(({ selection: _selection, ...atom }, index) => item(atom, opts.expect!, index === approved.items.length - 1));
     return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals: {} };
   },
   async apply(ctx, entry): Promise<RepairItemOutcome> {

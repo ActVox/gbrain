@@ -42,11 +42,12 @@ export async function retryManagedAtomBatch(engine: BrainEngine, sourceId: strin
       for (const row of deleted) {
         const p = row.intent as AtomIntent;
         const target = await engine.readPageSnapshot(row.slug, { sourceId, includeDeleted: true });
-        if (typeof p.expected_revision !== 'string' || row.page_id === null || !target ||
-          target.page.id !== row.page_id || target.revision !== p.expected_revision || Boolean(target.page.deleted_at) !== (row.state === 'committed')) {
+        const revision = row.state === 'committed' ? row.outcome?.revision : p.expected_revision;
+        if (typeof revision !== 'string' || row.page_id === null || !target ||
+          target.page.id !== row.page_id || target.revision !== revision || Boolean(target.page.deleted_at) !== (row.state === 'committed')) {
           throw new OperationError('page_identity_changed', 'An atom retirement target changed independently of the failed publication.');
         }
-        retirements.push({ slug: row.slug, pageId: row.page_id, revision: p.expected_revision });
+        retirements.push({ slug: row.slug, pageId: row.page_id, revision });
       }
       const receipts = await publishManagedAtoms(engine, session, current, atoms, undefined, retirements);
       return { status: 'completed', model_rerun: false, write_requests: receipts };
