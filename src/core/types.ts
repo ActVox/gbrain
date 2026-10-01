@@ -1648,6 +1648,8 @@ export interface OntologyReadOpts extends PageReadScope {
   includeQuarantined?: boolean;
   sourceId?: string;
   sourceIds?: string[];
+  /** Fact visibility tiers the caller may read; undefined reads every tier. */
+  visibility?: Array<'private' | 'world'>;
 }
 
 // Raw data
