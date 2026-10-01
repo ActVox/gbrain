@@ -13,6 +13,7 @@ import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
 import { localHostId } from './identity.ts';
 import { sha256 } from './digest.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
+import { ERROR_CATALOGUE } from '../error-catalogue.ts';
 import { currentCompanyBrainSync } from '../company-brain/profile.ts';
 import type { CompanyBrainPlan } from '../company-brain/types.ts';
 import { assertDistinctSyncOrigins, legacySyncOrigin, sameSyncOrigin, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
@@ -144,7 +145,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through',
       message: `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
       suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
-      docs: 'docs/guides/write-refusals.md#colon_slug_windows_write_through' });
+      docs: ERROR_CATALOGUE.colon_slug_windows_write_through.docs });
     return true;
   };
   const storable = <T extends { source_path: string | null }>(page: T) => page.source_path === null || !isWindowsColonTarget(page.source_path);

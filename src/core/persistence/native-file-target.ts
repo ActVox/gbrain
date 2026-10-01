@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, realpathSync, statSync, type BigIntStats } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { OperationError } from '../ops/contract.ts';
+import { catalogueError } from '../error-catalogue.ts';
 
 export function nativeFileTarget(root: string, target: string, code?: string): string {
   const unsafe = () => new OperationError(code ?? 'source_changed', 'The canonical file target has no unambiguous native identity.',
@@ -59,10 +60,9 @@ export function nativeFileTarget(root: string, target: string, code?: string): s
  * writes of the same slug are unaffected.
  */
 export function colonSlugWindowsRefusal(slug: string, sourceId: string): OperationError {
-  return new OperationError('colon_slug_windows_write_through',
+  return catalogueError('colon_slug_windows_write_through',
     `Page ${slug} has a ':' in its file name, which Windows cannot store.`,
-    `Use a slug without ':' (for example ${slug.replaceAll(':', '-')}), or write ${slug} from a macOS or Linux host that owns source ${sourceId}.`,
-    'docs/guides/write-refusals.md#colon_slug_windows_write_through');
+    `Use a slug without ':' (for example ${slug.replaceAll(':', '-')}), or write ${slug} from a macOS or Linux host that owns source ${sourceId}.`);
 }
 
 /** #5032: true when this process is on Windows and the relative file target contains `:`. */

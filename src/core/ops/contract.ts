@@ -46,7 +46,6 @@ export type ErrorCode =
   | 'unavailable'          // a required dependency cannot serve (no API key, gateway down, model refusal)
   | 'budget_unsatisfiable' // RESERVED in v1 — schema-listed, never returned
   | 'embedding_budget_below_worst_case' // #5680: migration cap below its worst-case authorization; refused before any change
-  | 'colon_slug_windows_write_through' // #5032: a ':' file name cannot be stored on Windows; refused before admission
   // eslint-disable-next-line @typescript-eslint/ban-types
   | (string & {});      // OPEN union for forward-compat (eE7 / D13)
 
