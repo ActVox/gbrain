@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { operations, OperationError, type OperationContext } from '../src/core/operations.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
@@ -108,6 +109,18 @@ describe('#5032 put_page with a colon slug', () => {
     const sourceId = await addSource(engine, null);
     await asWindows(() => putPage.handler(ctxOf(engine, sourceId), { slug: 'calendar:abc', content: CONTENT }));
     expect((await engine.getPage('calendar:abc', { sourceId }))?.compiled_truth).toContain('A calendar event.');
+  }), 60_000);
+
+  test('Windows: a live database-only page (derive-phase path, no file) keeps updating', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const engine = engines[0];
+    const root = join(home, `dbonly-${randomUUID()}`); mkdirSync(root);
+    const sourceId = await addSource(engine, root);
+    const seeded = await importFromContent(engine, 'atoms/cal:abc', CONTENT, { sourceId, noEmbed: true });
+    expect(seeded.status).toBe('imported');
+    await asWindows(() => putPage.handler(ctxOf(engine, sourceId), {
+      slug: 'atoms/cal:abc', content: CONTENT.replace('A calendar event.', 'An updated event.'), force: true,
+    }));
+    expect((await engine.getPage('atoms/cal:abc', { sourceId }))?.compiled_truth).toContain('An updated event.');
   }), 60_000);
 
   test('Windows: publication refuses a colon file target admitted elsewhere', async () => withEnv({ GBRAIN_HOME: home }, async () => {

@@ -21,6 +21,7 @@ import { normalizeSubagentPageInput } from './page-input.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { isUnboundSourcePage, readUnboundWritePolicy, unboundSourceError } from './unbound-source.ts';
 import { colonSlugWindowsRefusal, isWindowsColonTarget } from './native-file-target.ts';
+import { publishesDatabaseOnly } from './page-prepare.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
 
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
@@ -183,8 +184,9 @@ export async function submitPageMutation(ctx: OperationContext,
   }
   // #5032: this host publishes the canonical file, and on Windows a ':' in its
   // name cannot be stored; refuse before admission. Database-only writes pass.
-  if (writeThrough && binding?.owner_host_id === localHostId() && isWindowsColonTarget(snapshot?.page.source_path ?? `${slug}.md`)
-    && !(snapshot && !snapshot.page.source_path && await isUnboundSourcePage(ctx.engine, sourceId, slug))) {
+  if (writeThrough && binding?.owner_host_id === localHostId() && binding.local_path && isWindowsColonTarget(snapshot?.page.source_path ?? `${slug}.md`)
+    && !(snapshot && !snapshot.page.source_path && await isUnboundSourcePage(ctx.engine, sourceId, slug))
+    && !publishesDatabaseOnly(join(binding.local_path, binding.relative_path), slug, snapshot)) {
     throw colonSlugWindowsRefusal(slug, sourceId);
   }
   const row = await admitWrite(ctx.engine, { principal, operation: input.operation, sourceId, sourceIncarnation: source.incarnation,
