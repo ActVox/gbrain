@@ -1433,6 +1433,7 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
   // trusted local boundary) and consumed by federatedSearchScope in
   // operations.ts, which additionally gates on ctx.remote === false.
   let localFederated: string[] | undefined;
+  let sourceImplicit = true;
   // params.source is set when a CLI flag was parsed for the op (rare; most
   // CLI ops don't take --source). Falls through to env/dotfile/path-match.
   const explicit = (params.source as string | undefined) ?? null;
@@ -1440,6 +1441,7 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
   try {
     const resolved = await resolveSourceWithTier(engine, explicit);
     sourceId = resolved.source_id;
+    sourceImplicit = resolved.tier !== 'flag' && resolved.tier !== 'env' && resolved.tier !== 'dotfile';
     localFederated = await localFederatedSourceIds(engine, resolved.source_id, resolved.tier);
   } catch (err) {
     // #1712: an EXPLICIT --source that fails to resolve (invalid id, or a
@@ -1521,6 +1523,7 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
     // brain (that would be an untrusted-caller cross-brain hole over MCP).
     brainId: activeBrainId,
     ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
+    ...(sourceImplicit ? { localSourceImplicit: true } : {}),
     // T15/FOV-1: capture the retrieval meta for formatResult's empty-result
     // render (the local-engine twin of the MCP _meta.retrieval channel).
     emitResponseMeta: captureRetrievalMeta,
