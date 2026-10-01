@@ -212,7 +212,11 @@ export async function startPersistenceIpcServer(
           }
           if (record(request) && exactKeys(request, ['version', 'kind']) && request.version === 1 && request.kind === 'projection_status') {
             if (!provider.projectionStatus) throw new OperationError('unavailable', 'This owner does not report projection status.');
-            socket.end(responseFrame({ version: 1, ok: true, result: await provider.projectionStatus() }));
+            if (active >= PERSISTENCE_IPC_MAX_CONNECTIONS) throw new OperationError('queue_capacity', 'The persistence listener is at capacity; retry shortly.');
+            active++;
+            admitted = true;
+            const status = await provider.projectionStatus();
+            if (!socket.destroyed) socket.end(responseFrame({ version: 1, ok: true, result: status }));
             return;
           }
           if (!operationRequest(request) && !administrationRequest(request)) throw new OperationError('invalid_params', 'Invalid persistence request envelope.');

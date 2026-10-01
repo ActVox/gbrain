@@ -96,6 +96,10 @@ describe('doctor embedding_key_source', () => {
     const azure = embeddingAuthFailedError(getRecipe('azure-openai')!, 401, cfg({ azure_openai_api_key: CONFIG_KEY } as Partial<GBrainConfig>), {}, '/home/example/.gbrain/config.json');
     expect(azure.message).toContain('the key in effect is azure_openai_api_key in /home/example/.gbrain/config.json (AZURE_OPENAI_API_KEY is not set)');
     expect(azure.message).not.toContain('AZURE_OPENAI_ENDPOINT');
+    const entra = embeddingAuthFailedError(getRecipe('azure-openai')!, 403, cfg({ azure_openai_api_key: CONFIG_KEY } as Partial<GBrainConfig>), { AZURE_OPENAI_USE_ENTRA: '1' }, '/home/example/.gbrain/config.json');
+    expect(entra.message).toContain('Azure Entra mode is on (AZURE_OPENAI_USE_ENTRA)');
+    expect(entra.suggestion).toContain('az login');
+    expect(entra.suggestion).not.toContain('azure_openai_api_key');
   });
 
   test('is ok without a shadow and reports a config-plane embedding key', () => {

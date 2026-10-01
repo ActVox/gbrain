@@ -12,7 +12,7 @@
 import { configPath, loadConfigFileOnly, type GBrainConfig } from '../config.ts';
 import { catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
-import { providerKeyShadows, providerKeySource, type ProviderKeyShadow } from './provider-env.ts';
+import { mergedProviderEnv, providerKeyShadows, providerKeySource, type ProviderKeyShadow } from './provider-env.ts';
 
 type Env = Record<string, string | undefined>;
 const stderrSink = (line: string) => { process.stderr.write(`${line}\n`); };
@@ -56,6 +56,10 @@ export function embeddingAuthFailedError(provider: AuthFailedProvider, status: n
   const name = credentialEnvName(provider.auth_env);
   const rejected = `The ${provider.name} embedding provider rejected its key (HTTP ${status})`;
   const backfill = 'Then run `gbrain embed --stale` to embed what was saved while the key was rejected.';
+  if (provider.id === 'azure-openai' && mergedProviderEnv(fileCfg, env).AZURE_OPENAI_USE_ENTRA === '1') {
+    return catalogueError('embedding_auth_failed', `${rejected}; Azure Entra mode is on (AZURE_OPENAI_USE_ENTRA), so the rejected credential is the Azure CLI's Entra token, not an API key.`,
+      `Run \`az login\` as an identity with the "Cognitive Services OpenAI User" role on the resource, restart the process that reported this, then run \`gbrain embed --stale\`.`);
+  }
   if (!name) return catalogueError('embedding_auth_failed', `${rejected}.`, `Check the ${provider.name} credentials, restart the process that reported this, then run \`gbrain embed --stale\`.`);
   const source = providerKeySource(fileCfg, env, name);
   if (source.kind === 'config') {

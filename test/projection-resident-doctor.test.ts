@@ -62,6 +62,23 @@ test('the resident answers projection_status with counts only; an owner without 
   } finally { old.close(); }
 });
 
+test('stalled projection_status requests count toward the listener bound and cannot pile up', async () => {
+  const socket = persistenceSocketPathForConfig(config)!;
+  const stalled = Promise.withResolvers<void>();
+  let calls = 0;
+  const server = (await startPersistenceIpcServer(socket, provider(async () => { calls++; await stalled.promise; return { pending: 0, failed: 0, oldest_age_seconds: null }; })))!;
+  try {
+    const abandoned = await Promise.allSettled(Array.from({ length: 8 }, () => requestPersistenceProjectionStatus(socket, 200)));
+    expect(abandoned.every(result => result.status === 'rejected')).toBe(true);
+    expect(calls).toBe(8);
+    await expect(requestPersistenceProjectionStatus(socket)).rejects.toMatchObject({ code: 'queue_capacity' });
+    expect(calls).toBe(8);
+    stalled.resolve();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(await requestPersistenceProjectionStatus(socket)).toEqual({ pending: 0, failed: 0, oldest_age_seconds: null });
+  } finally { stalled.resolve(); server.close(); }
+});
+
 test('doctor reports the resident backlog, its pid and the stop-drain-restart path while the resident holds the brain', async () => {
   const socket = persistenceSocketPathForConfig(config)!;
   const server = (await startPersistenceIpcServer(socket, provider(() => projectionBacklog(engine))))!;
