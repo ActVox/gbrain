@@ -34,6 +34,8 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { compactWriteReceipts } from '../src/core/persistence/journal.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
+import { runExtractConversationFactsCore } from '../src/commands/extract-conversation-facts.ts';
+import { writeSingleFact } from '../src/core/facts/write-single.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -316,6 +318,65 @@ for (const backend of testBackends()) {
         await conversation(engine, 'conversations/journey', ['Alice sends the deck', 'Alice books the venue', 'Alice hires a designer'], root);
       } });
     }, 120_000);
+  });
+
+  describe(`cross-lane journey (ENG-O14): #5731 restore with managed writeSingleFact and a re-extraction (${backend})`, () => {
+    const CHAT = `---\ntitle: Synthetic chat\ntype: conversation\n---\n${[
+      '**Alice Example** (2024-03-15 9:00 AM): I will send the signed contract by Friday.',
+      '**Bob Demo** (2024-03-15 9:01 AM): Great, thanks.',
+    ].join('\n')}\n`;
+    const CLAIM = 'Alice Example will send the signed contract by Friday.';
+    const extractor = async () => [{ fact: CLAIM, kind: 'commitment' as const, entity_slug: ENTITY,
+      confidence: 1, notability: 'high' as const, source: 'test', visibility: 'private' as const }];
+
+    test('extract, pre-fix expiry, doctor, preview, apply, recall, remember, re-extract, doctor', async () => {
+      await managedBrain(async ({ engine, ctx }) => {
+        const slug = 'conversations/synthetic-chat';
+        const extracted = await runExtractConversationFactsCore(engine, { sourceId: 'default', overrideDisabled: true, extractor, types: ['conversation'] });
+        expect(extracted.facts_inserted).toBe(1);
+        const rows = () => engine.executeRaw<{ id: number; fact: string; active: boolean; row_num: number | null }>(
+          "SELECT id::int AS id, fact, expired_at IS NULL AS active, row_num FROM facts WHERE source_id='default' AND source_markdown_slug=$1 ORDER BY id", [slug]);
+        const original = await rows();
+        expect(original.map(row => [row.fact, row.active])).toEqual([[CLAIM, true], ['EXTRACTION_COMPLETE', true]]);
+        await prefixExpire(engine, ctx, slug);
+        expect((await rows()).every(row => !row.active && row.row_num === null)).toBe(true);
+
+        expect((await extractorFactsCheck(engine)).details).toMatchObject({ evidenced: 2, ambiguous: 0 });
+        const preview = await repair(engine, null, []);
+        const applied = await repair(engine, null, preview.results[0].apply_command.split(' ').slice(3));
+        expect(applied.results[0].outcomes).toEqual({ restored: 1 });
+        const restored = await rows();
+        expect(restored.map(row => [row.id, row.active])).toEqual(original.map(row => [row.id, true]));
+        const recalled = await operations.find(op => op.name === 'recall')!.handler(ctx, { entity: ENTITY }) as { facts: Array<{ fact_id: string }> };
+        expect(recalled.facts.map(fact => Number(fact.fact_id))).toContain(original[0].id);
+
+        // writeSingleFact dedups against the restored fact for the same entity and keeps an absent entity's claim apart.
+        const same = await writeSingleFact(engine, 'default', { fact: CLAIM, provenance: 'fixture', entity: ENTITY, kind: 'commitment' });
+        expect(same).toMatchObject({ status: 'duplicate', id: original[0].id, entity_slug: ENTITY });
+        const other = await writeSingleFact(engine, 'default', { fact: CLAIM, provenance: 'fixture', entity: 'Carol Absent', kind: 'commitment' });
+        expect(other).toMatchObject({ status: 'inserted', entity_slug: 'carol-absent' });
+
+        // A forced re-extraction replaces the restored batch, active, with nothing expired left behind on the page.
+        const rerun = await runExtractConversationFactsCore(engine, { sourceId: 'default', overrideDisabled: true, extractor, types: ['conversation'], force: true });
+        expect([rerun.facts_inserted, rerun.orphan_facts_cleaned]).toEqual([1, 2]);
+        expect((await rows()).map(row => [row.fact, row.active])).toEqual([[CLAIM, true], ['EXTRACTION_COMPLETE', true]]);
+        expect((await extractorFactsCheck(engine)).status).toBe('ok');
+        expect((await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM facts WHERE entity_slug='carol-absent' AND expired_at IS NULL"))[0].n).toBe(1);
+      }, { databaseUrl, setup: async ({ engine, root }) => {
+        await engine.setConfig('conversation_parser.llm_fallback_enabled', 'false');
+        const person = await engine.putPage(ENTITY, { type: 'person', title: 'Alice Example', compiled_truth: '# Alice Example' }, { sourceId: 'default' });
+        await engine.executeRaw('UPDATE pages SET source_path=$1 WHERE id=$2', [`${ENTITY}.md`, person.id]);
+        const personSnapshot = (await engine.readPageSnapshot(ENTITY, { sourceId: 'default' }))!;
+        mkdirSync(join(root, 'people'), { recursive: true });
+        writeFileSync(join(root, `${ENTITY}.md`), serializePageToMarkdown(personSnapshot.page, personSnapshot.tags));
+        const page = await engine.putPage('conversations/synthetic-chat', { type: 'conversation', title: 'Synthetic chat',
+          compiled_truth: CHAT.split('---\n')[2].trim() }, { sourceId: 'default' });
+        await engine.executeRaw('UPDATE pages SET source_path=$1 WHERE id=$2', ['conversations/synthetic-chat.md', page.id]);
+        const snapshot = (await engine.readPageSnapshot('conversations/synthetic-chat', { sourceId: 'default' }))!;
+        mkdirSync(join(root, 'conversations'), { recursive: true });
+        writeFileSync(join(root, 'conversations/synthetic-chat.md'), serializePageToMarkdown(snapshot.page, snapshot.tags));
+      } });
+    }, 180_000);
   });
 
   describe(`gbrain repair extractor-facts, unmanaged (${backend})`, () => {
