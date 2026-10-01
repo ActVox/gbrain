@@ -19,6 +19,7 @@ import { RECIPES } from '../src/core/ai/recipes/index.ts';
 import { __resetFactsQueueForTests } from '../src/core/facts/queue.ts';
 import type { CapabilityReport } from '../src/core/capability.ts';
 import { CORPUS_CLAIM_SUFFIX, CORPUS_INGESTED_SUFFIX } from '../src/core/sweep.ts';
+import { toCorpusText } from '../src/core/transcripts/claude-code-jsonl.ts';
 import {
   __drainCheckpointHarvestForTests,
   __resetCheckpointHarvestForTests,
@@ -671,5 +672,51 @@ describe('writeback lane (ambient memory backstop)', () => {
     });
     expect(ack2.status).toBe('scheduled');
     await __drainCheckpointHarvestForTests();
+  });
+});
+
+/** A chat stub that records every prompt the extractor sends. */
+function recordingChatStub(): string[] {
+  const prompts: string[] = [];
+  __setChatTransportForTests(async (opts): Promise<ChatResult> => {
+    prompts.push(opts.messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n'));
+    return {
+      text: JSON.stringify({ facts: [{ fact: 'prefers dark roast coffee', kind: 'preference', entity: null, confidence: 1.0, notability: 'high' }] }),
+      blocks: [], stopReason: 'end',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'test:stub', providerId: 'test',
+    };
+  });
+  return prompts;
+}
+
+const PASTE = '<pasted_content id="2830">\nForwarded email: the offsite moves to March and the budget is final.\n</pasted_content id="2830">';
+
+describe('pasted content never reaches the extractor (#5812)', () => {
+  test('compact lane: a paste inside a [user] block is stripped before extraction; the segment file is unchanged', async () => {
+    const prompts = recordingChatStub();
+    const text = toCorpusText([
+      { role: 'user', text: `Please remember this note I got:\n\n${PASTE}\n\nand also I prefer dark roast coffee.` },
+      { role: 'assistant', text: 'Saved both.' },
+    ]);
+    const seg = bankSegment('sess-paste-compact', text);
+    scheduleCheckpointHarvest({ engine, sourceId: 'default', sessionId: 'sess-paste-compact', corpusDir, file: seg.file, capabilities: KEYED });
+    await __drainCheckpointHarvestForTests();
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.join('\n')).not.toContain('offsite moves to March');
+    expect(prompts.join('\n')).toContain('I prefer dark roast coffee');
+    expect(readFileSync(join(corpusDir, seg.file), 'utf8')).toContain('offsite moves to March');
+  });
+
+  test('writeback lane: a turn file banked with a paste (older binary) is extracted without it', async () => {
+    await engine.setConfig('memory.auto_writeback', 'salient');
+    const prompts = recordingChatStub();
+    const file = 'sess-paste-wb.wb-0123456789abcdef01234567.txt';
+    writeFileSync(join(corpusDir, file), `Please remember this note I got: ${PASTE} and also I prefer dark roast coffee.\n`);
+    scheduleCheckpointHarvest({ engine, sourceId: 'default', sessionId: 'sess-paste-wb', corpusDir, file, capabilities: KEYED, lane: 'writeback' });
+    await __drainCheckpointHarvestForTests();
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.join('\n')).not.toContain('offsite moves to March');
+    expect(prompts.join('\n')).toContain('I prefer dark roast coffee');
   });
 });

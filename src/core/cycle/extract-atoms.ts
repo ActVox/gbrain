@@ -68,6 +68,7 @@ import { createGlobalLlmHaltTracker, haltedClassOf, type GlobalLlmErrorClass } f
 import { importFromContent } from '../import-file.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
+import { corpusTextForExtraction } from '../context/corpus-segments.ts';
 import { BudgetExhausted, BudgetTracker, loadPricingOverrides } from '../budget/budget-tracker.ts';
 import { resolveExtractAtomsCostGate, resolveEmbedModelForCostGate } from './extract-atoms-cost-gate.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
@@ -1087,8 +1088,8 @@ export async function runPhaseExtractAtoms(
     // and quote provenance is verified against THIS rather than the full
     // item, so a quote can only verify against text the model actually saw.
     // #4529/#4540: configurable input cap, cut UTF-8-safely (a bare .slice()
-    // can split a surrogate pair at the boundary).
-    const promptContent = truncateUtf8(item.content, maxInputChars);
+    // can split a surrogate pair at the boundary); #5812 strips pastes first.
+    const promptContent = truncateUtf8(item.kind === 'transcript' ? corpusTextForExtraction(item.filePath, item.content) : item.content, maxInputChars);
     try {
       const origin: AtomOrigin | null = managed ? await readAtomOrigin(engine, managed, item) : null;
       const visibility = origin?.visibility ?? effectiveVisibility(item.kind === 'transcript' ? { kind: 'transcript' } // #5525
