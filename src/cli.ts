@@ -1861,6 +1861,7 @@ const THIN_CLIENT_REFUSE_HINTS: Record<string, string> = {
   connectors: 'connectors manage provider session credentials in ~/.gbrain/connectors and sync your chat history on the host. Credentials never cross the wire — run on the host machine.',
   sweep: 'sweep runs the serve-resident maintenance passes against the LOCAL engine. Run it on the host (the serve process also runs it automatically).',
   'compile-context': 'compile-context compiles from the local brain; run it on the host install.',
+  decide: '`gbrain decide` runs on the brain host; run it there.',
   // v0.32 audit additions
   pages: '`pages purge-deleted` is admin+localOnly (hard-deletes from the local DB). Run on the host.',
   files: '`files list` and `files url` MCP ops are localOnly (paths live on the host filesystem). Use `gbrain files` on the host machine.',
@@ -2129,9 +2130,9 @@ async function routeEngineFreeSubcommands(command: string, args: string[]): Prom
   // explicitly via its grace-tick exit path (PGLite exitCode-hijack guard).
   if (command === 'eval' && args[0] === 'brainbench') {
     const { runEvalBrainBench } = await import('./commands/eval-brainbench.ts');
-    if (args.includes('--llm') && !args.includes('--help') && !args.includes('-h')) {
-      // --llm is the one mode that talks to a provider; mirror the
-      // longmemeval gateway bootstrap so extraction calls are priced.
+    if ((args.includes('--llm') || args.some((a) => a === '--decide' || a.startsWith('--decide='))) && !args.includes('--help') && !args.includes('-h')) {
+      // --llm and --decide arms talk to a provider; mirror the longmemeval
+      // gateway bootstrap so extraction and decide calls are keyed and priced.
       const config = loadConfig() ?? ({} as GBrainConfig);
       const { configureGateway } = await import('./core/ai/gateway.ts');
       configureGateway(buildGatewayConfig(config));
@@ -2980,6 +2981,7 @@ TOOLS
                                      See also: autopilot --install (continuous daemon).
   compile-context --target <t>       Compile a deterministic, scanned, budgeted context
         [--budget N] [--check]       file (claude-code | codex | openclaw)
+  decide <status|probe|enable|...>   System One decision support (Jev); every slot off by default
   check-resolvable [--json] [--fix]  Validate skill tree (reachability/MECE/DRY)
   report --type <name> --content ... Save timestamped report to brain/reports/
 
