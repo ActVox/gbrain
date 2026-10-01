@@ -43,7 +43,8 @@ read it and relay it to the human in plain language. Never work around a refusal
 ⛔ **VERIFY BEFORE CLAIMING DONE.** The install is done when `gbrain bootstrap
 verify` exits 0 — not when the transcript looks good. Paste its report to the human.
 
-⛔ **RESPECT THE TOOLCHAIN TRUST RULES.** Install bun via a platform package manager
+⛔ **RESPECT THE TOOLCHAIN TRUST RULES.** GBrain needs Bun 1.4.0 or newer (`bun upgrade`
+updates an older Bun). Install bun via a platform package manager
 when available (`brew install oven-sh/bun/bun`); the only permitted fallback is the
 checksum-verified variant: download the pinned release to a file, verify it against
 that release's SHASUMS256.txt, and only then execute. Install gh the same way —
