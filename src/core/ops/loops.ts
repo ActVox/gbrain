@@ -22,6 +22,7 @@
 import { OperationError, type Operation, type OperationContext } from './contract.ts';
 import { resolveRequestedScope, sourceScopeOpts } from './context.ts';
 import { validateSourceId } from '../utils.ts';
+import { closedLoopWithActiveFact, retireLoopFact } from '../persistence/loop-fact-retirement.ts';
 import {
   addSuppression,
   closeOpenLoop,
@@ -538,19 +539,15 @@ const loops_close: Operation = {
       p.id as number,
       p.status as 'done' | 'dropped',
       (p.note as string | undefined)?.slice(0, 200) || 'manual',
-    );
+    ) ?? await closedLoopWithActiveFact(ctx.engine, sourceId, p.id as number);
     if (!row) return { closed: false, reason: 'not_found_or_already_closed' };
-    // A closed commitment loop expires its projected fact so entity cards
-    // stop carrying it (fence round-trip happens on the next facts sweep).
-    if (row.fact_id !== null) {
-      try {
-        await ctx.engine.executeRaw(
-          `UPDATE facts SET expired_at = now() WHERE id = $1 AND expired_at IS NULL`,
-          [row.fact_id],
-        );
-      } catch { /* best-effort */ }
-    }
-    return { closed: true, id: row.id, status: row.status, fact_expired: row.fact_id !== null };
+    // #5869: a closed commitment loop retires its fact (expired + fence row
+    // struck) through one coordinated publication. A loop already closed whose
+    // fact is still active re-attempts it, so a refused retirement is retryable.
+    if (row.fact_id === null) return { closed: true, id: row.id, status: row.status, fact_expired: false, retryable: false };
+    const retired = await retireLoopFact(ctx, row.id);
+    return { closed: true, id: row.id, status: row.status, fact_expired: retired.fact_expired, retryable: retired.retryable,
+      ...(retired.reason && retired.reason !== 'already_expired' ? { reason: retired.reason } : {}) };
   },
 };
 
