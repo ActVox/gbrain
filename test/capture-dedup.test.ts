@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { acquireWorktree, claimWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
+import { acquireWorktree, claimWorktree, getWorktreeBinding, MANAGED_WRITER_PROBE_WAIT_MS } from '../src/core/persistence/ownership.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -33,7 +33,6 @@ import { configureGateway, resetGateway, __setChatTransportForTests, __setEmbedT
 import { runFactsPipeline, type FactsBackstopCtx } from '../src/core/facts/backstop.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { disposePersistenceConsumer, persistenceConsumerStatus } from '../src/core/persistence/service.ts';
-import { MANAGED_FACTS_WRITER_WAIT_MS } from '../src/core/persistence/facts-maintenance.ts';
 import { getBrainHotMemoryMeta, __resetHotMemoryCacheForTests } from '../src/core/facts/meta-hook.ts';
 import { readHeartbeatTail } from '../src/core/context/hook-heartbeat.ts';
 import { buildMemoryWritebackCheck } from '../src/commands/doctor/checks/memory-writeback.ts';
@@ -158,21 +157,21 @@ for (const mode of ['unmanaged', 'managed'] as const) {
     const run = (fn: () => Promise<void>) => withEnv({ GBRAIN_HOME: home }, async () => { await freshSource(mode); await fn(); });
 
     if (mode === 'managed') {
-      // The preflight waits up to MANAGED_FACTS_WRITER_WAIT_MS for the worktree
+      // The preflight waits up to MANAGED_WRITER_PROBE_WAIT_MS for the worktree
       // lock: a writer finishing its previous publication is not a conflict.
       const holdLock = async (ms: number) => {
         const lock = await acquireWorktree((await getWorktreeBinding(engine, sourceId))!, 0, undefined, engine);
         expect(lock).not.toBeNull();
-        return new Promise<void>(resolve => setTimeout(() => { void lock!.release().then(resolve); }, ms));
+        return { released: new Promise<void>(resolve => setTimeout(() => { void lock!.release().then(resolve); }, ms)) };
       };
       test('the fact preflight waits out a writer that releases within the bound', () => run(async () => {
-        const released = holdLock(200);
+        const { released } = await holdLock(200);
         extracts([{ fact: 'Bob Example owns the Acme Example launch checklist', entity: 'people/bob-example' }]);
         expect(await capture('hook:writeback', 'sess-lock')).toMatchObject({ inserted: 1 });
         await released;
       }), 60_000);
       test('a writer busy past the bound still refuses with writer_lock_unavailable', () => run(async () => {
-        const released = holdLock(MANAGED_FACTS_WRITER_WAIT_MS + 1500);
+        const { released } = await holdLock(MANAGED_WRITER_PROBE_WAIT_MS + 1500);
         extracts([{ fact: 'Bob Example owns the Acme Example budget review', entity: 'people/bob-example' }]);
         await expect(capture('hook:writeback', 'sess-lock-2')).rejects.toMatchObject({ code: 'writer_lock_unavailable' });
         await released;

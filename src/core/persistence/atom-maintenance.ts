@@ -9,7 +9,7 @@ import { authorizeStoredRequest, authorizeWrite, submissionAuthority } from './a
 import { currentVerifiedLocalWriter, localHostId, registerLocalWriter } from './identity.ts';
 import { admitWriteInTransaction, getWriteRequest, receiptFor } from './journal.ts';
 import { digest, requireUuid, sha256 } from './digest.ts';
-import { acquireWorktree, getWorktreeBinding, managedPersistenceEnabled, type WorktreeBinding } from './ownership.ts';
+import { getWorktreeBinding, managedPersistenceEnabled, probeWorktreeWriter, type WorktreeBinding } from './ownership.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
 import { preparePageMutation } from './page-prepare.ts';
 import { assertPersistenceAccepting, waitForWrite, writeResponse } from './service.ts';
@@ -99,9 +99,7 @@ export async function managedAtomSession(engine: BrainEngine, sourceId: string, 
   const { binding, writeThrough, connectorDatabase, refusal } = await atomOwnerTarget(engine, sourceId, source);
   if (refusal) throw new OperationError('owner_unavailable', refusal);
   if (writeThrough && binding) {
-    const lock = await acquireWorktree(binding, 0, undefined, engine);
-    if (!lock) throw new OperationError('writer_lock_unavailable', 'The canonical atom writer is busy; no extraction was started.');
-    await lock.release();
+    if (!await probeWorktreeWriter(binding, engine)) throw new OperationError('writer_lock_unavailable', 'The canonical atom writer is busy; no extraction was started.');
   }
   if (!writeThrough) authority.databaseOnlyReason = 'disabled_by_config';
   else if (connectorDatabase) authority.databaseOnlyReason = 'connector_database';

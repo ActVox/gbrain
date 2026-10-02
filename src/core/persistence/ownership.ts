@@ -139,6 +139,22 @@ export async function acquireWorktree(binding: WorktreeBinding, waitMs = 0, sign
     } catch (failure) { await lock.release(); throw failure; }
   }
 }
+/**
+ * How long a managed writer's preflight probe waits for the worktree lock.
+ * This process's own persistence consumer holds it while it finishes
+ * publishing the previous write, after that write's receipt already reads
+ * committed, so a zero-wait probe refused on our own writer. A holder still
+ * busy after the wait is a real conflict.
+ */
+export const MANAGED_WRITER_PROBE_WAIT_MS = 1000;
+
+/** Acquire-and-release probe of the worktree lock within MANAGED_WRITER_PROBE_WAIT_MS; false when it stayed busy. */
+export async function probeWorktreeWriter(binding: WorktreeBinding, engine?: BrainEngine): Promise<boolean> {
+  const lock = await acquireWorktree(binding, MANAGED_WRITER_PROBE_WAIT_MS, undefined, engine);
+  if (!lock) return false;
+  await lock.release();
+  return true;
+}
 export async function guardOwnership(tx: SqlEngine, row: WriteRequest, hostId: string): Promise<WorktreeBinding | null> {
   if (!row.worktree_id) return null;
   const [owner] = await tx.executeRaw<{ owner_host_id: string; owner_epoch: string | number; state: string }>(

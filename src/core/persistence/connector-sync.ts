@@ -16,7 +16,7 @@ import { authorizeStoredRequest, authorizeWrite } from './authority.ts';
 import { materializeTimeline, prepareCanonicalProjections } from './canonical-projections.ts';
 import { digest, sha256 } from './digest.ts';
 import { admitWriteInTransaction, assertReplayIntent, getWriteRequest, getWriteRequestById, intentDigest, receiptFor } from './journal.ts';
-import { acquireWorktree, containsPath, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
+import { acquireWorktree, containsPath, getWorktreeBinding, probeWorktreeWriter, type WorktreeBinding } from './ownership.ts';
 import { localHostId } from './identity.ts';
 import { assertPersistenceAccepting, startPersistenceConsumer, waitForWrite, writeResponse } from './service.ts';
 import { managedSyncAuthority, validateManagedSyncOptions, validateSyncAuthority, type SyncAuthority } from './sync-authority.ts';
@@ -189,7 +189,7 @@ export async function beginConnectorSync(engine: BrainEngine, sourceId: string, 
   const authority = await managedSyncAuthority(engine, sourceId, source.incarnation, source.local_path ?? '');
   const binding = await getWorktreeBinding(engine, sourceId);
   // The locked acquisition re-stamps a device-only physical-root change (#5604) before the root is asserted.
-  if (binding) { checkedConnectorBinding(sourceId, source, binding); await (await acquireWorktree(binding, 0, undefined, engine))?.release(); }
+  if (binding) { checkedConnectorBinding(sourceId, source, binding); await probeWorktreeWriter(binding, engine); }
   else authority.writer.databaseOnlyReason = 'connector_database';
   const canonicalRoot = connectorBindingRoot(sourceId, source, binding);
   const session = new ManagedConnectorSync(engine, sourceId, identity, source, authority, binding, canonicalRoot, opts.noEmbed === true, opts.noSchemaPack === true,
