@@ -391,6 +391,10 @@
       },
       {
         "category": "brain",
+        "name": "loop_facts_drift"
+      },
+      {
+        "category": "brain",
         "name": "integrity"
       },
       {

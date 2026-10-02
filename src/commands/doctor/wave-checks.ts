@@ -183,6 +183,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     impact: 'Some conversation-extractor facts were expired by the pre-v0.60.11.0 canonical projection and recall no longer returns them',
     run: async (engine, scope) => (await import('./checks/extractor-facts.ts')).extractorFactsCheck(engine, scope.sourceIds),
   },
+  {
+    id: 'loop_facts_drift', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Retiring closed-loop commitment facts is a host-side, explicit-only repair.',
+    count: d => Number(d.drifted ?? 0),
+    impact: 'Some closed commitment loops still have an active commitment fact, so recall keeps the finished promise',
+    run: async (engine, scope) => (await import('./checks/loop-facts.ts')).loopFactsDriftCheck(engine, scope.sourceIds),
+  },
 ];
 
 /** A check that could not run reports unknown, never ok. */

@@ -2264,9 +2264,9 @@ export async function runCycle(
           details: { reason: 'no_database' },
         });
       } else if (brainDir === null) {
-        phaseResults.push(skipNoBrainDir('extract'));
+        const { result, duration_ms } = await timePhase(async () => (await import('./cycle/connector-extract.ts')).runPhaseExtractDatabaseOnly(engine, { dryRun, sourceId: cycleSourceId, timeBudgetMs: CYCLE_STALE_DRAIN_BUDGET_MS }), 'extract');
+        phaseResults.push({ ...result, duration_ms });
       } else {
-        // Pass changed slugs from sync for incremental extract.
         // If sync didn't run (phases exclude it) or failed, syncPagesAffected
         // is undefined → extract falls back to full walk (safe default).
         progress.start('cycle.extract');

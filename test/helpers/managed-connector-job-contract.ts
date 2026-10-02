@@ -89,9 +89,6 @@ export const POSTGRES_ONLY_CASES: ReadonlySet<ContractCase> = new Set(['synthesi
  * passes. `signature` must match the case's failure message.
  */
 export const EXPECTED_FAILURES: Partial<Record<ContractCase, { issue: string; signature: RegExp; engines?: ReadonlyArray<'pglite' | 'postgres'> }>> = {
-  gmail_sweep_loops_enqueue: { issue: '#5867', signature: /loops_extract jobs enqueued by the managed sweep: 0/ },
-  loops_close: { issue: '#5869', signature: /loops_close reported fact_expired=true but the fact is still active/ },
-  cycle_extract: { issue: '#5875', signature: /cycle extract phase: skipped \(no_brain_dir\)/ },
   extract_timeline_db: { issue: '#5904', signature: /guard refusals: timeline_entries=/ },
 };
 
