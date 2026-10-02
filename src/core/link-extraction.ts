@@ -88,7 +88,8 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // PRE-wave code after this date reads as fresh and won't re-extract until
 // the page is next edited; no fixed watermark can cover code that keeps
 // running past it.
-export const LINK_EXTRACTOR_VERSION_TS = '2026-10-01T00:00:00Z';
+// 2026-10-02: normalizeBasename collapses hyphen runs (#5623), so [[Backlog - vault]] resolves; re-extract.
+export const LINK_EXTRACTOR_VERSION_TS = '2026-10-02T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -1415,7 +1416,7 @@ export function normalizeBasename(s: string): string {
     s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC')
       .replace(SLUG_VARIATION_SELECTORS_RE, '').toLowerCase(), // twin of slugifySegment's strip (#4985)
   );
-  return folded.replace(BASENAME_KEEP_RE, '').trim().replace(/\s+/g, '-');
+  return folded.replace(BASENAME_KEEP_RE, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 }
 
 /** Stable order: shorter slug first (likely closer to brain root), then lexical. */
