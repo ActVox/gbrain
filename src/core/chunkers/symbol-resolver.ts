@@ -291,11 +291,12 @@ async function processChunkBatch(
 
 /**
  * Read the resolution outcome from a single edge's metadata, if any.
- * Returns null when the edge hasn't been processed by the resolver yet.
+ * 'unresolved' also covers edges the resolver hasn't processed yet (no
+ * outcome keys written) — the two are indistinguishable by design.
  *
- * Public helper for downstream code (two-pass.ts, code_blast op) that
- * wants to use the resolver's output without parsing edge_metadata JSON
- * directly.
+ * Public helper for downstream code that wants to use the resolver's
+ * output without parsing edge_metadata JSON directly. Consumer: the
+ * two-pass structural walk (src/core/search/two-pass.ts).
  */
 export type EdgeResolution =
   | { kind: 'resolved'; chunk_id: number }
