@@ -193,7 +193,8 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
   if (renamed && (base?.page.id !== renamed.pageId || base.revision !== renamed.revision || base.page.deleted_at != null)) {
     throw new OperationError('revision_conflict', 'The renamed page changed after sync admission.');
   }
-  const parsedInput = parseMarkdown(p.content, row.slug, { activePack });
+  // row.slug is already resolved; parseMarkdown expects a filename, as in importFromContent.
+  const parsedInput = parseMarkdown(p.content, `${row.slug}.md`, { activePack });
   resolveParsedSubtype(parsedInput, base?.page);
   const expectedSlug = resolveSlugForPath(p.sourcePath);
   const retainedWindowsOrigin = process.platform === 'win32' && snapshot?.page.source_path != null &&
@@ -209,7 +210,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     // The checkpoint may advance past the pinned commit's bytes because the working tree wins, as for any local edit.
     const working = renamed ? null : readSyncFile(root, p.path);
     if (!working || sha256(working) !== p.rawHash
-      || !sameCanonicalImport(base, parseMarkdown(working.toString('utf8'), row.slug, { activePack }))) {
+      || !sameCanonicalImport(base, parseMarkdown(working.toString('utf8'), `${row.slug}.md`, { activePack }))) {
       throw new OperationError('source_changed', 'Newer working-tree bytes and the current page disagree with this pinned Git import.');
     }
     return { observedRevision: snapshot?.revision ?? null, noop: true, contentUnchanged: true, validate,
@@ -237,7 +238,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     // guarded proof about the other identity. Keep the cursor explicitly blocked.
     throw new OperationError('revision_conflict', 'A different page already owns this file identity; resolve the duplicate before syncing.');
   }
-  const parsed = parseMarkdown(p.content, row.slug, { activePack });
+  const parsed = parseMarkdown(p.content, `${row.slug}.md`, { activePack });
   resolveParsedSubtype(parsed, base?.page);
   const tags = [...new Set([...(base?.tags ?? []), ...ready.parsedPage.tags])].sort();
   const renderedPage = { ...(base?.page ?? { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage } as Page;

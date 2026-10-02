@@ -447,3 +447,51 @@ test('continuous foreground arrivals cannot starve a bounded sync batch', async 
     }finally{stopping=true;clearInterval(timer);await Promise.all(admitted);await disposePersistenceConsumer(engine);}
   }
 }),120_000);
+
+// Page identity must survive repeated suffixes. Existing sync cases only used
+// extension-free slugs; this exercises actual publication, without a new seam.
+test('managed sync preserves extension-bearing slugs and their distinct extension-free siblings', async () =>
+  withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      const content = (title: string, body: string) => `---\ntype: note\ntitle: ${title}\n---\n${body}\n`;
+      const ordinary = content('Ordinary', 'The ordinary page remains separate.');
+      const extended = content('Extended', 'The extension-bearing page keeps its identity.');
+      // No explicit title: the overlay comparison must use the same filename fallback as import.
+      const repeated = '---\ntype: note\n---\nThe repeated-extension page is separate too.\n';
+      const f = await fixture(engine, {
+        'notes/example.md': ordinary,
+        'notes/example.md.md': extended,
+        'notes/example.md.md.md': repeated,
+      });
+      const opts = { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true };
+      expect(await performManagedSync(engine, opts)).toMatchObject({ status: 'first_sync', added: 3 });
+      const slugs = ['notes/example', 'notes/example.md', 'notes/example.md.md'];
+      const before = await Promise.all(slugs.map(slug => engine.getPage(slug, { sourceId: f.id })));
+      expect(new Set(before.map(page => page?.id)).size).toBe(3);
+      expect(before.map(page => page?.title)).toEqual(['Ordinary', 'Extended', 'Example.Md.Md']);
+      expect(before.map(page => page?.source_path)).toEqual(slugs.map(slug => `${slug}.md`));
+      expect(readFileSync(join(f.root, 'notes/example.md.md.md'), 'utf8')).toBe(repeated);
+      for (const slug of slugs) expect(readFileSync(join(f.root, `${slug}.md`), 'utf8')).not.toContain('slug:');
+      writeFileSync(join(f.root, 'notes/example.md.md'), content('Extended', 'Updated extension-bearing content.'));
+      const head = commit(f.root, 'update extension-bearing page');
+      expect(await performManagedSync(engine, opts)).toMatchObject({ status: 'synced', modified: 1, toCommit: head });
+      const after = await Promise.all(slugs.map(slug => engine.getPage(slug, { sourceId: f.id })));
+      expect(after.map(page => page?.id)).toEqual(before.map(page => page?.id));
+      expect(after[0]?.compiled_truth).toBe(before[0]?.compiled_truth);
+      expect(after[1]?.compiled_truth).toContain('Updated extension-bearing content.');
+      expect(after[2]?.compiled_truth).toBe(before[2]?.compiled_truth);
+      expect(await performManagedSync(engine, opts)).toMatchObject({ status: 'up_to_date' });
+    }
+  }), 120_000);
+
+test('managed sync still rejects conflicting explicit slugs on extension-bearing paths', async () =>
+  withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+    for (const engine of engines) {
+      const f = await fixture(engine, { 'notes/example.md.md':
+        '---\ntype: note\ntitle: Example\nslug: notes/other\n---\nA conflicting identity must not be imported.\n' });
+      expect(await performManagedSync(engine, { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true }))
+        .toMatchObject({ status: 'blocked_by_failures', failedFiles: 1 });
+      expect(await engine.getPage('notes/example.md', { sourceId: f.id })).toBeNull();
+      expect(await engine.getPage('notes/other', { sourceId: f.id })).toBeNull();
+    }
+  }), 120_000);
