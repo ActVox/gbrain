@@ -545,7 +545,7 @@ describe('detectThreadLoop precision corpus', () => {
 });
 
 // gbrain-evals N7 (2026-10-02 receipt, repros n7-2, n7-6, n7-7).
-describe('N7 eval regressions', () => {
+describe('N7 open-loops wave regressions', () => {
   test('N7-7: a question mark inside a link is not an ask', () => {
     expect(asksQuestion('FYI, the doc: https://docs.example.com/view?id=42')).toBe(false);
     expect(asksQuestion('See www.example.com/a?b=c for details.')).toBe(false);
