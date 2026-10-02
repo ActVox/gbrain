@@ -81,6 +81,20 @@ export function isClaudeCodeWorkflowArtifactFile(path: string): boolean {
   return i !== -1 && segs[i + 1] === 'workflows' && segs.length > i + 2;
 }
 
+/**
+ * Claude Code Remote Control state files written next to session JSONL
+ * (`<session-uuid>.ccr-tip.json`, `bridge-pointer.json`). They match the
+ * importable `.json` extension but are never transcripts (#5597).
+ */
+const CCR_TIP_SUFFIX = '.ccr-tip.json';
+const CCR_BRIDGE_POINTER = 'bridge-pointer.json';
+
+/** True for Claude Code Remote Control state files (never transcripts). */
+export function isClaudeCodeRemoteControlStateFile(path: string): boolean {
+  const base = path.split(/[/\\]/).pop() ?? '';
+  return base.endsWith(CCR_TIP_SUFFIX) || base === CCR_BRIDGE_POINTER;
+}
+
 /** Keys that mark a Claude Code project transcript. */
 function looksLikeClaudeLine(obj: Record<string, unknown>): boolean {
   if (
