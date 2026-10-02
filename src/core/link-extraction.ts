@@ -1895,6 +1895,9 @@ const TIMELINE_LINE_RE = /^\s*(?:-\s*)?\*\*(\d{4}-\d{2}-\d{2})\*\*\s*([|\-–—
 // ASCII dates were never timeline entries and must stay that way.
 const TIMELINE_LINE_RE_CN = /^\s*(?:-\s*)?(?:\*\*)?(\d{4})年(\d{1,2})月(\d{1,2})日?(?:\*\*)?\s*([|\-–—]+)\s*(.+?)\s*$/;
 
+// `### YYYY-MM-DD — summary` headings, as the FS extractor (timeline-extract.ts Format 2) accepts.
+const TIMELINE_HEADING_RE = /^\s*###\s+(\d{4}-\d{2}-\d{2})\s*[\-–—]+\s*(.+?)\s*$/;
+
 /**
  * Parse timeline entries from content. Looks at:
  *   - The full content (most pages have a top-level "## Timeline" heading).
@@ -1910,23 +1913,32 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
 
   let i = 0;
   while (i < lines.length) {
-    // Try English format first, then Chinese
-    const m = TIMELINE_LINE_RE.exec(lines[i]);
+    const headingMatch = TIMELINE_HEADING_RE.exec(lines[i]);
+    const isHeadingEntry = headingMatch !== null;
     let date: string;
     let summary: string;
-    let separator: string;
-    if (m) {
-      date = m[1];
-      separator = m[2];
-      summary = m[3].trim();
+    let separator = '';
+
+    if (headingMatch) {
+      date = headingMatch[1];
+      summary = headingMatch[2].trim();
     } else {
-      const cm = TIMELINE_LINE_RE_CN.exec(lines[i]);
-      if (!cm) { i++; continue; }
-      // Normalize Chinese date to YYYY-MM-DD
-      date = `${cm[1]}-${cm[2].padStart(2, '0')}-${cm[3].padStart(2, '0')}`;
-      separator = cm[4];
-      summary = cm[5].trim();
+      // Try English bullet format first, then Chinese.
+      const lineMatch = TIMELINE_LINE_RE.exec(lines[i]);
+      if (lineMatch) {
+        date = lineMatch[1];
+        separator = lineMatch[2];
+        summary = lineMatch[3].trim();
+      } else {
+        const chineseMatch = TIMELINE_LINE_RE_CN.exec(lines[i]);
+        if (!chineseMatch) { i++; continue; }
+        // Normalize Chinese date to YYYY-MM-DD.
+        date = `${chineseMatch[1]}-${chineseMatch[2].padStart(2, '0')}-${chineseMatch[3].padStart(2, '0')}`;
+        separator = chineseMatch[4];
+        summary = chineseMatch[5].trim();
+      }
     }
+
     if (!isValidDate(date) || summary.length === 0) { i++; continue; }
     // #4277: backlink materialization historically wrote dated navigation
     // receipts such as `- **2026-06-13** | Referenced in [Acme](../companies/acme.md)`.
@@ -1942,7 +1954,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
     // shape; split them exactly like the FS extractor (extractTimelineFromContent
     // Format 1) so FS- and DB-extracted rows share one (source, summary) shape
     // and the DB dedup index collapses re-extractions instead of duplicating.
-    // Dash-separated bullets (`- **DATE** - text`) are one summary — no split.
+    // Dash-separated bullets and dated headings are one summary — no split.
     let source = 'markdown';
     if (separator.includes('|')) {
       const at = findTimelineSourceDelimiter(summary);
@@ -1956,7 +1968,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
     let j = i + 1;
     while (j < lines.length) {
       const next = lines[j];
-      if (TIMELINE_LINE_RE.test(next)) break;
+      if (TIMELINE_LINE_RE.test(next) || TIMELINE_HEADING_RE.test(next)) break;
       if (/^#{1,6}\s/.test(next) || isMaterializedMarkerLine(next)) break; // #5567: a marker opens the next bullet
       if (next.trim().length === 0 && detailLines.length === 0) {
         // skip leading blank line; if we hit a blank after detail content
@@ -1965,8 +1977,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
         continue;
       }
       if (next.trim().length === 0 && detailLines.length > 0) break;
-      // Indented continuation lines are detail; flush-left non-list lines too.
-      if (/^\s+/.test(next) || (!next.startsWith('-') && !next.startsWith('*') && !next.startsWith('#'))) {
+      if (isHeadingEntry || /^\s+/.test(next) || (!next.startsWith('-') && !next.startsWith('*') && !next.startsWith('#'))) {
         detailLines.push(next.trim());
         j++;
         continue;
