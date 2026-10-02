@@ -1649,8 +1649,12 @@ export function formatResult(
     case 'list_pages': {
       const pages = result as any[];
       if (pages.length === 0) return 'No pages found.\n';
+      const cell = (v: unknown): string => {
+        const s = v === null || v === undefined ? '' : String(v);
+        return s.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+      };
       return pages.map(p =>
-        `${p.slug}\t${p.type}\t${p.updated_at?.toString().slice(0, 10) || '?'}\t${p.title}`,
+        `${cell(p.slug)}\t${cell(p.type)}\t${cell(p.updated_at?.toString().slice(0, 10) || '?')}\t${cell(p.title)}`,
       ).join('\n') + '\n';
     }
     case 'search':
@@ -1891,7 +1895,7 @@ const THIN_CLIENT_REFUSE_HINTS: Record<string, string> = {
   'code-callers': '`code-callers` has no MCP op yet. Run on the host.',
   'code-callees': '`code-callees` has no MCP op yet. Run on the host.',
   // scratch-DB audit additions
-  config: "config reads/writes the host brain's config plane. Edit the host's .gbrain/config.json (file-plane keys) or run on the host with GBRAIN_HOME set.",
+  config: "config reads/writes the host brain's config plane. Edit the host's .gbrain/config.json (file-plane keys) or run on the host with GBRAIN_HOME set. self_upgrade.* keys are machine-local and work here.",
   jobs: '`jobs list`, `jobs get <id>`, and `jobs stats` are thin-client routable; this subcommand runs against the host queue. Use the submit_job / list_jobs / get_job / get_job_stats MCP tools from your agent, or run on the host with GBRAIN_HOME set.',
   // Gap-closure wave [OV6]: routable subcommands are intercepted before this
   // hint fires — these fire only for the host-bound remainder.

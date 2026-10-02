@@ -1524,43 +1524,43 @@ export class PGLiteEngine implements BrainEngine {
       extraFilter += ` AND p.source_id = $${params.length}`;
     }
 
-    // Page grain — one row per page by construction, so no best_per_page
-    // pooling CTE is needed. The LEFT JOIN LATERAL picks the representative
-    // chunk (compiled_truth first, then lowest chunk_index); COALESCEs keep
-    // chunkless pages retrievable (the extreme D1 case: a title with no
-    // body) with the alias-hop row shape (chunk_id 0, empty chunk_text).
+    // Page grain: one row per page, so no best_per_page pool. top_pages ranks
+    // and limits first; the representative-chunk LATERAL (compiled_truth
+    // first, then lowest chunk_index) and the stale probe then run per OUTPUT
+    // row, not per matched page. Neither affects order, so rows are unchanged.
+    // COALESCEs keep chunkless pages retrievable (chunk_id 0, empty text).
     // Accepted limitations (Reviewer F5/F6): the synthetic chunkless row
     // dedups on empty chunk_text (fusion's compiledTruthBoost skips it since
-    // #3695 — chunk_id 0 + empty chunk_text never gains chunk authority);
-    // and detail='low' filters only the REPRESENTATIVE — pages without a
-    // compiled_truth chunk still surface (unlike the keyword arm's filter).
+    // #3695); detail='low' filters only the representative.
     const titlesSql =
-      `SELECT
-         p.slug, p.id as page_id, p.title, p.type, p.source_id,
-         p.effective_date, p.effective_date_source,
+      `WITH top_pages AS (
+         SELECT p.slug, p.id as page_id, p.title, p.type, p.source_id,
+           p.effective_date, p.effective_date_source, p.updated_at,
+           ts_rank_cd(${titleVector}, websearch_to_tsquery('${ftsLang}', $1)) * ${sourceFactorCase} AS score
+         FROM pages p JOIN sources s ON s.id = p.source_id
+         WHERE ${titleVector} @@ websearch_to_tsquery('${ftsLang}', $1)
+           ${extraFilter} ${hardExcludeClause} ${visibilityClause}
+         ORDER BY score DESC, p.id ASC
+         LIMIT $2 OFFSET $3
+       )
+       SELECT tp.slug, tp.page_id, tp.title, tp.type, tp.source_id,
+         tp.effective_date, tp.effective_date_source,
          COALESCE(rep.id, 0) as chunk_id,
          COALESCE(rep.chunk_index, 0) as chunk_index,
          COALESCE(rep.chunk_text, '') as chunk_text,
-         COALESCE(rep.chunk_source, 'compiled_truth') as chunk_source,
-         ts_rank_cd(${titleVector}, websearch_to_tsquery('${ftsLang}', $1)) * ${sourceFactorCase} AS score,
-         CASE WHEN p.updated_at < (
-           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
-         ) THEN true ELSE false END AS stale
-       FROM pages p
-       JOIN sources s ON s.id = p.source_id
+         COALESCE(rep.chunk_source, 'compiled_truth') as chunk_source, tp.score,
+         CASE WHEN tp.updated_at < (SELECT MAX(te.created_at) FROM timeline_entries te
+           WHERE te.page_id = tp.page_id) THEN true ELSE false END AS stale
+       FROM top_pages tp
        LEFT JOIN LATERAL (
          SELECT cc.id, cc.chunk_index, cc.chunk_text, cc.chunk_source
          FROM content_chunks cc
-         WHERE cc.page_id = p.id
-           AND cc.modality = 'text'
+         WHERE cc.page_id = tp.page_id AND cc.modality = 'text'
            ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
          ORDER BY (cc.chunk_source = 'compiled_truth') DESC, cc.chunk_index ASC
          LIMIT 1
        ) rep ON true
-       WHERE ${titleVector} @@ websearch_to_tsquery('${ftsLang}', $1)
-         ${extraFilter} ${hardExcludeClause} ${visibilityClause}
-       ORDER BY score DESC, p.id ASC
-       LIMIT $2 OFFSET $3`;
+       ORDER BY tp.score DESC, tp.page_id ASC`;
 
     let { rows } = await this.db.query(titlesSql, params);
     if (rows.length === 0) {

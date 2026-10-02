@@ -179,6 +179,8 @@ Connect to someone else's brain without running a local engine:
 
 ```bash
 gbrain init --mcp-only            # configures remote MCP, skips local DB
+# requires: --issuer-url --mcp-url --oauth-client-id --oauth-client-secret
+# (or GBRAIN_REMOTE_ISSUER_URL / GBRAIN_REMOTE_MCP_URL / ... env vars)
 ```
 
 Useful for: team mounts, brain-as-a-service deployments, dev machines without disk space. Most local commands refuse with a paste-ready hint. See [`docs/architecture/topologies.md`](architecture/topologies.md).

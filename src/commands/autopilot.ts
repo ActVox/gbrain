@@ -37,6 +37,7 @@ import {
   isCacheFresh,
   readUpdateCache,
   reconcileBreadcrumb,
+  resolveQuietHoursWindow,
   resolveSelfUpgradeMode,
 } from '../core/self-upgrade.ts';
 import { logSelfUpgrade } from '../core/audit/self-upgrade-audit.ts';
@@ -329,14 +330,15 @@ export function decideLockAcquisition(
 
 /**
  * Reconcile the pre-swap breadcrumb at daemon boot (the post-swap attribution
- * gate). If we're running the version we attempted, the swap+relaunch worked;
- * if not, the new binary failed to launch and we record it as a known-bad
- * version so the auto channel never retries it. Best-effort.
+ * gate). If we're running the version we attempted or a newer one, the
+ * swap+relaunch worked; if not, the new binary failed to launch and we record
+ * it as a known-bad version so the auto channel never retries it. Best-effort.
  */
 export function reconcileSelfUpgradeAtBoot(): void {
   try {
     const cfg = loadConfig();
     if (!cfg) return;
+    const attempted = cfg.self_upgrade?.attempting_version;
     const { state, transition } = reconcileBreadcrumb(cfg.self_upgrade, VERSION);
     if (!transition) return;
     cfg.self_upgrade = state;
@@ -345,16 +347,17 @@ export function reconcileSelfUpgradeAtBoot(): void {
       channel: 'autopilot',
       action: 'apply',
       current: VERSION,
+      latest: attempted,
       outcome: transition === 'applied' ? 'applied' : 'failed',
       reason:
         transition === 'applied'
-          ? 'breadcrumb matched running version'
-          : 'crash-on-launch: attempted version != running version (recorded known-bad)',
+          ? 'running version is at or past the attempted version'
+          : 'crash-on-launch: running version is not at or past the attempted version (recorded known-bad)',
     });
     if (transition === 'applied') {
-      console.log(`[autopilot] self-upgrade confirmed: now running ${VERSION}.`);
+      console.log(`[autopilot] self-upgrade confirmed: attempted ${attempted}, now running ${VERSION}.`);
     } else {
-      console.error('[autopilot] self-upgrade did not take (running an older version); recorded known-bad.');
+      console.error(`[autopilot] self-upgrade did not take: attempted ${attempted}, still running ${VERSION}; recorded ${attempted} known-bad.`);
     }
   } catch {
     /* best-effort */
@@ -438,9 +441,7 @@ export async function attemptAutopilotSelfUpgrade(
     const latestVersion = entry.marker.latest;
 
     const idle = await computeAutopilotIdle(engine, engineType);
-    const qh = cfg.self_upgrade?.quiet_hours;
-    const tz = qh?.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const verdict = evaluateQuietHours({ start: qh?.start ?? 23, end: qh?.end ?? 8, tz }, new Date());
+    const verdict = evaluateQuietHours(resolveQuietHoursWindow(cfg.self_upgrade?.quiet_hours), new Date());
     const installMethod = detectInstallMethod();
 
     const decision = decideSelfUpgrade({

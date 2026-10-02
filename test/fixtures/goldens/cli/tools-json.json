@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 203219,
-    "stdoutSha256": "e07561286578badf4a4d0fbf7c4d1099ca3a90a938e578a2cfedb439ddf8501f",
+    "stdoutBytes": 204300,
+    "stdoutSha256": "90db6033940f46bd5594c9786287792ce46970d6aeba5f01fe31067083d003c2",
     "toolNames": [
       "remember",
       "entity",
@@ -472,7 +472,7 @@
         }
       },
       {
-        "description": "List pages with optional filters. For 'what's recent / what did I touch this week' questions, use list_pages with sort=updated_desc instead of semantic search. Default 50 rows; remote callers are capped at 100 (local CLI callers' explicit limits are honored). A result with exactly `limit` rows may be truncated. For exhaustive listing, page with sort=updated_asc + updated_after=<last row's updated_at> until a page returns fewer rows than the limit.",
+        "description": "List pages with optional filters. For 'what's recent / what did I touch this week' questions, use list_pages with sort=updated_desc instead of semantic search. Default 50 rows; remote callers are capped at 100 (local CLI callers' explicit limits are honored). A result with exactly `limit` rows may be truncated. For exhaustive listing, page with updated_after=<last row's updated_at_iso> + updated_after_slug=<last row's slug> until a page returns fewer rows than the limit (the keyset forces sort=updated_asc; a bare updated_after cursor skips rows sharing the cursor timestamp).",
         "name": "list_pages",
         "parameters": {
           "include_deleted": "boolean?",
@@ -482,7 +482,8 @@
           "source_id": "string?",
           "tag": "string?",
           "type": "string?",
-          "updated_after": "string?"
+          "updated_after": "string?",
+          "updated_after_slug": "string?"
         },
         "schema": {
           "properties": {
@@ -521,7 +522,11 @@
               "type": "string"
             },
             "updated_after": {
-              "description": "ISO date (YYYY-MM-DD) or full timestamp. Returns pages with updated_at > value.",
+              "description": "ISO date (YYYY-MM-DD) or full timestamp. Returns pages with updated_at > value. Bare (without updated_after_slug) this is LOSSY across rows sharing one timestamp — a bulk sync stamps one now() across a transaction; pair with updated_after_slug to page exactly.",
+              "type": "string"
+            },
+            "updated_after_slug": {
+              "description": "Keyset cursor slug: pass the last row's slug together with updated_after set to that row's updated_at_iso (column precision — a millisecond-rounded value re-selects same-millisecond rows). Resumes strictly after (updated_at, slug) and forces sort=updated_asc.",
               "type": "string"
             }
           },
@@ -5191,6 +5196,7 @@
         "parameters": {
           "id": "number",
           "note": "string?",
+          "source_id": "string?",
           "status": "string"
         },
         "schema": {
@@ -5201,6 +5207,10 @@
             },
             "note": {
               "description": "Optional closed_by note (default: manual).",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "The loop's home source (e.g. the google source, when the caller's transport is bound elsewhere). Remote callers must be write-bound to it — a federated read grant does not authorize the close. When omitted, the caller's bound write source is used.",
               "type": "string"
             },
             "status": {

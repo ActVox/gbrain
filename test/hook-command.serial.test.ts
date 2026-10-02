@@ -469,6 +469,35 @@ describe('user-prompt', () => {
     expect((await lastHeartbeat())?.reason).toBe('transcript_outside_projects_dir');
   });
 
+  // #5465: Claude Code writes transcripts asynchronously, so turn 1 of a
+  // fresh session (or the only turn of `claude -p`) can hand the hook a
+  // path that does not exist yet. A CONFINED absent path has nothing to
+  // read — the same trust as no transcript_path at all — so the event
+  // proceeds prompt-only instead of aborting with transcript_unreadable.
+  test('#5465: an absent transcript inside the root still delivers prompt-only context', async () => {
+    const dataDir = join(tmp, 'data');
+    writePgliteConfig(dataDir);
+    await startServer({ dataDir, blockText: 'CTX: first-turn context' });
+    const projectsRoot = join(tmp, 'projects-root-5465');
+    // The project DIRECTORY exists (Claude Code creates it); only the
+    // session file is not written yet — the shape the issue observed.
+    mkdirSync(join(projectsRoot, 'proj-slug'), { recursive: true });
+    const absent = join(projectsRoot, 'proj-slug', 'fresh-session.jsonl');
+    const out = collectStdout();
+    expect(
+      await runHook(['user-prompt'], {
+        ...out.io,
+        stdin: JSON.stringify({ prompt: 'first turn of a fresh session', transcript_path: absent }),
+        transcriptRoot: projectsRoot,
+      }),
+    ).toBe(0);
+    const parsed = JSON.parse(out.get().trim());
+    expect(parsed.hookSpecificOutput.additionalContext).toBe('CTX: first-turn context');
+    const hb = await lastHeartbeat();
+    expect(hb?.outcome).toBe('ok');
+    expect(hb?.turns).toBe(1);
+  });
+
   test('unauthorized (server holds a different secret) degrades cleanly', async () => {
     const dataDir = join(tmp, 'data');
     writePgliteConfig(dataDir);

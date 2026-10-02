@@ -34,6 +34,26 @@ import {
 
 const STALE_AFTER_MS = 24 * 3_600_000;
 
+/** Does this source carry Google content? A loops suppression row is only
+ *  ever consulted by the detector inside a google source — a mute written
+ *  anywhere else can never match. */
+async function sourceHasGoogleContent(ctx: OperationContext, sourceId: string): Promise<boolean> {
+  try {
+    const rows = await ctx.engine.executeRaw<{ config: unknown }>(
+      `SELECT config FROM sources WHERE id = $1`,
+      [sourceId],
+    );
+    const c = rows[0]?.config;
+    const cfg =
+      typeof c === 'string'
+        ? (JSON.parse(c) as Record<string, unknown>)
+        : ((c ?? {}) as Record<string, unknown>);
+    return cfg.kind === 'google';
+  } catch {
+    return false;
+  }
+}
+
 interface GoogleSourceFreshness {
   id: string;
   last_sync_at: string | null;
@@ -467,24 +487,49 @@ const loops_close: Operation = {
     id: { type: 'number', required: true, description: 'Loop id (from open_loops).' },
     status: { type: 'string', required: true, enum: ['done', 'dropped'], description: 'Terminal state.' },
     note: { type: 'string', description: 'Optional closed_by note (default: manual).' },
+    source_id: {
+      type: 'string',
+      description:
+        "The loop's home source (e.g. the google source, when the caller's transport is bound " +
+        'elsewhere). Remote callers must be write-bound to it — a federated read grant does not ' +
+        'authorize the close. When omitted, the caller\'s bound write source is used.',
+    },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    const scope = sourceScopeOpts(ctx);
-    // Remote callers stay inside their granted source scope; trusted local
+    const requested = p.source_id as string | undefined;
+    if (requested) validateSourceId(requested);
+    // Remote callers stay inside their bound write source; trusted local
     // closes across sources (null = unscoped).
     let sourceId: string | null = null;
     if (ctx.remote !== false) {
-      sourceId = scope.sourceId ?? (scope.sourceIds && scope.sourceIds.length === 1 ? scope.sourceIds[0] : null);
-      if (!sourceId) {
+      // Write authority is the caller's bound write source
+      // (auth.sourceId, dual-written to ctx.sourceId) ONLY — the federated
+      // allowedSources array is a READ grant and must never authorize a
+      // close+fact-expiry write in a sibling source (contract.ts).
+      const writeSource = (ctx.auth?.sourceId ?? ctx.sourceId) as string | undefined;
+      if (!writeSource) {
         // Enumerated error envelope (dispatch classifies + request-logs it),
         // never a success-shaped { closed:false } payload.
         throw new OperationError(
           'permission_denied',
-          'loops_close: remote callers need a single-source scope',
+          'loops_close: remote callers need a bound write source',
         );
       }
+      if (requested && requested !== writeSource) {
+        throw new OperationError(
+          'permission_denied',
+          `loops_close: source "${requested}" is outside the caller's write scope`,
+        );
+      }
+      // No cross-source SELECT: the close runs scoped to the write source,
+      // so a loop living in a grant-adjacent source is indistinguishable
+      // from a missing id — both answer closed:false, and neither the row's
+      // existence nor its home source name ever leaves the boundary.
+      sourceId = writeSource;
+    } else {
+      sourceId = requested ?? null;
     }
     if (ctx.dryRun) return { dry_run: true, action: 'loops_close', id: p.id, status: p.status };
     const row = await closeOpenLoop(
@@ -525,22 +570,29 @@ const loops_mute: Operation = {
   handler: async (ctx, p) => {
     const sourceId = (p.source_id as string | undefined) ?? ctx.sourceId ?? 'default';
     validateSourceId(sourceId);
-    // Remote callers stay strictly inside their grant (mirrors loops_close):
-    // a scalar-scoped caller may only mute within its own source; federated
-    // grants must include the target. Trusting p.source_id for a remote
-    // WRITE would let any remote client plant suppression rows into
+    // Remote callers stay strictly inside their bound write source (mirrors
+    // loops_close): the federated allowedSources array is a READ grant and
+    // never authorizes the write. Trusting it (or p.source_id alone) for a
+    // remote WRITE would let any remote client plant suppression rows into
     // arbitrary sources (targeted denial-of-loop-detection).
     if (ctx.remote !== false) {
-      const scope = sourceScopeOpts(ctx);
-      const granted =
-        (scope.sourceId && scope.sourceId === sourceId) ||
-        (scope.sourceIds?.includes(sourceId) ?? false);
-      if (!granted) {
+      const writeSource = (ctx.auth?.sourceId ?? ctx.sourceId) as string | undefined;
+      if (!writeSource || sourceId !== writeSource) {
         throw new OperationError(
           'permission_denied',
-          `loops_mute: source "${sourceId}" is outside the caller's scope`,
+          `loops_mute: source "${sourceId}" is outside the caller's write scope`,
         );
       }
+    }
+    // A suppression is only consulted inside a google source — when the
+    // caller omits source_id and the resolved target holds no Google
+    // content, the row can never match. Refuse instead of planting a dead
+    // mute (remote callers bound to a non-google source hit exactly this).
+    if (p.source_id === undefined && !(await sourceHasGoogleContent(ctx, sourceId))) {
+      throw new OperationError(
+        'invalid_params',
+        `loops_mute: source "${sourceId}" holds no Google content — a suppression there can never match; pass source_id naming the google source`,
+      );
     }
     if (ctx.dryRun) return { dry_run: true, action: 'loops_mute', kind: p.kind, value: p.value };
     await addSuppression(ctx.engine, sourceId, p.kind as 'sender' | 'thread', p.value as string);
@@ -564,20 +616,27 @@ const loops_unmute: Operation = {
   handler: async (ctx, p) => {
     const sourceId = (p.source_id as string | undefined) ?? ctx.sourceId ?? 'default';
     validateSourceId(sourceId);
-    // Same grant check as loops_mute — an unmute is equally a targeted write:
-    // letting a remote caller lift another source's suppression would re-open
-    // the very noise channel its owner silenced.
+    // Same write-source check as loops_mute — an unmute is equally a targeted
+    // write, and a federated read grant does not confer it: letting a remote
+    // caller lift another source's suppression would re-open the very noise
+    // channel its owner silenced.
     if (ctx.remote !== false) {
-      const scope = sourceScopeOpts(ctx);
-      const granted =
-        (scope.sourceId && scope.sourceId === sourceId) ||
-        (scope.sourceIds?.includes(sourceId) ?? false);
-      if (!granted) {
+      const writeSource = (ctx.auth?.sourceId ?? ctx.sourceId) as string | undefined;
+      if (!writeSource || sourceId !== writeSource) {
         throw new OperationError(
           'permission_denied',
-          `loops_unmute: source "${sourceId}" is outside the caller's scope`,
+          `loops_unmute: source "${sourceId}" is outside the caller's write scope`,
         );
       }
+    }
+    // Mirrors loops_mute: an omitted source_id resolving to a source with no
+    // Google content can never hold a live suppression — refuse rather than
+    // answer removed:false on a row that should never have existed.
+    if (p.source_id === undefined && !(await sourceHasGoogleContent(ctx, sourceId))) {
+      throw new OperationError(
+        'invalid_params',
+        `loops_unmute: source "${sourceId}" holds no Google content — pass source_id naming the google source`,
+      );
     }
     if (ctx.dryRun) return { dry_run: true, action: 'loops_unmute', kind: p.kind, value: p.value };
     const removed = await removeSuppression(

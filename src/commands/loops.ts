@@ -148,8 +148,8 @@ export async function runLoops(engine: BrainEngine, args: string[]): Promise<voi
         'gbrain loops — inspect and manage open loops',
         '  list  [--status open|done|dropped|stale] [--type <loop_type>] [--source <id>] [--json]',
         '  show  <id> [--json]',
-        '  done  <id>        mark handled',
-        '  drop  <id>        not going to do it',
+        '  done  <id> [--note <text>]   mark handled',
+        '  drop  <id> [--note <text>]   not going to do it',
         '  mute  sender <email> | thread <thread-id>   [--source <id>]',
         '  unmute sender <email> | thread <thread-id>  [--source <id>]   undo a mute',
         '',
@@ -214,10 +214,16 @@ export async function runLoops(engine: BrainEngine, args: string[]): Promise<voi
       console.error(`Usage: gbrain loops ${sub} <id>`);
       process.exit(2);
     }
+    const noteIdx = rest.indexOf('--note');
+    const note = noteIdx !== -1 ? rest[noteIdx + 1] : undefined;
     const result = (await handleToolCall(
       engine,
       'loops_close',
-      { id, status: sub === 'done' ? 'done' : 'dropped' },
+      {
+        id,
+        status: sub === 'done' ? 'done' : 'dropped',
+        ...(note !== undefined ? { note } : {}),
+      },
       { sourceId: ALL_SOURCES },
     )) as { closed: boolean; reason?: string; status?: string };
     if (json) {

@@ -64,7 +64,7 @@ import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat, withBudgetTracker, isAvailable } from '../ai/gateway.ts';
-import { createGlobalLlmHaltTracker, haltedClassOf, type GlobalLlmErrorClass } from '../ai/errors.ts';
+import { createGlobalLlmHaltTracker, haltedClassOf, providerContentBlockReason, type GlobalLlmErrorClass } from '../ai/errors.ts';
 import { importFromContent } from '../import-file.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
@@ -101,7 +101,7 @@ export const DEFAULT_EXTRACT_MAX_OUTPUT_TOKENS = 4096;
 
 /**
  * gbrain#4148: consecutive same-content failures of a content-deterministic
- * class (malformed model output) before the page is tombstoned so the
+ * class (malformed model output or provider content block) before the page is tombstoned so the
  * backlog floor can clear. A content edit resets the streak.
  */
 export const MAX_DETERMINISTIC_FAILURES = 3;
@@ -1093,6 +1093,21 @@ export async function runPhaseExtractAtoms(
     }
   }
 
+  // gbrain#4148 content-deterministic classes: hash-keyed bounded tombstone (v146: transcripts too).
+  async function recordDeterministicFailure(item: WorkItem, source: string, error: string): Promise<void> {
+    hardFailureCount++;
+    const failCount = await recordItemFailureCount(item);
+    failures.push({ source, error: error + (failCount != null ? ` (consecutive failure ${failCount} on this content)` : '') });
+    if (failCount == null || failCount < MAX_DETERMINISTIC_FAILURES || opts.dryRun) return;
+    if (item.kind === 'page') {
+      await stampAtomsScanHash(item);
+      tombstonedForFailures.push(item.slug);
+    } else {
+      await stampTranscriptTombstone(item.filePath, item.contentHash);
+      tombstonedTranscripts.push(item.filePath);
+    }
+  }
+
   let stoppedEarly = false;
   await withBudgetTracker(budgetTracker, async () => {
   for (const item of work) {
@@ -1149,29 +1164,8 @@ export async function runPhaseExtractAtoms(
       const parseOutcome = parseAtomsOutcome(result.text);
       if (!parseOutcome.ok) {
         malformedOutputs++;
-        hardFailureCount++;
         if (!opts.dryRun && managed && origin) writeRequests.push(...await publishManagedAtoms(engine, managed, origin, [], parseOutcome.reason));
-        const failCount = await recordItemFailureCount(item);
-        failures.push({
-          source: originLabel,
-          error: `malformed model output: ${parseOutcome.reason}` +
-            (failCount != null ? ` (consecutive failure ${failCount} on this content)` : ''),
-        });
-        // Content-deterministic class: the same prose reliably produces
-        // unparseable output. After N consecutive failures on the SAME
-        // content hash, tombstone so the backlog floor clears; a content
-        // edit re-eligibilizes (stamp is hash-keyed). Transient provider
-        // errors never reach here — they throw and take the catch path.
-        // v146: transcripts get the identical bound, via their own store.
-        if (failCount != null && failCount >= MAX_DETERMINISTIC_FAILURES && !opts.dryRun) {
-          if (item.kind === 'page') {
-            await stampAtomsScanHash(item);
-            tombstonedForFailures.push(item.slug);
-          } else {
-            await stampTranscriptTombstone(item.filePath, item.contentHash);
-            tombstonedTranscripts.push(item.filePath);
-          }
-        }
+        await recordDeterministicFailure(item, originLabel, `malformed model output: ${parseOutcome.reason}`);
         continue;
       }
       const atoms = parseOutcome.atoms;
@@ -1379,11 +1373,17 @@ export async function runPhaseExtractAtoms(
       }
       // gbrain#4148: classify. Transient provider/infra errors (timeouts,
       // rate limits, 5xx, network) stay retryable and are NOT counted toward
-      // any tombstone. Everything else gets a durable count for
-      // observability, but only the malformed-output class (handled above)
-      // ever tombstones — an unknown error class must never permanently
-      // suppress a page's atoms.
+      // any tombstone. A provider content block (prompt-level refusal) is
+      // content-deterministic: it takes the bounded tombstone path before the
+      // outage check. Everything else gets a durable count for observability,
+      // but an unknown error class must never permanently suppress a page's atoms.
       const message = err instanceof Error ? err.message : String(err);
+      const blockReason = providerContentBlockReason(err);
+      if (blockReason) {
+        llmHalt.reset();
+        await recordDeterministicFailure(item, originLabel, `provider blocked content: ${blockReason}`);
+        continue;
+      }
       // #3044: a whole-run LLM outage halts the phase. No
       // recordItemFailureCount here — a global outage says nothing about the
       // content, so it must not pre-charge the per-page tombstone counter.

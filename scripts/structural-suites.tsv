@@ -42,7 +42,7 @@ test/brain-durability-hook.serial.test.ts	brain-commit-push.sh (D13 guarantee)	4
 test/brain-durability-hook.serial.test.ts	durability push remote confirmation (#5138)	9	readFileSync
 test/brain-durability-hook.serial.test.ts	durability schedule (installCron:true) [D2/D12]	0	readFileSync
 test/brain-durability-hook.serial.test.ts	post-commit hook (D9 local, D7 self-contained)	4	readFileSync
-test/brain-repo-durability.serial.test.ts	hardenBrainRepo	16	readFileSync
+test/brain-repo-durability.serial.test.ts	hardenBrainRepo	20	readFileSync
 test/brain-score-breakdown.test.ts	Bug 11 — BrainHealth type shape	1	bun-file
 test/brain-score-breakdown.test.ts	Bug 11 — doctor renders brain_score breakdown	1	doctor-source-helper
 test/brain-score-breakdown.test.ts	Bug 11 — orphan_pages is "no inbound links"	3	doctor-source-helper
@@ -58,6 +58,7 @@ test/check-bootstrap-guards.test.ts	verify + workflow wiring	4	readFileSync
 test/check-update.test.ts	check-update CLI	3	source-surface-helper
 test/child-worker-supervisor.test.ts	issue #1801 — restartCurrentChild + killChild liveness fix	3	readFileSync
 test/chronicle-extract.test.ts	runChronicleExtract	9	readFileSync
+test/chunkers/symbol-resolver.test.ts	symbol-resolver source hygiene	1	readFileSync
 test/ci-local-empty-mounts.test.ts	(file-level)	2	readFileSync
 test/claude-cli-recipe.test.ts	claude-cli LanguageModel — CLI too old for the provider flags	2	readFileSync
 test/claude-cli-recipe.test.ts	claude-cli LanguageModel — abort + error envelopes	13	readFileSync
@@ -171,7 +172,7 @@ test/frontmatter-install-hook.test.ts	frontmatter install-hook (B13)	22	readFile
 test/get-page-federated-scope.test.ts	#2555 get_chunks federated scope	5	source-surface-helper
 test/get-page-federated-scope.test.ts	#4275 alias hop scope: archived sources, include_deleted, fuzzy precedence, grant precedence	5	source-surface-helper
 test/harness-onboarding.test.ts	harness identity and private handoff	5	readFileSync
-test/hook-command.serial.test.ts	user-prompt	15	source-surface-helper
+test/hook-command.serial.test.ts	user-prompt	16	source-surface-helper
 test/hook-push-spawn-env.test.ts	spawnDetachedPush env handoff	2	readFileSync
 test/hook-push-spawn-env.test.ts	tryExecAsync env handoff	1	readFileSync
 test/integrations-install.test.ts	installRecipeIntoHostRepo — happy path	6	readFileSync

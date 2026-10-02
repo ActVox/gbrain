@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.32.0] - 2026-10-02
 
-**Fix wave 7: the contradiction judge stops excusing undated conflicts as "change over time", "who is waiting on me" ages and ranks requests honestly, and four smaller eval findings plus a backlinks bug are fixed.**
+**Fix wave 7: the contradiction judge stops excusing undated conflicts as "change over time", "who is waiting on me" ages and ranks requests honestly, four smaller eval findings plus a backlinks bug are fixed, and 62 community pull requests land.**
 
 When two notes give different numbers for the same thing and neither note has a date, nothing tells you which came first, so that is a conflict you need to resolve. The judge kept calling those pairs a change over time instead, guessing an order from the numbers themselves (the bigger headcount must be newer) or from the kind of note (a board deck must be newer than a memo). Prompt v4 tells it plainly not to do that, and that one note saying nothing about headcount does not contradict another note that gives one. On a fresh test world it now calls 149 of 150 planted same-time conflicts contradictions (was 131), all 50 undated ones included (was 37). The price is a few more false alarms: 14 of 820 unrelated pairs (was 11) and 5 of 50 compatible pairs (was 2).
 
@@ -34,6 +34,8 @@ When two notes give different numbers for the same thing and neither note has a 
 | `check-backlinks fix` on a managed brain | one refusal per page; dry run claims success | one clear refusal, dry run too |
 
 These came from the gbrain-evals category waves A4 (abstention), N2 (contradictions), N7 (open loops), N9 (multi-hop), N12 (meeting formats) and N13 (code intelligence), plus open issue #5341.
+
+The release also absorbs 62 open community pull requests, each re-checked against current master: sync stops deleting pages it does not own and keeps skillpack files out of managed checkouts, backups and storage restores cover every source and every live page, Claude Sonnet 5.5 works and Sonnet 5 is priced at its standard rate, `list_pages` pages losslessly, a multi-line fact no longer blocks its page from being written, and two search paths get faster. Thank you to everyone listed below.
 
 ## To take advantage of v0.60.32.0
 
@@ -61,6 +63,10 @@ These came from the gbrain-evals category waves A4 (abstention), N2 (contradicti
 - **`Participants` is attendance evidence** everywhere `Attendees` is: a `Participants:` line, `**Participants:**`, or a `## Participants` link-list section.
 - **OR-relaxed keyword rows are not "keyword_exact".** A row from the keyword fallback that matched some query terms but not the query reads `weak_semantic` (`create_safety: unknown`), and CRAG grades a relaxed rank-1 `weak` with the new reason `keyword_relaxed_top`. A chunk that also appears in a strict list is not relaxed.
 - **`gbrain check-backlinks fix` refuses a managed canonical worktree once, before scanning,** with or without `--dry-run`. `check` still reports the gaps (#5341).
+- **Unpriced conversation models no longer stop fact extraction on a default cap.** `extract-conversation-facts`, the `conversation_facts_backfill` phase and transcript-ingest facts drop only the default USD cap, with a warning, when the extraction model has no price. An explicit cap still refuses with `no_pricing`, and the stop now names the model (#5825).
+- **`list_pages` takes `updated_after_slug`** with `updated_after` to resume strictly after a `(updated_at, slug)` keyset, and returns `updated_at_iso`; the truncation hint teaches that recipe (#5641).
+- **Claude 5 models get native request shapes.** `@ai-sdk/anthropic` moves to 3.0.125 (and the `@ai-sdk/provider-utils` override to 4.0.56), so Claude 5 models are no longer sent `temperature` or emulated structured output; Sonnet 5 and Sonnet 5.5 price at $2/$10 per million tokens (#5688, #5690).
+- **`whoami` and `capabilities` report the transport of the verified principal,** not the caller's claim (#5899).
 
 ### Itemized changes
 
@@ -85,6 +91,47 @@ These came from the gbrain-evals category waves A4 (abstention), N2 (contradicti
 #### Maintenance
 
 - **#5341** `check-backlinks fix` managed-worktree refusal.
+
+#### Community fixes
+
+Sync and persistence:
+
+- Deleting a file sync does not own no longer deletes its page (#5648, #5565), and recorded page identities survive exactly on every platform (#5649). Contributed by @MarvinDontPanic.
+- Reserved skillpack paths stay out of managed sync walkers (#5859, #5852); large deferrals deliver on worker-backed single-source runs (#5568, #5386); archives with invalid timestamps are protected from purge (#5618, #5452); `core.hooksPath` is classified by containment and re-harden repairs the exclusion (#5578, #5436). Contributed by @furuchanchan.
+- A committed pending sync cursor resets after a recorded failure (#5687). Contributed by @stevewandler.
+- Page identities with a file extension in the slug are preserved (#5841, #5840). Contributed by @arisgysel-design.
+- Remote page writes infer type and subtype from the active schema pack (#5548); takes fence writes commit on durability-hardened repos (#5638); derived-link errors name the rejected producer (#5643); `PageRevisionConflictError` keeps its specific message (#5659). Contributed by @dovstern.
+- Fence cells encode newlines, so a multi-line fact no longer write-blocks its page (#5844), and pages the provider blocks at the prompt level are tombstoned in `extract-atoms` (#5849). Contributed by @DmitryBMsk.
+
+Backup, storage, migrate and doctor:
+
+- `gbrain migrate` copies every live page, each source's `db_only` dump gets its own export, and `storage status` prints a restore command for exactly the listed files (#5539); connector sources stop pinning `backup_coverage` and `undeclared_db_only_pages` in warn (#5531, #5503, #5505); v0.32.2 verify accepts a duplicate active fence row indexed once (#5814, #5830); `self_upgrade.*` config keys route to the file plane (#5489, #5518); a relaunch onto a newer version counts as applied (#5813, #5826). Contributed by @andreineacsu.
+- `bootstrap_serve_lock` skips only the doctor's own PGLite lock (#5481, #5561). Contributed by @harjothkhara.
+- `sources status` reports an unreadable hold state (#5866); `edges-backfill` rejects invalid `--max-chunks` (#5896); the 3A time-boxed cold-pass test drives its clock deterministically (#5806). Contributed by @Masashi-Ono0611.
+
+Search, graph and timeline:
+
+- The title arm ranks pages before attaching the representative chunk, and dedup's compiled-truth guarantee is linear time with allocation-free Jaccard (#5655, #5652). Contributed by @kvnloo.
+- The relational arm spans every source for unscoped callers (#5640); embed spend records bank provider-reported `usage.tokens` (#5642); `list_pages` keyset paging (#5641). Contributed by @IvanPham03.
+- The two-pass code walk follows the symbol resolver's outcome (#5574). Contributed by @furuchanchan.
+- Symbol-resolver source escapes NUL delimiters (#5580). Contributed by @RoamingQuack.
+- `normalizeBasename` collapses hyphen runs like `slugifySegment`, so `[[Backlog - vault]]` resolves (#5623, #5624). Contributed by @woprrr.
+- Dated `###` headings parse as timeline entries on the database path (#5562). Contributed by @kishorkukreja.
+- Embedding signature invalidation skips soft-deleted pages (#5647). Contributed by @MarvinDontPanic.
+
+Facts, models and extraction:
+
+- Unpriced conversation models keep explicit caps and drop only the default (#5825, #5823). Contributed by @javieraldape.
+- Claude Sonnet 5.5, the Sonnet 5 price and the Claude 5 request shape (#5688, #5690). Contributed by @morven-ai and @mdoens.
+- `propose_takes` scales its call timeout with its output cap (#5771). Contributed by @h6y3.
+- The embed phase is skipped when embeddings are disabled (#5536). Contributed by @tarush1989.
+
+CLI, hooks, connectors and loops:
+
+- `extract-conversation-facts --json` (#5704, #5448); a not-yet-written transcript reaches the prompt-only hook path (#5465, #5724); timeline summaries drop a citation's link target (#5483, #5703); Claude Code Remote Control state files are skipped (#5597, #5702); `list_pages` TSV escapes record-boundary characters (#5784); `bootstrap harness --help` prints help (#5488, #5782). Contributed by @RerankerGuo.
+- Loop writes enforce the bound write source and hide foreign loop existence (#5697); persisted Gmail receipts omit ephemeral handles (#5802, #5818); `gbrain init` help and INSTALL show the supported thin-client flags (#5800, #5816); bootstrap verify says `facts.default_visibility` governs extraction writes only (#5605, #5834). Contributed by @furuchanchan.
+- Autopilot skips a tick on a transient `listAllSources` error instead of running the legacy repo-root cycle (#5678). Contributed by @bengio777.
+- `whoami`/`capabilities` transport from the verified principal (#5899); native CI never narrows scope on a large, capped or incomplete PR file list (#5900); `ci:local` uses portable `xargs` and a container-built CLI on macOS hosts (#5901). Contributed by @nezovskii.
 
 ### For contributors
 
