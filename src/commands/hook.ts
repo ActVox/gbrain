@@ -1657,6 +1657,8 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     }
     if (!conf.ok) {
       degrade(`transcript_${conf.reason}`);
+    } else if (conf.absent) {
+      degrade('transcript_unreadable');
     } else if (
       isClaudeCliSelfTranscriptPath(conf.path) ||
       (ws !== undefined && isClaudeCliSelfTranscriptPath(ws))
