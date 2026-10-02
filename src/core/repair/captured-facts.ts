@@ -300,7 +300,7 @@ export const capturedFactsRepair: RepairHandler = {
 export const CAPTURED_FACTS_INTENT = 'managed_maintenance_expire_captured_facts';
 
 const expireRows = (tx: BrainEngine, sourceId: string, ids: number[]) => tx.executeRaw<{ id: number | string }>(`UPDATE facts
-    SET expired_at=now(), valid_until=LEAST(COALESCE(valid_until, now()), now()), context=concat_ws(' | ', $3::text, NULLIF(context,''))
+    SET expired_at=now(), context=concat_ws(' | ', $3::text, NULLIF(context,''))
   WHERE source_id=$1 AND id=ANY($2::bigint[]) AND expired_at IS NULL AND row_num IS NULL RETURNING id`, [sourceId, ids, EXPIRY_CONTEXT]);
 
 /**

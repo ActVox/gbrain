@@ -48,6 +48,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/persistence/journal.ts": ["test/e2e/projection-drain-postgres.test.ts", "test/e2e/withdrawal-followup-writes-postgres.test.ts"],
   // Fix wave 5 (#5731): the extractor-facts restore and its doctor check.
   "src/core/repair/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
+  "src/core/repair/captured-facts.ts": ["test/e2e/repair-captured-facts-postgres.test.ts"],
+  "src/commands/doctor/checks/captured-facts.ts": ["test/e2e/repair-captured-facts-postgres.test.ts"],
+  "src/commands/extract-timeline-db.ts": ["test/e2e/extract-timeline-db-postgres.test.ts", "test/e2e/managed-connector-job-contract.test.ts"],
   "src/commands/doctor/checks/extractor-facts.ts": ["test/e2e/repair-extractor-facts-postgres.test.ts"],
   // Fix wave 5: managed writeSingleFact keeps an absent entity's fallback slug (attribute_fallback).
   "src/core/facts/write-single.ts": ["test/e2e/managed-write-single-attribution-postgres.test.ts", "test/e2e/managed-facts-writers.test.ts", "test/e2e/fix-wave-5-integration.test.ts"],
@@ -155,7 +158,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/openclaw-plugin-load-real.test.ts",
   ],
   // dream.ts is a thin alias over runCycle in cycle.ts.
-  "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts", "test/e2e/managed-phase-matrix.test.ts", "test/e2e/managed-connector-job-contract.test.ts"],
+  "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts", "test/e2e/managed-phase-matrix.test.ts", "test/e2e/managed-connector-job-contract.test.ts", "test/e2e/extract-timeline-db-postgres.test.ts"],
   "src/core/cycle/phase-*.ts": ["test/e2e/managed-phase-matrix.test.ts"],
   // Multi-source sync writes share the per-source bookmark anchor.
   "src/core/sync.ts": ["test/e2e/sync.test.ts", "test/e2e/multi-source.test.ts", "test/e2e/sync-reconcile-postgres.test.ts", "test/e2e/sync-lock-overlap-postgres.test.ts"],

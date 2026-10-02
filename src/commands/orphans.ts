@@ -30,7 +30,6 @@ import {
 } from '../core/orphan-policy.ts';
 import { quarantineFilterFragment } from '../core/quarantine.ts';
 import { isConnectorSourceKind } from '../core/persistence/connector-identity.ts';
-import { parseSourceConfig } from '../core/sources-load.ts';
 
 // --- Types ---
 
@@ -58,8 +57,8 @@ const CONNECTOR_RENDER_TYPES = new Set(['email', 'meeting']);
  * islanded render is expected and is reported apart rather than as an orphan.
  */
 async function loadConnectorSourceIds(engine: BrainEngine): Promise<Set<string>> {
-  const rows = await engine.executeRaw<{ id: string; config: unknown }>(`SELECT id, config FROM sources`);
-  return new Set(rows.filter(r => isConnectorSourceKind(parseSourceConfig(r.config).kind)).map(r => r.id));
+  const rows = await engine.executeRaw<{ id: string; kind: string | null }>(`SELECT id, config->>'kind' AS kind FROM sources`);
+  return new Set(rows.filter(r => isConnectorSourceKind(r.kind)).map(r => r.id));
 }
 
 // --- Filter logic ---
