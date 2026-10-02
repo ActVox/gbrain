@@ -1797,6 +1797,7 @@ interface ParsedArgs {
   /** v0.41.15.0 (D9): in-process parallel workers per source. */
   workers?: number;
   yes?: boolean;
+  json?: boolean;
   help?: boolean;
   error?: string;
 }
@@ -1807,6 +1808,7 @@ function parseArgs(args: string[]): ParsedArgs {
     const a = args[i];
     if (a === '--help' || a === '-h') { out.help = true; continue; }
     if (a === '--dry-run') { out.dryRun = true; continue; }
+    if (a === '--json') { out.json = true; continue; }
     if (a === '--force') { out.force = true; continue; }
     if (a === '--yes' || a === '-y') { out.yes = true; continue; }
     if (a === '--override-disabled') { out.overrideDisabled = true; continue; }
@@ -1904,6 +1906,7 @@ Options:
                          safety (delete-orphans-first on each page claim).
   --override-disabled    Bypass facts.extraction_enabled=false brain-wide kill-switch.
   --background           Submit as a Minion job; print job_id; exit (use 'gbrain jobs follow').
+  --json                 Emit the run counters as one JSON object on stdout (diagnostics stay on stderr).
   --yes                  Auto-confirm cost preview in non-TTY contexts.
   --help, -h             Show this help.
 
@@ -2072,56 +2075,71 @@ export async function runExtractConversationFacts(
   const outcome = parsed.dryRun
     ? '(dry run) segmentation only; no facts extracted'
     : `extracted ${aggregate.facts_extracted} facts (${aggregate.facts_inserted} inserted)`;
-  console.log(
-    `\nDone: ${outcome} across ${aggregate.segments_processed} segments ` +
-    `from ${aggregate.pages_processed}/${aggregate.pages_considered} pages ` +
-    `in ${sourceIds.length} source(s). ` +
-    `Spent ~$${totalSpent.toFixed(4)}.`,
-  );
-  if (aggregate.pages_skipped > 0) {
-    console.log(`  Skipped ${aggregate.pages_skipped} page(s) without eligible segments or outside the selected types:`);
-    console.log(`    ${aggregate.pages_skipped_unparsed} with no parseable speaker turns (retryable); ${aggregate.pages_skipped_type_mismatch} with a type mismatch; ${aggregate.pages_skipped_insufficient_turns} with insufficient turns; ${aggregate.pages_skipped_since} with no eligible segments after --since; ${aggregate.pages_skipped_unrecognized_speaker} declined for speaker attribution.`);
-  }
-  if (aggregate.pages_skipped_too_large > 0) {
-    console.log(`  Skipped ${aggregate.pages_skipped_too_large} page(s) exceeding ${MAX_PAGE_BODY_BYTES / 1024 / 1024}MB body cap.`);
-  }
-  if (aggregate.pages_skipped_disappeared > 0) {
-    console.log(`  Skipped ${aggregate.pages_skipped_disappeared} page(s) that disappeared between enumeration and fetch.`);
-  }
-  if (aggregate.pages_skipped_completed > 0) {
-    console.log(`  Skipped ${aggregate.pages_skipped_completed} page(s) with fresh durable completion outcomes.`);
-  }
-  if (aggregate.pages_skipped_non_extractable > 0) {
-    console.log(`  Skipped ${aggregate.pages_skipped_non_extractable} page(s) previously scanned as not extractable.`);
-  }
-  if (aggregate.pages_skipped_unrecognized_speaker > 0) {
-    console.log(`  Declined ${aggregate.pages_skipped_unrecognized_speaker} page(s) with unrecognized speaker headings (attribution would be wrong; retried next run).`);
-  }
-  if (aggregate.pages_marked_non_extractable > 0) {
-    console.log(`  Marked ${aggregate.pages_marked_non_extractable} page(s) as scanned, not extractable.`);
-  }
-  if (aggregate.pages_failed > 0) {
-    console.error(`  Failed ${aggregate.pages_failed} page(s); they remain unfinished and will retry.`);
-  }
-  if (aggregate.pages_llm_fallback > 0) {
-    console.log(`  Parsed ${aggregate.pages_llm_fallback} page(s) with the opt-in LLM fallback.`);
-  }
-  if (aggregate.pages_lock_skipped > 0) {
-    console.log(`  Skipped ${aggregate.pages_lock_skipped} page(s) held by another worker / process (will retry next run).`);
-  }
-  if (aggregate.orphan_facts_cleaned > 0) {
-    console.log(`  Cleaned ${aggregate.orphan_facts_cleaned} orphan fact(s) from prior partial runs (D11 replay safety).`);
-  }
-  if (aggregate.fallback_slugify_count > 0) {
-    console.log(`  Preserved ${aggregate.fallback_slugify_count} fact(s) without an entity target after unresolved fallback_slugify.`);
-  }
-  if (aggregate.resolution_errors > 0) {
-    console.log(`  Preserved ${aggregate.resolution_errors} fact(s) without an entity target after best-effort resolution errors.`);
-  }
-  if (anyBudgetExhausted) {
-    console.log(unpricedModels.size > 0
-      ? `  no_pricing: ${[...unpricedModels].join(', ')}. Configure pricing.overrides; raising --max-cost-usd cannot resolve missing pricing.`
-      : `  Budget cap reached. Re-run with a higher --max-cost-usd to continue.`);
+  // #5448: --json is a universal cli-flag-registry flag, so scripts add it
+  // expecting an envelope. Emit the same counters as the Done: summary as one
+  // JSON object on stdout; progress and diagnostics stay on stderr.
+  if (parsed.json) {
+    console.log(JSON.stringify({
+      ...aggregate,
+      sources: sourceIds,
+      dry_run: parsed.dryRun ?? false,
+      outcome,
+      spent_usd: totalSpent,
+      budget_exhausted: anyBudgetExhausted,
+      no_pricing_models: [...unpricedModels],
+    }, null, 2));
+  } else {
+    console.log(
+      `\nDone: ${outcome} across ${aggregate.segments_processed} segments ` +
+      `from ${aggregate.pages_processed}/${aggregate.pages_considered} pages ` +
+      `in ${sourceIds.length} source(s). ` +
+      `Spent ~$${totalSpent.toFixed(4)}.`,
+    );
+    if (aggregate.pages_skipped > 0) {
+      console.log(`  Skipped ${aggregate.pages_skipped} page(s) without eligible segments or outside the selected types:`);
+      console.log(`    ${aggregate.pages_skipped_unparsed} with no parseable speaker turns (retryable); ${aggregate.pages_skipped_type_mismatch} with a type mismatch; ${aggregate.pages_skipped_insufficient_turns} with insufficient turns; ${aggregate.pages_skipped_since} with no eligible segments after --since; ${aggregate.pages_skipped_unrecognized_speaker} declined for speaker attribution.`);
+    }
+    if (aggregate.pages_skipped_too_large > 0) {
+      console.log(`  Skipped ${aggregate.pages_skipped_too_large} page(s) exceeding ${MAX_PAGE_BODY_BYTES / 1024 / 1024}MB body cap.`);
+    }
+    if (aggregate.pages_skipped_disappeared > 0) {
+      console.log(`  Skipped ${aggregate.pages_skipped_disappeared} page(s) that disappeared between enumeration and fetch.`);
+    }
+    if (aggregate.pages_skipped_completed > 0) {
+      console.log(`  Skipped ${aggregate.pages_skipped_completed} page(s) with fresh durable completion outcomes.`);
+    }
+    if (aggregate.pages_skipped_non_extractable > 0) {
+      console.log(`  Skipped ${aggregate.pages_skipped_non_extractable} page(s) previously scanned as not extractable.`);
+    }
+    if (aggregate.pages_skipped_unrecognized_speaker > 0) {
+      console.log(`  Declined ${aggregate.pages_skipped_unrecognized_speaker} page(s) with unrecognized speaker headings (attribution would be wrong; retried next run).`);
+    }
+    if (aggregate.pages_marked_non_extractable > 0) {
+      console.log(`  Marked ${aggregate.pages_marked_non_extractable} page(s) as scanned, not extractable.`);
+    }
+    if (aggregate.pages_failed > 0) {
+      console.error(`  Failed ${aggregate.pages_failed} page(s); they remain unfinished and will retry.`);
+    }
+    if (aggregate.pages_llm_fallback > 0) {
+      console.log(`  Parsed ${aggregate.pages_llm_fallback} page(s) with the opt-in LLM fallback.`);
+    }
+    if (aggregate.pages_lock_skipped > 0) {
+      console.log(`  Skipped ${aggregate.pages_lock_skipped} page(s) held by another worker / process (will retry next run).`);
+    }
+    if (aggregate.orphan_facts_cleaned > 0) {
+      console.log(`  Cleaned ${aggregate.orphan_facts_cleaned} orphan fact(s) from prior partial runs (D11 replay safety).`);
+    }
+    if (aggregate.fallback_slugify_count > 0) {
+      console.log(`  Preserved ${aggregate.fallback_slugify_count} fact(s) without an entity target after unresolved fallback_slugify.`);
+    }
+    if (aggregate.resolution_errors > 0) {
+      console.log(`  Preserved ${aggregate.resolution_errors} fact(s) without an entity target after best-effort resolution errors.`);
+    }
+    if (anyBudgetExhausted) {
+      console.log(unpricedModels.size > 0
+        ? `  no_pricing: ${[...unpricedModels].join(', ')}. Configure pricing.overrides; raising --max-cost-usd cannot resolve missing pricing.`
+        : `  Budget cap reached. Re-run with a higher --max-cost-usd to continue.`);
+    }
   }
 
   // v0.41.15.0 (codex #3): exit 3 when pages were skipped due to

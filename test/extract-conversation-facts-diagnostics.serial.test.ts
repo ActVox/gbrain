@@ -161,6 +161,34 @@ describe('#5364 diagnostics across workers, sources, CLI, and cycle', () => {
     }
   });
 
+  test('#5448: --json (a universal registry flag) prints one JSON envelope on stdout instead of Unknown flag', async () => {
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const error = spyOn(console, 'error').mockImplementation(() => {});
+    const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit:${code}`); }) as never);
+    try {
+      await runExtractConversationFacts(engine, ['--dry-run', '--sleep', '0', '--types', 'conversation', '--json']);
+      expect(log.mock.calls).toHaveLength(1);
+      const envelope = JSON.parse(String(log.mock.calls[0]![0]));
+      expect(envelope).toMatchObject({
+        dry_run: true,
+        outcome: '(dry run) segmentation only; no facts extracted',
+        pages_considered: 10,
+        pages_processed: 6,
+        segments_processed: 6,
+        pages_skipped: 4,
+        spent_usd: 0,
+        budget_exhausted: false,
+        no_pricing_models: [],
+      });
+      expect([...envelope.sources].sort()).toEqual(['default', 'speaker-a', 'speaker-b']);
+      expect(calls).toBe(0);
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      log.mockRestore();
+    }
+  });
+
   test('cycle totals equal exact per-source subsets in dry-run and durable replay', async () => {
     const dry = await runPhaseConversationFactsBackfill(engine, { dryRun: true });
     expect(dry.status).toBe('ok');
