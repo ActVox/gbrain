@@ -159,6 +159,49 @@ gbrain recall projects/offsite-example
 Or ask your agent: *"Remember the offsite date from the email I just pasted,
 and note that it came from that email."*
 
+## Duplicates across lanes
+
+The same claim can arrive twice: the agent saves it with `remember`, and the
+writeback, compaction harvest or maintenance sweep extracts it again from the
+same turn. Automatic capture skips a fact when an active fact in the same
+source already has the same normalized text, and
+
+- it is on the same entity (or neither has one), or on a different entity
+  whose page title or alias the claim names. "Prefers email" captured for two
+  people stays two facts;
+- it is visible where the new fact would be. A private capture yields to a
+  world-visible `remember`; a world capture never yields to a private fact;
+- it was written within 15 minutes of the turn, or by automatic capture in the
+  same conversation (no time limit there, so a sweep hours later still
+  recognizes the writeback's copy).
+
+A reworded copy on the same entity is also skipped when the two are very close
+(cosine 0.95 or higher) and do not differ in a negation, number or date. A
+correction such as "is not moving" or a changed amount is never treated as a
+duplicate, however close the wording. Facts between cosine 0.92 and 0.95 are
+always kept; capture only counts them as near duplicates so a lower threshold
+can be measured before it ever removes anything. If the duplicate check cannot read
+the database, the fact is kept and a warning names the lane. Explicit
+`remember` is never skipped, so use it for anything that must persist.
+
+Each skip prints `[facts] capture dedup: lane=<lane> dropped a duplicate of
+fact #<id> (rule=same_entity|named_entity)` on stderr and adds a
+`writeback_dedup` heartbeat event (lane, `duplicate`, `near_duplicate`
+counts). `gbrain doctor` shows the 7-day totals as `cross_lane_duplicates_7d`
+and `near_duplicates_shadow_7d` under `memory_writeback`. Hot memory and the
+`context_pack`/`delta` facts show one line per duplicate group (the newest
+row, with every entity in `entity_slugs`).
+
+Two limits remain. Two capture writers racing on the same claim can both
+insert it (the check runs outside the write transaction). A `remember` saved
+after an automatic copy of the same claim leaves two rows; hot memory shows
+them once only when the text is identical, and search can return both.
+
+**Say to your agent:** *"Remember that the renewal moved to November."*
+(the agent's `remember` is the copy that stays) or *"How many duplicate facts
+did automatic capture skip this week?"* (the agent runs `gbrain doctor --json`
+and reads `memory_writeback`).
+
 ## Per-harness reality (honest limitations)
 
 | Harness | Real-time contract | Backstop |
