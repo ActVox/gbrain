@@ -31,6 +31,7 @@ import { dirname, join } from 'node:path';
 import { gbrainPath, isConfigTruthy } from './config.ts';
 import { isValidTimeZone } from './cycle/cycle-date.ts';
 import { isValidConfig as isValidQuietHoursWindow } from './minions/quiet-hours.ts';
+import { evaluateBunFloor, type HostBun, type TargetFloor } from './bun-floor.ts';
 import { acquirePackLock, type PackLockOpts } from './schema-pack/pack-lock.ts';
 import { isNewerVersion, isValidVersionString, parseSemver, semverGt, semverLte } from './semver.ts';
 
@@ -72,6 +73,7 @@ export type SelfUpgradeAction =
   | 'busy'
   | 'outside_quiet_hours'
   | 'unsupported_install'
+  | 'unsupported_runtime'
   | 'notify'
   | 'apply';
 
@@ -176,6 +178,28 @@ export function decideSelfUpgrade(inp: DecideSelfUpgradeInputs): SelfUpgradeDeci
     return { action: 'unsupported_install', reason: 'install method cannot self-update', ...base };
   }
   return { action: 'apply', reason: `auto-upgrading ${inp.currentVersion} -> ${inp.latestVersion}`, ...base };
+}
+
+/**
+ * Runtime gate for an `apply` on an install that runs the target on the host's
+ * Bun (every method but `binary`, which carries its own runtime). Holds the
+ * upgrade when the target's `engines.bun` floor is above the host's Bun, or
+ * when either could not be read: once swapped, every command refuses at
+ * startup (the relaunched daemon included, before it can reconcile the
+ * breadcrumb) and an unattended host has nothing that upgrades Bun (#5855).
+ * The target is NOT recorded known-bad, so the first tick after the cause
+ * clears applies it. Pure.
+ */
+export function gateOnTargetRuntime(
+  decision: SelfUpgradeDecision,
+  target: TargetFloor,
+  host: HostBun | null,
+): SelfUpgradeDecision {
+  if (decision.action !== 'apply') return decision;
+  const verdict = evaluateBunFloor(target, host, decision.latest);
+  if (verdict.ok) return decision;
+  const retry = verdict.kind === 'unreadable' ? ' The next quiet-hours tick retries.' : '';
+  return { ...decision, action: 'unsupported_runtime', reason: `${verdict.auditReason}${retry}` };
 }
 
 /**

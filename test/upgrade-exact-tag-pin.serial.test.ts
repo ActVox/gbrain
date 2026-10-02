@@ -35,7 +35,7 @@ async function runBareUpgrade(spec: string, observedVersion: string): Promise<{ 
   writeFileSync(join(globalRoot, 'package.json'), JSON.stringify({ dependencies: { gbrain: spec } }));
   writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'gbrain', repository: 'github:garrytan/gbrain' }));
   const driver = join(pkgDir, 'driver.ts');
-  writeFileSync(driver, `import { runUpgrade } from '${REPO}/src/commands/upgrade.ts';\nawait runUpgrade(['--swap-only']);\n`);
+  writeFileSync(driver, `import { runUpgrade } from '${REPO}/src/commands/upgrade.ts';\nawait runUpgrade(['--swap-only', '--no-bun-floor-check']);\n`);
   const env: Record<string, string | undefined> = { ...process.env, HOME: home, GBRAIN_HOME: home, PATH: `${bin}:${process.env.PATH}` };
   delete env.BUN_INSTALL;
   const proc = Bun.spawn([process.execPath, 'run', driver], { cwd: REPO, env, stdout: 'pipe', stderr: 'pipe' });

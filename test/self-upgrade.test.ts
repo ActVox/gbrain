@@ -9,6 +9,7 @@ import {
   clearUpdateCache,
   decideSelfUpgrade,
   formatMarker,
+  gateOnTargetRuntime,
   isCacheFresh,
   isSnoozeActive,
   parseMarker,
@@ -20,8 +21,10 @@ import {
   writeSnooze,
   writeUpdateCache,
   type DecideSelfUpgradeInputs,
+  type SelfUpgradeAction,
   type SelfUpgradeState,
 } from '../src/core/self-upgrade.ts';
+import type { HostBun, TargetFloor } from '../src/core/bun-floor.ts';
 
 function baseInputs(over: Partial<DecideSelfUpgradeInputs> = {}): DecideSelfUpgradeInputs {
   return {
@@ -120,6 +123,33 @@ describe('decideSelfUpgrade — pure branches', () => {
     });
     test('gate order: known_bad beats idle/quiet gates', () => {
       expect(auto({ failedVersions: ['0.43.0'], idle: false }).action).toBe('known_bad');
+    });
+
+    test('#5855: an apply is held when the target Bun floor is above the host Bun, or either is unknown', () => {
+      const bun = (version: string): HostBun => ({ label: 'bun on PATH', path: '/opt/bun', version });
+      const floor = (f: string): TargetFloor => ({ ok: true, floor: f, version: null });
+      const cases: Array<{ target: TargetFloor; host: HostBun | null; action: SelfUpgradeAction; reason?: string[] }> = [
+        { target: floor('1.4.0'), host: bun('1.4.2'), action: 'apply' },
+        { target: floor('1.4.0'), host: bun('1.4.0'), action: 'apply' },
+        { target: floor('1.4.0'), host: bun('1.4.0+5a1b2c3'), action: 'apply' },
+        { target: floor('1.4.0'), host: bun('1.5.0-canary.2'), action: 'apply' },
+        { target: floor('1.4.0'), host: bun('1.4.0-canary.9'), action: 'unsupported_runtime', reason: ['gbrain 0.43.0 requires Bun >=1.4.0', 'bun on PATH is 1.4.0-canary.9'] },
+        { target: floor('1.4.0'), host: bun('1.3.14'), action: 'unsupported_runtime', reason: ['gbrain 0.43.0 requires Bun >=1.4.0', 'bun on PATH is 1.3.14', 'Fix: bun upgrade, then gbrain upgrade'] },
+        { target: { ok: false, failedRead: '`git fetch` in the source clone failed' }, host: bun('1.4.2'), action: 'unsupported_runtime', reason: ['Could not read the Bun floor of gbrain 0.43.0', 'The next quiet-hours tick retries'] },
+        { target: floor('1.4.0'), host: null, action: 'unsupported_runtime', reason: ['could not run `bun --version` on PATH'] },
+      ];
+      for (const c of cases) {
+        const d = gateOnTargetRuntime(auto(), c.target, c.host);
+        expect(d.action, JSON.stringify(c)).toBe(c.action);
+        expect(d.latest).toBe('0.43.0');
+        for (const fragment of c.reason ?? []) expect(d.reason).toContain(fragment);
+        expect(d.reason).not.toContain('/opt/bun');
+      }
+    });
+
+    test('#5855: the runtime gate leaves a non-apply decision unchanged', () => {
+      const busy = auto({ idle: false });
+      expect(gateOnTargetRuntime(busy, { ok: true, floor: '9.0.0', version: null }, null)).toEqual(busy);
     });
   });
 });
