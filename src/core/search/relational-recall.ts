@@ -27,6 +27,8 @@
 import type { BrainEngine } from '../engine.ts';
 import type { SearchResult, PageType, RelationalFanoutRow, PageReadPolicy } from '../types.ts';
 import { createAuditWriter } from '../audit/audit-writer.ts';
+import { listSources } from '../sources-ops.ts';
+import { ALL_SOURCES } from '../source-id.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { buildVisibilityClause } from './sql-ranking.ts';
 import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
@@ -80,13 +82,25 @@ function truncate(msg: string, max = 200): string {
   return msg.length <= max ? msg : msg.slice(0, max - 1) + '…';
 }
 
-/** Sources to resolve a seed against. Federated → the set; scalar → [id];
- *  unscoped/__all__ → ['default'] (single-source brains; multi-source
- *  enumeration under __all__ is a v1 limitation). */
-function scopeSources(opts: RelationalArmOpts): string[] {
+/** Sources to resolve a seed against. Federated → the set; scalar → [id].
+ *
+ *  Unscoped (trusted local; the `query` op resolves `__all__` to unscoped for
+ *  local callers) → every non-archived source. The prior `['default']`
+ *  fallback made `--source-id __all__` a shipped-contract bug on multi-source
+ *  brains: the keyword and vector arms spanned every source while this arm
+ *  answered from `default` alone. Cost: one resolver chain per non-archived
+ *  source. Traversal is still WITHIN each seed's source (E2=A) — only seed
+ *  RESOLUTION widens here, never the walk.
+ *
+ *  A literal `__all__` that reaches this arm comes from a caller whose scope
+ *  was NOT resolved by a trusted-local path, so it must stay fail-closed:
+ *  resolve no seeds (the arm no-ops) rather than widen to every source. */
+async function scopeSources(engine: BrainEngine, opts: RelationalArmOpts): Promise<string[]> {
   if (opts.sourceIds && opts.sourceIds.length > 0) return opts.sourceIds;
-  if (opts.sourceId && opts.sourceId !== '__all__') return [opts.sourceId];
-  return ['default'];
+  if (opts.sourceId === ALL_SOURCES) return [];
+  if (opts.sourceId) return [opts.sourceId];
+  const sources = await listSources(engine);
+  return sources.map(s => s.id);
 }
 
 /** Page types a relation's seed may be besides an entity. The entity resolver
@@ -303,7 +317,7 @@ export async function buildRelationalArm(
   meta.kind = parsed.kind;
 
   try {
-    const sources = scopeSources(opts);
+    const sources = await scopeSources(engine, opts);
     const fanoutOpts = {
       sourceId: opts.sourceId,
       sourceIds: opts.sourceIds,
