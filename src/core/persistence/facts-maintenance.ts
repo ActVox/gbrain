@@ -103,6 +103,16 @@ export async function assertManagedFactsEmbedding(engine: BrainEngine, config: G
   }
 }
 
+/**
+ * How long the managed-facts preflight waits for the worktree lock. This
+ * process's own persistence consumer holds it while it finishes publishing
+ * the previous write, after that write's receipt already reads committed, so
+ * a capture that follows a `remember` or another capture found it busy and
+ * refused for a whole sweep cycle. A holder still busy after the wait is a
+ * real conflict and still refuses.
+ */
+export const MANAGED_FACTS_WRITER_WAIT_MS = 1000;
+
 export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
   input: { turnText: string; pageSlug?: string }): Promise<ManagedFactsSession | null> {
   const engine = ctx.engine;
@@ -166,7 +176,7 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
   if (writeThrough && binding) {
     if (binding.state !== 'active' || !binding.owner_host_id) throw new OperationError('owner_unavailable', 'The canonical fact writer is unavailable; extraction has not started.');
     if (binding.owner_host_id === localHostId()) {
-      const lock = await acquireWorktree(binding, 0, undefined, engine);
+      const lock = await acquireWorktree(binding, MANAGED_FACTS_WRITER_WAIT_MS, undefined, engine);
       if (!lock) throw new OperationError('writer_lock_unavailable', 'The canonical fact writer is busy; extraction has not started.');
       await lock.release();
     }
