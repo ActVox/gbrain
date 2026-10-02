@@ -20,6 +20,7 @@ import { parseGoogleSourceConfig, runGoogleSync } from '../src/core/google/googl
 import { readGoogleState } from '../src/core/google/google-source.ts';
 import { GRACE_REFETCH_PER_SWEEP } from '../src/core/google/loop-catchup.ts';
 import { makeLoopsExtractHandler } from '../src/core/minions/handlers/loops-extract.ts';
+import { makeSyncHandler } from '../src/core/minions/handlers/sync.ts';
 import { connectorHeldItemsCheck } from '../src/commands/doctor/checks/connector-holds.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { __clearSuppressionCacheForTests } from '../src/core/google/loop-detect.ts';
@@ -134,6 +135,25 @@ describe('#5867 managed Gmail sweeps enqueue loops_extract', () => {
       expect(jobs.map((j) => j.data.slug)).toEqual([jobs[0].data.slug]);
       expect((result as { loops_enqueue?: unknown }).loops_enqueue).toMatchObject({ enqueued: 1, deferred: 0, skipped_reason: null });
       expect(gmail.threadReads.length).toBeGreaterThan(0);
+      await disposePersistenceConsumer(engine);
+    }
+  }), 180_000);
+
+  test('the autopilot dispatch → sync handler chain on a managed source queues loops_extract', async () => withEnv(env, async () => {
+    chatReady();
+    for (const engine of engines) {
+      await engine.setConfig('loops.extraction_enabled', 'true');
+      const f = await gmailSource(engine, true);
+      const { gmail, fetcher } = fakeGmail(f.cfg.account, [{ tid: '17aa00000000e051', ms: Date.now() - 2 * DAY }]);
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = withGoogleAccount(fetcher, f.cfg.account) as typeof fetch;
+      try {
+        // The job data autopilot-dispatch's connector freshness sync submits (no noExtract: the handler defaults it to true).
+        await makeSyncHandler(engine)({ id: 1, name: 'sync', data: { sourceId: f.id, pull: false, auto_embed_backfill: true, embed_reason: 'autopilot_freshness' },
+          signal: new AbortController().signal, updateProgress: async () => {}, log: async () => {} } as never);
+      } finally { globalThis.fetch = realFetch; }
+      expect(gmail.threadReads.length).toBeGreaterThan(0);
+      expect((await loopsJobs(engine, f.id)).filter((j) => j.idempotency_key.startsWith('loops:'))).toHaveLength(1);
       await disposePersistenceConsumer(engine);
     }
   }), 180_000);
