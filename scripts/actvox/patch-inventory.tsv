@@ -124,3 +124,9 @@ scripts/check-tool-catalog-fresh.sh	tooling	2	review
 scripts/generate-tool-catalog.ts	tooling	5	review	
 scripts/llms-config.ts	tooling	4	review	
 scripts/check-key-files-current-state.sh	tooling	4	no (ActVox: CLAUDE.md cap +1000 for the fork paragraph; re-check after each integration)	
+docs/architecture/key-files/core-utilities-1.md	docs	2	yes (U1: whoami transport from verified principal, ActVox PR #30)	
+src/commands/serve-http-mcp.ts	code	3	yes (U1: whoami transport from verified principal, ActVox PR #30)	
+src/core/ops/contract.ts	code	12	yes (U1: whoami transport from verified principal, ActVox PR #30)	
+src/core/ops/sources.ts	code	11	yes (U1: whoami transport from verified principal, ActVox PR #30)	
+test/serve-http-auth-outcomes.test.ts	test	50	yes (U1: whoami transport from verified principal, ActVox PR #30)	
+test/whoami.test.ts	test	39	yes (U1: whoami transport from verified principal, ActVox PR #30)	
