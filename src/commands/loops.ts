@@ -82,6 +82,7 @@ export async function runWaiting(engine: BrainEngine, args: string[]): Promise<v
         '  --source <id>  scope to one source (default: every source in the brain)',
         '  --json         agent envelope (groups, staleness, completeness, held items, sources)',
         '  --stale-ok     show possibly-outdated loops even when google sources have not synced in 24h',
+        '  --as-of <iso>  rank and age loops as of this time (default: now), to reproduce an order',
         '',
         'Manage loops: gbrain loops --help · Setup: gbrain google setup · Docs: docs/guides/open-loops.md',
       ].join('\n') + '\n',
@@ -92,11 +93,12 @@ export async function runWaiting(engine: BrainEngine, args: string[]): Promise<v
   const staleOk = args.includes('--stale-ok');
   const topIdx = args.indexOf('--top');
   const top = topIdx !== -1 ? Number(args[topIdx + 1]) || 3 : 3;
+  const asOfIdx = args.indexOf('--as-of');
 
   const result = (await handleToolCall(
     engine,
     'open_loops',
-    { group_by: 'counterparty', limit: top, include_context: true },
+    { group_by: 'counterparty', limit: top, include_context: true, ...(asOfIdx !== -1 ? { as_of: args[asOfIdx + 1] } : {}) },
     { sourceId: sourceFlag(args) ?? ALL_SOURCES },
   )) as WaitingResult;
 

@@ -24,10 +24,17 @@ zero LLM, free, always on). For every synced Gmail thread:
   ≥72h → `unanswered_outbound` — *you are waiting on them*.
 - a reply lands → the loop **closes itself** (`closed_by: reply_detected`).
   Loops close by state transition, never delete — the audit trail stays.
+  A reply of yours that only acknowledges their question ("Thanks!",
+  "Got it, thanks.") is not an answer: the loop stays open and its clock
+  keeps running. "Will do" counts as a reply.
+- a question mark inside a link (`https://docs.example.com/view?id=42`) is
+  not a question, so an FYI that only shares a link opens nothing.
 - "unanswered" is measured from the oldest unanswered message since the
   last turn flip (the first one addressed to you, or your first question),
   so a nudge or follow-up never restarts the clock — a request that waited
-  40h and got a "bumping this" 5h ago opens on the first sync.
+  40h and got a "bumping this" 5h ago opens on the first sync. The loop's
+  `opened_at` is that message's time, not the time gbrain noticed it, so a
+  first sync of an old inbox ranks a 30-day wait as older than yesterday's.
 
 Precision rules (pinned by a labeled fixture corpus in
 `test/google-loop-detect.test.ts` — every false-positive class gets a
@@ -197,7 +204,8 @@ carry additive optional fields (`direction`, `due`, `counterparty`,
 
 ## Close semantics
 
-- Thread loops close deterministically when a reply lands.
+- Thread loops close deterministically when a reply lands (an
+  acknowledgement-only reply to a question does not count).
 - Commitment loops close manually (`gbrain loops done`) or by staleness
   (overdue >14 days AND no activity in 14 days — an actively-discussed
   overdue commitment stays open — or >90 days without any activity →
@@ -212,4 +220,7 @@ carry additive optional fields (`direction`, `due`, `counterparty`,
 
 Counterparties rank by open-loop count, due-date proximity, age of the
 oldest loop, and how connected the person is in your brain (backlink
-count). Deterministic — same data, same order.
+count). Deterministic — same data and same reference time, same order. Due
+dates and ages are relative to the reference time, which defaults to now;
+pin it with `gbrain waiting --as-of <iso>` (MCP: `open_loops` `as_of`) to
+reproduce a ranking. The result echoes it as `as_of`.

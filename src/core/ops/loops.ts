@@ -215,14 +215,14 @@ interface CounterpartyGroup {
   context?: unknown;
 }
 
-function rankGroups(groups: CounterpartyGroup[], backlinks: Map<string, number>): CounterpartyGroup[] {
+function rankGroups(groups: CounterpartyGroup[], backlinks: Map<string, number>, nowMs: number): CounterpartyGroup[] {
   const score = (g: CounterpartyGroup): number => {
     let s = g.loop_count * 10;
     if (g.nearest_due_at) {
-      const days = (Date.parse(g.nearest_due_at) - Date.now()) / 86_400_000;
+      const days = (Date.parse(g.nearest_due_at) - nowMs) / 86_400_000;
       s += days <= 0 ? 50 : days <= 3 ? 30 : days <= 7 ? 15 : 5;
     }
-    const ageDays = (Date.now() - Date.parse(g.oldest_opened_at)) / 86_400_000;
+    const ageDays = (nowMs - Date.parse(g.oldest_opened_at)) / 86_400_000;
     s += Math.min(20, ageDays);
     if (g.counterparty_slug) s += Math.min(20, backlinks.get(g.counterparty_slug) ?? 0);
     return s;
@@ -231,7 +231,7 @@ function rankGroups(groups: CounterpartyGroup[], backlinks: Map<string, number>)
 }
 
 function renderText(groups: CounterpartyGroup[], stale: boolean, noGoogleSources: boolean,
-  coverage: { completeness: 'complete' | 'partial'; held: HeldItemView[] } = { completeness: 'complete', held: [] }): string {
+  coverage: { completeness: 'complete' | 'partial'; held: HeldItemView[] }, nowMs: number): string {
   const lines: string[] = [];
   const { held } = coverage;
   if (stale) lines.push('⚠ google sources have not synced recently — this may be out of date.');
@@ -264,7 +264,7 @@ function renderText(groups: CounterpartyGroup[], stale: boolean, noGoogleSources
       const due = l.due_at ? ` — due ${l.due_at.slice(0, 10)}` : '';
       // Age renders at READ time from last_activity_at — stored summaries
       // deliberately carry no age (it would freeze at detection time).
-      const ageDays = Math.max(0, Math.floor((Date.now() - Date.parse(l.last_activity_at)) / 86_400_000));
+      const ageDays = Math.max(0, Math.floor((nowMs - Date.parse(l.last_activity_at)) / 86_400_000));
       const age = Number.isFinite(ageDays) ? ` (${ageDays}d)` : '';
       lines.push(`- [${l.loop_type}] ${l.summary}${age}${due}`);
       if (l.quote) lines.push(`  > "${l.quote}"`);
@@ -294,11 +294,16 @@ const open_loops: Operation = {
     include_context: { type: 'boolean', description: 'Attach the counterparty entity card per group (trusted local only). Default true.' },
     source_id: { type: 'string', description: "Scope to one source (e.g. the google source, when the caller's transport is bound elsewhere). Remote callers must hold a grant covering it." },
     all_sources: { type: 'boolean', description: 'Trusted local: span every source in the brain. Remote callers stay inside their grant.' },
+    as_of: { type: 'string', description: 'Reference time (ISO 8601) for due-date proximity, loop age and rendered ages. Default: now. Pin it to reproduce a ranking.' },
   },
   scope: 'read',
   annotations: { readOnlyHint: true },
   handler: async (ctx, p) => {
     const trusted = ctx.remote === false;
+    const nowMs = p.as_of === undefined ? Date.now() : Date.parse(String(p.as_of));
+    if (!Number.isFinite(nowMs)) {
+      throw new OperationError('invalid_params', `open_loops: as_of must be an ISO 8601 timestamp, got ${JSON.stringify(p.as_of)}`);
+    }
     const groupBy = (p.group_by as string | undefined) ?? 'counterparty';
     const status = ((p.status as string | undefined) ?? 'open') as LoopStatus;
     // Per-call scope via the canonical trust+grant resolver: an MCP caller
@@ -418,7 +423,7 @@ const open_loops: Operation = {
     } catch { /* rank without backlinks */ }
 
     const limit = Math.min(Math.max((p.limit as number | undefined) ?? 3, 1), 50);
-    const groups = rankGroups([...byKey.values()], backlinks).slice(0, limit);
+    const groups = rankGroups([...byKey.values()], backlinks, nowMs).slice(0, limit);
 
     // Entity-card context (zero-LLM, trusted local only).
     if (trusted && (p.include_context as boolean | undefined) !== false) {
@@ -446,7 +451,8 @@ const open_loops: Operation = {
       held: coverage.held,
       no_google_sources: noGoogleSources,
       redacted: !trusted,
-      ...(trusted ? { text: renderText(groups, freshness.stale, noGoogleSources, coverage) } : {}),
+      as_of: new Date(nowMs).toISOString(),
+      ...(trusted ? { text: renderText(groups, freshness.stale, noGoogleSources, coverage, nowMs) } : {}),
     };
   },
 };

@@ -164,6 +164,25 @@ describe('open_loops grouped', () => {
     );
   });
 
+  test('N7-5: as_of pins the ranking clock, so the same rows give the same order at any wall-clock time', async () => {
+    const T = Date.parse('2026-10-01T12:00:00Z');
+    const D = 86_400_000;
+    await upsertOpenLoop(engine, loop({ dedupKey: 'a', loopType: 'commitment_owed_by_me', counterpartyEmail: 'a@example.org', detector: 'llm_extract', dueAt: new Date(T + 8 * D).toISOString() }));
+    await upsertOpenLoop(engine, loop({ dedupKey: 'b', loopType: 'commitment_owed_to_me', counterpartyEmail: 'b@example.org', detector: 'llm_extract' }));
+    await engine.executeRaw(
+      `UPDATE open_loops SET opened_at = CASE dedup_key WHEN 'a' THEN $1::timestamptz ELSE $2::timestamptz END`,
+      [new Date(T).toISOString(), new Date(T - 10 * D).toISOString()],
+    );
+    const order = async (asOf: string) =>
+      ((await openLoopsOp.handler(ctx({ remote: true }), { as_of: asOf })) as GroupsResult & { as_of: string });
+    const atT = await order(new Date(T).toISOString());
+    const later = await order(new Date(T + 2 * D).toISOString());
+    expect(atT.groups.map((g) => g.counterparty)).not.toEqual(later.groups.map((g) => g.counterparty));
+    expect((await order(new Date(T).toISOString())).groups.map((g) => g.counterparty)).toEqual(atT.groups.map((g) => g.counterparty));
+    expect(atT.as_of).toBe(new Date(T).toISOString());
+    await expect(openLoopsOp.handler(ctx(), { as_of: 'yesterday' })).rejects.toThrow('as_of');
+  });
+
   test('limit caps GROUPS (default 3) while count reports total loops', async () => {
     await seedRanked();
     // A fourth counterparty that ranks last.

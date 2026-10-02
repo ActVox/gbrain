@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 202985,
-    "stdoutSha256": "bd0de8ec965e91bfc419afeccf1983ff9bc1d2590e38ec76d3b751dd53e3fe47",
+    "stdoutBytes": 203219,
+    "stdoutSha256": "e07561286578badf4a4d0fbf7c4d1099ca3a90a938e578a2cfedb439ddf8501f",
     "toolNames": [
       "remember",
       "entity",
@@ -5116,6 +5116,7 @@
         "name": "open_loops",
         "parameters": {
           "all_sources": "boolean?",
+          "as_of": "string?",
           "counterparty": "string?",
           "group_by": "string?",
           "include_context": "boolean?",
@@ -5129,6 +5130,10 @@
             "all_sources": {
               "description": "Trusted local: span every source in the brain. Remote callers stay inside their grant.",
               "type": "boolean"
+            },
+            "as_of": {
+              "description": "Reference time (ISO 8601) for due-date proximity, loop age and rendered ages. Default: now. Pin it to reproduce a ranking.",
+              "type": "string"
             },
             "counterparty": {
               "description": "Filter to one counterparty (slug or email).",
