@@ -147,6 +147,7 @@ import * as filesImpl from './engine-sql/files.ts';
 import type { ChunkWindowRequest, ChunkWindowOpts, ChunkWindowPage } from './search/chunk-windows.ts';
 import * as chunksImpl from './engine-sql/chunks.ts';
 import { searchKeywordCJK } from './engine-sql/cjk-search.ts';
+import * as titlesImpl from './engine-sql/titles.ts';
 import { applyForwardReferenceBootstrap, pgliteBootstrapTarget } from './engine-sql/bootstrap.ts';
 
 /**
@@ -1458,123 +1459,14 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   /**
-   * fix/title-retrieval-arm (D1): page-grain title candidate arm. See the
-   * BrainEngine interface doc for the full contract. Queries
-   * pages.search_vector (title weight 'A' dominates ts_rank_cd by
-   * construction) with the same page-grain filters the keyword arm applies
-   * (type/types/excludeSlugs/date/source scoping, hard-excludes,
-   * visibility), joined to one representative chunk per page. Applies the
-   * same AND→OR recall fallback as searchKeyword. Ordinary long titles are
-   * preserved; oversized pasted context is bounded before websearch FTS.
-   *
-   * CJK queries fall through to websearch FTS here (a single-token CJK
+   * fix/title-retrieval-arm (D1): page-grain title candidate arm. SQL lives
+   * once in engine-sql/titles.ts (exact-title key #5889, index-backed remote
+   * predicate). CJK queries fall through to websearch FTS (a single-token CJK
    * query CAN exact-match a single-token CJK title); the richer CJK ILIKE
    * fallback stays keyword-arm-only.
    */
   async searchTitles(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
-    // language/symbolKind are chunk-grain code filters with no page-grain
-    // meaning; a code-scoped query gets no title candidates rather than
-    // rows that silently violate the caller's filter.
-    if (opts?.language || opts?.symbolKind) return [];
-    const limit = clampSearchLimit(opts?.limit, 20, searchLimitCap());
-    const offset = opts?.offset || 0;
-    const detailLow = opts?.detail === 'low';
-
-    if (opts?.limit && opts.limit > searchLimitCap()) {
-      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${searchLimitCap()}`);
-    }
-
-    const boostMap = opts?.source_boosts ?? resolveBoostMap();
-    const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
-    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
-    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
-    const visibilityClause = buildVisibilityClause('p', 's', opts);
-    // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
-    // — safe to interpolate into raw SQL.
-    const ftsLang = getFtsLanguage();
-    const titleVector = requiresSafeChunks(opts) ? `to_tsvector('${ftsLang}', COALESCE(p.title, ''))` : 'p.search_vector';
-
-    const params: unknown[] = [boundWebsearchQuery(query), limit, offset];
-    let extraFilter = '';
-    if (opts?.type) {
-      params.push(opts.type);
-      extraFilter += ` AND p.type = $${params.length}`;
-    }
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      extraFilter += ` AND p.type = ANY($${params.length}::text[])`;
-    }
-    if (opts?.exclude_slugs?.length) {
-      params.push(opts.exclude_slugs);
-      extraFilter += ` AND p.slug != ALL($${params.length}::text[])`;
-    }
-    if (opts?.afterDate) {
-      params.push(opts.afterDate);
-      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) ${opts?.afterDateInclusive ? '>=' : '>'} $${params.length}::text::timestamptz`;
-    }
-    if (opts?.beforeDate) {
-      params.push(opts.beforeDate);
-      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) ${opts?.beforeDateInclusive ? '<=' : '<'} $${params.length}::text::timestamptz`;
-    }
-    if (opts?.sourceIds && opts.sourceIds.length > 0) {
-      params.push(opts.sourceIds);
-      extraFilter += ` AND p.source_id = ANY($${params.length}::text[])`;
-    } else if (opts?.sourceId) {
-      params.push(opts.sourceId);
-      extraFilter += ` AND p.source_id = $${params.length}`;
-    }
-
-    // Page grain — one row per page by construction, so no best_per_page
-    // pooling CTE is needed. The LEFT JOIN LATERAL picks the representative
-    // chunk (compiled_truth first, then lowest chunk_index); COALESCEs keep
-    // chunkless pages retrievable (the extreme D1 case: a title with no
-    // body) with the alias-hop row shape (chunk_id 0, empty chunk_text).
-    // Accepted limitations (Reviewer F5/F6): the synthetic chunkless row
-    // dedups on empty chunk_text (fusion's compiledTruthBoost skips it since
-    // #3695 — chunk_id 0 + empty chunk_text never gains chunk authority);
-    // and detail='low' filters only the REPRESENTATIVE — pages without a
-    // compiled_truth chunk still surface (unlike the keyword arm's filter).
-    const titlesSql =
-      `SELECT
-         p.slug, p.id as page_id, p.title, p.type, p.source_id,
-         p.effective_date, p.effective_date_source,
-         COALESCE(rep.id, 0) as chunk_id,
-         COALESCE(rep.chunk_index, 0) as chunk_index,
-         COALESCE(rep.chunk_text, '') as chunk_text,
-         COALESCE(rep.chunk_source, 'compiled_truth') as chunk_source,
-         ts_rank_cd(${titleVector}, websearch_to_tsquery('${ftsLang}', $1)) * ${sourceFactorCase} AS score,
-         CASE WHEN p.updated_at < (
-           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
-         ) THEN true ELSE false END AS stale
-       FROM pages p
-       JOIN sources s ON s.id = p.source_id
-       LEFT JOIN LATERAL (
-         SELECT cc.id, cc.chunk_index, cc.chunk_text, cc.chunk_source
-         FROM content_chunks cc
-         WHERE cc.page_id = p.id
-           AND cc.modality = 'text'
-           ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
-         ORDER BY (cc.chunk_source = 'compiled_truth') DESC, cc.chunk_index ASC
-         LIMIT 1
-       ) rep ON true
-       WHERE ${titleVector} @@ websearch_to_tsquery('${ftsLang}', $1)
-         ${extraFilter} ${hardExcludeClause} ${visibilityClause}
-       ORDER BY score DESC, p.id ASC
-       LIMIT $2 OFFSET $3`;
-
-    let { rows } = await this.db.query(titlesSql, params);
-    if (rows.length === 0) {
-      const orQuery = buildOrFallbackWebsearchQuery(params[0] as string);
-      if (orQuery) {
-        const fallbackParams = [...params];
-        fallbackParams[0] = boundWebsearchQuery(orQuery);
-        ({ rows } = await this.db.query(titlesSql, fallbackParams));
-        // 2026-09 (#3617 follow-up): same relaxed-row tagging as the keyword
-        // arm — see SearchResult.keyword_relaxed.
-        return (rows as Record<string, unknown>[]).map((r) => ({ ...rowToSearchResult(r), keyword_relaxed: true as const }));
-      }
-    }
-    return (rows as Record<string, unknown>[]).map(rowToSearchResult);
+    return titlesImpl.searchTitles(async (read) => read(scopedRead(this.engineSql)), query, opts, { relaxedPrefersIndex: false, staleProbe: true });
   }
 
   /**
@@ -2039,7 +1931,7 @@ export class PGLiteEngine implements BrainEngine {
     sourceIds?: string[];
     excludePrivate?: boolean;
     mode?: 'inbound' | 'islanded';
-  }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean }>> {
+  }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string }>> {
     return linksImpl.findOrphanPages(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), opts);
   }
 

@@ -98,7 +98,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
     const earlier = seen.get(key);
     if (earlier !== undefined) { entries.push({ fact, duplicateId: null, duplicateOf: earlier }); continue; }
     seen.set(key, entries.length);
-    const decision = await decideSingleFact(engine, row.source_id, fact, dedupEmbedding(fact), fact.embedding_model);
+    const decision = await decideSingleFact(engine, row.source_id, fact, dedupEmbedding(fact), fact.embedding_model, fact.source);
     const supersedes = p.supersede === true && decision.status === 'superseded' ? decision.candidate! : undefined;
     if (decision.candidate && !supersedes) { entries.push({ fact, duplicateId: decision.candidate.id }); continue; }
     const rowNum = fact.entity_slug !== null && !fallback(fact) ? nextRow++ : undefined;
@@ -136,7 +136,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
       for (const entry of entries) {
         await assertFactNotWithdrawn(tx, row.source_id, entry.fact);
         if (entry.duplicateOf !== undefined) continue;
-        const current = await decideSingleFact(tx, row.source_id, entry.fact, dedupEmbedding(entry.fact), entry.fact.embedding_model);
+        const current = await decideSingleFact(tx, row.source_id, entry.fact, dedupEmbedding(entry.fact), entry.fact.embedding_model, entry.fact.source);
         if ((current.candidate?.id ?? null) !== (entry.duplicateId ?? entry.supersedes?.id ?? null)) throw new OperationError('revision_conflict', 'The fact deduplication state changed before publication.');
       }
     }, apply: async tx => {

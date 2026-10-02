@@ -45,7 +45,7 @@
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync, realpathSync } from 'fs';
 import { join } from 'path';
-import { gbrainPath } from './config.ts';
+import { gbrainPath, loadConfig } from './config.ts';
 import type { BrainEngine } from './engine.ts';
 import { createProgress, type ProgressReporter } from './progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from './cli-options.ts';
@@ -1577,6 +1577,9 @@ async function runPhaseResolveSymbolEdges(
 
 async function runPhaseEmbed(engine: BrainEngine, dryRun: boolean, signal?: AbortSignal): Promise<PhaseResult> {
   try {
+    if (!dryRun && (loadConfig()?.embedding_disabled === true || await engine.getConfig('embedding_disabled') === 'true')) {
+      return { phase: 'embed', status: 'skipped', duration_ms: 0, summary: 'embeddings disabled; no provider call made', details: { reason: 'embedding_disabled' } };
+    }
     const { runEmbedCore } = await import('../commands/embed.ts');
     // #1737: thread the cycle's abort signal so the embed phase (the long,
     // 10-15 min one) bails within a batch instead of running to completion
@@ -1735,7 +1738,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
       duration_ms: 0,
       summary:
         `purged ${purgedSources.length} source(s)` +
-        (purgeResult.blocked.length > 0 ? ` (${purgeResult.blocked.length} FK-blocked, see details)` : '') +
+        (purgeResult.blocked.length > 0 ? ` (${purgeResult.blocked.length} blocked, see details)` : '') +
         `, ${purgedPages.count} page(s), ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
@@ -2261,9 +2264,9 @@ export async function runCycle(
           details: { reason: 'no_database' },
         });
       } else if (brainDir === null) {
-        phaseResults.push(skipNoBrainDir('extract'));
+        const { result, duration_ms } = await timePhase(async () => (await import('./cycle/connector-extract.ts')).runPhaseExtractDatabaseOnly(engine, { dryRun, sourceId: cycleSourceId, timeBudgetMs: CYCLE_STALE_DRAIN_BUDGET_MS }), 'extract');
+        phaseResults.push({ ...result, duration_ms });
       } else {
-        // Pass changed slugs from sync for incremental extract.
         // If sync didn't run (phases exclude it) or failed, syncPagesAffected
         // is undefined → extract falls back to full walk (safe default).
         progress.start('cycle.extract');

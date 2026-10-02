@@ -69,6 +69,8 @@ import {
   bankWritebackTurn,
   decideCorpusMode,
   gcCorpusArtifacts,
+  CORPUS_PROGRESS_SUFFIX,
+  CORPUS_PROGRESS_LOCK_SUFFIX,
   HARVEST_RECEIPT_SUFFIX,
   segmentHash,
 } from '../core/context/corpus-segments.ts';
@@ -1657,6 +1659,8 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     }
     if (!conf.ok) {
       degrade(`transcript_${conf.reason}`);
+    } else if (conf.absent) {
+      degrade('transcript_unreadable');
     } else if (
       isClaudeCliSelfTranscriptPath(conf.path) ||
       (ws !== undefined && isClaudeCliSelfTranscriptPath(ws))
@@ -1786,6 +1790,8 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
         gcCorpusArtifacts(dir, retentionMs, [
           CORPUS_INGESTED_SUFFIX,
           CORPUS_CLAIM_SUFFIX,
+          CORPUS_PROGRESS_SUFFIX,
+          CORPUS_PROGRESS_LOCK_SUFFIX,
           HARVEST_RECEIPT_SUFFIX,
         ]);
       }

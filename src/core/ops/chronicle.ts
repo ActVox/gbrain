@@ -278,50 +278,72 @@ const chronicle_backfill: Operation = {
   outputRedaction: 'no_stored_text',
   description:
     'Life Chronicle: sweep existing meeting/conversation/calendar pages into timeline events by ' +
-    'enqueuing chronicle_extract jobs (one per eligible page). --dry-run counts without enqueuing. ' +
-    'Local-only bulk op. CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N] [--dry-run]`.',
+    'enqueuing chronicle_extract jobs (one per eligible page). A page whose current content was already ' +
+    'enqueued is skipped (already_enqueued), so repeat runs move on to pages not yet swept. --dry-run counts ' +
+    'without enqueuing. Local-only bulk op. CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N] [--dry-run]`.',
   scope: 'admin',
   mutating: true,
   localOnly: true,
   params: {
     since: { type: 'string', description: 'Only pages updated on/after this date (YYYY-MM-DD).' },
-    limit: { type: 'number', description: 'Max pages per type to sweep (default 1000).' },
+    limit: { type: 'number', description: 'Max pages per type to enqueue in this run (default 1000); pages already enqueued for their current content do not count.' },
     dry_run: { type: 'boolean', description: 'Count eligible pages without enqueuing.' },
   },
   handler: async (ctx, p) => {
     const { isChronicleEligible } = await import('../chronicle/eligibility.ts');
     const TYPES = ['meeting', 'conversation', 'calendar-event'] as const;
+    const PAGE_BATCH = 200;
     const limit = typeof p.limit === 'number' ? p.limit : 1000;
     const updated_after = typeof p.since === 'string' ? p.since : undefined;
     const dryRun = p.dry_run === true;
     const scope = sourceScopeOpts(ctx);
-    type QueueLike = { add: (n: string, d: Record<string, unknown>) => Promise<unknown> };
+    type QueueLike = { add: (n: string, d: Record<string, unknown>, o?: { idempotency_key?: string }) => Promise<{ coalesced?: boolean }> };
     let queue: QueueLike | null = null;
     if (!dryRun) {
       const { MinionQueue } = await import('../minions/queue.ts');
       queue = new MinionQueue(ctx.engine) as unknown as QueueLike;
     }
-    let scanned = 0, eligible = 0, enqueued = 0;
+    // #5329: one job per (source, page, content). The key makes a repeat run
+    // skip pages already enqueued or extracted for their current content and
+    // page past them, so the tail of the corpus is reached; an edited page
+    // gets a new key and is swept again.
+    const jobKey = (page: { source_id?: string; slug: string; content_hash?: string; updated_at?: Date | string }) =>
+      `chronicle_extract:${page.source_id ?? 'default'}:${page.slug}:${page.content_hash ?? String(page.updated_at ?? '')}`;
+    let scanned = 0, eligible = 0, enqueued = 0, alreadyEnqueued = 0;
     const errors: { slug: string; error: string }[] = [];
     for (const type of TYPES) {
-      const pages = await ctx.engine.listPages({ type, updated_after, limit, ...scope });
-      for (const page of pages) {
-        scanned++;
-        const dreamGenerated = (page.frontmatter as Record<string, unknown> | undefined)?.dream_generated === true;
-        const elig = isChronicleEligible({ type: page.type, slug: page.slug, body: page.compiled_truth, dreamGenerated });
-        if (!elig.ok) continue;
-        eligible++;
-        if (dryRun || !queue) continue;
-        try {
-          await queue.add('chronicle_extract', { slug: page.slug, sourceId: page.source_id });
-          enqueued++;
-        } catch (e) {
-          // Never swallow — surface per-page failures (the #2057 no-swallow pattern).
-          errors.push({ slug: page.slug, error: e instanceof Error ? e.message : String(e) });
+      let taken = 0;
+      for (let offset = 0; taken < limit; offset += PAGE_BATCH) {
+        const pages = await ctx.engine.listPages({ type, updated_after, limit: PAGE_BATCH, offset, ...scope });
+        const candidates = pages.filter((page) => {
+          scanned++;
+          const dreamGenerated = (page.frontmatter as Record<string, unknown> | undefined)?.dream_generated === true;
+          return isChronicleEligible({ type: page.type, slug: page.slug, body: page.compiled_truth, dreamGenerated }).ok;
+        });
+        eligible += candidates.length;
+        const keys = candidates.map(jobKey);
+        const known = new Set(keys.length === 0 ? [] : (await ctx.engine.executeRaw<{ idempotency_key: string }>(
+          `SELECT idempotency_key FROM minion_jobs WHERE idempotency_key = ANY($1::text[]) AND status NOT IN ('dead', 'cancelled')`,
+          [keys],
+        )).map((row) => row.idempotency_key));
+        for (const [i, page] of candidates.entries()) {
+          if (taken >= limit) break;
+          if (known.has(keys[i])) { alreadyEnqueued++; continue; }
+          taken++;
+          if (dryRun || !queue) continue;
+          try {
+            const job = await queue.add('chronicle_extract', { slug: page.slug, sourceId: page.source_id }, { idempotency_key: keys[i] });
+            if (job.coalesced) alreadyEnqueued++;
+            else enqueued++;
+          } catch (e) {
+            // Never swallow — surface per-page failures (the #2057 no-swallow pattern).
+            errors.push({ slug: page.slug, error: e instanceof Error ? e.message : String(e) });
+          }
         }
+        if (pages.length < PAGE_BATCH) break;
       }
     }
-    return { scanned, eligible, enqueued, dry_run: dryRun, errors };
+    return { scanned, eligible, enqueued, already_enqueued: alreadyEnqueued, dry_run: dryRun, errors };
   },
   cliHints: { name: 'chronicle-backfill' },
 };

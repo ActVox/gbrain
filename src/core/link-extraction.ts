@@ -52,6 +52,9 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
  * OR updated_at > links_extracted_at`. It is an ISO-8601 string (NOT a number) —
  * the column is TIMESTAMPTZ and the predicate binds it as `::timestamptz`.
  */
+// 2026-10-02: eval wave N12-6 — a `Participants:` line (plain or bold) or a
+// `## Participants` section is attendance evidence like its `Attendees`
+// twin, so meeting pages written with it re-extract and gain attended edges.
 // 2026-10-01: eval wave N9-2/N9-3/N12-7 — schema-pack frontmatter mappings
 // keep FRONTMATTER_LINK_MAP's declared direction (company `investors:` is
 // investor -> company, meeting `attendees:` is person -> meeting), and a
@@ -88,7 +91,8 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // PRE-wave code after this date reads as fresh and won't re-extract until
 // the page is next edited; no fixed watermark can cover code that keeps
 // running past it.
-export const LINK_EXTRACTOR_VERSION_TS = '2026-10-01T00:00:00Z';
+// 2026-10-02: normalizeBasename collapses hyphen runs (#5623), so [[Backlog - vault]] resolves; re-extract.
+export const LINK_EXTRACTOR_VERSION_TS = '2026-10-02T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -1030,7 +1034,7 @@ export function attendanceEvidenceRanges(content: string): Array<[number, number
       continue;
     }
     if (/^#{1,2}[ \t]/.test(line.text)) finishSection();
-    if (/^##[ \t]+Attendees[ \t]*\r?$/i.test(line.text)) {
+    if (/^##[ \t]+(?:Attendees|Participants)[ \t]*\r?$/i.test(line.text)) {
       section = { valid: true, entries: [] };
       continue;
     }
@@ -1041,7 +1045,7 @@ export function attendanceEvidenceRanges(content: string): Array<[number, number
       section.entries.push([line.start, line.end]);
       continue;
     }
-    const inline = /^(?:Attendees:|\*\*Attendees:\*\*|\*\*Attendees\*\*:)[ \t]*(.*)$/i.exec(line.text);
+    const inline = /^(?:(?:Attendees|Participants):|\*\*(?:Attendees|Participants):\*\*|\*\*(?:Attendees|Participants)\*\*:)[ \t]*(.*)$/i.exec(line.text);
     if (inline && list(inline[1])) ranges.push([line.start, line.end]);
   }
   finishSection();
@@ -1415,7 +1419,7 @@ export function normalizeBasename(s: string): string {
     s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC')
       .replace(SLUG_VARIATION_SELECTORS_RE, '').toLowerCase(), // twin of slugifySegment's strip (#4985)
   );
-  return folded.replace(BASENAME_KEEP_RE, '').trim().replace(/\s+/g, '-');
+  return folded.replace(BASENAME_KEEP_RE, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 }
 
 /** Stable order: shorter slug first (likely closer to brain root), then lexical. */
@@ -1894,6 +1898,9 @@ const TIMELINE_LINE_RE = /^\s*(?:-\s*)?\*\*(\d{4}-\d{2}-\d{2})\*\*\s*([|\-–—
 // ASCII dates were never timeline entries and must stay that way.
 const TIMELINE_LINE_RE_CN = /^\s*(?:-\s*)?(?:\*\*)?(\d{4})年(\d{1,2})月(\d{1,2})日?(?:\*\*)?\s*([|\-–—]+)\s*(.+?)\s*$/;
 
+// `### YYYY-MM-DD — summary` headings, as the FS extractor (timeline-extract.ts Format 2) accepts.
+const TIMELINE_HEADING_RE = /^\s*###\s+(\d{4}-\d{2}-\d{2})\s*[\-–—]+\s*(.+?)\s*$/;
+
 /**
  * Parse timeline entries from content. Looks at:
  *   - The full content (most pages have a top-level "## Timeline" heading).
@@ -1909,23 +1916,32 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
 
   let i = 0;
   while (i < lines.length) {
-    // Try English format first, then Chinese
-    const m = TIMELINE_LINE_RE.exec(lines[i]);
+    const headingMatch = TIMELINE_HEADING_RE.exec(lines[i]);
+    const isHeadingEntry = headingMatch !== null;
     let date: string;
     let summary: string;
-    let separator: string;
-    if (m) {
-      date = m[1];
-      separator = m[2];
-      summary = m[3].trim();
+    let separator = '';
+
+    if (headingMatch) {
+      date = headingMatch[1];
+      summary = headingMatch[2].trim();
     } else {
-      const cm = TIMELINE_LINE_RE_CN.exec(lines[i]);
-      if (!cm) { i++; continue; }
-      // Normalize Chinese date to YYYY-MM-DD
-      date = `${cm[1]}-${cm[2].padStart(2, '0')}-${cm[3].padStart(2, '0')}`;
-      separator = cm[4];
-      summary = cm[5].trim();
+      // Try English bullet format first, then Chinese.
+      const lineMatch = TIMELINE_LINE_RE.exec(lines[i]);
+      if (lineMatch) {
+        date = lineMatch[1];
+        separator = lineMatch[2];
+        summary = lineMatch[3].trim();
+      } else {
+        const chineseMatch = TIMELINE_LINE_RE_CN.exec(lines[i]);
+        if (!chineseMatch) { i++; continue; }
+        // Normalize Chinese date to YYYY-MM-DD.
+        date = `${chineseMatch[1]}-${chineseMatch[2].padStart(2, '0')}-${chineseMatch[3].padStart(2, '0')}`;
+        separator = chineseMatch[4];
+        summary = chineseMatch[5].trim();
+      }
     }
+
     if (!isValidDate(date) || summary.length === 0) { i++; continue; }
     // #4277: backlink materialization historically wrote dated navigation
     // receipts such as `- **2026-06-13** | Referenced in [Acme](../companies/acme.md)`.
@@ -1941,7 +1957,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
     // shape; split them exactly like the FS extractor (extractTimelineFromContent
     // Format 1) so FS- and DB-extracted rows share one (source, summary) shape
     // and the DB dedup index collapses re-extractions instead of duplicating.
-    // Dash-separated bullets (`- **DATE** - text`) are one summary — no split.
+    // Dash-separated bullets and dated headings are one summary — no split.
     let source = 'markdown';
     if (separator.includes('|')) {
       const at = findTimelineSourceDelimiter(summary);
@@ -1955,7 +1971,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
     let j = i + 1;
     while (j < lines.length) {
       const next = lines[j];
-      if (TIMELINE_LINE_RE.test(next)) break;
+      if (TIMELINE_LINE_RE.test(next) || TIMELINE_HEADING_RE.test(next)) break;
       if (/^#{1,6}\s/.test(next) || isMaterializedMarkerLine(next)) break; // #5567: a marker opens the next bullet
       if (next.trim().length === 0 && detailLines.length === 0) {
         // skip leading blank line; if we hit a blank after detail content
@@ -1964,8 +1980,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
         continue;
       }
       if (next.trim().length === 0 && detailLines.length > 0) break;
-      // Indented continuation lines are detail; flush-left non-list lines too.
-      if (/^\s+/.test(next) || (!next.startsWith('-') && !next.startsWith('*') && !next.startsWith('#'))) {
+      if (isHeadingEntry || /^\s+/.test(next) || (!next.startsWith('-') && !next.startsWith('*') && !next.startsWith('#'))) {
         detailLines.push(next.trim());
         j++;
         continue;

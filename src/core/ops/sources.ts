@@ -7,7 +7,7 @@
  */
 
 import type { Operation } from './contract.ts';
-import { OperationError } from './contract.ts';
+import { OperationError, authTransport } from './contract.ts';
 import { assertSourceInCallerScope, assertSourceInCallerWriteScope, sourceScopeOpts } from './context.ts';
 import { resolveAuthCapabilities } from '../harness/capabilities.ts';
 
@@ -49,11 +49,9 @@ const whoami: Operation = {
           'or set ctx.remote === false.',
       );
     }
-    // OAuth tokens have client_id starting with 'gbrain_cl_'; legacy
-    // access_tokens reuse `name` as both clientId and clientName (verifyAccessToken
-    // at oauth-provider.ts:417-430). Detect by inspecting the prefix.
-    const isOauth = ctx.auth.clientId.startsWith('gbrain_cl_');
-    if (isOauth) {
+    // Legacy access_tokens reuse `name` as both clientId and clientName, so the
+    // transport comes from the verifier-set principal (prefix only as fallback).
+    if (authTransport(ctx.auth) === 'oauth') {
       return {
         transport: 'oauth',
         client_id: ctx.auth.clientId,

@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 202985,
-    "stdoutSha256": "bd0de8ec965e91bfc419afeccf1983ff9bc1d2590e38ec76d3b751dd53e3fe47",
+    "stdoutBytes": 204505,
+    "stdoutSha256": "361a0a6ada8208de169e71c9f95264e6bd6e6a3dc652a6148f46230a824035af",
     "toolNames": [
       "remember",
       "entity",
@@ -472,7 +472,7 @@
         }
       },
       {
-        "description": "List pages with optional filters. For 'what's recent / what did I touch this week' questions, use list_pages with sort=updated_desc instead of semantic search. Default 50 rows; remote callers are capped at 100 (local CLI callers' explicit limits are honored). A result with exactly `limit` rows may be truncated. For exhaustive listing, page with sort=updated_asc + updated_after=<last row's updated_at> until a page returns fewer rows than the limit.",
+        "description": "List pages with optional filters. For 'what's recent / what did I touch this week' questions, use list_pages with sort=updated_desc instead of semantic search. Default 50 rows; remote callers are capped at 100 (local CLI callers' explicit limits are honored). A result with exactly `limit` rows may be truncated. For exhaustive listing, page with updated_after=<last row's updated_at_iso> + updated_after_slug=<last row's slug> until a page returns fewer rows than the limit (the keyset forces sort=updated_asc; a bare updated_after cursor skips rows sharing the cursor timestamp).",
         "name": "list_pages",
         "parameters": {
           "include_deleted": "boolean?",
@@ -482,7 +482,8 @@
           "source_id": "string?",
           "tag": "string?",
           "type": "string?",
-          "updated_after": "string?"
+          "updated_after": "string?",
+          "updated_after_slug": "string?"
         },
         "schema": {
           "properties": {
@@ -521,7 +522,11 @@
               "type": "string"
             },
             "updated_after": {
-              "description": "ISO date (YYYY-MM-DD) or full timestamp. Returns pages with updated_at > value.",
+              "description": "ISO date (YYYY-MM-DD) or full timestamp. Returns pages with updated_at > value. Bare (without updated_after_slug) this is LOSSY across rows sharing one timestamp — a bulk sync stamps one now() across a transaction; pair with updated_after_slug to page exactly.",
+              "type": "string"
+            },
+            "updated_after_slug": {
+              "description": "Keyset cursor slug: pass the last row's slug together with updated_after set to that row's updated_at_iso (column precision — a millisecond-rounded value re-selects same-millisecond rows). Resumes strictly after (updated_at, slug) and forces sort=updated_asc.",
               "type": "string"
             }
           },
@@ -3951,7 +3956,7 @@
         }
       },
       {
-        "description": "Life Chronicle: sweep existing meeting/conversation/calendar pages into timeline events by enqueuing chronicle_extract jobs (one per eligible page). --dry-run counts without enqueuing. Local-only bulk op. CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N] [--dry-run]`.",
+        "description": "Life Chronicle: sweep existing meeting/conversation/calendar pages into timeline events by enqueuing chronicle_extract jobs (one per eligible page). A page whose current content was already enqueued is skipped (already_enqueued), so repeat runs move on to pages not yet swept. --dry-run counts without enqueuing. Local-only bulk op. CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N] [--dry-run]`.",
         "name": "chronicle_backfill",
         "parameters": {
           "dry_run": "boolean?",
@@ -3965,7 +3970,7 @@
               "type": "boolean"
             },
             "limit": {
-              "description": "Max pages per type to sweep (default 1000).",
+              "description": "Max pages per type to enqueue in this run (default 1000); pages already enqueued for their current content do not count.",
               "type": "number"
             },
             "since": {
@@ -5116,6 +5121,7 @@
         "name": "open_loops",
         "parameters": {
           "all_sources": "boolean?",
+          "as_of": "string?",
           "counterparty": "string?",
           "group_by": "string?",
           "include_context": "boolean?",
@@ -5129,6 +5135,10 @@
             "all_sources": {
               "description": "Trusted local: span every source in the brain. Remote callers stay inside their grant.",
               "type": "boolean"
+            },
+            "as_of": {
+              "description": "Reference time (ISO 8601) for due-date proximity, loop age and rendered ages. Default: now. Pin it to reproduce a ranking.",
+              "type": "string"
             },
             "counterparty": {
               "description": "Filter to one counterparty (slug or email).",
@@ -5186,6 +5196,7 @@
         "parameters": {
           "id": "number",
           "note": "string?",
+          "source_id": "string?",
           "status": "string"
         },
         "schema": {
@@ -5196,6 +5207,10 @@
             },
             "note": {
               "description": "Optional closed_by note (default: manual).",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "The loop's home source (e.g. the google source, when the caller's transport is bound elsewhere). Remote callers must be write-bound to it — a federated read grant does not authorize the close. When omitted, the caller's bound write source is used.",
               "type": "string"
             },
             "status": {

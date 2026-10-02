@@ -8,8 +8,8 @@ can load, and Google source files other local users can read. `gbrain repair`
 fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
-Three explicit-only kinds, `google-file-modes`, `stale-atoms` and `extractor-facts`, run only when
-you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+Five explicit-only kinds, `google-file-modes`, `stale-atoms`, `extractor-facts`,
+`captured-facts` and `loop-facts`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -99,8 +99,8 @@ gives each a fresh row number); it never deletes or rewrites a page.
 | `--limit <n>` | Repair at most `n` items per kind in this run (a positive integer; with `--all`, up to `n` for each kind). Rerun the same command to continue. |
 | `--no-embed` | `safe-chunks` and `contextual-mode`: skip the embedding provider. Run `gbrain embed --stale` later. `timeline` and `visibility` pages are re-embedded by their publication either way. |
 | `--all` | Run every automatic kind in order. Explicit-only kinds are listed with their preview command, never run. |
-| `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms` and `extractor-facts`. |
-| `--include-ambiguous` | `extractor-facts` only: widen the hashed set to `ambiguous` facts. Pass it to both the preview and the apply. See [Extractor facts](#extractor-facts). |
+| `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms`, `extractor-facts`, `captured-facts` and `loop-facts`. |
+| `--include-ambiguous` | `extractor-facts` and `captured-facts` only: widen the hashed set to `ambiguous` facts. Pass it to both the preview and the apply. See [Extractor facts](#extractor-facts) and [Captured facts](#captured-facts). |
 | `--json` | Print `{ scope, mode, results[], paid_kinds }`, one result per kind with `paid`, `affected`, `sample`, `residuals`, `cost`, `capacity`, `resumed_from`, `applied`, `skipped`, `complete`, `stopped` and `apply_command`, plus `explicit_kinds[]` when the run skipped explicit-only kinds. |
 
 The command exits 1 when a run stops early (capacity, a pending write, or a
@@ -398,6 +398,78 @@ The preview warns, naming the host, when a consumer older than this release
 published writes after `writer_version_cutoff`: an old consumer expires
 restored facts again. Upgrade and restart it first.
 
+<a id="captured-facts"></a>
+### Captured facts
+
+Before v0.60.30.0, automatic capture (the writeback hook, the compaction
+harvest and the corpus sweep) extracted facts from gbrain's own claude-cli
+model sessions and from text you pasted into a conversation. New capture skips
+both, but the facts already stored stay active, so recall and hot memory keep
+returning them. `gbrain repair captured-facts` expires them. It is
+explicit-only and preview-bound, and it runs on the brain host (it reads the
+Claude Code session directory and the session corpus there).
+
+**Say to your agent:** *"Doctor says some facts were captured from gbrain's own
+sessions or from pasted text. Show me which ones before removing anything."*
+The agent runs `gbrain repair captured-facts`, shows you the list and, after
+you agree, runs the printed apply command.
+
+```bash
+gbrain doctor                                   # captured_facts_active
+gbrain repair captured-facts                    # preview: every candidate with its class
+gbrain repair captured-facts --apply --expect <hash>
+gbrain doctor
+```
+
+| Class | Meaning | Expired |
+| --- | --- | --- |
+| `evidenced` | The fact's session is one of gbrain's own claude-cli sessions: a harness transcript in a gbrain scratch project, or a corpus file `gbrain doctor` (`self_capture`) quarantined. | By `--apply --expect <hash>` |
+| `ambiguous` | A paste candidate: at least 60% of the fact's content words appear in the session's retained corpus file only inside pasted blocks. A heuristic, so it is listed in every preview but expired only on request. | Only with `--include-ambiguous` and that preview's hash |
+| `excluded:legitimate_duplicate` | The same claim and entity also has an active fact from another lane or an unsuspected session, so the claim is legitimate. | Never |
+
+Sessions that cannot be classified on this host (the harness transcript was
+pruned, the corpus file is gone) are counted as `unclassifiable` and kept.
+`captured_facts_active` counts facts; the `self_capture` check counts corpus
+files. Clear both: quarantine the files with the commands `self_capture`
+prints, then expire the facts here.
+
+The apply expires exactly the previewed set. A fact that changed since the
+preview reports `changed_since_preview` and stays active. A fact with a row in
+its entity page's `## Facts` fence is struck in the page (one revision-bound
+`put_page` per page, which re-embeds the page), so a later write of the page
+cannot reactivate it; a fact with no fence row expires database-only (one
+maintenance request per page on a managed brain). Nothing is withdrawn, so
+`gbrain remember` can save the same claim again.
+
+<a id="loop-facts"></a>
+### Loop facts
+
+Closing a commitment loop (`gbrain loops done`, `gbrain loops drop`, or the
+`loops_close` tool) retires its commitment fact. A loop closed while that
+retirement could not commit (for example on a managed brain, where the write
+was refused but the close still reported `fact_expired: true`) left the fact
+active, so entity cards and recall keep the finished promise. `gbrain repair
+loop-facts` retires those facts. It is explicit-only and preview-bound.
+
+**Say to your agent:** *"Doctor says some closed loops still have an active
+commitment. Preview retiring those facts, then apply after I agree."* The agent
+runs `gbrain repair loop-facts` and, after you agree, the printed apply command.
+
+```bash
+gbrain doctor                                   # loop_facts_drift
+gbrain repair loop-facts                        # preview: closed_loop_facts=N
+gbrain repair loop-facts --apply --expect <hash>
+gbrain doctor
+```
+
+Each candidate is a `done` or `dropped` loop whose commitment fact is active
+and lives in the loop's own source. A fact that another open loop still
+references is skipped (`shared_with_open_loop`); it is retired when the last
+loop that uses it closes. The apply expires the fact and strikes its fence row
+in one coordinated write, exactly for the previewed set; a loop or fact that
+changed since the preview reports `changed_since_preview` and is kept. No
+withdrawal is recorded, so the same promise made again is stored normally.
+
 ## Resume
 
 Runs are resumable. After each page commits, the position is saved under the
@@ -574,6 +646,16 @@ walk me through it before changing anything."*
 | Working-tree sync prints `legacy file(s) skipped … no contextual retrieval mode` | #5751 | `gbrain repair contextual-mode` | `gbrain repair contextual-mode --apply` | the next `gbrain sync --working-tree` no longer prints the line |
 | Working-tree sync prints `legacy file(s) skipped … not valid UTF-8` | #5751 | `find <checkout> -name '*.md' ! -exec iconv -f UTF-8 -t UTF-8 -o /dev/null {} \; -print` | re-save each listed file as UTF-8 | the next `gbrain sync --working-tree` no longer prints the line |
 | Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | #5080 | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor` (`google_file_modes` ok) |
+| Recall or hot memory returns facts from gbrain's own claude-cli sessions or from pasted text; doctor `captured_facts_active` warns; the upgrade banner prints `captured_facts_active: N (explicit_kind_required; …)` | #5812, #5820 | `gbrain repair captured-facts` (add `--include-ambiguous` to include paste candidates) | `gbrain repair captured-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor` (`captured_facts_active` ok) |
+| A finished promise still shows on entity cards and in recall after its loop was closed; doctor `loop_facts_drift` warns; the upgrade banner prints `loop_facts_drift: N (explicit_kind_required; …)` | #5869 | `gbrain repair loop-facts` | `gbrain repair loop-facts --apply --expect <hash>` | `gbrain doctor` (`loop_facts_drift` ok) |
+| `gbrain upgrade` refuses with `requires Bun >=<floor>` (exit 78), or doctor `self_upgrade_health` says `Auto-upgrade to <target> held` | #5855 | `bun --version` | `bun upgrade`, then `gbrain upgrade` ([Bun floor](upgrades-auto-update.md#bun-floor)) | `gbrain --version` shows the target; `gbrain doctor` (`self_upgrade_health` ok) |
+
+**Say to your agent:** *"After the upgrade, preview the captured-facts and
+loop-facts repairs and tell me what each would expire before applying
+anything."* The agent runs `gbrain repair captured-facts` and `gbrain repair
+loop-facts`, shows you both lists, and after you agree runs each printed
+`--apply --expect <hash>` command. See [Captured facts](#captured-facts) and
+[Loop facts](#loop-facts).
 
 Hosted and thin-client callers see the same checks in `gbrain remote doctor`
 as one line each, for example
@@ -749,10 +831,10 @@ Each heading below is the `docs` anchor a refusal carries.
 
 ### Explicit-only repair kinds
 
-`google-file-modes`, `stale-atoms` and `extractor-facts` run only when named:
-`gbrain repair <kind>` previews, and `gbrain repair <kind> --apply` applies
-(`stale-atoms` and `extractor-facts` also need `--expect <hash>`, so they apply
-exactly the previewed set; `google-file-modes` re-checks each file's owner,
+`google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts` and
+`loop-facts` run only when named: `gbrain repair <kind>` previews, and
+`gbrain repair <kind> --apply` applies (every kind but `google-file-modes`
+also needs `--expect <hash>`, so it applies exactly the previewed set; `google-file-modes` re-checks each file's owner,
 type and mode at apply time). They are excluded everywhere else:
 
 - `gbrain repair --all` (and `gbrain repair` with no kind) lists each with its
@@ -779,7 +861,8 @@ saved preview is older than 7 days, or the selection no longer matches it (for
 "The preview changed since <hash>; re-run <preview command> and use the new
 hash." Re-run the printed preview command and apply with the new hash. It
 applies to `gbrain jobs authorize-legacy --select`, `gbrain jobs cancel
---select`, `gbrain repair stale-atoms` and `gbrain repair extractor-facts`.
+--select`, `gbrain repair stale-atoms`, `gbrain repair extractor-facts`,
+`gbrain repair captured-facts` and `gbrain repair loop-facts`.
 
 ### Legacy job authority
 

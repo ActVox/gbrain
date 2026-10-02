@@ -36,7 +36,8 @@ boundary and add its link here rather than raising the cap.
 | [Commands (6/6)](key-files/commands-6.md) | `src/commands/sync.ts` through `src/commands/whoknows.ts` |
 | [Core Ai](key-files/core-ai.md) | `src/core/ai/build-gateway-config.ts` through `src/core/ai/types.ts` |
 | [Core Decide](key-files/core-decide.md) | `src/core/ai/decide/*`, `src/core/search/decide-stage.ts`, `gbrain decide`, `decide_health` (System One) |
-| [Core Cycle](key-files/core-cycle.md) | `src/core/cycle/anomaly.ts` through `src/core/cycle/triage-rescue.ts` |
+| [Core Cycle](key-files/core-cycle.md) | `src/core/cycle/anomaly.ts` through `src/core/cycle/phase-table.ts`: atoms, facts, drains, probes, phase scope |
+| [Core Cycle (continued)](key-files/core-cycle-continued.md) | `src/core/cycle/` synthesis, patterns, consolidation, concept publication and `connector-atoms.ts` |
 | [Core Minions (1/2)](key-files/core-minions-1.md) | `src/core/minions/` through `src/core/minions/rss-default.ts` |
 | [Core Minions (2/2)](key-files/core-minions-2.md) | `src/core/minions/run-child.ts` through `src/core/minions/worker.ts` |
 | [Core Persistence](key-files/core-persistence.md) | `src/core/persistence/` write journal, coordinator, effects, canonical projections and managed sync |

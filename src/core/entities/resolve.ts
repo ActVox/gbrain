@@ -35,7 +35,8 @@ import { privatePagesFilterFragment } from '../search/private-visibility.ts';
  *      exact pages.slug row in this source), return it untouched. A mention
  *      that is exactly one live page's own name (slug basename) resolves to
  *      it next, before any other page's alias.
- *   2. Resolve a bare name only when prefix expansion finds one candidate.
+ *   2. Resolve a bare name only when prefix expansion finds one candidate,
+ *      or one candidate whose title is exactly that name.
  *   3. For multi-token input, take a fuzzy candidate within the source only
  *      when it carries the same name tokens (sameEntityName).
  *   4. Fall back to a deterministic slugify: lowercase-no-spaces with
@@ -85,7 +86,7 @@ export async function resolveEntitySlug(
   //    `"Alice"` → `people/alice-example` before we phantom-stub a bare
   //    `people/alice.md`.
   if (isBareName(trimmed)) {
-    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, slugify(trimmed));
+    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, trimmed);
     if (expanded) return expanded;
   } else {
     // 3. Fuzzy match against existing pages within the source. Bare names
@@ -279,7 +280,7 @@ export async function resolveEntitySlugWithSource(
   if (basenames.length > 1) return { slug: fallbackSlugify(trimmed), source: 'fallback_slugify' };
 
   if (isBareName(trimmed)) {
-    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, slugify(trimmed));
+    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, trimmed);
     if (expanded) return { slug: expanded, source: 'prefix_expansion' };
   } else {
     const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed);
@@ -476,13 +477,43 @@ export async function findPrefixCandidates(
   }
 }
 
+/**
+ * The sole prefix candidate, or, when every candidate sits in one entity
+ * directory, the one page whose title is exactly the bare name: "Acme" is
+ * `companies/acme-0` titled "Acme", not `companies/acme-labs-50` titled
+ * "Acme Labs" (gbrain-evals N9-5). A collision across directories (a person
+ * and a host) or two exact titles stays ambiguous.
+ */
 async function tryUnambiguousPrefixExpansion(
   engine: BrainEngine,
   source_id: string,
-  token: string,
+  raw: string,
 ): Promise<string | null> {
+  const token = slugify(raw);
   const candidates = await findPrefixCandidates(engine, source_id, token);
-  return candidates.length === 1 ? candidates[0].slug : null;
+  if (candidates.length === 1) return candidates[0].slug;
+  if (candidates.length === 0) return null;
+  const patterns = PREFIX_EXPANSION_DIRS.flatMap(dir => [`${dir}/${token}`, `${dir}/${token}-%`]);
+  try {
+    const dirs = await engine.executeRaw<{ dir: string }>(
+      `SELECT DISTINCT split_part(slug, '/', 1) AS dir FROM pages
+        WHERE source_id = $1 AND deleted_at IS NULL AND slug LIKE ANY($2::text[])
+        LIMIT 2`,
+      [source_id, patterns],
+    );
+    if (dirs.length !== 1) return null;
+    const rows = await engine.executeRaw<{ slug: string; title: string | null }>(
+      `SELECT slug, title FROM pages
+        WHERE source_id = $1 AND deleted_at IS NULL
+          AND slug LIKE ANY($2::text[]) AND lower(title) = lower($3)
+        LIMIT 3`,
+      [source_id, patterns, raw.trim()],
+    );
+    const exact = rows.filter(r => sameEntityName(raw, r.title, r.slug));
+    return exact.length === 1 ? exact[0].slug : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

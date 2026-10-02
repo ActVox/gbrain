@@ -20,10 +20,13 @@ import { authorizePageVisibility } from './page-visibility.ts';
 import { nativeLockCapability } from './native-lock.ts';
 import { assertPhysicalRoot } from './physical-root.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
+import { MaintenanceWriteWait } from './maintenance-wait.ts';
 
 export interface MaintenanceAuthority {
   writer: WriteAuthority;
   binding: WorktreeBinding | null;
+  /** #5854: the job's publish wait (one wait per job, bounded by its deadline); a fresh 30 s budget when absent. */
+  wait?: MaintenanceWriteWait;
 }
 
 function maintenanceRequestId(value: unknown): string {
@@ -31,7 +34,8 @@ function maintenanceRequestId(value: unknown): string {
   return `${key.slice(0, 8)}-${key.slice(8, 12)}-4${key.slice(13, 16)}-a${key.slice(17, 20)}-${key.slice(20, 32)}`;
 }
 
-export async function maintenancePreflight(engine: BrainEngine, sourceId: string, root?: string): Promise<MaintenanceAuthority | null> {
+export async function maintenancePreflight(engine: BrainEngine, sourceId: string, root?: string,
+  opts: { deadlineAtMs?: number | null } = {}): Promise<MaintenanceAuthority | null> {
   if (!await managedPersistenceEnabled(engine)) return null;
   assertPersistenceAccepting(engine);
   const job = currentSubmissionAuthority();
@@ -51,7 +55,7 @@ export async function maintenancePreflight(engine: BrainEngine, sourceId: string
   // (its local_path is the connector's state directory, not a canonical checkout).
   if (!binding && isConnectorSourceKind(source.kind)) {
     writer.databaseOnlyReason = 'connector_database';
-    return { writer, binding: null };
+    return { writer, binding: null, wait: new MaintenanceWriteWait(opts.deadlineAtMs) };
   }
   const writeThrough = !/^(false|0|off|no)$/i.test(await engine.getConfig('sync.write_through') ?? 'true');
   const configuredRoot = source.local_path || (sourceId === 'default' ? await engine.getConfig('sync.repo_path') : null);
@@ -68,7 +72,7 @@ export async function maintenancePreflight(engine: BrainEngine, sourceId: string
   }
   if (!writeThrough) writer.databaseOnlyReason = 'disabled_by_config';
   else if (!binding) writer.databaseOnlyReason = 'no_repo_configured';
-  return { writer, binding: writeThrough ? binding : null };
+  return { writer, binding: writeThrough ? binding : null, wait: new MaintenanceWriteWait(opts.deadlineAtMs) };
 }
 
 async function validateMaintenance(engine: BrainEngine, authority: MaintenanceAuthority, slug: string): Promise<void> {
@@ -88,11 +92,12 @@ async function validateMaintenance(engine: BrainEngine, authority: MaintenanceAu
 async function submitMaintenance(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
   intent: Record<string, unknown>, requestId: string, file = true): Promise<Record<string, unknown>> {
   await validateMaintenance(engine, authority, slug);
+  const wait = authority.wait ??= new MaintenanceWriteWait();
   const prior = await getWriteRequest(engine, authority.writer.principal, requestId);
   if (prior) {
     await authorizeStoredRequest(engine, prior);
     assertReplayIntent(prior, intentDigest({ operation: 'submit_job', sourceId: authority.writer.sourceId, slug, callerIntent: intent }));
-    return writeResponse(await waitForWrite(engine, prior, loadConfig() ?? { engine: engine.kind }));
+    return writeResponse(wait.observe(await waitForWrite(engine, prior, loadConfig() ?? { engine: engine.kind }, wait.ms())));
   }
   const snapshot = await engine.readPageSnapshot(slug, { sourceId: authority.writer.sourceId, includeDeleted: true });
   if (snapshot?.page.deleted_at) throw new OperationError('page_not_found', 'Maintenance cannot restore a deleted page.');
@@ -101,7 +106,7 @@ async function submitMaintenance(engine: BrainEngine, authority: MaintenanceAuth
     sourceId: authority.writer.sourceId, sourceIncarnation: authority.writer.sourceIncarnation, slug,
     pageId: snapshot?.page.id ?? null, authority: authority.writer, callerIntent: intent, intent,
     worktreeId: file ? authority.binding?.worktree_id : null, topologyGeneration: file ? authority.binding?.topology_generation : null });
-  return writeResponse(await waitForWrite(engine, row, loadConfig() ?? { engine: engine.kind }));
+  return writeResponse(wait.observe(await waitForWrite(engine, row, loadConfig() ?? { engine: engine.kind }, wait.ms())));
 }
 
 /** #5523: a Life Chronicle timeline row projected onto the depth page in the same publication. */
@@ -283,6 +288,8 @@ export async function applyPreservingTakeResolutions(tx: BrainEngine, pageId: nu
 export async function prepareMaintenanceMutation(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   if (row.authority.remote) throw new OperationError('permission_denied', 'Remote maintenance publication is not supported.');
   if (row.intent?.kind === 'managed_maintenance_restore_extractor_facts') return (await import('../repair/extractor-facts.ts')).prepareExtractorFactsRestore(engine, row);
+  if (row.intent?.kind === 'managed_maintenance_expire_captured_facts') return (await import('../repair/captured-facts.ts')).prepareCapturedFactsExpiry(engine, row);
+  if (row.intent?.kind === 'managed_maintenance_timeline_extract') return (await import('../../commands/extract-timeline-db.ts')).prepareTimelineExtract(engine, row);
   if (row.intent?.kind === 'managed_maintenance_page') {
     const prepared = await preparePageMutation(engine, row.intent.expected_revision === null
       ? { ...row, intent: { ...row.intent, expected_revision: undefined } } : row, config);

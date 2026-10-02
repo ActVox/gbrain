@@ -171,9 +171,11 @@
             ],
             "backstop_visibility": "private",
             "counters_note": "local, append-only, loss-tolerant observability over the last 7d — never a source of truth",
+            "cross_lane_duplicates_7d": 0,
             "instruction_visibility": "world",
             "mode": "off",
             "mode_valid": true,
+            "near_duplicates_shadow_7d": 0,
             "nudge_shown": true,
             "transient_ttl": "3d",
             "ttl_valid": true,
@@ -732,6 +734,31 @@
         },
         {
           "category": "brain",
+          "details": {
+            "ambiguous": 0,
+            "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
+            "evidenced": 0,
+            "excluded": 0,
+            "repair": "captured-facts",
+            "unclassifiable": 0
+          },
+          "message": "No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
+          "name": "captured_facts_active",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
+            "drifted": 0,
+            "repair": "loop-facts"
+          },
+          "message": "Every closed commitment loop has its fact retired.",
+          "name": "loop_facts_drift",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
           "message": "Sampled 0 pages; no bare-tweet phrases or external links.",
           "name": "integrity",
           "status": "ok"
@@ -960,7 +987,7 @@
               "unpushed": 0
             }
           },
-          "message": "0 knowledge asset(s) have no git remote: . Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
+          "message": "1 knowledge asset(s) lack verified recovery: default (not_a_git_repo). Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
           "name": "backup_coverage",
           "status": "warn"
         },
@@ -996,7 +1023,7 @@
         },
         {
           "category": "brain",
-          "message": "Every DB page is file-backed or under a declared/default db_only path (derive-phase defaults: life/events/ atoms/ concepts/ extracts/ dream-cycle-summaries/)",
+          "message": "Every DB page is file-backed or under a declared/default db_only path (derive-phase defaults: life/events/ atoms/ concepts/ extracts/ dream-cycle-summaries/).",
           "name": "undeclared_db_only_pages",
           "status": "ok"
         },
@@ -1256,7 +1283,7 @@
       "status": "warnings",
       "top_issues": [
         {
-          "fix": "0 knowledge asset(s) have no git remote: . Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
+          "fix": "1 knowledge asset(s) lack verified recovery: default (not_a_git_repo). Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
           "name": "backup_coverage",
           "status": "warn",
           "tier": "symptom"

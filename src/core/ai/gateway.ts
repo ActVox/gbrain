@@ -22,6 +22,7 @@
  */
 
 import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema, type JSONSchema7, type Output } from 'ai';
+import { installAiSdkWarningWriter } from './sdk-warnings.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { listRecipes } from './recipes/index.ts';
@@ -69,6 +70,7 @@ import { reportEmbeddingAuthFailure } from './key-warnings.ts';
 import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gateway-config.ts';
 import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError } from './invocation-guard.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
+installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
@@ -1592,10 +1594,17 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
 
   const allEmbeddings: Float32Array[] = [];
   let _embedThrew = false;
+  // Provider-reported input tokens summed across sub-batches; null as soon as
+  // any sub-batch's provider did not report (all-or-nothing: a partial sum
+  // would undercharge the budget while looking measured).
+  let reportedTokens: number | null = 0;
   try {
     for (const batch of batches) {
       const result = await embedSubBatch(batch, model, providerOpts, expected, recipe, modelId, opts);
-      allEmbeddings.push(...result);
+      allEmbeddings.push(...result.embeddings);
+      reportedTokens = reportedTokens !== null && result.reportedTokens !== null
+        ? reportedTokens + result.reportedTokens
+        : null;
     }
     return screenEmbeddings(truncated, sent, allEmbeddings, `${recipe.id}:${modelId}`);
   } catch (err) {
@@ -1603,22 +1612,25 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
     throw err;
   } finally {
     if (tracker) {
-      // Embed token usage is not surfaced by the AI SDK shape we use; charge
-      // based on the truncated input character count using the recipe's
-      // chars-per-token. On failure, A3 amended says charge the pessimistic
-      // estimate too — embed has no output side, so the input estimate IS
-      // the worst case.
+      // Charge what the provider reported (embedMany surfaces usage.tokens)
+      // when every sub-batch reported it; otherwise fall back to the
+      // chars-per-token estimate over the truncated input. On failure, A3
+      // amended says charge the pessimistic estimate — embed has no output
+      // side, so the input estimate IS the worst case.
+      const measured = !_embedThrew && reportedTokens !== null && reportedTokens > 0
+        ? reportedTokens
+        : null;
       const charsPerToken = recipe.touchpoints?.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
       const totalChars = truncated.reduce((s, t) => s + t.length, 0);
       recordOnTracker(tracker, {
         modelId: `${recipe.id}:${modelId}`,
         requestedModelId: resolveTarget,
-        inputTokens: Math.ceil(totalChars / Math.max(charsPerToken, 1)),
+        inputTokens: measured ?? Math.ceil(totalChars / Math.max(charsPerToken, 1)),
         outputTokens: 0,
         embeddingDims: expected,
         kind: 'embed',
         label: _embedThrew ? 'gateway.embed.failed' : 'gateway.embed',
-        estimated: true,
+        estimated: measured === null,
       });
     }
   }
@@ -1692,6 +1704,11 @@ export function __getShrinkStateForTests(recipeId: string): ShrinkEntry | undefi
 /**
  * Embed a single sub-batch with automatic halving on token-limit errors.
  * If the batch is already at MIN_SUB_BATCH and still fails, throws.
+ *
+ * `reportedTokens` is the provider's usage.tokens for this sub-batch (summed
+ * across halves when the batch split), or null when the provider did not
+ * report usage — the caller's budget record falls back to the chars-per-token
+ * estimate in that case.
  */
 async function embedSubBatch(
   texts: string[],
@@ -1701,7 +1718,7 @@ async function embedSubBatch(
   recipe: Recipe,
   modelId: string,
   opts?: EmbedOpts,
-): Promise<Float32Array[]> {
+): Promise<{ embeddings: Float32Array[]; reportedTokens: number | null }> {
   try {
     const callTransport = () => invokeAI({ operation: 'gateway.embed', kind: 'embedding', model: `${recipe.id}:${modelId}`,
       maxInputTokens: embedRequestMaxInputTokens(texts, recipe, modelId), maxOutputTokens: 0 }, () => _embedTransport({
@@ -1742,7 +1759,13 @@ async function embedSubBatch(
     }
 
     recordSubBatchSuccess(recipe);
-    return result.embeddings.map((e: number[]) => new Float32Array(e));
+    const usageTokens = (result as { usage?: { tokens?: unknown } }).usage?.tokens;
+    return {
+      embeddings: result.embeddings.map((e: number[]) => new Float32Array(e)),
+      reportedTokens: typeof usageTokens === 'number' && Number.isFinite(usageTokens) && usageTokens > 0
+        ? usageTokens
+        : null,
+    };
   } catch (err) {
     if (isAIInvocationPolicyError(err)) throw err;
     // On token-limit error, tighten the recipe's effective safety factor
@@ -1753,7 +1776,12 @@ async function embedSubBatch(
       const mid = Math.ceil(texts.length / 2);
       const left = await embedSubBatch(texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts);
       const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts);
-      return [...left, ...right];
+      return {
+        embeddings: [...left.embeddings, ...right.embeddings],
+        reportedTokens: left.reportedTokens !== null && right.reportedTokens !== null
+          ? left.reportedTokens + right.reportedTokens
+          : null,
+      };
     }
     reportEmbeddingAuthFailure(recipe, err);
     throw normalizeAIError(err, `embed(${recipe.id}:${modelId})`, redactKeys);

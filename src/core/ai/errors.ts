@@ -132,6 +132,33 @@ export function normalizeAIError(err: unknown, context?: string, redact?: (text:
   return carryStatusFields(err, new AITransientError(`${ctxPrefix}${msg}`, err));
 }
 
+/** A provider refusal tied to the prompt, even when the SDK wraps its response. */
+export function providerContentBlockReason(err: unknown): string | undefined {
+  for (let depth = 0; depth < 8 && err != null; depth++) {
+    try {
+      if (typeof err !== 'object') break;
+      const value = err as { responseBody?: unknown; statusCode?: unknown; status?: unknown; cause?: unknown };
+      if (typeof value.responseBody === 'string' &&
+          (value.statusCode == null || value.statusCode === 200) &&
+          (value.status == null || value.status === 200)) {
+        const body = JSON.parse(value.responseBody);
+        const reason = body?.promptFeedback?.blockReason;
+        if (typeof reason === 'string' && reason.trim()) return reason;
+        const candidate = body?.candidates?.[0];
+        if (['PROHIBITED_CONTENT', 'SAFETY', 'BLOCKLIST', 'SPII'].includes(candidate?.finishReason) &&
+            (!Array.isArray(candidate?.content?.parts) || candidate.content.parts.length === 0)) {
+          return candidate.finishReason;
+        }
+      }
+      err = value.cause;
+    } catch {
+      // Malformed provider bodies and hostile error objects are not content blocks.
+      break;
+    }
+  }
+  return undefined;
+}
+
 /** Whole-run LLM failure classes — see classifyGlobalLlmError. */
 export type GlobalLlmErrorClass = 'auth' | 'billing' | 'rate_limit';
 

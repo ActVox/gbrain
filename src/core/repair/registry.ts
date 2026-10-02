@@ -34,6 +34,8 @@ import { embeddingEffectsRepair } from './embedding-effects.ts';
 import { googleFileModesRepair } from './google-file-modes.ts';
 import { staleAtomsRepair } from './stale-atoms.ts';
 import { extractorFactsRepair } from './extractor-facts.ts';
+import { capturedFactsRepair } from './captured-facts.ts';
+import { loopFactsRepair } from './loop-facts.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -114,6 +116,20 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + '(a committed write of the page completed in the same transaction, by an older consumer); --include-ambiguous widens the hashed set to facts '
       + 'without that evidence. Preview-bound: --apply --expect <hash> restores exactly the previewed set; a fact that changed since reports '
       + 'changed_since_preview and stays expired. Superseded, withdrawn and duplicated facts are never restored. Database-only; no page is rewritten.',
+  },
+  'captured-facts': {
+    handler: capturedFactsRepair, embeds: 'effect', checks: ['captured_facts_active'], explicit_only: true,
+    summary: 'Expire facts the capture lanes (writeback, compact, corpus sweep) extracted before v0.60.30.0 from gbrain\'s own claude-cli sessions '
+      + '(evidence: a scratch-project harness transcript or a quarantined corpus file). Paste-derived facts are found by a heuristic over the retained '
+      + 'corpus file and expire only with --include-ambiguous. A claim that also has an active copy from another lane is kept. Preview-bound: --apply '
+      + '--expect <hash> expires exactly the previewed set; a fact that changed since reports changed_since_preview. Rows are expired, never withdrawn, '
+      + 'so remember can save the same claim again; fenced rows are struck in their page, which is re-embedded by its publication.',
+  },
+  'loop-facts': {
+    handler: loopFactsRepair, embeds: 'effect', checks: ['loop_facts_drift'], explicit_only: true,
+    summary: 'Retire the commitment facts of loops closed before this release (#5869): expires each fact and strikes its fence row in one coordinated write, '
+      + 'only when no open loop shares the fact. Preview-bound: --apply --expect <hash> retires exactly the previewed set; a loop or fact that changed since '
+      + 'reports changed_since_preview and is kept. Never writes a withdrawal, so the same promise made again is stored normally.',
   },
 };
 

@@ -16,7 +16,7 @@ import { authorizeStoredRequest, authorizeWrite } from './authority.ts';
 import { materializeTimeline, prepareCanonicalProjections } from './canonical-projections.ts';
 import { digest, sha256 } from './digest.ts';
 import { admitWriteInTransaction, assertReplayIntent, getWriteRequest, getWriteRequestById, intentDigest, receiptFor } from './journal.ts';
-import { acquireWorktree, containsPath, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
+import { acquireWorktree, containsPath, getWorktreeBinding, probeWorktreeWriter, type WorktreeBinding } from './ownership.ts';
 import { localHostId } from './identity.ts';
 import { assertPersistenceAccepting, startPersistenceConsumer, waitForWrite, writeResponse } from './service.ts';
 import { managedSyncAuthority, validateManagedSyncOptions, validateSyncAuthority, type SyncAuthority } from './sync-authority.ts';
@@ -189,7 +189,7 @@ export async function beginConnectorSync(engine: BrainEngine, sourceId: string, 
   const authority = await managedSyncAuthority(engine, sourceId, source.incarnation, source.local_path ?? '');
   const binding = await getWorktreeBinding(engine, sourceId);
   // The locked acquisition re-stamps a device-only physical-root change (#5604) before the root is asserted.
-  if (binding) { checkedConnectorBinding(sourceId, source, binding); await (await acquireWorktree(binding, 0, undefined, engine))?.release(); }
+  if (binding) { checkedConnectorBinding(sourceId, source, binding); await probeWorktreeWriter(binding, engine); }
   else authority.writer.databaseOnlyReason = 'connector_database';
   const canonicalRoot = connectorBindingRoot(sourceId, source, binding);
   const session = new ManagedConnectorSync(engine, sourceId, identity, source, authority, binding, canonicalRoot, opts.noEmbed === true, opts.noSchemaPack === true,
@@ -637,12 +637,14 @@ export class ManagedConnectorSync {
    * committed cursor state plus the updated `item_holds`, so the cursor never
    * moves past an uncommitted receipt. A stale publication is refused by the
    * `checkpointBefore` digest; any failure records nothing and returns false.
+   * `extra` carries connector bookkeeping that is not a cursor (#5867/#5868
+   * loop recovery state) and is published with the holds.
    */
-  async publishHolds(empty: Record<string, unknown>, holds: unknown): Promise<boolean> {
+  async publishHolds(empty: Record<string, unknown>, holds: unknown, extra: Record<string, unknown> = {}): Promise<boolean> {
     if (this.resetRequested || this.stopped) return false;
     const committed = (this.checkpoint[0] as { state?: Record<string, unknown> | null } | undefined)?.state ?? null;
-    if (digest(committed?.item_holds ?? { version: 1, items: {} }) === digest(holds)) return true;
-    const state = { ...empty, ...(committed ?? {}), item_holds: holds };
+    const state = { ...empty, ...(committed ?? {}), ...extra, item_holds: holds };
+    if (digest({ ...(committed ?? {}), item_holds: committed?.item_holds ?? { version: 1, items: {} } }) === digest({ ...(committed ?? {}), ...extra, item_holds: holds })) return true;
     const next = [{ generation: Number((this.checkpoint[0] as { generation?: number } | undefined)?.generation ?? 0) + 1, state }];
     try {
       await this.submit('connector_v2_checkpoint', CHECKPOINT_SLUG, null, { checkpointAfter: next, receipts: [], fresh: false });

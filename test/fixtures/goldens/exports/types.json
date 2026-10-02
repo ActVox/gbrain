@@ -78,7 +78,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage?: ((sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>) | undefined",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -981,7 +981,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage: (sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -3045,7 +3045,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage?: ((sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>) | undefined",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -3261,6 +3261,7 @@
           "activeOnly?: boolean | undefined",
           "eventTime?: boolean | undefined",
           "excludeAuditRows?: boolean | undefined",
+          "fingerprint?: boolean | undefined",
           "grep?: string | undefined",
           "kinds?: FactKind[] | undefined",
           "limit?: number | undefined",
@@ -3285,6 +3286,7 @@
           "entity_slug: string | null",
           "expired_at: Date | null",
           "fact: string",
+          "fact_fingerprint?: string | undefined",
           "id: number",
           "kind: FactKind",
           "notability: \"low\" | \"medium\" | \"high\"",
@@ -4009,6 +4011,13 @@
       },
       {
         "kind": "function",
+        "name": "filterRefsSince",
+        "signature": [
+          "<T extends { updated_at: Date; }>(refs: T[], since: string | undefined) => T[]"
+        ]
+      },
+      {
+        "kind": "function",
         "name": "logBatchRetry",
         "signature": [
           "(label: string, snapshotLen: number, err: unknown, jsonMode: boolean) => void"
@@ -4232,7 +4241,7 @@
         "kind": "function",
         "name": "importFromContent",
         "signature": [
-          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; remote?: boolean; allowEmptyOverwrite?: boolean; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: ParseOpts[\"activePack\"]; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; remote?: boolean; allowEmptyOverwrite?: boolean; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; }) => Promise<ImportResult>"
         ]
       },
       {
@@ -4491,7 +4500,7 @@
         "kind": "variable",
         "name": "LINK_EXTRACTOR_VERSION_TS",
         "signature": [
-          "\"2026-10-01T00:00:00Z\""
+          "\"2026-10-02T00:00:00Z\""
         ]
       },
       {
@@ -4765,7 +4774,7 @@
       {
         "kind": "interface",
         "members": [
-          "activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; }>; } | undefined",
+          "activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; subtypes?: ReadonlyArray<{ name: string; when: { path_pattern?: string; frontmatter_field?: string; frontmatter_value?: unknown; }; }>; }>; } | undefined",
           "expectedSlug?: string | undefined",
           "validate?: boolean | undefined"
         ],
@@ -4793,6 +4802,7 @@
           "compiled_truth: string",
           "errors?: ParseValidationError[] | undefined",
           "frontmatter: Record<string, unknown>",
+          "inferredSubtype?: { type: string; name: string; } | undefined",
           "slug: string",
           "tags: string[]",
           "timeline: string",
@@ -4863,6 +4873,13 @@
         "name": "resolvePageFilePath",
         "signature": [
           "(brainDir: string, slug: string, sourceId: string) => string"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "resolveParsedSubtype",
+        "signature": [
+          "(parsed: ParsedMarkdown, existing?: { type: string; frontmatter?: Record<string, unknown> | null; } | null) => void"
         ]
       },
       {
@@ -5615,7 +5632,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage: (sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -6008,6 +6025,20 @@
         "name": "peekLock",
         "signature": [
           "(dataDir: string | undefined) => LockPeekResult"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "readBootId",
+        "signature": [
+          "() => string | null"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "readPidNs",
+        "signature": [
+          "() => string | null"
         ]
       },
       {

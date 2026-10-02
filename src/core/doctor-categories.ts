@@ -57,11 +57,13 @@ export type CheckCategory = 'brain' | 'skill' | 'ops' | 'meta';
 export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'abandoned_threads',
   'atom_provenance_drift',
+  'captured_facts_active',
   'connector_checkpoints',
   'connector_held_items',
   'credential_projection_pending',
   'derived_visibility',
   'extractor_facts_expired',
+  'loop_facts_drift',
   'orphan_persistence_bindings',
   'safe_index_pending',
   'self_capture',

@@ -124,7 +124,10 @@ bank remains harmless — the target serve's own DB gate decides.
    again. The provider also starts its `claude` child with your Claude Code
    hooks disabled, and the serve-side harvest and the sweep skip any such
    file an older binary left behind. `gbrain doctor` (`self_capture`) lists
-   leftover files with one-time quarantine commands.
+   leftover files with one-time quarantine commands, and
+   `captured_facts_active` counts facts already extracted from such sessions;
+   `gbrain repair captured-facts` previews and expires them
+   ([repair guide](repair.md#captured-facts)).
 
 ## Pasted content
 
@@ -144,8 +147,12 @@ captured as a fact about you.
   `gbrain transcripts ingest`, ambient recall and the dream `synthesize`
   phase (which writes idea pages, not facts about you) still see the pasted
   text with its tags.
-- **Repair.** Facts extracted from pastes before this release stay until you
-  remove them. Find one with `gbrain recall`, then withdraw it with
+- **Repair.** Facts extracted from pastes by releases before v0.60.30.0 stay
+  active until removed. `gbrain repair captured-facts --include-ambiguous`
+  lists likely paste-derived facts (a word-overlap heuristic against the
+  retained session corpus) and expires the previewed set only with
+  `--apply --expect <hash>` ([repair guide](repair.md#captured-facts)). For a
+  single fact, find it with `gbrain recall` and withdraw it with
   `gbrain forget <fact-id> --reason "came from a pasted email"`.
 
 To keep something you pasted, save it explicitly with its provenance:
@@ -158,6 +165,48 @@ gbrain recall projects/offsite-example
 
 Or ask your agent: *"Remember the offsite date from the email I just pasted,
 and note that it came from that email."*
+
+## Duplicates across lanes
+
+The same claim can arrive twice: the agent saves it with `remember`, and the
+writeback, compaction harvest or maintenance sweep extracts it again from the
+same turn. Automatic capture skips a fact when an active fact in the same
+source already has the same normalized text, and
+
+- it is on the same entity (or neither has one), or on a different entity
+  whose page title or alias the claim names. "Prefers email" captured for two
+  people stays two facts;
+- it is visible where the new fact would be. A private capture yields to a
+  world-visible `remember`; a world capture never yields to a private fact;
+- it was written within 15 minutes of the turn, or by automatic capture in the
+  same conversation (no time limit there, so a sweep hours later still
+  recognizes the writeback's copy).
+
+Similar but differently worded facts are always kept. Capture counts them as
+near duplicates (cosine 0.92 or higher on the same entity, with no difference
+in a negation, number or date) so the threshold can be measured before it
+ever removes anything. A correction such as "is not moving" or a changed
+amount is never treated as a duplicate. If the duplicate check cannot read
+the database, the fact is kept and a warning names the lane. Explicit
+`remember` is never skipped, so use it for anything that must persist.
+
+Each skip prints `[facts] capture dedup: lane=<lane> dropped a duplicate of
+fact #<id> (rule=same_entity|named_entity)` on stderr and adds a
+`writeback_dedup` heartbeat event (lane, `duplicate`, `near_duplicate`
+counts). `gbrain doctor` shows the 7-day totals as `cross_lane_duplicates_7d`
+and `near_duplicates_shadow_7d` under `memory_writeback`. Hot memory and the
+`context_pack`/`delta` facts show one line per duplicate group (the newest
+row, with every entity in `entity_slugs`).
+
+Two limits remain. Two capture writers racing on the same claim can both
+insert it (the check runs outside the write transaction). A `remember` saved
+after an automatic copy of the same claim leaves two rows; hot memory shows
+them once only when the text is identical, and search can return both.
+
+**Say to your agent:** *"Remember that the renewal moved to November."*
+(the agent's `remember` is the copy that stays) or *"How many duplicate facts
+did automatic capture skip this week?"* (the agent runs `gbrain doctor --json`
+and reads `memory_writeback`).
 
 ## Per-harness reality (honest limitations)
 
@@ -232,9 +281,40 @@ retention are deleted, so a keyless brain — or one whose serve AND sweep
 stayed away for a month — does eventually shed unbanked turns; serve restarts
 reset the counter). Keyless brains skip extraction entirely (typed `keyless` skip)
 and still get agent-authored `remember` writes; note that keyless dedup is
-degraded (`degraded_dedup`) — near-duplicate phrasings may insert. See
+degraded (`degraded_dedup`) — near-duplicate phrasings may insert. The
+maintenance sweep's corpus pass costs one call per transcript window (see
+[Long transcripts](#long-transcripts-windowed-extraction)). See
 [spend-controls](../operations/spend-controls.md) for the brain-wide
 extraction switches.
+
+### Long transcripts: windowed extraction
+
+**Say to your agent:** *"How much of my long sessions has the sweep
+extracted?"* (the agent runs `gbrain sweep --once --json` and reads
+`corpus_files[]`) or *"Lower how many transcript windows the sweep extracts at
+once."* (the agent sets `GBRAIN_CORPUS_WINDOWS_PER_SWEEP` for the process that
+runs the sweep).
+
+The extractor reads at most 8,000 characters per call, so the maintenance
+sweep reads a session transcript in windows cut at turn boundaries. Each
+window carries its `[user]` or `[assistant]` label, and pasted blocks are
+removed before the cut. A long session therefore costs one call per window: a
+typical long transcript (about 120 KB) is roughly 15 calls where it used to be
+one call that saw only the first 8,000 characters.
+
+Spend per sweep is capped: at most 8 windows per file and 32 windows across all
+files. A longer file picks up where it stopped on the next sweep. Progress
+is kept in a `<file>.progress` file beside the transcript, so a resumed
+session or a compaction rewrite costs only its new turns. The compaction
+harvest extracts the first window right away; the sweep does the rest. Set
+`GBRAIN_CORPUS_WINDOWS_PER_SWEEP` to a positive integer in the environment of
+the process that runs the sweep (`gbrain serve` or `gbrain sweep --once`) to
+change the 32-window total; the per-file cap of 8 is fixed. The off switch
+for all of this is the brain-wide `facts.extraction_enabled`. `gbrain sweep
+--once --json` lists `corpus_files[]` with `windows_done` and
+`windows_remaining` per file. Transcripts marked done before windowed
+extraction existed are not re-read; only turns added after the upgrade are
+extracted, so their tails past the first 8,000 characters stay unextracted.
 
 ## Diagnostics
 
@@ -249,8 +329,15 @@ lingering instruction blocks and warns — the off switch is incomplete until a
 `bootstrap harness` re-run converges them. It also reports 7-day counters —
 `remember` outcomes over MCP (all callers — the
 wire cannot distinguish ambient from explicit saves) and persisted backstop
-results from the serve-side harvest receipts. Counters are local, append-only,
-loss-tolerant observability — never a source of truth.
+results from the serve-side harvest receipts, plus the capture dedup totals
+`cross_lane_duplicates_7d` and `near_duplicates_shadow_7d` (see
+[Duplicates across lanes](#duplicates-across-lanes)). Counters are local,
+append-only, loss-tolerant observability — never a source of truth.
+
+Two neighbouring checks cover capture residue: `self_capture` counts corpus
+files from gbrain's own claude-cli sessions, and `captured_facts_active`
+counts facts captured before v0.60.30.0 from those sessions or from pasted
+text (cleared by `gbrain repair captured-facts`).
 
 ## Enable / verify / disable
 
