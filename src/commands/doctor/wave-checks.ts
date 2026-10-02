@@ -184,6 +184,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/extractor-facts.ts')).extractorFactsCheck(engine, scope.sourceIds),
   },
   {
+    id: 'captured_facts_active', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Classifying captured facts reads harness transcripts and the session corpus on the brain host; the repair is explicit-only.',
+    count: d => Number(d.evidenced ?? 0) + Number(d.ambiguous ?? 0),
+    impact: 'Some active facts were captured from gbrain\'s own model sessions or from pasted text before v0.60.30.0',
+    run: async (engine, scope) => (await import('./checks/captured-facts.ts')).capturedFactsCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'loop_facts_drift', resolution: 'repair', registration: 'wave',
     hostOnly: 'Retiring closed-loop commitment facts is a host-side, explicit-only repair.',
     count: d => Number(d.drifted ?? 0),

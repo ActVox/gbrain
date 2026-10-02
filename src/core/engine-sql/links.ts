@@ -371,7 +371,7 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
     sourceIds?: string[];
     excludePrivate?: boolean;
     mode?: 'inbound' | 'islanded';
-  }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean }>> {
+  }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string }>> {
     // Soft-delete filter on BOTH sides:
     //   - candidate: p.deleted_at IS NULL — soft-deleted pages aren't orphan candidates
     //   - link source: src.deleted_at IS NULL — links FROM soft-deleted pages don't count as inbound
@@ -409,7 +409,8 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
         COALESCE(p.title, p.slug) AS title,
         p.frontmatter->>'domain' AS domain,
         p.type,
-        (NOT ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}) AS quarantined
+        (NOT ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}) AS quarantined,
+        p.source_id
       FROM pages p
       WHERE p.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
         ${sourceFilter}
@@ -423,7 +424,7 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
         ${outboundFilter}
       ORDER BY p.slug
     `)).rows;
-    return rows as unknown as Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean }>;
+    return rows as unknown as Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string }>;
   }
 
 

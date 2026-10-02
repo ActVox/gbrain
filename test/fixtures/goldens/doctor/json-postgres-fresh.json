@@ -171,9 +171,11 @@
             ],
             "backstop_visibility": "private",
             "counters_note": "local, append-only, loss-tolerant observability over the last 7d — never a source of truth",
+            "cross_lane_duplicates_7d": 0,
             "instruction_visibility": "world",
             "mode": "off",
             "mode_valid": true,
+            "near_duplicates_shadow_7d": 0,
             "nudge_shown": true,
             "transient_ttl": "3d",
             "ttl_valid": true,
@@ -728,6 +730,20 @@
           },
           "message": "No conversation-extractor fact is left expired by the pre-v0.60.11.0 projection.",
           "name": "extractor_facts_expired",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "ambiguous": 0,
+            "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
+            "evidenced": 0,
+            "excluded": 0,
+            "repair": "captured-facts",
+            "unclassifiable": 0
+          },
+          "message": "No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
+          "name": "captured_facts_active",
           "status": "ok"
         },
         {

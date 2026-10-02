@@ -191,7 +191,8 @@ for (const backend of testBackends()) {
         const liveAtoms = async () => (await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM pages WHERE type='atom' AND deleted_at IS NULL"))[0].n;
         const activeFacts = async () => (await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM facts WHERE source_markdown_slug='conversations/expired' AND expired_at IS NULL"))[0].n;
         const untouched = async () => { expect(await liveAtoms()).toBe(30); expect(await activeFacts()).toBe(0); };
-        const previews = { 'google-file-modes': 'gbrain repair google-file-modes', 'stale-atoms': 'gbrain repair stale-atoms', 'extractor-facts': 'gbrain repair extractor-facts', 'loop-facts': 'gbrain repair loop-facts' };
+        const previews = { 'google-file-modes': 'gbrain repair google-file-modes', 'stale-atoms': 'gbrain repair stale-atoms', 'extractor-facts': 'gbrain repair extractor-facts',
+          'captured-facts': 'gbrain repair captured-facts', 'loop-facts': 'gbrain repair loop-facts' };
 
         // The post-upgrade banner names both findings with the kind's read-only preview.
         const banner = await postUpgradeRecoveryBanner(engine, 'host');

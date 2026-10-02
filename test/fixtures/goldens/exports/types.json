@@ -78,7 +78,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage?: ((sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>) | undefined",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -981,7 +981,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage: (sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -3045,7 +3045,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage?: ((sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>) | undefined",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: PageReadScope & { sourceId?: string; sourceIds?: string[]; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -4005,6 +4005,13 @@
         "name": "extractTimelineFromContent",
         "signature": [
           "(content: string, slug: string) => ExtractedTimelineEntry[]"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "filterRefsSince",
+        "signature": [
+          "<T extends { updated_at: Date; }>(refs: T[], since: string | undefined) => T[]"
         ]
       },
       {
@@ -5623,7 +5630,7 @@
           "findCandidateDuplicates: (source_id: string, entitySlug: string, factText: string, opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; }) => Promise<FactRow[]>",
           "findDuplicatePage: (sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; }>>",
+          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
