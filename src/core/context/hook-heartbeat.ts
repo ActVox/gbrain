@@ -46,6 +46,8 @@ export interface HookHeartbeatEntry {
   inserted?: number;
   duplicate?: number;
   superseded?: number;
+  /** #5888 — `writeback_dedup` shadow count: near duplicates kept, never dropped (counts only). */
+  near_duplicate?: number;
   /**
    * Cathedral 5 — the compact hook's harvest-schedule ACK code
    * (`scheduled` / `skip_queue_full` / `skip_not_found` / `skip_bad_basename`
@@ -67,7 +69,7 @@ export interface HookHeartbeatEntry {
 /** The FULL key allowlist — CI greps the fixture against this [S3#7]. */
 export const HEARTBEAT_ALLOWED_KEYS = [
   'ts', 'event', 'outcome', 'reason', 'duration_ms', 'turns', 'bytes', 'redactions',
-  'segment', 'inserted', 'duplicate', 'superseded', 'links', 'flush',
+  'segment', 'inserted', 'duplicate', 'superseded', 'near_duplicate', 'links', 'flush',
   'pattern', 'fingerprint', 'hint',
 ] as const;
 
@@ -158,6 +160,7 @@ export async function writeHeartbeat(
       ...(entry.segment !== undefined ? { segment: entry.segment } : {}),
       ...(entry.inserted !== undefined ? { inserted: entry.inserted } : {}),
       ...(entry.duplicate !== undefined ? { duplicate: entry.duplicate } : {}),
+      ...(entry.near_duplicate !== undefined ? { near_duplicate: entry.near_duplicate } : {}),
       ...(entry.links !== undefined ? { links: entry.links } : {}),
       ...(entry.flush !== undefined ? { flush: entry.flush } : {}),
       ...(entry.pattern !== undefined ? { pattern: entry.pattern } : {}),
