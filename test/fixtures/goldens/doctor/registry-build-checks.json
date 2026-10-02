@@ -339,6 +339,10 @@
       },
       {
         "category": "brain",
+        "name": "credential_projection_pending"
+      },
+      {
+        "category": "brain",
         "name": "connector_checkpoints"
       },
       {
@@ -376,6 +380,10 @@
       {
         "category": "ops",
         "name": "stale_embedding_effects"
+      },
+      {
+        "category": "ops",
+        "name": "google_file_modes"
       },
       {
         "category": "brain",

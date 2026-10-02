@@ -68,6 +68,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/safe-index.ts')).safeIndexPendingCheck(engine, scope.sourceIds),
   },
   {
+    id: 'credential_projection_pending', resolution: 'operator', registration: 'wave',
+    count: d => Number(d.pages_pending ?? 0) + Number(d.kept_pages ?? 0),
+    impact: 'Some pages holding a private key are withheld from search until their credential-safe re-chunk completes',
+    instruction: 'Run `gbrain apply-migrations --yes --no-autopilot-install` on the brain host (no provider calls), then `gbrain embed --stale` when ready; re-import code pages without a recorded source path.',
+    run: async (engine, scope) => (await import('./checks/credential-projection.ts')).credentialProjectionPendingCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'connector_checkpoints', resolution: 'repair', registration: 'wave',
     count: d => Number(d.count ?? 0),
     impact: 'Some connector checkpoint rows can no longer be loaded by any connector source',
@@ -154,6 +161,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     count: d => Number(d.stale_effects ?? 0),
     impact: 'A committed write still has a stale queued or failed embedding effect that blocks compaction and activation',
     run: async (engine, scope) => (await import('./checks/stale-embedding-effects.ts')).staleEmbeddingEffectsCheck(engine, scope.sourceIds),
+  },
+  {
+    id: 'google_file_modes', resolution: 'repair', registration: 'wave',
+    hostOnly: 'File permissions and directory paths on the brain host are host-local filesystem state.',
+    count: d => Number(d.count ?? 0),
+    impact: 'Some files gbrain wrote under a Google source directory outside ~/.gbrain are readable by other local users',
+    run: async (engine, scope) => (await import('./checks/google-file-modes.ts')).checkGoogleFileModes(engine, scope.sourceIds),
   },
   {
     id: 'atom_provenance_drift', resolution: 'repair', registration: 'doctor.ts',

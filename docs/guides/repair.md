@@ -3,10 +3,12 @@
 `gbrain doctor` finds some damage that it cannot fix on its own: timeline
 history that exists only in the database, derived pages without an explicit
 visibility, pages indexed before the safe-chunk fence, pages imported
-without a contextual retrieval mode, and connector checkpoint rows no source
-can load. `gbrain repair` fixes those five kinds. Every run is a preview
-unless you pass `--apply`.
-Two explicit-only kinds, `stale-atoms` and `extractor-facts`, run only when
+without a contextual retrieval mode, connector checkpoint rows no source
+can load, and Google source files other local users can read. `gbrain repair`
+fixes those and the other kinds listed in
+[What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
+you pass `--apply`.
+Three explicit-only kinds, `google-file-modes`, `stale-atoms` and `extractor-facts`, run only when
 you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs` runs them under a budget
@@ -62,6 +64,7 @@ gbrain repair safe-chunks --apply
 gbrain repair safe-chunks --apply --no-embed   # re-seal text now, embed later
 gbrain repair contextual-mode --apply
 gbrain repair request-indexes --apply
+gbrain repair google-file-modes --apply             # explicit-only: runs only when named
 gbrain repair --all --apply                    # every automatic kind in order
 ```
 
@@ -72,7 +75,7 @@ refused run changes nothing. To cap paid embedding work, run the repairs
 through `gbrain doctor --remediate --yes --include-repairs --max-usd <n>`. `--all`
 runs `timeline`, then `visibility`, then `safe-chunks`, then `contextual-mode`, then `connector-checkpoints`, then `request-indexes`, then `connector-fences`, then `orphan-bindings`, then `embedding-effects`, and stops at the
 first kind that stops.
-The explicit-only kinds (`stale-atoms`, `extractor-facts`) never run under
+The explicit-only kinds (`google-file-modes`, `stale-atoms`, `extractor-facts`) never run under
 `--all`; it lists each with its preview command and still exits 0 when they
 are the only findings left. `gbrain repair` with no kind does the same for a
 preview. With `--json` the list is `explicit_kinds[]` (`kind`, `code:
@@ -117,8 +120,8 @@ should also check `results[].complete`.
 | `embedding-effects` | `stale_embedding_effects` | Settles stale queued and failed embedding effects of committed writes, which block receipt compaction and activation: `reconciled` when current vectors pass the effect verifier, `superseded` when the page was deleted or a newer revision owns its own effect, `retry_queued` for the owner (paid; a used-up retry allowance gets one new bounded cycle per explicit apply). See [stale queued embedding effects](#stale-queued-embedding-effects). | `blocked` effects, counted by reason (`owner_unavailable`, `embedding_disabled`, `embedding_unconfigured`, `projection_pending`, `no_replacement_obligation`). |
 | `safe-chunks` | `safe_index_pending` (also `contextual_retrieval_coverage`, `details.unsealed_pages`) | Rebuilds the chunks of markdown and code pages indexed before the safe-chunk fence, which remote and MCP search withhold. It rebuilds projections only: no page write, no new page version and no request ID. Vectors whose embedding input did not change are kept; the rest are embedded unless you pass `--no-embed` or no embedding model is configured. | `code_without_source_path`: code pages with no recorded file to re-chunk. `unsupported_page_kind`: other page kinds, such as images. Their importer re-seals them. |
 | `contextual-mode` | `contextual_retrieval_coverage` (pages with no recorded mode) | Stamps the contextual retrieval mode on markdown pages imported without one (for example by a large `--no-embed` sync or a connector source before this release), exactly as a fresh import of the page would: the page, source and brain settings decide, and the per-chunk synopsis tier lands at the free title tier. It rebuilds projections only: no page write, no new page version and no request ID. A page whose stored vectors already match the stamped convention keeps them and queues no re-embedding; a page whose embedding input changes has only those vectors cleared and is re-embedded once, unless you pass `--no-embed`. | `unsealed_projection`: pages whose chunks lag their text; `gbrain embed --stale` or `safe-chunks` seals them first, and the next run stamps them. `embed_skip`: pages marked to skip embedding keep their stored vectors and are not stamped. |
-| `stale-atoms` (explicit-only) | `atom_provenance_drift` | Retires, by soft delete, live page-bound atoms whose source page is gone (`origin_gone`), or whose source page was edited and its current text already extracted (`origin_changed`). Preview-bound: `--apply --expect <hash>` retires exactly the previewed set. See [Stale atoms](#stale-atoms). | Atoms with `imported_from`, transcript (file-bound) atoms, and atoms of an edited page that was not extracted again yet (the `extract_atoms` backlog). |
-| `extractor-facts` (explicit-only) | `extractor_facts_expired` | Restores conversation-extractor facts the pre-v0.60.11.0 canonical projection expired (#5731). Restores `evidenced` facts by default, `ambiguous` ones only with `--include-ambiguous`; database-only. See [Extractor facts](#extractor-facts). | `excluded:<reason>` facts: page missing or deleted, superseded, withdrawn, an active duplicate, or a duplicate candidate. |
+gbrain repair google-file-modes --apply             # explicit-only: runs only when named
+gbrain repair --all --apply                    # every automatic kind in order
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -570,6 +573,7 @@ walk me through it before changing anything."*
 | Doctor `persistence_request_growth` warns | #5751, #5762 | `gbrain doctor --json` | the printed `gbrain config set persistence.limits.<limit> <value>` | `gbrain doctor --json` (check `persistence_request_growth`) |
 | Working-tree sync prints `legacy file(s) skipped … no contextual retrieval mode` | #5751 | `gbrain repair contextual-mode` | `gbrain repair contextual-mode --apply` | the next `gbrain sync --working-tree` no longer prints the line |
 | Working-tree sync prints `legacy file(s) skipped … not valid UTF-8` | #5751 | `find <checkout> -name '*.md' ! -exec iconv -f UTF-8 -t UTF-8 -o /dev/null {} \; -print` | re-save each listed file as UTF-8 | the next `gbrain sync --working-tree` no longer prints the line |
+| Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | #5080 | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor` (`google_file_modes` ok) |
 
 Hosted and thin-client callers see the same checks in `gbrain remote doctor`
 as one line each, for example
@@ -745,9 +749,11 @@ Each heading below is the `docs` anchor a refusal carries.
 
 ### Explicit-only repair kinds
 
-`stale-atoms` and `extractor-facts` run only when named:
-`gbrain repair <kind>` previews, and `gbrain repair <kind> --apply --expect <hash>`
-applies exactly the previewed set. They are excluded everywhere else:
+`google-file-modes`, `stale-atoms` and `extractor-facts` run only when named:
+`gbrain repair <kind>` previews, and `gbrain repair <kind> --apply` applies
+(`stale-atoms` and `extractor-facts` also need `--expect <hash>`, so they apply
+exactly the previewed set; `google-file-modes` re-checks each file's owner,
+type and mode at apply time). They are excluded everywhere else:
 
 - `gbrain repair --all` (and `gbrain repair` with no kind) lists each with its
   preview command (`--json`: `explicit_kinds[]`) and never runs it. A

@@ -320,6 +320,7 @@ async function resolveSnippetCap(ctx: OperationContext, p: Record<string, unknow
 
 const search: Operation = {
   name: 'search',
+  outputRedaction: 'retrieval',
   description: SEARCH_DESCRIPTION,
   params: {
     query: { type: 'string', required: true, description: "Search text. Exact tokens, names, and structured-field values work best here (e.g. 'acme-example series A'), since this op does no LLM expansion. This is the search text param — there is no `text` or `q` param." },
@@ -454,6 +455,7 @@ const search: Operation = {
 
 const query: Operation = {
   name: 'query',
+  outputRedaction: 'retrieval',
   description: QUERY_DESCRIPTION,
   params: {
     // v0.27.1: `query` is no longer strictly required — `--image <path>`
@@ -911,6 +913,7 @@ const query: Operation = {
  */
 const assemble_evidence: Operation = {
   name: 'assemble_evidence',
+  outputRedaction: 'retrieval',
   description:
     'Deliver whole evidence for an ordered list of search hits (each {source_id, slug, chunk_id} from a prior search/query result): ' +
     "the same windows, sections or pages `query` returns with return_unit, packed into token_budget. Use it to widen hits you already have " +
@@ -959,6 +962,7 @@ const assemble_evidence: Operation = {
 
 const search_stats: Operation = {
   name: 'search_stats',
+  outputRedaction: 'no_stored_text',
   description:
     'Search observability over a window: cache hit rate, intent/mode mix, budget drops, ' +
     'rank-1 score drift, graph-signals failure counts. Same payload as the search-stats ' +
@@ -999,6 +1003,7 @@ const search_stats: Operation = {
 
 const search_modes: Operation = {
   name: 'search_modes',
+  outputRedaction: 'no_stored_text',
   description:
     'Read-only search-mode dashboard: active mode, EVERY mode-bundle knob resolved with ' +
     'attribution (mode default vs config override), the three frozen bundles, and a ' +
@@ -1021,6 +1026,7 @@ const search_modes: Operation = {
 
 const search_tune: Operation = {
   name: 'search_tune',
+  outputRedaction: 'no_stored_text',
   description:
     'Read-only tuning recommendations derived from the last 7 days of search telemetry: ' +
     'what should change, why, and the paste-ready config command per recommendation — relay ' +
@@ -1039,6 +1045,7 @@ const search_tune: Operation = {
 
 const cache_stats: Operation = {
   name: 'cache_stats',
+  outputRedaction: 'no_stored_text',
   description:
     'Semantic query-cache introspection: resolved knobs (enabled, similarity threshold, TTL) ' +
     'plus row counts and total hits. Read-only; clearing/pruning the cache stays on the CLI.',
