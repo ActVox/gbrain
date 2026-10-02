@@ -645,7 +645,80 @@ describe('loops_close', () => {
     expect(expired[0].expired_at).not.toBeNull();
   });
 
-  test('remote ctx without a single-source scope → throws permission_denied, loop untouched', async () => {
+  test('remote write-bound caller closes a loop in its write source even under a multi-source read grant (#5446)', async () => {
+    const { id } = await upsertOpenLoop(engine, loop()); // lives in g1 = ctx.sourceId
+    const res = (await loopsCloseOp.handler(
+      ctx({
+        remote: true,
+        auth: {
+          token: 't',
+          clientId: 'c',
+          scopes: ['write'],
+          allowedSources: ['g1', 'g2'], // read federation — write stays g1
+        },
+      }),
+      { id, status: 'done' },
+    )) as { closed: boolean; status: string };
+    expect(res.closed).toBe(true);
+    expect(res.status).toBe('done');
+  });
+
+  test('remote caller cannot close a loop in a read-granted sibling source — identical answer to a missing id (#5446)', async () => {
+    // Write source g1, read grant covers g1+g2, loop lives in g2: the
+    // federated READ grant must never authorize the close+fact-expiry write.
+    // The op does NOT cross-source SELECT — the close runs scoped to the
+    // write source, so a foreign-source loop is indistinguishable from a
+    // missing id and neither its existence nor its source name leaks.
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('g2', 'g2', '{}'::jsonb) ON CONFLICT (id) DO NOTHING`,
+    );
+    const { id } = await upsertOpenLoop(engine, loop({ sourceId: 'g2' }));
+    const boundCtx = ctx({
+      remote: true,
+      auth: {
+        token: 't',
+        clientId: 'c',
+        scopes: ['write'],
+        allowedSources: ['g1', 'g2'], // read covers g2 — write does not
+      },
+    });
+    const foreign = (await loopsCloseOp.handler(boundCtx, { id, status: 'done' })) as {
+      closed: boolean; reason?: string;
+    };
+    const missing = (await loopsCloseOp.handler(boundCtx, { id: 999999, status: 'done' })) as {
+      closed: boolean; reason?: string;
+    };
+    expect(foreign).toEqual(missing); // identical envelope — no existence/source disclosure
+    expect(foreign.closed).toBe(false);
+    expect(JSON.stringify(foreign)).not.toContain('g2');
+    const rows = await listOpenLoops(engine, { sourceIds: ['g2'], status: 'open' });
+    expect(rows).toHaveLength(1); // untouched
+  });
+
+  test('remote source_id param: equal to the write source → closes; anything else → permission_denied (#5446)', async () => {
+    const { id } = await upsertOpenLoop(engine, loop());
+    const boundCtx = ctx({
+      remote: true,
+      auth: { token: 't', clientId: 'c', scopes: ['write'], allowedSources: ['g1', 'g2'] },
+    });
+    const res = (await loopsCloseOp.handler(boundCtx, {
+      id,
+      status: 'done',
+      source_id: 'g1',
+    })) as { closed: boolean };
+    expect(res.closed).toBe(true);
+
+    const { id: id2 } = await upsertOpenLoop(
+      engine,
+      loop({ threadId: '18c2f4a9b3d21e99', dedupKey: 'thread:18c2f4a9b3d21e99:unanswered_inbound' }),
+    );
+    // 'g2' is inside the READ grant — still not the write source.
+    await expect(
+      loopsCloseOp.handler(boundCtx, { id: id2, status: 'done', source_id: 'g2' }),
+    ).rejects.toThrow(/permission_denied|outside the caller's write scope/);
+  });
+
+  test('remote ctx without any scope still throws permission_denied, loop untouched', async () => {
     const { id } = await upsertOpenLoop(engine, loop());
     // Denials are thrown OperationErrors (enumerated error envelope via
     // dispatch), never success-shaped { closed: false } payloads.
@@ -653,16 +726,11 @@ describe('loops_close', () => {
       loopsCloseOp.handler(
         ctx({
           remote: true,
-          auth: {
-            token: 't',
-            clientId: 'c',
-            scopes: ['write'],
-            allowedSources: ['g1', 'g2'], // multi-source grant → no single scope
-          },
+          sourceId: undefined,
         }),
         { id, status: 'done' },
       ),
-    ).rejects.toThrow(/permission_denied|single-source scope/);
+    ).rejects.toThrow(/permission_denied|bound write source/);
     const rows = await listOpenLoops(engine, { sourceIds: ['g1'], status: 'open' });
     expect(rows).toHaveLength(1);
   });
@@ -720,18 +788,23 @@ describe('loops_mute', () => {
     expect(set.senders.size).toBe(0);
   });
 
-  test('remote caller cannot mute outside its granted scope (throws)', async () => {
+  test('federated read grant does not confer write authority: write source mutes, read-only source refuses (#5446)', async () => {
+    // Write-bound to g1, read-federated over other-src: the other-source
+    // mute is a write the read grant cannot authorize, even though the
+    // caller can read that source.
+    const boundCtx = ctx({
+      remote: true,
+      auth: { token: 't', clientId: 'c', scopes: ['write'], allowedSources: ['other-src'] },
+    });
     await expect(
-      loopsMuteOp.handler(
-        ctx({
-          remote: true,
-          auth: { token: 't', clientId: 'c', scopes: ['write'], allowedSources: ['other-src'] },
-        }),
-        { kind: 'sender', value: 'bob@example.com' },
-      ),
-    ).rejects.toThrow(/permission_denied|outside the caller's scope/);
-    const set = await loadSuppressions(engine, 'g1');
-    expect(set.senders.size).toBe(0);
+      loopsMuteOp.handler(boundCtx, { kind: 'sender', value: 'bob@example.com', source_id: 'other-src' }),
+    ).rejects.toThrow(/permission_denied|outside the caller's write scope/);
+    const own = (await loopsMuteOp.handler(boundCtx, {
+      kind: 'sender',
+      value: 'bob@example.com',
+    })) as { muted: boolean };
+    expect(own.muted).toBe(true);
+    expect((await loadSuppressions(engine, 'g1')).senders.has('bob@example.com')).toBe(true);
   });
 
   test('REGRESSION: scalar-scoped remote caller cannot mute a DIFFERENT source via p.source_id', async () => {
@@ -744,7 +817,7 @@ describe('loops_mute', () => {
         ctx({ remote: true, sourceId: 'g1' }),
         { kind: 'sender', value: 'bob@example.com', source_id: 'g2' },
       ),
-    ).rejects.toThrow(/permission_denied|outside the caller's scope/);
+    ).rejects.toThrow(/permission_denied|outside the caller's write scope/);
     const set = await loadSuppressions(engine, 'g2');
     expect(set.senders.size).toBe(0);
     // Within its own scalar scope, the mute still works.
@@ -753,6 +826,36 @@ describe('loops_mute', () => {
       { kind: 'sender', value: 'bob@example.com' },
     )) as { muted: boolean };
     expect(ok.muted).toBe(true);
+  });
+
+  test('omitted source_id on a non-google source → invalid_params, no dead suppression (#5446)', async () => {
+    // The reporter's 4 dead mutes: a remote caller bound to 'workspace'
+    // (no Google content) planted suppression rows the detector could
+    // never consult.
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('workspace', 'workspace', '{"kind":"files"}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await expect(
+      loopsMuteOp.handler(
+        ctx({ remote: true, sourceId: 'workspace' }),
+        { kind: 'sender', value: 'bob@example.com' },
+      ),
+    ).rejects.toThrow(/no Google content|invalid_params/);
+    expect((await loadSuppressions(engine, 'workspace')).senders.size).toBe(0);
+  });
+
+  test('explicit source_id naming a non-google source is honored (deliberate scope)', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('workspace', 'workspace', '{"kind":"files"}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const res = (await loopsMuteOp.handler(
+      ctx({ remote: true, sourceId: 'workspace' }),
+      { kind: 'sender', value: 'bob@example.com', source_id: 'workspace' },
+    )) as { muted: boolean };
+    expect(res.muted).toBe(true);
+    expect((await loadSuppressions(engine, 'workspace')).senders.has('bob@example.com')).toBe(true);
   });
 });
 
@@ -800,18 +903,23 @@ describe('loops_unmute', () => {
     expect(set.threads.has('shared-value')).toBe(true);
   });
 
-  test('remote caller cannot unmute outside its granted scope (throws)', async () => {
+  test('federated read grant does not confer write authority on unmute either (#5446)', async () => {
+    // Write-bound to g1, read-federated over other-src: lifting g1's mute is
+    // the caller's own write domain; lifting a read-only source's is not.
     await loopsMuteOp.handler(ctx(), { kind: 'sender', value: 'bob@example.com' });
+    const boundCtx = ctx({
+      remote: true,
+      auth: { token: 't', clientId: 'c', scopes: ['write'], allowedSources: ['other-src'] },
+    });
     await expect(
-      loopsUnmuteOp.handler(
-        ctx({
-          remote: true,
-          auth: { token: 't', clientId: 'c', scopes: ['write'], allowedSources: ['other-src'] },
-        }),
-        { kind: 'sender', value: 'bob@example.com' },
-      ),
-    ).rejects.toThrow(/permission_denied|outside the caller's scope/);
-    expect((await loadSuppressions(engine, 'g1')).senders.has('bob@example.com')).toBe(true);
+      loopsUnmuteOp.handler(boundCtx, { kind: 'sender', value: 'bob@example.com', source_id: 'other-src' }),
+    ).rejects.toThrow(/permission_denied|outside the caller's write scope/);
+    const res = (await loopsUnmuteOp.handler(boundCtx, {
+      kind: 'sender',
+      value: 'bob@example.com',
+    })) as { removed: boolean };
+    expect(res.removed).toBe(true);
+    expect((await loadSuppressions(engine, 'g1')).senders.has('bob@example.com')).toBe(false);
   });
 
   test('REGRESSION: scalar-scoped remote caller cannot unmute a DIFFERENT source via p.source_id', async () => {
@@ -829,7 +937,20 @@ describe('loops_unmute', () => {
         ctx({ remote: true, sourceId: 'g1' }),
         { kind: 'sender', value: 'bob@example.com', source_id: 'g2' },
       ),
-    ).rejects.toThrow(/permission_denied|outside the caller's scope/);
+    ).rejects.toThrow(/permission_denied|outside the caller's write scope/);
     expect((await loadSuppressions(engine, 'g2')).senders.has('bob@example.com')).toBe(true);
+  });
+
+  test('omitted source_id on a non-google source → invalid_params (#5446)', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('workspace', 'workspace', '{"kind":"files"}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await expect(
+      loopsUnmuteOp.handler(
+        ctx({ remote: true, sourceId: 'workspace' }),
+        { kind: 'sender', value: 'bob@example.com' },
+      ),
+    ).rejects.toThrow(/no Google content|invalid_params/);
   });
 });

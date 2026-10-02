@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 202985,
-    "stdoutSha256": "bd0de8ec965e91bfc419afeccf1983ff9bc1d2590e38ec76d3b751dd53e3fe47",
+    "stdoutBytes": 203354,
+    "stdoutSha256": "c8950fdaf4565dfc46c9f17fd7707b39c7bdbdd3776d416b50f25f4d61ca79f8",
     "toolNames": [
       "remember",
       "entity",
@@ -5186,6 +5186,7 @@
         "parameters": {
           "id": "number",
           "note": "string?",
+          "source_id": "string?",
           "status": "string"
         },
         "schema": {
@@ -5196,6 +5197,10 @@
             },
             "note": {
               "description": "Optional closed_by note (default: manual).",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "The loop's home source (e.g. the google source, when the caller's transport is bound elsewhere). Remote callers must be write-bound to it — a federated read grant does not authorize the close. When omitted, the caller's bound write source is used.",
               "type": "string"
             },
             "status": {
