@@ -27,7 +27,12 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // GBRA-35 E10: the managed connector-source job contract drives these writers on an unbound connector source.
   "test/helpers/managed-connector-job-contract.ts": ["test/e2e/managed-connector-job-contract.test.ts"],
   "src/core/persistence/atom-maintenance.ts": ["test/e2e/managed-connector-job-contract.test.ts"],
-  "src/core/ops/loops.ts": ["test/e2e/managed-connector-job-contract.test.ts"],
+  "src/core/ops/loops.ts": ["test/e2e/managed-connector-job-contract.test.ts", "test/e2e/loops-close-fact-postgres.test.ts"],
+  "src/core/persistence/loop-fact-retirement.ts": ["test/e2e/loops-close-fact-postgres.test.ts", "test/e2e/managed-connector-job-contract.test.ts"],
+  "src/core/repair/loop-facts.ts": ["test/e2e/loops-close-fact-postgres.test.ts"],
+  "src/core/google/loop-catchup.ts": ["test/e2e/google-loops-recovery-postgres.test.ts"],
+  "src/core/google/loop-detect.ts": ["test/e2e/google-loops-recovery-postgres.test.ts"],
+  "src/core/cycle/connector-extract.ts": ["test/e2e/connector-cycle-extract-postgres.test.ts", "test/e2e/managed-connector-job-contract.test.ts"],
   "src/core/minions/handlers/autopilot-cycle.ts": ["test/e2e/managed-connector-job-contract.test.ts"],
   // Fix wave 4, Lane D: the apply-migrations orchestration lease (#5693), source deletes and
   // orphan bindings (#5732), and deactivate racing admission (#5455).
@@ -155,7 +160,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/openclaw-plugin-load-real.test.ts",
   ],
   // dream.ts is a thin alias over runCycle in cycle.ts.
-  "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts", "test/e2e/managed-phase-matrix.test.ts", "test/e2e/managed-connector-job-contract.test.ts"],
+  "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts", "test/e2e/managed-phase-matrix.test.ts", "test/e2e/managed-connector-job-contract.test.ts", "test/e2e/connector-cycle-extract-postgres.test.ts"],
   "src/core/cycle/phase-*.ts": ["test/e2e/managed-phase-matrix.test.ts"],
   // Multi-source sync writes share the per-source bookmark anchor.
   "src/core/sync.ts": ["test/e2e/sync.test.ts", "test/e2e/multi-source.test.ts", "test/e2e/sync-reconcile-postgres.test.ts", "test/e2e/sync-lock-overlap-postgres.test.ts"],
@@ -569,7 +574,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/facts/backstop.ts": ["test/e2e/managed-facts-backstop.test.ts", "test/e2e/facts-worker-config.test.ts", "test/e2e/managed-facts-embedding.test.ts", "test/e2e/managed-facts-compaction.test.ts", "test/e2e/legacy-fact-extraction-dedup-postgres.test.ts"],
   "src/core/facts/extract.ts": ["test/e2e/managed-facts-embedding.test.ts"],
   "src/core/github-source.ts": ["test/e2e/managed-connector-routing.test.ts", "test/e2e/managed-connector-retry.test.ts", "test/e2e/managed-connector-fencing.test.ts", "test/e2e/managed-connector-recovery.test.ts", "test/e2e/connector-holds.test.ts"],
-  "src/core/google/google-source.ts": ["test/e2e/managed-connector-routing.test.ts", "test/e2e/managed-connector-retry.test.ts", "test/e2e/managed-connector-fencing.test.ts", "test/e2e/managed-connector-recovery.test.ts", "test/e2e/google-attachments-postgres.test.ts", "test/e2e/connector-holds.test.ts", "test/e2e/managed-connector-job-contract.test.ts"],
+  "src/core/google/google-source.ts": ["test/e2e/managed-connector-routing.test.ts", "test/e2e/managed-connector-retry.test.ts", "test/e2e/managed-connector-fencing.test.ts", "test/e2e/managed-connector-recovery.test.ts", "test/e2e/google-attachments-postgres.test.ts", "test/e2e/connector-holds.test.ts", "test/e2e/managed-connector-job-contract.test.ts", "test/e2e/google-loops-recovery-postgres.test.ts"],
   "src/core/google/attachment-receipts.ts": ["test/e2e/google-attachments-postgres.test.ts"],
   "src/core/google/attachment-backfill.ts": ["test/e2e/google-attachments-postgres.test.ts"],
   "src/core/persistence/connector-google-receipts.ts": ["test/e2e/google-attachments-postgres.test.ts"],

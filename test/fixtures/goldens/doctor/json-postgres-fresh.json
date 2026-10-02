@@ -732,6 +732,17 @@
         },
         {
           "category": "brain",
+          "details": {
+            "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
+            "drifted": 0,
+            "repair": "loop-facts"
+          },
+          "message": "Every closed commitment loop has its fact retired.",
+          "name": "loop_facts_drift",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
           "message": "Sampled 0 pages; no bare-tweet phrases or external links.",
           "name": "integrity",
           "status": "ok"
