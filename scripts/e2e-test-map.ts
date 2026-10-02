@@ -307,6 +307,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/ai/embedding-guard.ts": ["test/e2e/embedding-zero-norm-4616-postgres.test.ts"],
   "src/commands/reindex-vectors.ts": ["test/e2e/embedding-zero-norm-4616-postgres.test.ts"],
   "src/core/embedding-invalidation.ts": ["test/e2e/embed-stale-dry-run-restamp-5289-postgres.test.ts", "test/e2e/embedding-tombstones-postgres.test.ts"],
+  "src/core/embed-concurrency.ts": ["test/e2e/embed-stale-pool-default-postgres.test.ts"],
+  "src/core/embed-stale.ts": ["test/e2e/embed-stale-pool-default-postgres.test.ts"],
   "src/core/persistence/effect-git.ts": ["test/e2e/persistence-git-coalescing-5530-postgres.test.ts"],
   "src/core/persistence/effect-journal.ts": ["test/e2e/persistence-git-coalescing-5530-postgres.test.ts"],
   "src/core/persistence/grandfather.ts": ["test/e2e/persistence-git-coalescing-5530-postgres.test.ts", "test/e2e/grandfather-projection-postgres.test.ts"],
