@@ -22,7 +22,9 @@ import { assertManagedSyncActive } from './sync-authority.ts';
 /** The page an import takes over from its previous origin: a Git rename, or a file that replaced a vanished origin at the same slug. */
 export interface SyncRename { sourcePath: string; slug: string; pageId: number; revision: string; }
 export interface SyncEntry { path: string; sourcePath: string; action: 'import' | 'delete'; working: boolean; slug?: string; pageId?: number | null; revision?: string | null;
-  renameFrom?: SyncRename; }
+  renameFrom?: SyncRename;
+  /** #5565: a deleted file no page records as its origin; its slug's page keeps another origin, so the deletion is a fenced no-op. */
+  unownedDeletion?: boolean; }
 /** Files that map to a slug another origin keeps; they are left out of the manifest until one is renamed. */
 export interface SyncSlugCollision { slug: string; kept: string; skipped: string[]; }
 /** #5032: a file sync skipped on this host with a named refusal, without failing the run. */
@@ -245,13 +247,16 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       continue;
     }
     const page = origins[0] ?? bySlug.get(slug);
-    if (page?.source_path != null && !sameSyncOrigin(page.source_path, entry.sourcePath, originScope, page.slug)) {
+    const foreignOrigin = page?.source_path != null && !sameSyncOrigin(page.source_path, entry.sourcePath, originScope, page.slug);
+    // Deleting a file that no page records (a skipped slug twin) must not delete the page another file backs.
+    const unownedDeletion = foreignOrigin && entry.action === 'delete' && !origins.length && !company;
+    if (foreignOrigin && !unownedDeletion) {
       const error = new OperationError('page_identity_changed', 'A different origin occupies the imported slug.',
         `Page ${slug} in source ${sourceId} records the origin '${page.source_path}', but sync found it at '${entry.sourcePath}'. On the brain host, rename or move one of the two files so each page has one origin, commit, then run gbrain sync --source ${sourceId} --no-pull --retry-failed.`);
       error.detail = 'sync_origin_mismatch';
       throw error;
     }
-    Object.assign(entry, { slug, pageId: page?.id ?? null, revision: page?.knowledge_revision ?? null });
+    Object.assign(entry, { slug, pageId: page?.id ?? null, revision: page?.knowledge_revision ?? null, ...(unownedDeletion ? { unownedDeletion: true } : {}) });
   }
   const deletions = new Map(selected.filter(entry => entry.action === 'delete').map(entry => [syncOriginPath(entry.sourcePath), entry]));
   // A soft-delete advances knowledge_revision, so the frozen revisions still guard this read.
