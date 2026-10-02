@@ -126,6 +126,34 @@ thread is a no-op and that key is the only dedupe in play. A generous safety
 ceiling (500/sweep) remains purely as a spend backstop for pathological
 sweeps; when it binds, the log names the drop honestly.
 
+The sweep queues extraction on managed and unmanaged brains alike. Its sync
+result carries `loops_enqueue` (`enqueued`, `deferred`, `skipped_reason`:
+`extraction_disabled`, `chat_unavailable`, `no_candidates` or
+`enqueue_failed`), and every skip is logged. On a managed brain a one-time
+catch-up also re-candidates email threads whose newest message is from the
+last 30 days. A thread counts as done only when the extractor recorded an
+outcome for its current revision (`extracted` or `skipped:<reason>`), so a
+thread whose job ran while extraction was off is analyzed later; a
+dead-lettered job is retried once. The catch-up honors the kill switch and
+the enqueue ceiling and marks itself done once every candidate is settled.
+
+### Quiet threads and grace holds
+
+A thread inside its waiting window (an inbound message under 24 h old, or
+your own question under 72 h) opens nothing yet. The sweep records a **grace
+hold** with the time the window ends and re-checks the thread on the first
+sweep after that time, even when no new mail arrives: an unchanged thread
+opens its loop from the stored page without a Gmail read, and a thread that
+changed or whose page is missing is re-fetched (at most 100 per sweep). A
+reply or a mute in the meantime means no loop opens. The first sweep after
+upgrading seeds holds for email pages active in the last 14 days from stored
+pages only, with no Gmail calls.
+
+Grace holds are kept apart from [held items](google-connect.md#held-items):
+they never appear in `connector_held_items`, never make `gbrain waiting`
+report partial coverage, and are capped at 2,000 per source (the oldest is
+dropped and logged).
+
 ## The surfaces
 
 ```bash
@@ -142,8 +170,8 @@ gbrain waiting [--top N] [--json] [--stale-ok]
     coverage is partial instead of "You are clean".
 
 gbrain loops list|show <id>          inspect
-gbrain loops done <id> | drop <id>   close (a closed commitment expires its
-                                     projected fact too)
+gbrain loops done <id> | drop <id>   close (a closed commitment retires its
+                                     projected fact too; see Close semantics)
 gbrain loops mute sender <email>     never open loops for this sender again
 gbrain loops mute thread <id>        ...or this thread (existing loops keep
                                      their state)
@@ -215,6 +243,26 @@ carry additive optional fields (`direction`, `due`, `counterparty`,
   same thread never resurrects a loop you closed by hand.
 - Fulfillment-by-reply detection for commitments is future work, not
   pretended at.
+- **Closing a commitment retires its fact.** `gbrain loops done`/`drop` and
+  the `loops_close` tool expire the commitment fact and strike its row in the
+  entity page's `## Facts` fence in one coordinated write, so entity cards
+  and recall stop showing the finished promise. A fact that another open loop
+  still references stays active until that loop closes too. The result
+  reports what actually happened: `{ closed, id, status, fact_expired,
+  retryable, reason? }`. `fact_expired: false, retryable: true` means the
+  loop closed but the fact retirement did not commit (`reason` names the
+  refusal); closing the same loop again retries it. `reason:
+  "shared_with_open_loop"` comes with `retryable: false`. No withdrawal is
+  recorded, so the same promise made again is stored normally.
+- **Loops closed before the fact was retired.** `gbrain doctor` reports them
+  as `loop_facts_drift`. Preview with `gbrain repair loop-facts`, then apply
+  the printed `gbrain repair loop-facts --apply --expect <hash>` after you
+  agree ([repair guide](repair.md#loop-facts)).
+
+**Say to your agent:** *"I finished the deck for Alice Example; close that
+loop."* (the agent runs `gbrain loops done <id>` and checks `fact_expired`) or
+*"Doctor says closed loops still have active commitments. Preview the fix."*
+(the agent runs `gbrain repair loop-facts`).
 
 ## Ranking
 

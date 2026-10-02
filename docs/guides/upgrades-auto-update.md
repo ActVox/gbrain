@@ -59,6 +59,10 @@ hook into it.
 
 ### Bun floor
 
+**Say to your agent:** *"gbrain says the upgrade needs a newer Bun. Upgrade Bun
+and finish the gbrain upgrade."* The agent runs `bun upgrade`, then
+`gbrain upgrade`, then `gbrain doctor` to confirm `self_upgrade_health` is ok.
+
 A source (bun-link) or package install runs the new release on the host's
 Bun, and a release refuses to start on a Bun below its `engines.bun` floor.
 So before swapping, `gbrain upgrade`, `gbrain self-upgrade` and the autopilot
@@ -105,8 +109,19 @@ start, the upgrade exits non-zero and prints recovery: `bun upgrade`, then
 rolled back automatically, and the autopilot channel records that version as
 failed.
 
-Hosts still running a release from before this check do not run it, so a Bun
-floor raise reaches them only after they have upgraded past this release.
+Recovery when autopilot is holding an upgrade:
+
+```bash
+gbrain doctor                 # self_upgrade_health: Auto-upgrade to <target> held: ...
+bun upgrade                   # raise the host's Bun to the floor or above
+gbrain upgrade                # apply now instead of waiting for quiet hours
+gbrain doctor                 # self_upgrade_health ok
+```
+
+Restart `gbrain serve` and autopilot afterwards if a service manager does not
+restart them for you, so they run on the new Bun. Hosts still running a
+release from before this check do not run it, so a Bun floor raise reaches
+them only after they have upgraded past this release.
 
 `gbrain config set self_upgrade.<key>` writes `~/.gbrain/config.json` (the
 file plane every self-upgrade reader uses) and refuses a value the readers

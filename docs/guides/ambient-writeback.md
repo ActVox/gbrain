@@ -124,7 +124,10 @@ bank remains harmless — the target serve's own DB gate decides.
    again. The provider also starts its `claude` child with your Claude Code
    hooks disabled, and the serve-side harvest and the sweep skip any such
    file an older binary left behind. `gbrain doctor` (`self_capture`) lists
-   leftover files with one-time quarantine commands.
+   leftover files with one-time quarantine commands, and
+   `captured_facts_active` counts facts already extracted from such sessions;
+   `gbrain repair captured-facts` previews and expires them
+   ([repair guide](repair.md#captured-facts)).
 
 ## Pasted content
 
@@ -144,8 +147,12 @@ captured as a fact about you.
   `gbrain transcripts ingest`, ambient recall and the dream `synthesize`
   phase (which writes idea pages, not facts about you) still see the pasted
   text with its tags.
-- **Repair.** Facts extracted from pastes before this release stay until you
-  remove them. Find one with `gbrain recall`, then withdraw it with
+- **Repair.** Facts extracted from pastes by releases before v0.60.30.0 stay
+  active until removed. `gbrain repair captured-facts --include-ambiguous`
+  lists likely paste-derived facts (a word-overlap heuristic against the
+  retained session corpus) and expires the previewed set only with
+  `--apply --expect <hash>` ([repair guide](repair.md#captured-facts)). For a
+  single fact, find it with `gbrain recall` and withdraw it with
   `gbrain forget <fact-id> --reason "came from a pasted email"`.
 
 To keep something you pasted, save it explicitly with its provenance:
@@ -275,11 +282,19 @@ retention are deleted, so a keyless brain — or one whose serve AND sweep
 stayed away for a month — does eventually shed unbanked turns; serve restarts
 reset the counter). Keyless brains skip extraction entirely (typed `keyless` skip)
 and still get agent-authored `remember` writes; note that keyless dedup is
-degraded (`degraded_dedup`) — near-duplicate phrasings may insert. See
+degraded (`degraded_dedup`) — near-duplicate phrasings may insert. The
+maintenance sweep's corpus pass costs one call per transcript window (see
+[Long transcripts](#long-transcripts-windowed-extraction)). See
 [spend-controls](../operations/spend-controls.md) for the brain-wide
 extraction switches.
 
 ### Long transcripts: windowed extraction
+
+**Say to your agent:** *"How much of my long sessions has the sweep
+extracted?"* (the agent runs `gbrain sweep --once --json` and reads
+`corpus_files[]`) or *"Lower how many transcript windows the sweep extracts at
+once."* (the agent sets `GBRAIN_CORPUS_WINDOWS_PER_SWEEP` for the process that
+runs the sweep).
 
 The extractor reads at most 8,000 characters per call, so the maintenance
 sweep reads a session transcript in windows cut at turn boundaries. Each
@@ -298,8 +313,9 @@ the process that runs the sweep (`gbrain serve` or `gbrain sweep --once`) to
 change the 32-window total; the per-file cap of 8 is fixed. The off switch
 for all of this is the brain-wide `facts.extraction_enabled`. `gbrain sweep
 --once --json` lists `corpus_files[]` with `windows_done` and
-`windows_remaining` per file. Transcripts marked done before this release are
-not re-read; only turns added after the upgrade are extracted.
+`windows_remaining` per file. Transcripts marked done before windowed
+extraction existed are not re-read; only turns added after the upgrade are
+extracted, so their tails past the first 8,000 characters stay unextracted.
 
 ## Diagnostics
 
@@ -314,8 +330,15 @@ lingering instruction blocks and warns — the off switch is incomplete until a
 `bootstrap harness` re-run converges them. It also reports 7-day counters —
 `remember` outcomes over MCP (all callers — the
 wire cannot distinguish ambient from explicit saves) and persisted backstop
-results from the serve-side harvest receipts. Counters are local, append-only,
-loss-tolerant observability — never a source of truth.
+results from the serve-side harvest receipts, plus the capture dedup totals
+`cross_lane_duplicates_7d` and `near_duplicates_shadow_7d` (see
+[Duplicates across lanes](#duplicates-across-lanes)). Counters are local,
+append-only, loss-tolerant observability — never a source of truth.
+
+Two neighbouring checks cover capture residue: `self_capture` counts corpus
+files from gbrain's own claude-cli sessions, and `captured_facts_active`
+counts facts captured before v0.60.30.0 from those sessions or from pasted
+text (cleared by `gbrain repair captured-facts`).
 
 ## Enable / verify / disable
 
