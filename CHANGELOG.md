@@ -10,6 +10,90 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.32.0] - 2026-10-02
+
+**Fix wave 7: the contradiction judge stops excusing undated conflicts as "change over time", "who is waiting on me" ages and ranks requests honestly, and four smaller eval findings plus a backlinks bug are fixed.**
+
+When two notes give different numbers for the same thing and neither note has a date, nothing tells you which came first, so that is a conflict you need to resolve. The judge kept calling those pairs a change over time instead, guessing an order from the numbers themselves (the bigger headcount must be newer) or from the kind of note (a board deck must be newer than a memo). Prompt v4 tells it plainly not to do that, and that one note saying nothing about headcount does not contradict another note that gives one. On a fresh test world it now calls 149 of 150 planted same-time conflicts contradictions (was 131), all 50 undated ones included (was 37). The price is a few more false alarms: 14 of 820 unrelated pairs (was 11) and 5 of 50 compatible pairs (was 2).
+
+`gbrain waiting` had four rough edges, all found by the gbrain-evals open-loops wave. A reply that only said "Thanks!" to someone's question closed the loop although the question was still open. An FYI whose only question mark sat inside a link opened a loop as if you had asked something. A first sync of an old inbox ranked a request that had waited 30 days as no older than one from yesterday, because a loop's age started when gbrain noticed it. And the ranking moved with the wall clock, so a published order could not be reproduced. All four are fixed; `--as-of` pins the clock.
+
+| After upgrading | Before | After |
+| --- | --- | --- |
+| Undated same-fact conflicts called a contradiction (fresh N2 seed) | 37/50 | 50/50 |
+| All same-time conflicts called a contradiction (fresh N2 seed) | 131/150 | 149/150 |
+| False alarms on unrelated / compatible pairs (fresh N2 seed) | 11/820, 2/50 | 14/820, 5/50 |
+| "Thanks!" in reply to a question | closes the loop | loop stays open |
+| FYI whose only `?` is inside a link | opens a loop after 72 h | opens nothing |
+| A 30-day-old request found on first sync | ranked as new | ranked 30 days old |
+| `gbrain waiting` order | moves with the wall clock | pinnable with `--as-of` |
+| "Who works at Acme?" when "Acme Labs" also exists | no seed, arm silent | seeds from the page titled "Acme" |
+| A meeting note's `Participants:` list | mentions | attended |
+| `segments.join("/")` in a file that defines `join` | resolved as a caller of `join` | unresolved |
+| Keyword-only answer to a question no page can answer | graded moderate | graded weak |
+| `check-backlinks fix` on a managed brain | one refusal per page; dry run claims success | one clear refusal, dry run too |
+
+These came from the gbrain-evals category waves A4 (abstention), N2 (contradictions), N7 (open loops), N9 (multi-hop), N12 (meeting formats) and N13 (code intelligence), plus open issue #5341.
+
+## To take advantage of v0.60.32.0
+
+`gbrain upgrade` installs the binary. There is no schema migration. Restart every `gbrain serve`, autopilot and worker afterwards so they run the new code.
+
+1. **Meeting pages re-derive their attendees on their own.** The link extractor version moved, so the next `gbrain extract --stale` (or the autopilot cycle) re-reads `Participants:` lists.
+2. **Expect one paid re-judge of contradictions.** The judge prompt version moved to 4, so the next `gbrain eval suspected-contradictions` re-judges every pair. It prints its cost estimate first, as on any prompt change.
+3. **Existing loops get request-time ages when their thread is next checked.** An open thread loop keeps the earlier of its stored age and the oldest unanswered message's time, so the next sync that touches a thread corrects an age set at detection time.
+4. **Code call graphs pick up the member-call fix when a file re-imports.** To refresh every code page now: `gbrain reindex-code`.
+5. **Verify:**
+   ```bash
+   gbrain waiting --as-of 2026-10-01T12:00:00Z --json | grep as_of
+   gbrain doctor
+   ```
+6. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Behavior changes
+
+- **Contradiction judge prompt v4.** The time check comes first: the three temporal verdicts need two different dates (metadata or text) or explicit change wording, never an order guessed from the values, the document kind or which statement is listed first. A statement that does not mention an attribute does not conflict with one that states it. A negative claim about one party ("Fund A is not leading") and a positive claim about another ("Fund B is leading") agree. Matched A/B against prompt v3 on the fresh N2 development seed 20261002, one Haiku 4.5 judge sample per arm, 1,371 identical pairs: same-time conflicts caught 131/150 -> 149/150 (undated 37 -> 50, same-day 45 -> 49, mixed 49 -> 50), temporal recognition unchanged at 40/40, false contradictions on unplanted pairs 11/820 -> 14/820 and on compatible pairs 2/50 -> 5/50, judged-pair precision 91.0% -> 88.7%. A code rule that turned temporal verdicts without time evidence into contradictions was measured and rejected: on the counted seed it added about 65 false alarms, because Haiku uses a temporal label for unrelated pairs it misreads. The prompt version bump invalidates the judge cache (step 2).
+- **An acknowledgement-only reply to a question does not close a thread loop.** "Thanks!", "Got it, thanks." or "Thanks, Bob!" after their question leaves the reply-owed loop open and its clock running. "Will do" and any reply with content still count as the reply. An acknowledgement of a message that asked nothing still closes it.
+- **A `?` inside a link is not a question,** so outbound FYIs that only share a link never open `unanswered_outbound`.
+- **Loop age is request time.** `opened_at` on a thread loop is the oldest message in the trailing run that carries the obligation, not the detection time.
+- **`open_loops` takes `as_of`** (ISO 8601, default now) for due-date proximity, loop age and rendered ages, and echoes it in the grouped result; `gbrain waiting --as-of <iso>` passes it through. An invalid value is refused with `invalid_params`.
+- **Bare-name resolution prefers the exact title within one directory.** When several pages share a bare name's prefix in one entity directory and exactly one is titled that name, it wins (`Acme` over `Acme Labs`). A collision across directories, or two pages with the same exact title, stays unresolved as before.
+- **`Participants` is attendance evidence** everywhere `Attendees` is: a `Participants:` line, `**Participants:**`, or a `## Participants` link-list section.
+- **OR-relaxed keyword rows are not "keyword_exact".** A row from the keyword fallback that matched some query terms but not the query reads `weak_semantic` (`create_safety: unknown`), and CRAG grades a relaxed rank-1 `weak` with the new reason `keyword_relaxed_top`. A chunk that also appears in a strict list is not relaxed.
+- **`gbrain check-backlinks fix` refuses a managed canonical worktree once, before scanning,** with or without `--dry-run`. `check` still reports the gaps (#5341).
+
+### Itemized changes
+
+#### Contradictions (N2)
+
+- Undated same-time conflicts: prompt v4 (above). Measured on the counted N2 seed and on a fresh development seed against prompt v3; numbers in behavior changes.
+
+#### Open loops (N7)
+
+- **N7-2** acknowledgement-only replies (`isAcknowledgementOnly`), **N7-5** pinnable ranking clock, **N7-6** request-time `opened_at` (`OpenLoopUpsert.openedAt`; an open row keeps the earlier value), **N7-7** link question marks (`asksQuestion`).
+
+#### Graph and retrieval (N9, N12, A4)
+
+- **N9-5** exact-title tiebreak in bare-name prefix expansion, so the relational arm fires for colliding names.
+- **N12-6** `Participants` attendance evidence; `LINK_EXTRACTOR_VERSION_TS` moves to `2026-10-02T00:00:00Z`.
+- **A4-2** relaxed keyword tops grade weak.
+
+#### Code intelligence (N13)
+
+- **N13-8** a call through a receiver the extractor cannot type (`obj.m()`, emitted as bare `m`) is flagged `memberCall` and stored as `edge_metadata.member_call`; the within-file resolver never resolves it to a same-file top-level function. Bare-name `code_callers` matching is unchanged.
+
+#### Maintenance
+
+- **#5341** `check-backlinks fix` managed-worktree refusal.
+
+### For contributors
+
+- `PROMPT_VERSION` is 4.
+- `isManagedFilesystemPath(path)` in `src/core/persistence/filesystem-guard.ts` is the predicate `assertManagedFilesystemWrite` uses.
+- `ExtractedEdge.memberCall` and `CodeEdgeInput.edge_metadata.member_call`.
+- `ThreadLoopSpec.openedMs`, `OpenLoopUpsert.openedAt`; `rankGroups` and `renderText` take the reference time.
+- `ConfidenceGrade.reason` gains `keyword_relaxed_top`.
+
 ## [0.60.31.0] - 2026-10-02
 
 **Your brain stops handing stored passwords and keys back to your agents, catches credential shapes it used to miss, and keeps your Gmail pages private on disk.**
