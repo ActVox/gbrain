@@ -419,6 +419,10 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // (src/core/search/cjk-keyword-sql.ts). The cross-engine parity is pinned — any change here must re-run the pin. (Matches
   // src/core/engine-sql/** too; selector unions the entries.)
   "src/core/engine-sql/cjk-search.ts": ["test/e2e/engine-parity-cjk.test.ts"],
+  // #5889 / title FTS: the title arm (engine-sql/titles.ts + its statement in
+  // search/title-statement.ts) — dual-backend ranking + remote plan proof.
+  "src/core/engine-sql/titles.ts": ["test/e2e/title-arm-postgres.test.ts"],
+  "src/core/search/title-statement.ts": ["test/e2e/title-arm-postgres.test.ts"],
   // D7 parity batch: the code-edge read paths (getCallersOf / getCalleesOf /
   // getEdgesByChunk) live in engine-sql/code-edges.ts (PGLite's getEdgesByChunk
   // stays in its engine module dir); both key the cross-engine read-parity
