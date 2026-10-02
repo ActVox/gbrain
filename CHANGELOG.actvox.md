@@ -3,6 +3,21 @@
 Fork-only entries that previously lived at the top of CHANGELOG.md. Upstream owns CHANGELOG.md; this file is ActVox-owned so upstream integrations never conflict with it.
 
 
+## [0.60.27.2] - 2026-10-02
+
+**Upstream releases now integrate without hand-resolving generated files, and the fork's divergence from upstream is measured on every change.**
+
+### Added
+- One integration command, `scripts/sync-from-upstream.sh` (the scheduled watcher runs the same script). It merges in a temporary worktree, so your checkout is never touched. It resolves version stamps, bundles, plugin trees, goldens, dependency security pins, ratchet ceilings, the dashboard build and the fork's CLAUDE.md paragraph by policy, then reruns the generators. Integrating the latest upstream release this way needed no hand resolution.
+- `scripts/actvox/check-delta.ts` and the `ActVox fork delta` workflow fail a change that edits an upstream-owned file without a reviewed line budget in `scripts/actvox/patch-inventory.tsv`.
+
+### Fixed
+- The upstream watcher can push again. It uses a GitHub App token, and a conflict the policy cannot resolve fails the run and updates one issue, instead of passing silently.
+- `gbrain extract --source db --from-meetings` reports failed timeline batches with the first error and still prints the `--json` result before exiting non-zero, matching upstream.
+
+### To take advantage of v0.60.27.2
+An org owner creates the watcher GitHub App and sets `ACTVOX_UPSTREAM_APP_CLIENT_ID` (repo variable) and `ACTVOX_UPSTREAM_APP_PRIVATE_KEY` (repo secret), as described in `docs/operations/fork-upstream-production-branching.md`. Until then the watcher fails with a message naming the missing credential. No runtime, migration or permission change.
+
 ## [0.60.27.1] - 2026-10-02
 
 **Agents now see their real connection type when they ask the Team brain who they are.**
