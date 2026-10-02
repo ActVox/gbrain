@@ -34,12 +34,14 @@ async function runCaptured(engine: BrainEngine, args: string[]) {
   const error = console.error;
   console.log = (...a: unknown[]) => { out.push(a.map(String).join(' ')); };
   console.error = (...a: unknown[]) => { err.push(a.map(String).join(' ')); };
+  const priorExitCode = process.exitCode;
   _resetCliExitVerdictForTests();
   try {
     await runExtract(engine, args);
   } finally {
     console.log = log;
     console.error = error;
+    process.exitCode = priorExitCode ?? 0;
   }
   const exitCode = currentExitCode();
   _resetCliExitVerdictForTests();

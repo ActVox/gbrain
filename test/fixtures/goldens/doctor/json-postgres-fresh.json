@@ -732,6 +732,20 @@
         },
         {
           "category": "brain",
+          "details": {
+            "ambiguous": 0,
+            "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
+            "evidenced": 0,
+            "excluded": 0,
+            "repair": "captured-facts",
+            "unclassifiable": 0
+          },
+          "message": "No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
+          "name": "captured_facts_active",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
           "message": "Sampled 0 pages; no bare-tweet phrases or external links.",
           "name": "integrity",
           "status": "ok"
