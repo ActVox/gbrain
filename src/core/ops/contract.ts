@@ -275,6 +275,16 @@ export interface AuthInfo {
   surfaceSetBy?: string;
 }
 
+/**
+ * Transport a verified caller authenticated through. The verifier-set
+ * `principal` is authoritative; the `gbrain_cl_` client-id prefix is only a
+ * fallback for AuthInfo built without one.
+ */
+export function authTransport(auth: AuthInfo): 'oauth' | 'legacy' {
+  if (auth.principal) return auth.principal.kind === 'oauth_client' ? 'oauth' : 'legacy';
+  return auth.clientId.startsWith('gbrain_cl_') ? 'oauth' : 'legacy';
+}
+
 export interface OperationContext {
   engine: BrainEngine;
   config: GBrainConfig;
