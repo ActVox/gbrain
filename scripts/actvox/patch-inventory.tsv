@@ -54,14 +54,14 @@ test/operational-memory-scope.test.ts	actvox-owned	*	no	fork-only file
 test/scripts/actvox-check-delta.test.ts	actvox-owned	*	no	fork-only file
 test/scripts/actvox-create-upstream-pr.test.ts	actvox-owned	*	no	fork-only file
 test/scripts/actvox-resolve-upstream-merge.test.ts	actvox-owned	*	no	fork-only file
-src/commands/extract.ts	code	253	yes (C5: runExtractDbCore as a generic db-source minion path)	
+src/commands/extract.ts	code	253	proposed upstream issue garrytan/gbrain#5904	
 src/commands/schema.ts	code	5	review	
 src/commands/serve-http-oauth.ts	code	10	review	
 src/commands/serve-http.ts	code	3	review	
 src/core/cycle/patterns.ts	code	7	review	
 src/core/db-lock.ts	code	43	review	
 src/core/git-remote.ts	code	14	review	
-src/core/minions/handlers/extract.ts	code	22	yes (C5, with extract.ts)	
+src/core/minions/handlers/extract.ts	code	22	proposed upstream issue garrytan/gbrain#5904	
 src/core/minions/supervisor.ts	code	19	review	
 src/core/process-watchdog.ts	code	50	review: worker diagnostics watchdog	
 src/core/schema-pack/load-active.ts	code	19	review	
@@ -89,7 +89,7 @@ test/redos-hardening.test.ts	test	6	with its code patch
 test/release-workflow.test.ts	test	31	with its code patch	
 test/scripts/build-schema-migrations.test.ts	test	28	with its code patch	
 test/scripts/ci-gates.test.ts	test	20	with its code patch	
-test/scripts/ci-pr-scope.test.ts	test	30	with its code patch	
+test/scripts/ci-pr-scope.test.ts	test	30	upstream PR garrytan/gbrain#5900 (generic hunks; Bun-matrix title stays fork)	
 test/scripts/ci-runner-routing.test.ts	test	34	with its code patch	
 test/scripts/heavy-door-workflow.test.ts	test	51	with its code patch	
 test/search-multimodal-no-embed.serial.test.ts	test	49	with its code patch	
@@ -99,16 +99,16 @@ test/serve-http-route-runtime-golden.test.ts	test	14	with its code patch
 test/tool-catalog.test.ts	test	2	with its code patch	
 .github/actionlint.yaml	ci	9	no (ActVox runner/CI policy)	
 .github/workflows/actionlint.yml	ci	2	no (ActVox runner/CI policy)	
-.github/workflows/e2e.yml	ci	58	yes (C4: paid-E2E opt-in switch); runner labels stay fork policy	
-.github/workflows/heavy-tests.yml	ci	45	yes (C4: paid-E2E opt-in switch); runner labels stay fork policy	
+.github/workflows/e2e.yml	ci	58	proposed upstream issue garrytan/gbrain#5903; runner labels stay fork policy	
+.github/workflows/heavy-tests.yml	ci	45	proposed upstream issue garrytan/gbrain#5903; runner labels stay fork policy	
 .github/workflows/native-locks.yml	ci	6	no (ActVox runner/CI policy)	
 .github/workflows/persistence-validation.yml	ci	8	no (ActVox runner/CI policy)	
 .github/workflows/semgrep.yml	ci	29	no (fork integration baseline selector)	
-.github/workflows/test.yml	ci	46	yes (C4: changed_files>=3000 fallback); runner labels stay fork policy	
+.github/workflows/test.yml	ci	46	upstream PR garrytan/gbrain#5900 (scope step); runner labels stay fork policy	
 .gitignore	ci	1	no (ActVox runner/CI policy)	
-docker-compose.ci.yml	ci	3	yes (C4: gbrain-ci-bin volume)	
-scripts/ci-local.sh	ci	6	yes (C4: macOS xargs portability + build step)	
-scripts/ci-native-scope.sh	ci	9	no (ActVox runner/CI policy)	
+docker-compose.ci.yml	ci	3	upstream PR garrytan/gbrain#5901	
+scripts/ci-local.sh	ci	6	upstream PR garrytan/gbrain#5901	
+scripts/ci-native-scope.sh	ci	9	upstream PR garrytan/gbrain#5900	
 scripts/run-heavy.sh	ci	7	no (ActVox runner/CI policy)	
 docs/TESTING.md	docs	70	review	
 docs/architecture/key-files/commands-5.md	docs	2	review	
@@ -124,9 +124,9 @@ scripts/check-tool-catalog-fresh.sh	tooling	2	review
 scripts/generate-tool-catalog.ts	tooling	5	review	
 scripts/llms-config.ts	tooling	4	review	
 scripts/check-key-files-current-state.sh	tooling	4	no (ActVox: CLAUDE.md cap +1000 for the fork paragraph; re-check after each integration)	
-docs/architecture/key-files/core-utilities-1.md	docs	2	yes (U1: whoami transport from verified principal, ActVox PR #30)	
-src/commands/serve-http-mcp.ts	code	3	yes (U1: whoami transport from verified principal, ActVox PR #30)	
-src/core/ops/contract.ts	code	12	yes (U1: whoami transport from verified principal, ActVox PR #30)	
-src/core/ops/sources.ts	code	11	yes (U1: whoami transport from verified principal, ActVox PR #30)	
-test/serve-http-auth-outcomes.test.ts	test	50	yes (U1: whoami transport from verified principal, ActVox PR #30)	
-test/whoami.test.ts	test	39	yes (U1: whoami transport from verified principal, ActVox PR #30)	
+docs/architecture/key-files/core-utilities-1.md	docs	2	upstream PR garrytan/gbrain#5899	
+src/commands/serve-http-mcp.ts	code	3	upstream PR garrytan/gbrain#5899	
+src/core/ops/contract.ts	code	12	upstream PR garrytan/gbrain#5899	
+src/core/ops/sources.ts	code	11	upstream PR garrytan/gbrain#5899	
+test/serve-http-auth-outcomes.test.ts	test	50	upstream PR garrytan/gbrain#5899	
+test/whoami.test.ts	test	39	upstream PR garrytan/gbrain#5899	
