@@ -130,3 +130,4 @@ src/core/ops/contract.ts	code	12	upstream PR garrytan/gbrain#5899
 src/core/ops/sources.ts	code	11	upstream PR garrytan/gbrain#5899	
 test/serve-http-auth-outcomes.test.ts	test	50	upstream PR garrytan/gbrain#5899	
 test/whoami.test.ts	test	39	upstream PR garrytan/gbrain#5899	
+test/ai/gateway-chat.test.ts	test	7	yes (upstream test-isolation fix: restore the gateway baseline after the file)	
