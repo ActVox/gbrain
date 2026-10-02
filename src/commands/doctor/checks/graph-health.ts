@@ -278,6 +278,7 @@ export const timelineHistoryEntry: DoctorEntry = {
     'stale_embedding_effects',
     'google_file_modes',
     'extractor_facts_expired',
+    'loop_facts_drift',
   ],
   run: runTimelineHistory,
 };

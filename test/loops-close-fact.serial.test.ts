@@ -24,6 +24,8 @@ import { upsertOpenLoop } from '../src/core/loops/loops-store.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { runRepairCommand } from '../src/commands/repair.ts';
+import { loopFactsDriftCheck } from '../src/commands/doctor/checks/loop-facts.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { createConnectorFixture, googleConfig } from './helpers/connector-fixture.ts';
 
@@ -169,6 +171,49 @@ describe('#5869 loops_close retires the commitment fact through the coordinator'
       const res = await loopsClose.handler({ ...ctx, sourceId: other.id } as OperationContext, { id, status: 'done', source_id: other.id }) as CloseResult;
       expect(res).toMatchObject({ closed: true, fact_expired: false, retryable: false, reason: 'source_mismatch' });
       expect(await factState(engine, sourceId, factId)).toMatchObject({ expired: false, rowActive: true });
+      await restore(engine);
+    }
+  }), 180_000);
+});
+
+describe('#5869 gbrain repair loop-facts and doctor loop_facts_drift', () => {
+  async function repair(engine: BrainEngine, args: string[]) {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...parts: unknown[]) => { lines.push(parts.map(String).join(' ')); };
+    try { await runRepairCommand(engine, ['loop-facts', ...args, '--json']); } finally { console.log = original; }
+    return JSON.parse(lines.join('\n')) as { results: Array<{ affected: number; applied: number; apply_command: string; listing?: unknown[]; outcomes?: Record<string, number> }> };
+  }
+
+  for (const managed of [true, false]) {
+    test(`${managed ? 'managed' : 'unmanaged'}: a loop closed before the fix is found, previewed, and retired by the explicit apply`, async () => withEnv(env, async () => {
+      for (const engine of engines) {
+        const { sourceId, loopId, factId } = await seedCommitment(engine, managed);
+        // What the pre-fix loops_close left: the loop closed, its fact active and fenced.
+        await engine.executeRaw("UPDATE open_loops SET status='done', closed_at=now(), closed_by='manual' WHERE id=$1", [loopId]);
+        const before = await loopFactsDriftCheck(engine, [sourceId]);
+        expect(before).toMatchObject({ name: 'loop_facts_drift', status: 'warn', details: { drifted: 1 } });
+        expect(before.message).toContain('gbrain repair loop-facts');
+        const preview = await repair(engine, ['--source', sourceId]);
+        expect(preview.results[0]).toMatchObject({ affected: 1, applied: 0 });
+        expect(await factState(engine, sourceId, factId)).toMatchObject({ expired: false, rowActive: true });
+        const hash = preview.results[0].apply_command.match(/--expect ([0-9a-f]+)/)![1];
+        const applied = await repair(engine, ['--source', sourceId, '--apply', '--expect', hash]);
+        expect(applied.results[0]).toMatchObject({ applied: 1, outcomes: { retired: 1 } });
+        expect(await factState(engine, sourceId, factId)).toMatchObject({ expired: true, rowActive: false });
+        expect(await loopFactsDriftCheck(engine, [sourceId])).toMatchObject({ status: 'ok', details: { drifted: 0 } });
+        await restore(engine);
+      }
+    }), 180_000);
+  }
+
+  test('the drift rule skips a fact still shared with an open loop', async () => withEnv(env, async () => {
+    for (const engine of engines) {
+      const { sourceId, loopId, factId } = await seedCommitment(engine, true);
+      await upsertOpenLoop(engine, { sourceId, dedupKey: 'commit:shared', loopType: 'commitment_owed_by_me',
+        summary: 'Send the deck by Friday', evidence: [], threadId: 'example-3', pageSlug: 'emails/example', detector: 'llm_extract', factId });
+      await engine.executeRaw("UPDATE open_loops SET status='done', closed_at=now(), closed_by='manual' WHERE id=$1", [loopId]);
+      expect(await loopFactsDriftCheck(engine, [sourceId])).toMatchObject({ status: 'ok', details: { drifted: 0 } });
       await restore(engine);
     }
   }), 180_000);
