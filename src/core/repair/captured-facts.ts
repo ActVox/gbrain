@@ -27,8 +27,9 @@
  * `remember` of the same claim is not blocked. A fenced row (`row_num` on its
  * entity page) is struck in the page's `## Facts` fence by one revision-bound
  * `put_page` per page, so the canonical projection expires it and a later
- * write of the page cannot reactivate it; a row with no fence row is expired
- * in a coordinated database write. Each fact is rechecked before it is
+ * write of the page cannot reactivate it; rows with no fence row are expired
+ * by one database-only maintenance request on a managed brain (one
+ * transaction on an unmanaged brain). Each fact is rechecked before it is
  * touched; a fact that changed since the preview is reported as
  * `changed_since_preview` and kept.
  */
@@ -40,9 +41,11 @@ import { parseFactsFence, type ParsedFact } from '../facts-fence.ts';
 import { strikeFenceRow } from '../facts/forget.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { digest } from '../persistence/digest.ts';
-import { withCoordinatedWrite } from '../persistence/context.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
-import { maintenancePreflight } from '../persistence/prepared-maintenance.ts';
+import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
+import { authorizeWrite } from '../persistence/authority.ts';
+import type { PreparedMutation } from '../persistence/coordinator.ts';
+import type { WriteRequest } from '../persistence/model.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { claudeCliSelfProjectDirs, isClaudeCliSelfSessionId } from '../ai/providers/claude-cli-scratch.ts';
@@ -284,7 +287,7 @@ export const capturedFactsRepair: RepairHandler = {
     });
     const expired: number[] = [];
     const dbOnly = unchanged.filter(f => f.row_num === null);
-    if (dbOnly.length) expired.push(...await expireDatabaseRows(engine, page.source_id, dbOnly.map(f => f.id)));
+    if (dbOnly.length) expired.push(...await expireDatabaseRows(engine, page, hash, dbOnly.map(f => f.id)));
     const fenced = unchanged.filter(f => f.row_num !== null);
     if (fenced.length) expired.push(...await strikeFencedRows(ctx, entry, page, fenced));
     if (last) await clearApprovedSet(engine, { command: 'captured-facts', hash });
@@ -294,15 +297,37 @@ export const capturedFactsRepair: RepairHandler = {
   },
 };
 
-/** Database-only rows: expired with a reason in one transaction (coordinated on a managed brain, whose source needs its owner). */
-async function expireDatabaseRows(engine: BrainEngine, sourceId: string, ids: number[]): Promise<number[]> {
-  const managed = await managedPersistenceEnabled(engine);
-  if (managed) await maintenancePreflight(engine, sourceId);
-  const expire = (tx: BrainEngine) => tx.executeRaw<{ id: number | string }>(`UPDATE facts
-      SET expired_at=now(), valid_until=LEAST(COALESCE(valid_until, now()), now()), context=concat_ws(' | ', $3::text, NULLIF(context,''))
-    WHERE source_id=$1 AND id=ANY($2::bigint[]) AND expired_at IS NULL AND row_num IS NULL RETURNING id`, [sourceId, ids, EXPIRY_CONTEXT]);
-  const rows = await engine.transaction(tx => managed ? withCoordinatedWrite(tx, [sourceId], () => expire(tx)) : expire(tx));
-  return rows.map(row => Number(row.id));
+export const CAPTURED_FACTS_INTENT = 'managed_maintenance_expire_captured_facts';
+
+const expireRows = (tx: BrainEngine, sourceId: string, ids: number[]) => tx.executeRaw<{ id: number | string }>(`UPDATE facts
+    SET expired_at=now(), valid_until=LEAST(COALESCE(valid_until, now()), now()), context=concat_ws(' | ', $3::text, NULLIF(context,''))
+  WHERE source_id=$1 AND id=ANY($2::bigint[]) AND expired_at IS NULL AND row_num IS NULL RETURNING id`, [sourceId, ids, EXPIRY_CONTEXT]);
+
+/**
+ * Database-only rows: on a managed brain one database-only maintenance
+ * request on the page key (owner-checked, with a publication receipt); on an
+ * unmanaged brain one transaction.
+ */
+async function expireDatabaseRows(engine: BrainEngine, page: CapturedFactsPage, hash: string, ids: number[]): Promise<number[]> {
+  if (!await managedPersistenceEnabled(engine)) return (await engine.transaction(tx => expireRows(tx, page.source_id, ids))).map(row => Number(row.id));
+  const authority = (await maintenancePreflight(engine, page.source_id))!;
+  const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
+  const h = digest(['captured-facts-expire-v1', hash, page.source_id, page.slug, ids, snapshot?.revision ?? null]);
+  const receipt = await submitDatabaseMaintenanceIntent(engine, authority, page.slug,
+    { kind: CAPTURED_FACTS_INTENT, expected_revision: snapshot?.revision ?? null, fact_ids: ids },
+    `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`);
+  return (receipt.expired as number[] | undefined) ?? [];
+}
+
+/** Preparer for `managed_maintenance_expire_captured_facts`: expires the named database-only rows of the source. */
+export async function prepareCapturedFactsExpiry(engine: BrainEngine, row: WriteRequest): Promise<PreparedMutation> {
+  const ids = (row.intent as { fact_ids?: unknown } | null)?.fact_ids;
+  if (!Array.isArray(ids) || !ids.every(id => Number.isSafeInteger(id))) throw new OperationError('invalid_params', 'The captured facts expiry intent does not name its facts.');
+  const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
+  await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
+  return { observedRevision: snapshot?.revision ?? null, noop: true,
+    validate: async tx => { await authorizeWrite(tx, row.authority, 'submit_job', row.slug); },
+    apply: async tx => ({ status: 'completed', expired: (await expireRows(tx, row.source_id, ids as number[])).map(r => Number(r.id)) }) };
 }
 
 /**

@@ -94,6 +94,8 @@ for (const backend of testBackends()) {
           writeSingleFact(engine, 'default', { fact, entity, provenance, sessionId }).then(r => r.id);
         const self = await write('Alice Example prefers Rust for systems work', ALICE, 'hook:writeback', 'sess-self');
         const selfCompact = await write('Acme Example ships quarterly', ACME, 'hook:compact', 'sess-self');
+        // An entity with no page: the managed writer keeps the row database-only (no fence row).
+        const selfDbOnly = await write('Carol Absent dislikes long meetings', 'Carol Absent', 'hook:writeback', 'sess-self');
         const paste = await write('Acme Example raised a Series B round led by Fund Alpha', ACME, 'sweep:corpus', 'sweep:corpus:sess-paste.txt');
         const pasteOwn = await write('Acme Example wants a summary of an email', ACME, 'sweep:corpus', 'sweep:corpus:sess-paste.txt');
         const twinned = await write('Alice Example lives in Lisbon', ALICE, 'hook:writeback', 'sess-self');
@@ -104,24 +106,28 @@ for (const backend of testBackends()) {
 
         const finding = await capturedFactsCheck(engine);
         expect(finding.status).toBe('warn');
-        expect(finding.details).toMatchObject({ evidenced: 2, ambiguous: 1, excluded: 1, unclassifiable: 1 });
+        expect(finding.details).toMatchObject({ evidenced: 3, ambiguous: 1, excluded: 1, unclassifiable: 1 });
         expect(finding.message).toContain('gbrain repair captured-facts');
         expect(finding.message).toContain('the self_capture check counts corpus files');
         const wave = (await runWaveChecks(engine, { only: 'wave' })).find(f => f.spec.id === 'captured_facts_active')!;
         expect(wave.state).toBe('finding');
-        expect(wave.spec.count(wave.check.details!)).toBe(3);
+        expect(wave.spec.count(wave.check.details!)).toBe(4);
 
         const preview = await repair(engine, []);
-        expect(preview.results[0].residuals).toEqual({ evidenced: 2, ambiguous: 1, excluded: 1, unclassifiable: 1, not_suspect: 2 });
+        expect(preview.results[0].residuals).toEqual({ evidenced: 3, ambiguous: 1, excluded: 1, unclassifiable: 1, not_suspect: 2 });
         const classes = Object.fromEntries(preview.results[0].listing!.map(l => [Number(l.item.split('#')[1]), l.class]));
-        expect(classes).toEqual({ [self]: 'evidenced', [selfCompact]: 'evidenced', [paste]: 'ambiguous', [twinned]: 'excluded:legitimate_duplicate' });
+        expect(classes).toEqual({ [self]: 'evidenced', [selfCompact]: 'evidenced', [selfDbOnly]: 'evidenced', [paste]: 'ambiguous', [twinned]: 'excluded:legitimate_duplicate' });
         expect(preview.results[0].apply_command).toMatch(/^gbrain repair captured-facts --apply --expect [0-9a-f]+$/);
-        for (const id of [self, selfCompact, paste, pasteOwn, twinned, normal, gone]) expect(await active(engine, id)).toBe(true);
+        expect((await engine.executeRaw<{ row_num: number | null }>('SELECT row_num FROM facts WHERE id=$1', [selfDbOnly]))[0].row_num).toBeNull();
+        for (const id of [self, selfCompact, selfDbOnly, paste, pasteOwn, twinned, normal, gone]) expect(await active(engine, id)).toBe(true);
 
         expect((await refusal(() => repair(engine, ['--apply']))).code).toBe('invalid_params');
         const applied = await repair(engine, applyArgs(preview));
-        expect(applied.results[0].outcomes).toEqual({ expired: 2 });
+        expect(applied.results[0].outcomes).toEqual({ expired: 3 });
         expect(await active(engine, self)).toBe(false);
+        expect(await active(engine, selfDbOnly)).toBe(false);
+        // Each expiry committed with a coordinator publication receipt.
+        expect((await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE state='committed' AND intent->>'kind'='managed_maintenance_expire_captured_facts'"))[0].n).toBe(1);
         expect(await active(engine, selfCompact)).toBe(false);
         for (const id of [paste, pasteOwn, twinned, normal, gone]) expect(await active(engine, id)).toBe(true);
         expect((await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM fact_withdrawals'))[0].n).toBe(0);
