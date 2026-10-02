@@ -47,7 +47,7 @@ import type { GBrainConfig } from '../config.ts';
 import { isAvailable } from '../ai/gateway.ts';
 import { withAIInvocationPreflight } from '../ai/invocation-guard.ts';
 import { decideSingleFact } from './single-prepare.ts';
-import { cosineVerdict, dedupCapturedFacts, isCaptureLane, withCaptureDrops } from './capture-dedup.ts';
+import { cosineVerdict, dedupCapturedFacts, withCaptureDrops } from './capture-dedup.ts';
 import { appendContextNote, type InferredVia } from './subject-infer.ts';
 import { inferenceNote, inferMissingSubjects } from './subject-infer-write.ts';
 
@@ -693,7 +693,7 @@ async function runPipelineBodyInner(
 
     // Dedup against DB candidates (correct per Codex Q7: fence rows
     // have no embeddings; FS lock + sync invariant means DB == fence
-    // at write time). cosineVerdict: 0.95 for explicit lanes; guarded 0.95 for capture lanes (#5888).
+    // at write time). cosineVerdict: 0.95 for explicit lanes; capture lanes never drop by cosine (#5888).
     const exact = resolvedSlug ? await decideSingleFact(ctx.engine, ctx.sourceId, { entity_slug: resolvedSlug, fact: f.fact, kind: f.kind ?? 'fact', visibility }, null) : null;
     let matchedExistingId: number | null = exact?.candidate?.id ?? null;
     if (matchedExistingId === null && resolvedSlug && f.embedding && !f.entity_inferred) {
@@ -705,7 +705,7 @@ async function runPipelineBodyInner(
       );
       let top: { id: number; score: number; fact: string } | null = null;
       for (const c of candidates) {
-        if (!c.embedding || isCaptureLane(ctx.source) && visibility === 'world' && c.visibility !== 'world') continue;
+        if (!c.embedding) continue;
         const s = cosineSimilarity(f.embedding, c.embedding);
         if (!top || s > top.score) top = { id: c.id, score: s, fact: c.fact };
       }

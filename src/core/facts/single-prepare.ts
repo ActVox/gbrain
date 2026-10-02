@@ -29,7 +29,7 @@ export async function assertFactNotWithdrawn(engine: BrainEngine, sourceId: stri
 }
 /**
  * SQL-only, so publication can verify the semantic decision under its guard.
- * `lane` is the writer's `facts.source`: capture lanes drop at 0.95 only through the claimsDiverge guard (#5888).
+ * `lane` is the writer's `facts.source`: capture lanes never drop by cosine (#5888).
  */
 export async function decideSingleFact(engine: BrainEngine, sourceId: string, input: SingleFactIntent, embedding: Float32Array | null, embeddingModel?: string | null, lane?: string | null): Promise<FactDecision> {
   const [exact] = await engine.executeRaw<FactCandidate>(`SELECT * FROM facts WHERE source_id=$1

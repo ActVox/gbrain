@@ -2,11 +2,10 @@
  * #5888 — the capture-lane dedup policy, branch by branch.
  *
  * Protects: corrections and changed numbers are never treated as duplicates,
- * capture lanes drop at 0.95 only through the guard and only count the
- * 0.92-0.95 band, explicit lanes keep their unguarded 0.95 rule, every
- * capture lane maps one conversation to one key, and the cross-entity naming
- * rule matches whole names only.
- * Fails when: the guard is dropped, the shadow band starts dropping, or
+ * capture lanes never drop by cosine (shadow count only), explicit lanes keep
+ * their 0.95 rule, every capture lane maps one conversation to one key, and
+ * the cross-entity naming rule matches whole names only.
+ * Fails when: the guard is dropped, a capture lane regains a cosine drop, or
  * the corpus sweep's `sweep:corpus:<file>` key no longer matches the writeback
  * session id. Pure functions, no engine.
  */
@@ -21,11 +20,8 @@ describe('cosineVerdict', () => {
     ['explicit lane at 0.95 is a duplicate', 'mcp:extract_facts', 0.95, same, same, 'duplicate'],
     ['explicit lane at 0.949 is distinct', 'mcp:extract_facts', 0.949, same, same, 'distinct'],
     ['explicit lane keeps its rule for a negation pair', 'sync:import', 0.97, same, 'Alice Example is not moving to NYC', 'duplicate'],
-    ['writeback paraphrase at 0.99 is a duplicate', 'hook:writeback', 0.99, same, 'Alice Example relocates to NYC', 'duplicate'],
-    ['compact harvest paraphrase at 0.95 is a duplicate', 'hook:compact', 0.95, same, 'Alice Example relocates to NYC', 'duplicate'],
-    ['corpus sweep at 0.949 is only a near duplicate', 'sweep:corpus', 0.949, same, 'Alice Example relocates to NYC', 'near_duplicate'],
-    ['corpus sweep at 0.93 is only a near duplicate', 'sweep:corpus', 0.93, same, 'Alice Example relocates to NYC', 'near_duplicate'],
-    ['a correction at 0.99 is kept by the guard', 'hook:writeback', 0.99, same, 'Alice Example is not moving to NYC', 'distinct'],
+    ['writeback at 0.99 is only a near duplicate', 'hook:writeback', 0.99, same, 'Alice Example relocates to NYC', 'near_duplicate'],
+    ['corpus sweep at 0.93 is a near duplicate', 'sweep:corpus', 0.93, same, 'Alice Example relocates to NYC', 'near_duplicate'],
     ['compact harvest at 0.919 is distinct', 'hook:compact', 0.919, same, 'Alice Example relocates to NYC', 'distinct'],
     ['negation pair at 0.97 is distinct', 'hook:writeback', 0.97, same, 'Alice Example is not moving to NYC', 'distinct'],
     ['"no longer" pair is distinct', 'hook:writeback', 0.97, 'Bob Example works at Acme Example', 'Bob Example no longer works at Acme Example', 'distinct'],
