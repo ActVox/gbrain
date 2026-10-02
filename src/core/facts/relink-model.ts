@@ -67,8 +67,13 @@ function parseSubjects(text: string, size: number): Map<number, string | null> |
 }
 
 function quotesWholeName(fact: string, subject: string): boolean {
-  const escaped = subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(fact);
+  const haystack = fact.toLowerCase();
+  const needle = subject.toLowerCase();
+  const isWordChar = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+    if (!isWordChar(haystack[at - 1]) && !isWordChar(haystack[at + needle.length])) return true;
+  }
+  return false;
 }
 
 /** Rough pre-call estimate for dry runs and the provider line: ~4 chars per token plus the prompt. */
