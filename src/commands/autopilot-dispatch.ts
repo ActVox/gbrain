@@ -390,7 +390,7 @@ async function autoDrainUnitsToday(engine: BrainEngine, utcDay: string): Promise
   const { STRUCTURAL_REFUSAL_PREFIX } = await import('../core/cycle/extract-atoms-drain.ts');
   const rows = await engine.executeRaw<{ cnt: number }>(
     `SELECT COALESCE(sum(CASE WHEN status = 'dead' AND attempts_started <= 1
-         AND left(COALESCE(error_text, ''), length($2)) = $2 THEN 0 ELSE GREATEST(attempts_started, 1) END), 0)::int AS cnt
+         AND left(COALESCE(error_text, ''), length($2::text)) = $2::text THEN 0 ELSE GREATEST(attempts_started, 1) END), 0)::int AS cnt
        FROM minion_jobs WHERE name = 'extract-atoms-drain' AND created_at >= $1::timestamptz`,
     [`${utcDay}T00:00:00Z`, STRUCTURAL_REFUSAL_PREFIX],
   );

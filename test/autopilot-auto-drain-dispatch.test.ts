@@ -9,21 +9,31 @@ import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { testBackends } from './helpers/test-backends.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { submitAutoDrains, AUTO_DRAIN_NEXT_KIND_KEY } from '../src/commands/autopilot-dispatch.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-let engine: PGLiteEngine;
+let engine: BrainEngine;
 let queue: MinionQueue;
 let home: string;
+let closePostgres: (() => Promise<void>) | undefined;
 beforeAll(async () => {
-  engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
+  if (testBackends().join() === 'postgres') {
+    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    engine = pg.engine;
+    closePostgres = pg.close;
+  } else {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+  }
   queue = new MinionQueue(engine);
-});
-afterAll(async () => { await engine.disconnect(); });
+}, 120_000);
+afterAll(async () => { if (closePostgres) await closePostgres(); else await engine.disconnect(); });
 async function reset(): Promise<void> {
   await engine.executeRaw('DELETE FROM minion_jobs');
   await engine.executeRaw("DELETE FROM pages");

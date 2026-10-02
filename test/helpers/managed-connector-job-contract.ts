@@ -92,10 +92,6 @@ export const EXPECTED_FAILURES: Partial<Record<ContractCase, { issue: string; si
   gmail_sweep_loops_enqueue: { issue: '#5867', signature: /loops_extract jobs enqueued by the managed sweep: 0/ },
   loops_close: { issue: '#5869', signature: /loops_close reported fact_expired=true but the fact is still active/ },
   cycle_extract: { issue: '#5875', signature: /cycle extract phase: skipped \(no_brain_dir\)/ },
-  atom_drain_default_off: { issue: '#5856', signature: /extract-atoms-drain ended dead after 3 attempt\(s\): Atom maintenance requires the configured canonical owner/ },
-  atom_drain_opted_in: { issue: '#5856', signature: /extract-atoms-drain ended dead after 3 attempt\(s\): Atom maintenance requires the configured canonical owner/ },
-  atom_dispatch: { issue: '#5856', signature: /auto-drain submitted extract-atoms-drain for the connector source with connector atoms off/, engines: ['postgres'] },
-  synthesize_publish_busy_writer: { issue: '#5854', signature: /The write is accepted and is still pending/ },
   extract_timeline_db: { issue: '#5904', signature: /guard refusals: timeline_entries=/ },
 };
 
@@ -104,7 +100,7 @@ export const EXPECTED_FAILURES: Partial<Record<ContractCase, { issue: string; si
  * behind one setting, default off. Lane L6 owns the key's final name; keep
  * this constant in step with it.
  */
-export const CONNECTOR_ATOMS_OPT_IN = { key: 'autopilot.auto_drain.connector_sources', on: 'true' } as const;
+export const CONNECTOR_ATOMS_OPT_IN = { key: 'cycle.extract_atoms.connector_pages', on: 'true' } as const;
 
 /**
  * Handlers from registerBuiltinHandlers that this contract does not drive on
@@ -604,7 +600,8 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
 
   async atom_drain_default_off(state) {
     await gmailSweep(state);
-    expect(await countExtractAtomsBacklog(state.brain.engine, state.sourceId)).toBeGreaterThan(0);
+    // Off, connector email/meeting pages are outside discovery and the backlog (#5856 opt-in).
+    expect(await countExtractAtomsBacklog(state.brain.engine, state.sourceId)).toBe(0);
     const [job] = await runJobs(state.brain.engine, [{ name: 'extract-atoms-drain', data: { sourceId: state.sourceId, window: 60 } }]);
     if (job.status !== 'completed') throw new Error(`extract-atoms-drain ended ${job.status} after ${job.attempts_started} attempt(s): ${job.error_text ?? ''}`);
     expect(job.attempts_started).toBe(1);
@@ -615,9 +612,9 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
   async atom_drain_opted_in(state) {
     await gmailSweep(state);
     const { engine } = state.brain;
-    expect(await countExtractAtomsBacklog(engine, state.sourceId)).toBeGreaterThan(0);
     await engine.setConfig(CONNECTOR_ATOMS_OPT_IN.key, CONNECTOR_ATOMS_OPT_IN.on);
     try {
+      expect(await countExtractAtomsBacklog(engine, state.sourceId)).toBeGreaterThan(0);
       const [job] = await runJobs(engine, [{ name: 'extract-atoms-drain', data: { sourceId: state.sourceId, window: 60 } }]);
       if (job.status !== 'completed') throw new Error(`extract-atoms-drain ended ${job.status} after ${job.attempts_started} attempt(s): ${job.error_text ?? ''}`);
       expect(job.attempts_started).toBe(1);
@@ -643,7 +640,7 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
     };
     await engine.setConfig('autopilot.auto_drain.threshold', '1');
     try {
-      expect(await countExtractAtomsBacklog(engine, state.sourceId)).toBeGreaterThan(1);
+      expect(await countExtractAtomsBacklog(engine, state.sourceId)).toBe(0);
       const off = await tick();
       // PGLite: the auto-drain dispatch is Postgres-only, so nothing is submitted.
       if (engine.kind === 'pglite') { expect(off).toHaveLength(0); return; }
@@ -652,6 +649,7 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
         throw new Error('auto-drain submitted extract-atoms-drain for the connector source with connector atoms off');
       }
       await engine.setConfig(CONNECTOR_ATOMS_OPT_IN.key, CONNECTOR_ATOMS_OPT_IN.on);
+      expect(await countExtractAtomsBacklog(engine, state.sourceId)).toBeGreaterThan(1);
       const on = await tick();
       expect(on).toHaveLength(1);
       const [job] = await drainQueue(engine, on.map(j => j.id));
