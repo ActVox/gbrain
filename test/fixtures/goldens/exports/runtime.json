@@ -660,6 +660,7 @@
         "isRelativeFileUri",
         "parseMarkdown",
         "resolvePageFilePath",
+        "resolveParsedSubtype",
         "resolveSourceLocalFilePath",
         "serializeMarkdown",
         "serializePageToMarkdown",

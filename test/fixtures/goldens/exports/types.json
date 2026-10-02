@@ -4232,7 +4232,7 @@
         "kind": "function",
         "name": "importFromContent",
         "signature": [
-          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; remote?: boolean; allowEmptyOverwrite?: boolean; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: ParseOpts[\"activePack\"]; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; remote?: boolean; allowEmptyOverwrite?: boolean; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; }) => Promise<ImportResult>"
         ]
       },
       {
@@ -4491,7 +4491,7 @@
         "kind": "variable",
         "name": "LINK_EXTRACTOR_VERSION_TS",
         "signature": [
-          "\"2026-10-01T00:00:00Z\""
+          "\"2026-10-02T00:00:00Z\""
         ]
       },
       {
@@ -4765,7 +4765,7 @@
       {
         "kind": "interface",
         "members": [
-          "activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; }>; } | undefined",
+          "activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; subtypes?: ReadonlyArray<{ name: string; when: { path_pattern?: string; frontmatter_field?: string; frontmatter_value?: unknown; }; }>; }>; } | undefined",
           "expectedSlug?: string | undefined",
           "validate?: boolean | undefined"
         ],
@@ -4793,6 +4793,7 @@
           "compiled_truth: string",
           "errors?: ParseValidationError[] | undefined",
           "frontmatter: Record<string, unknown>",
+          "inferredSubtype?: { type: string; name: string; } | undefined",
           "slug: string",
           "tags: string[]",
           "timeline: string",
@@ -4863,6 +4864,13 @@
         "name": "resolvePageFilePath",
         "signature": [
           "(brainDir: string, slug: string, sourceId: string) => string"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "resolveParsedSubtype",
+        "signature": [
+          "(parsed: ParsedMarkdown, existing?: { type: string; frontmatter?: Record<string, unknown> | null; } | null) => void"
         ]
       },
       {

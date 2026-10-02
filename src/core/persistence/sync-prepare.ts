@@ -5,7 +5,7 @@ import type { GBrainConfig } from '../config.ts';
 import type { Page } from '../types.ts';
 import { OperationError } from '../ops/contract.ts';
 import { importFromContent, importCodeFile } from '../import-file.ts';
-import { parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
+import { parseMarkdown, resolveParsedSubtype, serializePageToMarkdown } from '../markdown.ts';
 import { resolveSlugForPath, slugifyPath, isCodeFilePath } from '../sync.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
 import { sameCanonicalImport } from '../page-state/import-guard.ts';
@@ -194,6 +194,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     throw new OperationError('revision_conflict', 'The renamed page changed after sync admission.');
   }
   const parsedInput = parseMarkdown(p.content, row.slug, { activePack });
+  resolveParsedSubtype(parsedInput, base?.page);
   const expectedSlug = resolveSlugForPath(p.sourcePath);
   const retainedWindowsOrigin = process.platform === 'win32' && snapshot?.page.source_path != null &&
     syncOriginPath(snapshot.page.source_path) === syncOriginPath(p.sourcePath) && parsedInput.slug === snapshot.page.slug;
@@ -237,6 +238,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     throw new OperationError('revision_conflict', 'A different page already owns this file identity; resolve the duplicate before syncing.');
   }
   const parsed = parseMarkdown(p.content, row.slug, { activePack });
+  resolveParsedSubtype(parsed, base?.page);
   const tags = [...new Set([...(base?.tags ?? []), ...ready.parsedPage.tags])].sort();
   const renderedPage = { ...(base?.page ?? { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage } as Page;
   if (renamed && parsedInput.typeExplicit !== true) renderedPage.type = parsedInput.type;
