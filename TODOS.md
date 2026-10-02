@@ -1,6 +1,6 @@
 # TODOS
 
-## Memory, search and connector fix wave follow-ups (filed 2026-10-02, GBRA-35 wave 2; notes: docs/fix-wave-notes/capy-gbra35w2-fix-wave.md)
+## Memory, search and connector fix wave follow-ups (filed 2026-10-02, GBRA-35 wave 2; released in v0.60.32.0, see CHANGELOG)
 
 - [ ] **P2 — Honest `waiting` completeness while loop analysis is pending.**
   **What:** `gbrain waiting` reports `completeness: "partial"` only for held Gmail threads. Threads still queued for `loops_extract`, still inside the managed 30-day catch-up, or grace-held are not reflected, so a brain mid-backfill can answer "You are clean". **Fix:** a pending-analysis count beside the held-thread note, read from the catch-up cursor, the waiting `loops_extract` depth and `loop_grace_holds`. The message sits beside `rankGroups` (wave 7's area), so coordinate. **Effort:** S. **Priority:** P2.

@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.32.0] - 2026-10-02
 
-**Fix wave 7: the contradiction judge stops excusing undated conflicts as "change over time", "who is waiting on me" ages and ranks requests honestly, four smaller eval findings and three open issues are fixed, and 62 community pull requests land.**
+**Fix wave 7: automatic capture stops double-storing what you `remember`, the maintenance sweep reads whole transcripts, Gmail commitments and timelines work again on managed brains, `gbrain upgrade` refuses a Bun it can't run, the contradiction judge stops excusing undated conflicts, "who is waiting on me" ages and ranks requests honestly, and 62 community pull requests land.**
 
 When two notes give different numbers for the same thing and neither note has a date, nothing tells you which came first, so that is a conflict you need to resolve. The judge kept calling those pairs a change over time instead, guessing an order from the numbers themselves (the bigger headcount must be newer) or from the kind of note (a board deck must be newer than a memo). Prompt v4 tells it plainly not to do that, and that one note saying nothing about headcount does not contradict another note that gives one. On a fresh test world it now calls 149 of 150 planted same-time conflicts contradictions (was 131), all 50 undated ones included (was 37). The price is a few more false alarms: 14 of 820 unrelated pairs (was 11) and 5 of 50 compatible pairs (was 2).
 
@@ -32,10 +32,19 @@ When two notes give different numbers for the same thing and neither note has a 
 | `segments.join("/")` in a file that defines `join` | resolved as a caller of `join` | unresolved |
 | Keyword-only answer to a question no page can answer | graded moderate | graded weak |
 | `check-backlinks fix` on a managed brain | one refusal per page; dry run claims success | one clear refusal, dry run too |
+| A fact `remember`ed, then seen again by automatic capture | stored twice | stored once (corrections always kept) |
+| Sweep extraction of a 120 KB session transcript | first 8,000 characters | whole transcript, in windows |
+| Gmail commitments on a managed brain | never extracted | extracted every sweep |
+| `gbrain upgrade` to a release needing a newer Bun | installs, then fails to start | refuses (exit 78); autopilot holds |
+| Remote title search, rare term, 40k pages (Postgres) | ~490 ms | ~34 ms |
 | Conversation-facts backlog with source-evidence pages marked `conversation_parseable: false` | never reaches zero | drains |
 | `chronicle-backfill --limit N`, run twice | the same N pages again | the next N pages |
 
-These came from the gbrain-evals category waves A4 (abstention), N2 (contradictions), N7 (open loops), N9 (multi-hop), N12 (meeting formats) and N13 (code intelligence), plus open issues #5341, #5330 and #5329.
+These came from the gbrain-evals category waves A4 (abstention), N2 (contradictions), N7 (open loops), N9 (multi-hop), N12 (meeting formats) and N13 (code intelligence), plus open issues #5341, #5330 and #5329, and the GBRA-35 lane's fixes for #5888, #5887, #5889, #5890, #5892, #5855, #5902, #5875, #5867, #5856, #5877, #5854, #5868 and #5869.
+
+Memory capture got two fixes that change what lands in your brain. A fact your agent saved with `remember` was often stored a second time by automatic capture a moment later; capture now skips an exact same-claim copy on the same entity, and never skips a correction. And the maintenance sweep only ever read the first 8,000 characters of each session transcript, so everything said after that never became a fact. It now reads whole transcripts in turn-aligned windows and remembers where it stopped. That costs more model calls on long sessions (about 15 for a typical 120 KB transcript, capped per sweep).
+
+Managed brains with Google connected had quietly stopped doing several jobs: Gmail commitments were never extracted, Gmail and Calendar pages got no links or timeline entries, quiet threads never opened their loops once the waiting window passed, and closing a commitment loop claimed it retired the fact when it hadn't. All four work again. `gbrain upgrade` now checks the target release's Bun requirement before swapping, so a host can no longer upgrade itself into a binary it can't start. An exact-title page ranks first in title search again, and remote title search is index-backed (a rare term on a 40k-page Postgres brain: about 490 ms to about 34 ms).
 
 The release also absorbs 62 open community pull requests, each re-checked against current master: sync stops deleting pages it does not own and keeps skillpack files out of managed checkouts, backups and storage restores cover every source and every live page, Claude Sonnet 5.5 works and Sonnet 5 is priced at its standard rate, `list_pages` pages losslessly, a multi-line fact no longer blocks its page from being written, and two search paths get faster. Thank you to everyone listed below.
 
@@ -47,15 +56,32 @@ The release also absorbs 62 open community pull requests, each re-checked agains
 2. **Expect one paid re-judge of contradictions.** The judge prompt version moved to 4, so the next `gbrain eval suspected-contradictions` re-judges every pair. It prints its cost estimate first, as on any prompt change.
 3. **Existing loops get request-time ages when their thread is next checked.** An open thread loop keeps the earlier of its stored age and the oldest unanswered message's time, so the next sync that touches a thread corrects an age set at detection time.
 4. **Code call graphs pick up the member-call fix when a file re-imports.** To refresh every code page now: `gbrain reindex-code`.
-5. **Verify:**
+5. **Preview the two new explicit repairs, and apply only after you agree.** `gbrain doctor` reports `captured_facts_active` (facts captured before v0.60.30.0 from gbrain's own claude-cli sessions or pasted text) and `loop_facts_drift` (facts of loops closed before this release):
+   ```bash
+   gbrain repair captured-facts            # preview; apply with --apply --expect <hash>
+   gbrain repair loop-facts                # preview
+   ```
+   Guide: [docs/guides/repair.md](docs/guides/repair.md#captured-facts).
+6. **Decide on connector atom extraction.** Atom extraction of connector `email` and `meeting` pages is now opt-in on every brain. To keep it (the text of each thread or event goes to your `extract_atoms` model): `gbrain config set cycle.extract_atoms.connector_pages true`.
+7. **Cached search results are invalidated once** (`KNOBS_HASH_VERSION` 29 -> 30). If you changed your FTS language, run `gbrain reindex-search-vector` so remote title search matches it.
+8. **Verify:**
    ```bash
    gbrain waiting --as-of 2026-10-01T12:00:00Z --json | grep as_of
+   gbrain sweep --once --json        # corpus_files[] shows windows_done / windows_remaining
    gbrain doctor
    ```
-6. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
+9. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
 
 ### Behavior changes
 
+- **Automatic capture skips an exact copy of a claim already stored** in the same source on the same entity (or another entity the claim names), visible where the new fact would be, and written within 15 minutes of the turn or by capture in the same conversation. Reworded copies are never skipped, so corrections ("is not moving", a changed amount or place) are always kept. Explicit `remember` is never skipped (#5888).
+- **The sweep extracts whole transcripts** in turn-aligned windows of about 8,000 characters, with a `<file>.progress` sidecar, capped at 8 windows per file and 32 per sweep (`GBRAIN_CORPUS_WINDOWS_PER_SWEEP`). Transcripts marked done before this release are not re-read; only turns added after the upgrade are extracted (#5887).
+- **`gbrain upgrade` and `gbrain self-upgrade` refuse a release whose Bun floor the host does not meet** (exit 78, nothing changed); `--no-bun-floor-check` upgrades anyway when the floor cannot be read. Autopilot holds the upgrade and `self_upgrade_health` shows the hold and fix (#5855).
+- **Remote title matching follows the language `search_vector` was built with** (#5889).
+- **A synthesis publish still pending after the 30 s writer wait is a phase warning (`publish_pending`), not a failure,** and the next cycle finishes it (#5854).
+- **Connector `email` and `meeting` atom extraction is opt-in on every brain** (`cycle.extract_atoms.connector_pages`). The auto-drain's daily cap counts attempts at the per-attempt estimate, so 6 attempts a day by default (#5856).
+- **`loops_close` returns `{ closed, id, status, fact_expired, retryable, reason? }`** and expires the fact and strikes its fence row in one coordinated write (#5869).
+- **`gbrain extract timeline --source db` exits non-zero when a write is refused,** naming the code and recovery (#5904 probe).
 - **Contradiction judge prompt v4.** The time check comes first: the three temporal verdicts need two different dates (metadata or text) or explicit change wording, never an order guessed from the values, the document kind or which statement is listed first. A statement that does not mention an attribute does not conflict with one that states it. A negative claim about one party ("Fund A is not leading") and a positive claim about another ("Fund B is leading") agree. Matched A/B against prompt v3 on the fresh N2 development seed 20261002, one Haiku 4.5 judge sample per arm, 1,371 identical pairs: same-time conflicts caught 131/150 -> 149/150 (undated 37 -> 50, same-day 45 -> 49, mixed 49 -> 50), temporal recognition unchanged at 40/40, false contradictions on unplanted pairs 11/820 -> 14/820 and on compatible pairs 2/50 -> 5/50, judged-pair precision 91.0% -> 88.7%. A code rule that turned temporal verdicts without time evidence into contradictions was measured and rejected: on the counted seed it added about 65 false alarms, because Haiku uses a temporal label for unrelated pairs it misreads. The prompt version bump invalidates the judge cache (step 2).
 - **An acknowledgement-only reply to a question does not close a thread loop.** "Thanks!", "Got it, thanks." or "Thanks, Bob!" after their question leaves the reply-owed loop open and its clock running. "Will do" and any reply with content still count as the reply. An acknowledgement of a message that asked nothing still closes it.
 - **A `?` inside a link is not a question,** so outbound FYIs that only share a link never open `unanswered_outbound`.
@@ -97,6 +123,43 @@ The release also absorbs 62 open community pull requests, each re-checked agains
 - **#5341** `check-backlinks fix` managed-worktree refusal.
 - **#5330** shared conversation-facts eligibility (`isConversationFactsEligiblePage` and its SQL twin in `src/core/facts/conversation-types.ts`).
 - **#5329** `chronicle_backfill` idempotency keys and paging, no schema change. The issue's other parts (a cadence gate, extraction idempotency for direct `chronicle_extract` runs, the no-sub-events page, the judge output cap) remain open.
+
+#### Memory capture (#5888, #5887)
+
+- **What the agent saves with `remember` is no longer stored a second time by automatic capture (#5888).** The writeback hook, the compaction harvest and the corpus sweep skip a fact only on an exact normalized match (rules above). Capture counts same-entity near duplicates (cosine 0.92 or higher) without dropping them, so a threshold can be measured first. Hot memory and the `context_pack`/`delta` facts show one line per duplicate group. Each skip is logged on stderr and in the hook heartbeat, and `gbrain doctor` (`memory_writeback`) reports `cross_lane_duplicates_7d` and `near_duplicates_shadow_7d`.
+- **The maintenance sweep reads whole session transcripts, and a resumed session no longer re-extracts the same head (#5887).** Windows break at turn boundaries and carry their `[user]` or `[assistant]` label, pasted blocks are removed first, and the progress sidecar makes appends and compaction rewrites cost only their new turns. `gbrain sweep --once --json` reports `corpus_files[]` with `windows_done` and `windows_remaining`. Ported from #5897. Contributed by @javieraldape.
+- **New explicit repair `gbrain repair captured-facts`** expires facts captured before v0.60.30.0 from gbrain's own claude-cli sessions or from pasted text (doctor `captured_facts_active`; the post-upgrade banner names the preview). Self-capture facts with evidence expire with `--apply --expect <hash>`; paste candidates (a word-overlap heuristic against the retained session corpus) only with `--include-ambiguous`. A claim with a legitimate active copy is kept. Facts are expired, never withdrawn, so `remember` can save the claim again.
+
+#### Search (#5889, #5890, #5892)
+
+- **An exact-title page ranks first again in title search, for CLI and MCP callers on both engines (#5889).** Title ties broke by page id, so a page titled exactly "Acme" lost to dozens of "Acme weekly sync N" pages. Remote title search matches `pages.search_vector` with title-weight lexemes, with no migration: on a 40k-page Postgres brain, rare term 490.9 -> 33.6 ms, 2,000 matches 545.1 -> 453.3 ms, OR fallback 1142.6 -> 498.0 ms (median of 9). Diagnosis credit: @morven-ai (#5853).
+- **`think` and synthesis see the full evidence set again with `search.adaptive_return` on (#5890).** Gather was cut to 2 or 6 pages before synthesis; gather, brainstorm's close set, grade-takes evidence, `whoknows` and `enrich` now opt out of both reader-facing trims (6 of 12 matching pages -> 12 of 12 on the reproduction).
+- **`--json` output stays valid JSON when a claude-cli model runs (#5892).** AI SDK warnings go to stderr; a user-set `AI_SDK_LOG_WARNINGS` is kept.
+
+#### Upgrades and operations (#5855, #5902, #5854)
+
+- **`gbrain upgrade` no longer installs a release the host's Bun cannot run (#5855).** A clone fetches and checks `package.json` at the exact commit it then fast-forwards to. The post-swap smoke runs `gbrain --help` and prints per-method recovery when it fails. Clone installs should upgrade with `gbrain upgrade`, not `git pull`, so the check runs. Ported from #5860. Contributed by @andreineacsu.
+- **An unpaced embed backfill no longer takes every database connection (#5902).** Without an explicit concurrency, `embed --stale` and the `embed-backfill` job use at most half the engine's real pool (20 with no pool); an explicit `GBRAIN_EMBED_CONCURRENCY` keeps the full-pool clamp.
+- **Dream synthesis no longer fails its phase when the canonical writer is busy (#5854).** Maintenance publishes wait up to 30 s (one wait per job, bounded by the job deadline); a still-pending publish is deferred without stamping the cooldown.
+
+#### Managed brains and Google connectors (#5875, #5867, #5868, #5869, #5856, #5877)
+
+- **Gmail and Calendar pages get links and timeline entries again (#5875).** Cycles with no on-disk checkout (connector sources, Postgres brains without `--dir`) now run the bounded, source-scoped database-only stale drain each cycle.
+- **Managed brains extract commitments from Gmail again (#5867).** Every sweep queues `loops_extract` on managed and unmanaged brains, the sync result carries `loops_enqueue` (`enqueued`, `deferred`, `skipped_reason`), and every skip is logged. A one-time catch-up on managed sources analyzes email threads from the last 30 days that were never extracted.
+- **Quiet Gmail threads open their loops when the waiting window ends (#5868).** The sweep records a grace hold and re-evaluates the thread when due, from the stored page when nothing changed; the first sweep after upgrading seeds holds for threads active in the last 14 days, with no Gmail calls. Grace holds are not held items.
+- **Closing a commitment loop retires its fact, and says so honestly (#5869).** On a managed brain the expiry was refused, the error swallowed, and `loops_close` still answered `fact_expired: true`; the fence row was never struck on any brain. A fact another open loop still uses is kept, and a close whose retirement did not commit is retryable. New explicit repair `gbrain repair loop-facts` (doctor `loop_facts_drift`) retires the facts of loops closed before this release.
+- **Automatic atom drains stop dead-lettering on connector sources (#5856).** When opted in, each attempt runs under one budget across its batches; with a model the tracker cannot price, only the attempt count bounds spend. A job refused before any model call dead-letters once and does not count; checkout and connector sources take turns. Off switch: `gbrain config set autopilot.auto_drain.enabled false`. The `connector_database` write target is ported from #5865. Contributed by @andreineacsu.
+- **`gbrain doctor`'s `orphan_ratio` fix command runs, and connector mail no longer inflates the ratio (#5877).** The printed command includes `--source db` (and `--source-id` when scoped), and orphaned email/meeting renders of connector sources are reported apart as `connector_renders_excluded`.
+- **`gbrain extract timeline --source db` writes on fresh and managed brains (#5904 probe).** It publishes per page through the coordinator instead of inserting raw rows every managed brain refuses. #5904's library-level entry point stays open.
+
+Issue reports with reproductions for this group: @andreineacsu (#5888, #5887, #5889, #5890, #5892, #5855, #5875, #5867, #5856, #5877, #5868, #5869), @nezovskii (#5902, #5904), @ywlee7922 (#5854).
+
+#### Known limits
+
+- A `remember` saved after automatic capture already stored the same claim leaves two active rows, and two capture writers racing on the same claim can both insert it. Reworded duplicates still appear twice until a measured cosine threshold ships: single-word corrections ("Lisbon" -> "Porto") embed at 0.95 or higher, which no token guard catches (#5888).
+- Hosts on v0.60.31.0 or older run their own upgrade code, which has no Bun floor check (#5855).
+- With an unpriced `extract_atoms` model the auto-drain's dollar limit is not enforced (#5856).
+- #5902 is mitigated, not reproduced end to end; #5854 fixes the wait and phase failure, not the reported duplicate child re-runs, which were not proven.
 
 #### Community fixes
 
@@ -141,6 +204,9 @@ CLI, hooks, connectors and loops:
 
 ### For contributors
 
+- `KNOBS_HASH_VERSION` is 30.
+- The managed connector job contract harness (`test/helpers/managed-connector-job-contract.ts`, PGLite and Postgres) drives every automatic connector-source job on a managed brain through a real queue and worker and counts every `managed_writer_guard` refusal.
+- `src/commands/extract-timeline-db.ts` is the shared coordinated `--source db` timeline path.
 - `PROMPT_VERSION` is 4.
 - `isManagedFilesystemPath(path)` in `src/core/persistence/filesystem-guard.ts` is the predicate `assertManagedFilesystemWrite` uses.
 - `ExtractedEdge.memberCall` and `CodeEdgeInput.edge_metadata.member_call`.
