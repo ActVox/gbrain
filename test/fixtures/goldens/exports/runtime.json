@@ -580,6 +580,7 @@
         "extractStaleFromDB",
         "extractTimelineForSlugs",
         "extractTimelineFromContent",
+        "filterRefsSince",
         "logBatchRetry",
         "reconcileSourceLinks",
         "resolveBasenameMatchesFromSlugs",
