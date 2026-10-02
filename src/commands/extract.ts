@@ -247,7 +247,7 @@ interface ExtractResult {
   skipped_missing_target?: number;
   skipped_attendance_incomplete?: number;
   skipped_cross_source?: number;
-  /** #5904: timeline writes the writer refused (DB path); the command exits non-zero. */
+  /** #5904: timeline writes the writer refused or left pending (DB path); the command exits non-zero. */
   timeline_refused?: number;
 }
 
@@ -751,7 +751,7 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
   if (!dryRun && opts.mode === 'timeline' && opts.slugs?.length !== 0 && await managedPersistenceEnabled(engine)) {
     const { extractTimelineFromDB } = await import('./extract-timeline-db.ts');
     const r = await extractTimelineFromDB(engine, { dryRun, jsonMode, quiet: quiet || jsonMode, sourceIdFilter: opts.sourceId, slugs: opts.slugs });
-    return { links_created: 0, timeline_entries_created: r.created, pages_processed: r.pages, ...(r.refused ? { timeline_refused: r.refused } : {}) };
+    return { links_created: 0, timeline_entries_created: r.created, pages_processed: r.pages, ...(r.refused + r.pending ? { timeline_refused: r.refused + r.pending } : {}) };
   }
 
   // Incremental path: if specific slugs provided, only extract from those files.
@@ -1223,7 +1223,7 @@ export async function runExtract(engine: BrainEngine, args: string[], authority?
         }
         if (subcommand === 'timeline' || subcommand === 'all') {
           const r = await (await import('./extract-timeline-db.ts')).extractTimelineFromDB(engine, { dryRun, jsonMode, typeFilter, since, sourceIdFilter, inferDates });
-          Object.assign(result, { timeline_entries_created: r.created, pages_processed: Math.max(result.pages_processed, r.pages) }, r.refused ? { timeline_refused: r.refused } : {});
+          Object.assign(result, { timeline_entries_created: r.created, pages_processed: Math.max(result.pages_processed, r.pages) }, r.refused + r.pending ? { timeline_refused: r.refused + r.pending } : {});
         }
       }
     } else {

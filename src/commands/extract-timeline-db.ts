@@ -3,12 +3,14 @@
  *
  * `timeline_entries` is a guarded table: on a managed brain (every fresh
  * `gbrain init` brain is one) a raw batch insert is refused by
- * `managed_writer_guard`. Managed brains therefore publish each page's
- * timeline through the coordinator: under the page lock, bound to the
- * revision that was read, the rows an earlier version produced and the
- * current text no longer does are retracted and the timeline tuples the
- * canonical body projects with no stored row are inserted. Unmanaged brains
- * keep the batched raw insert.
+ * `managed_writer_guard`. Managed brains therefore publish each page that
+ * needs a change as one database-only maintenance request
+ * (`managed_maintenance_timeline_extract`, owner-checked by
+ * `maintenancePreflight`): under the page lock, bound to the revision that
+ * was read, the rows an earlier version produced and the current text no
+ * longer does are retracted and the timeline tuples the canonical body
+ * projects with no stored row are inserted. A page with nothing to change
+ * admits no request. Unmanaged brains keep the batched raw insert.
  *
  * A refused write is reported as what it is: nothing was written and the
  * timeline rows import already stored are untouched. Refusals are counted
@@ -19,13 +21,20 @@ import type { Page, PageType } from '../core/types.ts';
 import { parseTimelineEntries, deriveTimelineAnchor } from '../core/link-extraction.ts';
 import { retractRemovedTimelineEntries } from '../core/timeline-extract.ts';
 import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
-import { withCoordinatedWrite } from '../core/persistence/context.ts';
 import { unrecordedCanonicalTimeline } from '../core/persistence/canonical-projections.ts';
+import { maintenancePreflight, submitDatabaseMaintenanceIntent, type MaintenanceAuthority } from '../core/persistence/prepared-maintenance.ts';
+import { authorizeWrite } from '../core/persistence/authority.ts';
+import { getWriteRequest } from '../core/persistence/journal.ts';
+import { isTerminal, type WriteRequest } from '../core/persistence/model.ts';
+import { digest } from '../core/persistence/digest.ts';
+import type { PreparedMutation } from '../core/persistence/coordinator.ts';
+import { OperationError } from '../core/ops/contract.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { filterRefsSince } from './extract.ts';
 
 const BATCH_SIZE = 100;
+export const TIMELINE_EXTRACT_INTENT = 'managed_maintenance_timeline_extract';
 export const TIMELINE_REFUSAL_DOCS = 'docs/guides/write-refusals.md#extract-timeline-refused';
 
 export interface TimelineDbResult {
@@ -35,6 +44,8 @@ export interface TimelineDbResult {
   refused: number;
   /** Managed pages edited during the run; they keep their stored rows and are picked up by the next run. */
   skipped: number;
+  /** Managed pages whose request was accepted but has not committed yet; rerunning resumes the same request. */
+  pending: number;
   refusal_codes: string[];
 }
 
@@ -50,13 +61,17 @@ export interface TimelineDbOptions {
   slugs?: readonly string[];
 }
 
-/** The refusal reason: the guard's `code: message` prefix, else the error's own code. */
+/**
+ * The refusal reason: the error's own code, unless it is the coordinator's
+ * generic `storage_error`, whose message carries the database refusal
+ * (`writer_coordinator_required: ...`) that names the real reason.
+ */
 export function refusalCode(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  const prefixed = /^([a-z][a-z0-9_]+):/.exec(message);
-  if (prefixed) return prefixed[1];
   const code = (error as { code?: unknown })?.code;
-  return typeof code === 'string' && /^[a-z][a-z0-9_]+$/.test(code) ? code : 'storage_error';
+  const own = typeof code === 'string' && /^[a-z][a-z0-9_]+$/.test(code) ? code : null;
+  if (own && own !== 'storage_error') return own;
+  return /(?:^|[\s(])([a-z][a-z0-9]*_[a-z0-9_]+):/.exec(message)?.[1] ?? own ?? 'storage_error';
 }
 
 function reportRefusal(opts: TimelineDbOptions, code: string, where: string, message: string): void {
@@ -86,7 +101,12 @@ async function walkRefs(engine: BrainEngine, opts: TimelineDbOptions) {
  */
 export async function extractTimelineFromDB(engine: BrainEngine, opts: TimelineDbOptions): Promise<TimelineDbResult> {
   const refs = await walkRefs(engine, opts);
-  const result: TimelineDbResult = { created: 0, pages: 0, refused: 0, skipped: 0, refusal_codes: [] };
+  const result: TimelineDbResult = { created: 0, pages: 0, refused: 0, skipped: 0, pending: 0, refusal_codes: [] };
+  const authorities = new Map<string, Promise<MaintenanceAuthority>>();
+  const authorityFor = (sourceId: string) => {
+    if (!authorities.has(sourceId)) authorities.set(sourceId, maintenancePreflight(engine, sourceId).then(a => a!));
+    return authorities.get(sourceId)!;
+  };
   const codes = new Set<string>();
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('extract.timeline_db', refs.length);
@@ -110,26 +130,11 @@ export async function extractTimelineFromDB(engine: BrainEngine, opts: TimelineD
 
   for (const { slug, source_id } of refs) {
     if (managed) {
-      const snapshot = await engine.readPageSnapshot(slug, { sourceId: source_id });
-      if (!snapshot || (opts.typeFilter && snapshot.page.type !== opts.typeFilter)) continue;
       try {
-        const added = await engine.transaction(tx => withCoordinatedWrite(tx, [source_id], async () => {
-          await tx.lockPageKeys([{ sourceId: source_id, slug }]);
-          const current = await tx.readPageSnapshot(slug, { sourceId: source_id });
-          if (current?.revision !== snapshot.revision) return null;
-          const fullContent = current.page.compiled_truth + '\n' + current.page.timeline;
-          await retractRemovedTimelineEntries(tx, slug, source_id, fullContent);
-          let entries: Array<{ date: string; source?: string; summary: string; detail?: string }> = await unrecordedCanonicalTimeline(tx, current.page.id, current.page, slug);
-          if (entries.length === 0 && opts.inferDates && parseTimelineEntries(fullContent).length === 0) {
-            const anchor = anchorFor(current.page, slug);
-            if (anchor) entries = [anchor];
-          }
-          if (entries.length === 0) return 0;
-          return tx.addTimelineEntriesBatch(entries.map(entry => ({ slug, date: entry.date, source: entry.source,
-            summary: entry.summary, detail: entry.detail || '', source_id })), { auditSite: 'extract.timeline_db' });
-        }));
-        if (added === null) result.skipped++;
-        else { result.created += added; result.pages++; }
+        const outcome = await publishPageTimeline(engine, await authorityFor(source_id), slug, source_id, opts);
+        if (outcome === 'skipped') result.skipped++;
+        else if (outcome === 'pending') result.pending++;
+        else if (outcome !== null) { result.created += outcome; result.pages++; }
       } catch (e) {
         const code = refusalCode(e);
         codes.add(code);
@@ -181,7 +186,8 @@ export async function extractTimelineFromDB(engine: BrainEngine, opts: TimelineD
   if (!opts.jsonMode && !opts.quiet) {
     const label = opts.dryRun ? '(dry run) would create' : 'created';
     console.log(`Timeline: ${label} ${result.created} entries from ${result.pages} pages (db source)` +
-      (result.skipped ? `; ${result.skipped} page(s) changed during the run were left for the next run` : ''));
+      (result.skipped ? `; ${result.skipped} page(s) changed during the run were left for the next run` : '') +
+      (result.pending ? `; ${result.pending} page(s) accepted but still pending (writer busy); rerun the same command to confirm` : ''));
   }
   if (result.refused > 0) {
     const unit = managed ? 'page(s)' : 'row(s)';
@@ -192,4 +198,71 @@ export async function extractTimelineFromDB(engine: BrainEngine, opts: TimelineD
     );
   }
   return result;
+}
+
+/** The timeline change one page needs: removed rows to retract and canonical tuples (or an inferred anchor) to insert. */
+async function plannedTimeline(engine: BrainEngine, page: Page, slug: string, sourceId: string, inferDates: boolean) {
+  const fullContent = page.compiled_truth + '\n' + page.timeline;
+  const removed = await retractRemovedTimelineEntries(engine, slug, sourceId, fullContent, { dryRun: true });
+  let entries: Array<{ date: string; source?: string; summary: string; detail?: string }> = await unrecordedCanonicalTimeline(engine, page.id, page, slug);
+  if (entries.length === 0 && inferDates && parseTimelineEntries(fullContent).length === 0) {
+    const anchor = anchorFor(page, slug);
+    const [stored] = anchor ? await engine.executeRaw<{ n: number }>(
+      'SELECT count(*)::int AS n FROM timeline_entries WHERE page_id=$1 AND event_page_id IS NULL', [page.id]) : [{ n: 1 }];
+    if (anchor && !stored?.n) entries = [anchor];
+  }
+  return { fullContent, removed: removed.length, entries };
+}
+
+/** Under the coordinator's page lock: retract removed rows, insert the planned tuples. */
+async function writePageTimeline(tx: BrainEngine, page: Page, slug: string, sourceId: string, inferDates: boolean): Promise<number> {
+  const plan = await plannedTimeline(tx, page, slug, sourceId, inferDates);
+  if (plan.removed) await retractRemovedTimelineEntries(tx, slug, sourceId, plan.fullContent);
+  if (!plan.entries.length) return 0;
+  return tx.addTimelineEntriesBatch(plan.entries.map(entry => ({ slug, date: entry.date, source: entry.source,
+    summary: entry.summary, detail: entry.detail || '', source_id: sourceId })), { auditSite: 'extract.timeline_db' });
+}
+
+/**
+ * One page on a managed brain: null when the page is missing or filtered out,
+ * 0 when nothing changes (no request admitted), else the rows the committed
+ * request added. The request id is bound to the page revision, so a rerun
+ * replays an accepted request instead of admitting a second one.
+ */
+async function publishPageTimeline(engine: BrainEngine, authority: MaintenanceAuthority, slug: string, sourceId: string,
+  opts: TimelineDbOptions): Promise<number | null | 'skipped' | 'pending'> {
+  const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+  if (!snapshot || (opts.typeFilter && snapshot.page.type !== opts.typeFilter)) return null;
+  const plan = await plannedTimeline(engine, snapshot.page, slug, sourceId, opts.inferDates === true);
+  if (!plan.removed && !plan.entries.length) return 0;
+  for (let attempt = 0; ; attempt++) {
+    const h = digest(['extract-timeline-db-v1', sourceId, slug, snapshot.revision, attempt]);
+    const requestId = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+    const prior = await getWriteRequest(engine, authority.writer.principal, requestId);
+    if (prior && isTerminal(prior) && prior.state !== 'committed') continue;
+    try {
+      const receipt = await submitDatabaseMaintenanceIntent(engine, authority, slug,
+        { kind: TIMELINE_EXTRACT_INTENT, expected_revision: snapshot.revision, infer_dates: opts.inferDates === true }, requestId);
+      return Number(receipt.added ?? 0);
+    } catch (error) {
+      if (error instanceof OperationError && ['revision_conflict', 'page_not_found', 'page_identity_changed'].includes(error.code)) return 'skipped';
+      if (error instanceof OperationError && error.code === 'write_pending') return 'pending';
+      throw error;
+    }
+  }
+}
+
+/** Preparer for `managed_maintenance_timeline_extract`: a database-only publication on the page key. */
+export async function prepareTimelineExtract(engine: BrainEngine, row: WriteRequest): Promise<PreparedMutation> {
+  const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
+  if (!snapshot || snapshot.page.id !== Number(row.page_id)) throw new OperationError('page_identity_changed', 'The page was deleted or replaced before its timeline was extracted.');
+  await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
+  const inferDates = (row.intent as { infer_dates?: unknown } | null)?.infer_dates === true;
+  return { observedRevision: snapshot.revision, noop: true,
+    validate: async tx => { await authorizeWrite(tx, row.authority, 'submit_job', row.slug); },
+    apply: async tx => {
+      const current = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id });
+      if (!current) throw new OperationError('page_identity_changed', 'The page disappeared before its timeline was extracted.');
+      return { status: 'completed', added: await writePageTimeline(tx, current.page, row.slug, row.source_id, inferDates) };
+    } };
 }

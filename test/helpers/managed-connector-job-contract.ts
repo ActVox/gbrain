@@ -96,7 +96,6 @@ export const EXPECTED_FAILURES: Partial<Record<ContractCase, { issue: string; si
   atom_drain_opted_in: { issue: '#5856', signature: /extract-atoms-drain ended dead after 3 attempt\(s\): Atom maintenance requires the configured canonical owner/ },
   atom_dispatch: { issue: '#5856', signature: /auto-drain submitted extract-atoms-drain for the connector source with connector atoms off/, engines: ['postgres'] },
   synthesize_publish_busy_writer: { issue: '#5854', signature: /The write is accepted and is still pending/ },
-  extract_timeline_db: { issue: '#5904', signature: /guard refusals: timeline_entries=/ },
 };
 
 /**
