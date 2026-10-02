@@ -12,7 +12,7 @@
  * CLAUDE_CONFIG_DIR and corpus dir; the legitimate copy is a raw coordinated
  * insert (the managed writer dedups a same-entity duplicate).
  */
-import { afterAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -171,28 +171,30 @@ for (const backend of testBackends()) {
   });
 
   describe(`gbrain repair captured-facts, unmanaged (${backend})`, () => {
-    test('database-only self-capture rows expire; the rest stay', async () => {
-      let engine: BrainEngine;
-      let close: (() => Promise<void>) | undefined;
+    let engine: BrainEngine;
+    let close: (() => Promise<void>) | undefined;
+    beforeAll(async () => {
       if (backend === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(databaseUrl!));
       else { const pglite = new PGLiteEngine(); await pglite.connect({}); await pglite.initSchema(); engine = pglite; }
-      try {
-        await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
-        const insert = async (fact: string, session: string) => Number((await engine.executeRaw<{ id: number }>(`INSERT INTO facts
-          (source_id, entity_slug, fact, kind, visibility, source, source_session) VALUES ('default', $1, $2, 'fact', 'private', 'hook:writeback', $3) RETURNING id`,
-        [ALICE, fact, session]))[0].id);
-        const self = await insert('Alice Example drinks oat milk', 'sess-self');
-        const normal = await insert('Alice Example runs marathons', 'sess-normal');
-        await withEnv({ CLAUDE_CONFIG_DIR: claude }, async () => {
-          const preview = await repair(engine, []);
-          expect(preview.results[0].residuals).toMatchObject({ evidenced: 1, not_suspect: 1 });
-          expect((await repair(engine, applyArgs(preview))).results[0].outcomes).toEqual({ expired: 1 });
-        });
-        expect(await active(engine, self)).toBe(false);
-        expect(await active(engine, normal)).toBe(true);
-        const [row] = await engine.executeRaw<{ context: string }>('SELECT context FROM facts WHERE id=$1', [self]);
-        expect(row.context).toContain('expired: captured-facts repair');
-      } finally { if (close) await close(); else await engine.disconnect(); }
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }, 120_000);
+    afterAll(async () => { if (close) await close(); else await engine.disconnect(); });
+
+    test('database-only self-capture rows expire; the rest stay', async () => {
+      const insert = async (fact: string, session: string) => Number((await engine.executeRaw<{ id: number }>(`INSERT INTO facts
+        (source_id, entity_slug, fact, kind, visibility, source, source_session) VALUES ('default', $1, $2, 'fact', 'private', 'hook:writeback', $3) RETURNING id`,
+      [ALICE, fact, session]))[0].id);
+      const self = await insert('Alice Example drinks oat milk', 'sess-self');
+      const normal = await insert('Alice Example runs marathons', 'sess-normal');
+      await withEnv({ CLAUDE_CONFIG_DIR: claude }, async () => {
+        const preview = await repair(engine, []);
+        expect(preview.results[0].residuals).toMatchObject({ evidenced: 1, not_suspect: 1 });
+        expect((await repair(engine, applyArgs(preview))).results[0].outcomes).toEqual({ expired: 1 });
+      });
+      expect(await active(engine, self)).toBe(false);
+      expect(await active(engine, normal)).toBe(true);
+      const [row] = await engine.executeRaw<{ context: string }>('SELECT context FROM facts WHERE id=$1', [self]);
+      expect(row.context).toContain('expired: captured-facts repair');
     }, 120_000);
   });
 }
