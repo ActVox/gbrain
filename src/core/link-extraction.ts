@@ -52,6 +52,9 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
  * OR updated_at > links_extracted_at`. It is an ISO-8601 string (NOT a number) —
  * the column is TIMESTAMPTZ and the predicate binds it as `::timestamptz`.
  */
+// 2026-10-02: eval wave N12-6 — a `Participants:` line (plain or bold) or a
+// `## Participants` section is attendance evidence like its `Attendees`
+// twin, so meeting pages written with it re-extract and gain attended edges.
 // 2026-10-01: eval wave N9-2/N9-3/N12-7 — schema-pack frontmatter mappings
 // keep FRONTMATTER_LINK_MAP's declared direction (company `investors:` is
 // investor -> company, meeting `attendees:` is person -> meeting), and a
@@ -88,7 +91,7 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // PRE-wave code after this date reads as fresh and won't re-extract until
 // the page is next edited; no fixed watermark can cover code that keeps
 // running past it.
-export const LINK_EXTRACTOR_VERSION_TS = '2026-10-01T00:00:00Z';
+export const LINK_EXTRACTOR_VERSION_TS = '2026-10-02T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -1030,7 +1033,7 @@ export function attendanceEvidenceRanges(content: string): Array<[number, number
       continue;
     }
     if (/^#{1,2}[ \t]/.test(line.text)) finishSection();
-    if (/^##[ \t]+Attendees[ \t]*\r?$/i.test(line.text)) {
+    if (/^##[ \t]+(?:Attendees|Participants)[ \t]*\r?$/i.test(line.text)) {
       section = { valid: true, entries: [] };
       continue;
     }
@@ -1041,7 +1044,7 @@ export function attendanceEvidenceRanges(content: string): Array<[number, number
       section.entries.push([line.start, line.end]);
       continue;
     }
-    const inline = /^(?:Attendees:|\*\*Attendees:\*\*|\*\*Attendees\*\*:)[ \t]*(.*)$/i.exec(line.text);
+    const inline = /^(?:(?:Attendees|Participants):|\*\*(?:Attendees|Participants):\*\*|\*\*(?:Attendees|Participants)\*\*:)[ \t]*(.*)$/i.exec(line.text);
     if (inline && list(inline[1])) ranges.push([line.start, line.end]);
   }
   finishSection();
