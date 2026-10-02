@@ -164,8 +164,10 @@ export function __resetPGLiteWarn(): void {
  * so the repo walk cannot answer for it.
  */
 function gitScopePrefix(repoPath: string): string {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoPath is the local operator's --repo arg, a registered source path or the default source path on the trusted `gbrain storage status` CLI (never MCP/remote); this only absolutizes it
   const repo = resolve(repoPath);
   for (let cursor = repo; ; cursor = dirname(cursor)) {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- read-only existence probe walking up from that operator-supplied repo path
     if (existsSync(join(cursor, '.git'))) {
       const scope = relative(cursor, repo).split(sep).filter(Boolean).join('/');
       return scope ? scope + '/' : '';
