@@ -14,3 +14,6 @@ scripts/function-size-baseline.tsv	src/commands/extract.ts|runExtract	set	310	ru
 scripts/structural-suites.tsv	test/release-workflow.test.ts|forbid-atx-hub-pr-base.yml expression boundary	row	test/release-workflow.test.ts	forbid-atx-hub-pr-base.yml expression boundary	1	readFileSync
 scripts/structural-suites.tsv	test/release-workflow.test.ts|semgrep.yml differential baseline contract	row	test/release-workflow.test.ts	semgrep.yml differential baseline contract	2	readFileSync
 scripts/structural-suites.tsv	test/scripts/heavy-door-workflow.test.ts|heavy door supply chain and coverage gates	set	5	fork heavy-door paid gate adds one structural read
+scripts/structural-suites.tsv	test/scripts/actvox-check-delta.test.ts|fork-delta ratchet	row	test/scripts/actvox-check-delta.test.ts	fork-delta ratchet	6	readFileSync
+scripts/structural-suites.tsv	test/scripts/actvox-create-upstream-pr.test.ts|create-upstream-pr.sh integrates in an isolated worktree	row	test/scripts/actvox-create-upstream-pr.test.ts	create-upstream-pr.sh integrates in an isolated worktree	3	readFileSync
+scripts/structural-suites.tsv	test/scripts/actvox-resolve-upstream-merge.test.ts|resolveMerge on a real conflicted merge	row	test/scripts/actvox-resolve-upstream-merge.test.ts	resolveMerge on a real conflicted merge	1	readFileSync

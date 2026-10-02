@@ -196,6 +196,7 @@ describe('resolveMerge on a real conflicted merge', () => {
     expect(merged.overrides['@hono/node-server']).toBe('^2.0.10');
     expect(readFileSync(join(root, 'scripts/module-size-limits.tsv'), 'utf8')).toBe('src/a.ts\t164\tratchet\tgrew upstream\n');
     expect(git(root, 'diff', '--name-only', '--diff-filter=U').trim()).toBe('src/a.ts');
+    // test-reads-source-ok[raw-bytes]: fixture repo file (temp dir), asserts merge bytes, not repo src/
     expect(readFileSync(join(root, 'src/a.ts'), 'utf8')).toContain('<<<<<<<');
   });
 });

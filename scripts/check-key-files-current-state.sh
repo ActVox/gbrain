@@ -26,7 +26,7 @@
 #
 # Env overrides (for the guard's own test):
 #   GBRAIN_DOC_GUARD_ROOT        repo root to scan (default: script's ../)
-#   GBRAIN_CLAUDE_MD_MAX_BYTES   CLAUDE.md hard cap (default: 35000)
+#   GBRAIN_CLAUDE_MD_MAX_BYTES   CLAUDE.md hard cap (default: 36000; ActVox fork: +1000 for the fork version-policy paragraph)
 #
 # Exit codes:
 #   0   clean
@@ -35,7 +35,7 @@
 set -uo pipefail
 
 ROOT="${GBRAIN_DOC_GUARD_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-MAX_BYTES="${GBRAIN_CLAUDE_MD_MAX_BYTES:-35000}"
+MAX_BYTES="${GBRAIN_CLAUDE_MD_MAX_BYTES:-36000}"
 
 # Reference docs that MUST stay current-state (history-free).
 REFERENCE_DOCS=(

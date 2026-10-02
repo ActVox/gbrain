@@ -123,3 +123,4 @@ scripts/check-retired-phrases.sh	tooling	3	review
 scripts/check-tool-catalog-fresh.sh	tooling	2	review	
 scripts/generate-tool-catalog.ts	tooling	5	review	
 scripts/llms-config.ts	tooling	4	review	
+scripts/check-key-files-current-state.sh	tooling	4	no (ActVox: CLAUDE.md cap +1000 for the fork paragraph; re-check after each integration)	

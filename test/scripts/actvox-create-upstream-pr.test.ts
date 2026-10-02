@@ -80,6 +80,7 @@ function snapshot(caller: string) {
     head: git(caller, 'rev-parse', 'HEAD').trim(),
     status: git(caller, 'status', '--porcelain'),
     staged: git(caller, 'diff', '--cached'),
+    // test-reads-source-ok[raw-bytes]: fixture repo file (temp dir), asserts merge bytes, not repo src/
     b: readFileSync(join(caller, 'src/b.ts'), 'utf8'),
     untracked: readFileSync(join(caller, 'notes.local'), 'utf8'),
     worktrees: git(caller, 'worktree', 'list').split('\n').filter(Boolean).length,
@@ -117,6 +118,7 @@ describe('create-upstream-pr.sh integrates in an isolated worktree', () => {
     const kept = /integration worktree kept at (\S+)/.exec(run.out)?.[1];
     expect(kept).toBeDefined();
     expect(existsSync(join(kept!, 'src/a.ts'))).toBe(true);
+    // test-reads-source-ok[raw-bytes]: fixture repo file (temp dir), asserts merge bytes, not repo src/
     expect(readFileSync(join(kept!, 'src/a.ts'), 'utf8')).toContain('<<<<<<<');
     expect(readFileSync(join(kept!, 'VERSION'), 'utf8')).toBe('1.0.1.0\n');
   });
