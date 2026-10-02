@@ -197,9 +197,9 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
   const parsedInput = parseMarkdown(p.content, `${row.slug}.md`, { activePack });
   resolveParsedSubtype(parsedInput, base?.page);
   const expectedSlug = resolveSlugForPath(p.sourcePath);
-  const retainedWindowsOrigin = process.platform === 'win32' && snapshot?.page.source_path != null &&
+  const retainedRecordedOrigin = snapshot?.page.source_path != null &&
     syncOriginPath(snapshot.page.source_path) === syncOriginPath(p.sourcePath) && parsedInput.slug === snapshot.page.slug;
-  if (expectedSlug && parsedInput.slug !== expectedSlug && slugifyPath(parsedInput.slug) !== expectedSlug && !retainedWindowsOrigin) {
+  if (expectedSlug && parsedInput.slug !== expectedSlug && slugifyPath(parsedInput.slug) !== expectedSlug && !retainedRecordedOrigin) {
     throw new OperationError('invalid_params', frontmatterSlugConflictMessage(p.sourcePath, parsedInput.slug, expectedSlug));
   }
   if (!p.companyApproval && base && !p.lineEndingOnly && p.rawHash !== sha256(p.content) && !sameCanonicalImport(base, parsedInput)) {
