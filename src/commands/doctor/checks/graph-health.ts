@@ -274,6 +274,7 @@ export const timelineHistoryEntry: DoctorEntry = {
     'writer_version',
     'self_capture',
     'stale_embedding_effects',
+    'extractor_facts_expired',
   ],
   run: runTimelineHistory,
 };
