@@ -275,6 +275,18 @@ export interface AuthInfo {
   surfaceSetBy?: string;
 }
 
+/**
+ * Transport reported by introspection (whoami, gbrain://capabilities).
+ * Trusts the verifier-set `principal`; the `gbrain_cl_` id prefix is only a
+ * fallback for AuthInfo built without one. Hand-provisioned OAuth client ids
+ * and legacy tokens named like client ids both exist, so the prefix alone
+ * misreports them.
+ */
+export function authTransport(auth: Pick<AuthInfo, 'clientId' | 'principal'>): 'oauth' | 'legacy' {
+  if (auth.principal) return auth.principal.kind === 'oauth_client' ? 'oauth' : 'legacy';
+  return auth.clientId.startsWith('gbrain_cl_') ? 'oauth' : 'legacy';
+}
+
 export interface OperationContext {
   engine: BrainEngine;
   config: GBrainConfig;
