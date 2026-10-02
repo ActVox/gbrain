@@ -239,7 +239,9 @@ async function processChunkBatch(
   for (const e of edges) {
     stats.edges_examined += 1;
     const pageId = pageByChunkId.get(e.from_chunk_id);
-    if (pageId === undefined) {
+    // A member call with an untyped receiver (`segments.join()`) never
+    // invokes a same-file top-level function (gbrain-evals N13-8).
+    if (pageId === undefined || e.edge_metadata?.member_call === true) {
       stats.edges_unmatched += 1;
       continue;
     }

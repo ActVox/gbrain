@@ -1603,7 +1603,7 @@ export async function importCodeFile(
           to_chunk_id: null,
           from_symbol_qualified: from.symbol_name_qualified,
           to_symbol_qualified: e.toSymbol,
-          edge_type: e.edgeType,
+          edge_type: e.edgeType, ...(e.memberCall ? { edge_metadata: { member_call: true } } : {}),
           // Stamp the source: getCallersOf/getCalleesOf add
           // `AND source_id = <scoped>` whenever a worktree pin / --source is
           // in play, and a NULL here never matches that filter — so every
