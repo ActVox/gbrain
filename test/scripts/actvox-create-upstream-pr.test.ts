@@ -45,7 +45,7 @@ function write(root: string, files: Record<string, string>) {
 }
 
 /** Seed origin + upstream from one base; fork bumps VERSION and edits src/a.ts; upstream bumps VERSION and edits `upstreamFile`. */
-function fixture(upstreamFile: string) {
+function fixture(upstreamFile: string, opts: { packageJson?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'actvox-upstream-pr-'));
   roots.push(root);
   const origin = join(root, 'ActVox/gbrain.git'), upstream = join(root, 'garrytan/gbrain.git');
@@ -54,13 +54,15 @@ function fixture(upstreamFile: string) {
   git(root, 'init', '-q', '-b', 'master', seed);
   for (const p of SCRIPTS) { mkdirSync(dirname(join(seed, p)), { recursive: true }); copyFileSync(join(REPO, p), join(seed, p)); }
   write(seed, { VERSION: '1.0.0.0\n', 'src/a.ts': 'export const a = 1;\n', 'src/b.ts': 'export const b = 1;\n' });
+  const pkg = (version: string, marked: string) => `{\n  "name": "fixture",\n  "version": "${version}",\n  "dependencies": {\n    "marked": "${marked}"\n  },\n  "overrides": {\n    "@hono/node-server": "^2.0.10",\n    "fast-xml-parser": "^5.10.1"\n  }\n}\n`;
+  if (opts.packageJson) write(seed, { 'package.json': pkg('1.0.0.0', '^18.0.2') });
   git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'base');
   git(seed, 'push', '-q', upstream, 'master'); git(seed, 'push', '-q', origin, 'master');
 
-  write(seed, { VERSION: '1.0.1.0\n', [upstreamFile]: 'export const upstream = 2;\n' });
+  write(seed, { VERSION: '1.0.1.0\n', [upstreamFile]: 'export const upstream = 2;\n', ...(opts.packageJson ? { 'package.json': pkg('1.0.1.0', '^18.0.2') } : {}) });
   git(seed, 'commit', '-q', '-am', 'upstream release'); git(seed, 'push', '-q', upstream, 'master');
   git(seed, 'reset', '-q', '--hard', 'HEAD~1');
-  write(seed, { VERSION: '1.0.0.1\n', 'src/a.ts': 'export const a = 3;\n' });
+  write(seed, { VERSION: '1.0.0.1\n', 'src/a.ts': 'export const a = 3;\n', ...(opts.packageJson ? { 'package.json': pkg('1.0.0.1', '^18.0.5') } : {}) });
   git(seed, 'commit', '-q', '-am', 'fork release'); git(seed, 'push', '-q', origin, 'master');
 
   const caller = join(root, 'caller');
@@ -99,6 +101,16 @@ describe('create-upstream-pr.sh integrates in an isolated worktree', () => {
     expect(git(caller, 'show', `${branch}:VERSION`)).toBe('1.0.1.0\n');
     expect(git(caller, 'show', `${branch}:src/a.ts`)).toBe('export const a = 3;\n');
     expect(git(caller, 'rev-list', '--parents', '-n', '1', branch).trim().split(' ')).toHaveLength(3);
+  });
+
+  test('a conflicted package.json is resolved by policy before anything installs dependencies', () => {
+    const { caller } = fixture('src/c.ts', { packageJson: true });
+    const run = sh(caller, ['bash', 'scripts/create-upstream-pr.sh', '--dry-run'], { ACTVOX_RESOLVER_NO_REGENERATE: '1' });
+    expect(run.code).toBe(0);
+    expect(run.out).toContain('resolved  package-pins  package.json');
+    const merged = JSON.parse(git(caller, 'show', 'automation/upstream-master:package.json'));
+    expect(merged.version).toBe('1.0.1.0');
+    expect(merged.dependencies.marked).toBe('^18.0.5');
   });
 
   test('a conflict outside the policy fails the run and leaves no worktree behind', () => {

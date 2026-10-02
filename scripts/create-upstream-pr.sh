@@ -130,9 +130,13 @@ if [[ "$merge_exit" -ne 0 ]]; then
     echo "ERROR: upstream merge failed without resolvable conflict state (exit ${merge_exit})" >&2
     exit "$merge_exit"
   fi
-  if [[ -f "$wt/package.json" ]]; then (cd "$wt" && bun install --frozen-lockfile >/dev/null); fi
+  # No dependency install before resolving: package.json/bun.lock may still
+  # hold conflict markers. The resolver needs only the bun runtime; its
+  # regenerate step installs after package.json is resolved.
+  resolver_args=()
+  [[ "${ACTVOX_RESOLVER_NO_REGENERATE:-0}" == "1" ]] && resolver_args+=(--no-regenerate)
   resolver_exit=0
-  resolver_report="$(cd "$wt" && bun scripts/actvox/resolve-upstream-merge.ts 2>&1)" || resolver_exit=$?
+  resolver_report="$(cd "$wt" && bun scripts/actvox/resolve-upstream-merge.ts ${resolver_args[@]+"${resolver_args[@]}"} 2>&1)" || resolver_exit=$?
   printf '%s\n' "$resolver_report"
   if [[ "$resolver_exit" -eq 0 ]]; then
     merge_exit=0
