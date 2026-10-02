@@ -306,7 +306,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/import-contextual-mode.ts": ["test/e2e/repair-contextual-mode-5621-postgres.test.ts"],
   "src/core/ai/embedding-guard.ts": ["test/e2e/embedding-zero-norm-4616-postgres.test.ts"],
   "src/commands/reindex-vectors.ts": ["test/e2e/embedding-zero-norm-4616-postgres.test.ts"],
-  "src/core/embedding-invalidation.ts": ["test/e2e/embed-stale-dry-run-restamp-5289-postgres.test.ts"],
+  "src/core/embedding-invalidation.ts": ["test/e2e/embed-stale-dry-run-restamp-5289-postgres.test.ts", "test/e2e/embedding-tombstones-postgres.test.ts"],
   "src/core/persistence/effect-git.ts": ["test/e2e/persistence-git-coalescing-5530-postgres.test.ts"],
   "src/core/persistence/effect-journal.ts": ["test/e2e/persistence-git-coalescing-5530-postgres.test.ts"],
   "src/core/persistence/grandfather.ts": ["test/e2e/persistence-git-coalescing-5530-postgres.test.ts", "test/e2e/grandfather-projection-postgres.test.ts"],
@@ -639,5 +639,5 @@ E2E_TEST_MAP["src/core/engine-sql/executor.ts"] = ENGINE_SQL_EXECUTOR_E2E;
 E2E_TEST_MAP["src/core/engine-sql/dialect-*.ts"] = ENGINE_SQL_EXECUTOR_E2E;
 E2E_TEST_MAP["src/core/engine-sql/normalize.ts"] = ["test/e2e/engine-sql-normalize-parity.test.ts"];
 E2E_TEST_MAP["src/core/engine-sql/brands.ts"] = ["test/e2e/engine-sql-rls-scope.test.ts"];
-E2E_TEST_MAP["src/core/engine-sql/chunks.ts"] = ["test/e2e/evidence-delivery-leak.test.ts", "test/e2e/evidence-delivery-parity.test.ts"];
+E2E_TEST_MAP["src/core/engine-sql/chunks.ts"] = ["test/e2e/evidence-delivery-leak.test.ts", "test/e2e/evidence-delivery-parity.test.ts", "test/e2e/embedding-tombstones-postgres.test.ts"];
 E2E_TEST_MAP["src/core/engine-sql/links.ts"] = ["test/e2e/links-read-order.test.ts", "test/e2e/attendance-retrieval-postgres.test.ts", "test/e2e/federated-link-reads-postgres.test.ts"];
