@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.32.0] - 2026-10-02
 
-**Fix wave 7: the contradiction judge stops excusing undated conflicts as "change over time", "who is waiting on me" ages and ranks requests honestly, four smaller eval findings plus a backlinks bug are fixed, and 62 community pull requests land.**
+**Fix wave 7: the contradiction judge stops excusing undated conflicts as "change over time", "who is waiting on me" ages and ranks requests honestly, four smaller eval findings and three open issues are fixed, and 62 community pull requests land.**
 
 When two notes give different numbers for the same thing and neither note has a date, nothing tells you which came first, so that is a conflict you need to resolve. The judge kept calling those pairs a change over time instead, guessing an order from the numbers themselves (the bigger headcount must be newer) or from the kind of note (a board deck must be newer than a memo). Prompt v4 tells it plainly not to do that, and that one note saying nothing about headcount does not contradict another note that gives one. On a fresh test world it now calls 149 of 150 planted same-time conflicts contradictions (was 131), all 50 undated ones included (was 37). The price is a few more false alarms: 14 of 820 unrelated pairs (was 11) and 5 of 50 compatible pairs (was 2).
 
@@ -32,8 +32,10 @@ When two notes give different numbers for the same thing and neither note has a 
 | `segments.join("/")` in a file that defines `join` | resolved as a caller of `join` | unresolved |
 | Keyword-only answer to a question no page can answer | graded moderate | graded weak |
 | `check-backlinks fix` on a managed brain | one refusal per page; dry run claims success | one clear refusal, dry run too |
+| Conversation-facts backlog with source-evidence pages marked `conversation_parseable: false` | never reaches zero | drains |
+| `chronicle-backfill --limit N`, run twice | the same N pages again | the next N pages |
 
-These came from the gbrain-evals category waves A4 (abstention), N2 (contradictions), N7 (open loops), N9 (multi-hop), N12 (meeting formats) and N13 (code intelligence), plus open issue #5341.
+These came from the gbrain-evals category waves A4 (abstention), N2 (contradictions), N7 (open loops), N9 (multi-hop), N12 (meeting formats) and N13 (code intelligence), plus open issues #5341, #5330 and #5329.
 
 The release also absorbs 62 open community pull requests, each re-checked against current master: sync stops deleting pages it does not own and keeps skillpack files out of managed checkouts, backups and storage restores cover every source and every live page, Claude Sonnet 5.5 works and Sonnet 5 is priced at its standard rate, `list_pages` pages losslessly, a multi-line fact no longer blocks its page from being written, and two search paths get faster. Thank you to everyone listed below.
 
@@ -63,6 +65,8 @@ The release also absorbs 62 open community pull requests, each re-checked agains
 - **`Participants` is attendance evidence** everywhere `Attendees` is: a `Participants:` line, `**Participants:**`, or a `## Participants` link-list section.
 - **OR-relaxed keyword rows are not "keyword_exact".** A row from the keyword fallback that matched some query terms but not the query reads `weak_semantic` (`create_safety: unknown`), and CRAG grades a relaxed rank-1 `weak` with the new reason `keyword_relaxed_top`. A chunk that also appears in a strict list is not relaxed.
 - **`gbrain check-backlinks fix` refuses a managed canonical worktree once, before scanning,** with or without `--dry-run`. `check` still reports the gaps (#5341).
+- **Conversation-facts eligibility is one rule.** A page of a conversation type whose frontmatter says `conversation_parseable: false` (a single-message source-evidence page, say) is never claimed by `extract-conversation-facts` and never counted by doctor's `conversation_facts_backlog` or sampled by `conversation_format_coverage`, so the backlog can reach zero. Opt in to strict mode with `gbrain config set cycle.conversation_facts_backfill.require_parseable_flag true` to admit only `type: conversation` pages and pages marked `conversation_parseable: true`. The backlog now also counts granular collector types (`slack-thread`, `email-digest`, ...) the way the extractor already enumerated them (#5330).
+- **`chronicle_backfill` moves forward on every run.** Each `chronicle_extract` job is keyed by source, page and content hash, so a repeat run skips pages already enqueued or extracted for their current content (reported as `already_enqueued`) and enqueues up to `limit` new pages per type. An edited page is swept again (#5329, the backfill cursor).
 - **Unpriced conversation models no longer stop fact extraction on a default cap.** `extract-conversation-facts`, the `conversation_facts_backfill` phase and transcript-ingest facts drop only the default USD cap, with a warning, when the extraction model has no price. An explicit cap still refuses with `no_pricing`, and the stop now names the model (#5825).
 - **`list_pages` takes `updated_after_slug`** with `updated_after` to resume strictly after a `(updated_at, slug)` keyset, and returns `updated_at_iso`; the truncation hint teaches that recipe (#5641).
 - **Claude 5 models get native request shapes.** `@ai-sdk/anthropic` moves to 3.0.125 (and the `@ai-sdk/provider-utils` override to 4.0.56), so Claude 5 models are no longer sent `temperature` or emulated structured output; Sonnet 5 and Sonnet 5.5 price at $2/$10 per million tokens (#5688, #5690).
@@ -91,6 +95,8 @@ The release also absorbs 62 open community pull requests, each re-checked agains
 #### Maintenance
 
 - **#5341** `check-backlinks fix` managed-worktree refusal.
+- **#5330** shared conversation-facts eligibility (`isConversationFactsEligiblePage` and its SQL twin in `src/core/facts/conversation-types.ts`).
+- **#5329** `chronicle_backfill` idempotency keys and paging, no schema change. The issue's other parts (a cadence gate, extraction idempotency for direct `chronicle_extract` runs, the no-sub-events page, the judge output cap) remain open.
 
 #### Community fixes
 
@@ -140,6 +146,7 @@ CLI, hooks, connectors and loops:
 - `ExtractedEdge.memberCall` and `CodeEdgeInput.edge_metadata.member_call`.
 - `ThreadLoopSpec.openedMs`, `OpenLoopUpsert.openedAt`; `rankGroups` and `renderText` take the reference time.
 - `ConfidenceGrade.reason` gains `keyword_relaxed_top`.
+- `ALLOWED_TYPE_ALIASES` and `pageTypesForAllowed` moved to `src/core/facts/conversation-types.ts` (re-exported from `extract-conversation-facts.ts`), next to `isConversationFactsEligiblePage`, `conversationFactsEligibleSql` and `requireParseableConversationFlag`.
 
 ## [0.60.31.0] - 2026-10-02
 
