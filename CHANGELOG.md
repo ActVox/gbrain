@@ -82,6 +82,7 @@ The release also absorbs 62 open community pull requests, each re-checked agains
 - **Connector `email` and `meeting` atom extraction is opt-in on every brain** (`cycle.extract_atoms.connector_pages`). The auto-drain's daily cap counts attempts at the per-attempt estimate, so 6 attempts a day by default (#5856).
 - **`loops_close` returns `{ closed, id, status, fact_expired, retryable, reason? }`** and expires the fact and strikes its fence row in one coordinated write (#5869).
 - **`gbrain extract timeline --source db` exits non-zero when a write is refused,** naming the code and recovery (#5904 probe).
+- **Short random passwords are redacted reliably.** The `high_entropy_assignment` rule (retrieval redaction and memory relays) judges its 3.5 bits/char floor on bias-corrected entropy. Raw per-character entropy of a 12-16 character value is capped near log2 of its length, so the floor let through 68% of random 12-character secrets and 9% of 15-character ones; it now misses under 1%. A short weak password assigned to a password, secret or token key (`password1234`) now redacts too. All-digit values (counters, timestamps) never redact, as before.
 - **Contradiction judge prompt v4.** The time check comes first: the three temporal verdicts need two different dates (metadata or text) or explicit change wording, never an order guessed from the values, the document kind or which statement is listed first. A statement that does not mention an attribute does not conflict with one that states it. A negative claim about one party ("Fund A is not leading") and a positive claim about another ("Fund B is leading") agree. Matched A/B against prompt v3 on the fresh N2 development seed 20261002, one Haiku 4.5 judge sample per arm, 1,371 identical pairs: same-time conflicts caught 131/150 -> 149/150 (undated 37 -> 50, same-day 45 -> 49, mixed 49 -> 50), temporal recognition unchanged at 40/40, false contradictions on unplanted pairs 11/820 -> 14/820 and on compatible pairs 2/50 -> 5/50, judged-pair precision 91.0% -> 88.7%. A code rule that turned temporal verdicts without time evidence into contradictions was measured and rejected: on the counted seed it added about 65 false alarms, because Haiku uses a temporal label for unrelated pairs it misreads. The prompt version bump invalidates the judge cache (step 2).
 - **An acknowledgement-only reply to a question does not close a thread loop.** "Thanks!", "Got it, thanks." or "Thanks, Bob!" after their question leaves the reply-owed loop open and its clock running. "Will do" and any reply with content still count as the reply. An acknowledgement of a message that asked nothing still closes it.
 - **A `?` inside a link is not a question,** so outbound FYIs that only share a link never open `unanswered_outbound`.
@@ -153,6 +154,10 @@ The release also absorbs 62 open community pull requests, each re-checked agains
 - **`gbrain extract timeline --source db` writes on fresh and managed brains (#5904 probe).** It publishes per page through the coordinator instead of inserting raw rows every managed brain refuses. #5904's library-level entry point stays open.
 
 Issue reports with reproductions for this group: @andreineacsu (#5888, #5887, #5889, #5890, #5892, #5855, #5875, #5867, #5856, #5877, #5868, #5869), @nezovskii (#5902, #5904), @ywlee7922 (#5854).
+
+#### Security
+
+- **Short random secrets clear the entropy gate (v0.60.31.0 follow-up).** A `password=` value of 15 random characters with one letter repeated three times read 3.46 bits/char and stayed plaintext; the gate now uses the Miller-Madow estimate (`correctedEntropy`) and requires a non-digit, and the A5 test that flaked on such values runs on fixed seeded values plus that case.
 
 #### Known limits
 
