@@ -236,6 +236,28 @@ degraded (`degraded_dedup`) — near-duplicate phrasings may insert. See
 [spend-controls](../operations/spend-controls.md) for the brain-wide
 extraction switches.
 
+### Long transcripts: windowed extraction
+
+The extractor reads at most 8,000 characters per call, so the maintenance
+sweep reads a session transcript in windows cut at turn boundaries. Each
+window carries its `[user]` or `[assistant]` label, and pasted blocks are
+removed before the cut. A long session therefore costs one call per window: a
+typical long transcript (about 120 KB) is roughly 15 calls where it used to be
+one call that saw only the first 8,000 characters.
+
+Spend per sweep is capped: at most 8 windows per file and 32 windows across all
+files. A longer file picks up where it stopped on the next sweep. Progress
+is kept in a `<file>.progress` file beside the transcript, so a resumed
+session or a compaction rewrite costs only its new turns. The compaction
+harvest extracts the first window right away; the sweep does the rest. Set
+`GBRAIN_CORPUS_WINDOWS_PER_SWEEP` to a positive integer in the environment of
+the process that runs the sweep (`gbrain serve` or `gbrain sweep --once`) to
+change the 32-window total; the per-file cap of 8 is fixed. The off switch
+for all of this is the brain-wide `facts.extraction_enabled`. `gbrain sweep
+--once --json` lists `corpus_files[]` with `windows_done` and
+`windows_remaining` per file. Transcripts marked done before this release are
+not re-read; only turns added after the upgrade are extracted.
+
 ## Diagnostics
 
 `gbrain doctor` → `memory_writeback`: resolved mode (+`mode_valid`), TTL
