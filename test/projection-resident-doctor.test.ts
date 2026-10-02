@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { projectionBacklog } from '../src/core/page-state/projections.ts';
 import {
-  persistenceSocketPathForConfig, requestPersistenceProjectionStatus, startPersistenceIpcServer, type PersistenceIpcProvider,
+  PersistenceIpcTransportError, persistenceSocketPathForConfig, requestPersistenceProjectionStatus, startPersistenceIpcServer, type PersistenceIpcProvider,
 } from '../src/core/persistence/ipc.ts';
 import { projectionResidentEntry } from '../src/commands/doctor/checks/projection-readiness.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
@@ -71,7 +71,16 @@ test('stalled projection_status requests count toward the listener bound and can
     const abandoned = await Promise.allSettled(Array.from({ length: 8 }, () => requestPersistenceProjectionStatus(socket, 200)));
     expect(abandoned.every(result => result.status === 'rejected')).toBe(true);
     expect(calls).toBe(8);
-    await expect(requestPersistenceProjectionStatus(socket)).rejects.toMatchObject({ code: 'queue_capacity' });
+    // The abandoned clients are gone, but until the listener observes their
+    // sockets closing it refuses new connections at the transport level; once
+    // it does, the eight stalled handlers still hold the bound.
+    let refusal: unknown;
+    for (const deadline = Date.now() + 5_000; Date.now() < deadline;) {
+      refusal = await requestPersistenceProjectionStatus(socket).then(() => null, (error: unknown) => error);
+      if (!(refusal instanceof PersistenceIpcTransportError)) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(refusal).toMatchObject({ code: 'queue_capacity' });
     expect(calls).toBe(8);
     stalled.resolve();
     await new Promise(resolve => setTimeout(resolve, 50));
