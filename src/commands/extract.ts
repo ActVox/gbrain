@@ -2256,6 +2256,7 @@ export async function extractStaleFromDB(
 
     const timelineRows: TimelineBatchInput[] = [];
     const processedRefs: Array<{ slug: string; source_id: string; extractedAt: string }> = [];
+    const attendanceBlocked: Array<{ slug: string; source_id: string; revision: string }> = [];
 
     for (const page of rows) {
       const pack = packs.get(page.source_id);
@@ -2278,7 +2279,11 @@ export async function extractStaleFromDB(
           return resolved.ok ? targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
         } },
       );
-      if (!extracted.attendanceComplete) { skippedAttendanceIncomplete++; continue; }
+      if (!extracted.attendanceComplete) {
+        skippedAttendanceIncomplete++;
+        attendanceBlocked.push({ slug: page.slug, source_id: page.source_id, revision: snapshot.revision });
+        continue;
+      }
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(
           c, page.slug, page.source_id, allSlugs, slugToSources,
@@ -2332,6 +2337,7 @@ export async function extractStaleFromDB(
     // Stamp LAST, directly (not the swallowing stampExtracted) so a stamp
     // failure surfaces instead of looping forever.
     await engine.markPagesExtractedBatch(processedRefs, new Date().toISOString());
+    await engine.markPagesAttendanceBlocked(attendanceBlocked);
 
     pagesProcessed += processedRefs.length;
     progress.tick(processedRefs.length);
