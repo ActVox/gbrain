@@ -828,6 +828,25 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
   return result;
 }
 
+/** A --from-meetings run whose timeline batch inserts failed. Carries the
+ * partial result so the CLI can still print it, matching upstream's surface. */
+export class TimelineBatchError extends Error {
+  constructor(readonly result: ExtractResult, batchErrors: number, firstError?: string) {
+    super(`[extract timeline] ${batchErrors} batch(es) failed to insert` +
+      (firstError ? ` (first error: ${firstError})` : '') + ` — timeline is incomplete.`);
+    this.name = 'TimelineBatchError';
+  }
+}
+
+/** runExtract's failure path: a TimelineBatchError is reported and its partial
+ * result still prints (#2057 parity, exit verdict 1); anything else exits 1. */
+function extractFailureResult(e: unknown): ExtractResult {
+  console.error(e instanceof Error ? e.message : String(e));
+  setCliExitVerdict(1);
+  if (e instanceof TimelineBatchError) return e.result;
+  process.exit(1);
+}
+
 /**
  * Library-level DB-source extract. This is the safe surface for Minions/MCP:
  * it works on checkout-less or multi-source hosts and threads source_id into
@@ -876,9 +895,7 @@ export async function runExtractDbCore(engine: BrainEngine, opts: ExtractDbOpts)
         `omit --from-meetings to extract timeline entries from all pages.`,
       );
     }
-    if (r.batch_errors > 0) {
-      throw new Error(`Timeline from meetings lost ${r.batch_errors} batch(es); refusing a clean success result.`);
-    }
+    if (r.batch_errors > 0) throw new TimelineBatchError(result, r.batch_errors, r.first_batch_error);
     return result;
   }
 
@@ -1280,9 +1297,7 @@ export async function runExtract(engine: BrainEngine, args: string[], authority?
       });
     }
   } catch (e) {
-    console.error(e instanceof Error ? e.message : String(e));
-    setCliExitVerdict(1);
-    process.exit(1);
+    result = extractFailureResult(e);
   }
 
   if (jsonMode) {

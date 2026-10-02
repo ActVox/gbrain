@@ -1,0 +1,19 @@
+# ActVox fork deltas re-applied by scripts/actvox/resolve-upstream-merge.ts when an
+# upstream merge conflicts on a ratchet TSV. Each row names the TSV, the row key
+# (first column, or first two columns for function-size), and how to change the
+# numeric column after taking upstream's file:
+#   add N    upstream value + N (fork patch adds N lines to an upstream file)
+#   set N    exact value (fork-only rows or fork-shrunk functions)
+#   row      append the fork-only row verbatim if upstream lacks the key
+# Remove a row in the same commit that removes its fork patch.
+# Columns: tsv	key	op	value	reason
+scripts/module-size-limits.tsv	src/commands/extract.ts	add	59	ActVox runExtractDbCore + minion db path (C5; drop when upstreamed)
+scripts/module-size-limits.tsv	src/commands/serve-http.ts	add	1	ActVox serve-http patch
+scripts/module-size-limits.tsv	src/core/search/hybrid.ts	add	2	ActVox operational-memory ranking hook
+scripts/function-size-baseline.tsv	src/commands/extract.ts|runExtract	set	310	runExtractDbCore split shrank runExtract
+scripts/structural-suites.tsv	test/release-workflow.test.ts|forbid-atx-hub-pr-base.yml expression boundary	row	test/release-workflow.test.ts	forbid-atx-hub-pr-base.yml expression boundary	1	readFileSync
+scripts/structural-suites.tsv	test/release-workflow.test.ts|semgrep.yml differential baseline contract	row	test/release-workflow.test.ts	semgrep.yml differential baseline contract	2	readFileSync
+scripts/structural-suites.tsv	test/scripts/heavy-door-workflow.test.ts|heavy door supply chain and coverage gates	set	5	fork heavy-door paid gate adds one structural read
+scripts/structural-suites.tsv	test/scripts/actvox-check-delta.test.ts|fork-delta ratchet	row	test/scripts/actvox-check-delta.test.ts	fork-delta ratchet	6	readFileSync
+scripts/structural-suites.tsv	test/scripts/actvox-create-upstream-pr.test.ts|create-upstream-pr.sh integrates in an isolated worktree	row	test/scripts/actvox-create-upstream-pr.test.ts	create-upstream-pr.sh integrates in an isolated worktree	3	readFileSync
+scripts/structural-suites.tsv	test/scripts/actvox-resolve-upstream-merge.test.ts|resolveMerge on a real conflicted merge	row	test/scripts/actvox-resolve-upstream-merge.test.ts	resolveMerge on a real conflicted merge	1	readFileSync

@@ -570,6 +570,7 @@
       ],
       "./extract": [
         "STALE_TIME_BUDGET_MS",
+        "TimelineBatchError",
         "buildSlugPathIndex",
         "extractLinksForSlugs",
         "extractLinksFromFile",

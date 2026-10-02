@@ -1,0 +1,2 @@
+<!-- anchor: **Always use PATCH without asking**, including the initial release choice; -->
+**ActVox fork exception:** in ActVox/gbrain, an upstream integration carries upstream's exact version, and a fork-only release between integrations bumps only the `.MICRO` slot (for example `0.60.27.1`). Never take PATCH for a fork-only release; that number belongs to upstream. Fork release notes go in `CHANGELOG.actvox.md`. The upstream-merge resolver re-inserts this paragraph after each integration; see `docs/operations/fork-upstream-production-branching.md`.

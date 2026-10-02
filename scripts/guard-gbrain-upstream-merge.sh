@@ -56,19 +56,12 @@ if git show-ref --verify --quiet refs/remotes/origin/ATX-HUB; then
   fi
 fi
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: working tree is dirty; commit/stash before creating an upstream merge worktree." >&2
-  exit 6
-fi
-
 cat <<'EOF'
 OK: branch topology guard passed.
 
-Safe upstream merge path:
-  TS=$(date +%Y%m%d%H%M%S)
-  WT=/Users/nezovskii/workspace/tmp/gbrain-upstream-merge-$TS
-  git worktree add -b upgrade/gbrain-upstream-$TS "$WT" origin/master
-  git -C "$WT" merge --no-commit --no-ff upstream/master
+Safe upstream merge path (merges in its own temporary worktree; this checkout is untouched):
+  scripts/sync-from-upstream.sh            # prepare locally, keep the worktree for any residual conflicts
+  scripts/sync-from-upstream.sh --push     # push the integration branch and open/update the PR
 
 Hard rule: PR base is master. ATX-HUB is rollback/reference only.
 EOF
