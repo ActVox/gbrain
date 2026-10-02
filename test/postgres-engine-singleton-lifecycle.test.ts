@@ -27,26 +27,18 @@ function fatal(): Buffer {
 
 async function openEndpoint() {
   const held: Socket[] = [];
-  const refused = new WeakSet<Socket>();
-  const refuseSocket = (socket: Socket) => {
-    // Data already queued before refuse() can arrive after end(). Send one
-    // FATAL per connection, even when both paths observe the same socket.
-    if (refused.has(socket) || socket.destroyed) return;
-    refused.add(socket);
-    socket.end(fatal());
-  };
   let refusing = false;
   let dials = 0;
   const server = createServer(socket => {
     dials++;
     held.push(socket);
-    socket.on('data', () => { if (refusing) refuseSocket(socket); });
+    socket.on('data', () => { if (refusing && !socket.writableEnded) socket.end(fatal()); });
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   return {
     url: `postgres://user@127.0.0.1:${(server.address() as AddressInfo).port}/gbrain`,
     dials: () => dials,
-    refuse() { refusing = true; for (const socket of held.splice(0)) refuseSocket(socket); },
+    refuse() { refusing = true; for (const socket of held.splice(0)) socket.end(fatal()); },
     hold() { refusing = false; },
     close() { server.close(); },
   };
