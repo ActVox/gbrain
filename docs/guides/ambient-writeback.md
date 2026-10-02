@@ -175,11 +175,12 @@ source already has the same normalized text, and
   same conversation (no time limit there, so a sweep hours later still
   recognizes the writeback's copy).
 
-Similar but differently worded facts are always kept. Capture counts them as
-near duplicates (cosine 0.92 or higher on the same entity, with no difference
-in a negation, number or date) so the threshold can be measured before it
-ever removes anything. A correction such as "is not moving" or a changed
-amount is never treated as a duplicate. If the duplicate check cannot read
+A reworded copy on the same entity is also skipped when the two are very close
+(cosine 0.95 or higher) and do not differ in a negation, number or date. A
+correction such as "is not moving" or a changed amount is never treated as a
+duplicate, however close the wording. Facts between cosine 0.92 and 0.95 are
+always kept; capture only counts them as near duplicates so a lower threshold
+can be measured before it ever removes anything. If the duplicate check cannot read
 the database, the fact is kept and a warning names the lane. Explicit
 `remember` is never skipped, so use it for anything that must persist.
 

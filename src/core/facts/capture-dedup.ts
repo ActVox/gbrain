@@ -13,10 +13,11 @@
  *     `world` and `private` facts, a `world` candidate only with `world`);
  *   - was written within 15 minutes of the source turn, or by a capture lane
  *     in the same conversation (no time bound inside one conversation).
- * Near duplicates (cosine >= 0.92 on the same entity, claims not differing
- * in a negation, number or date token) are never dropped: they are counted
- * in shadow mode (`near_duplicate` on the `writeback_dedup` heartbeat event)
- * so a threshold can be measured before it ever deletes anything. A failed
+ * The writers' same-entity cosine check keeps its 0.95 drop for capture
+ * lanes, but only when the two claims do not differ in a negation, number or
+ * date token (a correction is never a duplicate). The 0.92-0.95 band is
+ * shadow-only: counted (`near_duplicate` on the `writeback_dedup` heartbeat
+ * event) so a lower threshold can be measured, never dropped. A failed
  * dedup read inserts the candidate (fail open) and warns with the lane.
  * Explicit lanes (`remember`, extract_facts, sync) never pass through here.
  *
@@ -35,8 +36,8 @@ export const CAPTURE_LANES = ['hook:writeback', 'sweep:corpus', 'hook:compact'] 
 export const CAPTURE_DEDUP_WINDOW_MS = 15 * 60 * 1000;
 /** Shadow-mode near-duplicate threshold (measured, never a drop). */
 export const NEAR_DUPLICATE_THRESHOLD = 0.92;
-/** Explicit lanes keep their pre-#5888 cosine rule. */
-export const EXPLICIT_DUPLICATE_THRESHOLD = 0.95;
+/** Same-entity cosine drop; capture lanes apply it only through the claimsDiverge guard. */
+export const DUPLICATE_THRESHOLD = 0.95;
 const CAPTURE_DEDUP_SCAN_LIMIT = 50;
 
 export function isCaptureLane(source: string | null | undefined): boolean {
@@ -74,12 +75,14 @@ export function claimsDiverge(a: string, b: string): boolean {
 export type CosineVerdict = 'duplicate' | 'near_duplicate' | 'distinct';
 
 /**
- * The one cosine policy for every fact-write decision point. Capture lanes
- * never return `duplicate`; explicit lanes keep the 0.95 rule unchanged.
+ * The one cosine policy for every fact-write decision point. Explicit lanes
+ * keep the unguarded 0.95 rule; capture lanes drop at 0.95 only when the
+ * claims do not diverge, and only count the 0.92-0.95 band.
  */
 export function cosineVerdict(source: string | null | undefined, score: number, claim: string, existing: string): CosineVerdict {
-  if (!isCaptureLane(source)) return score >= EXPLICIT_DUPLICATE_THRESHOLD ? 'duplicate' : 'distinct';
-  return score >= NEAR_DUPLICATE_THRESHOLD && !claimsDiverge(claim, existing) ? 'near_duplicate' : 'distinct';
+  if (!isCaptureLane(source)) return score >= DUPLICATE_THRESHOLD ? 'duplicate' : 'distinct';
+  if (score < NEAR_DUPLICATE_THRESHOLD || claimsDiverge(claim, existing)) return 'distinct';
+  return score >= DUPLICATE_THRESHOLD ? 'duplicate' : 'near_duplicate';
 }
 
 function nameKey(text: string): string {
