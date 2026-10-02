@@ -2231,6 +2231,8 @@ version stamps and the PR title, then report the number. This changes numbering
 only: scope, merge, deployment, paid-work and validation approvals still apply.
 CI rejects mismatched `VERSION`/`package.json` or versions not newer than master.
 
+**ActVox fork exception:** in ActVox/gbrain, an upstream integration carries upstream's exact version, and a fork-only release between integrations bumps only the `.MICRO` slot (for example `0.60.27.1`). Never take PATCH for a fork-only release; that number belongs to upstream. Fork release notes go in `CHANGELOG.actvox.md`. The upstream-merge resolver re-inserts this paragraph after each integration; see `docs/operations/fork-upstream-production-branching.md`.
+
 ### Version consistency and conflict recovery
 
 After version-related edits or merges, verify `VERSION`, `package.json`, and the

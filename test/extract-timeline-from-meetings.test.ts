@@ -171,6 +171,39 @@ describe('#4542 zero-meetings warning at the CLI surface', () => {
     const stderrLines = await runExtractCapturingStderr(['timeline', '--from-meetings', '--source', 'db']);
     expect(stderrLines.join('\n')).not.toContain('omit --from-meetings');
   });
+
+  // #2057 parity through the DB-source library path (runExtractDbCore): failed
+  // batches are reported with the first error, the partial result still
+  // prints, and the exit verdict is non-zero instead of an early exit.
+  it('reports failed timeline batches with the first error and still prints the --json result', async () => {
+    const { _resetCliExitVerdictForTests, currentExitCode } = await import('../src/core/cli-force-exit.ts');
+    _resetCliExitVerdictForTests();
+    await seedEntity('people/alice-example', 'Alice Example');
+    await engine.putPage('meetings/2026-04-21-review', {
+      type: 'meeting',
+      title: 'Review',
+      compiled_truth: 'Alice Example attended.',
+      timeline: '',
+      frontmatter: { attendees: ['Alice Example'] },
+      effective_date: new Date('2026-04-21T00:00:00.000Z'),
+    });
+    const original = engine.addTimelineEntriesBatch;
+    engine.addTimelineEntriesBatch = async () => { throw new Error('disk full'); };
+    const stdout: string[] = [];
+    const savedLog = console.log;
+    console.log = (...a: unknown[]) => { stdout.push(a.map(String).join(' ')); };
+    try {
+      const stderr = (await runExtractCapturingStderr(['timeline', '--from-meetings', '--source', 'db', '--json'])).join('\n');
+      expect(stderr).toContain('batch insert failed');
+      expect(stderr).toContain('[extract timeline] 1 batch(es) failed to insert (first error: disk full) — timeline is incomplete.');
+      expect(JSON.parse(stdout.join('\n'))).toMatchObject({ timeline_entries_created: 0, pages_processed: 1 });
+      expect(currentExitCode()).toBe(1);
+    } finally {
+      engine.addTimelineEntriesBatch = original;
+      console.log = savedLog;
+      _resetCliExitVerdictForTests();
+    }
+  });
 });
 
 // ─── put_page-written meetings: NULL effective_date column ──
