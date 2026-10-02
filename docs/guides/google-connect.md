@@ -159,6 +159,42 @@ deep backfill carries on. A thread that keeps failing is held (see
 source synced after its first sync; a source that has never synced stays idle
 until you run `gbrain sync --source <id>` once.
 
+### What runs on synced mail and calendar pages
+
+**Say to your agent:** *"Make sure my Gmail threads are checked for open loops
+and linked to the people in them"* or *"Also extract atoms from my email and
+calendar pages."*
+
+- **Links and timelines.** Every autopilot or dream cycle extracts links and
+  timeline entries for connector pages straight from the database (a connector
+  source has no checkout), source-scoped and bounded by the cycle's 3-minute
+  stale-drain budget; a large backlog finishes over later cycles. The cycle
+  reports `extract: ok` with `database_only: true`. On demand:
+  `gbrain extract --stale`.
+- **Open loops.** Every Gmail sweep queues commitment extraction for the
+  threads it touched, on managed and unmanaged brains. The sync result carries
+  `loops_enqueue` (`enqueued`, `deferred`, `skipped_reason`), and every skip is
+  logged with its reason (extraction off, no chat model, the enqueue ceiling).
+  On a managed brain the first sweep also runs a one-time catch-up over email
+  threads whose newest message is from the last 30 days, so threads synced
+  before extraction was queued are analyzed once; it finishes over later
+  sweeps when the enqueue ceiling binds.
+- **Quiet threads.** A thread still inside its waiting window (24 h for
+  inbound, 72 h for your own question) is re-checked when the window ends,
+  even if no new mail arrives, and opens its loop then. See
+  [open loops](open-loops.md#quiet-threads-and-grace-holds).
+- **Atoms (opt-in).** Atom extraction skips Gmail threads and Calendar events
+  until you opt in with `gbrain config set cycle.extract_atoms.connector_pages
+  true`. After that, the text of each extracted email thread or calendar event
+  is sent to the configured `extract_atoms` model under the daily auto-drain
+  cap. `gbrain config set cycle.extract_atoms.connector_pages false` stops new
+  extraction. Caps, the off switch and exactly what leaves the machine:
+  [spend controls](../operations/spend-controls.md#atom-extraction-auto-drain-cap-and-connector-pages).
+
+`gbrain doctor`'s `orphan_ratio` reports orphaned email and meeting renders of
+a connector source apart (`connector_renders_excluded`), since a mail page
+with no links is normal, and leaves them out of the ratio.
+
 ### Rate limits during backfill
 
 A large mailbox backfilling a wide `--history-days` window can trip Gmail's
@@ -313,6 +349,10 @@ upstream failures rather than triggering a full re-list.
   capped per sweep) to your configured chat provider. Kill switch:
   `gbrain config set loops.extraction_enabled false`. The deterministic
   unanswered-thread detector is free and always on.
+- Atom extraction from email and calendar pages is off until you run
+  `gbrain config set cycle.extract_atoms.connector_pages true`; then page
+  text goes to the `extract_atoms` model under the auto-drain cap
+  ([spend controls](../operations/spend-controls.md#atom-extraction-auto-drain-cap-and-connector-pages)).
 
 ## File permissions
 
