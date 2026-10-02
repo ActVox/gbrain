@@ -391,6 +391,10 @@
       },
       {
         "category": "brain",
+        "name": "captured_facts_active"
+      },
+      {
+        "category": "brain",
         "name": "integrity"
       },
       {
