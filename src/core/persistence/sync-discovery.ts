@@ -18,6 +18,7 @@ import { currentCompanyBrainSync } from '../company-brain/profile.ts';
 import type { CompanyBrainPlan } from '../company-brain/types.ts';
 import { assertDistinctSyncOrigins, legacySyncOrigin, sameSyncOrigin, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
 import { assertManagedSyncActive } from './sync-authority.ts';
+import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 
 /** The page an import takes over from its previous origin: a Git rename, or a file that replaced a vanished origin at the same slug. */
 export interface SyncRename { sourcePath: string; slug: string; pageId: number; revision: string; }
@@ -129,8 +130,9 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     .map(v => v.endsWith('/') ? `${v}**` : v);
   const includeHidden = [...new Set([...(opts.includeHidden ?? []), ...(await engine.getConfig('sync.include_hidden') ?? '')
     .split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
+  // Reserved skillpack paths belong to the shared skill publisher; the managed importer always refuses them.
   const eligible = (path: string) => (!scope || path.startsWith(`${scope}/`)) &&
-    !matchesAnyGlob(scope ? path.slice(scope.length + 1) : path, exclude) &&
+    !matchesAnyGlob(scope ? path.slice(scope.length + 1) : path, exclude) && !isReservedSkillBundlePath(sourcePath(path)) &&
     isSyncable(path, { strategy: strategy as 'markdown', includeHidden });
   const target = company?.plan.revision?.commit ?? syncGit(gitRoot, ['rev-parse', 'HEAD']).trim();
   const detached = !company && syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';

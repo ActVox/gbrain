@@ -551,3 +551,26 @@ test('retry-failed resets cursor when pending write is committed but failure rec
       await disposePersistenceConsumer(engine);
     }
   }), 120_000);
+
+test('managed sync leaves reserved skillpack paths to the skill publisher instead of blocking (#5852)', async () =>
+  withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+    for (const engine of engines) {
+      const page = (title: string) => `---\ntype: concept\ntitle: ${title}\n---\n${title} content.\n`;
+      const f = await fixture(engine, {
+        'topics/foo.md': page('Foo'),
+        'skills/brain-router/SKILL.md': '---\nname: brain-router\ndescription: seeded pack skill\n---\n\n# Brain Router\n',
+        'skillpack.json': '{"name":"example-pack","skills":["brain-router"]}\n',
+        'docs/skills/nested.md': page('Nested'),
+        'docs/skillset/tips.md': page('Tips'),
+        'skills.md': page('Skills'),
+      });
+      const opts = { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true };
+      expect(await performManagedSync(engine, opts)).toMatchObject({ status: 'first_sync', added: 3 });
+      const slugs = (await engine.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE source_id=$1 ORDER BY slug', [f.id])).map(row => row.slug);
+      expect(slugs).toEqual(['docs/skillset/tips', 'skills', 'topics/foo']);
+      writeFileSync(join(f.root, 'skills/brain-router/SKILL.md'), '---\nname: brain-router\ndescription: edited\n---\n\n# Brain Router v2\n');
+      const head = commit(f.root, 'edit the seeded skill');
+      expect(await performManagedSync(engine, opts)).toMatchObject({ status: 'synced', added: 0, modified: 0, deleted: 0, toCommit: head });
+      expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND state<>'committed'", [f.id])).toEqual([]);
+    }
+  }), 120_000);
