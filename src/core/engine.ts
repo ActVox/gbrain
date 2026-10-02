@@ -534,6 +534,8 @@ export interface FactRow {
   embedding: Float32Array | null;
   embedded_at: Date | null;
   created_at: Date;
+  /** Set only when the list call asked for `fingerprint` (#5888 hot-memory collapse). */
+  fact_fingerprint?: string;
 }
 
 /** Input for insertFact. source_id supplied via the ctx arg. */
@@ -633,6 +635,8 @@ export interface FactListOpts {
    * unaffected.
    */
   excludeAuditRows?: boolean;
+  /** #5888: listFactsSince/listFactsBySession also select `gbrain_fact_fingerprint(fact)` as `fact_fingerprint`. */
+  fingerprint?: boolean;
 }
 
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */
