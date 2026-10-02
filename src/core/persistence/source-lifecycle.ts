@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { isValidSourceId } from '../source-id.ts';
+import { EXPIRED_ARCHIVE_SQL } from '../source-delete.ts';
 import { parseSourceConfig } from '../sources-load.ts';
 import { redactSourceConfig } from '../source-config-redact.ts';
 import { discoverGitRoot } from '../sync-git.ts';
@@ -133,7 +134,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       throw new OperationError('writer_transfer_required','The source already has a different canonical binding. Use rebind or verified ownership transfer.');
     if(input.operation==='claim'&&!currentBinding&&source?.local_path&&realpathSync(source.local_path)!==root!.source)
       throw new OperationError('source_changed','The requested claim path differs from the configured source root.');
-    const expired=input.expiredOnly?await tx.executeRaw('SELECT id FROM sources WHERE id=$1 AND archived=true AND archive_expires_at<=now()',[input.sourceId]):null;
+    const expired=input.expiredOnly?await tx.executeRaw(`SELECT id FROM sources WHERE id=$1 AND ${EXPIRED_ARCHIVE_SQL}`,[input.sourceId]):null;
     const noop=expired?.length===0 || input.operation==='archive'&&source?.archived || input.operation==='restore'&&!source?.archived
       || input.operation==='claim'&&!!currentBinding || input.operation==='rebind'&&sameBinding;
     if(noop){

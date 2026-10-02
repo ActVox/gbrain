@@ -1738,7 +1738,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
       duration_ms: 0,
       summary:
         `purged ${purgedSources.length} source(s)` +
-        (purgeResult.blocked.length > 0 ? ` (${purgeResult.blocked.length} FK-blocked, see details)` : '') +
+        (purgeResult.blocked.length > 0 ? ` (${purgeResult.blocked.length} blocked, see details)` : '') +
         `, ${purgedPages.count} page(s), ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +

@@ -191,6 +191,32 @@ test('expiry sweep rechecks restored sources under the topology guard',()=>fixtu
 }),60_000);
 
 
+test('gbrain#5452 managed purge refuses missing/epoch archive stamps and still purges a real expiry',()=>fixture(async(_home,source)=>{
+  await runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source});
+  const purge=()=>runManagedSourceLifecycle(engine,{operation:'purge',sourceId:source,confirmDestructive:true,expiredOnly:true});
+  const survives=async()=>expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1',[source])).toHaveLength(1);
+  // Epoch expiry — pre-column-stamp archive shape from the report.
+  await engine.executeRaw(`UPDATE sources SET archive_expires_at='1970-01-01T00:00:00Z' WHERE id=$1`,[source]);
+  expect(await purge()).toMatchObject({state:'committed',noop:true});await survives();
+  // Missing expiry.
+  await engine.executeRaw(`UPDATE sources SET archive_expires_at=NULL WHERE id=$1`,[source]);
+  expect(await purge()).toMatchObject({state:'committed',noop:true});await survives();
+  // A normal past expiry is not enough on its own: an epoch/missing
+  // archived_at means the 72h window was never provably granted.
+  await engine.executeRaw(`UPDATE sources SET archive_expires_at=now()-INTERVAL '1 hour' WHERE id=$1`,[source]);
+  await engine.executeRaw(`UPDATE sources SET archived_at='1970-01-01T00:00:00Z' WHERE id=$1`,[source]);
+  expect(await purge()).toMatchObject({state:'committed',noop:true});await survives();
+  await engine.executeRaw(`UPDATE sources SET archived_at=NULL WHERE id=$1`,[source]);
+  expect(await purge()).toMatchObject({state:'committed',noop:true});await survives();
+  // Real stamps + past expiry purge normally — a real purge receipt carries
+  // no `noop` marker and the row is gone.
+  await engine.executeRaw(`UPDATE sources SET archived_at=now()-INTERVAL '73 hours' WHERE id=$1`,[source]);
+  const receipt=await purge();
+  expect(receipt).toMatchObject({state:'committed'});
+  expect('noop' in receipt).toBe(false);
+  expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1',[source])).toHaveLength(0);
+}),60_000);
+
 test('a failed new clone retries under the retained physical identity and a new explicit request',()=>fixture(async(home)=>{
   const target=join(home,'new-clone');
   const first={operation:'add' as const,sourceId:'new-clone-source',path:target,remoteUrl:'https://example.invalid/brain.git',requestId:randomUUID()};
