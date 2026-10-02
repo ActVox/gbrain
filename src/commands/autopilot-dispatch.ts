@@ -449,8 +449,6 @@ export async function submitAutoDrains(
 
   const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
   const { atomDrainOwnerRefusal } = await import('../core/persistence/atom-maintenance.ts');
-  const skipped = (src: SourceRow, event: string, reason: string) => process.stderr.write(
-    (jsonMode ? JSON.stringify({ event, source_id: src.id, reason }) : reason) + '\n');
   // #5856 fairness: checkout-backed and connector sources alternate for the
   // daily slots, starting with the kind the persisted pointer names, so a
   // large connector backlog cannot starve a git source's atoms (or the reverse).
@@ -471,7 +469,12 @@ export async function submitAutoDrains(
       // Same unavailable-path skip (relative / missing on this
       // machine) as the freshness loop above, same --json shape.
       const skipWarn = sourceLocalPathSkipWarning(src.id, src.local_path, undefined, src.config);
-      if (skipWarn) { skipped(src, 'freshness_source_path_skipped', skipWarn); continue; }
+      if (skipWarn) {
+        process.stderr.write(
+          (jsonMode ? JSON.stringify({ event: 'freshness_source_path_skipped', source_id: src.id, reason: skipWarn }) : skipWarn) + '\n',
+        );
+        continue;
+      }
     }
     // Time-sloted key (CODEX #2): a static key would block the
     // source FOREVER once the first job completes. A new UTC-day
@@ -500,7 +503,8 @@ export async function submitAutoDrains(
       // active local owner); submitting it would only dead-letter.
       const refusal = await atomDrainOwnerRefusal(engine, src.id);
       if (refusal) {
-        skipped(src, 'auto_drain_source_skipped', `[autopilot] skipping atom auto-drain for '${src.id}': ${refusal}`);
+        const reason = `[autopilot] skipping atom auto-drain for '${src.id}': ${refusal}`;
+        process.stderr.write((jsonMode ? JSON.stringify({ event: 'auto_drain_source_skipped', source_id: src.id, reason }) : reason) + '\n');
         continue;
       }
       const job = await queue.add(
