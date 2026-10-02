@@ -96,7 +96,7 @@ import { withRefreshingLock, LockUnavailableError } from '../core/db-lock.ts';
 import { assertFactsEmbeddingDimMatchesConfig } from '../core/embedding-dim-check.ts';
 import { writeReceipt, shortRunId } from '../core/extract/receipt-writer.ts';
 import { upsertExtractRollup, classifyRunStop } from '../core/extract/rollup-writer.ts';
-import { ALLOWED_TYPES, type AllowedType } from '../core/facts/conversation-types.ts';
+import { ALLOWED_TYPES, ALLOWED_TYPE_ALIASES, isConversationFactsEligiblePage, pageTypesForAllowed, requireParseableConversationFlag, type AllowedType } from '../core/facts/conversation-types.ts';
 import { TERMINAL_AUDIT_SOURCE, NON_EXTRACTABLE_AUDIT_SOURCE } from '../core/facts/audit-sources.ts';
 import {
   emptySaveTimeResolutionCounts,
@@ -112,6 +112,7 @@ import {
 // consumer that only needs the six values doesn't also pull in this file's
 // own CLI flag surface.
 export { ALLOWED_TYPES };
+export { ALLOWED_TYPE_ALIASES, pageTypesForAllowed };
 export type { AllowedType };
 
 // Re-exported for existing importers (test/extract-conversation-facts.test.ts,
@@ -185,40 +186,6 @@ export const DEFAULT_MAX_COST_USD = 5.0;
 // Mirrors cycle.conversation_facts_backfill.types config default. CLI's
 // `--types` flag is an explicit per-run override; cycle config is the
 // single source of truth.
-
-/**
- * Granular collector page-types that alias into each canonical conversation
- * bucket. The v2 type-consolidation pack retypes these to the canonical names
- * (`slack-dm-day`/`slack-thread` → `slack`, `email-digest` → `email`), but a
- * brain that hasn't run that pack still carries the collector's granular types
- * in `pages.type`. Without this expansion, `listPages({ type: 'slack' })`
- * matches zero rows on such brains and the whole comms corpus is silently
- * skipped (facts stay empty → `find_trajectory` returns nothing). The canonical
- * name is always included first so consolidated brains keep working unchanged.
- */
-export const ALLOWED_TYPE_ALIASES: Record<AllowedType, readonly string[]> = {
-  conversation: ['conversation'],
-  meeting: ['meeting'],
-  slack: ['slack', 'slack-dm-day', 'slack-thread'],
-  email: ['email', 'email-digest'],
-  imessage: ['imessage'],
-  'imessage-daily': ['imessage-daily'],
-};
-
-/**
- * Expand the requested logical types to the concrete `pages.type` values to
- * enumerate, canonical-first and de-duplicated. Unknown types pass through
- * unchanged so an explicit override is never dropped.
- */
-export function pageTypesForAllowed(types: readonly AllowedType[]): string[] {
-  const out: string[] = [];
-  for (const t of types) {
-    for (const concrete of ALLOWED_TYPE_ALIASES[t] ?? [t]) {
-      if (!out.includes(concrete)) out.push(concrete);
-    }
-  }
-  return out;
-}
 
 /**
  * Pagination batch size for listPages enumeration. Per-batch memory
@@ -604,7 +571,6 @@ function pageBodyBytes(page: Page): number {
 // ---------------------------------------------------------------------------
 
 const TYPES_CONFIG_KEY = 'cycle.conversation_facts_backfill.types';
-
 async function resolveTypesFromConfig(
   engine: BrainEngine,
   explicit?: AllowedType[],
@@ -1363,6 +1329,7 @@ export async function runExtractConversationFactsCore(
   }
 
   const types = await resolveTypesFromConfig(engine, opts.types);
+  const strictEligibility = await requireParseableConversationFlag(engine);
   const dryRun = !!opts.dryRun;
   const sleepMs = opts.sleepMs ?? DEFAULT_INTER_CALL_SLEEP_MS;
   const segmentLimit = opts.segmentLimit ?? 0;
@@ -1495,7 +1462,7 @@ export async function runExtractConversationFactsCore(
           result.pages_skipped_disappeared++;
           continue;
         }
-        if (!concreteTypes.includes(page.type)) {
+        if (!isConversationFactsEligiblePage(page, concreteTypes, strictEligibility)) {
           result.pages_skipped++;
           result.pages_skipped_type_mismatch++;
           continue;
@@ -1508,7 +1475,7 @@ export async function runExtractConversationFactsCore(
         result.pages_skipped_disappeared++;
         return;
       }
-      if (!concreteTypes.includes(page.type)) {
+      if (!isConversationFactsEligiblePage(page, concreteTypes, strictEligibility)) {
         result.pages_skipped++;
         result.pages_skipped_type_mismatch++;
         return;
@@ -1538,7 +1505,8 @@ export async function runExtractConversationFactsCore(
           });
           if (batch.length === 0) break;
 
-          let claimable = batch;
+          let claimable = batch.filter(page => isConversationFactsEligiblePage(page, concreteTypes, strictEligibility));
+          result.pages_skipped += batch.length - claimable.length;
           // Checkpoints are an intra-page cursor; fresh durable outcomes are
           // the page-level selection authority and survive checkpoint GC.
           if (!opts.force && claimable.length > 0) {
