@@ -25,6 +25,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
       - name: Fork delta within the patch inventory
         run: bun scripts/actvox/check-delta.ts
       - name: Upstream-merge tooling tests

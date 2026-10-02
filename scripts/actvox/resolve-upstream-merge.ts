@@ -36,10 +36,20 @@ export function parsePolicy(text: string): Rule[] {
   });
 }
 
-/** `*` matches any run of characters including `/`; everything else is literal. */
+/** `*` matches any run of characters including `/`; everything else is literal.
+ * Plain string matching (no RegExp built from data). */
 export function globMatches(glob: string, path: string): boolean {
-  const re = new RegExp('^' + glob.split('*').map(s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
-  return re.test(path);
+  const parts = glob.split('*');
+  if (parts.length === 1) return glob === path;
+  const first = parts[0], last = parts[parts.length - 1];
+  if (!path.startsWith(first)) return false;
+  let pos = first.length;
+  for (const middle of parts.slice(1, -1)) {
+    const at = path.indexOf(middle, pos);
+    if (at < 0) return false;
+    pos = at + middle.length;
+  }
+  return path.length - last.length >= pos && path.endsWith(last);
 }
 
 export function matchRule(rules: Rule[], path: string): Rule | undefined {

@@ -46,6 +46,10 @@ describe('policy table', () => {
     expect(globMatches('plugin/*', 'plugin/a/b.md')).toBe(true);
     expect(globMatches('plugin/*', 'plugin-variants/x')).toBe(false);
     expect(globMatches('llms.txt', 'llmsXtxt')).toBe(false);
+    expect(globMatches('.github/workflows/actvox-*', '.github/workflows/actvox-delta.yml')).toBe(true);
+    expect(globMatches('a*b*c', 'axxbyyc')).toBe(true);
+    expect(globMatches('a*b*c', 'axxcyyb')).toBe(false);
+    expect(globMatches('ab*ba', 'aba')).toBe(false);
   });
 });
 
