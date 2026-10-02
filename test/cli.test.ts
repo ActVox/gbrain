@@ -285,6 +285,11 @@ describe('CLI dispatch integration', () => {
       expect(stdout).toContain('ENGINE SELECTION');
       // ...and confirm the generic stub (printCliOnlyHelp) did NOT fire.
       expect(stdout).not.toContain('run gbrain --help for the full command list');
+      // #5800: the thin-client example must name the flags initRemoteMcp
+      // actually reads (--issuer-url/--mcp-url/oauth), not `--url`, which it
+      // ignores while requiring --issuer-url.
+      expect(stdout).toContain('--mcp-only --issuer-url');
+      expect(stdout).not.toContain('--mcp-only --url');
       expect(existsSync(join(home, '.gbrain', 'config.json'))).toBe(false);
       expect(exitCode).toBe(0);
     } finally {
