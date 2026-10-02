@@ -81,6 +81,11 @@ export function ledgerFileName(sessionId: string): string {
  * publish). Lives HERE so the engine-free hook lane can GC orphaned receipts
  * without importing the engine-typed harvest module. */
 export const HARVEST_RECEIPT_SUFFIX = '.receipt.json';
+/** #5887 window-progress sidecar (context/corpus-windows.ts) and its CAS
+ * lock. Engine-free home so the hook's GC reaps both with the `.txt`; the
+ * hook's resume rewrite never deletes them. */
+export const CORPUS_PROGRESS_SUFFIX = '.progress';
+export const CORPUS_PROGRESS_LOCK_SUFFIX = '.progress.lock';
 
 /**
  * Inverse of `segmentFileName`: `{sessionId, hash}` when `name` is a corpus

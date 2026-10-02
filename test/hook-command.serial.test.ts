@@ -1636,4 +1636,24 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
     expect(names).toContain('live.txt');
     expect(names).toContain('live.txt.in-progress');
   });
+
+  test('#5887: session-end reaps orphaned .progress sidecars and keeps a resumed session\'s live .progress', async () => {
+    const projRoot = join(tmp, 'projects');
+    const ws = join(tmp, 'ws');
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(corpus(), { recursive: true });
+    writeFileSync(join(corpus(), 'gone.txt.progress'), '{}');
+    writeFileSync(join(corpus(), 'gone.txt.progress.lock'), '');
+    writeFileSync(join(corpus(), 'sess-prog.txt.progress'), '{"generation":1}');
+    const t1 = seedTranscript(join(projRoot, 'p1'), 'r5.jsonl', [userLine('resumed session content')]);
+    await runHook(['session-end'], {
+      stdin: JSON.stringify({ session_id: 'sess-prog', transcript_path: t1, cwd: ws }),
+      transcriptRoot: projRoot,
+    });
+    const names = readdirSync(corpus());
+    expect(names).not.toContain('gone.txt.progress');
+    expect(names).not.toContain('gone.txt.progress.lock');
+    expect(names).toContain('sess-prog.txt');
+    expect(readFileSync(join(corpus(), 'sess-prog.txt.progress'), 'utf8')).toBe('{"generation":1}');
+  });
 });
