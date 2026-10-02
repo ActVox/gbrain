@@ -171,6 +171,13 @@ the text-date pre-filter in charge. A temporal verdict needs two different
 times: same-date or undated value conflicts are contradictions. Claims about
 two entities whose names merely look alike are never contradictions.
 
+Prompt v4 asks two questions before any verdict: do both statements give a
+value for the same attribute of the same entity (if not, nothing conflicts),
+and is there evidence of two different times? It tells the judge never to
+order two values by their size, the kind of document, or which statement is
+listed first, and that a negative claim about one party ("Fund A is not
+leading") and a positive claim about another ("Fund B is leading") agree.
+
 The trajectory substrate builds on the same signal:
 `gbrain eval trajectory <entity>` shows the chronological typed-claim
 history with regressions flagged inline; `gbrain founder scorecard
