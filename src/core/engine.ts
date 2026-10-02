@@ -1690,7 +1690,7 @@ export interface BrainEngine {
     title: string;
     domain: string | null;
     type?: string | null;
-    quarantined?: boolean;
+    quarantined?: boolean; source_id?: string;
   }>>;
 
   // Tags
