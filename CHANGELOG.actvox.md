@@ -3,6 +3,17 @@
 Fork-only entries that previously lived at the top of CHANGELOG.md. Upstream owns CHANGELOG.md; this file is ActVox-owned so upstream integrations never conflict with it.
 
 
+## [0.60.27.1] - 2026-10-02
+
+**Agents now see their real connection type when they ask the Team brain who they are.**
+
+### Fixed
+- `whoami` and the `gbrain://capabilities` resource report `oauth` or `legacy` from the identity the server verified, not from the shape of the client id. An OAuth client registered by hand with an id that does not start with `gbrain_cl_` was reported as a legacy token, and `whoami` hid its client id, write source and federated read grant. A legacy token named like an OAuth client id was reported as OAuth. Both cases now report correctly, on both surfaces.
+
+### To take advantage of v0.60.27.1
+Deploy this ActVox fork release. No migration, configuration or permission change is needed. Agents connected through a hand-provisioned OAuth client see `transport: oauth` with their grant on the next `whoami` call or capabilities read.
+
+
 ## [0.60.27.0] - 2026-10-02
 
 **ActVox integration of upstream garrytan/gbrain v0.60.27.0** (`ad7900d8dcd221e22b885fef0f4030b73a1d69c9`).
