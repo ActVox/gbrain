@@ -26,7 +26,8 @@ import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS } from '../search/snippet-cap.ts';
 import { redactRetrievalOutput } from '../search/output-redaction.ts';
 import { assembleEvidenceForHits, capDeliveredSnippets, deliverEvidence, effectivePlan, resolveEvidencePlan, unsupportedDelivery, type DeliveryMeta, type DeliveryScope, type EvidencePlan, type FrozenHit, type ReturnUnit } from '../search/evidence-delivery.ts';
-import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import { privateProvenanceFilterFragment, resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
 import { expandEngineTypeFilters } from '../schema-pack/query-types.ts';
 import { probeProjectionReadiness } from '../search/projection-readiness.ts';
@@ -182,6 +183,156 @@ async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope
 }
 
 /**
+ * Agents guess page types ("company", "account", "deal") that a brain may not
+ * have, and a filter on a type with no pages silently hides every page
+ * (gbrain-evals Cat 40: type-filtered agent runs failed 62% of tasks against
+ * 51% unfiltered). Requested types with no readable pages in scope are
+ * dropped, the rest stay; when none remain the filter is lifted. Either way
+ * the caller is told which types exist so it can refine.
+ */
+async function reconcileTypeFilter(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean,
+  types: string[] | undefined): Promise<{ types: string[] | undefined; notice?: string }> {
+  if (!types || scope.sourceIds?.length === 0) return { types };
+  const params: unknown[] = [];
+  let present: Set<string>;
+  try {
+    const rows = await ctx.engine.executeRaw<{ type: string }>(
+      `SELECT DISTINCT p.type FROM pages p WHERE ${pageReadFilter('p', { ...scope, excludePrivate }, params, true)} LIMIT 500`, params);
+    present = new Set(rows.map(r => r.type));
+  } catch {
+    return { types };
+  }
+  const keep: string[] = [];
+  const missing: string[] = [];
+  for (const type of types) {
+    // A schema-pack lookup failure propagates: typed reads fail closed rather than fall back to literal types.
+    const expanded = (await expandEngineTypeFilters(ctx.engine, { types: [type], ...scope })).types ?? [type];
+    (expanded.length === 0 || expanded.some(t => present.has(t)) ? keep : missing).push(type);
+  }
+  if (missing.length === 0) return { types };
+  const available = [...present].sort().join(', ');
+  return keep.length === 0
+    ? { types: undefined, notice: `No pages have type ${missing.join(', ')}, so the type filter was dropped and every page type was searched. Page types in this brain: ${available}.` }
+    : { types: keep, notice: `No pages have type ${missing.join(', ')}; filtered to ${keep.join(', ')}. Page types in this brain: ${available}.` };
+}
+
+const FACT_MATCH_STOPWORDS = new Set(['the', 'and', 'for', 'who', 'what', 'when', 'where', 'which', 'with', 'from', 'that', 'this', 'are', 'was', 'were', 'our', 'your', 'their', 'now', 'current', 'currently', 'should', 'does', 'did', 'has', 'have', 'how', 'any', 'all', 'about', 'into', 'its', 'next']);
+
+export interface AliasDeclaration { name: string; alias: string; slug: string }
+
+const isWordChar = (c: string | undefined) => c !== undefined && /\w/.test(c);
+
+/** Case-insensitive index of `word` in `text`; with `wholeWord`, edges that are word characters must sit on word boundaries. */
+function indexOfName(text: string, word: string, wholeWord: boolean): number {
+  const target = word.toLowerCase();
+  for (let i = 0; i + word.length <= text.length; i++) {
+    if (text.slice(i, i + word.length).toLowerCase() !== target) continue;
+    if (!wholeWord) return i;
+    if (isWordChar(word[0]) && isWordChar(text[i - 1])) continue;
+    if (isWordChar(word[word.length - 1]) && isWordChar(text[i + word.length])) continue;
+    return i;
+  }
+  return -1;
+}
+
+const ALIAS_DECLARATION = /\b(?:account code|also known as|a\.k\.a\.|aka|short name|ticker|code name)\b\s*[:(]?\s*["\u201c']?([A-Z0-9][A-Za-z0-9&.-]{1,24})/gi;
+
+/**
+ * Pages often declare another name for their subject ("Account code: MULI",
+ * "also known as ..."), and documents elsewhere use only that name, so a
+ * search for one name misses them (gbrain-evals Cat 40: amendments and
+ * corrections that named a customer only by its code). This reads the
+ * declarations in the returned evidence; the name is the page title after
+ * its last colon. Only declarations where the query uses one name and not
+ * the other are reported.
+ */
+export function aliasDeclarations(rows: Array<{ slug: string; title?: string; chunk_text?: string }>, queryText: string): AliasDeclaration[] {
+  const q = queryText.toLowerCase();
+  const out = new Map<string, AliasDeclaration>();
+  for (const row of rows.slice(0, 10)) {
+    const name = (row.title ?? '').split(':').pop()!.trim();
+    if (!name) continue;
+    for (const m of (row.chunk_text ?? '').matchAll(ALIAS_DECLARATION)) {
+      const alias = m[1].replace(/[.,;]+$/, '');
+      if (!/[A-Z0-9]/.test(alias) || alias.toLowerCase() === name.toLowerCase()) continue;
+      const hasName = q.includes(name.toLowerCase());
+      const hasAlias = indexOfName(q, alias, true) >= 0;
+      if (hasName === hasAlias) continue;
+      out.set(`${name}\u0000${alias}`, { name, alias, slug: row.slug });
+    }
+  }
+  return [...out.values()].slice(0, 5);
+}
+
+/**
+ * When the evidence declares another name for the entity the query names,
+ * also search under that name and splice the new pages in after the top two
+ * results, so documents that use only the other name are not left for the
+ * agent to discover (most agents did not act on the notice alone). Nothing is
+ * dropped: cutting the tail to make room lost the page that answered
+ * (gbrain-evals Cat 40, family B).
+ */
+async function withDeclaredNameFanOut(results: SearchResult[], queryText: string,
+  run: (query: string, limit: number) => Promise<SearchResult[]>): Promise<SearchResult[]> {
+  const [first] = aliasDeclarations(results, queryText);
+  if (!first) return results;
+  const nameAt = indexOfName(queryText, first.name, false);
+  const [from, to, at] = nameAt >= 0
+    ? [first.name, first.alias, nameAt]
+    : [first.alias, first.name, indexOfName(queryText, first.alias, true)];
+  const alt = queryText.slice(0, at) + to + queryText.slice(at + from.length);
+  let extra: SearchResult[];
+  try { extra = await run(alt, 5); } catch { return results; }
+  const seen = new Set(results.map(r => `${r.source_id ?? ''}\u0000${r.slug}`));
+  const fresh = extra.filter(r => !seen.has(`${r.source_id ?? ''}\u0000${r.slug}`));
+  if (fresh.length === 0) return results;
+  return [...results.slice(0, 2), ...fresh, ...results.slice(2)];
+}
+
+export interface SavedFactMatch { id: number; fact: string; entity_slug: string | null; kind: string; valid_from: string; source: string }
+
+/**
+ * Facts saved with `remember` live in the facts table, not in page chunks, so
+ * page search never returns them (gbrain-evals Cat 40: agents saved a
+ * correction with remember and the next session's search missed it). This
+ * finds active facts whose text or entity shares at least three quarters of the query's words,
+ * under the same source scope and visibility rules recall applies.
+ */
+async function matchingSavedFacts(ctx: OperationContext, scope: SourceScope, queryText: string, aliases: AliasDeclaration[] = []): Promise<SavedFactMatch[]> {
+  // A query naming one of two declared names also matches facts saved under the other.
+  for (const a of aliases) queryText += ` ${a.name} ${a.alias}`;
+  const terms = [...new Set(queryText.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}'-]+/gu) ?? [])]
+    .filter(t => t.length >= 3 && !FACT_MATCH_STOPWORDS.has(t)).slice(0, 12);
+  if (terms.length === 0 || !ctx.emitResponseMeta) return [];
+  const sources = scope.sourceIds?.length ? scope.sourceIds : [scope.sourceId ?? ctx.sourceId ?? 'default'];
+  const remote = ctx.remote !== false;
+  try {
+    const rows = await ctx.engine.executeRaw<SavedFactMatch & { haystack: string }>(
+      `SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source,
+         lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) AS haystack
+       FROM facts f
+       WHERE f.source_id = ANY($1::text[])
+         AND f.expired_at IS NULL AND (f.valid_until IS NULL OR f.valid_until > now())
+         AND f.source != ALL($2::text[])
+         AND lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY($3::text[])
+         ${remote ? `AND f.visibility = 'world' AND ${privateProvenanceFilterFragment('f')}` : ''}
+       ORDER BY f.valid_from DESC, f.id DESC
+       LIMIT 200`,
+      [sources, [...AUDIT_ROW_SOURCES], terms.map(t => `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%`)],
+    );
+    const need = Math.max(Math.min(2, terms.length), Math.ceil(terms.length * 0.75));
+    return rows
+      .map(r => ({ r, hits: terms.filter(t => r.haystack.includes(t)).length }))
+      .filter(x => x.hits >= need)
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, 5)
+      .map(({ r: { haystack: _h, ...fact } }) => ({ ...fact, id: Number(fact.id) }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * WP2/D3 + E1: the `retrieval` response-meta payload for the search/query
  * ops. Carries the already-computed HybridSearchMeta signal (vector arm,
  * cache, budget, degradation stages — populated by the search pipeline) plus
@@ -201,7 +352,7 @@ async function buildRetrievalResponseMeta(
   queryText: string,
   results: unknown[],
   meta: HybridSearchMeta | null,
-  opts: { conceptHint?: boolean; types?: string[] } = {},
+  opts: { conceptHint?: boolean; types?: string[]; typeFilterNotice?: string } = {},
 ): Promise<Record<string, unknown>> {
   const m = meta as (HybridSearchMeta & { degraded?: unknown[]; retrieved_count?: number }) | null;
   const hint = opts.conceptHint && looksConceptShaped(queryText)
@@ -218,6 +369,8 @@ async function buildRetrievalResponseMeta(
     types: opts.types,
     excludeSlugPrefixes,
   });
+  const aliases = aliasDeclarations(results as Array<{ slug: string; title?: string; chunk_text?: string }>, queryText);
+  const savedFacts = await matchingSavedFacts(ctx, scope, queryText, aliases);
   const degraded = [...(m?.degraded ?? [])];
   if (safeIndexPending) degraded.push({ stage: 'safe_index_pending' });
   if (readiness.status !== 'ready') {
@@ -238,6 +391,9 @@ async function buildRetrievalResponseMeta(
     } : {}),
     ...((m?.degraded !== undefined || degraded.length > 0) ? { degraded } : {}),
     projection_readiness: readiness,
+    ...(opts.typeFilterNotice ? { type_filter_notice: opts.typeFilterNotice } : {}),
+    ...(savedFacts.length ? { saved_facts: savedFacts } : {}),
+    ...(aliases.length ? { other_names: aliases } : {}),
     ...(hint || readiness.hint ? { hint: [hint, readiness.hint].filter(Boolean).join(' ') } : {}),
   };
 }
@@ -383,6 +539,8 @@ const search: Operation = {
     // #4352 — untrusted callers never see `visibility: private` pages
     // (config-gated; trusted local CLI unchanged).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
+    const typeFilter = await reconcileTypeFilter(ctx, scope, excludePrivate, types);
+    types = typeFilter.types;
 
     // T4/D5 — per-call mode honored ONLY for trusted/local callers so a remote
     // OAuth client can't escalate to the costly tokenmax bundle. Local + unknown
@@ -419,13 +577,13 @@ const search: Operation = {
       maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
       // #3800: cap AFTER capture/meta so eval + cache see the real payload.
       return evidenceOutput(ctx, p, results, plan, { ...scope, excludePrivate }, null, snippetCap,
-        rows => buildRetrievalResponseMeta(ctx, scope, queryText, rows, null, { conceptHint: true, types }));
+        rows => buildRetrievalResponseMeta(ctx, scope, queryText, rows, null, { conceptHint: true, types, typeFilterNotice: typeFilter.notice }));
     }
 
     // Cheap-hybrid (D4/D15): full vector+keyword+RRF+pool+title+alias, but
     // expansion OFF (no per-call LLM cost). `query` op is the full-control variant.
     let capturedMeta: HybridSearchMeta | null = null;
-    const results = (await hybridSearchCached(ctx.engine, queryText, {
+    const searchOpts = {
       limit,
       offset,
       expansion: false,
@@ -439,15 +597,17 @@ const search: Operation = {
       salience: p.salience as 'off' | 'on' | 'strong' | undefined,
       recency: p.recency as 'off' | 'on' | 'strong' | undefined,
       decide: { remote: ctx.remote !== false },
-      onMeta: (m) => { capturedMeta = m; },
-    })).map(r => ({ ...r }));
+    };
+    const primary = await hybridSearchCached(ctx.engine, queryText, { ...searchOpts, onMeta: (m) => { capturedMeta = m; } });
+    const results = (await withDeclaredNameFanOut(primary, queryText,
+      (alt, altLimit) => hybridSearchCached(ctx.engine, alt, { ...searchOpts, limit: altLimit, offset: 0 }))).map(r => ({ ...r }));
     stampDeepResearchIds(results);
     const latency_ms = Date.now() - startedAt;
     bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
     maybeCaptureSearch(ctx, queryText, results, latency_ms, true, capturedMeta);
     // #3800: cap AFTER capture/meta so eval + cache see the real payload.
     return evidenceOutput(ctx, p, results, plan, { ...scope, excludePrivate }, capturedMeta, snippetCap,
-      rows => buildRetrievalResponseMeta(ctx, scope, queryText, rows, capturedMeta, { conceptHint: true, types }));
+      rows => buildRetrievalResponseMeta(ctx, scope, queryText, rows, capturedMeta, { conceptHint: true, types, typeFilterNotice: typeFilter.notice }));
   },
   scope: 'read',
   cliHints: { name: 'search', positional: ['query'] },
@@ -678,6 +838,8 @@ const query: Operation = {
     // ctx.sourceId for callers that want to override (per-call multi-source
     // search). When the param is the literal '__all__', force-allow
     // cross-source mode (matches SearchOpts.sourceId contract).
+    const typeFilter = await reconcileTypeFilter(ctx, querySourceScope, excludePrivate, types);
+    types = typeFilter.types;
     let capturedMeta: HybridSearchMeta | null = null;
     // v0.32.x search-lite: route the query op through hybridSearchCached so
     // token budget and intent weighting apply at the operation boundary.
@@ -737,6 +899,10 @@ const query: Operation = {
       // v0.43 — relational recall override. Omitted = smart default (mode bundle).
       relationalRetrieval: typeof p.relational === 'boolean' ? (p.relational as boolean) : undefined,
     });
+    results = await withDeclaredNameFanOut(results, queryText, (alt, altLimit) => hybridSearchCached(ctx.engine, alt, {
+      limit: altLimit, excludePrivate, requireSafeChunks: ctx.remote !== false, takesHoldersAllowList: readHolders(ctx),
+      expansion: false, types, ...querySourceScope,
+    }));
     // #1663 — CRAG confidence gate. Grade what retrieval returned (zero-LLM;
     // reads the stamped honesty signals: evidence, exact_lookup, rerank
     // score), attach grade + query shape to the retrieval meta on EVERY call,
@@ -896,7 +1062,7 @@ const query: Operation = {
     // #3800: cap AFTER capture/meta/CRAG so every internal consumer graded
     // and recorded the real payload; only the returned envelope is snipped.
     return evidenceOutput(ctx, p, results, plan, { ...querySourceScope, excludePrivate, detail }, capturedMeta, snippetCap,
-      async rows => ({ ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, rows, capturedMeta, { types })), crag }));
+      async rows => ({ ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, rows, capturedMeta, { types, typeFilterNotice: typeFilter.notice })), crag }));
   },
   scope: 'read',
   cliHints: { name: 'query', positional: ['query'] },
