@@ -6,9 +6,6 @@ import { resolveBrainId, __testing } from '../src/core/brain-resolver.ts';
 import { HOST_BRAIN_ID, type MountEntry } from '../src/core/brain-registry.ts';
 
 const toCleanup: string[] = [];
-// Restore only the key this file touches. Replacing the whole `process.env`
-// object detaches it from Bun's native environment, so later TZ assignments
-// in the same process stop changing the time zone (see with-env.test.ts).
 const originalBrainId = process.env.GBRAIN_BRAIN_ID;
 
 function mktmp(prefix = 'brain-resolver-'): string {
