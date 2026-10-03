@@ -121,7 +121,6 @@ services:
         ["ask-stars"]="ask-stars"
         ["ai-rozum"]="ai-rozum"
         ["acre"]="Acre"
-        ["openclaw"]="openclaw"
       )
       for ID in "${!PAIRS[@]}"; do
         REPO="${PAIRS[$ID]}"
@@ -166,15 +165,18 @@ services:
       bun install --frozen-lockfile --ignore-scripts
       bun run build
     startCommand: |
-      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum acre openclaw"
+      SOURCES="basaev-app bsv-spec basaev-com research-actvox mandala-estate ask-stars ai-rozum acre"
+      # Keep `tail`, never `head`: gbrain prints an UPGRADE_AVAILABLE banner before it
+      # inserts the job, so `head -2` closed the pipe early and the next write died of
+      # SIGPIPE before the insert — from 2026-08-31 only the first source was ever queued.
       for SRC in $SOURCES; do
         echo "submit sync $SRC"
-        ./bin/gbrain jobs submit sync --params "{\"sourceId\":\"$SRC\"}" --idempotency-key "cron:sync:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | head -2
+        ./bin/gbrain jobs submit sync --params "{\"sourceId\":\"$SRC\"}" --idempotency-key "cron:sync:$SRC:$(date -u +%Y-%m-%dT%H:%M)" 2>&1 | tail -n 2
       done
       # Preserve the live sync/embed schedule. Extraction/enrichment is a
       # separately reviewed operation, not an implicit upgrade side effect.
       echo "submit embed --stale"
-      ./bin/gbrain jobs submit embed --idempotency-key "cron:embed:$(date -u +%Y-%m-%dT%H)" 2>&1 | head -2
+      ./bin/gbrain jobs submit embed --idempotency-key "cron:embed:$(date -u +%Y-%m-%dT%H)" 2>&1 | tail -n 2
     envVars:
       - fromGroup: gbrain-shared              # only needs DATABASE_URL really
 
