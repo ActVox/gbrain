@@ -72,7 +72,6 @@ src/core/search/hybrid/keyword-only.ts	code	5	review
 src/core/search/hybrid/rank.ts	code	3	review	
 test/admin-embed-spawn.serial.test.ts	test	26	with its code patch	
 test/attendance-retrieval.test.ts	test	39	with its code patch	
-test/brain-resolver.test.ts	test	8	with its code patch	
 test/cjk.test.ts	test	1	with its code patch	
 test/cycle-patterns-child-outcome.test.ts	test	9	with its code patch	
 test/db-lock-heartbeat-takeover.test.ts	test	26	with its code patch	
@@ -106,9 +105,6 @@ test/tool-catalog.test.ts	test	2	with its code patch
 .github/workflows/semgrep.yml	ci	29	no (fork integration baseline selector)	
 .github/workflows/test.yml	ci	46	upstream PR garrytan/gbrain#5900 (scope step); runner labels stay fork policy	
 .gitignore	ci	1	no (ActVox runner/CI policy)	
-docker-compose.ci.yml	ci	3	upstream PR garrytan/gbrain#5901	
-scripts/ci-local.sh	ci	6	upstream PR garrytan/gbrain#5901	
-scripts/ci-native-scope.sh	ci	9	upstream PR garrytan/gbrain#5900	
 scripts/run-heavy.sh	ci	7	no (ActVox runner/CI policy)	
 docs/TESTING.md	docs	70	review	
 docs/architecture/key-files/commands-5.md	docs	2	review	
@@ -119,15 +115,8 @@ admin/index.html	brand	8	no (ActVox dashboard brand)
 admin/src/App.tsx	brand	21	no (ActVox dashboard brand)	
 admin/src/main.tsx	brand	1	no (ActVox dashboard brand)	
 admin/src/pages/Dashboard.tsx	brand	191	no (ActVox dashboard brand)	
-scripts/check-retired-phrases.sh	tooling	3	review	
 scripts/check-tool-catalog-fresh.sh	tooling	2	review	
 scripts/generate-tool-catalog.ts	tooling	5	review	
 scripts/llms-config.ts	tooling	4	review	
 scripts/check-key-files-current-state.sh	tooling	4	no (ActVox: CLAUDE.md cap +1000 for the fork paragraph; re-check after each integration)	
-docs/architecture/key-files/core-utilities-1.md	docs	2	upstream PR garrytan/gbrain#5899	
-src/commands/serve-http-mcp.ts	code	3	upstream PR garrytan/gbrain#5899	
-src/core/ops/contract.ts	code	12	upstream PR garrytan/gbrain#5899	
-src/core/ops/sources.ts	code	11	upstream PR garrytan/gbrain#5899	
-test/serve-http-auth-outcomes.test.ts	test	50	upstream PR garrytan/gbrain#5899	
-test/whoami.test.ts	test	39	upstream PR garrytan/gbrain#5899	
 test/ai/gateway-chat.test.ts	test	7	yes (upstream test-isolation fix: restore the gateway baseline after the file)	
