@@ -108,7 +108,6 @@ test/tool-catalog.test.ts	test	2	with its code patch
 scripts/run-heavy.sh	ci	7	no (ActVox runner/CI policy)	
 docs/TESTING.md	docs	70	review	
 docs/architecture/key-files/commands-5.md	docs	2	review	
-docs/architecture/key-files/core-search-1.md	docs	2	review	
 docs/mcp/ADMIN.md	docs	13	review	
 admin/e2e/fixtures.ts	brand	6	no (ActVox dashboard brand)	
 admin/index.html	brand	8	no (ActVox dashboard brand)	
