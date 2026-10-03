@@ -2,6 +2,50 @@
 
 Fork-only entries that previously lived at the top of CHANGELOG.md. Upstream owns CHANGELOG.md; this file is ActVox-owned so upstream integrations never conflict with it.
 
+## [0.60.32.0] - 2026-10-03
+
+**ActVox integration of upstream garrytan/gbrain v0.60.32.0** (`48ed5e8233f617479df989998560840747af0425`).
+
+### Operator notes
+- Schema migrations v187-v189 apply on first start. v187 adds the fact-relink table and an index (`CONCURRENTLY` on Postgres). v188 adds a unique facts index; production was pre-checked and has 0 duplicate groups. v189 queues credential reprojection for pages that contain a private-key block; production has 0 such pages. They are roll-forward only, so take a verified database backup before deploying.
+- Upstream's security fix wave (credential redaction, credential-safe chunking, private Google files) is included.
+
+### Upstream absorbed these fork patches (fork copies dropped)
+- whoami / `gbrain://capabilities` transport from the verified principal (fork PR #30, upstream #5899).
+- Native CI scope on large or capped PR file lists (upstream #5900) and `ci:local` on macOS (upstream #5901).
+- The retired-phrases guard read and the `brain-resolver` env restore, which upstream fixed the same way.
+
+### Integration tooling
+- The upstream-merge resolver no longer runs generators while residual conflicts remain.
+- The operational-memory reference entry moved to `docs/operations/actvox-fork-modules.md`, so the upstream key-files doc stays byte-identical.
+- Fork delta vs upstream: 161 → 137 paths.
+
+
+## [0.60.27.2] - 2026-10-02
+
+**Upstream releases now integrate without hand-resolving generated files, and the fork's divergence from upstream is measured on every change.**
+
+### Added
+- One integration command, `scripts/sync-from-upstream.sh` (the scheduled watcher runs the same script). It merges in a temporary worktree, so your checkout is never touched. It resolves version stamps, bundles, plugin trees, goldens, dependency security pins, ratchet ceilings, the dashboard build and the fork's CLAUDE.md paragraph by policy, then reruns the generators. Integrating the latest upstream release this way needed no hand resolution.
+- `scripts/actvox/check-delta.ts` and the `ActVox fork delta` workflow fail a change that edits an upstream-owned file without a reviewed line budget in `scripts/actvox/patch-inventory.tsv`.
+
+### Fixed
+- The upstream watcher can push again. It uses a GitHub App token, and a conflict the policy cannot resolve fails the run and updates one issue, instead of passing silently.
+- `gbrain extract --source db --from-meetings` reports failed timeline batches with the first error and still prints the `--json` result before exiting non-zero, matching upstream.
+
+### To take advantage of v0.60.27.2
+An org owner creates the watcher GitHub App and sets `ACTVOX_UPSTREAM_APP_CLIENT_ID` (repo variable) and `ACTVOX_UPSTREAM_APP_PRIVATE_KEY` (repo secret), as described in `docs/operations/fork-upstream-production-branching.md`. Until then the watcher fails with a message naming the missing credential. No runtime, migration or permission change.
+
+## [0.60.27.1] - 2026-10-02
+
+**Agents now see their real connection type when they ask the Team brain who they are.**
+
+### Fixed
+- `whoami` and the `gbrain://capabilities` resource report `oauth` or `legacy` from the identity the server verified, not from the shape of the client id. An OAuth client registered by hand with an id that does not start with `gbrain_cl_` was reported as a legacy token, and `whoami` hid its client id, write source and federated read grant. A legacy token named like an OAuth client id was reported as OAuth. Both cases now report correctly, on both surfaces.
+
+### To take advantage of v0.60.27.1
+Deploy this ActVox fork release. No migration, configuration or permission change is needed. Agents connected through a hand-provisioned OAuth client see `transport: oauth` with their grant on the next `whoami` call or capabilities read.
+
 
 ## [0.60.27.0] - 2026-10-02
 

@@ -140,3 +140,4 @@ export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
     return { name, status: 'warn', message: `could not check: ${(e as Error).message}` };
   }
 }
+

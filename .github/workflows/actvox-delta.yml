@@ -1,0 +1,32 @@
+name: ActVox fork delta
+
+# Fork-owned ratchet: every edit the fork makes to an upstream-owned file must
+# be inventoried with a line budget in scripts/actvox/patch-inventory.tsv, so
+# the upstream-merge conflict surface cannot grow silently. Kept out of the
+# upstream-owned verify runner on purpose (that would itself be a fork edit).
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fork-delta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Fork delta within the patch inventory
+        run: bun scripts/actvox/check-delta.ts
+      - name: Upstream-merge tooling tests
+        run: bun test --timeout=60000 test/scripts/actvox-check-delta.test.ts test/scripts/actvox-resolve-upstream-merge.test.ts test/scripts/actvox-create-upstream-pr.test.ts

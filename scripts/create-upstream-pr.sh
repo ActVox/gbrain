@@ -4,6 +4,11 @@
 # Invariant:
 #   garrytan/gbrain:master -> integration branch in ActVox/gbrain -> PR to ActVox/gbrain:master
 #   ATX-HUB is rollback/reference only and must never be a PR base.
+#
+# The merge runs in a dedicated temporary git worktree: the caller's checkout
+# (branch, HEAD, index, working files) is never touched. Conflicts are resolved
+# by scripts/actvox/resolve-upstream-merge.ts per scripts/actvox/merge-policy.tsv;
+# anything the policy does not cover fails the run (exit 10) for a human.
 
 set -euo pipefail
 
@@ -15,10 +20,14 @@ PR_BRANCH="${PR_BRANCH:-automation/upstream-master}"
 PR_TITLE="${PR_TITLE:-chore: sync upstream gbrain master}"
 DRY_RUN=0
 PUSH=1
+KEEP_WORKTREE=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/create-upstream-pr.sh [--dry-run] [--no-push]
+Usage: scripts/create-upstream-pr.sh [--dry-run] [--no-push] [--keep-worktree]
+
+  --keep-worktree  keep the integration worktree (and any residual conflicts
+                   in it) for hand resolution instead of removing it
 
 Environment overrides:
   BASE_BRANCH=master
@@ -36,6 +45,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; PUSH=0; shift ;;
     --no-push) PUSH=0; shift ;;
+    --keep-worktree) KEEP_WORKTREE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -46,11 +56,6 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 2
 }
 cd "$repo_root"
-
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: working tree is dirty; commit/stash before creating upstream PR" >&2
-  exit 6
-fi
 
 origin_url="$(git remote get-url "$ORIGIN_REMOTE" 2>/dev/null || true)"
 upstream_url="$(git remote get-url "$UPSTREAM_REMOTE" 2>/dev/null || true)"
@@ -101,20 +106,49 @@ upstream_only="${left_right##*[[:space:]]}"
 base_sha="$(git rev-parse "$base_ref")"
 upstream_sha="$(git rev-parse "$upstream_ref")"
 
-# Recreate the automation branch from the production base every run. It is not
-# production and force-pushing it is intentional: one PR represents latest upstream.
-git checkout -B "$PR_BRANCH" "$base_ref" >/dev/null
+# Recreate the automation branch from the production base every run, in its
+# own worktree. It is not production and force-pushing it is intentional: one
+# PR represents latest upstream.
+wt_root="$(mktemp -d "${TMPDIR:-/tmp}/gbrain-upstream-integration.XXXXXX")"
+wt="$wt_root/worktree"
+cleanup_worktree() {
+  if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
+    echo "INFO: integration worktree kept at $wt"
+  else
+    git worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt_root"
+  fi
+}
+trap cleanup_worktree EXIT
+git worktree add -q -B "$PR_BRANCH" "$wt" "$base_ref"
 
 merge_exit=0
-git merge --no-ff --no-edit "$upstream_ref" || merge_exit=$?
+git -C "$wt" -c rerere.enabled=true -c rerere.autoupdate=true merge --no-ff --no-commit "$upstream_ref" || merge_exit=$?
+resolver_report=""
 if [[ "$merge_exit" -ne 0 ]]; then
-  conflict_files_raw="$(git diff --name-only --diff-filter=U)"
-  if [[ -z "$conflict_files_raw" ]] || ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+  if ! git -C "$wt" rev-parse -q --verify MERGE_HEAD >/dev/null; then
     echo "ERROR: upstream merge failed without resolvable conflict state (exit ${merge_exit})" >&2
     exit "$merge_exit"
   fi
+  # No dependency install before resolving: package.json/bun.lock may still
+  # hold conflict markers. The resolver needs only the bun runtime; its
+  # regenerate step installs after package.json is resolved.
+  resolver_args=()
+  [[ "${ACTVOX_RESOLVER_NO_REGENERATE:-0}" == "1" ]] && resolver_args+=(--no-regenerate)
+  resolver_exit=0
+  resolver_report="$(cd "$wt" && bun scripts/actvox/resolve-upstream-merge.ts ${resolver_args[@]+"${resolver_args[@]}"} 2>&1)" || resolver_exit=$?
+  printf '%s\n' "$resolver_report"
+  if [[ "$resolver_exit" -eq 0 ]]; then
+    merge_exit=0
+  elif [[ "$resolver_exit" -ne 3 ]]; then
+    echo "ERROR: upstream-merge resolver failed (exit ${resolver_exit})" >&2
+    exit "$resolver_exit"
+  fi
+fi
+if [[ "$merge_exit" -ne 0 ]]; then
+  conflict_files_raw="$(git -C "$wt" diff --name-only --diff-filter=U)"
   conflict_files="$(printf '%s\n' "$conflict_files_raw" | sed 's/^/- /')"
-  if ! git merge --abort; then
+  if [[ "$KEEP_WORKTREE" -ne 1 ]] && ! git -C "$wt" merge --abort; then
     echo "ERROR: failed to abort conflicted upstream merge" >&2
     exit 11
   fi
@@ -127,15 +161,18 @@ Automated merge failed.
 - Upstream: \`${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}\` @ \`${upstream_sha}\`
 - Commits ahead upstream: ${upstream_only}
 
-### Conflicted files
+### Conflicts the merge policy does not cover
 ${conflict_files:-none reported}
 
-Manual path:
+### Resolver output
+\`\`\`
+${resolver_report:-resolver not run}
+\`\`\`
+
+Manual path (the caller's checkout is never modified):
 \`\`\`bash
-git checkout ${BASE_BRANCH}
-git pull --ff-only ${ORIGIN_REMOTE} ${BASE_BRANCH}
-scripts/guard-gbrain-upstream-merge.sh
-# then create a temporary worktree and resolve the merge into a PR against master
+scripts/create-upstream-pr.sh --no-push --keep-worktree
+# resolve the listed files in the printed worktree, commit, then push the branch and open the PR
 \`\`\`
 EOF
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
@@ -147,10 +184,14 @@ EOF
       exit 12
     fi
     if [[ "$issues_enabled" == "true" ]]; then
-      gh issue create \
-        --repo ActVox/gbrain \
-        --title "Upstream sync conflict: garrytan/gbrain master" \
-        --body-file /tmp/gbrain-upstream-conflict.md
+      issue_title="Upstream sync conflict: garrytan/gbrain master"
+      open_issue="$(gh issue list --repo ActVox/gbrain --state open --search "\"$issue_title\" in:title" --json number,title --jq "map(select(.title == \"$issue_title\"))[0].number // empty")"
+      if [[ -n "$open_issue" ]]; then
+        gh issue edit "$open_issue" --repo ActVox/gbrain --body-file /tmp/gbrain-upstream-conflict.md >/dev/null
+        echo "INFO: updated conflict issue #${open_issue}"
+      else
+        gh issue create --repo ActVox/gbrain --title "$issue_title" --body-file /tmp/gbrain-upstream-conflict.md
+      fi
     elif [[ "$issues_enabled" == "false" ]]; then
       echo "INFO: repository Issues are disabled; conflict report kept as a workflow artifact."
     else
@@ -160,17 +201,23 @@ EOF
   else
     cat /tmp/gbrain-upstream-conflict.md
   fi
-  if [[ "${CONFLICT_IS_WARNING:-0}" == "1" ]]; then
-    echo "::warning title=Upstream merge conflict::Manual semantic integration is required; see the uploaded conflict report."
-    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-      cat /tmp/gbrain-upstream-conflict.md >> "$GITHUB_STEP_SUMMARY"
-    fi
-    exit 0
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    cat /tmp/gbrain-upstream-conflict.md >> "$GITHUB_STEP_SUMMARY"
   fi
+  # A conflict the policy cannot resolve is a failed run, never a green warning.
+  echo "::error title=Upstream merge conflict::$(printf '%s' "$conflict_files_raw" | wc -l | tr -d ' ') file(s) need a human; see the conflict report."
   exit 10
 fi
+if git -C "$wt" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+  # The fork-delta ratchet measures the fork against the upstream it integrated.
+  if [[ -d "$wt/scripts/actvox" ]]; then
+    git -C "$wt" rev-parse "$upstream_ref" > "$wt/scripts/actvox/upstream-base"
+    git -C "$wt" add scripts/actvox/upstream-base
+  fi
+  git -C "$wt" commit -q --no-edit
+fi
 
-range="${base_ref}..HEAD"
+range="${base_ref}..${PR_BRANCH}"
 changed_files="$(git diff --name-only "$range" | sort)"
 commit_subjects="$(git log --no-merges --format='- %h %s' "$range" | head -80)"
 
@@ -230,6 +277,12 @@ ${commit_subjects:-_No non-merge commits listed._}
 
 ${changed_preview:-_No changed files._}
 
+### Resolver output
+
+\`\`\`
+${resolver_report:-no conflicts}
+\`\`\`
+
 ### Required before merge
 
 - [ ] CI green: guard, gitleaks, verify, serial-tests, slow-tests, test-status
@@ -250,14 +303,14 @@ curl -sS -o /dev/null -w '%{http_code}' -X OPTIONS https://gbrain.actvox.dev/tok
 EOF
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "DRY RUN: upstream PR branch prepared locally: $PR_BRANCH"
+  echo "DRY RUN: upstream PR branch prepared locally: $PR_BRANCH (worktree: $wt)"
   echo "DRY RUN: PR body: /tmp/gbrain-upstream-pr.md"
   cat /tmp/gbrain-upstream-pr.md
   exit 0
 fi
 
 if [[ "$PUSH" -eq 1 ]]; then
-  git push --force-with-lease "$ORIGIN_REMOTE" "${PR_BRANCH}:${PR_BRANCH}"
+  git -C "$wt" push --force-with-lease "$ORIGIN_REMOTE" "${PR_BRANCH}:${PR_BRANCH}"
 
   existing_pr="$(gh pr list --head "$PR_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')"
 

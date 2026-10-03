@@ -6,10 +6,11 @@ on:
     - cron: '17 */6 * * *'
   workflow_dispatch:
 
+# The job pushes and opens PRs with a GitHub App installation token, not
+# GITHUB_TOKEN: GITHUB_TOKEN cannot push commits that touch .github/workflows/
+# (every upstream release does), and PRs it opens do not trigger CI.
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 concurrency:
   group: upstream-watcher
@@ -17,13 +18,39 @@ concurrency:
 
 jobs:
   upstream-watch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
+      - name: Require the watcher App credential
+        env:
+          CLIENT_ID: ${{ vars.ACTVOX_UPSTREAM_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.ACTVOX_UPSTREAM_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$CLIENT_ID" ] || [ "$HAS_KEY" != "true" ]; then
+            echo "::error title=Upstream watcher credential missing::Set repo variable ACTVOX_UPSTREAM_APP_CLIENT_ID and secret ACTVOX_UPSTREAM_APP_PRIVATE_KEY (docs/operations/fork-upstream-production-branching.md)."
+            exit 1
+          fi
+
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.ACTVOX_UPSTREAM_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ACTVOX_UPSTREAM_APP_PRIVATE_KEY }}
+          repositories: gbrain
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-workflows: write
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: 1.4.2
 
       - name: Configure remotes
         run: |
@@ -36,22 +63,21 @@ jobs:
 
       - name: Git identity
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "actvox-upstream-watcher[bot]"
+          git config user.email "actvox-upstream-watcher[bot]@users.noreply.github.com"
 
       - name: Create or update upstream PR
         id: upstream
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BASE_BRANCH: master
           UPSTREAM_REMOTE: upstream
           UPSTREAM_BRANCH: master
           ORIGIN_REMOTE: origin
           PR_BRANCH: automation/upstream-master
           PR_TITLE: "chore: sync upstream gbrain master"
-          # Scheduled detection reports a known semantic conflict as a warning.
-          # Manual dispatch preserves the non-zero conflict exit for investigation.
-          CONFLICT_IS_WARNING: ${{ github.event_name == 'schedule' && '1' || '0' }}
+        # Policy conflicts resolve by scripts/actvox/merge-policy.tsv; anything
+        # else fails this run (exit 10) and updates one conflict issue.
         run: bash scripts/create-upstream-pr.sh
 
       - name: Upload conflict report if merge failed

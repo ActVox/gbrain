@@ -1,0 +1,10 @@
+{
+  "_comment": "ActVox dependency security floors. The upstream-merge resolver keeps the higher of upstream's and these ranges, so an upstream bump past a floor is never downgraded.",
+  "dependencies": {
+    "marked": "^18.0.5"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.10",
+    "fast-xml-parser": "^5.10.1"
+  }
+}
