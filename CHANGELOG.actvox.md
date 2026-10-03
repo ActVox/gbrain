@@ -2,6 +2,24 @@
 
 Fork-only entries that previously lived at the top of CHANGELOG.md. Upstream owns CHANGELOG.md; this file is ActVox-owned so upstream integrations never conflict with it.
 
+## [0.60.32.0] - 2026-10-03
+
+**ActVox integration of upstream garrytan/gbrain v0.60.32.0** (`48ed5e8233f617479df989998560840747af0425`).
+
+### Operator notes
+- Schema migrations v187-v189 apply on first start. v187 adds the fact-relink table and an index (`CONCURRENTLY` on Postgres). v188 adds a unique facts index; production was pre-checked and has 0 duplicate groups. v189 queues credential reprojection for pages that contain a private-key block; production has 0 such pages. They are roll-forward only, so take a verified database backup before deploying.
+- Upstream's security fix wave (credential redaction, credential-safe chunking, private Google files) is included.
+
+### Upstream absorbed these fork patches (fork copies dropped)
+- whoami / `gbrain://capabilities` transport from the verified principal (fork PR #30, upstream #5899).
+- Native CI scope on large or capped PR file lists (upstream #5900) and `ci:local` on macOS (upstream #5901).
+- The retired-phrases guard read and the `brain-resolver` env restore, which upstream fixed the same way.
+
+### Integration tooling
+- The upstream-merge resolver no longer runs generators while residual conflicts remain.
+- The operational-memory reference entry moved to `docs/operations/actvox-fork-modules.md`, so the upstream key-files doc stays byte-identical.
+- Fork delta vs upstream: 161 → 137 paths.
+
 
 ## [0.60.27.2] - 2026-10-02
 

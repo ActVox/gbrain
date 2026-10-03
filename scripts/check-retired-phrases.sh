@@ -40,6 +40,9 @@ fi
 EXEMPT='^(docs/(designs|test-audit|incidents|plans|proposals|research|issues|superpowers|migrations)/|skills/migrations/|docs/architecture/wave-1-)'
 
 # pattern<TAB>current instruction
+# Read with `read -d ''`, never a `cat` heredoc inside a command substitution:
+# macOS /bin/bash 3.2 quote-scans that heredoc and dies on the apostrophe and
+# the odd backticks in these rows, so the guard could not even parse there.
 IFS= read -r -d '' RETIRED <<'EOF' || true
 MIGRATIONS`? array	Migrations are one file each: `bun run new:migration <snake_name>` scaffolds src/core/schema-migrations/v<NNN>-<name>.ts and regenerates registry.generated.ts; migrate.ts is only the runner.
 append(s|ing)? (an entry |a migration |it )?to (the )?`?MIGRATIONS	Migrations are one file each: `bun run new:migration <snake_name>` (src/core/schema-migrations/), never an array append.

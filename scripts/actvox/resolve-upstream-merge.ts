@@ -235,7 +235,9 @@ export function resolveMerge(cwd: string, opts: { regenerate: boolean }): Resolv
       result.residual.push(`${path} (${rule.action}: ${e instanceof Error ? e.message : String(e)})`);
     }
   }
-  if (opts.regenerate && result.resolved.length) {
+  // Generators import repo source; with residual conflicts they would parse
+  // conflict markers. Regenerate only once every conflict is resolved.
+  if (opts.regenerate && result.resolved.length && result.residual.length === 0) {
     // Each step runs only when its generator exists in the merged tree.
     const steps: Array<[string, string, string[]]> = [
       ['bun.lock', 'package.json', ['bun', 'install']],
