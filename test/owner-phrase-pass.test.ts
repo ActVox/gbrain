@@ -24,7 +24,7 @@ import { buildEntityCard } from '../src/core/verbs/entity-card.ts';
 import { entityAnchoredPages } from '../src/core/search/entity-anchor.ts';
 import { applyGeneratedDemotion } from '../src/core/search/provenance-demotion.ts';
 import type { SearchResult } from '../src/core/types.ts';
-import { ACME, NIMBUS, WIDGET, doc, ownerPhraseLinks, ownerPhraseSnapshot, seedOwnerPhraseBrain, sweepOwnerPhrases, windowRows } from './helpers/owner-phrase-brain.ts';
+import { ACME, NIMBUS, WIDGET, doc, knownAsContinuation, ownerPhraseLinks, ownerPhraseSnapshot, seedOwnerPhraseBrain, sweepOwnerPhrases, windowRows } from './helpers/owner-phrase-brain.ts';
 
 let engine: PGLiteEngine;
 let snap: Awaited<ReturnType<typeof ownerPhraseSnapshot>>;
@@ -154,6 +154,25 @@ describe('final-score invariance', () => {
     await engine.setConfig('mentions.owner_phrases', 'true');
     await sweepOwnerPhrases(engine);
     expect(await ownerPhraseLinks(engine)).toEqual([...snap.trusted, `notes/generated-summary -> ${ACME}`].sort());
+  });
+});
+
+describe('known_as continuation', () => {
+  test('rows < total carries a get_backlinks group:"known_as" next that continues the card in order to the end; private windows stay hidden from untrusted reads', async () => {
+    const r = await knownAsContinuation(engine);
+    const owners = ['Quill Example', 'Maple Example', 'Linden Example', 'Kauri Example', 'Ivy Example', 'Hazel Example', 'Ginkgo Example', 'Fir Example',
+      'Dogwood Example', 'Elm Example', 'Cedar Example', 'Birch Example', 'Alder Example'];
+    // 12 table stints, Quill's private takeover and Maple's private predecessor window ending the day before it.
+    expect(r.trusted).toMatchObject({ total: 14, shown: 10, next: { tool: 'get_backlinks', group: 'known_as', requires_surface: null }, allTotal: 14, truncated: false });
+    expect(r.trusted.all.slice(0, 3)).toEqual(['Quill Example', 'Maple Example', 'Maple Example']);
+    expect(r.trusted.followed).toEqual(r.trusted.all);
+    expect(r.trusted.pages).toEqual([1, 1, 1, 1]);
+    expect(r.remote).toMatchObject({ total: 12, shown: 10, allTotal: 12 });
+    expect(r.remote.followed).toEqual(r.remote.all);
+    expect(r.remote.all).not.toContain('Quill Example');
+    expect(new Set(r.trusted.all)).toEqual(new Set(owners));
+    expect(r.verbs).toBe('starter');
+    expect([r.badCursor, r.withType]).toEqual([true, true]);
   });
 });
 

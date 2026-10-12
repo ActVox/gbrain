@@ -144,7 +144,9 @@ The rules below are general to any brain. Each line is covered by a test row in
     that page as `origin_page_id`. Remote and world-scope readers apply the
     link-origin privacy check and do not see the link. Trusted local reads do.
     `known_as` rows on the card follow the same rule. The card shows at most
-    10 `known_as` rows, newest window first, with the `total`.
+    10 `known_as` rows, newest window first, with the `total`. When rows <
+    total, `known_as.next` is an executable `get_backlinks` call with
+    `group: "known_as"` and a cursor that returns the rest in the same order.
 13. **Invalidation.** A page is rescanned when its content revision or the
     owner-phrase version changes. Windows are rebuilt from every page's stored
     statements on each pass, and links are diffed against them. So a window

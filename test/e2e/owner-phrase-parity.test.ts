@@ -3,7 +3,8 @@
  *
  * Protects: the v240 migration (link_kind CHECK accepting 'owner_phrase',
  * the windowed tables) and the owner-phrase pass producing the same windows,
- * links, counters, visibility and `known_as` rows on both engines, plus a
+ * links, counters, visibility, `known_as` rows and their get_backlinks
+ * continuation on both engines, plus a
  * correction, a deletion, disable, and two passes racing over a real
  * connection pool on Postgres (the advisory lock serializes publication).
  * Regression: an engine-specific SQL difference in the jsonb batch writes,
@@ -17,7 +18,7 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { buildGazetteer } from '../../src/core/by-mention.ts';
 import { linkableTypesFor, loadSourcePack, readMentionPolicy } from '../../src/core/mentions/policy.ts';
 import { runOwnerPhrasePass } from '../../src/core/mentions/owner-phrase/pass.ts';
-import { ACME, NIMBUS, doc, ownerPhraseLinks, ownerPhraseSnapshot, seedOwnerPhraseBrain, sweepOwnerPhrases, windowRows } from '../helpers/owner-phrase-brain.ts';
+import { ACME, NIMBUS, doc, knownAsContinuation, ownerPhraseLinks, ownerPhraseSnapshot, seedOwnerPhraseBrain, sweepOwnerPhrases, windowRows } from '../helpers/owner-phrase-brain.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
 
 const SKIP_PG = !hasDatabase();
@@ -53,12 +54,14 @@ async function checkConstraint(engine: BrainEngine) {
 let pglite: PGLiteEngine;
 let pgliteSnap: Awaited<ReturnType<typeof ownerPhraseSnapshot>>;
 let pgliteLife: Awaited<ReturnType<typeof lifecycle>>;
+let pgliteKnownAs: Awaited<ReturnType<typeof knownAsContinuation>>;
 beforeAll(async () => {
   pglite = new PGLiteEngine();
   await pglite.connect({});
   await pglite.initSchema();
   await seedOwnerPhraseBrain(pglite);
   pgliteSnap = await ownerPhraseSnapshot(pglite);
+  pgliteKnownAs = await knownAsContinuation(pglite);
   pgliteLife = await lifecycle(pglite);
 }, 180_000);
 afterAll(async () => { await pglite.disconnect(); });
@@ -71,6 +74,8 @@ describe('owner phrases (PGLite half)', () => {
     expect(pgliteLife.afterRace).toContain(`notes/new-call -> ${NIMBUS}`);
     expect(pgliteLife.deleted.filter(l => l.endsWith(ACME))).toEqual([]);
     expect(pgliteLife.disabled).toEqual({ state: 'off', links: [], windows: [] });
+    expect(pgliteKnownAs.trusted.followed).toEqual(pgliteKnownAs.trusted.all);
+    expect(pgliteKnownAs.trusted).toMatchObject({ total: 14, shown: 10 });
   });
 });
 
@@ -86,6 +91,10 @@ describeBoth('owner phrases (Postgres parity)', () => {
 
   test('windows, links, counters, visibility and known_as match PGLite', async () => {
     expect(await ownerPhraseSnapshot(pg)).toEqual(pgliteSnap);
+  });
+
+  test('the known_as continuation (card next followed through get_backlinks) matches PGLite', async () => {
+    expect(await knownAsContinuation(pg)).toEqual(pgliteKnownAs);
   });
 
   test('correction, a pooled race, deletion and disable match PGLite', async () => {

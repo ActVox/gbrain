@@ -329,7 +329,7 @@ export async function buildEntityCard(
   if (opts.includeReferences) {
     Object.assign(card, await cardReferences(engine, sourceId, best.row, opts, excludePrivate, entityTypes),
       await readCardIdentity(engine, sourceId, best.row, { excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka }),
-      await readKnownAs(engine, sourceId, best.row.slug, { excludePrivate }));
+      await readKnownAs(engine, sourceId, best.row.slug, { excludePrivate, surfaceCeiling: opts.surfaceCeiling }));
   }
   return {
     found: true,

@@ -90,3 +90,44 @@ export async function ownerPhraseSnapshot(engine: BrainEngine) {
     knownAsRemote: (await card(true))?.rows.map(r => `${r.owner} ${r.from ?? '?'}..${r.to ?? 'open'}`) ?? [],
   };
 }
+
+/**
+ * Twelve dated stints on one account (more than the card's 10 `known_as` rows),
+ * then the card and its `known_as.next` continuation followed to the end
+ * through `get_backlinks`. Returns owners in served order per reader.
+ */
+export async function knownAsContinuation(engine: BrainEngine) {
+  const { dispatchToolCall } = await import('../../src/mcp/dispatch.ts');
+  const names = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Fir', 'Ginkgo', 'Hazel', 'Ivy', 'Kauri', 'Linden', 'Maple'];
+  await doc(engine, 'companies/orbit-example-labs', 'Segment: research', { type: 'company', title: 'Orbit Example Labs' });
+  await doc(engine, 'meetings/orbit-history', ['| Account | Owner | Start | End |', '|---|---|---|---|',
+    ...names.map((n, i) => `| Orbit Example Labs | ${n} Example | ${2010 + i}-01-01 | ${2010 + i}-12-31 |`)].join('\n'), { date: '2024-01-05' });
+  await doc(engine, 'notes/orbit-private', 'Orbit Example Labs moves from Maple Example to Quill Example, effective 2023-02-01.', { date: '2023-01-20', private: true });
+  await sweepOwnerPhrases(engine);
+  const config = { engine: 'pglite' };
+  const local = { remote: false, sourceId: 'default', config };
+  const remote = { remote: true, transport: 'stdio', sourceId: 'default', takesHoldersAllowList: ['world'], config };
+  const call = async (op: string, args: Record<string, unknown>, ctx: Record<string, unknown>) => {
+    const r = await dispatchToolCall(engine, op, args, ctx as never);
+    return r.isError ? { error: r.content[0]!.text } : JSON.parse(r.content[0]!.text);
+  };
+  const follow = async (ctx: Record<string, unknown>) => {
+    const card = (await call('entity', { name: 'Orbit Example Labs' }, ctx)).card.known_as;
+    const owners: string[] = card.rows.map((r: { owner: string }) => r.owner);
+    const pages: number[] = [];
+    let next = card.next?.arguments ? { ...card.next.arguments, limit: 1 } : null;
+    while (next) {
+      const page = await call('get_backlinks', next, ctx);
+      pages.push(page.rows.length);
+      owners.push(...page.rows.map((r: { owner: string }) => r.owner));
+      next = page.cursor ? { ...next, cursor: page.cursor } : null;
+    }
+    const all = await call('get_backlinks', { slug: 'companies/orbit-example-labs', group: 'known_as', limit: 500 }, ctx);
+    return { total: card.total, shown: card.rows.length, next: card.next ? { tool: card.next.tool, group: card.next.arguments.group, requires_surface: card.next.requires_surface ?? null } : null,
+      followed: owners, pages, all: all.rows.map((r: { owner: string }) => r.owner), allTotal: all.total, truncated: all.truncated };
+  };
+  const verbs = (await call('entity', { name: 'Orbit Example Labs' }, { ...remote, surfaceCeiling: 'verbs' })).card.known_as.next?.requires_surface ?? null;
+  const badCursor = await call('get_backlinks', { slug: 'companies/orbit-example-labs', group: 'known_as', cursor: 'nope' }, local);
+  const withType = await call('get_backlinks', { slug: 'companies/orbit-example-labs', group: 'known_as', type: 'note' }, local);
+  return { trusted: await follow(local), remote: await follow(remote), verbs, badCursor: 'error' in badCursor, withType: 'error' in withType };
+}
