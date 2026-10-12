@@ -164,7 +164,7 @@ async function evidencePlanFor(ctx: OperationContext, p: Record<string, unknown>
     snippetChars: p.snippet_chars,
     snippetCap,
     op,
-  }), { snippetChars: p.snippet_chars });
+  }));
 }
 
 /**

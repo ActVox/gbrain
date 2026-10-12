@@ -357,15 +357,14 @@ export function longPageMinCharsValueProblem(value: string): string | null {
 
 /**
  * The F2 policy for a search/query call. It applies only under an implied
- * `auto`: no `return_unit` on the call, `search.return_unit` unset or `auto`,
- * no explicit budget (the cap keeps its rules) and no positive
- * `snippet_chars` (it head-cuts every delivered block, so a widened unit
- * would lose its tail; `0` means full text and leaves it on). Read errors and
- * unknown values are `off`; an unusable threshold is the default.
+ * `auto`: no `return_unit` on the call, `search.return_unit` unset or `auto`
+ * and no explicit budget (the cap keeps its rules). `snippet_chars` does not
+ * turn it off: a widened row (`delivered.reason: 'long_page'`) is exempt from
+ * the snippet cap (capDeliveredSnippets), every other row is cut as before.
+ * Read errors and unknown values are `off`; an unusable threshold is the default.
  */
-export async function withLongPagePolicy(engine: BrainEngine, plan: EvidencePlan | null, input: { snippetChars: unknown }): Promise<EvidencePlan | null> {
+export async function withLongPagePolicy(engine: BrainEngine, plan: EvidencePlan | null): Promise<EvidencePlan | null> {
   if (!plan || plan.unit !== 'auto' || plan.explicitUnit || plan.budgetExplicit) return plan;
-  if (typeof input.snippetChars === 'number' && Number.isFinite(input.snippetChars) && Math.floor(input.snippetChars) > 0) return plan;
   const raw = (await engine.getConfig(LONG_PAGE_UNIT_CONFIG_KEY).catch(() => null))?.trim();
   if (raw !== 'window' && raw !== 'section' && raw !== 'page') return plan;
   const min = (await engine.getConfig(LONG_PAGE_MIN_CHARS_CONFIG_KEY).catch(() => null)) ?? '';
@@ -1420,7 +1419,10 @@ export function capEvidenceToBudget<T extends SearchResult & { delivered?: Deliv
 /**
  * Explicit `snippet_chars` precedence: cap delivered blocks at `cap`
  * characters (marker names the get_page recovery move), clip spans, mark
- * truncated and re-count. Non-mutating.
+ * truncated and re-count. A long-page row widened by the F2 policy
+ * (`delivered.reason: 'long_page'`) is exempt: it already fits the delivery
+ * budget and the page limits, and a head cut would drop the passage it was
+ * widened for. Non-mutating.
  */
 export function capDeliveredSnippets<T extends SearchResult & { delivered?: DeliveredEvidence }>(
   results: T[],
@@ -1432,7 +1434,7 @@ export function capDeliveredSnippets<T extends SearchResult & { delivered?: Deli
   const tokenizer = delivery.tokenizer;
   let markerOmitted = false;
   const out = results.map(r => {
-    if (typeof r.chunk_text !== 'string' || r.chunk_text.length <= cap) return r;
+    if (typeof r.chunk_text !== 'string' || r.chunk_text.length <= cap || r.delivered?.reason === 'long_page') return r;
     any = true;
     let keep = cap;
     let text = r.chunk_text.slice(0, cap) + buildSnippetMarker(r.slug, r.chunk_text.length - cap, r.follow_up);

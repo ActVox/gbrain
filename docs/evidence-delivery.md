@@ -199,16 +199,20 @@ delivered unit is always the one around the ranked hit.
 |---|---|---|---|
 | 1 | `return_unit` on the call | always (`auto` included: an explicit `auto` keeps every non-conversation chunk) | that unit |
 | 2 | `search.return_unit` set to anything but `auto` | `return_unit` omitted | that unit, every hit |
-| 3 | `search.long_page_unit` (not `off`) | `return_unit` omitted, `search.return_unit` unset or `auto`, no explicit `token_budget`, no positive `snippet_chars`, and the hit is a long non-conversation page | that unit (`delivered.reason: "long_page"`) |
+| 3 | `search.long_page_unit` (not `off`) | `return_unit` omitted, `search.return_unit` unset or `auto`, no explicit `token_budget`, and the hit is a long non-conversation page | that unit (`delivered.reason: "long_page"`) |
 | 4 | implied `auto` | everything else | conversations whole, other hits their ranked chunk |
 
 The policy is resolved at the `search`/`query` caller and passed to the
 assembler, so `recall`, `think` (`think.return_unit`) and `assemble_evidence`
-never read the key and stay byte-identical with it on. A positive
-`snippet_chars` keeps it off because it cuts every delivered block from the
-front, so a widened unit would lose its tail (`snippet_chars: 0`, full text,
-leaves it on and the unit comes back whole);
-an explicit `token_budget` keeps it off because the cap (next section) keeps
+never read the key and stay byte-identical with it on. `snippet_chars` does
+not turn it off: a row widened by it (`delivered: {unit, reason: "long_page"}`)
+is exempt from `snippet_chars` and comes back whole, because a head cut would
+drop the tail the unit was widened to reach. The widened row still sits inside
+`search.return_budget_conversation` and the long-page page and input-byte
+limits below, and `snippet_chars` still cuts every other row, ranked chunks
+included (those rows report `delivered: {truncated: true}`). The
+`delivered.unit` and `reason` on the row are what tell the reader why it is
+longer than `snippet_chars`. An explicit `token_budget` keeps it off because the cap (next section) keeps
 its own rules, and `query`'s bare `token_budget` is chunk-mode budgeting anyway.
 The subagent default snippet cap already keeps the implied `auto` on `chunk`.
 
@@ -311,14 +315,17 @@ so a bare budget does not engage the cap.
 
 1. An explicit `snippet_chars` wins: delivered blocks are capped at that many
    characters (spans are clipped, `delivered.truncated` becomes true and
-   `snippet_cap` is reported).
+   `snippet_cap` is reported). The one exemption is a row widened by
+   `search.long_page_unit` (`delivered.reason: "long_page"`): it comes back
+   whole, within `search.return_budget_conversation` and the long-page limits.
 2. Then an explicit `return_unit`: the subagent default snippet cap is skipped
    for its blocks.
 3. Then the subagent default snippet cap (`agent.search_snippet_chars`, 300):
    when it applies, neither the implied `auto` nor a config-level
    `search.return_unit` expands.
 4. Then `search.return_unit` from config, else `auto` (with `search.long_page_unit`
-   for long non-conversation hits, which an explicit `snippet_chars` keeps off).
+   for long non-conversation hits, whose widened rows are exempt from an
+   explicit `snippet_chars`; see rule 1).
 
 ## Response shape (additive)
 

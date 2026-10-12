@@ -8,8 +8,8 @@
  * Long means a rendered body of at least `search.long_page_min_chars`
  * (default 20,000) characters. Precedence (docs/evidence-delivery.md "Long
  * pages"): explicit `return_unit` > non-`auto` `search.return_unit` >
- * `search.long_page_unit`; an explicit `token_budget` or a positive
- * `snippet_chars` keeps it off. recall, think and
+ * `search.long_page_unit`; an explicit `token_budget` keeps it off. A widened
+ * row is exempt from `snippet_chars`; every other row is cut. recall, think and
  * `assemble_evidence` never read it. Assertions are on the serialized lean
  * MCP output a remote agent receives. The Postgres arm is
  * test/e2e/evidence-long-page.test.ts.
@@ -207,15 +207,24 @@ describe('precedence', () => {
     }
   });
 
-  test('a positive snippet_chars keeps the key off (it head-cuts every block); 0 (full text) leaves it on and the section survives whole', async () => {
-    const snippet = await withConfig(engine, { [KEY]: 'section' }, () => mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 300 }));
-    expect(snippet.bytes).toBe((await mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 300 })).bytes);
-    const whole = await withConfig(engine, { [KEY]: 'section' }, async () => [
-      long((await mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 0 })).rows),
-      long((await mcpCall(engine, 'search', { query: 'renewal fee' })).rows),
+  test('snippet_chars 300: the widened section survives whole and keeps delivered {unit, reason}; every other row is cut to 300 exactly as with the key off and marks delivered {truncated}', async () => {
+    const off = await mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 300 });
+    const [on, full] = await withConfig(engine, { [KEY]: 'section' }, async () => [
+      await mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 300 }),
+      await mcpCall(engine, 'search', { query: 'renewal fee' }),
     ]);
-    expect(whole[0].delivered).toEqual({ unit: 'section', reason: 'long_page' });
-    expect(whole[0].chunk_text).toBe(whole[1].chunk_text);
+    const widened = long(on.rows);
+    expect(widened.delivered).toEqual({ unit: 'section', reason: 'long_page' });
+    expect(widened.chunk_text).toBe(long(full.rows).chunk_text);
+    expect(String(widened.chunk_text).length).toBeGreaterThan(300);
+    for (const r of on.rows.filter(r => r.slug !== LONG_SLUG)) {
+      const { delivered, ...rest } = r;
+      expect(JSON.stringify(rest)).toBe(JSON.stringify(off.rows.find(o => o.slug === r.slug)));
+      expect(delivered).toEqual(String(r.chunk_text).includes('[truncated ') ? { truncated: true } : undefined);
+    }
+    expect(on.rows.some(r => r.slug !== LONG_SLUG && String(r.chunk_text).includes('[truncated '))).toBe(true);
+    const zero = await withConfig(engine, { [KEY]: 'section' }, () => mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 0 }));
+    expect(long(zero.rows).chunk_text).toBe(long(full.rows).chunk_text);
   });
 });
 
@@ -283,16 +292,16 @@ describe('selection limits (size preflight)', () => {
     expect(mixed.longPages?.fallbacks).toEqual(['long_page_deadline']);
   }, LONG_PAGE_DEADLINE_MS * 3 + 5_000);
 
-  test('the policy is resolved only under an implied auto, with no explicit budget or positive snippet_chars', async () => {
+  test('the policy is resolved only under an implied auto, with no explicit budget; snippet_chars does not turn it off', async () => {
     const resolve = async (input: Record<string, unknown>, config: Record<string, string> = {}) => withConfig(engine, { [KEY]: 'page', ...config }, async () =>
-      (await withLongPagePolicy(engine, await resolveEvidencePlan(engine, { remote: true, returnUnit: input.return_unit, returnWindow: undefined, budget: input.token_budget, snippetChars: input.snippet_chars, snippetCap: 0, op: 'search' }), { snippetChars: input.snippet_chars }))?.longPage ?? null);
+      (await withLongPagePolicy(engine, await resolveEvidencePlan(engine, { remote: true, returnUnit: input.return_unit, returnWindow: undefined, budget: input.token_budget, snippetChars: input.snippet_chars, snippetCap: 0, op: 'search' })))?.longPage ?? null);
     expect(await resolve({})).toEqual({ unit: 'page', minChars: DEFAULT_LONG_PAGE_MIN_CHARS });
     expect(await resolve({}, { [MIN_KEY]: '5000' })).toEqual({ unit: 'page', minChars: 5000 });
     expect(await resolve({}, { [MIN_KEY]: 'lots' })).toEqual({ unit: 'page', minChars: DEFAULT_LONG_PAGE_MIN_CHARS });
     expect(await resolve({ snippet_chars: 0 })).toEqual({ unit: 'page', minChars: DEFAULT_LONG_PAGE_MIN_CHARS });
     expect(await resolve({ return_unit: 'auto' })).toBeNull();
     expect(await resolve({ token_budget: 2000 })).toBeNull();
-    expect(await resolve({ snippet_chars: 200 })).toBeNull();
+    expect(await resolve({ snippet_chars: 200 })).toEqual({ unit: 'page', minChars: DEFAULT_LONG_PAGE_MIN_CHARS });
     expect(await resolve({}, { 'search.return_unit': 'section' })).toBeNull();
   });
 

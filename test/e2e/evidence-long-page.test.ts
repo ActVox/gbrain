@@ -5,7 +5,7 @@
  * golden, the replay case (default 20,000-character threshold, section; a
  * medium and a short hit keep their ranked chunks), the cap and explicit-unit
  * paths unchanged with the key on, the serialized lean MCP `delivered {unit,
- * reason}`, the precedence
+ * reason}`, the widened row surviving `snippet_chars` 300, the precedence
  * of a non-auto global unit, the over-budget fallback, recall/think/
  * assemble_evidence unchanged with the key on, and the d5b/F4 instruction
  * config readers, all on the same engine.
@@ -76,6 +76,24 @@ run('long-page delivery on Postgres', () => {
       const off = await mcpCall(engine, 'search', call);
       expect((await withConfig(engine, { [KEY]: 'section' }, () => mcpCall(engine, 'search', call))).bytes).toBe(off.bytes);
     }
+  });
+
+  test('snippet_chars 300: the widened section survives whole with delivered {unit, reason}; every other row is cut to 300 exactly as with the key off and marks delivered {truncated}', async () => {
+    const off = await mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 300 });
+    const [on, full] = await withConfig(engine, { [KEY]: 'section' }, async () => [
+      await mcpCall(engine, 'search', { query: 'renewal fee', snippet_chars: 300 }),
+      await mcpCall(engine, 'search', { query: 'renewal fee' }),
+    ]);
+    const widened = long(on.rows);
+    expect(widened.delivered).toEqual({ unit: 'section', reason: 'long_page' });
+    expect(widened.chunk_text).toBe(long(full.rows).chunk_text);
+    expect(String(widened.chunk_text).length).toBeGreaterThan(300);
+    for (const r of on.rows.filter(r => r.slug !== LONG_SLUG)) {
+      const { delivered, ...rest } = r;
+      expect(JSON.stringify(rest)).toBe(JSON.stringify(off.rows.find(o => o.slug === r.slug)));
+      expect(delivered).toEqual(String(r.chunk_text).includes('[truncated ') ? { truncated: true } : undefined);
+    }
+    expect(on.rows.some(r => r.slug !== LONG_SLUG && String(r.chunk_text).includes('[truncated '))).toBe(true);
   });
 
   test('global window wins over the long-page section; explicit budget keeps it off; over budget keeps the chunk', async () => {
