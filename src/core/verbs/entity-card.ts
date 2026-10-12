@@ -39,6 +39,7 @@ import { readMentionCoverage, type MentionCoverage } from '../mentions/coverage.
 import { encodeCursor, readReferrerGroups, PAGE_DEFAULT_LIMIT, type ReferenceRow } from '../mentions/referrers.ts';
 import { readCardIdentity, type CardIdentity } from './entity-card-identity.ts';
 import { factEntitySlugs } from '../mentions/siblings.ts';
+import { readKnownAs, type KnownAs } from '../mentions/owner-phrase/known-as.ts';
 
 const EDGE_CAP = 10;
 const OPEN_THREADS_CAP = 3;
@@ -121,6 +122,8 @@ export interface EntityCard {
   identity_excerpt?: CardIdentity['identity_excerpt'];
   /** Pages whose qualifying lines did not fit the excerpt budget. */
   identity_excerpt_omitted?: string[];
+  /** Owners of this account with their owner-phrase validity windows (`mentions.owner_phrases`). `entity` verb only. */
+  known_as?: KnownAs;
   /** What `aka` covers and which names to search before a history or as-of answer. `entity` verb only. */
   alias_guidance?: CardIdentity['alias_guidance'];
   /** #5575 A6 (additive): the entity page's trust tier and short write origin. */
@@ -325,7 +328,8 @@ export async function buildEntityCard(
   const card = await assembleCard(engine, sourceId, best.row, opts.remote, excludePrivate, opts.eligibility ?? {});
   if (opts.includeReferences) {
     Object.assign(card, await cardReferences(engine, sourceId, best.row, opts, excludePrivate, entityTypes),
-      await readCardIdentity(engine, sourceId, best.row, { excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka }));
+      await readCardIdentity(engine, sourceId, best.row, { excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka }),
+      await readKnownAs(engine, sourceId, best.row.slug, { excludePrivate }));
   }
   return {
     found: true,

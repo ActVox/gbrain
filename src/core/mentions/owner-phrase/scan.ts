@@ -47,8 +47,8 @@ export interface ScanInput {
   effective_date_source: string | null;
 }
 
-const CUE_RE = /\b(?:owns?|owned|owner|owners|ownership|runs?|ran|running|handles?|handled|handling|manages?|managed|managing|manager|covers?|covered|covering|coverage|leads?|led|leading|takes? over|took over|taking over|taken over|hands?|handed|handing|hand-?off|handover|pass(?:es|ed)?|passing|transfer(?:s|red|ring)?|(?:re)?assign(?:s|ed|ing)?|moves?|moved|moving|transition(?:s|ed|ing)?|inherit(?:s|ed)?|picks? up|picked up|assumes?|assumed|replac(?:es|ed|ing)|roll(?:s|ed|ing)? off|step(?:s|ped|ping)? (?:away|back|down|off)|no longer|last day|joins?|joined|joining|since|until|through|correction|correcting|clarification|actually|rather than|instead of|misspoke|mistake|wrong|incorrect|ae|csm|rep|point person|goes to|went to|book)\b/i;
-const OWNER_COLUMN_RE = /\b(?:owner|lead|ae|csm|manager|rep|am)\b/i;
+const CUE_RE = /\b(?:owns?|owned|owner|owners|ownership|runs?|ran|running|handles?|handled|handling|manages?|managed|managing|manager|covers?|covered|covering|coverage|leads?|led|leading|takes? over|took over|taking over|taken over|hands?|handed|handing|hand-?off|handover|pass(?:es|ed)?|passing|transfer(?:s|red|ring)?|(?:re)?assign(?:s|ed|ing)?|moves?|moved|moving|transition(?:s|ed|ing)?|inherit(?:s|ed|ing)?|pick(?:s|ed|ing)? up|assum(?:es?|ed|ing)|replac(?:es|ed|ing)|roll(?:s|ed|ing)? off|step(?:s|ped|ping)? (?:away|back|down|off)|no longer|last day|joins?|joined|joining|start(?:s|ed|ing)? (?:on|with|covering)|beg[ia]ns? (?:on|with|covering)|began (?:on|with|covering)|will (?:own|run|handle|cover|lead|manage)|incoming|outgoing|since|until|through|correction|correcting|clarification|actually|rather than|instead of|misspoke|mistake|wrong|incorrect|ae|csm|rep|point person|goes to|went to|book)\b/i;
+const OWNER_COLUMN_RE = /\b(?:owner|lead|ae|csm|manager|rep|am|incoming|outgoing)\b/i;
 const AGENT_TYPE_RE = /(?:^|[-_\s/])agent(?:$|[-_\s/])/i;
 
 /** Personal and benefit accounts: a sentence about them holds no owner phrase (contract line 8). */
@@ -70,7 +70,8 @@ export const NAME_STOPWORDS: ReadonlySet<string> = new Set(`a an the this that t
   mr ms mrs dr csm ae am vp ceo cto cfo coo sales ops support customer success q1 q2 q3 q4 effective monday tuesday wednesday thursday
   friday saturday sunday january february march april may june july august september october november december jan feb mar apr jun jul aug
   sep sept oct nov dec yes no ok okay good great sure all any each every some none who what when where why how if while because
-  following followup follow welcome hope best regards cheers new old previous current former incoming outgoing primary`.split(/\s+/).filter(Boolean));
+  following followup follow welcome hope best regards cheers new old previous current former incoming outgoing primary
+  is was are were be been being do does did can will would has have had shall must am`.split(/\s+/).filter(Boolean));
 
 /** Leading and trailing stop words of a capitalized run removed; empty when nothing is left. */
 export function trimNameRun(run: string): string {

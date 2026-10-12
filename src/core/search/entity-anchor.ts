@@ -24,6 +24,7 @@ import { isFactEntityPage } from '../entities/resolve.ts';
 import { pageReadFilter } from './read-policy-sql.ts';
 import { containsTokenRun, isTitleMentionedInQuery, tokenizeTitle } from './title-match.ts';
 import { enforceTokenBudget } from './token-budget.ts';
+import { rankingLinkSql } from '../mentions/owner-phrase/ranking.ts';
 
 export const ENTITY_ANCHORING_KEY = 'search.entity_anchoring';
 /** Anchored pages read per entity (the entity page is extra). */
@@ -42,7 +43,7 @@ export async function entityAnchoredPages(engine: BrainEngine, sourceId: string,
   const rows = await engine.executeRaw<{ id: number; slug: string }>(
     `SELECT p.id, p.slug FROM pages p WHERE p.source_id = $1 AND p.deleted_at IS NULL AND p.slug <> $2
        AND p.type NOT IN ('question', 'synthesis') AND NOT (p.frontmatter ? '${PINNED_QUESTION_MARKER}')
-       AND (p.compiled_truth ~* $3 OR ($4::integer IS NOT NULL AND EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id AND l.to_page_id = $4::integer)))
+       AND (p.compiled_truth ~* $3 OR ($4::integer IS NOT NULL AND EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id AND l.to_page_id = $4::integer AND ${rankingLinkSql('l')})))
      ORDER BY COALESCE(p.effective_date, p.updated_at) DESC, p.id DESC LIMIT ${limit}`,
     [sourceId, entitySlug, pattern, entity?.id ?? null]);
   return { entity: entity ? { id: Number(entity.id), slug: entitySlug } : null, pages: rows.map(r => ({ id: Number(r.id), slug: r.slug })) };

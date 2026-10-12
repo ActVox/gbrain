@@ -34,6 +34,9 @@ import { buildNameIndex, findNames, parseStatements, type NameEntry, type Statem
 import { accountDescriptors, buildWindows, resolvePhrase, type OwnerWindow } from './windows.ts';
 
 export const OWNER_PHRASE_KEY = 'mentions.owner_phrases';
+/** Group key prefix of an account named in a statement that has no page (statements.ts); never stored or linked. */
+const PAGELESS = 'pseudo:';
+const isPageless = (slug: string) => slug.startsWith(PAGELESS);
 const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
 const SCAN_BATCH = 500;
 
@@ -221,7 +224,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
     }));
   }
   const windows = buildWindows(statements, groupOf);
-  const descriptorsOf = (g: string) => descriptors.get(g) ?? new Set<string>();
+  const descriptorsOf = (g: string) => descriptors.get(g) ?? (isPageless(g) ? accountDescriptors([g.slice(PAGELESS.length)], []) : new Set<string>());
 
   const links: OwnerPhraseModel['links'] = [];
   const counters = { unresolved: 0, ambiguous: 0 };
@@ -233,6 +236,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
       const named = findNames(hit.owner, accountIndex);
       if (named.length && named[0]!.start === 0 && named[0]!.end === hit.owner.length) continue;
       const r = resolvePhrase(hit, s.page_date, s.readings ?? [], windows, descriptorsOf);
+      if (r.linked && r.accounts.every(isPageless)) { counters.unresolved++; continue; }
       if (!r.linked) {
         if (r.reason === 'ambiguous' || r.reason === 'readings_disagree') counters.ambiguous++;
         else counters.unresolved++;
@@ -246,7 +250,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
       }
     }
   }
-  return { windows, descriptors, links, counters };
+  return { windows: windows.filter(w => !isPageless(w.group)), descriptors, links, counters };
 }
 
 function windowsHash(windows: OwnerWindow[], privateIds: Set<number>): string {

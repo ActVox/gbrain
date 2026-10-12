@@ -3,6 +3,7 @@ import { unverifiedExtractionFragment } from '../extraction-review.ts';
 import { currentTextProjectionFilter, protectedBodyFilter, requiresSafeChunks, safeChunksFilter } from './safe-chunks.ts';
 import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
 import { relationshipFilterSql } from '../link-validity.ts';
+import { rankingLinkSql } from '../mentions/owner-phrase/ranking.ts';
 
 /** Narrow query dependency shared by both engines. */
 export type ReadQuery = <T = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]>;
@@ -281,7 +282,7 @@ export async function readAdjacencyBoosts(query: ReadQuery, ids: number[], scope
     FROM links l JOIN pages p ON p.id = l.from_page_id AND p.deleted_at IS NULL
       JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
     WHERE l.from_page_id = ANY(${idArray}) AND l.to_page_id = ANY(${idArray})
-      AND ${from} AND ${to} AND ${origin}
+      AND ${from} AND ${to} AND ${origin} AND ${rankingLinkSql('l')}
     GROUP BY l.to_page_id HAVING COUNT(DISTINCT l.from_page_id) >= 1`, params);
   return new Map(rows.map(row => [Number(row.to_page_id), { hits: Number(row.hits), cross_source_hits: Number(row.cross_source_hits) }]));
 }

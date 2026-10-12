@@ -10,7 +10,7 @@
  */
 
 import { tokenizeForScan } from '../../by-mention.ts';
-import { RELATIVE_DATE_RE, addDays, findDates, type FoundDate } from './dates.ts';
+import { RELATIVE_DATE_RE, findDates, type FoundDate } from './dates.ts';
 import { NAME_STOPWORDS, trimNameRun, type CueLine } from './scan.ts';
 
 export type StatementKind = 'takeover' | 'join' | 'ongoing' | 'end' | 'stint' | 'correction';
@@ -158,13 +158,17 @@ const D = (g: string) => `⟦D(?<${g}>\\d+)⟧`;
 const ACC_CORE = `(?:the |this |our )?⟦A(?<acc>\\d+)⟧(?:'s)?(?: (?:account|relationship|book|client|customer|portfolio))?`;
 const ROLE = '(?:account )?(?:owner|lead|manager|executive|ae|csm|rep|representative|point person|point|primary contact|am)';
 const FROM = `(?: from ${P('from')})?`;
+const ADV = '(?:(?:actually|officially|formally|also|already|effectively) )?';
 
 interface Pattern { kind: StatementKind; re: RegExp; reSelf: RegExp }
 
 function pattern(kind: StatementKind, template: string): Pattern {
-  const build = (acc: string) => new RegExp(template.replaceAll('{ACC}', acc).replaceAll('{O}', P('o')).replaceAll('{F}', P('from'))
+  const build = (acc: string) => new RegExp(template.replaceAll('{ACC}', acc).replaceAll('{O} ', `${P('o')} ${ADV}`).replaceAll('{O}', P('o')).replaceAll('{F}', P('from'))
     .replaceAll('{FROM}', FROM).replaceAll('{ROLE}', ROLE).replaceAll('{D1}', D('d1')).replaceAll('{D2}', D('d2')));
-  return { kind, re: build(` ${ACC_CORE}`), reSelf: build(`(?: ${ACC_CORE})?`) };
+  // Sentences are matched with a leading space, so a pattern may open with the account. An account-first
+  // pattern never takes the page itself implicitly: its subject must be written.
+  const re = build(` ${ACC_CORE}`);
+  return { kind, re, reSelf: template.startsWith('{ACC}') ? re : build(`(?: ${ACC_CORE})?`) };
 }
 
 const PATTERNS: Pattern[] = [
@@ -181,6 +185,8 @@ const PATTERNS: Pattern[] = [
   pattern('takeover', `{ACC} (?:is now|now is|becomes|became|will become|will now be) ${P('o')}'s(?: account)?`),
   pattern('takeover', `{ACC} (?:is now|will now be|will be) (?:owned|run|handled|managed|covered|led) by {O}`),
   pattern('takeover', `{O} now (?:owns|runs|handles|manages|covers|leads){ACC}`),
+  pattern('takeover', `{O} (?:will|is going to|is set to) (?:now )?(?:own|run|handle|cover|lead|manage)(?: the)?{ACC}`),
+  pattern('join', `{O} (?:started|starts|is starting|will start|began|begins|will begin)(?: on| with| covering| working on)?(?: the)?{ACC}`),
   pattern('join', `{O} (?:joins|joined|is joining|will join)(?: the)?{ACC}`),
   pattern('join', `{O} (?:co-owns|will co-own|is co-owning|also covers|will also cover|is also covering)(?: the)?{ACC}`),
   pattern('end', `{O} (?:rolls|roll|rolled|is rolling|will roll|rolling) off{ACC}`),
@@ -189,7 +195,7 @@ const PATTERNS: Pattern[] = [
   pattern('end', `{O}(?:'s)? last day (?:on|with|for|covering|running|handling){ACC} (?:is|was|will be) {D2}`),
   pattern('end', `{O} (?:leaves|left|is leaving|will leave){ACC}`),
   pattern('end', `{O} (?:hands|handed|is handing|will hand|has handed) off{ACC}(?! (?:off |over )?to )`),
-  pattern('ongoing', `{O} (?:owns|runs|handles|manages|covers|leads|is running|is handling|is managing|is covering|is leading|is on|still owns|still runs|still handles|still covers|has)(?: the)?{ACC}`),
+  pattern('ongoing', `{O} (?:owns|runs|handles|manages|covers|leads|is running|is handling|is managing|is covering|is leading|is on|still owns|still runs|still handles|still covers|has run|has owned|has handled|has covered|has led|has managed|has had|has)(?: the)?{ACC}`),
   pattern('ongoing', `{O} is (?:the |our )?{ROLE} (?:for|on|of|over)${' '}${ACC_CORE}`),
   pattern('ongoing', `{ACC} is (?:owned|run|handled|managed|covered|led|looked after) by {O}`),
   pattern('ongoing', `{ACC} is ${P('o')}'s(?: account)?`),
@@ -197,6 +203,7 @@ const PATTERNS: Pattern[] = [
 ];
 
 const LABEL_RE = new RegExp(`^(?:(?:the )?⟦A(?<acc>\\d+)⟧ )?(?<prev>previous |former |prior |past )?(?:account |primary |current )?(?:owner|lead|manager|ae|csm|rep|am|account owner|account lead|account manager)s?(?: \\(.*?\\))? ?[:=–-] ?${P('o')}`);
+const HANDOFF_LABEL_RE = new RegExp(`\\b(?:outgoing|previous|old|former)(?: owner)?:? ${P('from')},? (?:and |→ |-> )?(?:incoming|new)(?: owner)?:? ${P('o')}`);
 const NEGATION_RE = /\b(?:not|never)\b|n't\b/;
 const HYPOTHETICAL_RE = /\b(?:might|may|could|would|should|if|whether|considering|consider|proposal|proposed|propose|proposing|maybe|perhaps|tentatively|possibly|potentially|thinking about|plan to|planning to|plans to|hope to|hoping to|want to|wants to|suggest|suggested|suggesting|recommend|recommended|option)\b/;
 const CORRECTION_RE = /\b(?:correction|correcting|to correct|clarification|to clarify|misspoke|was wrong|were wrong|was incorrect|is incorrect|was a mistake|in error|by mistake|mistakenly|erroneously|actually|retract(?:ing|ed)?|disregard)\b|(?:^|,|—|–|\(| -| and) ?not (?:to )?⟦P|rather than ⟦P|instead of ⟦P/;
@@ -207,12 +214,16 @@ function splitSentences(line: string): string[] {
   return line.split(/(?<=[.!?])\s+(?=[A-Z"'(\[⟦]|$)/).map(s => s.trim()).filter(Boolean);
 }
 
-function chooseDate(norm: Normalized, matchStart: number, exclude: Set<number>): FoundDate | null {
-  const all = norm.dates.map((d, i) => ({ d, i, pos: norm.datePos[i] ?? -1 })).filter(x => !exclude.has(x.i) && x.pos >= 0);
+const START_CUE_RE = /(?:since|starting|beginning|effective|effective as of|as of|from)(?: on)? $/;
+
+function chooseDate(norm: Normalized, matchStart: number): { date: FoundDate; start: boolean } | null {
+  const all = norm.dates.map((d, i) => ({ d, i, pos: norm.datePos[i] ?? -1 })).filter(x => x.pos >= 0);
   if (!all.length) return null;
-  const cue = all.filter(x => CUE_LED_RE.test(norm.n.slice(Math.max(0, x.pos - 24), x.pos)));
+  const before = (x: { pos: number }) => norm.n.slice(Math.max(0, x.pos - 24), x.pos);
+  const cue = all.filter(x => CUE_LED_RE.test(before(x)));
   const pick = (xs: typeof all) => xs.find(x => x.pos >= matchStart) ?? xs[xs.length - 1];
-  return (cue.length ? pick(cue) : all.find(x => x.pos >= matchStart) ?? all[all.length - 1])!.d;
+  const chosen = (cue.length ? pick(cue) : all.find(x => x.pos >= matchStart) ?? all[all.length - 1])!;
+  return { date: chosen.d, start: START_CUE_RE.test(before(chosen)) };
 }
 
 function tableRows(lines: CueLine[]): Array<{ line: number; cells: Record<string, string>; pairs: string[] }> {
@@ -246,9 +257,24 @@ export function parseStatements(cues: CueLine[], ctx: ParseContext): Statement[]
   const sentences: Array<{ line: number; text: string; label: boolean }> = [];
   for (const row of tableRows(cues)) {
     if (row.pairs.length) { for (const p of row.pairs) sentences.push({ line: row.line, text: p, label: true }); continue; }
-    const owner = col(row.cells, /\b(?:owner|lead|ae|csm|manager|rep|am)\b/);
-    if (!owner) continue;
     const account = col(row.cells, /^(?:account|client|customer|company|account name|name)$/);
+    const owner = col(row.cells, /\b(?:owner|lead|ae|csm|manager|rep|am)\b/);
+    const incoming = col(row.cells, /^(?:incoming|incoming owner|new owner)$/);
+    if (!owner && incoming) {
+      const outgoing = col(row.cells, /^(?:outgoing|outgoing owner|previous owner|old owner)$/);
+      const when = col(row.cells, /^(?:effective|effective date|date|as of|start|start date)$/);
+      const acctSlug = account ? findNames(account, ctx.accounts)[0]?.entry.slug : ctx.selfAccount;
+      const person = (cell: string | undefined) => (cell && !/^\(.*\)$/.test(cell)
+        ? findNames(cell, ctx.persons)[0]?.entry.title ?? cell.match(RUN_RE)?.map(trimNameRun).find(Boolean) : undefined);
+      const to = person(incoming);
+      const date = when ? findDates(when, ctx.page.date)[0]?.iso ?? null : null;
+      if (!acctSlug || !to) continue;
+      const from = person(outgoing);
+      out.push({ ...base, kind: 'takeover', owner: to, ...(from ? { from } : {}), account: acctSlug, date: date ?? ctx.page.date, stated: !!date,
+        line: row.line, text: Object.values(row.cells).join(' | ') });
+      continue;
+    }
+    if (!owner) continue;
     const startCell = col(row.cells, /^(?:start|start date|from|since|began|effective|effective date|owner since)$/);
     const endCell = col(row.cells, /^(?:end|end date|until|to|through|ended)$/);
     const acctSlug = account ? findNames(account, ctx.accounts)[0]?.entry.slug : ctx.selfAccount;
@@ -263,34 +289,83 @@ export function parseStatements(cues: CueLine[], ctx: ParseContext): Statement[]
     else if (end) out.push({ ...base, kind: 'stint', owner: person, account: acctSlug, date: end, start: null, end, stated: true, line: row.line, text });
     else if (ctx.page.date) out.push({ ...base, kind: 'ongoing', owner: person, account: acctSlug, date: ctx.page.date, stated: false, line: row.line, text });
   }
+  const pageAccounts = new Set<string>();
   for (const l of cues) {
     if (l.text.trimStart().startsWith('|')) continue;
-    for (const s of splitSentences(cleanLine(l.text))) sentences.push({ line: l.line, text: s, label: false });
+    for (const s of splitSentences(speakerFirstPerson(cleanLine(l.text)))) sentences.push({ line: l.line, text: s, label: false });
+    for (const m of findNames(l.text, ctx.accounts)) pageAccounts.add(m.entry.slug);
   }
-  for (const s of sentences) out.push(...parseSentence(s.text, s.line, ctx));
+  const context = ctx.selfAccount ?? (pageAccounts.size === 1 ? [...pageAccounts][0]! : null);
+  for (const s of sentences) {
+    const lineAccounts = [...new Set(findNames(cues.find(c => c.line === s.line)?.text ?? '', ctx.accounts).map(m => m.entry.slug))];
+    out.push(...parseSentence(s.text, s.line, ctx, lineAccounts.length === 1 ? lineAccounts[0]! : context));
+  }
   return out;
 }
 
-function parseSentence(sentence: string, line: number, ctx: ParseContext): Statement[] {
+const SPEAKER_RE = /^\s*(?:\[[^\]]*\]\s*)?([A-Z][a-zA-Z]+(?:[-'][A-Z][a-zA-Z]+)?(?: [A-Z][a-zA-Z]+(?:[-'][A-Z][a-zA-Z]+)?){0,2}):\s+(.*)$/;
+
+/** A chat line "[time] Name: I'm taking X" speaks for Name: its first-person subject becomes the speaker. */
+function speakerFirstPerson(line: string): string {
+  const m = SPEAKER_RE.exec(line);
+  if (!m) return line;
+  const speaker = trimNameRun(m[1]!);
+  if (!speaker || speaker !== m[1]) return line;
+  const text = m[2]!;
+  if (!/(?:^|[.!?,;]\s+)I(?:'m|'ll|'ve| am| will| have| was|\b)/.test(text)) return line;
+  return text
+    .replace(/(^|[.!?,;]\s+)I'm\b/g, `$1${speaker} is`).replace(/(^|[.!?,;]\s+)I am\b/g, `$1${speaker} is`)
+    .replace(/(^|[.!?,;]\s+)I'll\b/g, `$1${speaker} will`).replace(/(^|[.!?,;]\s+)I've\b/g, `$1${speaker} has`)
+    .replace(/(^|[.!?,;]\s+)I\b/g, `$1${speaker}`);
+}
+
+function parseSentence(sentence: string, line: number, ctx: ParseContext, context: string | null): Statement[] {
   if (sentence.endsWith('?')) return [];
   const norm = normalize(sentence, ctx);
   const { n } = norm;
   if (!n.includes('⟦P')) return [];
+  if (!NEGATION_RE.test(n) && !HYPOTHETICAL_RE.test(n)) {
+    const handoff = HANDOFF_LABEL_RE.exec(n);
+    const account = /⟦A(\d+)⟧/.exec(n)?.[1];
+    const target = account !== undefined ? norm.accounts[Number(account)]! : context;
+    if (handoff?.groups && target) {
+      const chosen = chooseDate(norm, handoff.index);
+      return [{ page_id: ctx.page.id, slug: ctx.page.slug, recorded: ctx.page.date, line, text: sentence, kind: 'takeover',
+        owner: norm.persons[Number(handoff.groups.o)]!, from: norm.persons[Number(handoff.groups.from)]!, account: target,
+        date: chosen ? chosen.date.iso : RELATIVE_DATE_RE.test(sentence) ? null : ctx.page.date, stated: !!chosen }];
+    }
+  }
+  const real = matchSentence(norm, sentence, line, ctx, context);
+  if (real.length || norm.persons.length < 2) return real;
+  // An account with no page still holds its owner's phrases: a multi-word name in the account position becomes a
+  // page-less account (`pseudo:<name>`) that only competes in ambiguity (contract line 9) and never receives a link.
+  const pseudo: Statement[] = [];
+  norm.persons.forEach((name, k) => {
+    if (!name.includes(' ') || k > 3) return;
+    const variant: Normalized = { ...norm, accounts: [...norm.accounts, `pseudo:${name.toLowerCase()}`],
+      n: norm.n.replaceAll(`⟦P${k}⟧`, `⟦A${norm.accounts.length}⟧`) };
+    for (const s of matchSentence(variant, sentence, line, { ...ctx, selfAccount: null }, null)) if (s.owner !== name && s.kind !== 'correction') pseudo.push(s);
+  });
+  return pseudo;
+}
+
+function matchSentence(norm: Normalized, sentence: string, line: number, ctx: ParseContext, context: string | null): Statement[] {
+  const { n } = norm;
   const base = { page_id: ctx.page.id, slug: ctx.page.slug, recorded: ctx.page.date, line, text: sentence };
   const accountOf = (g: string | undefined) => (g === undefined ? ctx.selfAccount : norm.accounts[Number(g)] ?? null);
   const undated = RELATIVE_DATE_RE.test(sentence);
-  const dated = (found: FoundDate | null): { date: string | null; stated: boolean } =>
-    found ? { date: found.iso, stated: true } : { date: undated ? null : ctx.page.date, stated: false };
+  const dated = (found: { date: FoundDate } | null): { date: string | null; stated: boolean } =>
+    found ? { date: found.date.iso, stated: true } : { date: undated ? null : ctx.page.date, stated: false };
 
   const wrong = new Set<number>();
   if (CORRECTION_RE.test(n)) for (const re of WRONG_RES) for (const m of n.matchAll(re)) wrong.add(Number(m[1]));
   if (wrong.size) {
     const right = norm.persons.findIndex((_, i) => !wrong.has(i));
     const acc = /⟦A(\d+)⟧/.exec(n)?.[1];
-    const account = acc !== undefined ? norm.accounts[Number(acc)]! : ctx.selfAccount;
-    if (!account) return [{ ...base, kind: 'correction', owner: right >= 0 ? norm.persons[right]! : null, wrong: norm.persons[[...wrong][0]!]!, account: '', ...dated(chooseDate(norm, 0, new Set())) }];
+    const account = acc !== undefined ? norm.accounts[Number(acc)]! : context;
+    if (!account) return [{ ...base, kind: 'correction', owner: right >= 0 ? norm.persons[right]! : null, wrong: norm.persons[[...wrong][0]!]!, account: '', ...dated(chooseDate(norm, 0)) }];
     return [...wrong].map(w => ({ ...base, kind: 'correction' as const, owner: right >= 0 ? norm.persons[right]! : null, wrong: norm.persons[w]!, account,
-      ...dated(chooseDate(norm, 0, new Set())) }));
+      ...dated(chooseDate(norm, 0)) }));
   }
   if (NEGATION_RE.test(n) || HYPOTHETICAL_RE.test(n)) return [];
 
@@ -314,8 +389,8 @@ function parseSentence(sentence: string, line: number, ctx: ParseContext): State
   const used: Array<[number, number]> = [];
   for (const p of PATTERNS) {
     const re = ctx.selfAccount ? p.reSelf : p.re;
-    for (const m of n.matchAll(new RegExp(re.source, 'g'))) {
-      const s = m.index!;
+    for (const m of ` ${n}`.matchAll(new RegExp(re.source, 'g'))) {
+      const s = Math.max(0, m.index! - 1);
       const e = s + m[0].length;
       if (used.some(([a, b]) => s < b && e > a)) continue;
       const g = m.groups ?? {};
@@ -332,12 +407,12 @@ function parseSentence(sentence: string, line: number, ctx: ParseContext): State
       }
       if (p.kind === 'join' && d1) { out.push({ ...base, kind: 'join', owner, account, date: d1.iso, stated: true }); continue; }
       if (p.kind === 'end' && d2) { out.push({ ...base, kind: 'end', owner, account, date: d2.last, stated: true }); continue; }
-      const when = dated(chooseDate(norm, s, new Set()));
-      out.push({ ...base, kind: p.kind, owner, ...(from && from !== owner ? { from } : {}), account, ...when });
+      const chosen = chooseDate(norm, s);
+      const when = dated(chosen);
+      // An ongoing statement with a start cue ("as of", "since", "effective") dates the start of the stint.
+      const kind = p.kind === 'ongoing' && chosen?.start ? 'join' : p.kind;
+      out.push({ ...base, kind, owner, ...(from && from !== owner ? { from } : {}), account, ...when });
     }
   }
   return out;
 }
-
-/** The predecessor's last day for a takeover starting on `day`. */
-export function dayBefore(day: string): string { return addDays(day, -1); }
