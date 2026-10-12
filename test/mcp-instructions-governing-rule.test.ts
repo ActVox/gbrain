@@ -79,9 +79,11 @@ describe('governing rule (F4)', () => {
     expect(buildMcpInstructions({ governingRule: 'in_effect' })).toBe(GBRAIN_MCP_INSTRUCTIONS);
   });
 
-  test('a read error fails closed to `in_effect`', async () => {
+  test('a read error (or an engine with no config reader) fails closed to the defaults', async () => {
     const broken = { getConfig: async () => { throw new Error('db down'); } };
     expect((await readInstructionContent(broken)).governingRule).toBe('in_effect');
+    const noReader = {} as { getConfig(key: string): Promise<string | null> };
+    expect(await readInstructionContent(noReader)).toEqual({ references: { namesRow: true, records: false }, governingRule: 'in_effect' });
   });
 
   describe('on PGLite', () => {

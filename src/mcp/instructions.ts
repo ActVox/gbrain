@@ -63,7 +63,8 @@ export interface InstructionContent {
 /** Brain config behind InstructionContent. Fail-closed: a read error yields the defaults. */
 export async function readInstructionContent(engine: { getConfig(key: string): Promise<string | null> }): Promise<InstructionContent> {
   const refs = await readEntityReferencesConfig(engine);
-  const rule = await engine.getConfig(GOVERNING_RULE_CONFIG_KEY).catch(() => null);
+  let rule: string | null = null;
+  try { rule = await engine.getConfig(GOVERNING_RULE_CONFIG_KEY); } catch { /* defaults */ }
   return {
     references: { namesRow: refs.namesRow, records: refs.recordTypes.length > 0 },
     governingRule: rule?.trim() === 'newest' ? 'newest' : 'in_effect',
