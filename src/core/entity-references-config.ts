@@ -1,20 +1,20 @@
 /**
- * Config for the reference fields on compact entity rows (`entity names`,
- * `context_pack` cards) and the record view they carry.
+ * Entity references on compact `entity names` rows and record-type
+ * enrollment: the one reader for both keys, shared by the names-mode verb and
+ * the MCP instruction builder, so the served brief clause names only fields
+ * the agent actually receives.
  *
- * - `entity.names_references` (default on): every found `entity names` row
+ * - `entity.names_references` (boolean, default on): every found `names` row
  *   (and each identity sibling) carries `referenced_by_count` and a row-level
- *   `next` to the full card. `false` leaves the rows as before.
- * - `entity.record_types` (default empty): the canonical page types that
- *   count as records (contracts, amendments, orders, …). When it names a type,
- *   rows list those referring pages under `records`, newest page date first;
- *   empty leaves records off. A stored type alias is read as its pack type.
+ *   `next` to the full card (`{tool: 'entity', arguments: {name}}`).
+ * - `entity.record_types` (comma-separated page types, default empty): the
+ *   page types whose referring pages are listed as `records` on `names` rows,
+ *   the full card and `context_pack` cards (verbs/entity-references.ts); a
+ *   stored type alias is read as its pack type. Empty means no records.
  *
- * Fail-closed: a read error keeps the defaults (names rows on, records off).
+ * Fail-closed: a read error yields the defaults (names rows on, no records),
+ * never a field the agent would not receive.
  */
-import type { BrainEngine } from './engine.ts';
-import { isConfigTruthy } from './config.ts';
-import { parseNameList } from './mentions/policy.ts';
 
 export const ENTITY_NAMES_REFERENCES_KEY = 'entity.names_references';
 export const ENTITY_RECORD_TYPES_KEY = 'entity.record_types';
@@ -24,11 +24,22 @@ export interface EntityReferencesConfig {
   recordTypes: string[];
 }
 
-export async function readEntityReferencesConfig(engine: Pick<BrainEngine, 'getConfig'>): Promise<EntityReferencesConfig> {
+const OFF_VALUES: ReadonlySet<string> = new Set(['false', 'off', '0', 'no']);
+
+/** Off only for an explicit falsy value; unset or anything else keeps the default (on). */
+export function parseNamesReferences(raw: string | null | undefined): boolean {
+  return !OFF_VALUES.has((raw ?? '').trim().toLowerCase());
+}
+
+/** Comma-separated page types: trimmed, empty entries dropped, first occurrence kept, case preserved. */
+export function parseRecordTypes(raw: string | null | undefined): string[] {
+  return [...new Set((raw ?? '').split(',').map(t => t.trim()).filter(t => t.length > 0))];
+}
+
+export async function readEntityReferencesConfig(engine: { getConfig(key: string): Promise<string | null> }): Promise<EntityReferencesConfig> {
   try {
     const [names, types] = await Promise.all([engine.getConfig(ENTITY_NAMES_REFERENCES_KEY), engine.getConfig(ENTITY_RECORD_TYPES_KEY)]);
-    const namesRow = names === null || names === undefined || String(names).trim() === '' ? true : isConfigTruthy(names);
-    return { namesRow, recordTypes: [...new Set(parseNameList(types))] };
+    return { namesRow: parseNamesReferences(names), recordTypes: parseRecordTypes(types) };
   } catch {
     return { namesRow: true, recordTypes: [] };
   }

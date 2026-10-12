@@ -803,6 +803,12 @@
         "EVIDENCE_DELIVERY_MIN_SERVER_VERSION",
         "EVIDENCE_FETCH_TIMEOUT_MS",
         "EVIDENCE_OMISSION",
+        "LONG_PAGE_DEADLINE_MS",
+        "LONG_PAGE_MAX_INPUT_BYTES",
+        "LONG_PAGE_MAX_PAGES",
+        "LONG_PAGE_MIN_BYTES",
+        "LONG_PAGE_UNITS",
+        "LONG_PAGE_UNIT_CONFIG_KEY",
         "MAX_ASSEMBLE_HITS",
         "MIN_EXPLICIT_AUTO_BUDGET",
         "RETURN_BUDGET_CONVERSATION_KEY",
@@ -827,6 +833,7 @@
         "evidenceTokenizer",
         "isConversationLabels",
         "locateChunks",
+        "longPageUnitValueProblem",
         "pageEvidenceText",
         "pagePlanHits",
         "parseAutoPacking",
@@ -834,8 +841,10 @@
         "parseReturnWindow",
         "resolveEvidencePlan",
         "resolveFrozenHits",
+        "selectLongPages",
         "splitPieces",
-        "unsupportedDelivery"
+        "unsupportedDelivery",
+        "withLongPagePolicy"
       ],
       "./search/expansion": [
         "expandQuery",

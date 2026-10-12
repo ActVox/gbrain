@@ -1406,12 +1406,12 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.return_budget_conversation',
   'search.return_budget_max_remote',
   'search.auto_packing',
+  'search.long_page_unit', // F2: delivery unit for long non-conversation hits under an implied auto: off (default) | window | section | page (search/evidence-delivery.ts)
   'search.evidence_date_header', // C1: one-line date header per delivered block (default off; search/evidence-date.ts)
   'search.entity_anchoring', // entity-anchored retrieval for entity-scoped current-state query/search (default off; search/entity-anchor.ts)
   'search.query_facts_arm', // query adds matching active facts as rows in spare capacity (default on; search/facts-arm.ts)
   'search.temporal_fact_reserve', // temporal-cue queries reserve up to 15% of the token budget for question-ranked dated facts (default off; search/facts-arm.ts)
   'think.return_unit',
-  'entity.names_references', 'entity.record_types', // entity rows: count + card next (default on), record types (default empty); entity-references-config.ts
   'think.pages_budget_chars', // #5461: total chars for the synthesize pages block (4000-200000, default 12000; soft: the 600-char floor wins); think/pages-budget.ts
   'think.excerpt_ceiling_chars', // #5461: per-page excerpt cap for the synthesize pages block (600-200000, default 2400); think/pages-budget.ts
   // Models tier system (v0.31.12)
@@ -1620,6 +1620,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'mcp.strict_params',
   'mcp.result_rows', // C1 row shape, read dual-plane by src/mcp/result-rows.ts
   'mcp.allow_session_widen', // stdio request_tools session widening (default on), read dual-plane by src/mcp/surface.ts
+  'entity.names_references', 'entity.record_types', // names-row referenced_by_count + card `next` (default on); canonical page types listed as `records` (default empty); src/core/entity-references-config.ts
+  'mcp.instructions_governing_rule', // instruction 7: in_effect (default: the record in effect on the date asked about governs) | newest (the earlier recency sentence); src/mcp/instructions.ts
   // Skill-nag suppression (#2180): brain-resident pack install nag off-switch.
   'skillpack.nag_disabled',
   // Self-upgrade (v0.42; file plane, read on the hot path)
