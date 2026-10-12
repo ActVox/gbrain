@@ -117,11 +117,16 @@ The rules below are general to any brain. Each line is covered by a test row in
    aliases (without corporate suffixes such as Inc, LLC, Co or Group), plus
    declared descriptors on the account page: "X is our <d> account", "known
    internally as the <d> account", and the `segment`, `industry`, `vertical`,
-   `sector`, `category` and `descriptor` labels or frontmatter keys.
+   `sector`, `category`, `descriptor`, `region` and `territory` labels or
+   frontmatter keys. A label counts at the start of a line or after a
+   sentence boundary ("Account: X. Industry: food. Region: EMEA.").
 8. **Owner phrases.** "<Name>'s <d> account" (also book, client, customer,
    relationship, portfolio, book of business) and "the <d> account (that) <Name>
-   runs / handles / owns / manages / covers / leads". The descriptor must be
-   the whole run between the possessive and the noun. A plural noun, a name
+   runs / handles / owns / manages / covers / leads". The descriptor is the
+   whole run between the possessive and the noun, one to three words. It
+   matches an account when the run is one of the account's descriptors, or
+   when every word of the run is a word of its descriptors ("EMEA software"
+   for an account with region EMEA and industry software). A plural noun, a name
    that is itself an account or company, and a sentence about personal or
    benefit accounts (benefits, HSA, FSA, 401k, payroll, bank, login, password)
    are not owner phrases. A one-word name matches an owner by first name, a
@@ -155,3 +160,38 @@ The rules below are general to any brain. Each line is covered by a test row in
 
 Every pass reports `links`, `documents`, `unresolved`, `ambiguous` and
 `windows` under `mentions.owner_phrases` in `gbrain extract --stale --json`.
+
+## Precision sample
+
+Before the key's default can change, a labeled sample of derived links from a
+real brain must show precision at a Wilson 95% lower bound of 0.85 or more
+(at least 57 of 60 correct, or 92 of 100). `scripts/owner-phrase-sample.ts`
+draws that sample without writing anything:
+
+- It derives the windows and links the pass would store, inside a `READ ONLY`
+  transaction, with no model or network calls. The key can stay off.
+- Sampling rule v1, fixed before any sample is drawn: one population row per
+  (document, account page) link; rows are ranked by
+  sha256(`owner-phrase-sample-v1`, seed, document slug, account slug) and the
+  first `--n` (default 100) are taken. The same brain and seed give the same
+  sample.
+- Fewer than 22 derivable links is a refusal (exit 3); nothing is written.
+- The TSV goes only to the path given with `--out` (mode 0600; an existing file
+  needs `--force`). Columns: `id`, `doc_slug`, `phrase`, `line_excerpt`,
+  `account`, `window`, `evidence_page`, `label`. stdout carries counts only.
+
+From a checkout of the branch, against a copy of a PGLite brain or a live
+Postgres brain:
+
+```bash
+cd ~/gbrain-f5 && bun install
+cp -a "$(jq -r .database_path ~/.gbrain/config.json)" /tmp/brain-f5-copy   # PGLite only; copy while nothing writes
+bun scripts/owner-phrase-sample.ts --pglite /tmp/brain-f5-copy --source all --seed "<seed>" --n 100 --out ~/f5-sample.tsv
+# Postgres brain: omit --pglite; the script reads ~/.gbrain/config.json
+# label each row y (the document means that account) or n in the label column, then:
+bun scripts/owner-phrase-sample.ts --score ~/f5-sample.tsv
+```
+
+`--score` prints the labeled, correct and wrong counts and the Wilson 95%
+lower bound. The TSV stays with the owner; only the counts and the bound are
+published.

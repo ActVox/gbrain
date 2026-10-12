@@ -18,7 +18,7 @@ import { tokenizeTitle } from '../src/core/by-mention.ts';
 import { findDates } from '../src/core/mentions/owner-phrase/dates.ts';
 import { scanPage, type ScanInput } from '../src/core/mentions/owner-phrase/scan.ts';
 import { buildNameIndex, parseStatements, type Statement } from '../src/core/mentions/owner-phrase/statements.ts';
-import { accountDescriptors, buildWindows, ownerMatches, resolvePhrase, type OwnerWindow } from '../src/core/mentions/owner-phrase/windows.ts';
+import { accountDescriptors, buildWindows, descriptorMatches, ownerMatches, resolvePhrase, type OwnerWindow } from '../src/core/mentions/owner-phrase/windows.ts';
 
 const ACCOUNTS = ['Acme Example Freight', 'Widget Example Health', 'Orbit Example Labs', 'Nimbus Example Freight'];
 const slugOf = (t: string) => `companies/${t.toLowerCase().replace(/ /g, '-')}`;
@@ -186,6 +186,18 @@ describe('lines 5-6: window assembly', () => {
 describe('lines 7-10: resolution', () => {
   test('descriptors are name words without suffixes plus declared ones', () => {
     expect([...accountDescriptors(['CRM record: Acme Example Freight Inc'], ['logistics'])].sort()).toEqual(['acme', 'example', 'freight', 'logistics']);
+  });
+
+  test('a descriptor run of up to three words matches when it is one descriptor or every word is a descriptor word; labels count after a sentence boundary', () => {
+    const set = new Set(['freight', 'north america', 'emea']);
+    expect(descriptorMatches(set, 'freight')).toBe(true);
+    expect(descriptorMatches(set, 'emea freight')).toBe(true);
+    expect(descriptorMatches(set, 'north america freight')).toBe(true);
+    expect(descriptorMatches(set, 'new freight')).toBe(false);
+    expect(descriptorMatches(set, 'america')).toBe(false);
+    const acct = page(slugOf('Orbit Example Labs'), 'Account: Orbit Example Labs. Industry: robotics. Region: EMEA.', { type: 'company' });
+    expect(acct.scan.descriptors).toEqual(['emea', 'robotics']);
+    expect(page('notes/n5', "Quill Example's North America robotics account renewed.").scan.hits.map(h => h.descriptor)).toEqual(['north america robotics']);
   });
 
   test('owner matching: one word matches a first name, two words the full name', () => {

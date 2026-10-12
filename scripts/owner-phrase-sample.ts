@@ -7,7 +7,10 @@
  * calls, then writes a labeling TSV of a reproducible sample to the path the
  * operator names. stdout carries counts only, never page names or text.
  *
- *   bun scripts/owner-phrase-sample.ts --out <file.tsv> --seed <seed> [--source <id>] [--n 100] [--pglite <dir>] [--force]
+ *   bun scripts/owner-phrase-sample.ts --out <file.tsv> --seed <seed> [--source <id>|all] [--n 100] [--pglite <dir>] [--force]
+ *
+ * `--source all` derives every source and samples the union (slugs are
+ * written as <source>:<slug>).
  *   bun scripts/owner-phrase-sample.ts --score <labeled.tsv>
  *
  * Exit codes: 0 written (or scored), 1 usage or runtime error, 3 refused
@@ -19,10 +22,10 @@ import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
 import type { EngineConfig } from '../src/core/types.ts';
 import {
-  deriveOwnerPhraseLinks, lineExcerpt, sampleLinks, scoreLabels, toTsv, SAMPLE_DEFAULT_SIZE, SAMPLE_MIN_POPULATION, SAMPLE_RULE,
+  deriveOwnerPhraseLinks, lineExcerpt, sampleLinks, scoreLabels, toTsv, SAMPLE_DEFAULT_SIZE, SAMPLE_MIN_POPULATION, SAMPLE_RULE, type DerivedLink,
 } from '../src/core/mentions/owner-phrase/sample.ts';
 
-const USAGE = 'usage: bun scripts/owner-phrase-sample.ts --out <file.tsv> --seed <seed> [--source <id>] [--n 100] [--pglite <dir>] [--force]\n'
+const USAGE = 'usage: bun scripts/owner-phrase-sample.ts --out <file.tsv> --seed <seed> [--source <id>|all] [--n 100] [--pglite <dir>] [--force]\n'
   + '       bun scripts/owner-phrase-sample.ts --score <labeled.tsv>';
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -53,13 +56,23 @@ let code = 0;
 try {
   const result = await engine.transaction(async tx => {
     await tx.executeRaw('SET TRANSACTION READ ONLY');
-    const derived = await deriveOwnerPhraseLinks(tx, sourceId);
+    const sources = sourceId === 'all' ? (await tx.executeRaw<{ id: string }>('SELECT id FROM sources ORDER BY id')).map(r => r.id) : [sourceId];
+    const derived = { links: [] as Array<DerivedLink & { source: string }>, pages: 0, windows: 0, unresolved: 0, ambiguous: 0 };
+    for (const source of sources) {
+      const d = await deriveOwnerPhraseLinks(tx, source);
+      derived.links.push(...d.links.map(l => sources.length > 1 ? { ...l, source, doc: `${source}:${l.doc}`, account: `${source}:${l.account}` } : { ...l, source }));
+      derived.pages += d.pages; derived.windows += d.windows; derived.unresolved += d.unresolved; derived.ambiguous += d.ambiguous;
+    }
     if (derived.links.length < SAMPLE_MIN_POPULATION) return { refused: true as const, derived };
-    const sample = sampleLinks(derived.links, seed!, n);
-    const pages = new Map((await tx.executeRaw<{ slug: string; title: string | null; compiled_truth: string | null; timeline: string | null }>(
-      'SELECT slug, title, compiled_truth, timeline FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[])',
-      [sourceId, [...new Set(sample.map(s => s.doc))]])).map(p => [p.slug, p]));
-    return { refused: false as const, derived, rows: sample.map(s => ({ ...s, excerpt: pages.has(s.doc) ? lineExcerpt(pages.get(s.doc)!, s.line) : '' })) };
+    const sample = sampleLinks(derived.links, seed!, n) as Array<DerivedLink & { source: string }>;
+    const rows = [];
+    for (const s of sample) {
+      const slug = sources.length > 1 ? s.doc.slice(s.source.length + 1) : s.doc;
+      const [page] = await tx.executeRaw<{ title: string | null; compiled_truth: string | null; timeline: string | null }>(
+        'SELECT title, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL', [s.source, slug]);
+      rows.push({ ...s, excerpt: page ? lineExcerpt(page, s.line) : '' });
+    }
+    return { refused: false as const, derived, rows };
   });
   const counts = { rule: SAMPLE_RULE, seed_sha256: createHash('sha256').update(seed!).digest('hex').slice(0, 16), source: sourceId,
     pages: result.derived.pages, windows: result.derived.windows, population: result.derived.links.length,

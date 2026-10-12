@@ -110,6 +110,9 @@ describe('scripts/owner-phrase-sample.ts', () => {
     expect(run(['--out', out, '--seed', 'operator-seed', '--n', '25']).exitCode).toBe(3);
     expect(run(['--out', out, '--seed', 'operator-seed', '--n', '25', '--force']).exitCode).toBe(0);
     expect(readFileSync(out, 'utf8')).toBe(tsv);
+    const all = run(['--out', join(dir, 'all.tsv'), '--seed', 'operator-seed', '--n', '25', '--source', 'all']);
+    expect(all.exitCode).toBe(0);
+    expect(JSON.parse(all.stdout.toString().trim().split('\n').at(-1)!)).toMatchObject({ population: 28, sample: 25 });
   }, 120_000);
 
   test(`refuses below ${SAMPLE_MIN_POPULATION} links and writes nothing`, async () => {
