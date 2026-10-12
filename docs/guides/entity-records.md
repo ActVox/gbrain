@@ -53,9 +53,11 @@ Effective 2026-03-01, the monthly fee changes to 12,000 USD. All other terms are
   `unsigned`).
 - `amends` is a relationship field: a non-ranking `amends` link to the record
   it changes, with the terms-start date in `since`. Map the field for your page
-  type in the schema pack's frontmatter links and re-extract, as described in
-  [temporal edges](temporal-edges.md). Without the mapping the page is still a
-  record; it just shows no `amends`.
+  type in the schema pack's frontmatter links (example pack:
+  `examples/schema-packs/amends-example/pack.yaml`; details in
+  [temporal edges](temporal-edges.md#amendments-the-amends-link)), then link the
+  pages you already have with `gbrain extract links --source db --include-frontmatter`.
+  Without the mapping the page is still a record; it just shows no `amends`.
 - Whole-record replacement is a `supersedes` link, which also down-ranks the
   replaced page in search. Use it only when the new record replaces the old one
   entirely.
