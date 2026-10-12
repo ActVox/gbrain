@@ -731,7 +731,15 @@ const context_pack: Operation = {
     // Pack, price and render the redacted presentation sets (one echo
     // dictionary); local callers get the delivered facts back raw below.
     const rawFacts = await withProvenance(ctx.engine, sourceId, res.facts ?? []);
-    const view = redactRetrievalOutput([{ cards: res.cards ?? [], facts: rawFacts }], {}).results[0];
+    // F1 records (pull verb only; the ambient push path never reads them): the count and enrolled-type records of each card.
+    const { readPackReferences, renderRecordLines, RECORDS_HEADER } = await import('../verbs/entity-references.ts');
+    type PackRefs = Awaited<ReturnType<typeof readPackReferences>>;
+    const packRefs: PackRefs = await readPackReferences(ctx.engine, sourceId, res.cards ?? [], { remote: !includePrivate, eligibility, surfaceCeiling: ctx.surfaceCeiling,
+      emitNotice: (n) => ctx.emitNotice?.(n) })
+      .catch((): PackRefs => ({ bySlug: new Map(), notice: null }));
+    if (packRefs.notice) ctx.emitNotice?.(packRefs.notice);
+    const withRefs = (res.cards ?? []).map((c) => (packRefs.bySlug.has(c.entity.slug) ? { ...c, ...packRefs.bySlug.get(c.entity.slug) } : c));
+    const view = redactRetrievalOutput([{ cards: withRefs, facts: rawFacts }], {}).results[0];
     let cards = view.cards;
     let facts = view.facts;
     // The SAME since filter the assembler applied (pre-landing review: the raw
@@ -760,6 +768,14 @@ const context_pack: Operation = {
         : dropAll(withMentions);
       const keptMentions = new Set(mentionPack.items);
       cards = cards.map((c) => (c.newer_mentions && !keptMentions.has(c) ? { ...c, newer_mentions: undefined } : c));
+      // Records pack last, into what everything else left; a card whose records do not fit keeps its count.
+      const recordBudget = mentionBudget - mentionPack.meta.used - lineCost('') - lineCost(RECORDS_HEADER);
+      const withRecords = cards.filter((c) => renderRecordLines(c).length);
+      const recordPack = recordBudget > 0
+        ? packToBudget(withRecords, (c) => renderRecordLines(c).reduce((n, l) => n + lineCost(l), 0), recordBudget)
+        : dropAll(withRecords);
+      const keptRecords = new Set(recordPack.items);
+      cards = cards.map((c) => (renderRecordLines(c).length && !keptRecords.has(c) ? { ...c, records: undefined, sibling_records: undefined } : c));
       droppedCount = cardPack.meta.dropped + factPack.meta.dropped;
     }
     const open_threads = cards.flatMap(threadsOf);
@@ -767,7 +783,9 @@ const context_pack: Operation = {
     // `text` is what harnesses inject, so it must honor the same budget the
     // structured arrays report — the assembler's pre-budget rendering would
     // overrun the declared budget_tokens. budget_used reports that text.
-    const packText = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts) : res.text;
+    const recordLines = cards.flatMap(renderRecordLines);
+    const basePack = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts) : res.text;
+    const packText = recordLines.length ? [basePack, ['', RECORDS_HEADER, ...recordLines].join('\n')].filter(Boolean).join('\n') : basePack;
     const text = [coreText, packText].filter(Boolean).join('\n\n');
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
 
@@ -787,6 +805,10 @@ const context_pack: Operation = {
         ...(c.quarantined ? { quarantined: true } : {}),
         ...(c.unconfirmed ? { unconfirmed: true } : {}),
         ...(c.newer_mentions ? { newer_mentions: c.newer_mentions } : {}),
+        ...(c.referenced_by_count !== undefined ? { referenced_by_count: c.referenced_by_count } : {}),
+        ...(c.records ? { records: c.records } : {}),
+        ...(c.sibling_records ? { sibling_records: c.sibling_records } : {}),
+        ...(c.references_unavailable ? { references_unavailable: c.references_unavailable } : {}),
       })),
       open_threads,
       facts: (ctx.remote === false ? rawFacts.slice(0, facts.length) : facts).map((f) => ({

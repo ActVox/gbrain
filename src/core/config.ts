@@ -1411,6 +1411,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.query_facts_arm', // query adds matching active facts as rows in spare capacity (default on; search/facts-arm.ts)
   'search.temporal_fact_reserve', // temporal-cue queries reserve up to 15% of the token budget for question-ranked dated facts (default off; search/facts-arm.ts)
   'think.return_unit',
+  'entity.names_references', 'entity.record_types', // entity rows: count + card next (default on), record types (default empty); entity-references-config.ts
   'think.pages_budget_chars', // #5461: total chars for the synthesize pages block (4000-200000, default 12000; soft: the 600-char floor wins); think/pages-budget.ts
   'think.excerpt_ceiling_chars', // #5461: per-page excerpt cap for the synthesize pages block (600-200000, default 2400); think/pages-budget.ts
   // Models tier system (v0.31.12)

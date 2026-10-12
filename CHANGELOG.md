@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased: cat40 next wave part 1, version stamped at merge] - 2026-10-12
+
+**Entity rows now point at the records behind an account.** Every found `entity names` row (and each identity sibling) carries `referenced_by_count` and a `next` to its full card, so an agent that resolved a batch of names knows which ones have pages to read and how to open them. With `entity.record_types` set (off by default), the rows, the full card and `context_pack` also list the referring contracts, amendments or other record types you enroll: newest page date first, each with its page date labeled as a page date, its `status`, the record it amends (with the terms-start date when the link records one) and what it replaces, bounded per page and per call, with continuations that return exactly the rest. The order never claims which record governs. A late or failed read is marked `references_unavailable` with a degraded notice, never shown as an empty list.
+
+### Itemized changes
+
+- `src/core/mentions/referrers.ts`: `readTargetReferences`, the batched variant of the shared referrer CTE (target index on every row, the same filters), with per-type totals and record filtering inside the membership query before ORDER BY, LIMIT and hydration; `readRecordMetadata` (page status, `amends` with `since` from the caller's temporal scope, `supersedes`), shared with `get_backlinks {group:"page"}` continuations of an enrolled type.
+- `src/core/verbs/entity-references.ts`: the row fields, caps (5 per page, 24 per call, input order, repeated pages counted once), per-type `next`, the 2-second cooperative deadline, the `references_unavailable` marker and notice, the `record_types_undeclared` notice, and `context_pack`'s records block (pull verb only).
+- `src/core/entity-references-config.ts`: `entity.names_references` (default on) and `entity.record_types` (default empty).
+- `src/core/verbs/entity-names.ts`, `entity-card.ts`, `src/core/ops/facts.ts`: names rows, the full card (records, and the `referenced_by` failure marker) and `context_pack` cards; `src/core/verbs.ts` output schemas; `src/core/verbs/usage-log.ts` `records_firing` (listed, zero, unavailable).
+- Docs: MEMORY_VERBS v1 "entity names reference fields and records", "entity records" and "context_pack records"; `docs/guides/entity-records.md`.
+- Tests: `test/entity-records.test.ts` and `test/e2e/entity-records-postgres.test.ts` (shared scenarios: batched-vs-single parity with private, quarantined and below-floor referrers, hidden amends dates, caps and continuations, deadline and failure markers, schema validity, packing order); a 50-names / 150-target case in `test/entity-card-perf.slow.test.ts`.
+
 ## [0.60.180.0] - 2026-10-12
 
 **When `remember` refuses a forgotten claim, the refusal now says when and how widely it was forgotten.** An agent that re-saves a claim the user forgot gets `fact_withdrawn` as before, and the refusal now carries `withdrawn: { at, subject, visibility }`, where `subject` is the entity the claim was forgotten for or `all_entities`. The agent can tell the user "you asked me to forget that on <date>" instead of retrying. The object rides the immediate refusal, the batch item error, the failed write receipt and `get_write_request`. It covers the exact claim only, the message, code and suggestion are unchanged, and nothing is ever restored.

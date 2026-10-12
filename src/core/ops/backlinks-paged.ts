@@ -15,9 +15,10 @@ import type { Link, PageReadPolicy } from '../types.ts';
 import type { Notice } from '../agent-output.ts';
 import { canonicalTypeOf, loadSourcePack } from '../mentions/policy.ts';
 import {
-  decodeCursor, readReferrerPage, referrerTypes, PAGE_DEFAULT_LIMIT, PAGE_MAX_LIMIT, type ReferenceRow, type ReferrerScope,
+  canonicalRecordTypes, decodeCursor, readReferrerPage, referrerTypes, PAGE_DEFAULT_LIMIT, PAGE_MAX_LIMIT, type ReferenceRow, type ReferrerScope,
 } from '../mentions/referrers.ts';
 import { mentionCoverageNotice, readMentionCoverage, type MentionCoverage } from '../mentions/coverage.ts';
+import { readEntityReferencesConfig } from '../entity-references-config.ts';
 
 export interface BacklinkPage {
   rows: ReferenceRow[];
@@ -97,7 +98,10 @@ export async function readBacklinkPage(ctx: OperationContext, p: Record<string, 
   if (!resolved) return { rows: [], total: 0, truncated: false, cursor: null, coverage };
   const type = typeof p.type === 'string' && p.type ? p.type : undefined;
   if (type) await assertKnownType(ctx, resolved.scope, type);
-  return { ...await readReferrerPage(ctx.engine, resolved.scope, { type, limit, cursor }), coverage };
+  // F1: a record type's continuation rows carry the same record metadata as the record view (membership unchanged).
+  const recordMetadata = type !== undefined && canonicalRecordTypes((await readEntityReferencesConfig(ctx.engine)).recordTypes, resolved.scope.pack)
+    .includes(canonicalTypeOf(type, resolved.scope.pack));
+  return { ...await readReferrerPage(ctx.engine, resolved.scope, { type, limit, cursor, recordMetadata }), coverage };
 }
 
 /**
