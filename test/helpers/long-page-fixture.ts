@@ -3,11 +3,13 @@
  * `search.long_page_unit`): the PGLite unit arm (test/evidence-long-page.test.ts)
  * and the Postgres arm (test/e2e/evidence-long-page.test.ts).
  *
- * `contracts/msa-example` is the one long page (well over LONG_PAGE_MIN_BYTES,
- * with ATX sections). Its term words ("renewal fee") recur in clauses that do
- * not decide the value, so a delivered unit has to be anchored on the ranked
- * hit, never on term overlap. The other pages are short; `chat/session-example`
- * is a conversation for the mixed case.
+ * `contracts/msa-example` is the one long page (over the default
+ * `search.long_page_min_chars`, 20,000 rendered characters, with ATX
+ * sections). Its term words ("renewal fee") recur in clauses that do not
+ * decide the value, so a delivered unit has to be anchored on the ranked hit,
+ * never on term overlap. `notes/policy-example` is medium (over the old
+ * 8,000-byte line, under 20,000 characters), the others are short;
+ * `chat/session-example` is a conversation for the mixed case.
  */
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { operations, type OperationContext } from '../../src/core/operations.ts';
@@ -20,6 +22,7 @@ import { withEnv } from './with-env.ts';
 const filler = (topic: string, n: number) => Array.from({ length: n }, (_, i) => `Clause ${i + 1} on ${topic} restates the general obligations of both parties and the notice address for correspondence.`).join(' ');
 
 export const LONG_SLUG = 'contracts/msa-example';
+export const MEDIUM_SLUG = 'notes/policy-example';
 export const DECIDING = 'Effective 2026-03-01 the annual renewal fee for acme-example is 4,200 USD.';
 
 export const LONG_PAGE_CORPUS: Array<{ slug: string; type: string; body: string }> = [
@@ -27,14 +30,15 @@ export const LONG_PAGE_CORPUS: Array<{ slug: string; type: string; body: string 
     slug: LONG_SLUG,
     type: 'note',
     body: [
-      `## Definitions\n\nThe renewal fee means the amount stated in the order form. ${filler('definitions', 18)}`,
-      `## Fees\n\nNo renewal fee applies to trial seats, and the renewal fee is invoiced in advance. ${filler('fees', 18)}`,
-      `## Term and renewal\n\nThe agreement renews each year; a renewal fee change needs written notice. ${filler('term', 18)}`,
+      `## Definitions\n\nThe renewal fee means the amount stated in the order form. ${filler('definitions', 48)}`,
+      `## Fees\n\nNo renewal fee applies to trial seats, and the renewal fee is invoiced in advance. ${filler('fees', 48)}`,
+      `## Term and renewal\n\nThe agreement renews each year; a renewal fee change needs written notice. ${filler('term', 48)}`,
       `## Amendment 2\n\n${DECIDING} ${filler('amendment', 6)}`,
-      `## Notices\n\n${filler('notices', 18)}`,
+      `## Notices\n\n${filler('notices', 48)}`,
     ].join('\n\n'),
   },
   { slug: 'notes/short-example', type: 'note', body: 'A short note: ask about the renewal fee before the call.' },
+  { slug: MEDIUM_SLUG, type: 'note', body: `## Renewal policy\n\nThe renewal fee policy is reviewed once a year. ${filler('policy', 100)}` },
   { slug: 'notes/handbook-example', type: 'note', body: `## Renewals\n\nThe handbook describes how a renewal fee is quoted. ${filler('handbook', 3)}` },
 ];
 

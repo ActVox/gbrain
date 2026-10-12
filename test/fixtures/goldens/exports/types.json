@@ -6892,6 +6892,13 @@
       },
       {
         "kind": "variable",
+        "name": "DEFAULT_LONG_PAGE_MIN_CHARS",
+        "signature": [
+          "20000"
+        ]
+      },
+      {
+        "kind": "variable",
         "name": "DEFAULT_REMOTE_BUDGET_MAX",
         "signature": [
           "32000"
@@ -7059,9 +7066,9 @@
       },
       {
         "kind": "variable",
-        "name": "LONG_PAGE_MIN_BYTES",
+        "name": "LONG_PAGE_MIN_CHARS_CONFIG_KEY",
         "signature": [
-          "8000"
+          "\"search.long_page_min_chars\""
         ]
       },
       {
@@ -7081,6 +7088,7 @@
       {
         "kind": "interface",
         "members": [
+          "minChars: number",
           "unit: LongPageUnit"
         ],
         "name": "LongPagePolicy"
@@ -7091,6 +7099,7 @@
           "deadlineAt: number",
           "fallbacks: string[]",
           "kept: ReadonlyMap<number, string>",
+          "minChars: number",
           "pages: ReadonlySet<number>",
           "unit: LongPageUnit"
         ],
@@ -7302,6 +7311,13 @@
         "name": "locateChunks",
         "signature": [
           "(text: string, chunks: Array<{ id: number; chunk_index: number; chunk_text: string; }>) => Array<{ id: number; chunk_index: number; start: number; end: number; }>"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "longPageMinCharsValueProblem",
+        "signature": [
+          "(value: string) => string | null"
         ]
       },
       {

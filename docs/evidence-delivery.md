@@ -85,6 +85,9 @@ Per-call params on `search`, `query`, `recall`:
 - `search.long_page_unit` (config only, default `off`): `window` | `section` |
   `page` for long non-conversation hits under the implied `auto`; see
   [Long pages](#long-pages-searchlong_page_unit).
+- `search.long_page_min_chars` (config only, default 20,000): the
+  rendered-body length in characters at which a page counts as long for
+  `search.long_page_unit`.
 - `return_window`: integer 1–3, default from `search.return_window` (default 1).
   Used by `window` (and by the `section` fallback to `window`).
 - Budget: `token_budget` on `search` / `query`, `budget_tokens` on `recall`.
@@ -196,24 +199,31 @@ delivered unit is always the one around the ranked hit.
 |---|---|---|---|
 | 1 | `return_unit` on the call | always (`auto` included: an explicit `auto` keeps every non-conversation chunk) | that unit |
 | 2 | `search.return_unit` set to anything but `auto` | `return_unit` omitted | that unit, every hit |
-| 3 | `search.long_page_unit` (not `off`) | `return_unit` omitted, `search.return_unit` unset or `auto`, no explicit `token_budget`, no explicit `snippet_chars`, and the hit is a long non-conversation page | that unit (`delivered.reason: "long_page"`) |
+| 3 | `search.long_page_unit` (not `off`) | `return_unit` omitted, `search.return_unit` unset or `auto`, no explicit `token_budget`, no positive `snippet_chars`, and the hit is a long non-conversation page | that unit (`delivered.reason: "long_page"`) |
 | 4 | implied `auto` | everything else | conversations whole, other hits their ranked chunk |
 
 The policy is resolved at the `search`/`query` caller and passed to the
 assembler, so `recall`, `think` (`think.return_unit`) and `assemble_evidence`
-never read the key and stay byte-identical with it on. An explicit
-`snippet_chars` keeps it off because a cut from the front could drop the hit;
+never read the key and stay byte-identical with it on. A positive
+`snippet_chars` keeps it off because it cuts every delivered block from the
+front, so a widened unit would lose its tail (`snippet_chars: 0`, full text,
+leaves it on and the unit comes back whole);
 an explicit `token_budget` keeps it off because the cap (next section) keeps
 its own rules, and `query`'s bare `token_budget` is chunk-mode budgeting anyway.
 The subagent default snippet cap already keeps the implied `auto` on `chunk`.
 
-**What is long.** A page whose stored body (compiled truth plus timeline;
-compiled truth only under `detail: "low"`) holds at least **8,000 bytes**
-(`LONG_PAGE_MIN_BYTES`, about 2,000 tokens or four chunks). Conversation pages
+**What is long.** A page whose rendered body (compiled truth plus timeline;
+compiled truth only under `detail: "low"`) holds at least
+`search.long_page_min_chars` characters (default **20,000**;
+`gbrain config set` refuses anything but a positive whole number, and an
+unusable stored value reads as the default). The size preflight compares the
+stored body's character count; delivery confirms the threshold on the rendered
+text (`pageEvidenceText`), and a page under it keeps its ranked chunk with no
+fallback code. Conversation pages
 (see [Conversation detection](#conversation-detection)) and saved-fact rows are
 never long pages.
 
-**Limits.** One size preflight query reads the byte counts of the hit pages
+**Limits.** One size preflight query reads the character and byte counts of the hit pages
 under the caller's read scope; it never reads a body. Then, in rank order, at
 most **5** long pages (`LONG_PAGE_MAX_PAGES`) holding at most **1,000,000**
 stored-body bytes together (`LONG_PAGE_MAX_INPUT_BYTES`) are fetched in one

@@ -325,8 +325,9 @@ export function effectivePlan(plan: EvidencePlan | null, hits: SearchResult[]): 
 export const LONG_PAGE_UNIT_CONFIG_KEY = 'search.long_page_unit';
 export const LONG_PAGE_UNITS = ['off', 'window', 'section', 'page'] as const;
 export type LongPageUnit = Exclude<typeof LONG_PAGE_UNITS[number], 'off'>;
-/** A page is long when its stored body (compiled truth, plus timeline unless `detail: "low"`) holds this many bytes: about 2,000 tokens, four or more chunks. */
-export const LONG_PAGE_MIN_BYTES = 8_000;
+/** A page is long when its rendered body (compiled truth, plus timeline unless `detail: "low"`) holds at least this many characters. */
+export const LONG_PAGE_MIN_CHARS_CONFIG_KEY = 'search.long_page_min_chars';
+export const DEFAULT_LONG_PAGE_MIN_CHARS = 20_000;
 /** Long pages per call that get the unit, in rank order; later ones keep their chunk (`long_page_pages`). */
 export const LONG_PAGE_MAX_PAGES = 5;
 /** Stored-body bytes those pages may bring in; a page that would cross it keeps its chunk (`long_page_bytes`), since bodies are read whole and never sliced. */
@@ -334,11 +335,12 @@ export const LONG_PAGE_MAX_INPUT_BYTES = 1_000_000;
 /** Cooperative deadline for the size preflight plus the long-page fetch (`long_page_deadline`). */
 export const LONG_PAGE_DEADLINE_MS = 2_000;
 
-export interface LongPagePolicy { unit: LongPageUnit }
+export interface LongPagePolicy { unit: LongPageUnit; minChars: number }
 
 /** The long pages one call delivers in the policy's unit, and the ones that keep their chunk (page id → fallback code). */
 export interface LongPageSelection {
   unit: LongPageUnit;
+  minChars: number;
   pages: ReadonlySet<number>;
   kept: ReadonlyMap<number, string>;
   deadlineAt: number;
@@ -349,24 +351,33 @@ export function longPageUnitValueProblem(value: string): string | null {
   return (LONG_PAGE_UNITS as readonly string[]).includes(value.trim()) ? null : `${LONG_PAGE_UNIT_CONFIG_KEY} must be one of ${LONG_PAGE_UNITS.join(', ')} (got ${JSON.stringify(value.slice(0, 40))}).`;
 }
 
+export function longPageMinCharsValueProblem(value: string): string | null {
+  return /^[1-9][0-9]{0,8}$/.test(value.trim()) ? null : `${LONG_PAGE_MIN_CHARS_CONFIG_KEY} must be a positive whole number of characters (got ${JSON.stringify(value.slice(0, 40))}).`;
+}
+
 /**
  * The F2 policy for a search/query call. It applies only under an implied
  * `auto`: no `return_unit` on the call, `search.return_unit` unset or `auto`,
- * no explicit budget (the cap keeps its rules) and no explicit `snippet_chars`
- * (a head cut could drop the hit). Read errors and unknown values are `off`.
+ * no explicit budget (the cap keeps its rules) and no positive
+ * `snippet_chars` (it head-cuts every delivered block, so a widened unit
+ * would lose its tail; `0` means full text and leaves it on). Read errors and
+ * unknown values are `off`; an unusable threshold is the default.
  */
 export async function withLongPagePolicy(engine: BrainEngine, plan: EvidencePlan | null, input: { snippetChars: unknown }): Promise<EvidencePlan | null> {
   if (!plan || plan.unit !== 'auto' || plan.explicitUnit || plan.budgetExplicit) return plan;
-  if (typeof input.snippetChars === 'number' && Number.isFinite(input.snippetChars)) return plan;
+  if (typeof input.snippetChars === 'number' && Number.isFinite(input.snippetChars) && Math.floor(input.snippetChars) > 0) return plan;
   const raw = (await engine.getConfig(LONG_PAGE_UNIT_CONFIG_KEY).catch(() => null))?.trim();
-  return raw === 'window' || raw === 'section' || raw === 'page' ? { ...plan, longPage: { unit: raw } } : plan;
+  if (raw !== 'window' && raw !== 'section' && raw !== 'page') return plan;
+  const min = (await engine.getConfig(LONG_PAGE_MIN_CHARS_CONFIG_KEY).catch(() => null)) ?? '';
+  return { ...plan, longPage: { unit: raw, minChars: longPageMinCharsValueProblem(min) ? DEFAULT_LONG_PAGE_MIN_CHARS : Number(min.trim()) } };
 }
 
 /**
  * The plan to run for these hits once the long-page policy is applied: a
- * size preflight (one query, the caller's read scope) finds the long
- * non-conversation pages and keeps the rank-order ones inside the page and
- * byte limits. With no long page this is exactly effectivePlan, so a
+ * size preflight (one query, the caller's read scope) finds the
+ * non-conversation pages whose stored body reaches the character threshold
+ * and keeps the rank-order ones inside the page and byte limits; delivery
+ * confirms the threshold on the rendered body. With no long page this is exactly effectivePlan, so a
  * response without one is unchanged; a failed or late preflight is too.
  */
 export async function selectLongPages(engine: BrainEngine, plan: EvidencePlan | null, hits: SearchResult[], scope: DeliveryScope): Promise<{ plan: EvidencePlan | null; longPages?: LongPageSelection }> {
@@ -376,31 +387,33 @@ export async function selectLongPages(engine: BrainEngine, plan: EvidencePlan | 
   const ids: number[] = [];
   for (const h of hits) if (!h.fact_row && conversationSignal(h) === null && Number.isFinite(h.page_id) && !ids.includes(h.page_id)) ids.push(h.page_id);
   if (ids.length === 0) return { plan: base };
-  let bytes: Map<number, number>;
+  const { unit, minChars } = plan.longPage;
+  let sizes: Map<number, { chars: number; bytes: number }>;
   try {
     const params: unknown[] = [ids];
     const filter = pageReadFilter('p', scope, params, true);
-    const timeline = scope.detail === 'low' ? '' : ` + octet_length(COALESCE(p.timeline, ''))`;
-    const rows = await withTimeout(engine.executeRaw<{ id: number; bytes: number }>(
-      `SELECT p.id, octet_length(COALESCE(p.compiled_truth, ''))${timeline} AS bytes FROM pages p
+    const tl = scope.detail === 'low' ? null : `CASE WHEN COALESCE(p.timeline, '') !~ '\\S' THEN 0 ELSE ${TIMELINE_SEPARATOR.length} + `;
+    const rows = await withTimeout(engine.executeRaw<{ id: number; chars: number; bytes: number }>(
+      `SELECT p.id, char_length(COALESCE(p.compiled_truth, ''))${tl ? ` + ${tl}char_length(p.timeline) END` : ''} AS chars,
+              octet_length(COALESCE(p.compiled_truth, ''))${tl ? ` + ${tl}octet_length(p.timeline) END` : ''} AS bytes FROM pages p
         WHERE p.id = ANY($1::int[]) AND ${filter} AND ${currentTextProjectionFilter('p')}${requiresSafeChunks(scope) ? ` AND ${safeChunksFilter('p')}` : ''}`,
       params), LONG_PAGE_DEADLINE_MS);
-    bytes = new Map(rows.map(r => [Number(r.id), Number(r.bytes)]));
+    sizes = new Map(rows.map(r => [Number(r.id), { chars: Number(r.chars), bytes: Number(r.bytes) }]));
   } catch (e) {
-    return { plan: base, ...(base ? { longPages: { unit: plan.longPage.unit, pages: new Set(), kept: new Map(), deadlineAt, fallbacks: [e instanceof EvidenceTimeout ? 'long_page_deadline' : 'long_page_preflight_failed'] } } : {}) };
+    return { plan: base, ...(base ? { longPages: { unit, minChars, pages: new Set(), kept: new Map(), deadlineAt, fallbacks: [e instanceof EvidenceTimeout ? 'long_page_deadline' : 'long_page_preflight_failed'] } } : {}) };
   }
   const pages = new Set<number>();
   const kept = new Map<number, string>();
   let total = 0;
   for (const id of ids) {
-    const size = bytes.get(id);
-    if (size === undefined || size < LONG_PAGE_MIN_BYTES) continue;
+    const size = sizes.get(id);
+    if (size === undefined || size.chars < minChars) continue;
     if (pages.size >= LONG_PAGE_MAX_PAGES) kept.set(id, 'long_page_pages');
-    else if (total + size > LONG_PAGE_MAX_INPUT_BYTES) kept.set(id, 'long_page_bytes');
-    else { pages.add(id); total += size; }
+    else if (total + size.bytes > LONG_PAGE_MAX_INPUT_BYTES) kept.set(id, 'long_page_bytes');
+    else { pages.add(id); total += size.bytes; }
   }
   if (pages.size === 0 && kept.size === 0) return { plan: base };
-  return { plan, longPages: { unit: plan.longPage.unit, pages, kept, deadlineAt, fallbacks: [] } };
+  return { plan, longPages: { unit, minChars, pages, kept, deadlineAt, fallbacks: [] } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,6 +1224,10 @@ export async function deliverEvidence(
       if (typeof longFetch === 'string') { keepChunks(g, longFetch === 'fetch_timeout' ? 'long_page_deadline' : 'long_page_fetch_failed'); continue; }
       const page = longFetch.get(g.pageId!);
       if (!page) { dropped.not_readable = (dropped.not_readable ?? 0) + 1; continue; }
+      if (pageEvidenceText(page, scope.detail !== 'low').text.length < long!.minChars) {
+        for (const h of g.hits) passthrough.push({ rank: hits.indexOf(h), hit: h, reason: 'not_conversation' });
+        continue;
+      }
       b = planBlock(page, g.hits, long!.unit, plan.window, scope.detail !== 'low');
       if (b.unit === 'chunk') { keepChunks(g, b.fallbackReason ?? 'long_page_fallback'); continue; }
     } else if (g.pageId === null) {
