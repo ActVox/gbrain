@@ -21,6 +21,7 @@ import type { GBrainConfig } from '../core/config.ts';
 import type { ReadinessEntry } from '../core/readiness.ts';
 import { buildAmbientWritebackSection } from '../core/facts/writeback-instructions.ts';
 import type { AmbientWritebackOpts } from '../core/facts/writeback-instructions.ts';
+import { readEntityReferencesConfig } from '../core/entity-references-config.ts';
 
 /** Which tools this connection can call (the tools/list predicate). */
 export type CallablePredicate = (toolName: string) => boolean;
@@ -35,9 +36,29 @@ export interface InstructionTools {
   hiddenCallable?: number;
 }
 
-const ALL: CallablePredicate = () => true;
+/**
+ * Which reference fields compact `entity names` rows carry on this brain
+ * (`entity.names_references`, `entity.record_types`), so the brief clause
+ * names only fields the agent receives. Absent: the defaults (names-row
+ * references on, no records).
+ */
+export interface InstructionReferences { namesRow: boolean; records: boolean }
 
-function contractClauses(c: CallablePredicate, writeback?: AmbientWritebackOpts | null): string[] {
+/** The served-text options that follow brain config; every call site reads them with readInstructionContent. */
+export interface InstructionContent {
+  references?: InstructionReferences;
+}
+
+/** Brain config behind InstructionContent. Fail-closed: a read error yields the defaults. */
+export async function readInstructionContent(engine: { getConfig(key: string): Promise<string | null> }): Promise<InstructionContent> {
+  const refs = await readEntityReferencesConfig(engine);
+  return { references: { namesRow: refs.namesRow, records: refs.recordTypes.length > 0 } };
+}
+
+const ALL: CallablePredicate = () => true;
+const DEFAULT_REFERENCES: InstructionReferences = { namesRow: true, records: false };
+
+function contractClauses(c: CallablePredicate, writeback?: AmbientWritebackOpts | null, content?: InstructionContent): string[] {
   const out: string[] = [];
   const any = (...names: string[]) => names.some(c);
   if (any('search', 'query')) {
@@ -65,8 +86,11 @@ function contractClauses(c: CallablePredicate, writeback?: AmbientWritebackOpts 
     const batch = c('put_pages');
     out.push(`Writing:${batch ? ' for more than 3 pages use put_pages (one request_id per batch, about 5-8 large pages per call).' : ''} Pass wait_ms (e.g. 25000) instead of polling; if still pending, ${batch ? 'follow the reply\'s `next`' : 'replay with the same request_id'} no sooner than retry_after_ms.`);
   }
-  // Entity recall: a brief starts from the entity card's referrers, wherever `entity` is served.
-  const brief = c('entity') ? `For a brief on an account, person or company, call \`entity\`, then walk \`referenced_by\`${c('get_backlinks') ? ' or `get_backlinks`' : ''} by type.` : null;
+  // Entity recall: a brief starts from the single-name card's referrers, wherever `entity` is served; a `names` row
+  // carries no `referenced_by`, so the clause names only the fields those rows carry on this brain.
+  const refs = content?.references ?? DEFAULT_REFERENCES;
+  const namesRow = refs.records ? `; a \`names\` row lists \`records\` by type${refs.namesRow ? ', and its `next` opens the card' : ''}` : refs.namesRow ? '; a `names` row\'s `next` opens the card' : '';
+  const brief = c('entity') ? `For a brief on an account, person or company, walk the \`entity\` card's \`referenced_by\`${c('get_backlinks') ? ' or `get_backlinks`' : ''} by type${namesRow}.` : null;
   if (brief && !any('search', 'query')) out.push(brief);
   if (any('search', 'query')) {
     // Cat 40 (#5932): measured answer-completeness guidance. Cat 40 Hard round 4: separate parts stay separate,
@@ -109,9 +133,9 @@ function readinessTail(entries: readonly ReadinessEntry[], callable: (op: string
  * tail. With no `tools` and no writeback the output is byte-identical to
  * `GBRAIN_MCP_INSTRUCTIONS`.
  */
-export function buildMcpInstructions(opts?: { writeback?: AmbientWritebackOpts | null; tools?: InstructionTools }): string {
+export function buildMcpInstructions(opts?: { writeback?: AmbientWritebackOpts | null; tools?: InstructionTools } & InstructionContent): string {
   const tools = opts?.tools;
-  const clauses = contractClauses(tools?.callable ?? ALL, opts?.writeback);
+  const clauses = contractClauses(tools?.callable ?? ALL, opts?.writeback, opts);
   // D1: capped harnesses read the first 2,048 characters, so the hidden-tool sentence leads the contract.
   const hidden = tools?.hiddenCallable && tools.callable('request_tools')
     ? `The tool list shows the everyday tools; ${tools.hiddenCallable} more are callable. Call request_tools with no arguments to list them, or with tools: [names] for their schemas, then call them directly.\n`
@@ -140,7 +164,7 @@ type Env = Record<string, string | undefined>;
 export function resolveMcpInstructions(
   config: Pick<GBrainConfig, 'mcp'> | null | undefined,
   env: Env = process.env,
-  opts?: { writeback?: AmbientWritebackOpts | null; tools?: InstructionTools },
+  opts?: { writeback?: AmbientWritebackOpts | null; tools?: InstructionTools } & InstructionContent,
 ): string {
   const base = buildMcpInstructions(opts);
   // An empty / whitespace-only env value is UNSET, not an override: with `??`

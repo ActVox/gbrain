@@ -1619,6 +1619,11 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'mcp.strict_params',
   'mcp.result_rows', // C1 row shape, read dual-plane by src/mcp/result-rows.ts
   'mcp.allow_session_widen', // stdio request_tools session widening (default on), read dual-plane by src/mcp/surface.ts
+  // Entity references on compact `entity names` rows (src/core/entity-references-config.ts, read by the names verb and
+  // the MCP instruction builder): referenced_by_count + a row-level `next` to the card (default on), and the canonical
+  // page types listed as `records` (comma-separated, default empty: no records).
+  'entity.names_references',
+  'entity.record_types',
   // Skill-nag suppression (#2180): brain-resident pack install nag off-switch.
   'skillpack.nag_disabled',
   // Self-upgrade (v0.42; file plane, read on the hot path)
