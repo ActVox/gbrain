@@ -360,9 +360,8 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
     }
     const visibleOps = await stdioVisibleTools(engine, session.surfacedOps), visible = new Set(visibleOps.map(op => op.name));
     return resolveMcpInstructions(config, process.env, {
-      writeback: writebackOpts,
+      writeback: writebackOpts, ...await readInstructionContent(engine),
       tools: { callable: n => visible.has(n), readiness: await instructionReadiness(engine, config, 'stdio'), hiddenCallable: visibleOps.length - (await listing.listed(visibleOps)).length },
-      ...await readInstructionContent(engine),
     });
   }, gate.initializeAnswered);
 
