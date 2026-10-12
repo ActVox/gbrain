@@ -22,9 +22,9 @@ import type { PageReadScope, SearchResult } from '../types.ts';
 import { PINNED_QUESTION_MARKER } from '../questions/identity.ts';
 import { isFactEntityPage } from '../entities/resolve.ts';
 import { pageReadFilter } from './read-policy-sql.ts';
+import { rankingLinkSql } from '../link-ranking-policy.ts';
 import { containsTokenRun, isTitleMentionedInQuery, tokenizeTitle } from './title-match.ts';
 import { enforceTokenBudget } from './token-budget.ts';
-import { rankingLinkSql } from '../mentions/owner-phrase/ranking.ts';
 
 export const ENTITY_ANCHORING_KEY = 'search.entity_anchoring';
 /** Anchored pages read per entity (the entity page is extra). */

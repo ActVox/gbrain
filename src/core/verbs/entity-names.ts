@@ -5,22 +5,30 @@
  * (buildEntityCard's alias, slug, title and fuzzy arms; private and
  * quarantined pages, siblings included, hidden from remote callers) and returns a compact row: the page, its names, the
  * opening lines of its body (`lead`) and its identity siblings with theirs.
- * No references, facts or open threads: a full card per name is `entity name:`.
+ * Each found page and sibling also carries `referenced_by_count` and a `next`
+ * to its full card (`entity.names_references`, default on), and `records`
+ * when record types are enrolled (`entity.record_types`), from one batched
+ * read for the whole call (verbs/entity-references.ts). No facts or open
+ * threads: a full card per name is `entity name:`.
  *
  * Bounded: at most ENTITY_NAMES_MAX names, ENTITY_LEAD_CHARS per lead,
- * duplicates resolved once.
+ * duplicates resolved once; records RECORD_ROWS_PER_TARGET per page and
+ * RECORD_ROWS_PER_CALL per call, allotted in input order.
  */
 import type { BrainEngine } from '../engine.ts';
 import { buildEntityCard } from './entity-card.ts';
 import { readCardIdentity } from './entity-card-identity.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { redactFindings } from '../secret-scan.ts';
+import type { Notice } from '../agent-output.ts';
+import { readRowReferences, type RowReferences } from './entity-references.ts';
+import { mentionCoverageNotice, readMentionCoverage } from '../mentions/coverage.ts';
 
 export const ENTITY_NAMES_MAX = 50;
 export const ENTITY_LEAD_CHARS = 200;
 const CONCURRENCY = 8;
 
-export interface EntityNamePage { slug: string; title: string; type: string | null; aka: string[]; lead: string }
+export interface EntityNamePage extends RowReferences { slug: string; title: string; type: string | null; aka: string[]; lead: string }
 export type EntityNameRow =
   | ({ name: string; found: true } & EntityNamePage & { siblings?: EntityNamePage[] })
   | { name: string; found: false; suggestions?: Array<{ slug: string; title: string }> };
@@ -35,15 +43,34 @@ export function pageLead(body: string | null, max = ENTITY_LEAD_CHARS): string {
 }
 
 export async function lookupEntityNames(engine: BrainEngine, sourceId: string, names: string[],
-  opts: { remote: boolean; surfaceCeiling?: 'verbs' | 'starter' | 'full' }): Promise<{ results: EntityNameRow[]; found: number; missing: number }> {
+  opts: { remote: boolean; surfaceCeiling?: 'verbs' | 'starter' | 'full'; emitNotice?: (n: Notice) => void }): Promise<{ results: EntityNameRow[]; found: number; missing: number }> {
   const unique = [...new Set(names.map(n => n.trim()).filter(Boolean))];
   const rows = new Map<string, EntityNameRow>();
   for (let i = 0; i < unique.length; i += CONCURRENCY) {
     await Promise.all(unique.slice(i, i + CONCURRENCY).map(async name => rows.set(name, await lookupOne(engine, sourceId, name, opts))));
   }
   const results = unique.map(n => rows.get(n)!);
+  await attachReferences(engine, sourceId, results, opts);
   const found = results.filter(r => r.found).length;
   return { results, found, missing: results.length - found };
+}
+
+/** One batched reference read for every found page and sibling, in input order (page first, then its siblings). */
+async function attachReferences(engine: BrainEngine, sourceId: string, results: EntityNameRow[],
+  opts: { remote: boolean; surfaceCeiling?: 'verbs' | 'starter' | 'full'; emitNotice?: (n: Notice) => void }): Promise<void> {
+  const pages: EntityNamePage[] = [];
+  for (const r of results) if (r.found) pages.push(r, ...(r.siblings ?? []));
+  if (!pages.length) return;
+  const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
+  const excludePrivate = await resolveExcludePrivatePages(engine, opts.remote ? undefined : false);
+  const refs = await readRowReferences(engine, sourceId, pages.map(p => ({ slug: p.slug, sourceId })),
+    { remote: opts.remote, excludePrivate, surfaceCeiling: opts.surfaceCeiling, surface: 'names', emitNotice: opts.emitNotice });
+  pages.forEach((p, i) => Object.assign(p, refs.rows[i]));
+  if (refs.notice) opts.emitNotice?.(refs.notice);
+  if (!refs.rows.some(r => r.referenced_by_count !== undefined || r.records)) return;
+  const coverage = await readMentionCoverage(engine, [sourceId]).catch(() => null);
+  const notice = coverage ? mentionCoverageNotice(coverage) : null;
+  if (notice) opts.emitNotice?.(notice);
 }
 
 async function lookupOne(engine: BrainEngine, sourceId: string, name: string,

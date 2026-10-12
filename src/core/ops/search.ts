@@ -34,7 +34,7 @@ import { redactRetrievalOutput } from '../search/output-redaction.ts';
 import { projectRows, resultRowsFor } from '../search/lean-rows.ts';
 import { buildScoreDetails } from '../search/explain-formatter.ts';
 import { TargetTrace, diagnoseProbe, diagnoseTrace, probeTarget, type ExplainTargetDiagnosis } from '../search/explain-target.ts';
-import { assembleEvidenceForHits, capDeliveredSnippets, capEvidenceToBudget, deliverEvidence, effectivePlan, pagePlanHits, resolveEvidencePlan, unsupportedDelivery, type DeliveryMeta, type DeliveryScope, type EvidencePlan, type FrozenHit, type ReturnUnit } from '../search/evidence-delivery.ts';
+import { assembleEvidenceForHits, capDeliveredSnippets, capEvidenceToBudget, deliverEvidence, pagePlanHits, resolveEvidencePlan, selectLongPages, unsupportedDelivery, withLongPagePolicy, type DeliveryMeta, type DeliveryScope, type EvidencePlan, type FrozenHit, type ReturnUnit } from '../search/evidence-delivery.ts';
 import { privateProvenanceFilterFragment, resolveExcludePrivatePages } from '../search/private-visibility.ts';
 import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
@@ -150,10 +150,11 @@ const RETURN_WINDOW_PARAM = {
 /**
  * With a plan, `token_budget` budgets the delivered evidence, so query's
  * chunk-level budget stays off; query's token_budget without a return_unit
- * keeps its chunk-mode meaning.
+ * keeps its chunk-mode meaning. The long-page policy (`search.long_page_unit`)
+ * is resolved here, at the search/query caller, and nowhere else.
  */
 async function evidencePlanFor(ctx: OperationContext, p: Record<string, unknown>, snippetCap: number, op: 'search' | 'query'): Promise<EvidencePlan | null> {
-  return resolveEvidencePlan(ctx.engine, {
+  return withLongPagePolicy(ctx.engine, await resolveEvidencePlan(ctx.engine, {
     legacyBudget: op === 'query' && typeof p.token_budget === 'number',
     remote: ctx.remote,
     viaSubagent: ctx.viaSubagent,
@@ -163,7 +164,7 @@ async function evidencePlanFor(ctx: OperationContext, p: Record<string, unknown>
     snippetChars: p.snippet_chars,
     snippetCap,
     op,
-  });
+  }));
 }
 
 /**
@@ -173,9 +174,10 @@ async function evidencePlanFor(ctx: OperationContext, p: Record<string, unknown>
  */
 async function withEvidence(ctx: OperationContext, p: Record<string, unknown>, results: SearchResult[], plan: EvidencePlan | null,
   scope: DeliveryScope, meta: HybridSearchMeta | null): Promise<{ rows: SearchResult[]; evidence?: { delivery: DeliveryMeta; explicitSnippet: boolean } }> {
-  const applied = effectivePlan(plan, results);
+  const deliveryScope = { ...scope, requireSafeChunks: ctx.remote !== false };
+  const { plan: applied, longPages } = await selectLongPages(ctx.engine, plan, results, deliveryScope);
   if (!applied) return { rows: results };
-  const d = await deliverEvidence(ctx.engine, results, applied, { ...scope, requireSafeChunks: ctx.remote !== false }, { liveHits: meta?.cache?.status !== 'hit' });
+  const d = await deliverEvidence(ctx.engine, results, applied, deliveryScope, { liveHits: meta?.cache?.status !== 'hit', ...(longPages ? { longPages } : {}) });
   return { rows: d.results, evidence: { delivery: d.delivery, explicitSnippet: typeof p.snippet_chars === 'number' && Number.isFinite(p.snippet_chars) } };
 }
 

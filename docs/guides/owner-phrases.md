@@ -32,8 +32,8 @@ in `context`. Owner-phrase links never change search scores. Most ranking
 readers already skip mention links (backlink counts, relational chain hops and
 typed degree, salience inbound counts). The three that count every link
 (adjacency boosts, entity anchoring and generated-page demotion) skip
-`link_kind='owner_phrase'` through `rankingLinkSql`
-(`src/core/mentions/owner-phrase/ranking.ts`), so a brain's final scores are
+`link_kind='owner_phrase'` through the shared ranking policy
+(`rankingLinkSql`, `src/core/link-ranking-policy.ts`), so a brain's final scores are
 the same with the key on or off. Graph traversal, `get_backlinks` and the entity card's
 `referenced_by` see them the same way they see plain mentions. A page pair that
 another link already connects gets no owner-phrase link. A plain mention found

@@ -20,7 +20,7 @@
  * facts respect visibility for remote callers (world-only).
  */
 
-import { annotateTemporalRow, temporalLinkJoinSql, TEMPORAL_LINK_SELECT_SQL, type TemporalAnnotation } from '../link-validity.ts';
+import { annotateTemporalRow, LIVENESS_EXEMPT_LINK_TYPES, temporalLinkJoinSql, TEMPORAL_LINK_SELECT_SQL, type TemporalAnnotation } from '../link-validity.ts';
 import type { BrainEngine, FactRow } from '../engine.ts';
 import type { TrustTier } from '../trust/tier.ts';
 import type { ReadEligibility } from '../eligibility/policy.ts';
@@ -37,6 +37,8 @@ import type { NewerMentions } from '../mentions/newer-mentions.ts';
 import { loadLinkableTypes } from '../mentions/policy.ts';
 import { readMentionCoverage, type MentionCoverage } from '../mentions/coverage.ts';
 import { encodeCursor, readReferrerGroups, PAGE_DEFAULT_LIMIT, type ReferenceRow } from '../mentions/referrers.ts';
+import { readRowReferences, referencesUnavailableNotice, type RecordGroupView, type ReferencesUnavailable, type RowReferences } from './entity-references.ts';
+import type { Notice } from '../agent-output.ts';
 import { readCardIdentity, type CardIdentity } from './entity-card-identity.ts';
 import { factEntitySlugs } from '../mentions/siblings.ts';
 import { readKnownAs, type KnownAs } from '../mentions/owner-phrase/known-as.ts';
@@ -106,12 +108,23 @@ export interface EntityCard {
    * a relationship that ended. Absent when there is nothing to say.
    */
   relationship_note?: string;
+  /** F3: this page's own frontmatter `status` (a string up to 40 characters), only when set. `context_pack` cards only. */
+  page_status?: string;
   /** Pages dated after this page that mention it, newest first, bounded. `context_pack` cards only (mentions/newer-mentions.ts). */
   newer_mentions?: NewerMentions;
   /** Distinct pages with any inbound link (every link source, mentions included). `entity` verb only. */
   referenced_by_count?: number;
   /** Those pages grouped by pack-canonical type, newest first; capped per group and per card. `entity` verb only. */
   referenced_by?: ReferenceGroupView[];
+  /**
+   * The referring pages of the enrolled record types (`entity.record_types`), one group per type, newest page date first
+   * (the order never says which record governs). `entity` and `context_pack` only, and only when types are enrolled.
+   */
+  records?: RecordGroupView[];
+  /** `context_pack` cards: the same reference fields for each identity sibling, side by side, never merged. */
+  sibling_records?: Array<{ slug: string; title: string } & RowReferences>;
+  /** The reference count and records could not be read (deadline or failure); unread, not empty. */
+  references_unavailable?: ReferencesUnavailable;
   /** Whether every page in this source has been scanned for this entity's names. `entity` verb only. */
   coverage?: MentionCoverage;
   /** Parallel to `aka`: each entry's origin (frontmatter, declared, subject) and the page that declares it. `entity` verb only. */
@@ -166,6 +179,8 @@ export interface EntityCardOpts {
   includeReferences?: boolean;
   /** The serving surface ceiling; on `verbs` a continuation names the starter surface. */
   surfaceCeiling?: 'verbs' | 'starter' | 'full';
+  /** Receives the degraded notice when the card's references or records could not be read. */
+  emitNotice?: (n: Notice) => void;
   /**
    * #5575 (ENG-8, CEO-20): the eligibility for the card's facts and timeline
    * rows. Always hides quarantined-page projections and rows awaiting
@@ -330,6 +345,7 @@ export async function buildEntityCard(
     Object.assign(card, await cardReferences(engine, sourceId, best.row, opts, excludePrivate, entityTypes),
       await readCardIdentity(engine, sourceId, best.row, { excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka }),
       await readKnownAs(engine, sourceId, best.row.slug, { excludePrivate, surfaceCeiling: opts.surfaceCeiling }));
+    await attachCardRecords(engine, sourceId, card, opts, excludePrivate);
   }
   return {
     found: true,
@@ -350,7 +366,7 @@ function exactMatchPreference(row: CardPageRow, exactSlugs: string[], entityType
  * read leaves the card without them rather than failing the lookup.
  */
 async function cardReferences(engine: BrainEngine, sourceId: string, row: CardPageRow, opts: EntityCardOpts, excludePrivate: boolean,
-  entityTypes: ReadonlySet<string>): Promise<Pick<EntityCard, 'referenced_by_count' | 'referenced_by' | 'coverage'>> {
+  entityTypes: ReadonlySet<string>): Promise<Pick<EntityCard, 'referenced_by_count' | 'referenced_by' | 'coverage' | 'references_unavailable'>> {
   try {
     const { pack } = await loadLinkableTypes(engine, sourceId);
     const { total, groups } = await readReferrerGroups(engine, { slug: row.slug, sourceId, referrerSources: [sourceId], excludePrivate, pack,
@@ -367,8 +383,22 @@ async function cardReferences(engine: BrainEngine, sourceId: string, row: CardPa
     });
     return { referenced_by_count: total, referenced_by, coverage };
   } catch {
-    return {};
+    opts.emitNotice?.(referencesUnavailableNotice('read_failed'));
+    return { references_unavailable: 'read_failed' };
   }
+}
+
+/** The full card's record view for the page and each identity sibling (records only: the card has its own count). */
+async function attachCardRecords(engine: BrainEngine, sourceId: string, card: EntityCard, opts: EntityCardOpts, excludePrivate: boolean): Promise<void> {
+  const siblings = card.identity_siblings?.pages ?? [];
+  const refs = await readRowReferences(engine, sourceId, [card.entity.slug, ...siblings.map(p => p.slug)].map(slug => ({ slug, sourceId })),
+    { remote: opts.remote, excludePrivate, surfaceCeiling: opts.surfaceCeiling, eligibility: opts.eligibility, surface: 'full_card', emitNotice: opts.emitNotice });
+  const [own, ...rest] = refs.rows;
+  if (own?.records) card.records = own.records;
+  siblings.forEach((p, i) => { if (rest[i]?.records) Object.assign(p, { records: rest[i]!.records }); });
+  if (!own?.references_unavailable || card.references_unavailable) return;
+  card.references_unavailable = own.references_unavailable;
+  if (refs.notice) opts.emitNotice?.(refs.notice);
 }
 
 async function assembleCard(
@@ -467,7 +497,8 @@ async function assembleCard(
   ]);
 
   // Live relationships first so ended ones never push a current edge past the cap.
-  const rank = (status?: string) => (status === 'live' || status === 'disputed' ? 0 : status === 'event' || status === 'reference' || !status ? 1 : 2);
+  const rank = ({ status, type }: EntityCardEdge) => (status === 'live' || status === 'disputed' ? 0
+    : status === 'event' || status === 'reference' || !status || LIVENESS_EXEMPT_LINK_TYPES.includes(type) ? 1 : 2);
   const edgeOf = (l: { link_type: string; context?: string | null } & Partial<TemporalAnnotation>, direction: 'out' | 'in', slug: string): EntityCardEdge => {
     const last = l.stints?.[l.stints.length - 1];
     return {
@@ -481,8 +512,8 @@ async function assembleCard(
     .map(l => edgeOf(l, 'out', l.to_slug));
   const inCandidates = inEdges.map(l => edgeOf(l as typeof l & Partial<TemporalAnnotation>, 'in', l.from_slug));
   const edges: EntityCardEdge[] = [
-    ...[...outCandidates].sort((a, b) => rank(a.status) - rank(b.status)),
-    ...[...inCandidates].sort((a, b) => rank(a.status) - rank(b.status)),
+    ...[...outCandidates].sort((a, b) => rank(a) - rank(b)),
+    ...[...inCandidates].sort((a, b) => rank(a) - rank(b)),
   ].slice(0, EDGE_CAP);
   const summary = safeSynopsis(row, { keepVisibility: remote ? ['world'] : ['private', 'world'] });
   const relationshipNote = await loadRelationshipNotes(engine, [{ slug: pageSlug, source_id: sourceId, summary }], { excludePrivate })

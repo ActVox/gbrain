@@ -22,8 +22,8 @@
 import type { BrainEngine } from '../engine.ts';
 import type { SearchResult } from '../types.ts';
 import { parseFactsFence } from '../facts-fence.ts';
+import { rankingLinkSql } from '../link-ranking-policy.ts';
 import { resolveQueryEntity } from './alias-fanout.ts';
-import { rankingLinkSql } from '../mentions/owner-phrase/ranking.ts';
 
 export const GENERATED_FACTOR = 0.5;
 

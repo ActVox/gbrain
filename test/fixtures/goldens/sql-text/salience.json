@@ -222,8 +222,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.slug, p.source_id, p.title, p.type, (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) AS body_len, COALESCE(( SELECT COUNT(*) FROM links l WHERE l.to_page_id = p.id AND l.link_source IS DISTINCT FROM 'mentions' ), 0)::int AS inbound_count FROM pages p WHERE p.deleted_at IS NULL AND p.type = ANY($1::text[]) AND (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) < $2 AND (p.frontmatter ->> 'dream_generated') IS DISTINCT FROM 'true' ORDER BY inbound_count DESC, p.source_id ASC, p.slug ASC LIMIT $3",
-            "textSha256": "3338bd2f96f229be17a9f3405af5556f88263be691c24990ac2ae0db4c358661"
+            "sql": "SELECT p.slug, p.source_id, p.title, p.type, (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) AS body_len, COALESCE(( SELECT COUNT(*) FROM links l WHERE l.to_page_id = p.id AND l.link_source IS DISTINCT FROM 'mentions' AND (l.link_type <> ALL(ARRAY['amends']::text[]) AND COALESCE(l.link_kind, '') <> ALL(ARRAY['owner_phrase']::text[])) ), 0)::int AS inbound_count FROM pages p WHERE p.deleted_at IS NULL AND p.type = ANY($1::text[]) AND (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) < $2 AND (p.frontmatter ->> 'dream_generated') IS DISTINCT FROM 'true' ORDER BY inbound_count DESC, p.source_id ASC, p.slug ASC LIMIT $3",
+            "textSha256": "8f368d9866c4bd7b414151d634cb32c6fed8eabd78b1b6035aceb3b7830874b9"
           }
         ],
         "sourceId": [
@@ -235,8 +235,8 @@
               "string",
               "number"
             ],
-            "sql": "SELECT p.slug, p.source_id, p.title, p.type, (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) AS body_len, COALESCE(( SELECT COUNT(*) FROM links l WHERE l.to_page_id = p.id AND l.link_source IS DISTINCT FROM 'mentions' ), 0)::int AS inbound_count FROM pages p WHERE p.deleted_at IS NULL AND p.type = ANY($1::text[]) AND (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) < $2 AND p.source_id = $3 AND (p.frontmatter ->> 'dream_generated') IS DISTINCT FROM 'true' ORDER BY inbound_count DESC, p.source_id ASC, p.slug ASC LIMIT $4",
-            "textSha256": "d66d07de0d8a4b29e1a7f730e8bfae4ca1f52e8afc12cf356552eb151d4ddfdb"
+            "sql": "SELECT p.slug, p.source_id, p.title, p.type, (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) AS body_len, COALESCE(( SELECT COUNT(*) FROM links l WHERE l.to_page_id = p.id AND l.link_source IS DISTINCT FROM 'mentions' AND (l.link_type <> ALL(ARRAY['amends']::text[]) AND COALESCE(l.link_kind, '') <> ALL(ARRAY['owner_phrase']::text[])) ), 0)::int AS inbound_count FROM pages p WHERE p.deleted_at IS NULL AND p.type = ANY($1::text[]) AND (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) < $2 AND p.source_id = $3 AND (p.frontmatter ->> 'dream_generated') IS DISTINCT FROM 'true' ORDER BY inbound_count DESC, p.source_id ASC, p.slug ASC LIMIT $4",
+            "textSha256": "fe012403bd78fc3b31f4a2875a65e71043d262483467dbaebbf4d1d612dcdf27"
           }
         ],
         "sourceIds+reenrich": [
@@ -249,8 +249,8 @@
               "string",
               "number"
             ],
-            "sql": "SELECT p.slug, p.source_id, p.title, p.type, (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) AS body_len, COALESCE(( SELECT COUNT(*) FROM links l WHERE l.to_page_id = p.id AND l.link_source IS DISTINCT FROM 'mentions' ), 0)::int AS inbound_count FROM pages p WHERE p.deleted_at IS NULL AND p.type = ANY($1::text[]) AND (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) < $2 AND p.source_id = ANY($3::text[]) AND NOT ( p.frontmatter ->> 'enriched_at' IS NOT NULL AND p.frontmatter ->> 'enriched_at' > $4 ) AND (p.frontmatter ->> 'dream_generated') IS DISTINCT FROM 'true' ORDER BY inbound_count DESC, p.source_id ASC, p.slug ASC LIMIT $5",
-            "textSha256": "99c6dc60239a138d17df8f52076ceb9020c9404507aa45fa608be039f3b90d4d"
+            "sql": "SELECT p.slug, p.source_id, p.title, p.type, (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) AS body_len, COALESCE(( SELECT COUNT(*) FROM links l WHERE l.to_page_id = p.id AND l.link_source IS DISTINCT FROM 'mentions' AND (l.link_type <> ALL(ARRAY['amends']::text[]) AND COALESCE(l.link_kind, '') <> ALL(ARRAY['owner_phrase']::text[])) ), 0)::int AS inbound_count FROM pages p WHERE p.deleted_at IS NULL AND p.type = ANY($1::text[]) AND (char_length(p.compiled_truth) + char_length(COALESCE(p.timeline, ''))) < $2 AND p.source_id = ANY($3::text[]) AND NOT ( p.frontmatter ->> 'enriched_at' IS NOT NULL AND p.frontmatter ->> 'enriched_at' > $4 ) AND (p.frontmatter ->> 'dream_generated') IS DISTINCT FROM 'true' ORDER BY inbound_count DESC, p.source_id ASC, p.slug ASC LIMIT $5",
+            "textSha256": "388baaace733ea685b8b4b0678c589ccdb5e1b8b7618f154bdca53a17381ee8a"
           }
         ]
       },
