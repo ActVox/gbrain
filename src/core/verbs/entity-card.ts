@@ -20,7 +20,7 @@
  * facts respect visibility for remote callers (world-only).
  */
 
-import { annotateTemporalRow, temporalLinkJoinSql, TEMPORAL_LINK_SELECT_SQL, type TemporalAnnotation } from '../link-validity.ts';
+import { annotateTemporalRow, LIVENESS_EXEMPT_LINK_TYPES, temporalLinkJoinSql, TEMPORAL_LINK_SELECT_SQL, type TemporalAnnotation } from '../link-validity.ts';
 import type { BrainEngine, FactRow } from '../engine.ts';
 import type { TrustTier } from '../trust/tier.ts';
 import type { ReadEligibility } from '../eligibility/policy.ts';
@@ -491,7 +491,8 @@ async function assembleCard(
   ]);
 
   // Live relationships first so ended ones never push a current edge past the cap.
-  const rank = (status?: string) => (status === 'live' || status === 'disputed' ? 0 : status === 'event' || status === 'reference' || !status ? 1 : 2);
+  const rank = ({ status, type }: EntityCardEdge) => (status === 'live' || status === 'disputed' ? 0
+    : status === 'event' || status === 'reference' || !status || LIVENESS_EXEMPT_LINK_TYPES.includes(type) ? 1 : 2);
   const edgeOf = (l: { link_type: string; context?: string | null } & Partial<TemporalAnnotation>, direction: 'out' | 'in', slug: string): EntityCardEdge => {
     const last = l.stints?.[l.stints.length - 1];
     return {
@@ -505,8 +506,8 @@ async function assembleCard(
     .map(l => edgeOf(l, 'out', l.to_slug));
   const inCandidates = inEdges.map(l => edgeOf(l as typeof l & Partial<TemporalAnnotation>, 'in', l.from_slug));
   const edges: EntityCardEdge[] = [
-    ...[...outCandidates].sort((a, b) => rank(a.status) - rank(b.status)),
-    ...[...inCandidates].sort((a, b) => rank(a.status) - rank(b.status)),
+    ...[...outCandidates].sort((a, b) => rank(a) - rank(b)),
+    ...[...inCandidates].sort((a, b) => rank(a) - rank(b)),
   ].slice(0, EDGE_CAP);
   const summary = safeSynopsis(row, { keepVisibility: remote ? ['world'] : ['private', 'world'] });
   const relationshipNote = await loadRelationshipNotes(engine, [{ slug: pageSlug, source_id: sourceId, summary }], { excludePrivate })
