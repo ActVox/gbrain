@@ -37,6 +37,9 @@ beforeAll(async () => {
     await doc(engine, `notes/call-${String(i).padStart(2, '0')}`, `Call recap: Quill's freight account asked about lane ${i}.`, { date: `2025-05-${String(i + 1).padStart(2, '0')}` });
   }
   await sweepOwnerPhrases(engine);
+  await engine.executeRaw("INSERT INTO sources(id, name) VALUES('small-example', 'small-example') ON CONFLICT DO NOTHING");
+  await doc(engine, 'notes/small', "Quill's freight account called.", { date: '2025-06-02' });
+  await engine.executeRaw("UPDATE pages SET source_id = 'small-example' WHERE slug = 'notes/small'");
 }, 180_000);
 afterAll(async () => { await engine.disconnect().catch(() => {}); rmSync(dir, { recursive: true, force: true }); });
 
@@ -116,14 +119,10 @@ describe('scripts/owner-phrase-sample.ts', () => {
   }, 120_000);
 
   test(`refuses below ${SAMPLE_MIN_POPULATION} links and writes nothing`, async () => {
-    const small = new PGLiteEngine();
-    await small.connect({ database_path: brainPath } as never);
-    await small.executeRaw(`DELETE FROM pages WHERE slug LIKE 'notes/call-%'`);
-    await small.disconnect();
     const out = join(dir, 'small.tsv');
-    const r = run(['--out', out, '--seed', 'x']);
+    const r = run(['--out', out, '--seed', 'x', '--source', 'small-example']);
     expect(r.exitCode).toBe(3);
-    expect(JSON.parse(r.stdout.toString().trim().split('\n').at(-1)!)).toMatchObject({ population: 4 });
+    expect(JSON.parse(r.stdout.toString().trim().split('\n').at(-1)!)).toMatchObject({ population: 0 });
     expect(() => readFileSync(out)).toThrow();
   }, 120_000);
 });
