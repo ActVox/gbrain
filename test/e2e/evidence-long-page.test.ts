@@ -2,7 +2,10 @@
  * F2 (`search.long_page_unit`) on Postgres: the PGLite unit arm
  * (test/evidence-long-page.test.ts) run against a real Postgres brain. Pins
  * the off path (byte-identical to return_unit chunk), the frozen on-path
- * golden, the serialized lean MCP `delivered {unit, reason}`, the precedence
+ * golden, the replay case (default 20,000-character threshold, section; a
+ * medium and a short hit keep their ranked chunks), the cap and explicit-unit
+ * paths unchanged with the key on, the serialized lean MCP `delivered {unit,
+ * reason}`, the precedence
  * of a non-auto global unit, the over-budget fallback, recall/think/
  * assemble_evidence unchanged with the key on, and the d5b/F4 instruction
  * config readers, all on the same engine.
@@ -17,7 +20,7 @@ import type { SearchResult } from '../../src/core/types.ts';
 import { assembleEvidenceForHits } from '../../src/core/search/evidence-delivery.ts';
 import { buildMcpInstructions, readInstructionContent } from '../../src/mcp/instructions.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
-import { DECIDING, LONG_SLUG, mcpCall, opCall, seedLongPages, withConfig } from '../helpers/long-page-fixture.ts';
+import { DECIDING, LONG_SLUG, MEDIUM_SLUG, mcpCall, opCall, seedLongPages, withConfig } from '../helpers/long-page-fixture.ts';
 
 const GOLDEN = join(import.meta.dir, '../fixtures/goldens/evidence-delivery/long-page-on-path.json');
 const KEY = 'search.long_page_unit';
@@ -55,6 +58,24 @@ run('long-page delivery on Postgres', () => {
     }
     const page = await withConfig(engine, { [KEY]: 'page' }, () => mcpCall(engine, 'search', { query: 'renewal fee' }));
     expect(String(long(page.rows).chunk_text)).toContain(DECIDING);
+  });
+
+  test('replay: section at the default threshold widens only the long hit; every other row is its off-path bytes', async () => {
+    const off = await mcpCall(engine, 'search', { query: 'renewal fee' });
+    const on = await withConfig(engine, { [KEY]: 'section' }, () => mcpCall(engine, 'search', { query: 'renewal fee' }));
+    expect(long(on.rows).delivered).toEqual({ unit: 'section', reason: 'long_page' });
+    expect(on.rows.map(r => r.slug)).toEqual(expect.arrayContaining([MEDIUM_SLUG, 'notes/short-example']));
+    for (const r of on.rows.filter(r => r.slug !== LONG_SLUG)) expect(JSON.stringify(r)).toBe(JSON.stringify(off.rows.find(o => o.slug === r.slug)));
+    const lowered = await withConfig(engine, { [KEY]: 'section', 'search.long_page_min_chars': '5000' }, () => mcpCall(engine, 'search', { query: 'renewal fee' }));
+    expect(lowered.rows.find(r => r.slug === MEDIUM_SLUG)!.delivered).toEqual({ unit: 'section', reason: 'long_page' });
+  });
+
+  test('the cap path and explicit chunk/window units are byte-identical with the key on', async () => {
+    for (const params of [{ token_budget: 4000 }, { return_unit: 'chunk' }, { return_unit: 'window' }]) {
+      const call = { query: 'renewal fee', ...params };
+      const off = await mcpCall(engine, 'search', call);
+      expect((await withConfig(engine, { [KEY]: 'section' }, () => mcpCall(engine, 'search', call))).bytes).toBe(off.bytes);
+    }
   });
 
   test('global window wins over the long-page section; explicit budget keeps it off; over budget keeps the chunk', async () => {
