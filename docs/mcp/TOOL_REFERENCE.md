@@ -78,6 +78,8 @@ MEMORY VERB (v1): budget-packed session-boundary bundle for a set of standing en
 
 Each card may carry `newer_mentions` (`since`, `rows` of `date`/`slug`/`title`/`preview`, `more`): the newest pages dated after the entity's own page that mention it, at most 8 rows and 2,000 characters per card, rendered in `text` after hot memory. They follow the `entity` card's read policy and pack last under `budget_tokens`. Off with `mentions.newer_on_cards false`.
 
+The card and each `newer_mentions` row carry `page_status` when that page's frontmatter sets `status` (a string up to 40 characters, never inferred; the convention for a record not yet in force is `draft` or `unsigned`). Structured rows only; `text` is unchanged. Off with `entity.row_page_status false`; `records` rows keep theirs.
+
 ## `delta`
 
 MEMORY VERB (v1): "what changed since T" for heartbeats — pages updated after `since` + hot facts newer than `since` + open-thread events after `since`, zero-LLM. Lets a periodic wake maintain warm state in O(changes) instead of re-deriving. Optionally scope thread deltas to `entities`. WORLD-ONLY by default; include_private honored for local trusted callers only. budget_tokens packs server-side (pages first, then facts; threads are never dropped). protocol_version rides every response.
@@ -142,6 +144,8 @@ Poll an agent job submitted via submit_agent. Returns a trimmed status view (id,
 ## `get_backlinks`
 
 List incoming links to a page
+
+Each link row and each `group: "page"` row carries `page_status`, the referring page's frontmatter `status`, when set (a string up to 40 characters; never inferred). The link row's own `status` is the relationship's temporal state and the `status` filter acts on that. Off with `entity.row_page_status false`; a record type's continuation keeps it.
 
 | Parameter | Type | Guidance |
 | --- | --- | --- |

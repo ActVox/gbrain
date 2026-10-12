@@ -12,12 +12,19 @@
  *   the full card and `context_pack` cards (verbs/entity-references.ts); a
  *   stored type alias is read as its pack type. Empty means no records.
  *
+ * - `entity.row_page_status` (boolean, default on): F3. `context_pack` cards
+ *   and their `newer_mentions` rows, and `get_backlinks` rows (link rows and
+ *   `group: "page"` rows), carry the page's own frontmatter `status` as
+ *   `page_status` when set. Off removes it from those rows only; record rows
+ *   (`records`, and a record type's `get_backlinks` continuation) keep it.
+ *
  * Fail-closed: a read error yields the defaults (names rows on, no records),
  * never a field the agent would not receive.
  */
 
 export const ENTITY_NAMES_REFERENCES_KEY = 'entity.names_references';
 export const ENTITY_RECORD_TYPES_KEY = 'entity.record_types';
+export const ROW_PAGE_STATUS_KEY = 'entity.row_page_status';
 
 export interface EntityReferencesConfig {
   namesRow: boolean;
@@ -43,4 +50,9 @@ export async function readEntityReferencesConfig(engine: { getConfig(key: string
   } catch {
     return { namesRow: true, recordTypes: [] };
   }
+}
+
+/** F3 `page_status` on `context_pack` and `get_backlinks` rows: on unless explicitly off; a read error keeps the default. */
+export async function readRowPageStatus(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
+  return parseNamesReferences(await engine.getConfig(ROW_PAGE_STATUS_KEY).catch(() => null));
 }

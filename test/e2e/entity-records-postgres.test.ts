@@ -30,4 +30,6 @@ d('entity records (Postgres)', () => {
   test('zero records is an empty list; the firing counter separates listed, zero and unavailable', () => S.zeroRecordsAndFiring(engine), 60_000);
   test('every optional record field validates against the v1 response schemas', () => S.recordFieldsSchemaValid(engine), 60_000);
   test('records pack last under 1,500 and 2,000 token budgets; newer mentions unaffected', () => S.recordsPackLast(engine), 60_000);
+  test('F3 page_status on get_backlinks and context_pack rows: additive, bounded, hidden pages none; its key removes it there', () => S.pageStatusOnRows(engine), 60_000);
+  test('F1 on, F3 off: record rows keep page_status on initial and continued outputs; other rows have none', () => S.recordsKeepPageStatusWithRowKeyOff(engine), 60_000);
 });

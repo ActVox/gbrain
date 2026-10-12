@@ -182,7 +182,7 @@ export async function referrerTypes(engine: BrainEngine, scope: ReferrerScope): 
 
 /** One page of referring pages (newest first), optionally of one type. */
 export async function readReferrerPage(engine: BrainEngine, scope: ReferrerScope,
-  opts: { type?: string; limit: number; cursor?: [string | null, string, string] | null; recordMetadata?: boolean }): Promise<{ rows: Array<ReferenceRow & RecordMetadata>; total: number; truncated: boolean; cursor: string | null }> {
+  opts: { type?: string; limit: number; cursor?: [string | null, string, string] | null; recordMetadata?: boolean; pageStatus?: boolean }): Promise<{ rows: Array<ReferenceRow & RecordMetadata>; total: number; truncated: boolean; cursor: string | null }> {
   const t = await targetPages(engine, scope);
   const pairs = typeAliasPairs(scope.pack);
   const params: unknown[] = [t.sources, t.slugs, scope.referrerSources, pairs.stored, pairs.canonical, opts.type ?? null];
@@ -206,6 +206,9 @@ export async function readReferrerPage(engine: BrainEngine, scope: ReferrerScope
   if (opts.recordMetadata) {
     const meta = await readRecordMetadata(engine, page.map(r => Number(r.id)), scope);
     page.forEach((r, i) => Object.assign(rows[i]!, meta.get(Number(r.id)) ?? {}));
+  } else if (opts.pageStatus) {
+    const status = await readPageStatusByRef(engine, rows, scope);
+    rows.forEach(r => { const value = status.get(`${r.source_id}:${r.slug}`); if (value) r.page_status = value; });
   }
   return { rows, total: Number(count?.n ?? 0), truncated, cursor: truncated ? encodeCursor(rows[rows.length - 1]!) : null };
 }
@@ -338,6 +341,36 @@ function referrersCteBatched(scope: Pick<ReferrerScope, 'excludePrivate' | 'elig
     )`;
 }
 
+/** A frontmatter `status` as `page_status`: a string, trimmed, at most PAGE_STATUS_MAX_CHARS; anything else is not shown. */
+export function pageStatusValue(raw: unknown): string | undefined {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  return value && value.length <= PAGE_STATUS_MAX_CHARS ? value : undefined;
+}
+
+/**
+ * F3: `page_status` of live pages by `(source_id, slug)`, keyed
+ * `source_id:slug`, one statement. A private page (for an untrusted caller)
+ * or a quarantined page (unless the caller may read quarantined pages) gets
+ * none.
+ */
+export async function readPageStatusByRef(engine: BrainEngine, refs: Array<{ source_id: string; slug: string }>,
+  scope: { excludePrivate: boolean; includeQuarantined?: boolean }): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!refs.length) return out;
+  const priv = scope.excludePrivate ? ` AND ${privatePagesFilterFragment('p')}` : '';
+  const quarantine = scope.includeQuarantined ? '' : ` AND ${quarantineFilterFragment('p')}`;
+  const rows = await engine.executeRaw<{ source_id: string; slug: string; status: unknown }>(
+    `SELECT p.source_id, p.slug, p.frontmatter->'status' AS status
+       FROM pages p JOIN unnest($1::text[], $2::text[]) AS u(s, g) ON p.source_id = u.s AND p.slug = u.g
+      WHERE p.deleted_at IS NULL AND p.frontmatter ? 'status'${priv}${quarantine}`,
+    [refs.map(r => r.source_id), refs.map(r => r.slug)]);
+  for (const row of rows) {
+    const value = pageStatusValue(row.status);
+    if (value) out.set(`${row.source_id}:${row.slug}`, value);
+  }
+  return out;
+}
+
 /**
  * The record metadata of referring pages: `page_status` from frontmatter,
  * `amends` and `supersedes` links to pages the caller can see (link origins
@@ -365,9 +398,8 @@ export async function readRecordMetadata(engine: BrainEngine, pageIds: number[],
         ORDER BY l.from_page_id, t.slug`, [pageIds, scope.excludePrivate ? 'world' : 'all']).catch(() => []),
   ]);
   for (const row of status) {
-    const raw = typeof row.status === 'string' ? row.status : null;
-    const value = raw?.trim();
-    if (value && value.length <= PAGE_STATUS_MAX_CHARS) out.set(Number(row.id), { page_status: value });
+    const value = pageStatusValue(row.status);
+    if (value) out.set(Number(row.id), { page_status: value });
   }
   for (const link of links) {
     const id = Number(link.from_id);

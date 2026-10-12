@@ -107,6 +107,8 @@ export interface EntityCard {
    * a relationship that ended. Absent when there is nothing to say.
    */
   relationship_note?: string;
+  /** F3: this page's own frontmatter `status` (a string up to 40 characters), only when set. `context_pack` cards only. */
+  page_status?: string;
   /** Pages dated after this page that mention it, newest first, bounded. `context_pack` cards only (mentions/newer-mentions.ts). */
   newer_mentions?: NewerMentions;
   /** Distinct pages with any inbound link (every link source, mentions included). `entity` verb only. */

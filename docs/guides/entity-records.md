@@ -62,6 +62,25 @@ Effective 2026-03-01, the monthly fee changes to 12,000 USD. All other terms are
   replaced page in search. Use it only when the new record replaces the old one
   entirely.
 
+## Document status on other rows
+
+The same `page_status` rides more than records. Under `entity.row_page_status`
+(default `true`), `context_pack` cards (the card's own page) and their
+`newer_mentions` rows, and `get_backlinks` link rows and `group: "page"` rows,
+carry it whenever the page sets `status`. Set `entity.row_page_status false` to
+remove it from those rows only; record rows keep it.
+
+`page_status` is the page's own frontmatter `status`, copied only when it is set
+to a string: trimmed, at most 40 characters (longer or non-string values are not
+shown). It is never inferred from a title, subject or text, and it does not make
+a page lesser evidence. The documented convention for a record that is not in
+force yet is `status: draft` or `status: unsigned`; any other string is passed
+through as written. Search rows carry the same frontmatter value as raw
+`status` (`frontmatter->>'status'`, unbounded and untrimmed), so a search row's
+`status` and a pack or backlink row's `page_status` agree whenever the value is
+a string of 40 characters or fewer. A link row's `status` is the relationship's
+temporal state, a different field, and the `status` input filter is unchanged.
+
 ## What the agent gets
 
 `entity {names: ["Acme Example"]}` returns, for the found page (and for each

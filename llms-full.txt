@@ -9387,6 +9387,29 @@ cards carry none of these fields, so `context_pack` still computes no
 references by default. `backlink_count` keeps excluding mentions;
 `referenced_by_count` counts every link source.
 
+#### page_status on context_pack and get_backlinks rows (additive)
+
+Under `entity.row_page_status` (default `true`), each `context_pack` card
+carries `page_status` for its own page, and each `newer_mentions.rows[]` entry
+for the referring page; `get_backlinks` adds it to every link row (the
+referring page's status) and every `group: "page"` row. Absent when the page
+has no status. A private page (for an untrusted caller) or a quarantined page
+(unless the caller may read quarantined pages) shows none. `text` is unchanged:
+the field rides the structured rows only. `false` removes it from these rows;
+record rows (`records[]`, and a record type's `get_backlinks` continuation)
+keep their `page_status` either way.
+
+`page_status` is the page's own frontmatter `status`, copied only when it is set
+to a string: trimmed, at most 40 characters (longer or non-string values are not
+shown). It is never inferred from a title, subject or text, and it does not make
+a page lesser evidence. The documented convention for a record that is not in
+force yet is `status: draft` or `status: unsigned`; any other string is passed
+through as written. Search rows carry the same frontmatter value as raw
+`status` (`frontmatter->>'status'`, unbounded and untrimmed), so a search row's
+`status` and a pack or backlink row's `page_status` agree whenever the value is
+a string of 40 characters or fewer. A link row's `status` is the relationship's
+temporal state, a different field, and the `status` input filter is unchanged.
+
 #### context_pack core memory (additive)
 
 `core: { text, revision, chars_used, chars_limit, pages, truncated }` carries the

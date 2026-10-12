@@ -41,7 +41,7 @@ async function since(engine: BrainEngine, from: string, to: string, scope: 'all'
 
 export async function resetRecordsWorld(engine: BrainEngine): Promise<void> {
   for (const t of ['link_relationships', 'links', 'page_aliases', 'pages']) await engine.executeRaw(`DELETE FROM ${t}`);
-  for (const k of ['entity.names_references', 'entity.record_types', 'entity_identity.union', 'mentions.sibling_merge']) await engine.unsetConfig(k);
+  for (const k of ['entity.names_references', 'entity.record_types', 'entity.row_page_status', 'entity_identity.union', 'mentions.sibling_merge']) await engine.unsetConfig(k);
   await engine.setConfig('schema_pack', 'gbrain-base-v2');
 }
 
@@ -359,5 +359,93 @@ export async function recordsPackLast(engine: BrainEngine): Promise<void> {
   if (tiny.cards.length) {
     expect(tiny.cards[0].records).toBeUndefined();
     expect(tiny.cards[0].referenced_by_count).toBeDefined();
+  }
+}
+
+const statusMap = (rows: Array<{ slug?: string; from_slug?: string; page_status?: string }>) =>
+  Object.fromEntries(rows.filter(r => r.page_status !== undefined).map(r => [r.slug ?? r.from_slug, r.page_status]));
+const withoutPageStatus = (v: unknown): unknown => JSON.parse(JSON.stringify(v, (k, x) => (k === 'page_status' ? undefined : x)));
+
+async function seedStatuses(engine: BrainEngine): Promise<void> {
+  await seedRecordsWorld(engine);
+  const set = (slug: string, status: string) => engine.executeRaw(
+    `UPDATE pages SET frontmatter = frontmatter || jsonb_build_object('status', $2::text) WHERE source_id = $1 AND slug = $3`, [SRC, status, slug]);
+  await set('crm/acme-example', 'active');
+  await set('contracts/acme-msa', '  signed  ');
+  await set('notes/acme-call', 'x'.repeat(41));
+  await engine.executeRaw(`UPDATE pages SET frontmatter = frontmatter || jsonb_build_object('status', 3) WHERE source_id = $1 AND slug = 'deals/acme-term-sheet'`, [SRC]);
+  await set('contracts/acme-private', 'unsigned');
+  await set('contracts/acme-quarantined', 'binding');
+  await engine.executeRaw(`UPDATE pages SET effective_date = '2025-05-01T00:00:00Z', effective_date_source = 'date' WHERE slug = 'crm/acme-example'`);
+}
+
+/** F3 (default on): `page_status` on get_backlinks link and page rows and on context_pack cards and newer-mention rows; additive, bounded, hidden pages none. */
+export async function pageStatusOnRows(engine: BrainEngine): Promise<void> {
+  const { validateAgainstSchema } = await import('../../src/core/verbs/conformance.ts');
+  const { RESPONSE_SCHEMAS } = await import('../../src/core/verbs.ts');
+  const { readPageStatusByRef, PAGE_STATUS_MAX_CHARS } = await import('../../src/core/mentions/referrers.ts');
+  await seedStatuses(engine);
+  const shown = { 'contracts/acme-amend-2-draft': 'draft', 'contracts/acme-msa': 'signed' };
+  const reads = async () => ({
+    links: (await call(engine, 'get_backlinks', { slug: 'crm/acme-example' })).body as unknown as Array<Record<string, any>>,
+    typed: (await call(engine, 'get_backlinks', { slug: 'crm/acme-example', type: 'contract', limit: 50 })).body as unknown as Array<Record<string, any>>,
+    page: (await call(engine, 'get_backlinks', { slug: 'crm/acme-example', group: 'page' })).body,
+    pack: (await call(engine, 'context_pack', { entities: 'crm/acme-example' })).body,
+  });
+  const on = await reads();
+  expect(statusMap(on.links)).toEqual(shown);
+  expect(statusMap(on.typed)).toEqual(shown);
+  expect(statusMap(on.page.rows)).toEqual(shown);
+  // The relationship `status` on link rows is unchanged; page_status only adds.
+  await engine.setConfig('entity.row_page_status', 'false');
+  const off = await reads();
+  await engine.unsetConfig('entity.row_page_status');
+  expect(JSON.stringify([off.links, off.typed, off.page, off.pack])).not.toContain('page_status');
+  expect(withoutPageStatus([on.links, on.typed, on.page])).toEqual([off.links, off.typed, off.page]);
+  expect(on.links.some(l => typeof l.status === 'string')).toBe(off.links.some(l => typeof l.status === 'string'));
+  // context_pack: the card's own status and each newer-mention row's; the injected text is unchanged.
+  const card = on.pack.cards[0];
+  expect(card.page_status).toBe('active');
+  expect(statusMap(card.newer_mentions.rows)).toEqual({ 'contracts/acme-amend-2-draft': 'draft' });
+  expect(on.pack.text).toBe(off.pack.text);
+  expect(withoutPageStatus(on.pack)).toEqual(off.pack);
+  expect(validateAgainstSchema(on.pack, RESPONSE_SCHEMAS.context_pack)).toEqual([]);
+  // Only a string up to the bound is shown, trimmed; a private or quarantined page shows none unless the caller may read it.
+  const refs = ['notes/acme-call', 'deals/acme-term-sheet', 'contracts/acme-private', 'contracts/acme-quarantined', 'contracts/acme-msa'].map(slug => ({ source_id: SRC, slug }));
+  expect(PAGE_STATUS_MAX_CHARS).toBe(40);
+  expect(Object.fromEntries(await readPageStatusByRef(engine, refs, { excludePrivate: true }))).toEqual({ [`${SRC}:contracts/acme-msa`]: 'signed' });
+  expect(Object.fromEntries(await readPageStatusByRef(engine, refs, { excludePrivate: false, includeQuarantined: true }))).toEqual({
+    [`${SRC}:contracts/acme-msa`]: 'signed', [`${SRC}:contracts/acme-private`]: 'unsigned', [`${SRC}:contracts/acme-quarantined`]: 'binding' });
+  for (const hidden of ['unsigned', 'binding']) expect(JSON.stringify(on)).not.toContain(`"${hidden}"`);
+}
+
+/** F1 on, F3 off: record rows keep `page_status` on the initial outputs (names rows, card, context_pack) and on the record-type continuation; every other row has none. */
+export async function recordsKeepPageStatusWithRowKeyOff(engine: BrainEngine): Promise<void> {
+  await seedStatuses(engine);
+  await engine.setConfig('entity.record_types', 'contract');
+  await engine.setConfig('entity.row_page_status', 'false');
+  try {
+    const names = (await call(engine, 'entity', { names: ['CRM record: Acme Example'] })).body.results[0];
+    const fullCard = (await call(engine, 'entity', { name: 'crm/acme-example' })).body.card;
+    const pack = (await call(engine, 'context_pack', { entities: 'crm/acme-example' })).body;
+    for (const group of [names.records[0], fullCard.records[0], pack.cards[0].records[0]]) {
+      expect(statusMap(group.rows)['contracts/acme-amend-2-draft']).toBe('draft');
+    }
+    const next = names.records[0].next;
+    const continued = (await call(engine, 'get_backlinks', next.arguments)).body;
+    expect(continued.rows.map((r: { slug: string }) => r.slug)).toEqual(['contracts/acme-msa']);
+    expect(continued.rows[0].page_status).toBe('signed');
+    expect(pack.cards[0].page_status).toBeUndefined();
+    expect(JSON.stringify(pack.cards[0].newer_mentions)).not.toContain('page_status');
+    const untyped = (await call(engine, 'get_backlinks', { slug: 'crm/acme-example', group: 'page' })).body;
+    expect(JSON.stringify(untyped)).not.toContain('page_status');
+    expect(JSON.stringify((await call(engine, 'get_backlinks', { slug: 'crm/acme-example' })).body)).not.toContain('page_status');
+    // Turning F3 back on changes only the non-record rows.
+    await engine.unsetConfig('entity.row_page_status');
+    const continuedOn = (await call(engine, 'get_backlinks', next.arguments)).body;
+    expect(continuedOn).toEqual(continued);
+    expect((await call(engine, 'entity', { names: ['CRM record: Acme Example'] })).body.results[0]).toEqual(names);
+  } finally {
+    await engine.unsetConfig('entity.row_page_status');
   }
 }

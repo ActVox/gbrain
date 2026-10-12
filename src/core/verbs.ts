@@ -853,6 +853,8 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
             },
             backlink_count: { type: 'integer' },
             relationship_note: { type: 'string' },
+            // F3 — ADDITIVE OPTIONAL: the card page's own frontmatter `status`, only when set (entity.row_page_status).
+            page_status: { type: 'string', maxLength: 40 },
             // F1 record view — ADDITIVE OPTIONAL: only when record types are enrolled (pull verb only).
             referenced_by_count: { type: 'integer' },
             records: { type: 'array', items: RECORD_GROUP_SCHEMA },
