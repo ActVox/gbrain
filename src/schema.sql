@@ -524,7 +524,9 @@ CREATE TABLE IF NOT EXISTS links (
   -- Codex finding #12 design: keep link_source stable; add link_kind
   -- so callers can distinguish without breaking existing mentions queries.
   -- NULL = legacy / unknown / pre-v98 row (semantically 'plain').
-  link_kind      TEXT    CHECK (link_kind IS NULL OR link_kind IN ('plain', 'typed_ner')),
+  -- 'owner_phrase': a document naming an account by its owner phrase inside
+  -- the owner's validity window (src/core/mentions/owner-phrase/).
+  link_kind      TEXT    CHECK (link_kind IS NULL OR link_kind IN ('plain', 'typed_ner', 'owner_phrase')),
   origin_page_id INTEGER REFERENCES pages(id) ON DELETE SET NULL,
   origin_field   TEXT,
   -- v0.18.0 Step 4: 'qualified' when the link was written as
