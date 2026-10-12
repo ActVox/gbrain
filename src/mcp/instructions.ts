@@ -44,15 +44,30 @@ export interface InstructionTools {
  */
 export interface InstructionReferences { namesRow: boolean; records: boolean }
 
+/**
+ * `mcp.instructions_governing_rule`: which record instruction 7 says governs.
+ * `in_effect` (default): the record whose terms are in effect on the date
+ * asked about. `newest`: the earlier "prefer the newest governing source"
+ * sentence, kept so the rule can be measured against it.
+ */
+export const GOVERNING_RULE_CONFIG_KEY = 'mcp.instructions_governing_rule';
+export const GOVERNING_RULES = ['in_effect', 'newest'] as const;
+export type GoverningRule = typeof GOVERNING_RULES[number];
+
 /** The served-text options that follow brain config; every call site reads them with readInstructionContent. */
 export interface InstructionContent {
   references?: InstructionReferences;
+  governingRule?: GoverningRule;
 }
 
 /** Brain config behind InstructionContent. Fail-closed: a read error yields the defaults. */
 export async function readInstructionContent(engine: { getConfig(key: string): Promise<string | null> }): Promise<InstructionContent> {
   const refs = await readEntityReferencesConfig(engine);
-  return { references: { namesRow: refs.namesRow, records: refs.recordTypes.length > 0 } };
+  const rule = await engine.getConfig(GOVERNING_RULE_CONFIG_KEY).catch(() => null);
+  return {
+    references: { namesRow: refs.namesRow, records: refs.recordTypes.length > 0 },
+    governingRule: rule?.trim() === 'newest' ? 'newest' : 'in_effect',
+  };
 }
 
 const ALL: CallablePredicate = () => true;
@@ -97,7 +112,15 @@ function contractClauses(c: CallablePredicate, writeback?: AmbientWritebackOpts 
     // but lists of names are batched and independent calls go out together (one call per name ran readers out of turns).
     const batchVia = [c('entity') ? '`entity` with `names`' : null, c('search') ? 'one keyword `search` for "A" OR "B" OR …' : null].filter(Boolean);
     const batch = `Keep separate parts of a question in separate searches, but batch lists: resolve many names or codes in one call${batchVia.length ? ` (${batchVia.join(' or ')})` : ''}, and issue independent calls together in one turn, not one per turn.`;
-    out.push(`Answering from the brain: a search returns the best-ranked excerpts, not every relevant page, so keep going until the evidence is complete. ${batch} ${brief ?? 'People and companies appear under several names (abbreviations, codes, nicknames); when a page lists another name, search for that too.'} For what is true now, prefer the newest governing source: a later correction, handoff or executed change outranks an older record, and drafts, proposals and agent-written notes do not override records.`);
+    const names = brief ?? 'People and companies appear under several names (abbreviations, codes, nicknames); when a page lists another name, search for that too.';
+    if (content?.governingRule === 'newest') {
+      out.push(`Answering from the brain: a search returns the best-ranked excerpts, not every relevant page, so keep going until the evidence is complete. ${batch} ${names} For what is true now, prefer the newest governing source: a later correction, handoff or executed change outranks an older record, and drafts, proposals and agent-written notes do not override records.`);
+    } else {
+      // F4: validity, not recency, decides; page dates are named as page dates. The rule leads the clause so it ends
+      // inside the 2,048 characters capped harnesses read on every surface's default rendering.
+      const dates = c('entity') ? '`date`/`effective_date`' : '`effective_date`';
+      out.push(`Answering from the brain: a search returns top excerpts, not every relevant page, so keep going until the evidence is complete. The record whose terms are in effect on the date asked about governs: a page's ${dates} is when it was written, not when its terms take effect, and a change not yet effective does not apply yet; drafts, proposals and agent-written notes do not override records. ${batch} ${names}`);
+    }
   }
   if (c('list_skills') && c('get_skill')) {
     out.push(`When the task calls for a procedure or workflow, discover available skills with list_skills using schema_version:2 when supported. Match descriptions and frontmatter triggers to the task, then read the matching skill in full with get_skill using its qualified_id, revision and schema_version:2.${c('get_skill_asset') ? ' Load approved dependencies from that exact revision with get_skill_asset.' : ''} If an older server explicitly rejects version 2, use its documented legacy discovery; an unavailable catalog is not empty.`);

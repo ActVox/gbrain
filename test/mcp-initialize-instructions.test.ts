@@ -101,8 +101,9 @@ describe('F1 generated instructions', () => {
     // Cat 40 Hard round 4: instruction 7's batching clause (BATCHING_CLAUSE_BYTES); starter 4_630 -> 4_824 and full 4_781 -> 4_975.
     // d5b: the brief names the fields compact `entity names` rows carry (NAMES_ROW_REFERENCES_BYTES): +39 at the default
     // (names-row references on, no records) on every surface serving entity; +70 with records enrolled (maximal).
-    const recorded = { verbs: 2_225, starter: 4_863, full: 5_014 };
-    const maximal = { verbs: 2_256, starter: 4_894, full: 5_045 };
+    // F4: instruction 7's governing rule (in effect on the date asked about), +63 on starter and full; verbs serves no clause 7.
+    const recorded = { verbs: 2_225, starter: 4_926, full: 5_077 };
+    const maximal = { verbs: 2_256, starter: 4_957, full: 5_108 };
     for (const surface of SURFACES) {
       const listed = new Set(filterOpsForSurface(operations, surface).map(o => o.name));
       const size = buildMcpInstructions({ tools: { callable: n => listed.has(n) } }).length;

@@ -78,7 +78,7 @@ describe('entity references config reader', () => {
   test('a read error fails closed to the defaults', async () => {
     const broken = { getConfig: async () => { throw new Error('db down'); } };
     expect(await readEntityReferencesConfig(broken)).toEqual({ namesRow: true, recordTypes: [] });
-    expect(await readInstructionContent(broken)).toEqual({ references: { namesRow: true, records: false } });
+    expect((await readInstructionContent(broken)).references).toEqual({ namesRow: true, records: false });
   });
 
   describe('on PGLite', () => {
@@ -91,12 +91,12 @@ describe('entity references config reader', () => {
     afterAll(async () => { await engine?.disconnect(); });
 
     test('unset keys read as the defaults; set keys drive the instruction content', async () => {
-      expect(await readInstructionContent(engine)).toEqual({ references: { namesRow: true, records: false } });
+      expect((await readInstructionContent(engine)).references).toEqual({ namesRow: true, records: false });
       await engine.setConfig(ENTITY_NAMES_REFERENCES_KEY, 'false');
       await engine.setConfig(ENTITY_RECORD_TYPES_KEY, 'contract, amendment');
       expect(await readEntityReferencesConfig(engine)).toEqual({ namesRow: false, recordTypes: ['contract', 'amendment'] });
       const content = await readInstructionContent(engine);
-      expect(content).toEqual({ references: { namesRow: false, records: true } });
+      expect(content.references).toEqual({ namesRow: false, records: true });
       const line = briefLine(buildMcpInstructions(content));
       expect(line).toContain('a `names` row lists `records` by type.');
       expect(line).not.toContain(NEXT);

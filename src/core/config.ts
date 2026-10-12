@@ -1624,6 +1624,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // page types listed as `records` (comma-separated, default empty: no records).
   'entity.names_references',
   'entity.record_types',
+  // Instruction 7's governing rule (src/mcp/instructions.ts): in_effect (default, the record whose terms are in effect
+  // on the date asked about governs) | newest (the earlier "prefer the newest governing source" sentence).
+  'mcp.instructions_governing_rule',
   // Skill-nag suppression (#2180): brain-resident pack install nag off-switch.
   'skillpack.nag_disabled',
   // Self-upgrade (v0.42; file plane, read on the hot path)
