@@ -205,13 +205,16 @@ export async function callCapInInputOrder(engine: BrainEngine): Promise<void> {
     }
   }
   await engine.setConfig('entity.record_types', 'contract');
-  const names = [1, 1, 2, 3, 4, 5].map(a => `crm/bulk-${a}`);
+  // The second name resolves to the same page as the first (by title): it repeats that page's records and takes no more of the cap.
+  const names = ['crm/bulk-1', 'CRM record: Bulk 1', 'crm/bulk-2', 'crm/bulk-3', 'crm/bulk-4', 'crm/bulk-5'];
   const { body } = await call(engine, 'entity', { names });
   const rows = body.results;
-  expect(rows).toHaveLength(5);
-  expect(rows.map((r: { records: Array<{ rows: unknown[] }> }) => r.records[0]!.rows.length)).toEqual([5, 5, 5, 5, 4]);
-  expect(rows.map((r: { records: Array<{ total: number }> }) => r.records[0]!.total)).toEqual([6, 6, 6, 6, 6]);
-  expect(rows[4].records[0]).toMatchObject({ capped: 'per_call' });
+  expect(rows).toHaveLength(6);
+  expect(rows[1]).toMatchObject({ found: true, slug: 'crm/bulk-1' });
+  expect(rows[1].records).toEqual(rows[0].records);
+  expect(rows.map((r: { records: Array<{ rows: unknown[] }> }) => r.records[0]!.rows.length)).toEqual([5, 5, 5, 5, 5, 4]);
+  expect(rows.map((r: { records: Array<{ total: number }> }) => r.records[0]!.total)).toEqual([6, 6, 6, 6, 6, 6]);
+  expect(rows[5].records[0]).toMatchObject({ capped: 'per_call' });
   expect(rows[0].records[0]).toMatchObject({ capped: 'per_page' });
   const sixth = await call(engine, 'entity', { names: ['crm/bulk-1', 'crm/bulk-2', 'crm/bulk-3', 'crm/bulk-4', 'crm/bulk-5', 'crm/widget-example'] });
   const zero = sixth.body.results[5].records[0];
