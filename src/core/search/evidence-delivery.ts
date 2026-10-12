@@ -79,7 +79,9 @@ export interface MatchSpan { chunk_id: number; start: number; end: number }
  * a conversation whose matching span no longer fits the budget keeps its
  * ranked chunks too.
  */
-export type AutoReason = 'conversation_type' | 'conversation_slug' | 'not_conversation' | 'conversation_over_budget' | 'saved_fact';
+export type AutoReason = 'conversation_type' | 'conversation_slug' | 'not_conversation' | 'conversation_over_budget' | 'saved_fact'
+  /** `search.long_page_unit` delivered this long page in its unit; `long_page_chunk`: it kept its ranked chunk (`delivery.fallbacks` says why). */
+  | 'long_page' | 'long_page_chunk';
 
 export interface DeliveredEvidence {
   unit: DeliveredUnit;
@@ -130,6 +132,8 @@ export interface EvidencePlan {
   budgetClamped?: { requested: number; max: number };
   /** `search.evidence_date_header` is on: each block starts with its date header line. */
   dateHeader?: true;
+  /** F2: set only by the search/query caller (withLongPagePolicy); recall, think and assemble_evidence never carry it. */
+  longPage?: LongPagePolicy;
 }
 
 /** The cap runs only under `auto`, with a budget the caller passed and a packing other than `off`. */
@@ -312,6 +316,91 @@ export function conversationSignal(hit: { type?: string | null; slug: string }):
 export function effectivePlan(plan: EvidencePlan | null, hits: SearchResult[]): EvidencePlan | null {
   if (!plan || plan.unit !== 'auto' || plan.explicitUnit || capEngaged(plan)) return plan;
   return hits.some(h => conversationSignal(h) !== null) ? plan : null;
+}
+
+// ---------------------------------------------------------------------------
+// auto: long non-conversation pages (search.long_page_unit, F2)
+// ---------------------------------------------------------------------------
+
+export const LONG_PAGE_UNIT_CONFIG_KEY = 'search.long_page_unit';
+export const LONG_PAGE_UNITS = ['off', 'window', 'section', 'page'] as const;
+export type LongPageUnit = Exclude<typeof LONG_PAGE_UNITS[number], 'off'>;
+/** A page is long when its stored body (compiled truth, plus timeline unless `detail: "low"`) holds this many bytes: about 2,000 tokens, four or more chunks. */
+export const LONG_PAGE_MIN_BYTES = 8_000;
+/** Long pages per call that get the unit, in rank order; later ones keep their chunk (`long_page_pages`). */
+export const LONG_PAGE_MAX_PAGES = 5;
+/** Stored-body bytes those pages may bring in; a page that would cross it keeps its chunk (`long_page_bytes`), since bodies are read whole and never sliced. */
+export const LONG_PAGE_MAX_INPUT_BYTES = 1_000_000;
+/** Cooperative deadline for the size preflight plus the long-page fetch (`long_page_deadline`). */
+export const LONG_PAGE_DEADLINE_MS = 2_000;
+
+export interface LongPagePolicy { unit: LongPageUnit }
+
+/** The long pages one call delivers in the policy's unit, and the ones that keep their chunk (page id → fallback code). */
+export interface LongPageSelection {
+  unit: LongPageUnit;
+  pages: ReadonlySet<number>;
+  kept: ReadonlyMap<number, string>;
+  deadlineAt: number;
+  fallbacks: string[];
+}
+
+export function longPageUnitValueProblem(value: string): string | null {
+  return (LONG_PAGE_UNITS as readonly string[]).includes(value.trim()) ? null : `${LONG_PAGE_UNIT_CONFIG_KEY} must be one of ${LONG_PAGE_UNITS.join(', ')} (got ${JSON.stringify(value.slice(0, 40))}).`;
+}
+
+/**
+ * The F2 policy for a search/query call. It applies only under an implied
+ * `auto`: no `return_unit` on the call, `search.return_unit` unset or `auto`,
+ * no explicit budget (the cap keeps its rules) and no explicit `snippet_chars`
+ * (a head cut could drop the hit). Read errors and unknown values are `off`.
+ */
+export async function withLongPagePolicy(engine: BrainEngine, plan: EvidencePlan | null, input: { snippetChars: unknown }): Promise<EvidencePlan | null> {
+  if (!plan || plan.unit !== 'auto' || plan.explicitUnit || plan.budgetExplicit) return plan;
+  if (typeof input.snippetChars === 'number' && Number.isFinite(input.snippetChars)) return plan;
+  const raw = (await engine.getConfig(LONG_PAGE_UNIT_CONFIG_KEY).catch(() => null))?.trim();
+  return raw === 'window' || raw === 'section' || raw === 'page' ? { ...plan, longPage: { unit: raw } } : plan;
+}
+
+/**
+ * The plan to run for these hits once the long-page policy is applied: a
+ * size preflight (one query, the caller's read scope) finds the long
+ * non-conversation pages and keeps the rank-order ones inside the page and
+ * byte limits. With no long page this is exactly effectivePlan, so a
+ * response without one is unchanged; a failed or late preflight is too.
+ */
+export async function selectLongPages(engine: BrainEngine, plan: EvidencePlan | null, hits: SearchResult[], scope: DeliveryScope): Promise<{ plan: EvidencePlan | null; longPages?: LongPageSelection }> {
+  const base = effectivePlan(plan, hits);
+  if (!plan?.longPage) return { plan: base };
+  const deadlineAt = Date.now() + LONG_PAGE_DEADLINE_MS;
+  const ids: number[] = [];
+  for (const h of hits) if (!h.fact_row && conversationSignal(h) === null && Number.isFinite(h.page_id) && !ids.includes(h.page_id)) ids.push(h.page_id);
+  if (ids.length === 0) return { plan: base };
+  let bytes: Map<number, number>;
+  try {
+    const params: unknown[] = [ids];
+    const filter = pageReadFilter('p', scope, params, true);
+    const timeline = scope.detail === 'low' ? '' : ` + octet_length(COALESCE(p.timeline, ''))`;
+    const rows = await withTimeout(engine.executeRaw<{ id: number; bytes: number }>(
+      `SELECT p.id, octet_length(COALESCE(p.compiled_truth, ''))${timeline} AS bytes FROM pages p
+        WHERE p.id = ANY($1::int[]) AND ${filter} AND ${currentTextProjectionFilter('p')}${requiresSafeChunks(scope) ? ` AND ${safeChunksFilter('p')}` : ''}`,
+      params), LONG_PAGE_DEADLINE_MS);
+    bytes = new Map(rows.map(r => [Number(r.id), Number(r.bytes)]));
+  } catch (e) {
+    return { plan: base, ...(base ? { longPages: { unit: plan.longPage.unit, pages: new Set(), kept: new Map(), deadlineAt, fallbacks: [e instanceof EvidenceTimeout ? 'long_page_deadline' : 'long_page_preflight_failed'] } } : {}) };
+  }
+  const pages = new Set<number>();
+  const kept = new Map<number, string>();
+  let total = 0;
+  for (const id of ids) {
+    const size = bytes.get(id);
+    if (size === undefined || size < LONG_PAGE_MIN_BYTES) continue;
+    if (pages.size >= LONG_PAGE_MAX_PAGES) kept.set(id, 'long_page_pages');
+    else if (total + size > LONG_PAGE_MAX_INPUT_BYTES) kept.set(id, 'long_page_bytes');
+    else { pages.add(id); total += size; }
+  }
+  if (pages.size === 0 && kept.size === 0) return { plan: base };
+  return { plan, longPages: { unit: plan.longPage.unit, pages, kept, deadlineAt, fallbacks: [] } };
 }
 
 // ---------------------------------------------------------------------------
@@ -650,7 +739,7 @@ function sectionCandidates(doc: Doc, anchors: Anchor[], conversation: boolean): 
   return set.size === 0 ? null : [...set].sort((x, y) => x - y);
 }
 
-function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePlan, includeTimeline: boolean): PlannedBlock {
+function planBlock(page: ChunkWindowPage, hits: SearchResult[], requested: Exclude<ReturnUnit, 'chunk' | 'auto'>, radius: number, includeTimeline: boolean): PlannedBlock {
   const best = hits[0];
   if (!page.sealed) return fallbackBlock(best, hits, 'unsealed_page');
   if (page.chunks.length === 0 && page.row_limited) return fallbackBlock(best, hits, 'row_limit');
@@ -669,7 +758,7 @@ function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePl
   const labels = doc.pieces.map(p => p.speaker).filter((x): x is string => x !== null);
   const conversation = isConversationLabels(labels);
   const hasHeadings = doc.pieces.some(p => p.heading > 0);
-  let unit: DeliveredUnit = plan.unit === 'auto' ? 'page' : plan.unit;
+  let unit: DeliveredUnit = requested;
   let fallbackReason: string | undefined;
   let candidates: number[];
   if (unit === 'page') {
@@ -679,11 +768,11 @@ function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePl
     if (sec) candidates = sec;
     else {
       unit = 'window';
-      if (plan.unit === 'section') fallbackReason = 'no_section_structure';
-      candidates = windowCandidates(doc, anchors, plan.window);
+      fallbackReason = 'no_section_structure';
+      candidates = windowCandidates(doc, anchors, radius);
     }
   } else {
-    candidates = windowCandidates(doc, anchors, plan.window);
+    candidates = windowCandidates(doc, anchors, radius);
   }
   return {
     hit: best, hits, doc, unit, candidates, anchors,
@@ -1011,6 +1100,8 @@ export interface DeliverOptions {
    */
   liveHits?: boolean;
   timeoutMs?: number;
+  /** F2: the long pages selectLongPages chose for these hits (search/query only). */
+  longPages?: LongPageSelection;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -1046,50 +1137,69 @@ export async function deliverEvidence(
   type Group = { pageId: number | null; hits: SearchResult[]; rank: number; reason?: AutoReason };
   const groups: Group[] = [];
   const byPage = new Map<number, Group>();
+  const long = auto ? opts.longPages : undefined;
+  for (const code of long?.fallbacks ?? []) fallbacks.add(code);
   hits.forEach((h, rank) => {
     // A saved-fact row (facts arm) has no page to expand: it is delivered as written, paid for first.
     if (h.fact_row) { passthrough.push({ rank, hit: h, reason: 'saved_fact' }); return; }
     const signal = auto ? conversationSignal(h) : null;
-    if (auto && !signal) { passthrough.push({ rank, hit: h, reason: 'not_conversation' }); return; }
+    const longPage = !signal && long?.pages.has(h.page_id) === true;
+    if (auto && !signal && !longPage) {
+      const code = long?.kept.get(h.page_id);
+      if (code) fallbacks.add(code);
+      passthrough.push({ rank, hit: h, reason: code ? 'long_page_chunk' : 'not_conversation' });
+      return;
+    }
     const id = Number.isFinite(h.page_id) ? h.page_id : null;
     const g = id === null ? undefined : byPage.get(id);
     if (g) { g.hits.push(h); return; }
-    const ng: Group = { pageId: id, hits: [h], rank, ...(signal ? { reason: signal } : {}) };
+    const ng: Group = { pageId: id, hits: [h], rank, ...(signal ? { reason: signal } : longPage ? { reason: 'long_page' as const } : {}) };
     if (id !== null) byPage.set(id, ng);
     groups.push(ng);
   });
 
   // Chunks only anchor hits in the page text; every unit but window (and the
-  // section fallback to window) needs just the hit chunks themselves.
-  const radius = plan.window;
-  const requests: ChunkWindowRequest[] = [];
-  groups.forEach((g, rank) => {
-    if (g.pageId === null) return;
-    for (const h of g.hits) {
-      const at = Number.isFinite(h.chunk_index) ? h.chunk_index : 0;
-      requests.push({ page_id: g.pageId, from_index: Math.max(0, at - radius), to_index: at + radius, priority: rank });
-    }
-  });
-  const maxRows = Math.min(MAX_ROWS, requests.reduce((n, r) => n + (r.to_index - r.from_index + 1), 0));
-
-  let pages: Map<number, ChunkWindowPage> | null = null;
-  let fetchFailure: string | null = null;
-  if (requests.length > 0) {
+  // section fallback to window) needs just the hit chunks themselves. Long
+  // pages (F2) are read in their own bounded call under the long-page
+  // deadline, so they can neither slow nor fail the conversation fetch.
+  const fetchPages = async (want: Group[], timeoutMs: number): Promise<Map<number, ChunkWindowPage> | string> => {
+    const requests: ChunkWindowRequest[] = [];
+    want.forEach((g, rank) => {
+      if (g.pageId === null) return;
+      for (const h of g.hits) {
+        const at = Number.isFinite(h.chunk_index) ? h.chunk_index : 0;
+        requests.push({ page_id: g.pageId, from_index: Math.max(0, at - plan.window), to_index: at + plan.window, priority: rank });
+      }
+    });
+    if (requests.length === 0) return new Map();
+    if (timeoutMs <= 0) return 'fetch_timeout';
     try {
       const rows = await withTimeout(engine.getChunkWindows(requests, {
         ...(scope.sourceIds && scope.sourceIds.length > 0 ? { sourceIds: scope.sourceIds } : scope.sourceId ? { sourceId: scope.sourceId } : {}),
         excludePrivate: scope.excludePrivate,
         requireSafeChunks: requiresSafeChunks(scope),
         chunkSources: scope.detail === 'low' ? ['compiled_truth'] : ['compiled_truth', 'timeline'],
-        maxRows,
-      }), opts.timeoutMs ?? EVIDENCE_FETCH_TIMEOUT_MS);
+        maxRows: Math.min(MAX_ROWS, requests.reduce((n, r) => n + (r.to_index - r.from_index + 1), 0)),
+      }), timeoutMs);
       for (const p of rows) p.fenceOverlay = await loadFenceChunkOverlay(engine, { sourceId: p.source_id, slug: p.slug, compiled_truth: p.compiled_truth, timeline: p.timeline });
-      pages = new Map(rows.map(p => [p.page_id, p]));
+      return new Map(rows.map(p => [p.page_id, p]));
     } catch (e) {
-      fetchFailure = e instanceof EvidenceTimeout ? 'fetch_timeout' : 'fetch_failed';
-      fallbacks.add(fetchFailure);
+      return e instanceof EvidenceTimeout ? 'fetch_timeout' : 'fetch_failed';
     }
-  }
+  };
+  const longGroups = groups.filter(g => g.reason === 'long_page');
+  const [mainFetch, longFetch] = await Promise.all([
+    fetchPages(groups.filter(g => g.reason !== 'long_page'), opts.timeoutMs ?? EVIDENCE_FETCH_TIMEOUT_MS),
+    long && longGroups.length > 0 ? fetchPages(longGroups, long.deadlineAt - Date.now()) : Promise.resolve(new Map<number, ChunkWindowPage>()),
+  ]);
+  const pages = typeof mainFetch === 'string' ? null : mainFetch;
+  const fetchFailure = typeof mainFetch === 'string' ? mainFetch : null;
+  if (fetchFailure) fallbacks.add(fetchFailure);
+  // A long page that cannot be delivered in its unit keeps its ranked chunks, exactly as with the policy off.
+  const keepChunks = (g: Group, code: string) => {
+    fallbacks.add(code);
+    for (const h of g.hits) passthrough.push({ rank: hits.indexOf(h), hit: h, reason: 'long_page_chunk' });
+  };
 
   // C1 date headers: one line per block (passthrough rows included), paid for inside the budget like the title.
   const headerFor = plan.dateHeader ? await blockDateHeaders(engine, hits, () => fallbacks.add('date_header_unavailable')) : () => '';
@@ -1097,7 +1207,13 @@ export async function deliverEvidence(
   const planned: Block[] = [];
   for (const g of groups) {
     let b: PlannedBlock;
-    if (g.pageId === null) {
+    if (g.reason === 'long_page') {
+      if (typeof longFetch === 'string') { keepChunks(g, longFetch === 'fetch_timeout' ? 'long_page_deadline' : 'long_page_fetch_failed'); continue; }
+      const page = longFetch.get(g.pageId!);
+      if (!page) { dropped.not_readable = (dropped.not_readable ?? 0) + 1; continue; }
+      b = planBlock(page, g.hits, long!.unit, plan.window, scope.detail !== 'low');
+      if (b.unit === 'chunk') { keepChunks(g, b.fallbackReason ?? 'long_page_fallback'); continue; }
+    } else if (g.pageId === null) {
       b = fallbackBlock(g.hits[0], g.hits, 'page_missing');
     } else if (fetchFailure) {
       if (opts.liveHits === false) { dropped.not_readable = (dropped.not_readable ?? 0) + 1; continue; }
@@ -1105,7 +1221,7 @@ export async function deliverEvidence(
     } else {
       const page = pages?.get(g.pageId);
       if (!page) { dropped.not_readable = (dropped.not_readable ?? 0) + 1; continue; }
-      b = planBlock(page, g.hits, plan, scope.detail !== 'low');
+      b = planBlock(page, g.hits, plan.unit === 'auto' ? 'page' : plan.unit, plan.window, scope.detail !== 'low');
     }
     if (b.fallbackReason) fallbacks.add(b.fallbackReason);
     const title = b.hit.title ?? '';
@@ -1124,7 +1240,10 @@ export async function deliverEvidence(
     // whose matching span no longer fits keeps its ranked chunks instead.
     const reserved = passthrough.reduce((n, p) => n + countEvidenceTokens(headerFor(p.hit) + (p.hit.chunk_text ?? ''), tokenizer) + countEvidenceTokens(p.hit.title ?? '', tokenizer), 0);
     kept = allocate(planned, Math.max(0, plan.budgetTokens - reserved), tokenizer, dropped, auto
-      ? b => { for (const h of b.hits) passthrough.push({ rank: hits.indexOf(h), hit: h, reason: 'conversation_over_budget' }); }
+      ? b => {
+        if (b.reason === 'long_page') fallbacks.add('long_page_over_budget');
+        for (const h of b.hits) passthrough.push({ rank: hits.indexOf(h), hit: h, reason: b.reason === 'long_page' ? 'long_page_chunk' : 'conversation_over_budget' });
+      }
       : undefined);
   }
   let results: DeliveredSearchResult[] = kept.map(b => {
