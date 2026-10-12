@@ -162,12 +162,16 @@ function groupAccounts(accounts: EntityRow[], pack: PackTypes | null, policy: Me
 export interface OwnerPhraseModel {
   windows: OwnerWindow[];
   descriptors: Map<string, Set<string>>;
-  links: Array<{ from_id: number; from_slug: string; to_slug: string; context: string; evidence: number[] }>;
+  links: Array<{ from_id: number; from_slug: string; to_slug: string; context: string; evidence: number[]; line: number; windows: OwnerWindow[] }>;
   counters: Omit<OwnerPhraseCounters, 'links' | 'documents' | 'windows'>;
 }
 
-/** Statements, windows and resolved links of one source from its stored scans (no writes). */
-export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<OwnerPhrasePassOpts, 'sourceId' | 'gazetteer' | 'types' | 'pack' | 'policy'>): Promise<OwnerPhraseModel> {
+/** One page's scan as the model reads it (`owner_phrase_page_state`, or computed in memory by a dry run). */
+export type OwnerPhraseState = StateRow;
+
+/** Statements, windows and resolved links of one source from its stored scans, or from `states` when given (no writes). */
+export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<OwnerPhrasePassOpts, 'sourceId' | 'gazetteer' | 'types' | 'pack' | 'policy'>,
+  states?: OwnerPhraseState[]): Promise<OwnerPhraseModel> {
   const { sourceId } = opts;
   const entities = await engine.executeRaw<EntityRow>(
     `SELECT id, slug, type, title, frontmatter->>'identity' AS identity FROM pages
@@ -195,7 +199,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
   const accountIndex = buildNameIndex(accountEntries);
   const personIndex = buildNameIndex(personEntries);
 
-  const states = await engine.executeRaw<StateRow>(
+  states ??= await engine.executeRaw<StateRow>(
     `SELECT s.page_id, p.slug, s.page_date::text AS page_date, s.readings, s.agent, s.cues, s.descriptors, s.hits
        FROM owner_phrase_page_state s JOIN pages p ON p.id = s.page_id
       WHERE s.source_id = $1 AND p.deleted_at IS NULL
@@ -246,7 +250,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
       for (const to of r.accounts) {
         if (to === s.slug || seen.has(to)) continue;
         seen.add(to);
-        links.push({ from_id: Number(s.page_id), from_slug: s.slug, to_slug: to, context: hit.surface, evidence });
+        links.push({ from_id: Number(s.page_id), from_slug: s.slug, to_slug: to, context: hit.surface, evidence, line: hit.line, windows: r.windows });
       }
     }
   }

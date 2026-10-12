@@ -20,7 +20,7 @@
 import { findDates, dayOf } from './dates.ts';
 
 /** Bump to rescan every page's owner-phrase state once (scanner behavior change). */
-export const OWNER_PHRASE_SCAN_VERSION = 1;
+export const OWNER_PHRASE_SCAN_VERSION = 2;
 
 export interface CueLine { line: number; text: string }
 export interface PhraseHit { owner: string; descriptor: string; noun: string; line: number; surface: string }
@@ -56,7 +56,7 @@ export const PERSONAL_ACCOUNT_RE = /\b(?:benefits?|hsa|fsa|401\(?k\)?|payroll|pe
 
 const NAME = String.raw`[A-Z][a-zA-Z]+(?:[-'][A-Z][a-zA-Z]+)?`;
 const NAME_RUN = String.raw`${NAME}(?: ${NAME}){0,2}`;
-const DESC = String.raw`[A-Za-z][A-Za-z0-9&-]*(?: [A-Za-z][A-Za-z0-9&-]*)?`;
+const DESC = String.raw`[A-Za-z][A-Za-z0-9&-]*(?: [A-Za-z][A-Za-z0-9&-]*){0,2}`;
 const NOUN = '(?:book of business|account|book|client|customer|relationship|portfolio)';
 const POSSESSIVE_RE = new RegExp(String.raw`(?<![\w'’])(${NAME_RUN})['’]s (${DESC}) (${NOUN})(?![\w-])`, 'g');
 const RUNS_RE = new RegExp(String.raw`\b[Tt]he (${DESC}) (account|book|client|customer|relationship) (?:that |which )?(${NAME_RUN}) (?:runs|handles|owns|manages|covers|leads|looks after|is running|is handling|is managing|is covering|is leading|has been running|runs point on)\b`, 'g');
@@ -90,7 +90,7 @@ function isAgentAuthored(type: string | null, fm: Record<string, unknown>): bool
   return false;
 }
 
-const DESCRIPTOR_LABEL_RE = /^\s*(?:[-*]\s*)?(?:\*\*)?(?:segment|industry|vertical|sector|category|line of business|business line|descriptor)(?:\*\*)?\s*:\s*(?:\*\*)?([^|;,.()]+)/i;
+const DESCRIPTOR_LABEL_RE = /(?:^|[.;]\s+)\s*(?:[-*]\s*)?(?:\*\*)?(?:segment|industry|vertical|sector|category|line of business|business line|descriptor|region|territory)(?:\*\*)?\s*:\s*(?:\*\*)?([^|;,.()]+)/gi;
 const DESCRIPTOR_DECL_RES = [
   /\b(?:is|as) (?:our|the|a|an) ((?:[a-z][a-z0-9&-]*)(?: [a-z][a-z0-9&-]*)?) (?:account|client|customer)\b/gi,
   /\bknown (?:internally )?as the ((?:[a-z][a-z0-9&-]*)(?: [a-z][a-z0-9&-]*)?) (?:account|client|customer|book)\b/gi,
@@ -108,7 +108,7 @@ function cleanDescriptor(raw: string): string | null {
 
 function frontmatterDescriptors(fm: Record<string, unknown>): string[] {
   const out: string[] = [];
-  for (const key of ['segment', 'industry', 'vertical', 'sector', 'category', 'descriptor', 'line_of_business']) {
+  for (const key of ['segment', 'industry', 'vertical', 'sector', 'category', 'descriptor', 'line_of_business', 'region', 'territory']) {
     const v = fm[key];
     for (const item of Array.isArray(v) ? v : [v]) {
       if (typeof item !== 'string') continue;
@@ -205,8 +205,7 @@ export function scanPage(page: ScanInput): PageScan {
   }
   const descriptors = new Set(frontmatterDescriptors(fm));
   for (const raw of lines) {
-    const label = DESCRIPTOR_LABEL_RE.exec(raw);
-    if (label) { const d = cleanDescriptor(label[1]!); if (d) descriptors.add(d); }
+    for (const label of raw.matchAll(DESCRIPTOR_LABEL_RE)) { const d = cleanDescriptor(label[1]!); if (d) descriptors.add(d); }
     for (const re of DESCRIPTOR_DECL_RES) for (const m of raw.matchAll(re)) { const d = cleanDescriptor(m[1]!); if (d) descriptors.add(d); }
   }
   const titleHits = page.title ? phraseHits([page.title]).map(h => ({ ...h, line: 0 })) : [];

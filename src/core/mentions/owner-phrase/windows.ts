@@ -184,11 +184,20 @@ export function ownerMatches(surface: string, window: Pick<OwnerWindow, 'owner'>
   return s.join(' ') === w.join(' ');
 }
 
+/** A descriptor run matches an account when the whole run is one of its descriptors, or every word of the run is a word of its descriptors ("EMEA software" with region EMEA and industry software). */
+export function descriptorMatches(descriptors: ReadonlySet<string>, run: string): boolean {
+  if (descriptors.has(run)) return true;
+  const words = run.split(' ');
+  if (words.length < 2) return false;
+  const known = new Set([...descriptors].flatMap(d => d.split(' ')));
+  return words.every(w => known.has(w));
+}
+
 /** Resolve one owner phrase on a document dated `date` (plus its other readings) against the windows (contract lines 9-10). */
 export function resolvePhrase(hit: Pick<PhraseHit, 'owner' | 'descriptor'>, date: string | null, readings: string[],
   windows: OwnerWindow[], descriptorsOf: (group: string) => ReadonlySet<string>): Resolution {
   if (!date) return { linked: false, reason: 'no_page_date' };
-  const owned = windows.filter(w => ownerMatches(hit.owner, w) && descriptorsOf(w.group).has(hit.descriptor));
+  const owned = windows.filter(w => ownerMatches(hit.owner, w) && descriptorMatches(descriptorsOf(w.group), hit.descriptor));
   if (!owned.length) return { linked: false, reason: 'no_owner' };
   let chosen: string | null = null;
   let chosenWindows: OwnerWindow[] = [];
