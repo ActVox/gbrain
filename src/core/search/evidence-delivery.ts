@@ -356,11 +356,9 @@ export function longPageMinCharsValueProblem(value: string): string | null {
 }
 
 /**
- * The F2 policy for a search/query call. It applies only under an implied
- * `auto`: no `return_unit` on the call, `search.return_unit` unset or `auto`
- * and no explicit budget (the cap keeps its rules). `snippet_chars` does not
- * turn it off: a widened row (`delivered.reason: 'long_page'`) is exempt from
- * the snippet cap (capDeliveredSnippets), every other row is cut as before.
+ * The F2 policy for a search/query call: only under an implied `auto` (no
+ * `return_unit`, `search.return_unit` unset or `auto`, no explicit budget).
+ * `snippet_chars` leaves it on; capDeliveredSnippets exempts widened rows.
  * Read errors and unknown values are `off`; an unusable threshold is the default.
  */
 export async function withLongPagePolicy(engine: BrainEngine, plan: EvidencePlan | null): Promise<EvidencePlan | null> {

@@ -7401,7 +7401,7 @@
         "kind": "function",
         "name": "withLongPagePolicy",
         "signature": [
-          "(engine: BrainEngine, plan: EvidencePlan | null, input: { snippetChars: unknown; }) => Promise<EvidencePlan | null>"
+          "(engine: BrainEngine, plan: EvidencePlan | null) => Promise<EvidencePlan | null>"
         ]
       }
     ],
