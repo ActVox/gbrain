@@ -50,6 +50,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { heapSize } from 'bun:jsc';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { measureWithoutSteal } from './helpers/hypervisor-steal.ts';
 import { buildEntityCard } from '../src/core/verbs/entity-card.ts';
 import {
   assembleContextPack,
@@ -91,20 +92,26 @@ const HUB_RATIO_CEILING = 8;
 // Catastrophe backstop only; the ratio is the gate.
 const HUB_ABSOLUTE_CEILING_MS = 1000 * (Number(process.env.GBRAIN_TEST_PERF_BUDGET_MULTIPLIER) || 1);
 
-interface Sample { name: string; wall: number; cpu: number; heapDeltaMB: number }
+interface Sample { name: string; wall: number; cpu: number; heapDeltaMB: number; steal: Array<number | null> }
 
-/** One timed call, with the thread's CPU time and JS heap change (a large change means a GC ran inside it). */
+/**
+ * One timed call, with the thread's CPU time and JS heap change (a large change means a GC ran inside it).
+ * A call across which hypervisor steal advanced is timed again (test/helpers/hypervisor-steal.ts).
+ */
 async function sample(name: string, fn: () => Promise<unknown>): Promise<Sample> {
-  const h0 = heapSize(), c0 = process.threadCpuUsage(), t0 = performance.now();
-  await fn();
-  const wall = performance.now() - t0, c = process.threadCpuUsage(c0);
-  return { name, wall, cpu: (c.user + c.system) / 1000, heapDeltaMB: (heapSize() - h0) / 2 ** 20 };
+  const { value, steal } = await measureWithoutSteal(async () => {
+    const h0 = heapSize(), c0 = process.threadCpuUsage(), t0 = performance.now();
+    await fn();
+    const wall = performance.now() - t0, c = process.threadCpuUsage(c0);
+    return { wall, cpu: (c.user + c.system) / 1000, heapDeltaMB: (heapSize() - h0) / 2 ** 20 };
+  });
+  return { name, ...value, steal };
 }
 
-/** The five slowest samples for the log: cpu well under wall is scheduler wait, a heap jump is a GC, cpu≈wall with neither is a slower CPU. */
+/** The five slowest samples for the log: cpu well under wall is scheduler wait, a heap jump is a GC, steal ticks per attempt show re-timed calls, cpu≈wall with none of these is a slower CPU. */
 function slowest(samples: Sample[]): string {
   return [...samples].sort((a, b) => b.wall - a.wall).slice(0, 5)
-    .map(s => `${s.name} wall=${s.wall.toFixed(1)} cpu=${s.cpu.toFixed(1)} heapΔ=${s.heapDeltaMB.toFixed(1)}MB`).join(' | ');
+    .map(s => `${s.name} wall=${s.wall.toFixed(1)} cpu=${s.cpu.toFixed(1)} heapΔ=${s.heapDeltaMB.toFixed(1)}MB steal=${s.steal.join('/')}`).join(' | ');
 }
 
 function percentile(sorted: number[], p: number): number {
