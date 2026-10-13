@@ -53,6 +53,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { heapSize } from 'bun:jsc';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { buildEntityCard } from '../src/core/verbs/entity-card.ts';
 import {
@@ -95,18 +96,24 @@ const HUB_RATIO_CEILING = 8;
 // Catastrophe backstop only; the ratio is the gate.
 const HUB_ABSOLUTE_CEILING_MS = 1000 * (Number(process.env.GBRAIN_TEST_PERF_BUDGET_MULTIPLIER) || 1);
 
+interface Sample { name: string; wall: number; cpu: number; heapDeltaMB: number }
+
 /**
- * One call's wall time and this thread's CPU time (user + system) across it, in ms. The gates read `cpu`: the
- * code path's own work, including the queries PGLite runs on this thread and GC on it, but not time this
- * process spent waiting for a CPU while other test processes ran.
+ * One call's wall time, this thread's CPU time (user + system) across it, in ms, and the JS heap change (a large
+ * change means a GC ran inside it). The gates read `cpu`: the code path's own work, including the queries PGLite
+ * runs on this thread and GC on it, but not time this process spent waiting for a CPU while other test processes ran.
  */
-async function timed(fn: () => Promise<unknown>): Promise<{ wall: number; cpu: number }> {
-  const c0 = process.threadCpuUsage();
-  const t0 = performance.now();
+async function sample(name: string, fn: () => Promise<unknown>): Promise<Sample> {
+  const h0 = heapSize(), c0 = process.threadCpuUsage(), t0 = performance.now();
   await fn();
-  const wall = performance.now() - t0;
-  const c = process.threadCpuUsage(c0);
-  return { wall, cpu: (c.user + c.system) / 1000 };
+  const wall = performance.now() - t0, c = process.threadCpuUsage(c0);
+  return { name, wall, cpu: (c.user + c.system) / 1000, heapDeltaMB: (heapSize() - h0) / 2 ** 20 };
+}
+
+/** The five slowest samples for the log: cpu well under wall is scheduler wait, a heap jump is a GC, cpu≈wall with neither is a slower CPU. */
+function slowest(samples: Sample[]): string {
+  return [...samples].sort((a, b) => b.cpu - a.cpu).slice(0, 5)
+    .map(s => `${s.name} wall=${s.wall.toFixed(1)} cpu=${s.cpu.toFixed(1)} heapΔ=${s.heapDeltaMB.toFixed(1)}MB`).join(' | ');
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -229,23 +236,23 @@ describe('entity card p99 latency gate', () => {
       await buildEntityCard(engine, 'default', names[i % names.length], { remote: true });
     }
 
-    const samples: number[] = [];
-    const walls: number[] = [];
+    Bun.gc(true);
+    const runs: Sample[] = [];
     for (let i = 0; i < MEASURED; i++) {
       const name = names[(i * 13) % names.length];
-      const t = await timed(() => buildEntityCard(engine, 'default', name, { remote: true }));
-      samples.push(t.cpu);
-      walls.push(t.wall);
+      runs.push(await sample(name, () => buildEntityCard(engine, 'default', name, { remote: true })));
     }
-    samples.sort((a, b) => a - b);
-    walls.sort((a, b) => a - b);
+    // eslint-disable-next-line no-console
+    console.log(`[entity-card-perf] slowest: ${slowest(runs)}`);
+    const samples = runs.map(r => r.cpu).sort((a, b) => a - b);
+    const walls = runs.map(r => r.wall).sort((a, b) => a - b);
     const p50 = percentile(samples, 50);
     const p99 = percentile(samples, 99);
 
     // Ratio baseline: getPage p50 on the same corpus, timed the same way.
     const pageSamples: number[] = [];
     for (let i = 0; i < 50; i++) {
-      pageSamples.push((await timed(() => engine.getPage(`people/target-person-${i % TARGET_ENTITIES}`, { sourceId: 'default' }))).cpu);
+      pageSamples.push((await sample('getPage', () => engine.getPage(`people/target-person-${i % TARGET_ENTITIES}`, { sourceId: 'default' }))).cpu);
     }
     pageSamples.sort((a, b) => a - b);
     const pageP50 = Math.max(percentile(pageSamples, 50), 1.0); // 1ms floor vs sub-ms division noise
@@ -269,15 +276,16 @@ describe('entity verb with referenced_by (entity recall)', () => {
     const names: string[] = [];
     for (let i = 0; i < TARGET_ENTITIES; i++) names.push(`Target Person ${i}`, `tp${i}`, `zzz-absent-${i}`);
     for (let i = 0; i < WARMUP; i++) await buildEntityCard(engine, 'default', names[i % names.length], opts);
-    const samples: number[] = [];
-    const walls: number[] = [];
+    Bun.gc(true);
+    const runs: Sample[] = [];
     for (let i = 0; i < MEASURED; i++) {
-      const t = await timed(() => buildEntityCard(engine, 'default', names[(i * 13) % names.length], opts));
-      samples.push(t.cpu);
-      walls.push(t.wall);
+      const name = names[(i * 13) % names.length];
+      runs.push(await sample(name, () => buildEntityCard(engine, 'default', name, opts)));
     }
-    samples.sort((a, b) => a - b);
-    walls.sort((a, b) => a - b);
+    // eslint-disable-next-line no-console
+    console.log(`[entity-recall-perf] slowest: ${slowest(runs)}`);
+    const samples = runs.map(r => r.cpu).sort((a, b) => a - b);
+    const walls = runs.map(r => r.wall).sort((a, b) => a - b);
     const p50 = percentile(samples, 50);
     const p99 = percentile(samples, 99);
     // eslint-disable-next-line no-console
