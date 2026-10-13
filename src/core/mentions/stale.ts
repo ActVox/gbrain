@@ -63,6 +63,5 @@ export function mentionJsonFields(r: MentionPassResult): Record<string, unknown>
     mention_pages: r.pages, mention_links_created: r.created, mention_links_removed: r.removed,
     mention_alias_pages: r.aliasPages, mention_due_remaining: r.remaining, mention_state: r.state,
     ...(r.error ? { mention_error: r.error } : {}),
-    ...(r.ownerPhrases ? { owner_phrases: r.ownerPhrases } : {}),
   };
 }

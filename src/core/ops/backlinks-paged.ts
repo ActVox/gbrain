@@ -7,8 +7,7 @@
  * `{rows, total, truncated, cursor, coverage}`: one row per referring page,
  * newest first by `(date DESC, source_id, slug)`, read through the same
  * helper as the entity card's `referenced_by`, so a card group's `next` call
- * continues it exactly. `group: "known_as"` pages the card's owner windows
- * (`known_as.next`) with the same `{rows, total, truncated, cursor}` shape.
+ * continues it exactly.
  */
 
 import { opError, type OperationContext } from './contract.ts';
@@ -19,7 +18,6 @@ import {
   canonicalRecordTypes, decodeCursor, readPageStatusByRef, readReferrerPage, referrerTypes, PAGE_DEFAULT_LIMIT, PAGE_MAX_LIMIT, type ReferenceRow, type ReferrerScope,
 } from '../mentions/referrers.ts';
 import { mentionCoverageNotice, readMentionCoverage, type MentionCoverage } from '../mentions/coverage.ts';
-import { decodeKnownAsCursor, readKnownAsPage, type KnownAsRow } from '../mentions/owner-phrase/known-as.ts';
 import { readEntityReferencesConfig, readRowPageStatus } from '../entity-references-config.ts';
 
 export interface BacklinkPage {
@@ -84,10 +82,9 @@ async function assertKnownType(ctx: OperationContext, scope: ReferrerScope, type
  * `group: "page"`: one page of referring pages. A slug with no live page in
  * scope answers like an empty read (no rows, total 0).
  */
-export async function readBacklinkPage(ctx: OperationContext, p: Record<string, unknown>, policy: PageReadPolicy): Promise<BacklinkPage | KnownAsPage> {
-  if (p.group === 'known_as') return readKnownAsGroup(ctx, p, policy);
+export async function readBacklinkPage(ctx: OperationContext, p: Record<string, unknown>, policy: PageReadPolicy): Promise<BacklinkPage> {
   if (p.group !== 'page') {
-    throw opError('invalid_params', `get_backlinks: group must be "page" or "known_as".`, 'Pass group: "page" for one row per referring page, group: "known_as" for the card\'s owner windows, or omit group for link rows.');
+    throw opError('invalid_params', `get_backlinks: group must be "page".`, 'Pass group: "page" for one row per referring page, or omit group for link rows.');
   }
   const limit = parseLimit(p, PAGE_DEFAULT_LIMIT)!;
   const cursor = p.cursor === undefined ? null : decodeCursor(String(p.cursor));
@@ -123,28 +120,6 @@ export async function withLinkPageStatus(ctx: OperationContext, policy: () => Pr
     const value = status.get(`${l.from_source_id}:${l.from_slug}`);
     return value ? { ...l, page_status: value } : l;
   });
-}
-
-export interface KnownAsPage { rows: KnownAsRow[]; total: number; truncated: boolean; cursor: string | null }
-
-/**
- * `group: "known_as"`: one page of the entity card's owner windows
- * (mentions/owner-phrase/known-as.ts), continuing a card's `known_as.next`.
- * A slug with no live page in scope answers like an empty read.
- */
-async function readKnownAsGroup(ctx: OperationContext, p: Record<string, unknown>, policy: PageReadPolicy): Promise<KnownAsPage> {
-  if (p.type !== undefined) {
-    throw opError('invalid_params', 'get_backlinks: type does not apply to group: "known_as".', 'Omit type with group: "known_as".');
-  }
-  const limit = parseLimit(p, PAGE_DEFAULT_LIMIT)!;
-  const after = p.cursor === undefined ? null : decodeKnownAsCursor(String(p.cursor));
-  if (p.cursor !== undefined && !after) {
-    throw opError('invalid_params', 'get_backlinks: cursor is not one this tool returned.', 'Pass the cursor from the previous known_as response unchanged, or omit it to start from the newest window.');
-  }
-  const sourceId = await targetSource(ctx, String(p.slug), await scopeSources(ctx, policy));
-  if (!sourceId) return { rows: [], total: 0, truncated: false, cursor: null };
-  const page = await readKnownAsPage(ctx.engine, sourceId, String(p.slug), { excludePrivate: policy.excludePrivate === true, limit, after });
-  return { rows: page.rows, total: page.total, truncated: page.cursor !== null, cursor: page.cursor };
 }
 
 /**

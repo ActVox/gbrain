@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 231834,
-    "stdoutSha256": "eef0626406fb696b8e89167e34df89c6c823e47532257c0a9701f992e73860d1",
+    "stdoutBytes": 231878,
+    "stdoutSha256": "b1d2ef871d92ce9360a547ac5cc1651136a6eb12a96799fcdd317459870690b9",
     "toolNames": [
       "remember",
       "entity",
@@ -1990,7 +1990,10 @@
               "type": "string"
             },
             "group": {
-              "description": "page or known_as.",
+              "description": "Per page.",
+              "enum": [
+                "page"
+              ],
               "type": "string"
             },
             "limit": {
