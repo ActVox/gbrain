@@ -12,6 +12,10 @@
  * connection count that picks a canonical entity, generated-page demotion and
  * entity anchoring.
  *
+ * Owner-phrase links (`link_kind = 'owner_phrase'`, mentions/owner-phrase/)
+ * are non-ranking the same way: a brain's final scores are the same with
+ * `mentions.owner_phrases` on or off.
+ *
  * The policy lives in code, not in a schema pack field, so a pack that
  * declares one of these types loads on any gbrain. Contract:
  * docs/guides/temporal-edges.md ("Amendments: the amends link").
@@ -19,6 +23,9 @@
 
 /** Link types that take no part in ranking. */
 export const NON_RANKING_LINK_TYPES: readonly string[] = Object.freeze(['amends']);
+
+/** Link kinds that take no part in ranking, whatever their type. */
+export const NON_RANKING_LINK_KINDS: readonly string[] = Object.freeze(['owner_phrase']);
 
 /** True when edges of this type may feed a ranking signal. */
 export function linkTypeRanks(linkType: string): boolean {
@@ -31,5 +38,6 @@ export function linkTypeRanks(linkType: string): boolean {
  * the fragment composes into statements with any parameter numbering.
  */
 export function rankingLinkSql(alias: string): string {
-  return `${alias}.link_type <> ALL(ARRAY[${NON_RANKING_LINK_TYPES.map(t => `'${t}'`).join(', ')}]::text[])`;
+  return `(${alias}.link_type <> ALL(ARRAY[${NON_RANKING_LINK_TYPES.map(t => `'${t}'`).join(', ')}]::text[])`
+    + ` AND COALESCE(${alias}.link_kind, '') <> ALL(ARRAY[${NON_RANKING_LINK_KINDS.map(k => `'${k}'`).join(', ')}]::text[]))`;
 }

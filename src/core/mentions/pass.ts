@@ -54,6 +54,7 @@ import { normalizeAliasList } from '../search/alias-normalize.ts';
 import { withCoordinatedWrite } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
+import { readOwnerPhrasesEnabled, runOwnerPhrasePass, type OwnerPhrasePassResult } from './owner-phrase/pass.ts';
 
 /** Bump to rescan every page's mentions once (gazetteer or scanner behavior change). */
 export const MENTION_EXTRACTOR_VERSION = 5;
@@ -79,6 +80,8 @@ export interface MentionPassResult {
   remaining: number;
   state: MentionState;
   error?: string;
+  /** Owner-phrase pass (`mentions.owner_phrases`), summed over sources; absent when it is off and had nothing to remove. */
+  ownerPhrases?: OwnerPhrasePassResult;
 }
 
 export interface MentionPassOpts {
@@ -135,11 +138,23 @@ async function sourcesInScope(engine: BrainEngine, sourceId?: string): Promise<s
   return rows.map(r => r.id);
 }
 
-function policyFingerprint(types: string[], crossSource: boolean, policy: MentionPolicy): string {
+/** `ownerPhrases` enters the hash only when on, so a brain without the key keeps its fingerprint. */
+export function policyFingerprint(types: string[], crossSource: boolean, policy: MentionPolicy, ownerPhrases = false): string {
   return createHash('sha256').update(JSON.stringify({
     types, crossSource, ignore: [...policy.ignore].map(n => n.toLowerCase()).sort(),
     aliasDeny: [...policy.aliasDeny].map(n => n.toLowerCase()).sort(), multiword: policy.multiwordAliases, siblings: policy.siblingMerge,
+    ...(ownerPhrases ? { ownerPhrases: true } : {}),
   })).digest('hex').slice(0, 16);
+}
+
+function addOwnerPhrases(result: MentionPassResult, r: OwnerPhrasePassResult): void {
+  if (r.state === 'off' && !r.removed) return;
+  const sum = result.ownerPhrases;
+  if (!sum) { result.ownerPhrases = { ...r }; return; }
+  const rank = { failed: 3, pending: 2, complete: 1, off: 0 } as const;
+  for (const k of ['scanned', 'created', 'removed', 'links', 'documents', 'unresolved', 'ambiguous', 'windows'] as const) sum[k] += r[k];
+  if (rank[r.state] > rank[sum.state]) sum.state = r.state;
+  if (r.error) sum.error = r.error;
 }
 
 async function writeStatus(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, patch: {
@@ -447,21 +462,26 @@ async function reconcileSource(engine: BrainEngine, sourceId: string, gazetteer:
         [pages.map(p => p.id)])).map(r => [Number(r.id), r.revision]));
       const fresh = pages.filter(p => current.get(Number(p.id)) === p.revision);
       if (!fresh.length) return { fresh: 0, created: 0, removed: 0 };
-      const rows = await tx.executeRaw<{ id: number; from_page_id: number; to_slug: string; to_source_id: string; plain: boolean }>(
+      const rows = await tx.executeRaw<{ id: number; from_page_id: number; to_slug: string; to_source_id: string; plain: boolean; owner_phrase: boolean }>(
         `SELECT l.id, l.from_page_id, t.slug AS to_slug, t.source_id AS to_source_id,
-                (l.link_source = 'mentions' AND (l.link_kind IS NULL OR l.link_kind = 'plain')) AS plain
+                (l.link_source = 'mentions' AND (l.link_kind IS NULL OR l.link_kind = 'plain')) AS plain,
+                (l.link_kind = 'owner_phrase') AS owner_phrase
            FROM links l JOIN pages t ON t.id = l.to_page_id WHERE l.from_page_id = ANY($1::int[])`,
         [fresh.map(p => p.id)]);
       const existing = rows.filter(r => r.plain);
       // One link per page pair: a pair another producer already links (markdown, frontmatter, typed_ner, manual) gets no plain mention.
       // A cross-source mention is also covered by an explicit link to the same slug in any source (the resolver may pick another twin).
-      const covered = new Set(rows.filter(r => !r.plain).flatMap(r => [`${r.from_page_id}\0${r.to_source_id}\0${r.to_slug}`, `${r.from_page_id}\0*\0${r.to_slug}`]));
+      // Owner-phrase rows cover nothing: a plain mention of the same pair replaces them (owner-phrase/pass.ts then skips the pair).
+      const covered = new Set(rows.filter(r => !r.plain && !r.owner_phrase).flatMap(r => [`${r.from_page_id}\0${r.to_source_id}\0${r.to_slug}`, `${r.from_page_id}\0*\0${r.to_slug}`]));
       const pageSource = new Map(fresh.map(p => [Number(p.id), p.source_id]));
       const want = new Set(fresh.flatMap(p => (found.get(Number(p.id)) ?? [])
         .filter(m => !covered.has(`${p.id}\0${m.source_id}\0${m.slug}`) && !(m.source_id !== pageSource.get(Number(p.id)) && covered.has(`${p.id}\0*\0${m.slug}`)))
         .map(m => `${p.id}\0${m.source_id}\0${m.slug}`)));
       const have = new Set(existing.map(r => `${r.from_page_id}\0${r.to_source_id}\0${r.to_slug}`));
       const drop = existing.filter(r => !want.has(`${r.from_page_id}\0${r.to_source_id}\0${r.to_slug}`)).map(r => Number(r.id));
+      const displaced = rows.filter(r => r.owner_phrase && want.has(`${r.from_page_id}\0${r.to_source_id}\0${r.to_slug}`)
+        && !have.has(`${r.from_page_id}\0${r.to_source_id}\0${r.to_slug}`)).map(r => Number(r.id));
+      if (displaced.length) await tx.executeRaw('DELETE FROM links WHERE id = ANY($1::int[])', [displaced]);
       if (drop.length) await tx.executeRaw('DELETE FROM links WHERE id = ANY($1::int[])', [drop]);
       const add: LinkBatchInput[] = fresh.flatMap(p => (found.get(Number(p.id)) ?? [])
         .filter(m => want.has(`${p.id}\0${m.source_id}\0${m.slug}`) && !have.has(`${p.id}\0${m.source_id}\0${m.slug}`))
@@ -494,9 +514,13 @@ export async function runMentionPass(engine: BrainEngine, opts: MentionPassOpts 
   const deadline = opts.deadline ?? Infinity;
   const passStart = new Date().toISOString();
   const policy = await readMentionPolicy(engine);
+  const ownerPhrases = await readOwnerPhrasesEnabled(engine);
   const sources = await sourcesInScope(engine, opts.sourceId);
   const managed = await managedPersistenceEnabled(engine);
   if (!policy.enabled) {
+    for (const sourceId of sources) {
+      addOwnerPhrases(result, await runOwnerPhrasePass(engine, { sourceId, gazetteer: new Map(), types: [], pack: null, policy, enabled: false, deadline }));
+    }
     const status = new Map((await engine.executeRaw<{ source_id: string; state: string }>(
       'SELECT source_id, state FROM mention_index_status WHERE source_id = ANY($1::text[])', [sources])).map(r => [r.source_id, r.state]));
     for (const sourceId of sources) {
@@ -508,9 +532,13 @@ export async function runMentionPass(engine: BrainEngine, opts: MentionPassOpts 
   }
   const allowCrossSource = await isCrossSourceLinksEnabled(engine);
   const types = new Map<string, string[]>();
+  const packs = new Map<string, PackTypes | null>();
   let gazetteer: Gazetteer;
   try {
-    for (const sourceId of sources) types.set(sourceId, linkableTypesFor(await loadSourcePack(engine, sourceId, { strict: true }), policy));
+    for (const sourceId of sources) {
+      packs.set(sourceId, await loadSourcePack(engine, sourceId, { strict: true }));
+      types.set(sourceId, linkableTypesFor(packs.get(sourceId)!, policy));
+    }
     gazetteer = await buildGazetteer(engine, { policy, strict: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -518,7 +546,7 @@ export async function runMentionPass(engine: BrainEngine, opts: MentionPassOpts 
     return { ...result, state: 'failed', error: message, remaining: await countMentionDuePages(engine, opts.sourceId) };
   }
   const allSources = allowCrossSource ? (await sourcesInScope(engine)) : [];
-  const fingerprints = new Map<string, string>(sources.map(s => [s, policyFingerprint(types.get(s)!, allowCrossSource, policy)]));
+  const fingerprints = new Map<string, string>(sources.map(s => [s, policyFingerprint(types.get(s)!, allowCrossSource, policy, ownerPhrases)]));
   const stored = new Map((await engine.executeRaw<{ source_id: string; policy_fingerprint: string | null }>(
     'SELECT source_id, policy_fingerprint FROM mention_index_status WHERE source_id = ANY($1::text[])', [sources]))
     .map(r => [r.source_id, r.policy_fingerprint]));
@@ -551,6 +579,8 @@ export async function runMentionPass(engine: BrainEngine, opts: MentionPassOpts 
   }
   for (const sourceId of sources) {
     await reconcileSource(engine, sourceId, gazetteer, allowCrossSource ? allSources : [sourceId], allowCrossSource, opts, deadline, result);
+    addOwnerPhrases(result, await runOwnerPhrasePass(engine, { sourceId, gazetteer, types: types.get(sourceId)!, pack: packs.get(sourceId) ?? null,
+      policy, enabled: ownerPhrases, deadline, signal: opts.signal }));
     const pending = await countIndexDuePages(engine, sourceId, types.get(sourceId)!);
     result.remaining += pending;
     await writeStatus(engine, sourceId, { state: pending > 0 ? 'pending' : 'complete', pending, error: null, lastPassAt: passStart });

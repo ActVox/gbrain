@@ -1115,6 +1115,12 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // doctor reader probes for the column on older brains.
   'pages.links_attendance_blocked_revision',
   'pages.links_attendance_blocked_at',
+  // Owner phrases (v243): migration-only tables created with these columns in
+  // the same migration; the ADD COLUMN IF NOT EXISTS lines only widen tables an
+  // unreleased build created earlier. No schema blob references them.
+  'owner_phrase_page_state.statements',
+  'owner_phrase_page_state.statements_key',
+  'owner_phrase_status.inputs_hash',
 ]);
 
 test('every ALTER TABLE ADD COLUMN in MIGRATIONS is covered by applyForwardReferenceBootstrap (column-only class)', async () => {
