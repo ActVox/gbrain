@@ -552,6 +552,15 @@ export interface OperationContext {
    */
   resultRows?: 'lean' | 'full';
   /**
+   * Whether this caller can call `opName` on its surface right now: the MCP
+   * dispatch predicate (the stdio session's surface after any `request_tools`
+   * widening, the HTTP client's effective surface and scopes under the
+   * server ceiling). Set by MCP dispatch only; publish-gated ops read as not
+   * callable. Unset on local and in-process callers. Shape only, never
+   * authority: dispatch enforces callability itself.
+   */
+  isCallable?: (opName: string) => boolean;
+  /**
    * Resolved global CLI options (--quiet / --progress-json / --progress-interval).
    * CLI callers populate this from `getCliOptions()`. MCP / library callers
    * may leave it undefined — consumers default to quiet/no-progress for

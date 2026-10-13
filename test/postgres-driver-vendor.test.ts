@@ -42,4 +42,23 @@ describe('vendored Postgres driver packaging', () => {
       expect(connection).toContain('function answersStatement(xs, x)');
     }
   });
+
+  test('#6543: all three shipped copies carry the A1 close reset, the A2 build-failure pipelining gate and the A7 parameter index (offline; update-postgres.sh --check is the networked proof)', () => {
+    for (const path of ['src', 'cjs/src', 'cf/src']) {
+      const connection = readFileSync(new URL(`../vendor/postgres/${path}/connection.js`, import.meta.url), 'utf8');
+      // A1: a closed socket's ErrorResponse and partial result never reach the replacement connection's first statement.
+      expect(connection).toContain('query = errorResponse = results = null');
+      expect(connection).toContain('result = new Result()');
+      // A2: a build failure obeys max_pipeline and onexecute (stock: `write(Unbuildable)` then `return true`); onexecute runs only after build.
+      expect(connection).toContain('let mayPipeline = !q.options.onexecute');
+      expect(connection).toMatch(/build\(q\)\n\s+mayPipeline = mayPipeline \|\| q\.options\.onexecute\(connection\)/);
+      expect(connection).toMatch(/return write\(Unbuildable\)\n\s+&& sent\.length < max_pipeline\n\s+&& mayPipeline/);
+      expect(connection).not.toMatch(/write\(Unbuildable\)\n\s+return true/);
+      // A7: onbuilderror names the undefined parameter.
+      expect(connection).toContain("statementText(q), error && error.parameter)");
+      const types = readFileSync(new URL(`../vendor/postgres/${path}/types.js`, import.meta.url), 'utf8');
+      expect(types).toContain('(parameter $');
+    }
+    expect(readFileSync(new URL('../vendor/postgres/types/index.d.ts', import.meta.url), 'utf8')).toContain('parameter?: number');
+  });
 });

@@ -149,7 +149,7 @@ async function runModesSubcommand(engine: BrainEngine, args: string[]): Promise<
       process.exit(1);
     }
     const overrides = await engine.listConfigKeys('search.');
-    const toRemove = overrides.filter((k) => k !== SEARCH_MODE_KEY && k !== 'search.mode_upgrade_notice_shown');
+    const toRemove = overrides.filter((k) => k !== SEARCH_MODE_KEY && k !== 'search.mode_upgrade_notice_shown' && k !== 'search.mode_source');
     if (toRemove.length === 0) {
       console.log('No search.* overrides set. Mode bundle is the only voice.');
       return;

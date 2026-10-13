@@ -608,22 +608,15 @@ jobs:
             esac
           fi
       - name: Install OpenClaw
-        # Bound + retry the install: a transient npm/registry stall here used to
-        # hang unbounded and (since the v0.42.50.0 job timeout) burn the entire
-        # 30m Tier 2 budget before failing — even though the install normally
-        # finishes in well under a minute. `timeout` kills a hung attempt fast;
-        # up to 3 attempts ride out a flaky registry. Step cap is a backstop.
+        # Bound + retry the install (scripts/ci-install-openclaw.sh): a transient
+        # npm/registry stall here used to hang unbounded and (since the v0.42.50.0
+        # job timeout) burn the entire 30m Tier 2 budget before failing — even
+        # though the install normally finishes in well under a minute. `timeout`
+        # kills a hung attempt fast; up to 3 attempts ride out a flaky registry,
+        # and a registry race (ETARGET/E404 on a dependency version published
+        # moments ago) gets up to 4 attempts 20/40/80 s apart. Step cap is a backstop.
         timeout-minutes: 8
-        run: |
-          for attempt in 1 2 3; do
-            if timeout 120 npm install -g openclaw@2026.4.9; then
-              exit 0
-            fi
-            echo "::warning::openclaw install attempt $attempt failed or timed out; retrying in 10s" >&2
-            sleep 10
-          done
-          echo "::error::openclaw install failed after 3 attempts" >&2
-          exit 1
+        run: scripts/ci-install-openclaw.sh
       - name: Configure OpenClaw MCP
         run: |
           mkdir -p ~/.openclaw

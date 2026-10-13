@@ -76,6 +76,13 @@ export interface Notice {
   fix?: Action;
   user_message?: string;
   decisions?: Decision[];
+  /**
+   * Unrendered: the NoticeLedger's dedupe identity. A per-call code carrying
+   * one is deduped per session under `code` + this key instead of riding
+   * every call; any code carrying one dedupes under it instead of `code`
+   * alone. renderNotice never copies it, so it never reaches the wire.
+   */
+  dedupe_key?: string;
 }
 export interface RenderedNotice extends Omit<Notice, 'fix'> { fix?: RenderedAction; contract_version: 1 }
 

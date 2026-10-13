@@ -2276,6 +2276,8 @@ export interface EngineConfig {
   database_url?: string;
   database_path?: string;
   engine?: 'postgres' | 'pglite';
+  /** #6495 file-plane `search.keyword_statement_timeout_ms`, read by the Postgres engine at connect (postgres-engine/keyword-statement-timeout.ts). */
+  keyword_statement_timeout_ms?: number;
 }
 
 // Errors

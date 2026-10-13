@@ -20,10 +20,11 @@ import type { BrainEngine } from '../core/engine.ts';
 import { resolveGbrainBin } from '../core/gbrain-bin.ts';
 import { configReadiness, embeddingEnablement, harnessWiringEntry } from '../core/readiness.ts';
 import type { SearchMode } from '../core/search/mode.ts';
+import { costMatrixSentence } from '../core/search/mode-advice.ts';
 import type { McpSurface } from '../mcp/surface.ts';
 
 export interface InitFirstRunInputs {
-  /** The search mode init applied and why (from the install-time picker). */
+  /** The search mode the install-time picker applied and why; absent when `--search-mode` recorded the operator's choice. */
   searchMode?: { mode: SearchMode; reason: string };
   /** The config init saved; harness wiring is read from its config-plane readiness. */
   config?: GBrainConfig | null;
@@ -35,15 +36,11 @@ export interface InitFirstRunInputs {
   surface?: McpSurface;
 }
 
-const SEARCH_MODE_COST =
-  'Per-query search payload cost at 10K queries/month (Haiku 4.5 / Sonnet 4.6 / Opus 4.7): ' +
-  'conservative $40 / $120 / $200, balanced $100 / $300 / $500, tokenmax $200 / $600 / $1,000 per month.';
-
 function searchModeDecision(applied: { mode: SearchMode; reason: string }): Decision {
   const modes: SearchMode[] = ['conservative', 'balanced', 'tokenmax'];
   return {
     id: 'search_mode',
-    question: `Which search mode should this brain use? ${SEARCH_MODE_COST}`,
+    question: `Which search mode should this brain use? ${costMatrixSentence()}`,
     options: modes.map(m => ({ id: m, label: m === applied.mode ? `${m} (applied)` : m, argv: ['gbrain', 'config', 'set', 'search.mode', m] })),
     default: applied.mode,
     default_reason: applied.reason,

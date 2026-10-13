@@ -31,7 +31,7 @@ import type { HybridSearchMeta, SearchResult } from '../types.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS } from '../search/snippet-cap.ts';
 import { redactRetrievalOutput } from '../search/output-redaction.ts';
-import { projectRows, resultRowsFor } from '../search/lean-rows.ts';
+import { leanRowsKeepId, projectRows, resultRowsFor } from '../search/lean-rows.ts';
 import { buildScoreDetails } from '../search/explain-formatter.ts';
 import { TargetTrace, diagnoseProbe, diagnoseTrace, probeTarget, type ExplainTargetDiagnosis } from '../search/explain-target.ts';
 import { assembleEvidenceForHits, capDeliveredSnippets, capEvidenceToBudget, deliverEvidence, pagePlanHits, resolveEvidencePlan, selectLongPages, unsupportedDelivery, withLongPagePolicy, type DeliveryMeta, type DeliveryScope, type EvidencePlan, type FrozenHit, type ReturnUnit } from '../search/evidence-delivery.ts';
@@ -109,6 +109,7 @@ function thinkScopeFromQueryScope(scope: SourceScope): { sourceId?: string; allo
 function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results: SearchResult[], meta: Record<string, unknown>, snippetCap: number,
   evidence?: { delivery: DeliveryMeta; explicitSnippet: boolean }): SearchResult[] {
   const rows = resultRowsFor(ctx, p.fields);
+  const lean = { keepId: leanRowsKeepId(ctx) };
   // `explain: true` — every row carries its score breakdown (kept in lean rows).
   if (p.explain === true) for (const r of results) r.score_details = buildScoreDetails(r);
   // The shape is reported where it can vary: remote callers, or an explicit `fields`.
@@ -116,7 +117,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   if (!evidence) {
     const output = redactRetrievalOutput(results, { ...meta, ...shown });
     ctx.emitResponseMeta?.('retrieval', output.meta);
-    return projectRows(applySnippetCap(output.results, snippetCap).map(factRowOutput), rows);
+    return projectRows(applySnippetCap(output.results, snippetCap).map(factRowOutput), rows, lean);
   }
   // Evidence delivery: explicit snippet_chars wins over the delivered blocks;
   // otherwise the blocks are returned whole (their budget already bounds
@@ -126,7 +127,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // markers and redaction recounted); without one both are no-ops.
   const capped = evidence.explicitSnippet ? capDeliveredSnippets(output.results, snippetCap, output.meta.delivery) : capEvidenceToBudget(output.results, output.meta.delivery);
   ctx.emitResponseMeta?.('retrieval', output.meta);
-  return projectRows(capped.map(factRowOutput), rows);
+  return projectRows(capped.map(factRowOutput), rows, lean);
 }
 
 /** C1: the per-call row-shape escape hatch shared by `search` and `query` (`detail` is query's low/medium/high). */
@@ -447,8 +448,8 @@ async function buildRetrievalResponseMeta(
 ): Promise<Record<string, unknown>> {
   const m = meta as (HybridSearchMeta & { degraded?: unknown[]; retrieved_count?: number }) | null;
   const hint = opts.conceptHint && looksConceptShaped(queryText)
-    ? "concept-shaped question — the 'query' tool adds multi-query expansion and recovers " +
-      'synonym-phrased matches this keyword-leaning search can miss.'
+    ? "concept-shaped question — the 'query' tool with expand: true adds multi-query expansion, " +
+      'which can recover synonym-phrased matches this keyword-leaning search can miss.'
     : undefined;
   const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
   const excludeSlugPrefixes = resolveHardExcludes();
@@ -841,7 +842,7 @@ const query: Operation = {
     return_unit: RETURN_UNIT_PARAM,
     return_window: RETURN_WINDOW_PARAM,
     token_budget: { type: 'number', description: 'Evidence token cap.' },
-    expand: { type: 'boolean', description: 'Default true; false skips the LLM expansion.' },
+    expand: { type: 'boolean', description: 'Default per search mode (tokenmax on).' },
     detail: { type: 'string', description: 'low (compiled truth), medium (default) or high (all chunks).' },
     fields: FIELDS_PARAM,
     mode: { type: 'string', description: 'Local callers only.' },
@@ -867,7 +868,7 @@ const query: Operation = {
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
-    const expand = p.expand !== false;
+    const expandParam = typeof p.expand === 'boolean' ? p.expand : undefined;
     const detail = (p.detail as 'low' | 'medium' | 'high') || undefined;
     const queryText = p.query as string | undefined;
     // #3985: validated multi-type filter (text path; the image-similarity
@@ -988,8 +989,8 @@ const query: Operation = {
       excludePrivate,
       requireSafeChunks: ctx.remote !== false, decide: { remote: ctx.remote !== false, answerability: true },
       takesHoldersAllowList: readHolders(ctx),
-      expansion: expand,
-      expandFn: expand ? expandQuery : undefined,
+      expansion: expandParam,
+      expandFn: expandParam === false ? undefined : expandQuery,
       // T4/D5 — per-call mode (local/trusted only; remote ignored).
       ...((): { mode?: string } => { const m = resolvePerCallMode(ctx, p.mode); return m ? { mode: m } : {}; })(),
       detail,
@@ -1057,16 +1058,17 @@ const query: Operation = {
         ctx.engine.getConfig('search.crag_escalation').catch(() => null),
         ctx.engine.getConfig('search.crag_think').catch(() => null),
       ]);
-      // #4610: pass the documented guard inputs. `callerExpanded: expand`
-      // implements the long-documented high-ceiling skip — a first pass that
-      // already ran with expansion (the default) doesn't pay for a second
-      // expansion LLM call + rerank over a near-identical query. Escalation
-      // now fires for callers that explicitly opted out of expansion (the
-      // shape where the forced-expansion re-run has something new to find).
+      // #4610: pass the documented guard inputs. `callerExpanded` reads what
+      // the first pass actually did (`expansion_applied`), not what was
+      // requested: a first pass that produced expansion variants doesn't pay
+      // for a second expansion LLM call + rerank over a near-identical query,
+      // while one that ran without expansion (the mode default outside
+      // tokenmax, an explicit opt-out, or an expander that produced nothing)
+      // can still escalate.
       if (shouldEscalateRetrieval(grade, {
         enabled: escalationCfg === 'true',
         alreadyEscalated: false,
-        callerExpanded: expand,
+        callerExpanded: (capturedMeta as HybridSearchMeta | null)?.expansion_applied === true,
       })) {
         try {
           // The caller's effective row contract (shared with the image
@@ -1180,7 +1182,7 @@ const query: Operation = {
           meta,
           latency_ms,
           remote: ctx.remote ?? false,
-          expand_enabled: expand,
+          expand_enabled: expandParam ?? null,
           detail: detail ?? null,
           job_id: ctx.jobId ?? null,
           subagent_id: ctx.subagentId ?? null,

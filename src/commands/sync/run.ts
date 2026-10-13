@@ -133,6 +133,10 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
   const { syncResumeCommand } = await import('../../core/sync-reconcile.ts');
   const { getCliOptions } = await import('../../core/cli-options.ts');
   const resumeCommand = syncResumeCommand(args, getCliOptions().brain);
+  // #6543: --all never delegates, so its opt-out keeps this process's own consumer here (single-source runs: sync-delegate.ts).
+  if (syncAll && (args.includes('--no-delegate') || process.env.GBRAIN_SYNC_NO_DELEGATE === '1')) {
+    (await import('../../core/persistence/consumer-election.ts')).forceOwnConsumer('opted_out');
+  }
   if (syncAll) return await runSyncAll(engine, { ...flags, ...fanout }, { noEmbed, embeddingCredentialError, resumeCommand });
 
   return await runSingleSourceSync(engine, { ...flags, ...fanout }, { sourceId, companyPolicy, noEmbed, resumeCommand, args });

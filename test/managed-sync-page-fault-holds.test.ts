@@ -56,7 +56,7 @@ function countDiscoveries(engine: BrainEngine, sourceId: string): { count: () =>
   const executeRaw = engine.executeRaw;
   let reads = 0;
   engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
-    if (params?.[0] === sourceId && sql.includes('SELECT id,slug,source_path,knowledge_revision FROM pages')) reads++;
+    if (params?.[0] === sourceId && sql.includes('SELECT id,slug,source_path,knowledge_revision,deleted_at FROM pages')) reads++;
     return executeRaw.call(this, sql, params);
   } as BrainEngine['executeRaw'];
   return { count: () => reads, restore: () => { engine.executeRaw = executeRaw; } };

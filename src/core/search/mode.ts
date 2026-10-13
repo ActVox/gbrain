@@ -105,10 +105,10 @@ export interface ModeBundle {
    */
   tokenBudget: number | undefined;
   /**
-   * LLM multi-query expansion (Haiku call per search).
-   * Per CLAUDE.md TODOS the corpus eval shows ~97.6% lift relative to no
-   * expansion — barely measurable. Off for conservative/balanced;
-   * on for tokenmax to preserve power-user retrieval ceiling.
+   * LLM multi-query expansion (one chat call per expanded search). The
+   * `query` op's default when a call leaves `expand` unset; `search` and the
+   * memory verbs never expand. Off for conservative/balanced, on for
+   * tokenmax. Override: per-call `expand` → `search.expansion` → bundle.
    */
   expansion: boolean;
   /**
@@ -125,10 +125,10 @@ export interface ModeBundle {
    * the config parser AND both per-call seams in hybrid.ts.
    * Arithmetic: two variants agreeing on a distractor at rank 0 tie
    * the original's rank-0 vote exactly at `b = 1.0`; legacy with two variants
-   * is ≈ `b = 2.0`; `b = 0.5` subordinates them. Receipt (LongMemEval strict
-   * recall_all@5, v0.48.2.0 harness): plain hybrid 93.19% vs hybrid + LLM
-   * expansion 54.89% (paired +3 / −183) — variant lists fusing at full weight
-   * outvote the original on small-k recall. No-op when `expansion` is off.
+   * is ≈ `b = 2.0`; `b = 0.5` subordinates them. Receipt (LongMemEval-S strict
+   * recall_all@5, recorded expansions, reranker off, gbrain-evals 2026-10-04):
+   * legacy-weight expansion 436/470 vs plain hybrid 434/470 (+6/−4, p = 0.75)
+   * — no measured gain. No-op when `expansion` is off.
    * Override: per-call → `search.expansion_variant_budget` config → bundle.
    */
   expansion_variant_budget: number | null;

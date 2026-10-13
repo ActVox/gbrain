@@ -265,6 +265,8 @@ export interface GBrainConfig {
     hnsw_iterative_scan?: string;
     /** #5989 CJK keyword arm deadline in ms (search/cjk-keyword-deadline.ts); file > DB. */
     cjk_keyword_deadline_ms?: number;
+    /** #6495 Postgres keyword/title statement_timeout in ms (postgres-engine/keyword-statement-timeout.ts); file > DB, resolved per connection. */
+    keyword_statement_timeout_ms?: number;
   };
 
   /**
@@ -839,6 +841,8 @@ async function mergeSearchScanKnobs(
   if (mergedSearch.hnsw_iterative_scan === undefined && dbHnswIterativeScan !== undefined) mergedSearch.hnsw_iterative_scan = dbHnswIterativeScan;
   const dbCjkDeadline = Number(await dbStr('search.cjk_keyword_deadline_ms'));
   if (mergedSearch.cjk_keyword_deadline_ms === undefined && Number.isFinite(dbCjkDeadline) && dbCjkDeadline > 0) mergedSearch.cjk_keyword_deadline_ms = dbCjkDeadline;
+  const dbKeywordTimeout = Number(await dbStr('search.keyword_statement_timeout_ms'));
+  if (mergedSearch.keyword_statement_timeout_ms === undefined && Number.isFinite(dbKeywordTimeout) && dbKeywordTimeout > 0) mergedSearch.keyword_statement_timeout_ms = dbKeywordTimeout;
 }
 /**
  * v0.27.1 — async config loader that overlays DB-plane config on top of the
@@ -1341,6 +1345,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // (commands/upgrade.ts, ops/image.ts, ops/search.ts, private-visibility.ts,
   // last-retrieved.ts).
   'search.mode_upgrade_notice_shown',
+  'search.mode_source',
   'search.image_query.max_bytes',
   'search.image_query.daily_budget_usd_per_client',
   'search.image_query.remote_max_bytes',
@@ -1375,6 +1380,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.vector_legacy_guard',
   'search.hnsw_iterative_scan',
   'search.cjk_keyword_deadline_ms',
+  'search.keyword_statement_timeout_ms',
   'search.adaptive_return',
   'search.adaptive_return_entity_max',
   'search.adaptive_return_other_max',
@@ -1896,6 +1902,7 @@ export function toEngineConfig(config: GBrainConfig): EngineConfig {
     engine: config.engine,
     database_url: config.database_url,
     database_path: config.database_path,
+    keyword_statement_timeout_ms: config.search?.keyword_statement_timeout_ms,
   };
 }
 

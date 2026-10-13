@@ -41,23 +41,22 @@ and maintenance commands remain available.
 | `reranker` (cross-encoder)    | off            | `voyage:rerank-2.5` | `voyage:rerank-2.5` |
 | `autocut` (rerank-cliff cut)  | off            | off        | off            |
 
-The `expansion` row is not decisive for any shipped verb today: `gbrain query`
-(the only verb that can expand) expands by default in every mode — pass
-`--no-expand` / `expand: false` to opt out — while `gbrain search`, the memory
-verbs and the eval harnesses pin expansion per call. The bundle value (and the
-`search.expansion` config key) only reaches a core-library caller that leaves `expansion`
-unset AND wires an `expandFn`; none ship today. `gbrain search modes` reports
-the bundle value and prints the operation-level exception before its knob table.
+The `expansion` row is `gbrain query`'s default: `query` (the only verb that
+can expand) expands when a call leaves `expand` unset and the resolved row is
+on, so it expands by default in `tokenmax` and not in `balanced` or
+`conservative`. `--expand` / `expand: true` forces expansion in any mode and
+`--no-expand` / `expand: false` skips it in any mode. The `search.expansion`
+config key overrides the row like any other knob. `gbrain search`, the memory
+verbs and the eval harnesses pin expansion per call, so `search` never
+expands, even with `search.expansion=true`. `gbrain search modes` reports the
+resolved row.
 
-This preserves the existing query contract: changing modes does not silently
-enable or disable expansion. `query` defaults to `expand: true`; explicit
-`expand: false` (CLI `--no-expand`) wins even in `tokenmax`. `search` never
-expands, even with `search.expansion=true`. Keyless retrieval takes the
-keyword-only path before expansion; configured embedding and expansion
-providers are prerequisites. Image-only retrieval also skips expansion.
-Check response metadata `expansion_applied` for actual variant use, not just
-the requested setting. A configured cloud expander receives the query;
-its model's input/output charges are separate from downstream reading costs.
+Keyless retrieval takes the keyword-only path before expansion; configured
+embedding and expansion providers are prerequisites. Image-only retrieval also
+skips expansion. Check response metadata `expansion_applied` for actual
+variant use, not just the requested setting. A configured cloud expander
+receives the query; its model's input/output charges are separate from
+downstream reading costs.
 
 - **`conservative`** — smallest payloads. Pairs naturally with a cheap
   downstream model (Haiku-class) or a high query volume.
@@ -70,9 +69,9 @@ Seven of the knobs deserve a sentence:
 - **`expansion`** rewrites your query into multiple variants via a cheap
   LLM call when available (the historical Haiku estimate is roughly $1.50 per
   1K queries; actual charges depend on model and token counts). It can recover
-  alternate phrasings but can also hurt precision. `gbrain query` requests
-  expansion in every mode unless `--no-expand`;
-  this knob does not turn it off (see the caption under the table).
+  alternate phrasings but can also hurt precision. It is `gbrain query`'s
+  default when a call leaves `expand` unset (see the caption under the table);
+  `--expand` / `--no-expand` win per call.
 - **`expansion_variant_budget`** (config key
   `search.expansion_variant_budget`) is the total RRF weight the expansion
   variants share at fusion time (`weight_i = b / n_voting_arms`; the original
@@ -150,6 +149,18 @@ Seven of the knobs deserve a sentence:
   one capped retry (see [multi-language FTS](multi-language-fts.md)). A cut
   arm reports `keyword_candidates_incomplete`; another value is refused
   with exit 2.
+- **`keyword_statement_timeout_ms`** (Postgres only; config key
+  `search.keyword_statement_timeout_ms`, integer milliseconds, default 8000,
+  range 1000 to 60000; for example
+  `gbrain config set search.keyword_statement_timeout_ms 20000`) is the
+  transaction-local `statement_timeout` around every keyword, keyword-count,
+  keyword-page, title and CJK search statement. It is an operator knob, read
+  once per connection (restart `gbrain serve` or the workers after setting
+  it) and never taken from a request; another value is refused with exit 2.
+  A keyword statement the bound cancels fails open to the vector arm
+  (`keyword_arm_failed`); doctor's `keyword_plan` check warns when the
+  brain's commonest term is near the bound (see
+  [troubleshooting](troubleshooting.md#keyword-search-times-out-on-a-large-postgres-brain)).
 - **`hnsw_iterative_scan`** (Postgres with pgvector 0.8+; config key
   `search.hnsw_iterative_scan`, string, default `relaxed_order`, one of
   `relaxed_order | strict_order | off`; env `GBRAIN_HNSW_ITERATIVE_SCAN`
@@ -181,15 +192,18 @@ reports effective `cache_enabled: false`, and `cache stats` reports
 ### Cost intuition
 
 The table estimates only the tokens your *downstream agent* pays to read
-per query. Embedding, reranking and expansion calls can add separate charges. The
-corner-to-corner spread is ~25x once you pair mode with downstream model.
-Rough anchors at 10K queries/month, full payload, no cache savings:
+per query: an assumed payload per mode times 10K queries a month times the
+model's input rate from gbrain's pricing table (`src/core/model-pricing.ts`).
+Embedding, reranking and expansion calls are separate charges. The
+corner-to-corner spread is about 200x once you pair mode with downstream model.
+The install picker and the upgrade banner print the same matrix from
+`src/core/search/mode-advice.ts`.
 
-| Mode \ Downstream | Haiku-class (\$1/M in) | Sonnet-class (\$3/M in) | Opus-class (\$5/M in) |
+| Mode \ Downstream | Haiku 5.5 (\$0.10/M in) | Sonnet 5.5 (\$2/M in) | Opus 5.5 (\$4/M in) |
 |---|---|---|---|
-| conservative (~4K tok) | **\$40/mo** | \$120/mo | \$200/mo |
-| balanced (~10K tok) | \$100/mo | \$300/mo | \$500/mo |
-| tokenmax (~20K tok) | \$200/mo | \$600/mo | **\$1,000/mo** |
+| conservative (~4K tok) | **\$4/mo** | \$80/mo | \$160/mo |
+| balanced (~10K tok) | \$10/mo | \$200/mo | \$400/mo |
+| tokenmax (~20K tok) | \$20/mo | \$400/mo | **\$800/mo** |
 
 Scales linearly with volume. Budget for fresh retrieval on every query while
 semantic result caching is disabled; repeated searches may take longer and use
@@ -233,12 +247,21 @@ the search path, such as an evidence gate that drops results with no evidence
 for the question but, by default, never below three results and never an exact match.
 None of them changes a mode bundle. See [System One](system-one.md).
 
-The mode picker runs inside `gbrain init`. Non-TTY initialization tentatively
-applies its recommendation: `conservative` for a Haiku subagent or no detected
-expansion-capable key, otherwise `tokenmax`. Existing valid selections are
-preserved. This differs from retrieval's `balanced` fallback when no valid
-`search.mode` is stored; the picker asks agents to confirm the choice with
-their operator before continuing a real setup.
+The mode picker runs inside `gbrain init`. Non-TTY and `--json` initialization
+tentatively applies its recommendation: `tokenmax` with a chat key (Anthropic,
+OpenAI or Google), `balanced` with a ready reranker but no chat key (nothing in
+`balanced` needs a chat model), and `conservative` for a Haiku subagent or when
+neither exists. Keys count whether they are exported or saved in
+`~/.gbrain/config.json`. Existing valid selections are preserved, and the
+picker asks agents to confirm the choice with their operator before
+continuing a real setup.
+
+An agent that already knows the operator's choice records it at install time
+with `gbrain init --search-mode <conservative|balanced|tokenmax>`: no
+recommendation, no first-run `search_mode` question, and the brain records
+`search.mode_source: operator` (picker choices record `auto`; `gbrain config
+set search.mode` records `operator`). On a brain that already has a different
+mode, `--search-mode` refuses unless you also pass `--force`.
 
 ## Query instruction prefix
 

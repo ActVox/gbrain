@@ -18,8 +18,8 @@ import type { Migration } from './types.ts';
 //     firing counters).
 // Off by default (`mentions.owner_phrases`); the tables stay empty until the
 // mention pass runs with the key on.
-export const v240: Migration = {
-  version: 240,
+export const v243: Migration = {
+  version: 243,
   name: 'owner_phrase_windows',
   idempotent: true,
   sql: `

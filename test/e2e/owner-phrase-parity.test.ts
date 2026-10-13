@@ -1,7 +1,7 @@
 /**
  * Owner phrases: PGLite and Postgres parity (docs/guides/owner-phrases.md).
  *
- * Protects: the v240 migration (link_kind CHECK accepting 'owner_phrase',
+ * Protects: the v243 migration (link_kind CHECK accepting 'owner_phrase',
  * the windowed tables) and the owner-phrase pass producing the same windows,
  * links, counters, visibility, `known_as` rows and their get_backlinks
  * continuation on both engines, plus a

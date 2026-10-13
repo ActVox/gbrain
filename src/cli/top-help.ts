@@ -41,8 +41,8 @@ PAGES
 
 SEARCH
   search <query>                     Keyword search (tsvector)
-  query <question> [--no-expand]     Hybrid search (RRF + expansion)
-  ask <question> [--no-expand]       Alias for query
+  query <question> [--expand]        Hybrid search (RRF; expansion per search mode)
+  ask <question> [--expand]          Alias for query
 
 IMPORT/EXPORT
   import <dir> [--no-embed]          Import markdown directory
@@ -149,6 +149,8 @@ SOURCES (multi-repo / multi-brain)
                                      current, federate, set-cr-mode, webhook, harden, ...)
   sync --all                         Sync all sources with a local_path
   sync --source <id>                 Sync one specific source
+  git commit-push -m <m> -- <paths>  Commit + push only those paths in a shared checkout
+                                     (lock, in-memory merge, no rebase/stash); --pull, --push-only
   repos ...                          DEPRECATED alias for 'sources' (v0.19.0)
 
 CODE INDEXING (v0.19.0 / v0.20.0 Cathedral II)

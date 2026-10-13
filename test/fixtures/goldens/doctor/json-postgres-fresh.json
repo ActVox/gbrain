@@ -507,7 +507,7 @@
         },
         {
           "category": "ops",
-          "message": "RLS enabled on 134/134 public tables",
+          "message": "RLS enabled on 137/137 public tables",
           "name": "rls",
           "status": "ok"
         },
@@ -519,7 +519,7 @@
         },
         {
           "category": "meta",
-          "message": "1117 column(s) verified against live schema",
+          "message": "1119 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
@@ -780,6 +780,10 @@
               {
                 "name": "persistence_requests_sync_run_committed",
                 "state": "valid"
+              },
+              {
+                "name": "persistence_requests_slug_intent",
+                "state": "valid"
               }
             ],
             "repair": "request-indexes"
@@ -991,6 +995,19 @@
           },
           "message": "Skipped: about 0 embedded chunk(s) in embedding; below 10000 a sequential scan is the right plan.",
           "name": "vector_plan",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "canary_timeout_ms": "<volatile>",
+            "docs": "docs/guides/troubleshooting.md#keyword-search-times-out-on-a-large-postgres-brain",
+            "outcome": "skipped",
+            "reason": "small_brain",
+            "timeout_ms": "<volatile>"
+          },
+          "message": "Skipped: fewer than 10000 chunks by the planner's estimate; the keyword statements finish well inside search.keyword_statement_timeout_ms = 8000 ms (range 1000-60000).",
+          "name": "keyword_plan",
           "status": "ok"
         },
         {
@@ -1378,6 +1395,19 @@
           "category": "brain",
           "message": "OCR not in use (or no images ingested with OCR opt-in)",
           "name": "ocr_health",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "image_pages": 0,
+            "multimodal": false,
+            "null_source_path": 0,
+            "unsupported_holds": 0,
+            "without_image_vector": 0
+          },
+          "message": "No image pages indexed yet.",
+          "name": "image_embedding_coverage",
           "status": "ok"
         },
         {
@@ -2119,7 +2149,7 @@
         },
         {
           "category": "brain",
-          "message": "No retrieval-affecting files changed in working tree.",
+          "message": "8 retrieval-affecting file(s) changed since HEAD: src/core/search/hybrid/degraded.ts, src/core/search/lean-rows.ts, src/core/search/mode-advice.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
           "name": "eval_drift",
           "status": "ok"
         },

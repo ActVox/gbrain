@@ -19,6 +19,7 @@ import { REMOTE_PRIVATE_PAGES_KEY } from '../src/core/search/private-visibility.
 const DIRECTLY_READ_SINGLETONS = [
   SEARCH_MODE_KEY,
   'search.mode_upgrade_notice_shown',        // commands/upgrade.ts
+  'search.mode_source',                      // init --search-mode / config set search.mode (who chose search.mode)
   'search.image_query.max_bytes',            // ops/image.ts
   'search.image_query.daily_budget_usd_per_client', // ops/image.ts
   'search.image_query.remote_max_bytes',     // ops/image.ts
@@ -35,6 +36,7 @@ const DIRECTLY_READ_SINGLETONS = [
   'search.vector_legacy_guard',              // search/vector-legacy-guard.ts via loadConfigWithEngine
   'search.hnsw_iterative_scan',              // search/hnsw-iterative-scan.ts via loadConfigWithEngine
   'search.cjk_keyword_deadline_ms',          // search/cjk-keyword-deadline.ts via loadConfigWithEngine
+  'search.keyword_statement_timeout_ms',     // postgres-engine/keyword-statement-timeout.ts (engine.getConfig once per connection) + loadConfigWithEngine
   'search.crag_escalation',                  // ops/search.ts
   'search.alias_fanout_max',                 // search/alias-fanout.ts
   'search.demote_generated',                 // search/provenance-demotion.ts

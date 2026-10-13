@@ -411,11 +411,24 @@ Classes in the preview:
 | `no_cursor` | a `managed-sync-failure` row with no `managed-sync` cursor under its key | cleared only by a success under the same key |
 | `principal_unadoptable` | an unfinished cursor recorded by a principal that is not an active local writer | the live writer never reads that key, and the pending request is invisible to it |
 | `superseded` | an unfinished cursor from before sync options were recorded, with a later completed run for the same source and incarnation | its exact options are unknown, so no command resumes it |
+| `incarnation_retired` | an unfinished cursor, or a failure row, recorded under a source incarnation the source no longer has (it was re-pointed at a new checkout, or removed and added again) | the cursor key digests the incarnation, so no current sync selects it, and every incarnation-joined reader (doctor's durable read, `--retry-failed`, `--acknowledge-managed`) drops it; only the local ledger mirror still shows it. `gbrain sync status` reports it as `cursor: null` with `last_error.code: cursor_incarnation_retired` |
+| `mirror_only` | a row of the local ledger (`~/.gbrain/sync-failures.jsonl`) carrying a `managed_cursor_key` with no durable failure row under that key in any incarnation | the mirror is pruned only after a durable delete, so one whose durable row is already gone keeps `gbrain doctor --fast` warning. The apply removes the ledger row after reading the durable rows again; a successful sync of the source prunes its own mirror-only rows too |
 
 Kept and counted, never retired: a cursor whose pending request is still
 queued, running or recovering (`pending_request_live`), and a cursor the live
 writer can still resume with its recorded options (`resumable`; doctor prints
-the exact `gbrain sync ... --retry-failed` command). The apply rechecks every
+the exact `gbrain sync ... --retry-failed` command). An `incarnation_retired`
+cursor is retired even when its recording principal is the live local writer
+with recorded options: that veto is for a cursor the writer could still
+resume, which no retired key can be. Rows on an archived source are never
+listed, and an apply that finds the source archived meanwhile keeps them.
+Retiring an old incarnation's bookkeeping says nothing about whether the
+current source's files are imported; `gbrain sync status --source <id> --json`
+does. Without a database connection, `gbrain doctor --fast` reports the mirror
+rows it cannot verify as `warn` ("could not be verified"), never `fail`: a
+better fast score there is less certainty, not recovery; `gbrain doctor --only
+sync_failures` with the brain reachable is the authoritative check.
+The apply rechecks every
 predicate in the deleting statement and removes the cursor, its same-key
 failure row and its manifest (when no other cursor shares the run) in one
 transaction, so a cursor the writer picked up meanwhile is left alone. Do not
@@ -959,7 +972,7 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
 6. Commit, sync, and read the remaining hold as JSON.
 
    ```console
-   $ git -C ~/brain/notes commit -qam "Repair frontmatter"
+   $ git -C ~/brain/notes commit -q -m "Repair frontmatter" -- notes/roundup.md notes/standup.md
    $ gbrain sync --source notes --no-pull
    0 file(s) held this run, 1 held in source notes; they do not block sync. Inspect them with 'gbrain sources status notes'; the repair preview proposes each fix and writes nothing. Preview the repair: gbrain repair frontmatter --source notes
    $ gbrain sources status notes --json
@@ -991,7 +1004,7 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    interpretive: notes:notes/digest.md (Kept the later "title" (line 4) and dropped the earlier one (line 2))
    $ gbrain repair frontmatter --source notes --include-ambiguous --only notes/digest.md --apply --expect <hash> --yes
    repaired: notes:notes/digest path=notes/digest.md, written=true, imported=created, hold_cleared=true, committed=queued
-   $ git -C ~/brain/notes commit -qam "Keep the later digest title"
+   $ git -C ~/brain/notes commit -q -m "Keep the later digest title" -- notes/digest.md
    $ gbrain sync --source notes --no-pull
    +0 added, ~0 modified, -0 soft-deleted (recoverable 72h), R0 renamed
    $ gbrain doctor --only git_held_files,frontmatter_repairable
@@ -1308,7 +1321,7 @@ exists). An older gbrain blocked the source on the first fence it refused.
    M companies/acme-example.md
    M meetings/2026-04-03.md
    M projects/widget-launch.md
-   $ git -C ~/brain/notes commit -qam "Repair fences"
+   $ git -C ~/brain/notes commit -q -m "Repair fences" -- companies/acme-example.md meetings/2026-04-03.md projects/widget-launch.md
    $ gbrain doctor --only fence_integrity
    [OK] fence_integrity: No malformed facts or takes fence is held, stored or waiting in a checkout (2 source(s) scanned).
    ```
@@ -2024,6 +2037,64 @@ because sessions would then read an empty brain while useful memory stays on
 the hosted one. Manage that connection with `gbrain connect <mcp-url>
 --harness claude-code --install`; `gbrain doctor --only harness_wiring` shows
 which brain the registration reaches.
+
+## Connection notices
+
+Two notices tell an agent, on its own MCP connection, why something it
+expected is out of reach. Neither changes what the connection can call.
+
+### Grant blocked operations
+
+`grant_blocked_operations` (info): this connection's grant cannot call some
+operations its scopes allow. The notice says which proven blocker applies,
+with counts and never operation names: the grant's operation snapshot, the
+client's stored tool surface (a pin the brain owner set), or the server's
+tool surface. A missing scope is named only on a refused call, because it is
+how the grant was issued. Grant age is kept apart from the blockers: a grant
+whose snapshot was written before snapshots recorded their operation catalog
+says "this grant's snapshot excludes N currently eligible operations;
+original intent unknown", and only a grant with recorded catalog provenance
+says it predates operations. Operations outside the grant's scopes are never
+counted, so a writer is not told about admin-only operations.
+
+It arrives once per session: once per (principal, transport session) on
+stdio and HTTP, and for a stateless HTTP call with no session id once per
+(principal, grant revision), so a rescoped grant is diagnosed afresh.
+`fix.next` is `tell_user_to_run`: the brain owner previews the change on the
+brain host and then applies it (`then`). For an OAuth client that is
+`gbrain auth rescope --client <client_id> --operations <OPERATIONS> --surface full --dry-run`
+(`--surface full` only when the stored surface also blocks), then the same
+command without `--dry-run`; for a legacy token,
+`gbrain auth rescope --id <token_id> --refresh-operations` and then
+`... --add <OPERATIONS>`. The owner chooses `<OPERATIONS>`. When only the
+server's tool surface blocks, no grant change lifts it, and the fix is the
+read-only doctor check that names the setting. `fix.verify` is read-only:
+`gbrain doctor --only grant_new_ops_available --json` on the host, or
+`whoami` on the same connection (its `grant_diagnosis` field carries the same
+diagnosis). Nothing widens automatically; see
+[grants that cannot reach new operations](../mcp/ADMIN.md#grants-that-cannot-reach-new-operations).
+
+### Hidden tool content
+
+`hidden_tool_content` (info): a page read, search or query left out takes
+(page reads and search never include the takes table for an agent-facing
+reader) and the tool that lists them, `takes_list`, is not in this
+connection's tool list. The notice counts the takes and names the result's
+own pages, and its `fix` is the next step this connection can actually take:
+
+- `takes_list` is callable but not listed (an advertised surface narrower
+  than the callable one): the fix is the `takes_list` call itself, and a
+  stdio session also adds it to its tool list. A client that ignores
+  `tools/list_changed` can still call it by name.
+- one `request_tools {surface}` call would make it callable: the fix is that
+  call (stdio: this session only, nothing written; HTTP: the client's own
+  surface, within the server ceiling and never past an operator pin).
+- otherwise only the brain host can change it: on HTTP the fix is the grant
+  repair from `grant_blocked_operations`; on stdio it is the tool's CLI
+  equivalent, relayed to the user.
+
+A fix never names a call the connection cannot make: read-only access,
+operator pins, the grant's snapshot and `GBRAIN_MCP_FORCE_SURFACE` all hold.
 
 ## Related
 

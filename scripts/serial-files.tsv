@@ -190,6 +190,7 @@ test/fts-language-migration.serial.test.ts	R1	R1: mutates process.env (bracket o
 test/fts-language-schema-replay.serial.test.ts	R1	R1: mutates process.env (GBRAIN_PGLITE_SNAPSHOT)
 test/fts-language.serial.test.ts	R1	R1: mutates process.env (bracket or computed key)
 test/gateway-reconfigure-clobber.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
+test/git-commit-push-6530.serial.test.ts	R1	R1: mutates process.env (GBRAIN_GIT_ALLOW_FILE_TRANSPORT, BRAIN_COMMIT_LOCK_HELD, GBRAIN_GIT_NO_MERGE_TREE, PATH for a racing git shim)
 test/git-listing-memo.serial.test.ts	R1	R1: puts a git-counting shim on process.env.PATH for every spawn in the process (git child processes inherit it, so withEnv cannot scope it)
 test/git-remote-durable.serial.test.ts	R1	R1: mutates process.env (GBRAIN_GIT_ALLOW_FILE_TRANSPORT)
 test/git-remote-pull-file-transport.serial.test.ts	R1	R1: mutates process.env (GBRAIN_GIT_ALLOW_FILE_TRANSPORT)
@@ -394,3 +395,7 @@ test/hook-push-banner-superseded.serial.test.ts	R1	R1: mutates process.env (GBRA
 test/spawn-seam-batch1-4992.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GIT_DIR) and spies on node:child_process
 test/divergence-safe-pull-5429.serial.test.ts	R1	R1: mutates process.env (GBRAIN_GIT_ALLOW_FILE_TRANSPORT) and spies on node:child_process
 test/embed-stale-progress-5968.serial.test.ts	R1	R1: mutates process.env (GBRAIN_MAX_CHUNK_TOKENS)
+test/eval-longmemeval-via-operation.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; process-wide test seams __setEmbedTransportForTests, __setGenerateObjectTransportForTests, __setRerankTransportForTests; process.chdir to prove the summary names gbrain's own tree
+test/init-search-mode.serial.test.ts	global-state	global-state: spawns real gbrain init/config CLI children against PGLite datastores in temp homes (180 s budget each)
+test/search/mode-receipt.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; process-wide test seams __setEmbedTransportForTests, __setRerankTransportForTests, __setChatTransportForTests, __setGenerateTextTransportForTests, __setGenerateObjectTransportForTests; R3: constructs PGLiteEngine outside beforeAll
+test/search/query-expand-capture-replay.serial.test.ts	global-state	global-state: spyOn replaces the hybridSearch module export process-wide

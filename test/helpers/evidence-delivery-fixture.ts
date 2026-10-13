@@ -126,7 +126,7 @@ export function withCostWave(key: string, frozen: string): string {
   if (base === 'search-remote') {
     const v = JSON.parse(frozen) as { result: Record<string, unknown>[]; meta: Array<{ key: string; value: Record<string, unknown> }> };
     return JSON.stringify({
-      result: v.result.map(leanRow),
+      result: v.result.map(r => leanRow(r)),
       meta: v.meta.map(m => m.key === 'retrieval' ? { key: m.key, value: leanRetrieval(m.value) } : m),
     });
   }
@@ -134,7 +134,7 @@ export function withCostWave(key: string, frozen: string): string {
   const res = JSON.parse(frozen) as { content: Array<{ type: string; text: string }>; _meta?: Record<string, Record<string, unknown>> };
   const body = JSON.parse(res.content[0].text);
   const lean = base === 'mcp-search' || base === 'mcp-query';
-  res.content[0].text = JSON.stringify(lean ? (body as Record<string, unknown>[]).map(leanRow) : base === 'mcp-recall' ? withFactsOrder(body) : body);
+  res.content[0].text = JSON.stringify(lean ? (body as Record<string, unknown>[]).map(r => leanRow(r)) : base === 'mcp-recall' ? withFactsOrder(body) : body);
   if (lean && res._meta?.retrieval) res._meta.retrieval = leanRetrieval(res._meta.retrieval);
   return JSON.stringify(res);
 }

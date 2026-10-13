@@ -135,9 +135,10 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
   onstuck: (stuck: { age_ms: number; queued: number; statement: string }) => void;
   /**
    * GBrain: called when a statement fails to build (`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`);
-   * `statement` is its text with `$n` placeholders, never parameter values.
+   * `statement` is its text with `$n` placeholders, never parameter values; `parameter` is the 1-based
+   * index of an undefined parameter value, undefined when the failure names none (an array element).
    */
-  onbuilderror: (code: string, statement: string) => void;
+  onbuilderror: (code: string, statement: string, parameter?: number) => void;
   /**
    * GBrain: called once per connection retired because a statement's answer arrived with no statement
    * waiting for it; `statement` is the last statement written on it, with `$n` placeholders.

@@ -76,6 +76,20 @@ describe('warn lines', () => {
     expect(formatBuildFailureWarning('read', 'weird code', 'SELECT 1')).toContain('error=BUILD_FAILED');
   });
 
+  test('#6543: an UNDEFINED_VALUE line names the parameter, `param=?` when the driver gave none (an array element)', () => {
+    expect(formatBuildFailureWarning('read', 'UNDEFINED_VALUE', 'SELECT * FROM source_ingestion_receipts WHERE a = $1 AND b = $2', 2))
+      .toContain('error=UNDEFINED_VALUE pool=read sql=SELECT_source_ingestion_receipts param=$2 cause=');
+    expect(formatBuildFailureWarning('read', 'UNDEFINED_VALUE', 'SELECT $1')).toContain('sql=SELECT param=? cause=');
+    expect(formatBuildFailureWarning('read', 'MAX_PARAMETERS_EXCEEDED', 'SELECT $1', 3)).not.toContain('param=');
+    const counter = new PoolIncidentCounter();
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (line: string) => { lines.push(line); };
+    try { counter.hooks('direct').onbuilderror('UNDEFINED_VALUE', 'UPDATE persistence_effects SET state = $1 WHERE id = $2', 2); } finally { console.warn = warn; }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('sql=UPDATE_persistence_effects param=$2');
+  });
+
   test('pg_connection_desync names the message type, the connection and the last statement by keyword and table only', () => {
     const line = formatDesyncWarning('read', { message: 'C', connection: 7, statement: "SELECT enabled FROM persistence_brain WHERE singleton = 1 AND note = 'secret'" });
     expect(line).toContain('[gbrain] warn code=pg_connection_desync pool=read message=C connection=7 sql=SELECT_persistence_brain');

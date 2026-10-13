@@ -177,6 +177,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     if (q.cancelled)
       return
 
+    let mayPipeline = !q.options.onexecute
     try {
       q.state = backend
       query
@@ -184,9 +185,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
         : (query = q, query.active = true, armInflight())
 
       build(q)
+      mayPipeline = mayPipeline || q.options.onexecute(connection)
       lastWritten = q
       lastExecuted = q
-      const mayPipeline = !q.options.onexecute || q.options.onexecute(connection)
       return write(toBuffer(q))
         && !q.describeFirst
         && !q.cursorFn
@@ -204,15 +205,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       q.retried = error
       q.describeFirst = false
       q.cursorFn = null
+      // GBrain (#6543): the stock `return true` let the pool route more statements behind q whatever max_pipeline and
+      // onexecute said, so a pool built not to pipeline (a transaction-mode pooler) pipelined after every build failure.
+      // onexecute (a transaction's begin) ran only if q built; a begin that failed to build is never pipelined behind.
       options.onbuilderror && reportBuildError(q, error)
-      write(Unbuildable)
-      return true
+      return write(Unbuildable)
+        && sent.length < max_pipeline
+        && mayPipeline
     }
   }
 
   function reportBuildError(q, error) {
     try {
-      options.onbuilderror(error && error.code ? error.code : 'BUILD_FAILED', statementText(q))
+      options.onbuilderror(error && error.code ? error.code : 'BUILD_FAILED', statementText(q), error && error.parameter)
     } catch (_) {}
   }
 
@@ -546,7 +551,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     }
 
     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
-    query = null
+    // GBrain (#6543): the dead socket's ErrorResponse (a FATAL 57P01, a pooler's XX000) and its partial result belonged
+    // to statements that just failed. Left in place, the replacement connection's startup ReadyForQuery handed that
+    // error to its first statement, and a stale row count left holes at the start of the next result.
+    query = errorResponse = results = null
+    result = new Result()
+    rows = 0
     closedTime = performance.now()
     hadError && options.shared.retries++
     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
