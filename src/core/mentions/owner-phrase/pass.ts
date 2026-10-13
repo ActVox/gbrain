@@ -30,8 +30,8 @@ import { canonicalTypeOf, type MentionPolicy, type PackTypes } from '../policy.t
 import { siblingVerdict } from '../siblings.ts';
 import { titleName } from '../aliases.ts';
 import { OWNER_PHRASE_SCAN_VERSION, scanPage, type CueLine, type PhraseHit } from './scan.ts';
-import { buildNameIndex, findNames, parseStatements, type NameEntry, type Statement } from './statements.ts';
-import { accountDescriptors, buildWindows, resolvePhrase, type OwnerWindow } from './windows.ts';
+import { buildNameIndex, findNames, parseStatements, OWNER_PHRASE_RULES_VERSION, type NameEntry, type Statement } from './statements.ts';
+import { accountDescriptors, buildWindows, resolvePhrase, windowsByFirstName, type OwnerWindow } from './windows.ts';
 
 export const OWNER_PHRASE_KEY = 'mentions.owner_phrases';
 /** Group key prefix of an account named in a statement that has no page (statements.ts); never stored or linked. */
@@ -78,7 +78,8 @@ export interface OwnerPhrasePassOpts {
 }
 
 interface EntityRow { id: number; slug: string; type: string | null; title: string | null; identity: string | null }
-interface StateRow { page_id: number; slug: string; page_date: string | null; readings: string[]; agent: boolean; cues: unknown; descriptors: string[]; hits: unknown }
+interface StateRow { page_id: number; slug: string; page_date: string | null; readings: string[]; agent: boolean; cues: unknown; descriptors: string[]; hits: unknown;
+  statements?: unknown; statements_key?: string | null }
 
 function json<T>(value: unknown): T {
   return (typeof value === 'string' ? JSON.parse(value) : value) as T;
@@ -133,7 +134,7 @@ async function scanDuePages(engine: BrainEngine, sourceId: string, deadline: num
          FROM jsonb_to_recordset(($3::jsonb)->'rows') AS x(id int, rev text, page_date text, readings jsonb, agent boolean, cues jsonb, descriptors jsonb, hits jsonb)
        ON CONFLICT (page_id) DO UPDATE SET revision = EXCLUDED.revision, version = EXCLUDED.version, page_date = EXCLUDED.page_date,
          readings = EXCLUDED.readings, agent = EXCLUDED.agent, cues = EXCLUDED.cues, descriptors = EXCLUDED.descriptors, hits = EXCLUDED.hits,
-         scanned_at = EXCLUDED.scanned_at`,
+         statements = NULL, statements_key = NULL, scanned_at = EXCLUDED.scanned_at`,
       [sourceId, OWNER_PHRASE_SCAN_VERSION], [{ rows }]);
     scanned += rows.length;
   }
@@ -163,6 +164,8 @@ export interface OwnerPhraseModel {
   windows: OwnerWindow[];
   descriptors: Map<string, Set<string>>;
   links: Array<{ from_id: number; from_slug: string; to_slug: string; context: string; evidence: number[]; line: number; windows: OwnerWindow[] }>;
+  /** Statements parsed this build (pages whose cached statements were missing or keyed to other name inputs), to store under `key`. */
+  statementCache: { key: string; writes: Array<{ page_id: number; statements: Statement[] }> };
   counters: Omit<OwnerPhraseCounters, 'links' | 'documents' | 'windows'>;
 }
 
@@ -200,7 +203,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
   const personIndex = buildNameIndex(personEntries);
 
   states ??= await engine.executeRaw<StateRow>(
-    `SELECT s.page_id, p.slug, s.page_date::text AS page_date, s.readings, s.agent, s.cues, s.descriptors, s.hits
+    `SELECT s.page_id, p.slug, s.page_date::text AS page_date, s.readings, s.agent, s.cues, s.descriptors, s.hits, s.statements, s.statements_key
        FROM owner_phrase_page_state s JOIN pages p ON p.id = s.page_id
       WHERE s.source_id = $1 AND p.deleted_at IS NULL
         AND (jsonb_array_length(s.cues) > 0 OR jsonb_array_length(s.hits) > 0 OR cardinality(s.descriptors) > 0)
@@ -217,18 +220,26 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
   for (const [g, set] of descriptors) for (const d of set) descriptorGroups.set(d, new Set([...(descriptorGroups.get(d) ?? []), g]));
   const descriptorAccounts = new Map<string, Set<string>>([...descriptorGroups].map(([d, gs]) => [d, gs.size === 1 ? new Set([[...gs][0]!]) : new Set(gs)]));
 
+  const nameKey = (entries: NameEntry[]) => entries.map(e => [e.slug, e.tokens, e.caseTokens ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])) || JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const statementsKey = createHash('sha256').update(JSON.stringify([OWNER_PHRASE_RULES_VERSION, nameKey(accountEntries), nameKey(personEntries), [...accountSlugs].sort(),
+    [...descriptorAccounts].map(([d, gs]) => [d, [...gs].sort()]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))])).digest('hex').slice(0, 16);
   const statements: Statement[] = [];
+  const writes: OwnerPhraseModel['statementCache']['writes'] = [];
   for (const s of states) {
     const cues = json<CueLine[]>(s.cues);
     if (!cues.length) continue;
-    statements.push(...parseStatements(cues, {
+    if (s.statements_key === statementsKey && s.statements != null) { statements.push(...json<Statement[]>(s.statements)); continue; }
+    const parsed = parseStatements(cues, {
       page: { id: Number(s.page_id), slug: s.slug, date: s.page_date, agent: s.agent },
       selfAccount: accountSlugs.has(s.slug) ? s.slug : null,
       accounts: accountIndex, persons: personIndex, descriptorAccounts,
-    }));
+    });
+    statements.push(...parsed);
+    writes.push({ page_id: Number(s.page_id), statements: parsed });
   }
   const windows = buildWindows(statements, groupOf);
   const descriptorsOf = (g: string) => descriptors.get(g) ?? (isPageless(g) ? accountDescriptors([g.slice(PAGELESS.length)], []) : new Set<string>());
+  const candidatesFor = windowsByFirstName(windows);
 
   const links: OwnerPhraseModel['links'] = [];
   const counters = { unresolved: 0, ambiguous: 0 };
@@ -239,7 +250,7 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
     for (const hit of hits) {
       const named = findNames(hit.owner, accountIndex);
       if (named.length && named[0]!.start === 0 && named[0]!.end === hit.owner.length) continue;
-      const r = resolvePhrase(hit, s.page_date, s.readings ?? [], windows, descriptorsOf);
+      const r = resolvePhrase(hit, s.page_date, s.readings ?? [], candidatesFor(hit.owner), descriptorsOf);
       if (r.linked && r.accounts.every(isPageless)) { counters.unresolved++; continue; }
       if (!r.linked) {
         if (r.reason === 'ambiguous' || r.reason === 'readings_disagree') counters.ambiguous++;
@@ -254,7 +265,29 @@ export async function buildOwnerPhraseModel(engine: BrainEngine, opts: Pick<Owne
       }
     }
   }
-  return { windows: windows.filter(w => !isPageless(w.group)), descriptors, links, counters };
+  return { windows: windows.filter(w => !isPageless(w.group)), descriptors, links, counters, statementCache: { key: statementsKey, writes } };
+}
+
+/**
+ * Everything a pass reads besides page scans that are due: the rules version,
+ * the source's linkable names, its entity pages, the pack and sibling policy,
+ * the set of live scanned pages and the source's other links (a pair another
+ * link covers gets no owner-phrase link). A pass that scanned nothing and finds the
+ * same hash skips the rebuild (its stored windows and links are current).
+ */
+async function inputsHash(engine: BrainEngine, opts: Pick<OwnerPhrasePassOpts, 'sourceId' | 'gazetteer' | 'types' | 'pack' | 'policy'>): Promise<string> {
+  const names: unknown[] = [];
+  for (const bucket of opts.gazetteer.values()) for (const e of bucket) if (e.source_id === opts.sourceId) names.push([e.slug, e.title, e.tokens, e.caseTokens ?? null, e.matchText ?? null]);
+  names.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const [sig] = await engine.executeRaw<{ e: string; s: string; l: string }>(
+    `SELECT (SELECT count(*) || ':' || COALESCE(sum(id), 0) || ':' || COALESCE(max(updated_at)::text, '') FROM pages
+              WHERE source_id = $1 AND deleted_at IS NULL AND type = ANY($2::text[])) AS e,
+            (SELECT count(*) || ':' || COALESCE(sum(s.page_id), 0) || ':' || COALESCE(max(s.scanned_at)::text, '') FROM owner_phrase_page_state s
+               JOIN pages p ON p.id = s.page_id WHERE s.source_id = $1 AND p.deleted_at IS NULL) AS s,
+            (SELECT count(*) || ':' || COALESCE(max(l.id), 0) FROM links l JOIN pages f ON f.id = l.from_page_id
+              WHERE f.source_id = $1 AND l.link_kind IS DISTINCT FROM 'owner_phrase') AS l`, [opts.sourceId, opts.types]);
+  return createHash('sha256').update(JSON.stringify([OWNER_PHRASE_RULES_VERSION, OWNER_PHRASE_SCAN_VERSION, opts.types, names, sig?.e, sig?.s, sig?.l,
+    opts.policy.siblingMerge, opts.pack ?? null])).digest('hex').slice(0, 16);
 }
 
 function windowsHash(windows: OwnerWindow[], privateIds: Set<number>): string {
@@ -282,6 +315,15 @@ export async function runOwnerPhrasePass(engine: BrainEngine, opts: OwnerPhraseP
     const scan = await scanDuePages(engine, sourceId, opts.deadline, opts.signal);
     result.scanned = scan.scanned;
     if (!scan.done) return { ...result, state: 'pending' };
+    const inputs = await inputsHash(engine, opts);
+    if (!scan.scanned) {
+      const [prev] = await engine.executeRaw<{ state: string; inputs_hash: string | null; links: number; documents: number; unresolved: number; ambiguous: number; windows: number }>(
+        'SELECT state, inputs_hash, links, documents, unresolved, ambiguous, windows FROM owner_phrase_status WHERE source_id = $1', [sourceId]);
+      if (prev?.state === 'complete' && prev.inputs_hash === inputs) {
+        return { ...result, links: Number(prev.links), documents: Number(prev.documents), unresolved: Number(prev.unresolved),
+          ambiguous: Number(prev.ambiguous), windows: Number(prev.windows) };
+      }
+    }
     const model = await buildOwnerPhraseModel(engine, opts);
     result.unresolved = model.counters.unresolved;
     result.ambiguous = model.counters.ambiguous;
@@ -295,6 +337,12 @@ export async function runOwnerPhrasePass(engine: BrainEngine, opts: OwnerPhraseP
             AND (s.page_id IS NULL OR s.revision IS DISTINCT FROM p.knowledge_revision OR s.version IS DISTINCT FROM $2)`,
         [sourceId, OWNER_PHRASE_SCAN_VERSION]);
       if (Number(due?.n ?? 0) > 0) return { ...result, state: 'pending' as const };
+      if (model.statementCache.writes.length) {
+        await executeRawJsonb(tx,
+          `UPDATE owner_phrase_page_state s SET statements = x.statements, statements_key = $1
+             FROM jsonb_to_recordset(($2::jsonb)->'rows') AS x(page_id int, statements jsonb) WHERE s.page_id = x.page_id`,
+          [model.statementCache.key], [{ rows: model.statementCache.writes }]);
+      }
       const privateIds = new Set(evidenceIds.length ? (await tx.executeRaw<{ id: number }>(
         `SELECT p.id FROM pages p WHERE p.id = ANY($1::int[]) AND NOT ${privatePagesFilterFragment('p')}`, [evidenceIds])).map(r => Number(r.id)) : []);
       const hash = windowsHash(model.windows, privateIds);
@@ -355,12 +403,12 @@ export async function runOwnerPhrasePass(engine: BrainEngine, opts: OwnerPhraseP
       const created = add.length ? await tx.addLinksBatch(add, { auditSite: 'extract.mentions' }) : 0; // gbrain-allow-direct-insert: owner-phrase pass — reconciling write of its own owner_phrase rows
       const documents = new Set([...want.values()].map(w => w.link.from_id)).size;
       await tx.executeRaw(
-        `INSERT INTO owner_phrase_status (source_id, state, generation, window_hash, windows, links, documents, unresolved, ambiguous, last_pass_at, error, updated_at)
-         VALUES ($1, 'complete', $2, $3, $4, $5, $6, $7, $8, now(), NULL, now())
-         ON CONFLICT (source_id) DO UPDATE SET state = 'complete', generation = EXCLUDED.generation, window_hash = EXCLUDED.window_hash,
+        `INSERT INTO owner_phrase_status (source_id, state, generation, window_hash, inputs_hash, windows, links, documents, unresolved, ambiguous, last_pass_at, error, updated_at)
+         VALUES ($1, 'complete', $2, $3, $9, $4, $5, $6, $7, $8, now(), NULL, now())
+         ON CONFLICT (source_id) DO UPDATE SET state = 'complete', generation = EXCLUDED.generation, window_hash = EXCLUDED.window_hash, inputs_hash = EXCLUDED.inputs_hash,
            windows = EXCLUDED.windows, links = EXCLUDED.links, documents = EXCLUDED.documents, unresolved = EXCLUDED.unresolved,
            ambiguous = EXCLUDED.ambiguous, last_pass_at = EXCLUDED.last_pass_at, error = NULL, updated_at = now()`,
-        [sourceId, generation, hash, model.windows.length, want.size, documents, result.unresolved, result.ambiguous]);
+        [sourceId, generation, hash, model.windows.length, want.size, documents, result.unresolved, result.ambiguous, inputs]);
       return { ...result, created, removed: drop.length, links: want.size, documents };
     });
   } catch (error) {

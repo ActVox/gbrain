@@ -37,8 +37,12 @@ export const v240: Migration = {
       cues JSONB NOT NULL DEFAULT '[]'::jsonb,
       descriptors TEXT[] NOT NULL DEFAULT '{}',
       hits JSONB NOT NULL DEFAULT '[]'::jsonb,
+      statements JSONB,
+      statements_key TEXT,
       scanned_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE owner_phrase_page_state ADD COLUMN IF NOT EXISTS statements JSONB;
+    ALTER TABLE owner_phrase_page_state ADD COLUMN IF NOT EXISTS statements_key TEXT;
     CREATE INDEX IF NOT EXISTS owner_phrase_page_state_source_idx ON owner_phrase_page_state (source_id);
     CREATE TABLE IF NOT EXISTS owner_phrase_windows (
       id BIGSERIAL PRIMARY KEY,
@@ -63,6 +67,7 @@ export const v240: Migration = {
       state TEXT NOT NULL CHECK (state IN ('complete','pending','failed')),
       generation BIGINT NOT NULL DEFAULT 0,
       window_hash TEXT,
+      inputs_hash TEXT,
       windows INTEGER NOT NULL DEFAULT 0,
       links INTEGER NOT NULL DEFAULT 0,
       documents INTEGER NOT NULL DEFAULT 0,
@@ -72,6 +77,7 @@ export const v240: Migration = {
       error TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE owner_phrase_status ADD COLUMN IF NOT EXISTS inputs_hash TEXT;
     DO $rls$ BEGIN
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname=current_user AND rolbypassrls) THEN
         ALTER TABLE owner_phrase_page_state ENABLE ROW LEVEL SECURITY;

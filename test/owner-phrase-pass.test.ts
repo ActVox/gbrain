@@ -88,9 +88,32 @@ describe('windows and links', () => {
     expect(Number(aliases[0]!.n)).toBe(0);
   });
 
-  test('a rerun with nothing changed writes nothing', async () => {
+  test('a rerun with nothing changed writes nothing; parsed statements are cached under one key; an edited page or a stale key is reparsed', async () => {
     const r = await sweepOwnerPhrases(engine);
-    expect(r).toMatchObject({ state: 'complete', created: 0, removed: 0, links: 4 });
+    expect(r).toMatchObject({ state: 'complete', created: 0, removed: 0, links: 4, unresolved: 3, ambiguous: 1, windows: 6 });
+    const keys = async () => (await engine.executeRaw<{ slug: string; k: string | null }>(
+      `SELECT p.slug, s.statements_key AS k FROM owner_phrase_page_state s JOIN pages p ON p.id = s.page_id WHERE jsonb_array_length(s.cues) > 0 ORDER BY 1`));
+    const before = await keys();
+    expect(before.length).toBeGreaterThan(3);
+    expect(new Set(before.map(k => k.k)).size).toBe(1);
+    expect(before[0]!.k).not.toBeNull();
+    const [status] = await engine.executeRaw<{ inputs_hash: string | null }>('SELECT inputs_hash FROM owner_phrase_status');
+    expect(status!.inputs_hash).not.toBeNull();
+    await doc(engine, 'updates/nimbus-owner', 'Juniper Example owns Nimbus Example Freight. Renewal is on track.', { date: '2025-01-01' });
+    await engine.executeRaw(`UPDATE owner_phrase_page_state SET statements_key = 'stale' WHERE page_id <> (SELECT id FROM pages WHERE slug = 'updates/nimbus-owner') AND statements_key IS NOT NULL`);
+    await sweepOwnerPhrases(engine);
+    expect(new Set((await keys()).map(k => k.k))).toEqual(new Set([before[0]!.k]));
+    expect(await ownerPhraseLinks(engine)).toEqual(snap.trusted);
+  });
+
+  test('a link another producer adds for a linked pair replaces the owner-phrase row on the next pass, with no page edited', async () => {
+    const [[f], [t]] = await Promise.all(['notes/renewal', ACME].map(slug => engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE slug = $1', [slug])));
+    await engine.executeRaw(`INSERT INTO links (from_page_id, to_page_id, link_type, link_source) VALUES ($1, $2, 'mentions', 'manual')`, [f!.id, t!.id]);
+    await sweepOwnerPhrases(engine);
+    expect(await ownerPhraseLinks(engine)).not.toContain(`notes/renewal -> ${ACME}`);
+    await engine.executeRaw(`DELETE FROM links WHERE link_source = 'manual'`);
+    await sweepOwnerPhrases(engine);
+    expect(await ownerPhraseLinks(engine)).toEqual(snap.trusted);
   });
 });
 

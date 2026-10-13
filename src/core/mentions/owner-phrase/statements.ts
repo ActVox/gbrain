@@ -13,6 +13,9 @@ import { tokenizeForScan } from '../../by-mention.ts';
 import { RELATIVE_DATE_RE, findDates, type FoundDate } from './dates.ts';
 import { NAME_STOPWORDS, trimNameRun, type CueLine } from './scan.ts';
 
+/** Bump when the statement grammar changes: cached statements keyed to another version are reparsed. */
+export const OWNER_PHRASE_RULES_VERSION = 1;
+
 export type StatementKind = 'takeover' | 'join' | 'ongoing' | 'end' | 'stint' | 'correction';
 
 export interface Statement {

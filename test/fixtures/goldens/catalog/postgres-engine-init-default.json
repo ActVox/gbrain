@@ -2553,7 +2553,9 @@
           "8 cues jsonb/jsonb NOT NULL DEFAULT '[]'::jsonb",
           "9 descriptors ARRAY/_text NOT NULL DEFAULT '{}'::text[]",
           "10 hits jsonb/jsonb NOT NULL DEFAULT '[]'::jsonb",
-          "11 scanned_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+          "11 statements jsonb/jsonb NULL",
+          "12 statements_key text/text NULL",
+          "13 scanned_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },
@@ -2563,14 +2565,15 @@
           "2 state text/text NOT NULL",
           "3 generation bigint/int8 NOT NULL DEFAULT 0",
           "4 window_hash text/text NULL",
-          "5 windows integer/int4 NOT NULL DEFAULT 0",
-          "6 links integer/int4 NOT NULL DEFAULT 0",
-          "7 documents integer/int4 NOT NULL DEFAULT 0",
-          "8 unresolved integer/int4 NOT NULL DEFAULT 0",
-          "9 ambiguous integer/int4 NOT NULL DEFAULT 0",
-          "10 last_pass_at timestamp with time zone/timestamptz NULL",
-          "11 error text/text NULL",
-          "12 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+          "5 inputs_hash text/text NULL",
+          "6 windows integer/int4 NOT NULL DEFAULT 0",
+          "7 links integer/int4 NOT NULL DEFAULT 0",
+          "8 documents integer/int4 NOT NULL DEFAULT 0",
+          "9 unresolved integer/int4 NOT NULL DEFAULT 0",
+          "10 ambiguous integer/int4 NOT NULL DEFAULT 0",
+          "11 last_pass_at timestamp with time zone/timestamptz NULL",
+          "12 error text/text NULL",
+          "13 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },

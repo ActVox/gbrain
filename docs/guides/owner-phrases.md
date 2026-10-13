@@ -156,7 +156,12 @@ The rules below are general to any brain. Each line is covered by a test row in
     owner-phrase version changes. Windows are rebuilt from every page's stored
     statements on each pass, and links are diffed against them. So a window
     change alone relinks exactly the documents it affects, and a deleted or
-    edited evidence page withdraws its windows.
+    edited evidence page withdraws its windows. Parsed statements are cached
+    per page under a key of the rules version and the source's account and
+    person names, so a pass reparses only edited pages (or every page after a
+    name change). A pass that scanned nothing skips the rebuild when its
+    inputs hash (rules, names, entity pages, pack, scanned pages and the
+    source's other links) is unchanged.
 
 Every pass reports `links`, `documents`, `unresolved`, `ambiguous` and
 `windows` under `mentions.owner_phrases` in `gbrain extract --stale --json`.

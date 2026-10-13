@@ -189,8 +189,21 @@ export function descriptorMatches(descriptors: ReadonlySet<string>, run: string)
   if (descriptors.has(run)) return true;
   const words = run.split(' ');
   if (words.length < 2) return false;
-  const known = new Set([...descriptors].flatMap(d => d.split(' ')));
+  let known = descriptorWords.get(descriptors);
+  if (!known) { known = new Set([...descriptors].flatMap(d => d.split(' '))); descriptorWords.set(descriptors, known); }
   return words.every(w => known.has(w));
+}
+const descriptorWords = new WeakMap<ReadonlySet<string>, Set<string>>();
+
+/** Windows keyed by the owner's first name: every window `ownerMatches` can accept for a surface shares its first word. */
+export function windowsByFirstName(windows: OwnerWindow[]): (surface: string) => OwnerWindow[] {
+  const index = new Map<string, OwnerWindow[]>();
+  for (const w of windows) {
+    const key = w.owner.split(/\s+/)[0]!;
+    const list = index.get(key);
+    if (list) list.push(w); else index.set(key, [w]);
+  }
+  return surface => index.get(surface.toLowerCase().split(/\s+/)[0]!) ?? [];
 }
 
 /** Resolve one owner phrase on a document dated `date` (plus its other readings) against the windows (contract lines 9-10). */
