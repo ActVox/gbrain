@@ -2149,7 +2149,7 @@
         },
         {
           "category": "brain",
-          "message": "8 retrieval-affecting file(s) changed since HEAD: src/core/search/hybrid/degraded.ts, src/core/search/lean-rows.ts, src/core/search/mode-advice.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
+          "message": "No retrieval-affecting files changed in working tree.",
           "name": "eval_drift",
           "status": "ok"
         },
