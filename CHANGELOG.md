@@ -10,32 +10,27 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.213.0] - 2026-10-13
+## [0.60.214.0] - 2026-10-13
 
-**Shell-out reads on a local PGLite brain start about 110 ms faster.** Every `gbrain call get_page`, `gbrain get`, `gbrain list` or `gbrain search` on a local brain used to spend part of its startup preparing database features the command never used: a 128 MB page cache that one read never fills, and the vector and fuzzy-match extensions loaded before the first query whether or not the command touched them. One-shot reads now open with a smaller cache, the extensions load the first time a query needs them, and `gbrain call` starts preparing the database engine while the rest of the command loads, as `get` and `list` already did. Results are identical. `gbrain serve`, imports and every write keep the full cache.
-
-| Command (local PGLite brain, fresh process) | 85 pages, before | after | 5,000 pages, before | after |
-|---|---|---|---|---|
-| `gbrain call get_page` | 714–731 ms | 598–607 ms | 716–722 ms | 601–606 ms |
-| `gbrain list` | 575–616 ms | 514–533 ms | 597–605 ms | 507–516 ms |
-| MCP stdio start + first `get_page` | 863–865 ms | 840–894 ms | 865–874 ms | 857–861 ms |
-
-Medians (p50) of two runs of 20 cold processes each, on a 4-vCPU cloud machine. MCP start is unchanged within noise: serve keeps the full cache, and its boot touches a vector table, so the extension load only moves. Postgres brains are unchanged.
-
-## To take advantage of v0.60.213.0
-
-Nothing to do: `gbrain upgrade` is enough. There is no migration and no config.
+**`search` and `query` start the query embed (and `query`'s expansion) alongside the keyword arms instead of after them, so a search no longer waits for both one after the other.** On a 20,000-page Postgres brain with Voyage embeddings and reranking, the median warm `search` dropped from 578 ms to 424 ms and `query` from 578 ms to 448 ms (two rounds of 40 unique questions each); on a 400-page PGLite brain the saving is the keyword arms' 13 to 15 ms. Results are unchanged.
 
 ### Itemized changes
 
-- **Smaller buffer pool for one-shot reads** (`core/engine-connect.ts`, `core/pglite-embedded-assets.ts` `withSharedBuffers`, `EngineConfig.pglite_shared_buffers`). PGLite's backend zero-fills its whole `shared_buffers` pool when it starts, about 55 ms for the data directory's 128MB default. A CLI process that runs one read-scope operation (the shared-op path, `gbrain call <read op>`, `search`, `sources list`) now opens with `-c shared_buffers=32MB` (`ONE_SHOT_READ_SHARED_BUFFERS`), which keeps about 90% of that saving. Serve, writes, admin ops and every other command keep the default. Measured first-query cost after a fresh open on a 5,000-page brain moves by ±5 ms.
-- **Extensions load on first use** (`core/pglite-embedded-assets.ts` `lazyExtension`, `readExtensionFiles`). The `vector` and `pg_trgm` bundles are gunzipped and untarred in memory and written into PGLite's filesystem in the extension's `init`, after the backend starts, instead of PGLite streaming them through gunzip and compiling and linking both libraries before startup. Postgres loads each library on its first call into it. Open drops about 30 ms; the first query that needs `vector.so` pays about 1–4 ms more. The tarballs are no longer copied to a temp directory.
-- **`gbrain call`, `capture` and `forget` prewarm the PGLite WASM compile** while their modules load (`cli/main.ts`), as shared-op and post-connect commands already did.
+- **Vector side runs alongside the lexical arms** (`src/core/search/hybrid.ts`, `src/core/search/hybrid/arms.ts`): after the keyword-only gate, `startVectorSide` begins modality resolution, expansion, the query embeds and the vector searches, then the keyword, title and relational arms run as before, and `joinVectorSide` waits for the vector side. That side reads nothing the lexical and relational arms produce. Its `degraded[]` stamps (vector-pool exhaustion included) go to their own list and are appended after the lexical ones, so the order matches a sequential run. A keyword-only search (no embedding provider, embeddings opted out, System One keyword-only) starts no vector work. When the lexical arms throw, the vector side is allowed to settle before the error is rethrown.
+- **Timings** (`src/core/search/stage-timings.ts`): `StageTimer` gains `branch()` and `join()`. The part of `expansion`, `embed` and `vector` that finished while the lexical arms ran is now listed in `overlapped_ms` under the stage's name; `stages_ms` keeps the part the request waited for (the stage key is present even at 0). `sum(stages_ms) + other_ms = total_ms` still holds.
+- **Parity:** the refactor-wave-1 bench result digests match master on PGLite and on Postgres (400 pages each). With stub embedder and reranker on one retained 20,000-page Postgres brain, all 80 result lists match master's. At 4,000 fresh-imported Postgres pages master's own digests differ run to run (the HNSW index is rebuilt on each import), so that size is not a parity check.
+- **Tests:** a fail-first probe in `test/search/stage-timings-ops.test.ts` with a 300 ms embed and 300 ms lexical arms (632 ms on the old flow, under 550 ms now), a degraded-order case where the embed fails before the keyword arm, and branch/join accounting cases in `test/search/stage-timings.test.ts`.
 
-### For contributors
+## [0.60.213.0] - 2026-10-13
 
-- `scripts/bench/efficiency/probe-pglite-open.ts` times `PGlite.create` on a copy of a data directory: stock (eager) versus lazy extensions at 128MB and 32MB, one fresh process per sample, plus the first query that loads `vector.so`. On the 85-page brain: 202 / 239 ms stock at 128MB, 120 / 153 ms lazy at 32MB (p50 / p95, N=20).
-- Tests: `test/engine-connect.test.ts` pins 32MB for a one-shot read connect and 128MB otherwise, and that `gbrain call` asks for it only for read-scope tools; `test/pglite-embedded-assets.test.ts` pins the bundle contents, refuses an unsupported tar entry, and installs and queries both extensions through an HNSW and a trigram index.
+**`gbrain eval longmemeval --call-plan FILE` prices a paid LongMemEval run before it runs.** It writes the run's call plan in gstack's `GSTACK_EVAL_CALLS` v1 format: one line per paid lane (embeddings, rerank, trajectory extraction, per-chunk synopsis, fact keys, expansion, reader, judge) with its model, call count and token bounds. It makes no provider call and opens no brain. `gstack-eval-plan price-gate --plan-file FILE` then prices it against a cap, so a run like tokenmax's per-chunk synopses on about 100k chunks is priced before approval, not discovered in a smoke run.
+
+### Itemized changes
+
+- **Counts:** trajectory extraction and synopsis calls are exact. Haystacks are chunked offline with the import's own functions, and on the mini fixture the plan matches a real run at 13 of 13 calls each. Reader, rerank and judge inputs are upper bounds. Input tokens use one conservative rule, `ceil(chars / 3)`, and output tokens are each call's cap times its calls, so the price is a ceiling.
+- **Binding:** the plan names the exact gate command (`--call-plan-gate` overrides it), the commit, and each tracked input's sha256. An outside dataset is named by its sha256 and basename only.
+- **Preconditions** name each lane's model source and env vars (set or unset, never values), the spend caps, and that caches and retries are not counted.
+- **Refusals:** a lane the planner can't bound refuses with exit 1 and writes nothing: `--decide`, `--via-operation`, cross-modal LLM intent, or an expansion model other than claude-haiku-4-5.
 
 ## [0.60.212.0] - 2026-10-13
 
