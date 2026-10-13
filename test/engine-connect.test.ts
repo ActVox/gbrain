@@ -83,8 +83,8 @@ describe('gbrain call sizes its connect by the operation scope', () => {
   const stub = {
     executeRaw: async (sql: string) => sql.includes('FROM sources') ? [{ id: 'default' }] : [],
     getStats: async () => ({ pages: 1, chunks: 1 }),
+    getTags: async () => [],
   } as unknown as BrainEngine;
-  // Only the options runCall hands its connect are under test; the stub's op results may fail.
 
   test('a read-scope operation asks for a one-shot read connect, an admin-scope one does not', async () => {
     const asked: (EngineConnectOptions | undefined)[] = [];
@@ -92,7 +92,7 @@ describe('gbrain call sizes its connect by the operation scope', () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-engine-connect-call-'));
     try {
       await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
-        await runCall(connect, ['--source', 'default', 'get_page', '{"slug":"notes/x"}'], async () => {});
+        await runCall(connect, ['--source', 'default', 'get_tags', '{"slug":"notes/x"}'], async () => {});
         await runCall(connect, ['--source', 'default', 'get_stats'], async () => {});
       });
     } finally {
