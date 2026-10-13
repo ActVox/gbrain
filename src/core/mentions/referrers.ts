@@ -74,9 +74,9 @@ interface RawRow { id: number; slug: string; source_id: string; type: string | n
   d: string | null; gtotal?: number }
 
 /** The entity page plus, under `entity_identity.union`, its identity co-members. */
-async function targetPages(engine: BrainEngine, scope: ReferrerScope): Promise<{ sources: string[]; slugs: string[] }> {
+async function targetPages(engine: BrainEngine, scope: ReferrerScope, union?: boolean): Promise<{ sources: string[]; slugs: string[] }> {
   const targets = [{ slug: scope.slug, source_id: scope.sourceId }];
-  if (await isIdentityUnionEnabled(engine)) {
+  if (union ?? await isIdentityUnionEnabled(engine)) {
     try {
       const members = await listEntityIdentities(engine, { slug: scope.slug, slugSourceId: scope.sourceId, sourceId: scope.sourceId,
         allowedSources: scope.referrerSources, excludePrivate: scope.excludePrivate });
@@ -441,7 +441,8 @@ export async function readTargetReferences(engine: BrainEngine,
   const index = new Map<string, number>();
   for (const t of targets) if (!index.has(keyOf(t))) { index.set(keyOf(t), unique.length); unique.push(t); }
   if (!unique.length) return [];
-  const expanded = await Promise.all(unique.map(t => targetPages(engine, { ...scope, slug: t.slug, sourceId: t.sourceId })));
+  const union = await isIdentityUnionEnabled(engine);
+  const expanded = await Promise.all(unique.map(t => targetPages(engine, { ...scope, slug: t.slug, sourceId: t.sourceId }, union)));
   const sources: string[] = [];
   const slugs: string[] = [];
   const idx: number[] = [];
