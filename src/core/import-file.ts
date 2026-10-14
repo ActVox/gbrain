@@ -632,9 +632,8 @@ export async function importFromContent(
   // it reuses inside its publication transaction, under the page guard, from
   // the chunks it is about to replace; only the chunks left without a vector
   // reach the provider.
-  // A page above the inline threshold commits with NULL vectors and embeds
-  // after the write through the stale sweep, where the per-page spend cap and
-  // the sampled junk check apply: its provider calls never hold the write.
+  // A large page commits with NULL vectors; the stale sweep embeds it under the
+  // per-page cap and the sampled junk check, so no provider call holds the write.
   const largePage = isLargePageBytes(Buffer.byteLength(parsed.compiled_truth, 'utf-8') + Buffer.byteLength(parsed.timeline ?? '', 'utf-8'));
   const postCommitEmbedding = largePage ? undefined : opts.onPostCommitEmbedding;
   const reusable = !!existing && !existing.deleted_at && !opts.forceRechunk && !postCommitEmbedding && chunks.length > 0

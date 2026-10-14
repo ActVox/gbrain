@@ -1170,8 +1170,7 @@ export async function applyStdinParam(
     if (content.trim() === '') return;
     const MAX_STDIN = PAGE_MAX_BYTES; // the 24 MiB page ceiling
     if (Buffer.byteLength(content, 'utf-8') > MAX_STDIN) {
-      exitCliError(opError('payload_too_large', `stdin content exceeds ${MAX_STDIN} bytes (the 24 MiB page ceiling).`,
-        'Nothing was written. A page larger than the ceiling cannot be stored in this version; see docs/guides/memory-boundaries.md#large-pages.'), op.cliHints?.name ?? op.name);
+      exitCliError(opError('payload_too_large', `stdin content exceeds ${MAX_STDIN} bytes (the 24 MiB page ceiling).`, 'Nothing was written. A page larger than the ceiling cannot be stored in this version; see docs/guides/memory-boundaries.md#large-pages.'), op.cliHints?.name ?? op.name);
     }
     params[op.cliHints.stdin] = content;
   }

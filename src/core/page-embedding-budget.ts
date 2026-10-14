@@ -173,3 +173,64 @@ export async function listBudgetLimitedPages(engine: Pick<BrainEngine, 'executeR
     WHERE ${filters.join(' AND ')} ORDER BY b.updated_at DESC, p.id LIMIT $1`, params);
   return rows.map(row => ({ ...row, spent_usd: Number(row.spent_usd), cap_usd: row.cap_usd === null ? null : Number(row.cap_usd), pending_chunks: Number(row.pending_chunks), pending_chars: Number(row.pending_chars) }));
 }
+
+/** Run the provider call under a grant: booked as spent once it returns, released if it throws. */
+export async function spendGrant<T>(grant: PageEmbedGrant | undefined, call: () => Promise<T>): Promise<T> {
+  if (!grant) return call();
+  try {
+    const out = await call();
+    await grant.settle({ ok: true });
+    return out;
+  } catch (error) {
+    await grant.settle({ ok: false }).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * One embedding run's per-page step: meter `candidates` (the page's chunks
+ * without a vector) and narrow them to the grant, saying on stderr why chunks
+ * wait. Null means embed nothing now (held, or the cap left no chunk);
+ * otherwise `chunks` is the batch to embed, every candidate on an unmetered page.
+ */
+export async function meterPageBatch<C extends { chunk_index: number; chunk_text: string }>(engine: BrainEngine, page: BudgetPage & { slug: string },
+  candidates: readonly C[], opts: { signature?: string | null; approvedCapUsd?: number; announceHeld?: boolean }): Promise<{ grant?: PageEmbedGrant; chunks: C[] } | null> {
+  const decision = await planPageEmbedding(engine, page, candidates, opts);
+  if (decision.kind === 'unmetered') return { chunks: [...candidates] };
+  const approve = `gbrain embed --slugs ${page.slug} --max-usd <N>`;
+  if (decision.kind === 'held') {
+    if (opts.announceHeld) process.stderr.write(`[embed] ${page.slug}: embedding held (${decision.reason}); the page stays keyword-searchable. Approve with: ${approve}\n`);
+    return null;
+  }
+  const { grant } = decision;
+  const chunks = candidates.filter(c => grant.chunkIndexes.has(c.chunk_index));
+  if (grant.deferred) process.stderr.write(`[embed] ${page.slug}: per-page cap $${grant.capUsd} reached; ${grant.deferred} older chunk(s) stay keyword-only until it rises (${approve})\n`);
+  if (chunks.length) return { grant, chunks };
+  await grant.settle({ ok: true });
+  return null;
+}
+
+/**
+ * `gbrain embed --held`: list the held and capped large pages with what each
+ * would cost to finish, then return the `--source S --slugs ...` argv that
+ * embeds them under the user's `--max-usd` (one source per approval).
+ */
+export async function heldEmbedArgv(engine: BrainEngine, args: readonly string[], signature: string | null, say: (line: string) => void): Promise<{ argv: string[] } | { error: string } | null> {
+  if (args.includes('--background')) return { error: '[embed] --held runs in the foreground: the per-page approval is not carried into background jobs.' };
+  const sourceIdx = args.indexOf('--source');
+  const limited = await listBudgetLimitedPages(engine, sourceIdx >= 0 ? { sourceId: args[sourceIdx + 1] } : {});
+  if (limited.length === 0) {
+    say('[embed] No large pages are held or capped by embed.max_usd_per_page.');
+    return null;
+  }
+  for (const row of limited) {
+    say(`[embed] ${row.slug} (${row.source_id}): ${row.state}${row.reason ? ` (${row.reason})` : ''}, ${row.pending_chunks} chunk(s) without a vector, `
+      + `spent $${row.spent_usd.toFixed(2)}, about $${estimatePageEmbedUsd(row.pending_chars, signature).toFixed(2)} to finish`);
+  }
+  const sources = [...new Set(limited.map(row => row.source_id))];
+  if (sources.length > 1) {
+    return { error: `[embed] Held pages span ${sources.length} sources; one approval covers one source. Run per source: ${sources.map(id => `gbrain embed --held --source ${id} --max-usd <N>`).join('; ')}` };
+  }
+  const rest = args.filter((a, i) => a !== '--held' && a !== '--source' && args[i - 1] !== '--source');
+  return { argv: [...rest, '--source', sources[0], '--slugs', ...limited.map(row => row.slug)] };
+}
