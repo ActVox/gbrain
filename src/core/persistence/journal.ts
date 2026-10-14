@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { WRITE_SWITCHES, writeSwitchOn } from './switches.ts';
 import type { BrainEngine } from '../engine.ts';
+import { getCode } from '../retry-matcher.ts';
 import { assertRecoveryStagingAbsent } from './staging.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
@@ -936,6 +937,21 @@ export async function vacuumPersistenceQueues(engine: BrainEngine): Promise<numb
   return Number(requests?.rows ?? 0);
 }
 
+/**
+ * #6696 (A9): compaction drops the intent, and a sync receipt's `intent.runId`
+ * is how a resumed run finds what it committed. A receipt of a run whose
+ * managed-sync cursor is still open (not done) is never compacted, nor the newest
+ * committed sync receipt of its worktree.
+ */
+export const OPEN_SYNC_CURSOR_EXCLUSION = (r: string) => `AND NOT (${r}.intent ? 'runId' AND EXISTS (SELECT 1 FROM op_checkpoints c
+      WHERE c.op='managed-sync' AND c.completed_keys->0->>'runId'=${r}.intent->>'runId' AND COALESCE(c.completed_keys->0->>'done','false')<>'true'))`;
+export async function newestSyncReceipt(tx: SqlEngine, row: Pick<WriteRequest, 'id' | 'state' | 'intent' | 'worktree_id'>): Promise<boolean> {
+  const intent = row.intent as { runId?: unknown; kind?: unknown } | null;
+  if (row.state !== 'committed' || !row.worktree_id || typeof intent?.runId !== 'string' || !String(intent.kind ?? '').startsWith('managed_sync_')) return false;
+  const [newest] = await tx.executeRaw<{ id: string }>(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid AND state='committed'
+    AND COALESCE(intent->>'kind','') LIKE 'managed_sync_%' ORDER BY completed_at DESC, sequence DESC LIMIT 1`, [row.worktree_id]);
+  return newest?.id === row.id;
+}
 /** What one compaction pass did (#6696 A11): receipts compacted, reservation bytes it freed, candidates it left and why. */
 export interface ReceiptCompactionResult { compacted: number; freed_bytes: number; skipped_by_reason: Record<string, number> }
 export async function compactWriteReceipts(engine: BrainEngine, retentionDays?: number): Promise<number> {
@@ -950,27 +966,54 @@ export async function compactWriteReceiptsDetailed(engine: BrainEngine, retentio
     WHERE state IN ('committed','conflict','failed','cancelled') AND recovery IS NULL AND NOT compacted
     AND completed_at < now()-($1::double precision*interval '1 day')
     AND NOT EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.state<>'committed')
+    ${OPEN_SYNC_CURSOR_EXCLUSION('r')}
     ORDER BY sequence LIMIT 100`, [retentionDays]);
   const result: ReceiptCompactionResult = { compacted: 0, freed_bytes: 0, skipped_by_reason: {} };
-  const skip = (reason: string) => { result.skipped_by_reason[reason] = (result.skipped_by_reason[reason] ?? 0) + 1; return 0; };
-  for(const row of rows) result.freed_bytes+=await engine.transaction(async tx=>{
-    await declarePersistenceProtocol(tx);
-    const keys=['brain',principalKey(requestPrincipal(row))];
-    await lockCounters(tx,keys);
-    const [current]=await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE',[row.id]);
-    if(!current || current.compacted || current.recovery || !isTerminal(current)) return skip('changed');
-    const unfinished=await tx.executeRaw("SELECT 1 FROM persistence_effects WHERE request_id=$1::uuid AND state<>'committed' LIMIT 1",[row.id]);
-    if(unfinished.length) return skip('unfinished_effect');
-    const [effects]=await tx.executeRaw<{bytes:string}>(`SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0)::text AS bytes
-      FROM persistence_effects WHERE request_id=$1::uuid`,[row.id]);
-    const retained=Math.min(Number(current.terminal_reservation),retainedReceiptBytes(current,{stage:'compacted',effects:Number(effects.bytes)}));
-    const freed=Number(current.terminal_reservation)-retained;
-    await tx.executeRaw('UPDATE persistence_requests SET intent=NULL,compacted=true,error_message=NULL,terminal_reservation=$2 WHERE id=$1::uuid',[row.id,retained]);
-    await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-LEAST($2::bigint,terminal_bytes) WHERE key=ANY($1::text[])',[keys,freed]);
-    result.compacted++;
-    return freed;
-  });
+  for (const row of rows) {
+    const done = await compactReceipt(engine, row).catch(error => {
+      if (['55P03', '57014'].includes(getCode(error) ?? '')) return { skipped: 'lock_timeout' };
+      throw error;
+    });
+    if ('skipped' in done) result.skipped_by_reason[done.skipped] = (result.skipped_by_reason[done.skipped] ?? 0) + 1;
+    else { result.compacted++; result.freed_bytes += done.freed_bytes; }
+  }
   return result;
+}
+/** Terminal states a compaction may take; the receipt-compaction repair keeps failures unless asked. */
+export const COMPACTABLE_STATES = ['committed', 'conflict', 'failed', 'cancelled'] as const;
+/**
+ * Compacts one terminal receipt in its own short transaction (#6696 A9, A11): counters locked first in key order, then
+ * the request row, with transaction-local lock and statement timeouts so a concurrent admission waits at most that
+ * long. Every eligibility rule is rechecked under the lock: terminal, no recovery, not compacted, `states`,
+ * `completedBefore`, no unfinished effect, no open sync cursor for its run, not the worktree's newest sync receipt.
+ */
+export async function compactReceipt(engine: BrainEngine, row: Pick<WriteRequest, 'id' | 'principal_kind' | 'principal_id'>,
+  opts: { states?: readonly string[]; completedBefore?: string } = {}): Promise<{ freed_bytes: number } | { skipped: string }> {
+  return engine.transaction(async tx => {
+    await declarePersistenceProtocol(tx);
+    await tx.executeRaw("SET LOCAL lock_timeout = '2s'");
+    await tx.executeRaw("SET LOCAL statement_timeout = '15s'");
+    const keys = ['brain', principalKey(requestPrincipal(row as WriteRequest))];
+    await lockCounters(tx, keys);
+    const [current] = await tx.executeRaw<WriteRequest & { eligible_age: boolean; open_cursor: boolean }>(`SELECT r.*,
+        ($2::timestamptz IS NULL OR r.completed_at < $2::timestamptz) AS eligible_age,
+        EXISTS (SELECT 1 FROM op_checkpoints c WHERE r.intent ? 'runId' AND c.op='managed-sync' AND c.completed_keys->0->>'runId'=r.intent->>'runId'
+          AND COALESCE(c.completed_keys->0->>'done','false')<>'true') AS open_cursor
+      FROM persistence_requests r WHERE r.id=$1::uuid FOR UPDATE OF r`, [row.id, opts.completedBefore ?? null]);
+    if (!current || current.compacted || current.recovery || !isTerminal(current)) return { skipped: 'changed' };
+    if (!(opts.states ?? COMPACTABLE_STATES).includes(current.state) || !current.eligible_age) return { skipped: 'changed' };
+    const unfinished = await tx.executeRaw("SELECT 1 FROM persistence_effects WHERE request_id=$1::uuid AND state<>'committed' LIMIT 1", [row.id]);
+    if (unfinished.length) return { skipped: 'unfinished_effect' };
+    if (current.open_cursor) return { skipped: 'open_sync_cursor' };
+    if (await newestSyncReceipt(tx, current)) return { skipped: 'newest_sync_receipt' };
+    const [effects] = await tx.executeRaw<{ bytes: string }>(`SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0)::text AS bytes
+      FROM persistence_effects WHERE request_id=$1::uuid`, [row.id]);
+    const retained = Math.min(Number(current.terminal_reservation), retainedReceiptBytes(current, { stage: 'compacted', effects: Number(effects.bytes) }));
+    const freed = Number(current.terminal_reservation) - retained;
+    await tx.executeRaw('UPDATE persistence_requests SET intent=NULL,compacted=true,error_message=NULL,terminal_reservation=$2 WHERE id=$1::uuid', [row.id, retained]);
+    await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-LEAST($2::bigint,terminal_bytes) WHERE key=ANY($1::text[])', [keys, freed]);
+    return { freed_bytes: freed };
+  });
 }
 export function receiptFor(row: WriteRequest, facts?: WriteHealthFacts, now = Date.now()) {
   return {
