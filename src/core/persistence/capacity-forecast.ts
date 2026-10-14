@@ -1,7 +1,7 @@
 /**
  * #6696 (A3): days until a cumulative managed-write cap refuses admission,
  * from a full 7-day aggregate of `persistence_requests` (and lifecycle
- * receipts) on the `sequence` index, per scope (`brain`, each principal) and
+ * receipts) on the principal index, per scope (`brain`, each principal) and
  * resource (`lifetime_ids`, `terminal_bytes`).
  *
  * Receipt bytes are reported gross (what the window's receipts reserve now)
@@ -10,6 +10,15 @@
  * by the net rate after that, so `days_to_exhaustion` for terminal bytes uses
  * net and `basis` says so. Rates are the larger of the window mean and the
  * last 24 hours.
+ *
+ * The window is read without a `created_at` index (PR A adds no migration):
+ * per principal, one statement walks the existing principal index newest
+ * first until `created_at` leaves the window and buckets the walked range by
+ * day; the brain row sums the principals. Receipts admitted
+ * before reservations counted their intent can hold more than they reserve;
+ * `basis` notes them (`:legacy_under_reserved`) until compaction drops the
+ * intent. `light` (the 60 s receipt snapshot) skips the whole-table reclaim
+ * read and the table size.
  */
 import type { SqlEngine } from './model.ts';
 import { DEFAULT_JOURNAL_LIMITS, type JournalLimits } from './model.ts';
@@ -41,8 +50,10 @@ export interface CapacityForecastRow {
   spike_day: string | null;
   days_to_exhaustion: number | null;
   exhaustion_date: string | null;
-  /** Terminal bytes only: slack a true-up or compaction would free now. */
+  /** Terminal bytes only: slack compaction would free now (absent in a light read). */
   reclaimable_bytes?: number;
+  /** Terminal bytes only: uncompacted receipts holding more intent and authority than they reserved (admitted before #6696). */
+  under_reserved_receipts?: number;
   basis: string;
   /** A cap that covers one more year at this rate (never below double the current cap). */
   recommended_limit: number;
@@ -64,18 +75,36 @@ async function readDays(engine: SqlEngine, key: string, fallback: number): Promi
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
-/** First `sequence` inside the window: a binary search over the unique `sequence` index, never a scan of `created_at`. */
-async function windowStart(engine: SqlEngine, days: number): Promise<string | null> {
-  const [bounds] = await engine.executeRaw<{ lo: string | null; hi: string | null }>('SELECT min(sequence)::text AS lo,max(sequence)::text AS hi FROM persistence_requests');
-  if (!bounds?.lo || !bounds.hi) return null;
-  let lo = BigInt(bounds.lo), hi = BigInt(bounds.hi) + 1n;
-  while (lo < hi) {
-    const mid = (lo + hi) / 2n;
-    const [next] = await engine.executeRaw<{ sequence: string; inside: boolean }>(`SELECT sequence::text,created_at>now()-($2::double precision*interval '1 day') AS inside
-      FROM persistence_requests WHERE sequence>=$1::bigint ORDER BY sequence LIMIT 1`, [mid.toString(), days]);
-    if (!next || next.inside) hi = mid; else lo = BigInt(next.sequence) + 1n;
-  }
-  return lo.toString();
+/** Rows one step of the principal-index walk reads. */
+const WALK_STEP = 1000;
+
+/**
+ * One principal's window, bucketed by UTC day, in one statement: the walk
+ * reads the principal index (`principal_kind, principal_id, sequence DESC`)
+ * newest first, WALK_STEP rows a step, and stops at the first step that
+ * reaches a row older than the window; the buckets read only the walked range.
+ */
+async function principalDays(engine: SqlEngine, key: string, net: string): Promise<Day[]> {
+  const [, kind, ...rest] = key.split(':');
+  const id = rest.join(':');
+  if (!kind || !id) return [];
+  const rows = await engine.executeRaw<Record<string, string>>(`WITH RECURSIVE walk(lo,oldest,n) AS (
+      SELECT min(sequence),min(created_at),count(*) FROM (SELECT sequence,created_at FROM persistence_requests
+        WHERE principal_kind=$1 AND principal_id=$2 ORDER BY sequence DESC LIMIT $4) s
+      UNION ALL
+      SELECT c.lo,c.oldest,c.n FROM walk w CROSS JOIN LATERAL (SELECT min(sequence) AS lo,min(created_at) AS oldest,count(*) AS n FROM (SELECT sequence,created_at
+        FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND sequence<w.lo ORDER BY sequence DESC LIMIT $4) s) c
+      WHERE w.n=$4 AND w.oldest>now()-($3::double precision*interval '1 day') AND c.n>0),
+    w AS (SELECT * FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND sequence>=(SELECT min(lo) FROM walk)
+      AND created_at>now()-($3::double precision*interval '1 day')),
+    e AS (SELECT request_id,SUM(octet_length(data::text)+octet_length(kind)+1024) AS bytes FROM persistence_effects WHERE request_id IN (SELECT id FROM w) GROUP BY request_id)
+    SELECT to_char(w.created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
+      count(*)::text AS ids,COALESCE(SUM(w.terminal_reservation),0)::text AS gross,COALESCE(SUM(${net}),0)::text AS net,
+      count(*) FILTER (WHERE w.created_at>now()-interval '1 day')::text AS recent_ids,
+      COALESCE(SUM(w.terminal_reservation) FILTER (WHERE w.created_at>now()-interval '1 day'),0)::text AS recent_gross,
+      COALESCE(SUM(${net}) FILTER (WHERE w.created_at>now()-interval '1 day'),0)::text AS recent_net
+    FROM w LEFT JOIN e ON e.request_id=w.id GROUP BY 1`, [kind, id, WINDOW_DAYS, WALK_STEP]);
+  return rows.map(row => toDay({ ...row, scope: key }));
 }
 
 const NET_SQL = (r: string, e: string) => `LEAST(${r}.terminal_reservation,octet_length(${r}.authority::text)+COALESCE(octet_length(${r}.outcome::text),0)
@@ -87,25 +116,14 @@ export async function readCapacityThresholds(engine: SqlEngine): Promise<{ warnD
   return { warnDays, failDays };
 }
 
-export async function readCapacityForecast(engine: SqlEngine & { kind?: string }, opts: { limits?: JournalLimits } = {}): Promise<CapacityForecast> {
+export async function readCapacityForecast(engine: SqlEngine & { kind?: string }, opts: { limits?: JournalLimits; light?: boolean } = {}): Promise<CapacityForecast> {
   const limits = opts.limits ?? await readJournalLimits(engine);
   const [{ warnDays, failDays }, retention] = await Promise.all([readCapacityThresholds(engine),
     readReceiptRetentionDays(engine).catch(() => DEFAULT_RECEIPT_RETENTION_DAYS)]);
   const counters = await engine.executeRaw<{ key: string; lifetime_ids: string; terminal_bytes: string }>(
     "SELECT key,lifetime_ids::text,terminal_bytes::text FROM persistence_counters WHERE key='brain' OR key LIKE 'principal:%' ORDER BY key");
-  const start = await windowStart(engine, WINDOW_DAYS);
   const days: Day[] = [];
-  if (start !== null) {
-    days.push(...(await engine.executeRaw<Record<string, string>>(`WITH w AS (SELECT * FROM persistence_requests
-        WHERE sequence>=$1::bigint AND created_at>now()-($2::double precision*interval '1 day')),
-      e AS (SELECT request_id,SUM(octet_length(data::text)+octet_length(kind)+1024) AS bytes FROM persistence_effects WHERE request_id IN (SELECT id FROM w) GROUP BY request_id)
-      SELECT 'principal:'||w.principal_kind||':'||w.principal_id AS scope,to_char(w.created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
-        count(*)::text AS ids,COALESCE(SUM(w.terminal_reservation),0)::text AS gross,COALESCE(SUM(${NET_SQL('w', 'e')}),0)::text AS net,
-        count(*) FILTER (WHERE w.created_at>now()-interval '1 day')::text AS recent_ids,
-        COALESCE(SUM(w.terminal_reservation) FILTER (WHERE w.created_at>now()-interval '1 day'),0)::text AS recent_gross,
-        COALESCE(SUM(${NET_SQL('w', 'e')}) FILTER (WHERE w.created_at>now()-interval '1 day'),0)::text AS recent_net
-      FROM w LEFT JOIN e ON e.request_id=w.id GROUP BY 1,2`, [start, WINDOW_DAYS])).map(toDay));
-  }
+  for (const counter of counters) if (counter.key !== 'brain') days.push(...await principalDays(engine, counter.key, NET_SQL('w', 'e')));
   days.push(...(await engine.executeRaw<Record<string, string>>(`SELECT 'principal:local_cli:'||principal_id::text AS scope,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
       count(*)::text AS ids,COALESCE(SUM(terminal_bytes),0)::text AS gross,COALESCE(SUM(terminal_bytes),0)::text AS net,
       count(*) FILTER (WHERE created_at>now()-interval '1 day')::text AS recent_ids,
@@ -119,12 +137,16 @@ export async function readCapacityForecast(engine: SqlEngine & { kind?: string }
   const windowDays = Math.min(WINDOW_DAYS, Math.max(1, Number(history?.age_days ?? WINDOW_DAYS)));
   // Days until the oldest uncompacted receipt is compactable: until then every receipt keeps its gross reservation.
   const untilCompaction = Math.max(0, retention - Number(history?.compaction_age_days ?? 0));
-  const reclaim = await engine.executeRaw<{ scope: string; bytes: string }>(`WITH e AS (SELECT request_id,SUM(octet_length(data::text)+octet_length(kind)+1024) AS bytes,
-      bool_or(state<>'committed') AS unfinished FROM persistence_effects GROUP BY request_id)
-    SELECT 'principal:'||r.principal_kind||':'||r.principal_id AS scope,COALESCE(SUM(r.terminal_reservation-${NET_SQL('r', 'e')}),0)::text AS bytes
-    FROM persistence_requests r LEFT JOIN e ON e.request_id=r.id
-    WHERE r.state IN ('committed','conflict','failed','cancelled') AND r.recovery IS NULL AND NOT COALESCE(e.unfinished,false) GROUP BY 1`);
-  const tableBytes = await engine.executeRaw<{ bytes: string }>("SELECT pg_total_relation_size('persistence_requests')::text AS bytes").then(r => Number(r[0]?.bytes), () => null);
+  // The uncompacted terminal receipts (the compactable partial index): what compaction would free, and the legacy under-reserved ones.
+  const reclaim = opts.light ? [] : await engine.executeRaw<{ scope: string; bytes: string; under: string }>(`WITH r AS (SELECT * FROM persistence_requests
+      WHERE recovery IS NULL AND NOT compacted AND state IN ('committed','conflict','failed','cancelled')),
+    e AS (SELECT request_id,SUM(octet_length(data::text)+octet_length(kind)+1024) AS bytes,
+      bool_or(state IN ('queued','running')) AS unfinished FROM persistence_effects WHERE request_id IN (SELECT id FROM r) GROUP BY request_id)
+    SELECT 'principal:'||r.principal_kind||':'||r.principal_id AS scope,
+      COALESCE(SUM(r.terminal_reservation-${NET_SQL('r', 'e')}) FILTER (WHERE NOT COALESCE(e.unfinished,false)),0)::text AS bytes,
+      count(*) FILTER (WHERE COALESCE(octet_length(r.intent::text),0)+octet_length(r.authority::text)>r.terminal_reservation)::text AS under
+    FROM r LEFT JOIN e ON e.request_id=r.id GROUP BY 1`);
+  const tableBytes = opts.light ? null : await engine.executeRaw<{ bytes: string }>("SELECT pg_total_relation_size('persistence_requests')::text AS bytes").then(r => Number(r[0]?.bytes), () => null);
   const now = Date.now();
   const rows: CapacityForecastRow[] = [];
   for (const counter of counters) {
@@ -137,7 +159,9 @@ export async function readCapacityForecast(engine: SqlEngine & { kind?: string }
     }
     const total = (field: keyof Omit<Day, 'scope' | 'day'>) => [...byDay.values()].reduce((n, day) => n + day[field], 0);
     const prefix = counter.key === 'brain' ? 'brain' : 'principal';
-    const reclaimable = counter.key === 'brain' ? reclaim.reduce((n, row) => n + Number(row.bytes), 0) : Number(reclaim.find(row => row.scope === counter.key)?.bytes ?? 0);
+    const scoped = (field: 'bytes' | 'under') => counter.key === 'brain' ? reclaim.reduce((n, row) => n + Number(row[field]), 0)
+      : Number(reclaim.find(row => row.scope === counter.key)?.[field] ?? 0);
+    const reclaimable = scoped('bytes'), underReserved = scoped('under');
     for (const resource of ['lifetime_ids', 'terminal_bytes'] as const) {
       const setting = `${prefix}${resource === 'lifetime_ids' ? 'LifetimeIds' : 'TerminalBytes'}` as keyof JournalLimits;
       const limit = limits[setting] ?? DEFAULT_JOURNAL_LIMITS[setting];
@@ -155,12 +179,14 @@ export async function readCapacityForecast(engine: SqlEngine & { kind?: string }
       else if (perDay <= 0) daysLeft = null;
       else if (remaining <= perDay * untilCompaction) { daysLeft = remaining / perDay; basis += ':gross_before_compaction'; }
       else { daysLeft = netPerDay > 0 ? untilCompaction + (remaining - perDay * untilCompaction) / netPerDay : null; basis += untilCompaction > 0 ? ':gross_then_net' : ':net_after_compaction'; }
+      if (!ids && underReserved > 0) basis += ':legacy_under_reserved';
       if (daysLeft !== null && daysLeft > HORIZON_DAYS) daysLeft = null;
       const pct = limit > 0 ? Math.round(used / limit * 1000) / 10 : used > 0 ? 100 : 0;
       const status = pct >= CAPACITY_FAIL_PCT || daysLeft !== null && daysLeft < failDays ? 'fail'
         : pct >= CAPACITY_WARN_PCT || daysLeft !== null && daysLeft < warnDays ? 'warn' : 'ok';
       rows.push({ scope: counter.key, resource, used, limit, pct, config_key: journalLimitKey(setting), window_days: Number(windowDays.toFixed(2)),
-        per_day_7d: Math.round(perDay), ...(ids ? {} : { net_per_day_7d: Math.round(netPerDay), reclaimable_bytes: reclaimable }),
+        per_day_7d: Math.round(perDay), ...(ids ? {} : { net_per_day_7d: Math.round(netPerDay),
+          ...(opts.light ? {} : { reclaimable_bytes: reclaimable, under_reserved_receipts: underReserved }) }),
         max_day_7d: maxDay, spike_day: spike,
         days_to_exhaustion: daysLeft === null ? null : Math.floor(daysLeft),
         exhaustion_date: daysLeft === null ? null : new Date(now + daysLeft * 86_400_000).toISOString().slice(0, 10),

@@ -85,6 +85,42 @@ for (const kind of testBackends()) {
       expect((await checkPersistenceCapacity(engine)).status).toBe('fail');
     });
 
+    check('a history over 10,000 rows with an early burst is counted in full', async engine => {
+      const requests = await requestFixture(engine);
+      const template = await requests.admit('template');
+      const columns = (await engine.executeRaw<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
+        WHERE table_name='persistence_requests' AND table_schema=current_schema() AND column_name NOT IN ('id','sequence','request_id','client_request_id','created_at')`)).map(c => c.column_name);
+      await engine.transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        // The template is the oldest row (eight days), so the history spans the full window.
+        await tx.executeRaw("UPDATE persistence_requests SET created_at=now()-interval '8 days' WHERE id=$1::uuid", [template.id]);
+        // 10,000 admissions six days ago (a bulk catch-up), then 499 more spread over the last day.
+        for (const [count, age] of [[10_000, '6 days'], [499, '12 hours']] as const) {
+          await tx.executeRaw(`INSERT INTO persistence_requests(${columns.join(',')},request_id,created_at)
+            SELECT ${columns.map(c => `t.${c}`).join(',')},gen_random_uuid(),now()-interval '${age}'
+            FROM persistence_requests t, generate_series(1,$2) WHERE t.id=$1::uuid`, [template.id, count]);
+        }
+      });
+      const row = await principalIds(engine);
+      expect(row.per_day_7d).toBe(Math.round(10_499 / 7));
+      expect(row.max_day_7d).toBeGreaterThanOrEqual(10_000);
+      expect(row.spike_day).not.toBeNull();
+    });
+
+    check('receipts admitted before reservations counted their intent are reported in basis', async engine => {
+      const requests = await requestFixture(engine);
+      const admitted = await requests.admit('legacy');
+      await engine.transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        await tx.executeRaw(`UPDATE persistence_requests SET state='failed',completed_at=now(),intent=jsonb_build_object('body',repeat('x',100000)) WHERE id=$1::uuid`, [admitted.id]);
+      });
+      const bytes = (await readCapacityForecast(engine)).rows.find(r => r.scope.startsWith('principal:') && r.resource === 'terminal_bytes')!;
+      expect(bytes.under_reserved_receipts).toBe(1);
+      expect(bytes.basis).toContain(':legacy_under_reserved');
+      const light = (await readCapacityForecast(engine, { light: true })).rows.find(r => r.scope.startsWith('principal:') && r.resource === 'terminal_bytes')!;
+      expect(light.reclaimable_bytes).toBeUndefined();
+    });
+
     check('a quiet brain far from its caps is ok', async engine => {
       await requestFixture(engine).then(r => r.admit('one'));
       expect((await checkPersistenceCapacity(engine)).status).toBe('ok');
