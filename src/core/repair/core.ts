@@ -177,7 +177,8 @@ export interface RepairResult {
   details?: Record<string, unknown>;
 }
 
-const RECEIPT_BYTES = 16_384;
+/** Receipt bytes one repair admission reserves (the journal's minimum per-request reservation). */
+export const RECEIPT_BYTES = 16_384;
 const STOP_RATIO = 0.9;
 const SAMPLE = 10;
 
@@ -212,8 +213,8 @@ async function writeCursor(engine: BrainEngine, kind: RepairKind, scope: RepairS
   [fingerprint(kind, scope, approval), JSON.stringify([{ kind, scope, cursor, run_id: runId }])]);
 }
 
-/** Cumulative journal counters this repair's admissions consume, with their 90% stop line. */
-async function capacity(ctx: OperationContext) {
+/** Cumulative journal counters this repair's admissions consume, with their 90% stop line (also the keep_db policy's headroom gate). */
+export async function capacity(ctx: OperationContext) {
   // A dry run never registers a writer; an unregistered installation has consumed nothing yet.
   const principal = await requestPrincipalForContext(ctx).then(principalKey, () => 'principal:unregistered');
   const limits = await readJournalLimits(ctx.engine);
