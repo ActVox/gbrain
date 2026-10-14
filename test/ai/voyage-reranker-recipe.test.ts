@@ -3,13 +3,13 @@
  *
  * Pins:
  *  - The voyage recipe declares a reranker touchpoint: the rerank-2.5 pair
- *    (rerank-2.5 default) + the preview rerank-3 pair, POST path '/rerank'
+ *    + the rerank-3 pair (rerank-3-lite default), POST path '/rerank'
  *    (base_url_default already ends in /v1 — no /v1/v1 doubling), request
  *    top-N key `top_k` via `top_param`.
  *  - #4938: rerank-3 / rerank-3-lite are in the allowlist (both the gateway's
  *    runtime check and `gbrain models doctor`'s reranker_config probe read
- *    this same array) while default_model stays rerank-2.5 — adding a model
- *    must not move existing installs onto it.
+ *    this same array); default_model is rerank-3-lite (gbrain-evals #148),
+ *    reaching only brains with no explicit search.reranker.model.
  *  - `default_model: 'voyage-4'` on the embedding touchpoint — array order is
  *    quality-sorted (voyage-4-large first) and must NOT drive selection.
  *  - voyage-code-4 is in the embedding models AND in the flexible-dims set.
