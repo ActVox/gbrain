@@ -13,7 +13,7 @@
  * clears and passes it anew.
  */
 import type { Notice } from '../agent-output.ts';
-import type { SqlEngine } from './model.ts';
+import { principalKey, type Principal, type SqlEngine } from './model.ts';
 import { BACKGROUND_PRODUCERS, readBackgroundPauseShare } from './admission-origin.ts';
 import { readCapacityForecast } from './capacity-forecast.ts';
 
@@ -111,4 +111,10 @@ export async function capacityNotices(engine: SqlEngine, opts: { throttle: boole
 export function __resetCapacityNoticesForTests(): void {
   lowShownAt.clear();
   pausedShown.clear();
+}
+
+/** #6696 (A4): a write receipt's capacity notices, throttled hourly per scope; a remote caller sees only the brain and its own principal. Never throws. */
+export async function writeReceiptCapacityNotices(engine: SqlEngine, ctx: { remote?: boolean; auth?: { principal?: Principal } }): Promise<Notice[]> {
+  const scopes = ctx.remote === false ? undefined : ['brain', ...(ctx.auth?.principal ? [principalKey(ctx.auth.principal)] : [])];
+  return capacityNotices(engine, { throttle: true, scopes }).catch(() => []);
 }

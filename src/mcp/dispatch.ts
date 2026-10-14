@@ -6,8 +6,7 @@
  * + missing-context bugs; this module exists to prevent that recurring.
  */
 
-import { capacityNotices } from '../core/persistence/capacity-snapshot.ts';
-import { principalKey } from '../core/persistence/model.ts';
+import { writeReceiptCapacityNotices } from '../core/persistence/capacity-snapshot.ts';
 import { affectsRecall } from '../core/types.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { operations, OperationError, enforceBoundClientOpAllowList, opError } from '../core/operations.ts';
@@ -1064,11 +1063,9 @@ export async function dispatchToolCall(
         return op.handler(ctx, safeParams);
       })
       : await op.handler(ctx, safeParams);
-    // Hot memory built before a write (forget, remember, …) is never served after it, on every transport.
-    if (op.mutating) invalidateHotMemoryForEngine(engine);
-    // #6696 (A4): a write's receipt carries the capacity notices, from the 60 s snapshot and at most once an hour per scope.
-    if (op.mutating) notices.push(...await capacityNotices(engine, { throttle: true,
-      scopes: ctx.remote === false ? undefined : ['brain', ...(ctx.auth?.principal ? [principalKey(ctx.auth.principal)] : [])] }).catch(() => []));
+    // Hot memory built before a write (forget, remember, …) is never served after it, on every transport;
+    // #6696 (A4): the write's receipt carries the capacity notices (60 s snapshot, at most hourly per scope).
+    if (op.mutating) { invalidateHotMemoryForEngine(engine); notices.push(...await writeReceiptCapacityNotices(engine, ctx)); }
     // [E4] verb success metrics: budget drops + entity hit/miss when present.
     {
       const r = result as { dropped_count?: number; found?: boolean; status?: string } | null;
