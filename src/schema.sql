@@ -337,6 +337,8 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- doctor's embeddings check ages the backlog from it, never from created_at)
   -- is added by migration v221 on every install, after the migration-added
   -- content_chunks columns, so fresh and upgraded brains share their ordinals.
+  -- v244: projected_byte_start / projected_byte_end (a prose chunk's UTF-8
+  -- span in its source's read projection) are added the same way.
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
   embedded_text_hash    TEXT,
@@ -1904,7 +1906,7 @@ CREATE TABLE IF NOT EXISTS extract_atoms_page_state (
 CREATE INDEX IF NOT EXISTS extract_atoms_page_state_tombstoned_idx
   ON extract_atoms_page_state (source_incarnation, content_hash, page_id) WHERE tombstoned;
 CREATE INDEX IF NOT EXISTS extract_atoms_page_state_page_idx ON extract_atoms_page_state (page_id);
--- (migration v244) Per-page embedding spend ledger for large pages
+-- (migration v245) Per-page embedding spend ledger for large pages
 -- (page-embedding-budget.ts): held pages wait for approval, capped pages are
 -- partially embedded up to embed.max_usd_per_page.
 CREATE TABLE IF NOT EXISTS page_embedding_budget (
@@ -1970,7 +1972,7 @@ CREATE TABLE IF NOT EXISTS dream_synthesis_completions (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, idempotency_key)
 );
--- Large pages A7 (migration v245): per-page extraction watermark and the
+-- Large pages A7 (migration v246): per-page extraction watermark and the
 -- durable receipt of a partial-input extraction (src/core/extraction-watermark.ts).
 CREATE TABLE IF NOT EXISTS page_extraction_state (
   page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,

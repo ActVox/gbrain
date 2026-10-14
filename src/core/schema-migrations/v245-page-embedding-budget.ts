@@ -2,8 +2,8 @@ import type { Migration } from './types.ts';
 
 // Applied by src/core/migrate.ts on the next initSchema(); the fresh-install
 // copy in src/schema.sql carries the same table.
-export const v244: Migration = {
-  version: 244,
+export const v245: Migration = {
+  version: 245,
   name: 'page_embedding_budget',
   // Large pages (above pages.inline_max_bytes): the durable per-page embedding
   // spend ledger behind embed.max_usd_per_page (page-embedding-budget.ts).

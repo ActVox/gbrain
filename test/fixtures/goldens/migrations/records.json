@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 240,
+    "count": 241,
     "gaps": [
       17,
       18,
@@ -54,7 +54,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 245,
+    "latest": 246,
     "records": [
       {
         "handler": {
@@ -3701,6 +3701,19 @@
       {
         "handler": "absent",
         "idempotent": true,
+        "name": "chunk_projected_spans",
+        "sql": {
+          "length": 171,
+          "sha256": "abc04e738f487873c5c7f676ca01643d0f2554204dda36799a093fc7bc02d988"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 244
+      },
+      {
+        "handler": "absent",
+        "idempotent": true,
         "name": "page_embedding_budget",
         "sql": {
           "length": 785,
@@ -3709,7 +3722,7 @@
         "sqlFor": "absent",
         "transaction": "absent",
         "verify": "absent",
-        "version": 244
+        "version": 245
       },
       {
         "handler": "absent",
@@ -3722,7 +3735,7 @@
         "sqlFor": "absent",
         "transaction": "absent",
         "verify": "absent",
-        "version": 245
+        "version": 246
       }
     ],
     "versions": [
@@ -3965,7 +3978,8 @@
       242,
       243,
       244,
-      245
+      245,
+      246
     ]
   },
   "normalizer": "migrations-record-v1"

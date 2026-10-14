@@ -13,8 +13,8 @@ import type { Migration } from './types.ts';
 // Hashes, offsets and counts only: no page text is stored. Rows go with
 // their page (ON DELETE CASCADE). DDL only, nothing to backfill: a page with
 // no row falls back to today's behavior and records the receipt.
-export const v245: Migration = {
-  version: 245,
+export const v246: Migration = {
+  version: 246,
   name: 'page_extraction_state',
   idempotent: true,
   sql: `

@@ -2683,7 +2683,7 @@
           },
           {
             "category": "brain",
-            "message": "No retrieval-affecting files changed in working tree.",
+            "message": "9 retrieval-affecting file(s) changed since HEAD: src/core/chunkers/recursive.ts, src/core/search/alias-hop.ts, src/core/search/chunk-windows.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
             "name": "eval_drift",
             "status": "ok"
           },
@@ -5869,7 +5869,7 @@
           },
           {
             "category": "brain",
-            "message": "No retrieval-affecting files changed in working tree.",
+            "message": "9 retrieval-affecting file(s) changed since HEAD: src/core/chunkers/recursive.ts, src/core/search/alias-hop.ts, src/core/search/chunk-windows.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
             "name": "eval_drift",
             "status": "ok"
           },
