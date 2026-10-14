@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { admitWriteGroupInTransaction } from '../src/core/persistence/journal.ts';
-import { BACKGROUND_PAUSE_KEY, BACKGROUND_PRODUCERS, resolveAdmissionOrigin, withAdmissionOrigin } from '../src/core/persistence/admission-origin.ts';
+import { BACKGROUND_PAUSE_KEY, BACKGROUND_PRODUCERS, readBackgroundPauseShare, resolveAdmissionOrigin, withAdmissionOrigin } from '../src/core/persistence/admission-origin.ts';
 import { checkPersistenceCapacity } from '../src/commands/doctor/checks/persistence-capacity.ts';
 import { CODES } from '../src/core/error-registry.ts';
 import { freshBrainFactory, requestFixture } from './helpers/persistence-request-fixture.ts';
@@ -49,6 +49,14 @@ for (const kind of testBackends()) {
       const engine = await factory.fresh();
       await withEnv({ GBRAIN_HOME: scratch, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, () => fn(engine));
     }, 120_000);
+
+    check('the pause line reads as a percent, a share reads the same, and an invalid value keeps the default', async engine => {
+      expect(await readBackgroundPauseShare(engine)).toBe(0.8);
+      for (const [value, share] of [['90', 0.9], ['0.6', 0.6], ['100', 1], ['1', 1], ['0', 0.8], ['250', 0.8], ['abc', 0.8]] as const) {
+        await engine.setConfig(BACKGROUND_PAUSE_KEY, value);
+        expect(await readBackgroundPauseShare(engine)).toBe(share);
+      }
+    });
 
     check('a background admission past the line refuses with no receipt; an interactive one is admitted', async engine => {
       const requests = await requestFixture(engine);

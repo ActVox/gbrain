@@ -12,7 +12,7 @@
  * `ctx.remote`: an autopilot phase writes with `remote: true` too.
  *
  * Near a cumulative cap (`persistence.capacity.background_pause_pct`, default
- * 0.8, of a principal's or the brain's request ids or receipt bytes) a
+ * 80 percent, of a principal's or the brain's request ids or receipt bytes) a
  * background admission refuses `write_capacity_backpressure` before any
  * receipt exists, so the rest stays free for interactive writes.
  */
@@ -45,11 +45,12 @@ export function isAdmissionOrigin(value: unknown): value is AdmissionOrigin {
   return value === 'interactive' || value === 'background';
 }
 
-/** The pause line as a share of each cumulative cap (0 < share <= 1). */
+/** The pause line as a share of each cumulative cap (0 < share <= 1); the setting is a percent (80), and a share (0.8) reads the same. */
 export async function readBackgroundPauseShare(engine: SqlEngine): Promise<number> {
   const [row] = await engine.executeRaw<{ value: string }>('SELECT value FROM config WHERE key=$1', [BACKGROUND_PAUSE_KEY]);
   const value = row ? Number(row.value) : DEFAULT_BACKGROUND_PAUSE_SHARE;
-  return Number.isFinite(value) && value > 0 && value <= 1 ? value : DEFAULT_BACKGROUND_PAUSE_SHARE;
+  if (!Number.isFinite(value) || value <= 0 || value > 100) return DEFAULT_BACKGROUND_PAUSE_SHARE;
+  return value > 1 ? value / 100 : value;
 }
 
 /**
