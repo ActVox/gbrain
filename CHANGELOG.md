@@ -10,6 +10,21 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.219.0] - 2026-10-14
+
+**Writes that ended without committing are now summarized and explained, and the few that block work are named (#6650).** Every write leaves a receipt, and receipts that ended `failed`, `conflict` or `cancelled` used to pile up with no summary: an agent couldn't tell the one that holds a root from hundreds a later write already superseded or an older build left behind. gbrain now classifies each such receipt at read time (category, class, safe actions, whether a person decides, a structured fix) and stores nothing new. A new doctor check, `persistence_terminal_failures`, warns when a receipt blocks work now (a publication recovery record or a sync checkpoint blocker) or when an unresolved receipt is a gbrain-defect class. A 24-hour spike warns only when nothing else does, and a spike written by builds older than the fix says so, names the build and points at the write owner to upgrade or restart. Superseded rows and rows from builds older than their fixing release count as historical and never warn.
+
+### Itemized changes
+
+- **Classifier** (`src/core/persistence/terminal-classify.ts`): `classifyTerminal` routes each receipt by its recovery record, its typed knock-on marker, and the origin or cause it recorded. A receipt whose code and origin don't say what happened is `diagnosis_required`, and its fix is read-only writer status, never a guess. It also owns the supersession rule `gbrain repair failed-writes` uses.
+- **Bounded readers** (`src/core/persistence/terminal-failures.ts`): one set-based aggregate with a 5 s statement deadline and a 2 s connection deadline; past either the result is `unknown`, never an empty pile. The drill-down scans at most 2,000 receipts per call and pages with a cursor. Thresholds: `persistence.terminal_failures.window_days` (default 7, clamped to `persistence.receipt_retention_days`), `spike_factor` (3) and `spike_min` (25).
+- **`gbrain write-request <id>`** adds `write_error_reason`, `suggestion` and a `diagnosis` with a rendered `fix` for such receipts.
+- **`gbrain sync status`** adds `terminal_failures` (active blockers, unresolved, historical, the drill-down command) and names a recovery record as `next` when nothing else is.
+- **`gbrain sources writer failures <source>`** (read-only) lists the receipts or groups them (`--group-by category`), each group with an exact drill-down filter; a table by default, JSON with `--json`. A resident owner advertises the operation in a new `administration_extensions` capability key, so older clients and owners interoperate.
+- **`/metrics`** (admin only) adds per-source gauges `gbrain_writer_terminal_failures_{active_blockers,unresolved,historical,new_24h,defects}` and `_known`, from one aggregate shared by every scrape for 60 s. `/health` is unchanged.
+- **Fact-fence step** (`src/core/facts/unfenced-facts.ts`): the up-front lifetime-ID check counts only pages that will submit, so a page suppressed by a recent identical refusal, or one with nothing adoptable, no longer pushes the whole step to the cap and refuses it.
+- Docs: [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures), the troubleshooting row, write-refusals and the maintain skill.
+
 ## [0.60.218.0] - 2026-10-14
 
 **Fencing legacy facts no longer leaks, loops or blocks.** When a legacy fact is adopted into a fence row that an earlier, interrupted run left behind, the row is now rebuilt from the stored fact, so the fact's own kind, dates, confidence, visibility and speaker attribution are kept. Before, a leftover row with a different visibility made the adoption refuse every time, and one with the same visibility overwrote the fact's metadata. A managed adoption that gbrain refused as a planning defect is no longer resubmitted every cycle, so the writer stops collecting one identical failed request per page per cycle. And one fact that can't be fenced now holds up only its own page: the phantom-redirect pass runs for the rest of the source.

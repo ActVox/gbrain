@@ -185,6 +185,26 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     expect(validateTerminalConfigValue('persistence.terminal_failures.spike_factor', '2.5')).toBeNull();
   });
 
+  test('a spike an older write owner drives says so and names its build, instead of reading as a new defect', async () => {
+    await engine.setConfig('persistence.terminal_failures.spike_min', '3');
+    for (let i = 0; i < 4; i++) await seed({ slug: `notes/k${i}`, operation: 'submit_job', state: 'cancelled', code: 'cancelled', detail: knockOnDetail('window_predecessor', null), build: '0.60.200.0', hoursAgo: 1 });
+    await seed({ slug: 'notes/c', state: 'conflict', code: 'revision_conflict', hoursAgo: 1 });
+    const summary = await readTerminalFailureSummary(engine);
+    if (summary.status !== 'ok') throw new Error('unknown');
+    expect(summary.sources[0]!.new_last_24h_older_builds).toEqual({ rows: 4, builds: ['0.60.200.0'] });
+    const check = (await terminalFailuresCheck(engine))!;
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('4 of them were written by gbrain 0.60.200.0, older than the release that fixed their class: an older write owner is still producing these; upgrade or restart it.');
+    expect((check.fix as { argv: string[] }).argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', SOURCE, '--json']);
+    expect(check.details).toMatchObject({ spike: { spiking: true, older_builds: { rows: 4, builds: ['0.60.200.0'] } } });
+    // The same spike from the current build stays the generic drill-down.
+    await engine.executeRaw('DELETE FROM persistence_requests');
+    for (let i = 0; i < 4; i++) await seed({ slug: `notes/k${i}`, operation: 'submit_job', state: 'cancelled', code: 'cancelled', detail: knockOnDetail('window_predecessor', null), hoursAgo: 1 });
+    const current = (await terminalFailuresCheck(engine))!;
+    expect(current.message).not.toContain('older write owner');
+    expect((current.fix as { argv: string[] }).argv.slice(0, 4)).toEqual(['gbrain', 'sources', 'writer', 'failures']);
+  });
+
   test('the window is clamped to receipt retention', async () => {
     await engine.setConfig('persistence.receipt_retention_days', '3');
     expect(await readTerminalThresholds(engine, 7)).toMatchObject({ windowDays: 3, clamped: true, retentionDays: 3 });

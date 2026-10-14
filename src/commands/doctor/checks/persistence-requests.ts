@@ -287,6 +287,16 @@ export async function terminalFailuresCheck(engine: BrainEngine | null, sourceId
     const drill = (sourceId: string) => ['gbrain', 'sources', 'writer', 'failures', sourceId, '--group-by', 'category', '--json'];
     if (spike) {
       const busiest = [...sources].sort((a, b) => b.new_last_24h - a.new_last_24h)[0]!;
+      // Rows a build older than their class's fix wrote are an old owner still running, not a new defect: say so and name it.
+      const older = sources.reduce((n, s) => n + s.new_last_24h_older_builds.rows, 0);
+      if (older * 2 > last24h) {
+        const builds = [...new Set(sources.flatMap(s => s.new_last_24h_older_builds.builds))].sort();
+        const owner = [...sources].sort((a, b) => b.new_last_24h_older_builds.rows - a.new_last_24h_older_builds.rows)[0]!.source_id;
+        return { name, status: 'warn', details: { ...details, spike: { ...details.spike, older_builds: { rows: older, builds } } },
+          fix: agentFix(['gbrain', 'sources', 'writer', 'status', '--source', owner, '--json'], 'Read-only: names the write owner of the source, its process and the gbrain version it runs.', name, { docs }),
+          message: `${last24h} write receipt(s) ended without committing in the last 24 h, above ${thresholds.spikeFactor}× the 7-day median (${sevenDayMedian(daily)}/day), but ${older} of them `
+            + `were written by gbrain ${builds.join(', ') || 'an older build'}, older than the release that fixed their class: an older write owner is still producing these; upgrade or restart it. ${counts}.` };
+      }
       return { name, status: 'warn', details,
         fix: agentFix(drill(busiest.source_id), 'Read-only: groups the source\'s unresolved receipts by code, origin and category, each with its fix and drill-down filter.', name, { docs }),
         message: `${last24h} write receipt(s) ended without committing in the last 24 h, above ${thresholds.spikeFactor}× the 7-day median (${sevenDayMedian(daily)}/day; `

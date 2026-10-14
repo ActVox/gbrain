@@ -107,6 +107,8 @@ export interface TerminalSourceSummary {
   unresolved: { rows: number; distinct_slugs: number; distinct_intents: number; oldest_at: string | null; oldest_age_seconds: number | null };
   historical_rows: number;
   new_last_24h: number;
+  /** Of `new_last_24h`, the receipts a build older than its class's fixing release wrote (`TERMINAL_FIXED_IN`), by build. */
+  new_last_24h_older_builds: { rows: number; builds: string[] };
   daily_7d: number[];
   defects: Array<{ category: TerminalCategory; code: string; origin: string | null; rows: number; human_reason?: string; action: Action }>;
   categories: Array<{ category: TerminalCategory; code: string; origin: string | null; rows: number; unresolved: number; historical: number; class: string; needs_human: boolean }>;
@@ -156,7 +158,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
   const summaryOf = (sourceId: string) => {
     let s = bySource.get(sourceId);
     if (!s) bySource.set(sourceId, s = { source_id: sourceId, active_blockers: [], unresolved: { rows: 0, distinct_slugs: 0, distinct_intents: 0, oldest_at: null, oldest_age_seconds: null },
-      historical_rows: 0, new_last_24h: 0, daily_7d: [0, 0, 0, 0, 0, 0, 0], defects: [], categories: [] });
+      historical_rows: 0, new_last_24h: 0, new_last_24h_older_builds: { rows: 0, builds: [] }, daily_7d: [0, 0, 0, 0, 0, 0, 0], defects: [], categories: [] });
     return s;
   };
   // Per-group oldest unresolved: the GROUPING SETS total row's oldest covers every row, so the unresolved one is taken from groups.
@@ -170,6 +172,10 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
     }
     const verdict = verdictOf(row);
     const n = Number(row.rows);
+    if (verdict.historical && Number(row.n_24h) > 0) {
+      s.new_last_24h_older_builds.rows += Number(row.n_24h);
+      if (row.build && !s.new_last_24h_older_builds.builds.includes(row.build)) s.new_last_24h_older_builds.builds.push(row.build);
+    }
     if (row.has_recovery) {
       (row.recovery_ids ?? []).forEach((id, i) => {
         const v = verdictOf({ ...row, request_id: id, slug: row.recovery_slugs?.[i] });

@@ -102,6 +102,25 @@ export function renderTerminalFailureMetrics(summary: TerminalSummary): string {
   return lines.join('\n');
 }
 
+/** #6650: how long one terminal-failure aggregate serves /metrics scrapes (a 15 s scrape cadence runs the query once a minute). */
+export const TERMINAL_METRICS_TTL_MS = 60_000;
+const terminalSummaries = new WeakMap<BrainEngine, { at: number; summary: Promise<TerminalSummary> }>();
+
+/**
+ * The aggregate for /metrics, shared by every scrape within `TERMINAL_METRICS_TTL_MS` (in flight included). One query covers
+ * every source, so the cache is the whole summary per engine; an `unknown` result is cached too, so a database that is
+ * timing out is not asked again on every scrape.
+ */
+export function cachedTerminalSummary(engine: BrainEngine, now: number = Date.now()): Promise<TerminalSummary> {
+  const hit = terminalSummaries.get(engine);
+  if (hit && now - hit.at < TERMINAL_METRICS_TTL_MS) return hit.summary;
+  const summary = readCheckpointBlockerMap(engine)
+    .then(checkpointBlockers => readTerminalFailureSummary(engine, { checkpointBlockers }))
+    .catch((error): TerminalSummary => ({ status: 'unknown', window_days: 0, reason: error instanceof Error ? error.message : String(error) }));
+  terminalSummaries.set(engine, { at: now, summary });
+  return summary;
+}
+
 export function renderPrometheusMetrics(
   counters: MetricsCounters,
   now: number = Date.now(),
@@ -347,9 +366,7 @@ export function mountMetrics(app: Express, ctx: ServeHttpContext): void {
   // request/error/latency series profile a personal brain's usage, so this
   // is not a public surface (the original PR served it unauthenticated).
   app.get('/metrics', requireAdmin, async (_req: Request, res: Response) => {
-    const summary: TerminalSummary = await readCheckpointBlockerMap(ctx.engine)
-      .then(checkpointBlockers => readTerminalFailureSummary(ctx.engine, { checkpointBlockers }))
-      .catch(error => ({ status: 'unknown' as const, window_days: 0, reason: error instanceof Error ? error.message : String(error) }));
+    const summary = await cachedTerminalSummary(ctx.engine);
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(renderPrometheusMetrics(metricsCounters) + renderTerminalFailureMetrics(summary));
   });
