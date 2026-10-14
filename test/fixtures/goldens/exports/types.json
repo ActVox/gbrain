@@ -4566,7 +4566,7 @@
         "kind": "variable",
         "name": "MAX_FILE_SIZE",
         "signature": [
-          "5000000"
+          "number"
         ]
       },
       {

@@ -29,6 +29,7 @@ import {
   type Check,
 } from '../src/commands/doctor.ts';
 import { buildEmbedSkipMarker } from '../src/core/embed-skip.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 
 let engine: PGLiteEngine;
 
@@ -214,7 +215,7 @@ describe('buildChecks — orchestrator against PGLite', () => {
     // the postgres.js singleton, which is never connected on the default
     // PGLite engine — so every run reported
     // "Skipped (No database connection: connect() has not been called)".
-    const big = 'oversized page body prose for the block threshold probe. '.repeat(11_000); // ~630KB > 500KB default
+    const big = 'oversized page body prose for the block threshold probe. '.repeat(Math.ceil((PAGE_MAX_BYTES + 1) / 57)); // over the 24 MiB default block
     await engine.putPage('wiki/oversized-probe-1871', {
       type: 'note',
       title: 'Oversized Probe 1871',
@@ -253,7 +254,7 @@ describe('buildChecks — orchestrator against PGLite', () => {
     // (an object from buildEmbedSkipMarker, not a bare boolean) — the
     // canonical writer (src/core/content-sanity.ts) never writes a boolean,
     // and the exclusion must match what actually lands in frontmatter.
-    const big = 'oversized page body prose for the embed_skip exclusion probe. '.repeat(11_000);
+    const big = 'oversized page body prose for the embed_skip exclusion probe. '.repeat(Math.ceil((PAGE_MAX_BYTES + 1) / 62));
     await engine.putPage('wiki/oversized-embed-skip-probe', {
       type: 'note',
       title: 'Oversized Embed-Skip Probe',
@@ -285,7 +286,7 @@ describe('buildChecks — orchestrator against PGLite', () => {
     // embed-skip consumer in the codebase (embed.ts, postgres-engine.ts,
     // pglite-engine.ts). This check must stay consistent with that shared
     // contract rather than inventing its own true/false semantics.
-    const big = 'oversized page body prose for the embed_skip-absent probe. '.repeat(11_000);
+    const big = 'oversized page body prose for the embed_skip-absent probe. '.repeat(Math.ceil((PAGE_MAX_BYTES + 1) / 59));
     await engine.putPage('wiki/oversized-embed-skip-absent-probe', {
       type: 'note',
       title: 'Oversized Embed-Skip-Absent Probe',

@@ -132,12 +132,18 @@ describe('#2822 — chunk_skip_reason on 0-chunk puts', () => {
   });
 
   test('oversized content the gate marks embed_skip → embed_skip', async () => {
-    const result = (await putPage.handler(makeCtx(), {
-      slug: 'inbox/skipped-embed',
-      content: `---\ntitle: Big\n---\n\n${'Some prose that keeps going past the block threshold. '.repeat(10_000)}`,
-    })) as { chunks: number; chunk_skip_reason?: string };
-    expect(result.chunks).toBe(0);
-    expect(result.chunk_skip_reason).toBe('embed_skip');
+    // An operator's bytes_block under the page ceiling: the gate stores the page with embed_skip and no chunks.
+    await engine.setConfig('content_sanity.bytes_block', '500000');
+    try {
+      const result = (await putPage.handler(makeCtx(), {
+        slug: 'inbox/skipped-embed',
+        content: `---\ntitle: Big\n---\n\n${'Some prose that keeps going past the block threshold. '.repeat(10_000)}`,
+      })) as { chunks: number; chunk_skip_reason?: string };
+      expect(result.chunks).toBe(0);
+      expect(result.chunk_skip_reason).toBe('embed_skip');
+    } finally {
+      await engine.unsetConfig('content_sanity.bytes_block');
+    }
   });
 
   // #6259: a local put_page is not an owner-tier path, so an embed_skip it plants is stripped.

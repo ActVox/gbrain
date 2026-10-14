@@ -33,8 +33,8 @@
           {
             "lane": "pool",
             "params": [],
-            "sql": "SELECT count(*)::int AS count FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')",
-            "textSha256": "f7c19af79f144c19284a85521a93bf64cc5034c5784271637faefd9faacf99a6"
+            "sql": "SELECT count(*)::int AS count FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')",
+            "textSha256": "97bfdf50343c2c13a69749e54ca43f8a8831070a4bda17853d6c06f667697009"
           }
         ],
         "signature+includeNullSignature": [
@@ -49,8 +49,8 @@
             "params": [
               "string"
             ],
-            "sql": "SELECT count(*)::int AS count FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND (cc.\"embedding\" IS NULL OR p.embedding_signature IS NULL OR p.embedding_signature <> $1) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')",
-            "textSha256": "eaf3dbafdaa135ddd90d480f2fed763481c3e0ed23b37c52f57888b7f758c866"
+            "sql": "SELECT count(*)::int AS count FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND (cc.\"embedding\" IS NULL OR p.embedding_signature IS NULL OR p.embedding_signature <> $1) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')",
+            "textSha256": "da53d97719d3277cfbdfda19c015c9b2b05f80723dccfad34cbb7594e70b30df"
           }
         ],
         "signature+sourceId": [
@@ -66,8 +66,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT count(*)::int AS count FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND (cc.\"embedding\" IS NULL OR (p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1)) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND p.source_id = $2",
-            "textSha256": "617a3e9d3faff29727611581e3391e39cdb18f073a32a9db523d7d5604cbfdc0"
+            "sql": "SELECT count(*)::int AS count FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND (cc.\"embedding\" IS NULL OR (p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1)) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND p.source_id = $2",
+            "textSha256": "112deb1371695b66247475c2092862ab7bda82f38933168df00b8bb399671571"
           }
         ]
       },
@@ -296,8 +296,8 @@
             "params": [
               "array<>"
             ],
-            "sql": "UPDATE content_chunks cc SET \"embedding\" = NULL, embedded_at = NULL, embedded_text_hash = NULL, embedding_pending_since = now() FROM pages p WHERE cc.page_id = p.id AND p.source_id=ANY($1::text[]) AND EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived) AND p.deleted_at IS NULL AND cc.\"embedding\" IS NOT NULL AND cc.embedded_text_hash IS NOT NULL AND cc.embedded_text_hash <> md5(cc.chunk_text) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') RETURNING cc.page_id",
-            "textSha256": "1923e910207cfe4111f94acf3d93af891997f1f1ef503ede9593b0650ccb54e7"
+            "sql": "UPDATE content_chunks cc SET \"embedding\" = NULL, embedded_at = NULL, embedded_text_hash = NULL, embedding_pending_since = now() FROM pages p WHERE cc.page_id = p.id AND p.source_id=ANY($1::text[]) AND EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived) AND p.deleted_at IS NULL AND cc.\"embedding\" IS NOT NULL AND cc.embedded_text_hash IS NOT NULL AND cc.embedded_text_hash <> md5(cc.chunk_text) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') RETURNING cc.page_id",
+            "textSha256": "fb381f53bfef8651bd109cb1182781bd25f65cf2a1b0b94ffbfc3d97186acc08"
           },
           {
             "event": "commit",
@@ -330,8 +330,8 @@
               "array<>",
               "string"
             ],
-            "sql": "UPDATE content_chunks cc SET \"embedding\" = NULL, embedded_at = NULL, embedded_text_hash = NULL, embedding_pending_since = now() FROM pages p WHERE cc.page_id = p.id AND p.source_id=ANY($1::text[]) AND EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived) AND p.deleted_at IS NULL AND cc.\"embedding\" IS NOT NULL AND cc.embedded_text_hash IS NOT NULL AND cc.embedded_text_hash <> md5(cc.chunk_text) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND p.source_id = $2 RETURNING cc.page_id",
-            "textSha256": "8aa457cf6fd0f7a5891eb13db34d5d109faebe46ef2c798adf18622dac5a2687"
+            "sql": "UPDATE content_chunks cc SET \"embedding\" = NULL, embedded_at = NULL, embedded_text_hash = NULL, embedding_pending_since = now() FROM pages p WHERE cc.page_id = p.id AND p.source_id=ANY($1::text[]) AND EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived) AND p.deleted_at IS NULL AND cc.\"embedding\" IS NOT NULL AND cc.embedded_text_hash IS NOT NULL AND cc.embedded_text_hash <> md5(cc.chunk_text) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND p.source_id = $2 RETURNING cc.page_id",
+            "textSha256": "ab5f41f2171c1b82bfd50dba397be0dbd0f23849bb1ffe55b2a1bc389ba13a5b"
           },
           {
             "event": "commit",
@@ -453,8 +453,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND (cc.page_id, cc.chunk_index) > ($1, $2) ORDER BY cc.page_id, cc.chunk_index LIMIT $3",
-            "textSha256": "7485ae74ce21c864245aa7feecc993e754f5a92be9a173ffbc820cb9c9982610"
+            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND (cc.page_id, cc.chunk_index) > ($1, $2) ORDER BY cc.page_id, cc.chunk_index LIMIT $3",
+            "textSha256": "30e3022cbdd786647cd5d83b3e6e290d685612da6f4ff4d0e60ae2d32a62da47"
           }
         ],
         "sourceId": [
@@ -472,8 +472,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND (cc.page_id, cc.chunk_index) > ($2, $3) ORDER BY cc.page_id, cc.chunk_index LIMIT $4",
-            "textSha256": "552e046582d33013abd64e01d8aa7c165f4ce31105f23f14a9268e385a8b7a8c"
+            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND (cc.page_id, cc.chunk_index) > ($2, $3) ORDER BY cc.page_id, cc.chunk_index LIMIT $4",
+            "textSha256": "2bcb4b1c3ef490a7c0dd05a40de054a9a723e102f1c6d7ef5ea9ba4d2907c752"
           }
         ],
         "updated_desc": [
@@ -488,8 +488,8 @@
             "params": [
               "number"
             ],
-            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $1",
-            "textSha256": "b50b804738defb5e6746ba788e604689399938c0ff67579bd035b03fa43dcd51"
+            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $1",
+            "textSha256": "ae7a9e008a2ee2e9a06c81076831d0aab18e2a7687caf4ddebe242f4af32c5d3"
           }
         ],
         "updated_desc+cursor": [
@@ -510,8 +510,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ( p.updated_at < $1::timestamptz OR (p.updated_at = $2::timestamptz AND p.id > $3) OR (p.updated_at = $4::timestamptz AND p.id = $5 AND cc.chunk_index > $6) ) ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $7",
-            "textSha256": "5ac6b67b9ace4e0a6f2f67b416795073440d15cbc9628b08fbab911ec6ca891f"
+            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND ( p.updated_at < $1::timestamptz OR (p.updated_at = $2::timestamptz AND p.id > $3) OR (p.updated_at = $4::timestamptz AND p.id = $5 AND cc.chunk_index > $6) ) ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $7",
+            "textSha256": "a6705a1ff3131f3f832055d173b08efaf220385b9ea9bede8b02dc3c009590bc"
           }
         ],
         "updated_desc+sourceId": [
@@ -527,8 +527,8 @@
               "string",
               "number"
             ],
-            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $2",
-            "textSha256": "2b767ab1b7ba583d593e075e19b79072f3e21b3891e85d0a6c3fc58ddbf0b424"
+            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $2",
+            "textSha256": "d2a8d36b4683a0ae5b0983b0d06fb22e1cc0e6360b6e0a8593c46014adefe2f1"
           }
         ],
         "updated_desc+sourceId+cursor": [
@@ -550,8 +550,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ( p.updated_at < $2::timestamptz OR (p.updated_at = $3::timestamptz AND p.id > $4) OR (p.updated_at = $5::timestamptz AND p.id = $6 AND cc.chunk_index > $7) ) ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $8",
-            "textSha256": "ba7b2efcb89df8907fad094882719d8cba4b24b23bb8d3bdec1229133001c655"
+            "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND ( p.updated_at < $2::timestamptz OR (p.updated_at = $3::timestamptz AND p.id > $4) OR (p.updated_at = $5::timestamptz AND p.id = $6 AND cc.chunk_index > $7) ) ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $8",
+            "textSha256": "e7d5d93ccb96ab546168596ee9ea4b15d2441d62bb0d05d4505f4dc1d10a8c98"
           }
         ]
       },
@@ -580,8 +580,8 @@
           {
             "lane": "pool",
             "params": [],
-            "sql": "SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')",
-            "textSha256": "293069e934731c25886cdeb52825015630186dbe93a0fabe01b67e10cb81c4e4"
+            "sql": "SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')",
+            "textSha256": "67b4ffd6b3b6383b7b7d4a9737bd2e6fa6a4be6c63106a284daa636e37a55168"
           }
         ],
         "signature": [
@@ -596,8 +596,8 @@
             "params": [
               "string"
             ],
-            "sql": "SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND (cc.\"embedding\" IS NULL OR (p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1)) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')",
-            "textSha256": "0af30c01b21c5d96c909aba54e4e4843cbdbf919b281441dc75d2698e3f1ce64"
+            "sql": "SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.deleted_at IS NULL AND (cc.\"embedding\" IS NULL OR (p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1)) AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')",
+            "textSha256": "9c034aef0db1eb12ebc2f41441bdb1bb9a71f59663efbfa7ca19099e7e8aaa97"
           }
         ]
       },

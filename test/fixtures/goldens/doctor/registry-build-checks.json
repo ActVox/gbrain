@@ -783,11 +783,11 @@
       },
       {
         "category": "brain",
-        "name": "fence_integrity"
+        "name": "extraction_input_truncated"
       },
       {
         "category": "brain",
-        "name": "extraction_input_truncated"
+        "name": "fence_integrity"
       },
       {
         "category": "ops",
