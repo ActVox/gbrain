@@ -37,6 +37,7 @@ import { claudePluginProvidesName, codexPluginProvidesName } from '../core/boots
 import { claudeUserSettingsPath, type ClaudeHookEvent } from '../core/bootstrap/host-specs.ts';
 import { readHarnessReceiptState } from '../core/bootstrap/format.ts';
 import { smokeStdioRegistration } from './doctor/checks/harness-wiring.ts';
+import { finishFreshSetupMigrations } from './setup-migrations.ts';
 import type { McpSurface } from '../mcp/surface.ts';
 import {
   SETUP_CAPABILITIES,
@@ -430,11 +431,13 @@ function runBrainInit(initArgv: string[], out: Out, harness: SetupHarnessId): No
   say(out, `Creating the brain: ${initArgv.join(' ')}`);
   const child = Bun.spawnSync(initArgv, { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: process.env });
   const initOut = child.stdout?.toString() ?? '';
-  process.stderr.write(child.stderr?.toString() ?? '');
+  const initErr = child.stderr?.toString() ?? '';
   if (child.exitCode !== 0) {
+    process.stderr.write(initErr);
     process.stderr.write(initOut);
     throw new Error(`\`${initArgv.join(' ')}\` exited ${child.exitCode}; nothing else was written. Fix the init error above, then run setup again.`);
   }
+  process.stderr.write(finishFreshSetupMigrations(initArgv[0]!, initErr));
   try {
     const doc = JSON.parse(initOut) as { path?: string; notices?: unknown[] };
     if (doc.path) say(out, `Brain ready at ${doc.path}`);
