@@ -199,7 +199,7 @@ export function maintenanceDriftRefusal(sourceId: string, slug: string): Operati
 }
 
 /** #6696 (A12): maintenance kinds whose preparer passes `allowMissingFile` (chronicle, stale-atom retirement): a missing canonical file publishes, so it is no ghost. */
-const PUBLISHES_WITHOUT_FILE = new Set(['managed_maintenance_chronicle_event', 'managed_maintenance_chronicle_retire', 'managed_maintenance_retire_stale_atoms']);
+export const PUBLISHES_WITHOUT_FILE: ReadonlySet<string> = new Set(['managed_maintenance_chronicle_event', 'managed_maintenance_chronicle_retire', 'managed_maintenance_retire_stale_atoms']);
 
 /** #6696 (A12): `source_changed` / `canonical_file_missing` before admission: the page's recorded file is gone; never a new request. */
 export function maintenanceGhostRefusal(sourceId: string, slug: string): OperationError {
