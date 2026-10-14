@@ -58,6 +58,8 @@ import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { contentHash } from '../src/core/utils.ts';
 import { CODES } from '../src/core/error-registry.ts';
 import { CONSUMER_LIVE_MS, CONSUMER_RENEWAL_MS } from '../src/core/persistence/consumer-heartbeat.ts';
+import type { FaultPoint } from '../src/core/persistence/fault-points.ts';
+import { PUBLICATION_CEILING_DEFAULT_MS, publicationLeaseMs } from '../src/core/persistence/publication-deadline.ts';
 import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
 import { keylessBrainEnv } from './helpers/provider-env.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -84,7 +86,7 @@ const BIG = 'companies/acme-example';
  * never fires for it; `lane:applied` is the bulk group's applied-but-not-
  * committed point, once per group.
  */
-const FAULT_POINTS = ['publication:before_commit', 'publication:after_commit', 'lane:applied'] as const;
+const FAULT_POINTS = ['publication:before_commit', 'publication:after_commit', 'lane:applied'] as const satisfies readonly FaultPoint[];
 const MAX_RECOVERY_RUNS = 3;
 /** Oracle tests are named by the persistence gate's violation class (scripts/persistence/model.ts) they would report. */
 const as = (violation: ViolationClass, title: string): string => `[${violation}] ${title}`;
@@ -406,6 +408,18 @@ async function runWriter(slugs: string[], stop: () => boolean): Promise<void> {
 }
 
 // ---------------------------------------------------------------- scenario
+
+// Runs on every invocation, harness enabled or not: the calibration the chaos run's verdicts rest on.
+describe('convergence harness calibration (#6650 L0)', () => {
+  test('the owner-kill stall bound is below the default publication lease it exists to catch', () => {
+    expect(OWNER_KILL_STALL_BOUND_S * 1000).toBeLessThan(publicationLeaseMs(PUBLICATION_CEILING_DEFAULT_MS));
+  });
+  test('a seed reproduces its fault plan and writer targets', () => {
+    const draw = (seed: number) => { const next = prng(seed); return Array.from({ length: 16 }, next); };
+    expect(draw(SEED)).toEqual(draw(SEED));
+    expect(draw(SEED)).not.toEqual(draw(SEED + 1));
+  });
+});
 
 describeConvergence('managed sync converges after owner, client and writer chaos (#6650 L0)', () => {
   beforeAll(async () => {
