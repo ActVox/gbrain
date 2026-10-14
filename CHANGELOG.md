@@ -10,6 +10,16 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A worker whose memory watchdog fires while a claim is mid-flight now aborts that job too.** `gracefulShutdown` aborted only the jobs already registered in `inFlight`; a claim whose `UPDATE … RETURNING` had committed but whose result had not reached the poll loop launched afterwards with a live per-job signal, ran unaborted through the 30 s drain, and ended on the SIGTERM path (`worker_shutdown` hand-back, or the handler's own text for an `UnrecoverableError`) instead of `aborted: watchdog`. This was the `worker-shutdown-error-matrix` CI flake: the test observed `active` on a second Postgres connection and fired the watchdog inside that round trip.
+
+### Itemized changes
+
+- `src/core/minions/worker.ts` (+3 lines, ceiling 1777): `gracefulShutdown` records its reason; `launchJob` aborts a job it registers after the shutdown fired with that reason, so the job takes the same abort path as one that was already in flight (attempt burned, `delayed`; `UnrecoverableError` dead).
+- `test/worker-shutdown-error-matrix.test.ts`: a forced case holds the committed claim's result until the watchdog has fired (both engines; fails on the previous worker, passes now).
+- Docs: `docs/architecture/key-files/core-minions-2.md` worker entry.
+
 ## [0.60.217.0] - 2026-10-13
 
 **Pages whose writes keep refusing `source_changed` can now be listed, resolved and measured, and maintenance stops adding to the pile (#6643).** A page whose canonical file differs from its database copy refuses every coordinated write with `source_changed` (`file_database_drift`) until someone reconciles it. Nothing listed those pages, nothing resolved them in bulk, and `synthesize_concepts` paid for a new narrative for each drifted concept on every cycle and left another conflict receipt each time. Now the audit groups the receipts by page, maintenance checks the file before it spends or admits anything, `gbrain repair file-drift` resolves the pages through canonical reconciliation, and doctor counts what is left.
