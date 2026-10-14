@@ -173,6 +173,8 @@ export async function compactionSkipsUnfinishedReceipts(databaseUrl?: string) {
 export async function capacityWarnsAndRefusalNamesTheKey(databaseUrl?: string) {
   await managedBrain(async ({ engine, ctx }) => {
     expect(await checkPersistenceCapacity(engine)).toMatchObject({ status: 'ok', details: { exact: true, truncated: false } });
+    // The percentage line alone: the days-to-exhaustion thresholds (#6696) are off for this scenario.
+    await engine.setConfig('persistence.capacity.warn_days', '0'); await engine.setConfig('persistence.capacity.fail_days', '0');
     for (let i = 0; i < 8; i++) await put(ctx, `notes/cap-${i}`, `Cap ${i}.`);
     await engine.setConfig('persistence.limits.principal_outstanding', '10');
     expect((await checkPersistenceCapacity(engine)).status).toBe('ok');
