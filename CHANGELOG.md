@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.232.0] - 2026-10-14
 
 **Writes stop failing at the cumulative quota wall (#6696).** A brain running autopilot hit `queue_capacity` on every write once its receipt bytes reached the 1.5 GiB principal cap, because every receipt held a 16 KiB reservation it never gave back and nothing warned before the wall. Receipts are now charged for what they keep, the defaults cover a year at 5,000 writes a day, background work pauses before the wall so your own writes keep working, and doctor, notices and `/metrics` say how many days are left.
 
