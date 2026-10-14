@@ -32,6 +32,15 @@ identifiers and attribution are available in the pre-removal Git revision
   - `tar -xf` runs under 90 s and `zig version` under 60 s, killed with SIGKILL on overrun with `<phase> did not finish within <n>s`.
   - The script prints the download, extraction and version-check times.
   - `GBRAIN_ZIG_SOURCES` and `GBRAIN_ZIG_DOWNLOAD_BUDGET_S` point it at a local mirror (and the tests).
+- **Shard weights refreshed** (`scripts/{test,serial,e2e}-weights.json` and their `.metadata.json`) from Test run 38587567819 (unit, serial) and the full E2E run 38521702276. Unweighted share, before → after, counted the way `check:weight-coverage` counts:
+
+  | Lane | Before | After |
+  | --- | --- | --- |
+  | unit | 24 of 3322 (0.7%) | 10 of 3322 (0.3%) |
+  | serial | 2 of 404 (0.5%) | 1 of 404 (0.2%) |
+  | e2e | 9 of 579 (1.6%) | 5 of 579 (0.9%) |
+
+  `check:weight-coverage` reports no dead entries.
 - **`native-locks.yml`:** both Zig setup steps are named and carry `timeout-minutes: 9`, which covers the script's 450 s worst case. The job timeout stays at 15 minutes.
 - **Forced probe (a loopback mirror serving the real 49 MB pinned archive, throttled):**
   - Two sources at 100 KB/s, old script: 240 s on each, failed after 480 s.
