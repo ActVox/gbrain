@@ -3,7 +3,7 @@ import { DEFAULT_JOURNAL_LIMITS, type JournalLimits, type SqlEngine } from './mo
 import { COMPACTED_HEADROOM_BYTES, RECEIPT_RESERVATION_FLOOR } from './receipt-bytes.ts';
 
 /** Fallback compacted receipt size when no receipt is sampled; a compacted put_page measures about 3.9 KB. */
-const RETAINED_RECEIPT_BYTES = 4096;
+export const RETAINED_RECEIPT_BYTES = 4096;
 
 export const RECEIPT_RETENTION_KEY = 'persistence.receipt_retention_days';
 export const DEFAULT_RECEIPT_RETENTION_DAYS = 30;
