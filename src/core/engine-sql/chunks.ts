@@ -356,6 +356,7 @@ export async function getChunks(
                cc.model, cc.token_count, cc.embedded_at, cc.language,
                cc.symbol_name, cc.symbol_type, cc.start_line, cc.end_line,
                cc.parent_symbol_path, cc.doc_comment, cc.symbol_name_qualified, cc.modality,
+               cc.projected_byte_start, cc.projected_byte_end,
                (cc.${colId} IS NULL) AS embedding_is_null
                ${embedCol}
         FROM content_chunks cc
