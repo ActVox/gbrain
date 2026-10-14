@@ -203,7 +203,7 @@ export function maintenanceGhostRefusal(sourceId: string, slug: string): Operati
   return opError('source_changed', 'The canonical file was removed outside coordinated publication.',
     `Maintenance submitted nothing for ${slug} in '${sourceId}': the page's canonical file is missing, so the write would only add another conflict receipt. `
     + `Import the deletion with gbrain sync --source ${sourceId}, or restore the file and preview the page with gbrain sources reconcile ${sourceId} ${slug} --brain host --preview. Neither copy was changed.`,
-    { detail: CANONICAL_FILE_MISSING, fix: readFix(`Previews how page ${slug} and its missing canonical file reconcile; read-only.`,
+    { detail: CANONICAL_FILE_MISSING, docs: 'docs/guides/write-refusals.md#canonical_file_missing', fix: readFix(`Previews how page ${slug} and its missing canonical file reconcile; read-only.`,
       { argv: ['gbrain', 'sources', 'reconcile', sourceId, slug, '--brain', 'host', '--preview', '--json'] }) });
 }
 

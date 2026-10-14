@@ -57,7 +57,7 @@ function refusalBreakerError(sourceId: string, slug: string, prior: PriorRefusal
     `Maintenance submitted nothing for ${slug} in '${sourceId}': the same write was refused ${prior.count} time(s) with ${prior.error_code} in the last ${REFUSAL_BREAKER_WINDOW_HOURS} hours `
     + `(${REFUSAL_BREAKER_THRESHOLD_KEY}=${threshold}), so another attempt would only add a receipt. It is tried again once the page, the planner or the write changes, `
     + `or when the oldest refusal is ${REFUSAL_BREAKER_WINDOW_HOURS} hours old. Read the last refusal with gbrain write-request -- ${prior.request_id} and fix what it names.`,
-    { detail: 'refusal_breaker', fix: readFix(`Reads the last refused attempt (request ${prior.request_id}), read-only.`, { argv: ['gbrain', 'write-request', '--', prior.request_id] }) });
+    { detail: 'refusal_breaker', docs: 'docs/guides/write-refusals.md#refusal_breaker', fix: readFix(`Reads the last refused attempt (request ${prior.request_id}), read-only.`, { argv: ['gbrain', 'write-request', '--', prior.request_id] }) });
 }
 
 export interface SuppressedWrite { source_id: string; slug: string; error_code: string; refusals: number; last_request_id: string; cause: string | null; exit: string }
