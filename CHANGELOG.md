@@ -10,6 +10,16 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.229.0] - 2026-10-14
+
+**When a gbrain process that was running a group of writes is killed, its queued group members are now reclaimed with the rest of its claims, within about 5 s, instead of after their 30 s claim lease (#6650 follow-up).** On Linux, a consumer on the same machine already took back the claims of a write owner it could prove dead. But the members of a group the owner had claimed and not yet started carried no record of their owner, so they waited out their lease and held up the rest of the catch-up behind them. Now each member records its owner when it is claimed. Members that the owner had started, and any member with a recovery record or a publication in progress, are handled exactly as before. In the convergence harness (seed 6650, 50 ms latency) the worst stall after the round-1 serve kill went from 30 s to 21 s.
+
+### Itemized changes
+
+- **Follower claims record their owner** (`src/core/persistence/journal.ts` `claimGroupFollowers`): a group follower's claim stamp holds its own token and the claiming process's identity (pid, nonce, pid namespace, boot id, start time), with no phase until its wave dispatches it. The dead-owner reclaim (`consumer.ts`) matches it by owner like any other claim. Because it has no `preparing` phase, the reclaim charges it no preparation attempt, as before.
+- **Readers of a follower stamp** (`claim-phase.ts` `claimStateOf`, `sync-drain.ts` `drainClaimOf`): a stamp with an owner and no phase reads as unrecorded for its phase and stall window, as an unstamped follower did, and now names its owner. Doctor ages it from when it was claimed, and `gbrain sources writer status` does not count its wait against the preparation budget it has not started.
+- **Owner probe** (`consumer-heartbeat.ts` `probeLiveFullConsumer`): the probe reads every live row of the host before it skips rows it can prove dead, so a live serve listed after eight dead rows is still found. Before, it read the first eight rows and could answer "no owner".
+
 ## [0.60.228.0] - 2026-10-14
 
 **Search reranking costs 60% less: the default reranker is now Voyage `rerank-3-lite`, for brains that never set `search.reranker.model`.** In gbrain-evals #148 (v0.10.93), `rerank-3-lite` reranked the same 50 candidates × 1,400 tokens for $0.60 per 1,000 LongMemEval queries instead of $1.51 with `rerank-2.5`, and retrieval quality stayed within run-to-run noise (strict recall@10 298 vs 299 of 300 questions, recall@5 289 vs 288, reranker latency about the same). Voyage now lists `rerank-3` / `rerank-3-lite` as its current, generally available models and `rerank-2.5` as an older one. A brain that set `search.reranker.model` keeps its model, including brains created on v0.46.3–v0.47.10, where `gbrain init` wrote `voyage:rerank-2.5` explicitly. To go back to the previous default: `gbrain config set search.reranker.model voyage:rerank-2.5`.
