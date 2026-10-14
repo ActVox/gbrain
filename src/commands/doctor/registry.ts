@@ -108,6 +108,7 @@ import { chatFallbackChainEntry } from './checks/chat-fallback.ts';
 import { providerConsentEntry } from './checks/provider-consent.ts';
 import { behaviorChangesEntry } from './checks/behavior-changes.ts';
 import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
+import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import { STOP_DOCTOR, type DoctorContext, type DoctorEntry } from './context.ts';
@@ -198,6 +199,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   serveBuildDriftEntry,
   atomHeldFailedEntry,
   fenceIntegrityEntry,
+  ghostPagesEntry,
   searchModeEntry,
 ];
 

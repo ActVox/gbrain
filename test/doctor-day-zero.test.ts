@@ -48,6 +48,8 @@ describe('day-zero keyless doctor', () => {
     for (const name of ['embeddings', 'embedding_provider', 'takes_count', 'retrieval_reflex_health', 'skill_preconditions', 'cycle_freshness', 'backup_coverage']) {
       if (report.checks.some(c => c.name === name)) expect(info.has(name), name).toBe(true);
     }
+    // #6696 B5: ghost_pages runs on day zero and is ok, never a warning.
+    expect(report.checks.find(c => c.name === 'ghost_pages')).toMatchObject({ status: 'ok' });
   }, 120_000);
 
   test('human doctor on a pipe keeps the heartbeat within 10 stderr lines', async () => {

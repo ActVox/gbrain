@@ -2,6 +2,7 @@
  * gbrain pages — page-level operator commands. v0.26.5+.
  *
  * The first subcommand: `pages purge-deleted [--older-than HOURS|Nh|Nd] [--dry-run] [--json] [--yes]`.
+ * `pages ghosts [--source <id>] [--json]` (#6696 B5, pages-ghosts.ts) lists ghost pages, read-only.
  * Manual escape hatch alongside the autopilot purge phase. Hard-deletes pages
  * whose `deleted_at` is older than the cutoff; cascades to content_chunks,
  * page_links, chunk_relations via existing FKs.
@@ -90,6 +91,9 @@ export function printUsage(): void {
   console.log(`gbrain pages — page-level operator commands (v0.26.5)
 
 Subcommands:
+  ghosts [--source <id>] [--json]   List live pages whose canonical file is missing on the
+                                    owner host (ghost pages). Read-only; remove them with
+                                    gbrain repair ghost-pages --source <id> (preview first).
   purges list [--source <id>] [--json]
                                     List page purge tombstones (slug, hash, request, time).
   unpurge <slug> [--source <id>] [--json]
@@ -118,6 +122,7 @@ export async function runPages(engine: BrainEngine, args: string[]): Promise<voi
   switch (sub) {
     case 'purge-deleted': return runPurgeDeleted(engine, args.slice(1));
     case 'purges': case 'unpurge': return (await import('./pages-purges.ts')).runPagePurges(engine, sub, args.slice(1));
+    case 'ghosts': return (await import('./pages-ghosts.ts')).runPagesGhosts(engine, args.slice(1));
     case undefined:
       printUsage();
       return;

@@ -786,6 +786,10 @@
         "name": "fence_integrity"
       },
       {
+        "category": "brain",
+        "name": "ghost_pages"
+      },
+      {
         "category": "ops",
         "name": "search_mode"
       },

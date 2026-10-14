@@ -67,6 +67,7 @@ export const REPAIR_HELP = `Usage: gbrain repair [<kind>] [--apply] [--source <i
                                 [--only <glob>]... [--skip <glob>]... --prefer file|database [--apply --expect <preview-hash>] [--json]
        gbrain repair stuck-recovery [--source <id>] [--request-id <uuid>]
                                     [--keep prior|disk --apply --expect <preview-hash> --yes] [--json]
+       gbrain repair ghost-pages --source <id> [--apply --expect <preview-hash> --yes] [--json]
 ${REPAIR_CONTENT_HELP}
 
 Repair residual damage that \`gbrain doctor\` reports. Dry run unless --apply.
@@ -108,7 +109,7 @@ Options:
                  stuck-recovery --apply: the version of each blocked file to keep (the user's choice from the preview).
   --request-id <uuid>
                  stuck-recovery: resolve only this request's recovery (default: every blocked record of the source).
-  --yes          frontmatter, conversation-labels, stuck-recovery --apply: the user agreed to the previewed changes (destructive
+  --yes          frontmatter, conversation-labels, stuck-recovery, ghost-pages --apply: the user agreed to the previewed changes (destructive
                  consent; without it a terminal asks, and a non-interactive run exits 3 with the consent payload).
   --json         Machine-readable output with a stable shape (frontmatter: every per-file diff).
 
@@ -118,13 +119,14 @@ run gbrain doctor --remediate --yes --include-repairs --max-usd <n> --expect <pl
 With no kind, previews every kind. Run it on the brain host.
 Held files (the content lane, then the two-pass frontmatter repair): docs/guides/repair.md#held-files.
 Malformed facts/takes fences (preview, apply, undo): docs/guides/repair.md#fences.
-A write recovery blocked on unexpected_file_bytes: docs/guides/repair.md#stuck-recovery.`;
+A write recovery blocked on unexpected_file_bytes: docs/guides/repair.md#stuck-recovery.
+Live pages whose canonical file is missing (ghost pages): docs/guides/repair.md#ghost-pages.`;
 
 const BOOLEAN_FLAGS = new Set(['--apply', '--all', '--json', '--no-embed', '--include-ambiguous', '--diff', '--yes', '--no-llm', '--all-drifted']);
 const VALUE_FLAGS = new Set(['--source', '--limit', '--expect', '--only', '--skip', '--slug', '--max-usd', '--prefer', '--request', '--class', '--keep', '--request-id']);
 /** Flags only some kinds accept, with the kinds that do. */
 const KIND_FLAGS: Record<string, readonly string[]> = {
-  '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery'],
+  '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery', 'ghost-pages'],
   '--slug': ['fences', 'file-drift'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift'],
   '--keep': ['stuck-recovery'], '--request-id': ['stuck-recovery'],
 };

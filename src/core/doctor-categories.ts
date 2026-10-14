@@ -184,6 +184,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5254 — pages written database-only to a source with no canonical owner.
   'unbound_source',
   'undeclared_db_only_pages',
+  // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
+  'ghost_pages',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
