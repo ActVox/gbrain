@@ -515,7 +515,6 @@ describe('labeled_credential (transcript lane): every candidate start does const
     ['200 KB of `a/` after a login label', 'login: ' + 'a/'.repeat(100_000)],
     ['20000 dangling pair lines', Array.from({ length: 20_000 }, () => 'login: alice-example /').join('\n')],
     ['20000 dangling single labels', Array.from({ length: 20_000 }, () => 'password:').join('\n')],
-    ['a 10k-row table with two credential columns', ['| user | password | pwd |', '|---|---|---|', ...Array.from({ length: 10_000 }, (_, k) => `| u${k} | s3cret${k} | p${k}x\\|y |`)].join('\n')],
     ['a 200 KB row of escaped pipes', '| password | ' + '\\|'.repeat(100_000) + ' |'],
     ['200 KB of `--password `', '--password '.repeat(20_000)],
     ['a 64k-cell row of label cells under 64k password columns (W12 S3)', ['|' + 'password|'.repeat(64_000), '|' + '---|'.repeat(64_000), '|' + 'pwd|'.repeat(64_000)].join('\n')],
@@ -526,4 +525,21 @@ describe('labeled_credential (transcript lane): every candidate start does const
       expect(ms).toBeLessThan(400);
     });
   }
+
+  // A table row costs the same at row 10,000 as at row 1,000, so ten times the rows is about ten times the time
+  // (measured 9.9-12.4x idle; per-row work that grows with the rows already seen reads about 100x). Timing both
+  // sizes back to back cancels the load a shared CI VM puts on both: the former absolute 400 ms bound on the
+  // 10k table (~70 ms idle) read 409 ms at 32 busy slots. A pair passes below 30x; any of 3 pairs suffices.
+  test('a 10k-row table with two credential columns: 10x the rows costs < 30x the time of 1k rows', () => {
+    const table = (rows: number) => ['| user | password | pwd |', '|---|---|---|', ...Array.from({ length: rows }, (_, k) => `| u${k} | s3cret${k} | p${k}x\\|y |`)].join('\n');
+    const small = table(1_000), large = table(10_000);
+    expect(redactFindings(large, LABELED).redactions.length).toBe(20_000);
+    redactFindings(small, LABELED);
+    const ratios: number[] = [];
+    for (let pair = 0; pair < 3 && !(ratios.at(-1)! < 30); pair++) {
+      const t1 = elapsedMs(() => { redactFindings(small, LABELED); });
+      ratios.push(elapsedMs(() => { redactFindings(large, LABELED); }) / Math.max(t1, 0.5));
+    }
+    expect(Math.min(...ratios)).toBeLessThan(30);
+  }, 60_000);
 });
