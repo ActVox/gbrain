@@ -85,7 +85,7 @@ import { legacyJobAuthorityEntry } from './checks/legacy-job-authority.ts';
 import { legacyTokenGrantsEntry } from './checks/legacy-token-grants.ts';
 import { grantNewOpsEntry } from './checks/grant-new-ops.ts';
 import { syncFreshnessEntry, searchModeEntry } from './checks/sync-search.ts';
-import { persistenceConsumersEntry } from './checks/persistence-consumers.ts';
+import { persistenceConsumersEntry, serveBuildDriftEntry } from './checks/persistence-consumers.ts';
 import { gitConvergenceEntry } from './checks/git-convergence.ts';
 import { retrievalFeedbackEntry } from './checks/retrieval-feedback.ts';
 import { transcriptSecretExposureEntry } from './checks/transcript-secrets.ts';
@@ -195,6 +195,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   coreMemoryEntry,
   managedSyncMovementEntry,
   persistenceConsumersEntry,
+  serveBuildDriftEntry,
   atomHeldFailedEntry,
   fenceIntegrityEntry,
   searchModeEntry,

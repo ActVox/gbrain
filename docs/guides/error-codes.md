@@ -2705,6 +2705,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | A search offset was over the 10,000 limit. | The request itself was wrong or no longer matches the brain; nothing was changed. | Page with match: "keyword" and the next object each response returns; a cursor has no depth limit. | agent | `repeat the read that failed` | 1 | no |
 
+### serve_build_drift
+
+<a id="serve_build_drift"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A live `serve` or resident worker on this host runs an older gbrain build than this checkout: its `persistence_consumers` heartbeat `version` is below this binary's VERSION. | Upgrading or pulling the checkout does not restart the processes already running from it, so one-shot commands from the checkout (`gbrain sync`, `bun run src/cli.ts`) run newer code against the older consumer until serve and its workers restart. A serve older than the heartbeat table writes no row; `consumers_without_heartbeat` names it. | Restart serve with the command the check prints (`systemctl --user restart gbrain-serve.service`, `launchctl kickstart -k gui/<uid>/com.gbrain.serve`, or stop the named pid and start it again), then restart each other listed worker; nothing restarts automatically. Run: gbrain sources writer status --json | agent | `gbrain doctor --only serve_build_drift --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#serve-build-drift](../../docs/guides/troubleshooting.md#serve-build-drift)
+
 ### serve_port_in_use
 
 <a id="serve_port_in_use"></a>

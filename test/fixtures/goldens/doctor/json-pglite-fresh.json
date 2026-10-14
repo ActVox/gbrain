@@ -2124,6 +2124,16 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/troubleshooting.md#serve-build-drift"
+          },
+          "message": "PGLite admits one process; no consumer heartbeat rows are kept to compare builds.",
+          "name": "serve_build_drift",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "code": "held_failed",

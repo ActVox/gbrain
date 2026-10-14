@@ -274,6 +274,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'two_consumers_on_host',
   'consumers_without_heartbeat',
   'host_identity_mismatch',
+  // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
+  'serve_build_drift',
   'stale_embedding_effects',
   'vector_plan',
   'keyword_plan',
