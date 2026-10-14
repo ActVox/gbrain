@@ -92,8 +92,8 @@ Options:
                  Explicit-only kinds: widen the preview to ambiguous items (its hash covers them).
   --only <path>, --skip <path>
                  frontmatter, fences, slug-conflicts, content: select source-relative files (repeatable); the hash covers the selection.
-                 file-drift: narrow the selected pages by canonical file path (repeatable; an exact path, or a glob with
-                 * within a segment and ** across segments, e.g. --only 'concepts/**'); the hash and the apply command cover them.
+                 file-drift: narrow the selected pages by canonical file path (repeatable; an exact path, or, on file-drift
+                 only, a glob with * within a segment and ** across segments, e.g. --only 'concepts/**'); the hash and the apply command cover them.
   --slug <slug>  fences, file-drift: select a database page by slug (repeatable); the hash covers the selection.
   --prefer file|database, --request <id>, --all-drifted, --class <name>
                  file-drift: the side that wins; select conflict receipts by request id (repeatable), or every page

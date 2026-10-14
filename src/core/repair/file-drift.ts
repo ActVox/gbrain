@@ -26,9 +26,9 @@
  * `--all-drifted` takes every page the conflict audit finds still drifted. It
  * refuses a selection that mixes drift classes unless `--class <name>` keeps
  * exactly one, so one `--prefer` never resolves differently shaped drift in bulk.
- * #6696 C7: repeatable `--only` / `--skip` globs over the canonical file path,
- * source-relative like the other kinds' `--only` (`*` within a segment, `**`
- * across segments, sync's `matchesAnyGlob`; an exact path matches itself),
+ * #6696 C7: repeatable `--only` / `--skip` over the canonical file path,
+ * source-relative: an exact path, or a glob (`*` within a segment, `**` across
+ * segments; `path-glob.ts`, file-drift being the only kind that takes globs),
  * narrow the selection before the class check, the bound and any preview
  * work; they are part of the selection digest (so of the plan hash) and of
  * every printed preview and apply command. Trusted local CLI only.
@@ -42,7 +42,7 @@ import { flushDirectory } from '../fs-durable.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { readFix, trustedCliRequired } from '../ops/op-fix.ts';
 import { validateSlug } from '../utils.ts';
-import { matchesAnyGlob } from '../sync.ts';
+import { matchesRepairPath } from './path-glob.ts';
 import { shellQuote } from '../agent-output.ts';
 import type { ParsedPage } from '../import-file.ts';
 import { digest, stableJson } from '../persistence/digest.ts';
@@ -81,7 +81,7 @@ function previewCommand(sourceId: string, opts: RepairPlanOptions): string {
 /** Whether a canonical file path passes the `--only` / `--skip` globs (no `--only`: every path; an unknown path only then). */
 const selectedByGlobs = (path: string | undefined, opts: Pick<RepairPlanOptions, 'only' | 'skip'>) =>
   path === undefined ? !opts.only?.length && !opts.skip?.length
-    : (!opts.only?.length || matchesAnyGlob(path, opts.only)) && !matchesAnyGlob(path, opts.skip);
+    : (!opts.only?.length || matchesRepairPath(path, opts.only)) && !matchesRepairPath(path, opts.skip);
 
 /** The reconcile decisions that make the preferred side win every field reconcile lets a decision choose. */
 export function preferSideDecisions(file: ParsedPage, database: ParsedPage, prefer: DriftSide): ReconcileDecision[] {
@@ -215,7 +215,7 @@ function validateOptions(scope: RepairScope, opts: RepairPlanOptions | undefined
   for (const glob of [...(opts.only ?? []), ...(opts.skip ?? [])]) {
     try { validateSlug(glob); } catch {
       throw opError('invalid_params', `Invalid file path glob '${glob}'.`,
-        `--only and --skip take canonical file path globs relative to the source, like the other kinds' --only, without a leading / or .. segment: * matches within one path segment, ** across segments, an exact path matches itself (e.g. --only 'concepts/**' or --only concepts/agi.md). ${usage}`);
+        `--only and --skip take a canonical file path relative to the source, without a leading / or .. segment: an exact path, or (file-drift only) a glob where * matches within one path segment and ** across segments (e.g. --only concepts/agi.md or --only 'concepts/**'). ${usage}`);
     }
   }
   if (opts.requests?.some(id => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {

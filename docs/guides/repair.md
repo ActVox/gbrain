@@ -992,11 +992,12 @@ differs from the preferred side and why (`protected_metadata`, `scan_state`,
 `tags_union`, `protected_takes_or_private_facts`).
 
 <a id="file-drift-globs"></a>`--only <path>` and `--skip <path>` (both repeatable) narrow any selection by
-the page's canonical file path, relative to the source, the same thing
-`--only` names for `frontmatter`, `fences` and `slug-conflicts`: an exact
-path (`concepts/agi.md`) matches itself, `*` matches within one path segment
-(`concepts/*` is every file directly under concepts/) and `**` matches across
-segments (`concepts/**` is everything under it, at any depth). A page is
+the page's canonical file path, relative to the source. A value with no `*`
+is an exact path (`concepts/agi.md` selects that file only), as `--only` is for
+`frontmatter`, `fences` and `slug-conflicts`. Globs work on `file-drift` only:
+`*` matches within one path segment (`concepts/*` is every file directly under
+concepts/) and `**` matches across segments (`concepts/**` is everything under
+it, at any depth); the other kinds' `--only` takes exact paths. A page is
 selected when it matches some `--only` (or there is none) and no `--skip`.
 They match the file path, not the slug: `--only concepts/agi` selects
 nothing, `--only concepts/agi.md` selects the page. The pages they leave out
