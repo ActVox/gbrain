@@ -54,6 +54,7 @@ const ALLOWLIST = new Map([
 // reason 'script-reachable', which the guard verifies.
 const PERMITTED_TEST_ONLY = [
   { path: 'src/core/bootstrap/template-repo.ts', reason: 'script-reachable' },
+  { path: 'src/core/page-size-policy.ts', reason: 'held: Wave A large-pages policy module; the large-pages ingress lane wires PAGE_MAX_BYTES / isLargePageBytes into the import screens and drops this row' },
   { path: 'src/eval/longmemeval/diagnostics.ts', reason: 'script-reachable' },
   { path: 'src/eval/longmemeval/evidence-brief.ts', reason: 'held: eval-only wave 1 brief builder (10x memory advantage plan A3), loaded by path from gbrain-evals eval/runner/pilot; product wiring is plan item A8, conditional on the A5 pilot' },
   { path: 'src/eval/longmemeval/evidence-packet.ts', reason: 'script-reachable' },
