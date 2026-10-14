@@ -1308,6 +1308,17 @@ approval ([`tail_exposure_approval`](write-refusals.md#tail_exposure_approval)).
 paragraph in `human_reason`; `fences.repair.llm false` turns the model tier
 off for the whole lane.
 
+**Slug conflicts agree with sync.** The `slug-conflicts` kind screens a held
+file, and the edit it would write, with the same screen managed sync froze
+the file with. A held file the screen now admits as it is (its `slug:` line
+names the file's own page, or it no longer conflicts) is listed as `import`
+and imported unchanged; the write clears only the hold observation the
+preview read, so a hold a newer sync wrote stays and the next run retries it.
+A file sync would hold whatever the lane writes (the page it is filed as
+carries a different slug than its path, or the line reaches the page only
+through an alias) is held [`slug_page_mismatch`](write-refusals.md#slug_page_mismatch)
+with both slugs and the exact hand edit.
+
 **Say to your agent:** *"Sync is holding a few files over their tables or
 slugs. Repair what gbrain can by itself and tell me what it wants me to
 decide."*

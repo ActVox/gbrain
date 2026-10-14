@@ -2841,6 +2841,16 @@ More: [docs/guides/repair.md#setup-owner-conflict](../../docs/guides/repair.md#s
 
 More: [docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover](../../docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover)
 
+### slug_page_mismatch
+
+<a id="slug_page_mismatch"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Managed sync files a held file as a page whose slug the file does not carry as written, so removing its frontmatter `slug:` line would not clear the `frontmatter_slug_conflict` hold; nothing was written. | The content-repair lane judges a held file with the screen managed sync froze it with (#6696). Sync keys a file to the page that records it as its origin (or its path-derived slug) and accepts a `slug:` line only when it equals the path-derived slug or that page's slug as written. When the page's slug differs from the path-derived slug (an older import that honored the line, or a source in a subdirectory of its Git repository), or the line reaches the page only through an alias, neither removing the line nor keeping it imports the file, so the lane records `slug_page_mismatch` with both slugs instead of a generic `still_invalid`. | Make the slug: line of the held file name the page it is filed as exactly (the hold slug in gbrain sources status <id> --json), or move the file to the path that derives that slug; commit and run gbrain sync --source <id> --no-pull. gbrain repair content --source <id> --only <path> previews the current state read-only. Run: gbrain sources status '{source_id}' --json | agent | `gbrain sources status '{source_id}' --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#slug_page_mismatch](../../docs/guides/write-refusals.md#slug_page_mismatch)
+
 ### source_binding_required
 
 <a id="source_binding_required"></a>
