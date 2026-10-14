@@ -67,6 +67,7 @@ import {
   isSyncStartRegistration,
   toWireSyncResult,
   validateDelegatedSyncOptions,
+  DELEGATED_SYNC_PROCESSING_KEYS,
   type DelegatedSyncOptions,
   type DelegatedSyncState,
   type SyncAbortResponse,
@@ -341,8 +342,8 @@ async function startVerifiedDelegatedSync(
           // flags ride through; the classic path keeps the always-deferred embed rule of the legacy lane.
           ...(managed
             ? { drain: true, noBulk: options.noBulk, lanes: options.lanes, noEmbed: options.noEmbed, embedDeferred: options.embedDeferred,
-              // #6696: an older CLI drops an empty list; a delegated run without one set no processing flag.
-              explicitProcessing: options.explicitProcessing ?? [] }
+              // #6696: an older CLI omits the list but still sends true for each processing flag its user typed.
+              explicitProcessing: options.explicitProcessing ?? DELEGATED_SYNC_PROCESSING_KEYS.filter(key => options[key] === true) }
             : { noEmbed: true }),
           signal: job.controller.signal,
           onProgress: (p) => {

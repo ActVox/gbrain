@@ -8,8 +8,10 @@
  *     `explicitProcessing: []` instead of dropping the empty list (which made
  *     every processing key explicit on the serve and refused the resume with
  *     `invalid_params`);
- *   - an older CLI that still omits the list is read the same way by a newer
- *     serve (a missing list on a delegated run means "no flags");
+ *   - an older CLI omits the list but still sends `true` for each processing
+ *     flag its user typed: a newer serve reads those true-valued keys as the
+ *     explicit ones (a flagless payload is "no flags"), so `--no-embed` from an
+ *     older CLI never resumes a cursor storing `noEmbed=false` into embedding;
  *   - a runtime embedding deferral (the cost gate's auto-defer) is not a
  *     processing option: adopting a cursor that stores `noEmbed=false` never
  *     turns embedding back on for the run, in-process or delegated. A provider
@@ -174,7 +176,7 @@ describe('the client builders send an empty explicit-processing list', () => {
   }), 180_000);
 });
 
-describe('the serve reads a missing list from an older CLI as "no flags"', () => {
+describe('the serve infers a missing list from an older CLI\'s true-valued flags', () => {
   test('sync_start without explicitProcessing (older CLI) adopts the stored options', async () => withEnv(env, async () => {
     const f = await fixture(3);
     await partialCursor(f.id, { noEmbed: true, noExtract: true });
@@ -185,6 +187,23 @@ describe('the serve reads a missing list from an older CLI as "no flags"', () =>
     const done = await quiet(() => waitTerminal(start.jobId!));
     expect(done.jobErrorEnvelope).toBeUndefined();
     expect(done).toMatchObject({ state: 'done', result: { status: 'first_sync' } });
+  }), 180_000);
+
+  test('an older CLI\'s --no-embed (noEmbed: true, no list) never resumes a noEmbed=false cursor into embedding', async () => withEnv(env, async () => {
+    const f = await fixture(3);
+    await partialCursor(f.id, {});
+    expect(await storedOptions(f.id)).toEqual({ noEmbed: false, noExtract: false, noSchemaPack: false });
+    const before = await embeddingEffects(f.id);
+    const local = await registerLocalWriter(engine, 'cli');
+    const start = await startDelegatedSync(engine, { sourceId: f.id, noPull: true, noEmbed: true, timeoutSeconds: 120 }, randomUUID(),
+      { registration: { id: local.id, credential: local.credential, lane: 'cli' } });
+    expect(start.ok).toBe(true);
+    // The typed flag is explicit, as in-process: it conflicts with the stored noEmbed=false and the resume is refused.
+    const done = await quiet(() => waitTerminal(start.jobId!));
+    expect(done).toMatchObject({ state: 'error', jobErrorEnvelope: { code: 'invalid_params' } });
+    await drainEffects();
+    expect(await embeddingEffects(f.id)).toBe(before);
+    expect(embedded).toEqual([]);
   }), 180_000);
 });
 
