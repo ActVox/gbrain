@@ -6,13 +6,15 @@
  * persistence_capacity` when its token lacks admin.
  *
  * Capacity is brain-wide host state (one band for the brain and every
- * principal); write failures are scoped to the caller's readable sources. A
+ * principal), read from the shared 60 s capacity snapshot (`cachedCapacitySnapshot`); write failures are scoped to the caller's readable sources. A
  * section that could not be read is `unknown`, never a clear band. Answers are
  * cached per engine and scope for 60 s, so a polling agent costs one read a
  * minute.
  */
 import type { BrainEngine } from '../../core/engine.ts';
-import { capacityBands, readCapacityView, type CapacityBand, type DaysBand } from '../../core/persistence/capacity-view.ts';
+import { capacityBands, type CapacityBand, type DaysBand } from '../../core/persistence/capacity-view.ts';
+import { cachedCapacitySnapshot } from '../../core/persistence/capacity-snapshot.ts';
+import { readCapacityThresholds } from '../../core/persistence/capacity-forecast.ts';
 import { cachedTerminalSummary } from '../serve-http-metrics.ts';
 import { readEmbeddingState } from '../../core/embedding-state.ts';
 import { readGhostPages } from '../../core/ghost-pages.ts';
@@ -54,7 +56,10 @@ export function readBrainHealthBands(engine: BrainEngine, opts: { sourceIds?: st
 
 async function computeBands(engine: BrainEngine, sourceIds: string[] | undefined): Promise<BrainHealthBands> {
   const [capacity, failures, unsearchable, ghostPages] = await Promise.all([
-    readCapacityView(engine).then((view) => ({ ...capacityBands(view), forecast: view.forecast ? 'available' as const : 'unavailable' as const }))
+    Promise.all([cachedCapacitySnapshot(engine), readCapacityThresholds(engine)])
+      .then(([snapshot, thresholds]) => snapshot.status !== 'ok'
+        ? { capacity: 'unknown' as const, days: 'unknown' as const, max_pct_band: 'unknown' as const, forecast: 'unavailable' as const }
+        : { ...capacityBands(snapshot, thresholds), forecast: 'available' as const })
       .catch(() => ({ capacity: 'unknown' as const, days: 'unknown' as const, max_pct_band: 'unknown' as const, forecast: 'unavailable' as const })),
     cachedTerminalSummary(engine).then((summary) => {
       if (summary.status !== 'ok') return { band: 'unknown' as const, active_blockers: 'unknown' as const, window_days: null };

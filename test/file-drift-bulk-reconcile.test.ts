@@ -268,4 +268,26 @@ for (const backend of testBackends()) describe(`C7 bulk file-drift reconcile (${
     expect(reconciles).toEqual(CONCEPTS.map(slug => ({ slug, state: 'committed' })));
     await refusedWrite(ctx, PERSON);
   }), 240_000);
+
+  test('storage.keep_db at 81% of a cumulative cap: the worker is refused write_capacity_backpressure and writes no receipt (#6696 A5)', () => fixture(async ({ root, sourceId, ctx }) => {
+    writeFileSync(join(root, 'gbrain.yml'), 'storage:\n  keep_db:\n    - concepts/\n');
+    await driftedPages(root, ctx);
+    const { runKeepDbPolicy } = await import('../src/core/repair/keep-db-policy.ts');
+    const ownerHost = existingLocalHostId()!;
+    const [writer] = await engine.executeRaw<{ key: string }>("SELECT 'principal:'||principal_kind||':'||principal_id AS key FROM persistence_requests WHERE source_id=$1 LIMIT 1", [sourceId]);
+    const lifetime = async () => (await engine.executeRaw<{ n: string }>('SELECT lifetime_ids::text AS n FROM persistence_counters WHERE key=$1', [writer!.key]))[0]!.n;
+    const used = Number(await lifetime());
+    const limit = Math.ceil(used * 100 / 81);
+    expect(used / limit).toBeGreaterThanOrEqual(0.8);
+    expect(used / limit).toBeLessThan(0.9);
+    await engine.setConfig('persistence.limits.principal_lifetime_ids', String(limit));
+    const before = await requests(sourceId);
+    // The default seam sees the pause line before preparing anything.
+    expect(await runKeepDbPolicy(engine, { hostId: ownerHost, sourceIds: [sourceId] })).toMatchObject({ submitted: 0, stopped: 'write_capacity_backpressure' });
+    // Admission itself refuses this background producer even with the seam open.
+    expect(await runKeepDbPolicy(engine, { hostId: ownerHost, sourceIds: [sourceId], admission: async () => null })).toMatchObject({ submitted: 0, stopped: 'write_capacity_backpressure' });
+    expect(await requests(sourceId)).toBe(before);
+    expect(await lifetime()).toBe(String(used));
+    expect(await stillDrifted(sourceId, [...CONCEPTS])).toEqual([...CONCEPTS]);
+  }), 240_000);
 });

@@ -263,7 +263,7 @@
       },
       {
         "category": "ops",
-        "name": "receipt_compaction"
+        "name": "persistence_compaction"
       },
       {
         "category": "ops",
@@ -288,6 +288,10 @@
       {
         "category": "meta",
         "name": "pages_upsert_arbiter"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_counter_drift"
       },
       {
         "category": "brain",

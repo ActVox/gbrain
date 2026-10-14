@@ -83,7 +83,9 @@ describe('get_brain_health bands', () => {
     expect(fund.write_failures.band).toBe('1-9');
     expect(all.write_failures.band).toBe('10-99');
     expect(['ok', 'low', 'critical', 'unknown']).toContain(acme.capacity.band);
-    expect(acme.capacity.forecast).toBe('unavailable');
+    expect(acme.capacity.forecast).toBe('available');
+    expect(acme.capacity.days).toBe('over_365');
+    expect(acme.capacity.band).toBe('ok');
     expect(['none', '1-9', '10-99', '100-999', '1000+', 'unknown']).toContain(acme.unsearchable.band);
     expect(typeof acme.unsearchable.lower_bound).toBe('boolean');
     expect(['none', '1-9', '10-99', '100-999', '1000+', 'unknown']).toContain(acme.ghost_pages.band);
@@ -235,7 +237,7 @@ describe('thin-client doctor --tier ops / --only routing', () => {
 
   test('a read token asking for a check the bands do not cover: handoff', async () => {
     listed = [tool('get_brain_health')];
-    await runScopedRemoteDoctor(config(), { only: new Set(['receipt_compaction']), json: true, label: '--only receipt_compaction' });
+    await runScopedRemoteDoctor(config(), { only: new Set(['persistence_compaction']), json: true, label: '--only persistence_compaction' });
     expect(calls).toEqual([]);
     expect(out).toContain('doctor_tier_unavailable');
   });

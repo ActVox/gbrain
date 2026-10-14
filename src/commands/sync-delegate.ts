@@ -582,7 +582,8 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
   const hard = await deriveDelegatedTimeoutSeconds(args, { env });
   const timeoutSeconds = soft && soft > 0 ? (hard > 0 ? Math.min(soft, hard) : soft) : hard;
   const options: DelegatedSyncOptions = {
-    sourceId, timeoutSeconds,
+    // #6696 (A5): an operator's sync keeps the capacity background producers leave free.
+    sourceId, timeoutSeconds, origin: 'interactive',
     ...pick(opts, ['dryRun', 'full', 'noPull', 'noEmbed', 'noExtract', 'noSchemaPack', 'skipFailed', 'retryFailed', 'includeGitignored', 'noBulk'] as const),
     ...(opts.lanes !== undefined ? { lanes: opts.lanes } : {}),
     // #6696: an empty list crosses the wire (a flagless run adopts the cursor's options); a caller that set none is strict, as in-process.

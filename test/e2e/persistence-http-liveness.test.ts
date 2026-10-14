@@ -15,6 +15,7 @@ import { cliDiagnostic, fixtureDiagnostic } from '../helpers/fixture-diagnostics
 import { initializeFixtures, fixtures, selectFixtureHost, assertConservation, type HarnessConfig } from '../../scripts/persistence/harness.ts';
 import { acquireWorktree } from '../../src/core/persistence/ownership.ts';
 import type { WriteRequest } from '../../src/core/persistence/model.ts';
+import { trueUpRequests } from '../../src/core/persistence/receipt-true-up.ts';
 
 const url = process.env.DATABASE_URL;
 const oldBinary = process.env.GBRAIN_TEST_OLD_BINARY;
@@ -32,6 +33,14 @@ describe.skipIf(!url)('authenticated PostgreSQL HTTP accepted-write liveness', (
   let oauthSecret: string;
   let stderr = '';
   const content = (text: string) => `---\ntitle: Synthetic note\ntype: note\n---\n\n${text}`;
+  // #6696 (A1): a request keeps its whole reservation until its last effect settles, then gives back what its receipt does not keep.
+  // Settle the requests and run the (idempotent) true-up before reading counters, so a comparison measures the write, not effect timing.
+  const settle = async (clientRequestIds: string[]) => {
+    const ids = (await pg.engine.executeRaw<{ id: string }>('SELECT id FROM persistence_requests WHERE request_id=ANY($1::uuid[])', [clientRequestIds])).map(row => row.id);
+    await waitFor(async () => (await pg.engine.executeRaw("SELECT 1 FROM persistence_effects WHERE request_id=ANY($1::uuid[]) AND state IN ('queued','running') LIMIT 1", [ids])).length === 0,
+      { timeoutMs: 45000, label: 'request effects settled' });
+    await trueUpRequests(pg.engine, ids);
+  };
 
   function cli(args: string[]): string {
     const result = spawnSync('bun', ['--no-env-file', 'run', 'src/cli.ts', ...args], { env, encoding: 'utf8', timeout: 60000 });
@@ -162,6 +171,7 @@ describe.skipIf(!url)('authenticated PostgreSQL HTTP accepted-write liveness', (
     const replacement = clients[index];
     await committed(replacement, put.request_id);
     await committed(replacement, memory.request_id);
+    await settle([put.request_id, memory.request_id]);
     const before = await pg.engine.executeRaw('SELECT key,lifetime_ids,terminal_bytes FROM persistence_counters ORDER BY key');
     const snapshot = await pg.engine.readPageSnapshot(put.slug, { sourceId: source.id });
     expect(snapshot?.page.compiled_truth).toBe(`Original ${auth} fixture`);
@@ -380,7 +390,12 @@ describe.skipIf(!url)('authenticated PostgreSQL HTTP accepted-write liveness', (
       expect((await call(successor, 'put_page', args)).body.revision).toBe(done.revision);
       expect(await pg.engine.executeRaw('SELECT id FROM persistence_requests WHERE request_id=$1::uuid', [args.request_id])).toEqual([{ id: retained.id }]);
       expect(await pg.engine.executeRaw('SELECT id FROM page_versions WHERE page_id=$1', [before.page.id])).toHaveLength(versions.length + 1);
-      expect(await pg.engine.executeRaw('SELECT key,lifetime_ids,terminal_bytes FROM persistence_counters ORDER BY key')).toEqual(counters);
+      // The handoff charges nothing twice: the only change since the retained snapshot is this request's settlement true-up.
+      await settle([args.request_id]);
+      const freed = BigInt(retained.terminal_reservation) - BigInt((await read()).terminal_reservation);
+      const charged = new Set(['brain', `principal:${retained.principal_kind}:${retained.principal_id}`]);
+      expect(await pg.engine.executeRaw('SELECT key,lifetime_ids,terminal_bytes FROM persistence_counters ORDER BY key')).toEqual(
+        (counters as Array<{ key: string; lifetime_ids: bigint; terminal_bytes: bigint }>).map(row => charged.has(row.key) ? { ...row, terminal_bytes: BigInt(row.terminal_bytes) - freed } : row));
       await assertConservation(pg.engine);
     }, 90000);
   }

@@ -88,7 +88,7 @@ describe('#6696 B1 doctor tiers', () => {
     const checks = await buildChecks(guarded(['getHealth', 'findOrphanPages', 'getStats']), args, undefined, undefined, deadline);
     const ops = opsCheckNames();
     expect(names(checks).filter((n) => n !== 'connection').every((n) => ops.has(n))).toBe(true);
-    for (const n of ['persistence_capacity', 'persistence_terminal_failures', 'managed_sync_not_moving', 'receipt_compaction', 'serve_build_drift', 'schema_pack_consistency', 'embedding_state']) {
+    for (const n of ['persistence_capacity', 'persistence_terminal_failures', 'managed_sync_not_moving', 'persistence_compaction', 'serve_build_drift', 'schema_pack_consistency', 'embedding_state']) {
       expect(names(checks)).toContain(n);
     }
     expect(checks.filter((c) => c.status !== 'ok')).toEqual([]);
@@ -115,7 +115,7 @@ describe('#6696 B1 doctor tiers', () => {
     expect(checks.every((c) => typeof c.elapsed_ms === 'number')).toBe(true);
     // The registry tags exactly the plan's ops sections.
     expect(DOCTOR_CHECK_REGISTRY.filter((e) => e.tier === 'ops').map((e) => e.name)).toEqual(
-      expect.arrayContaining(['persistence_capacity', 'persistence_terminal_failures', 'managed_sync_not_moving', 'receipt_compaction', 'serve_build_drift', 'schema_pack_consistency', 'embedding_state']));
+      expect.arrayContaining(['persistence_capacity', 'persistence_terminal_failures', 'managed_sync_not_moving', 'persistence_compaction', 'serve_build_drift', 'schema_pack_consistency', 'embedding_state']));
   });
 
   test('a section past the --budget-ms deadline is unknown (reason budget) and the report is incomplete', async () => {

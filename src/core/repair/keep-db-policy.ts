@@ -19,7 +19,8 @@
  * whose id is derived from the page revision and file bytes, so the same drift
  * is never submitted twice, whatever its outcome. A run submits at most `limit`
  * requests (`KEEP_DB_BATCH`; the consumer runs it at most every 10 minutes) and
- * stops before an admission the `admission` gate refuses.
+ * stops before an admission the `admission` gate refuses, or at the first
+ * `write_capacity_backpressure` refusal (it submits as a background producer).
  */
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -32,7 +33,9 @@ import { getWriteRequest } from '../persistence/journal.ts';
 import { runReconcileApply } from '../persistence/reconcile.ts';
 import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
 import { digest } from '../persistence/digest.ts';
-import { capacity, RECEIPT_BYTES } from './core.ts';
+import { capacity } from './core.ts';
+import { RECEIPT_RESERVATION_FLOOR } from '../persistence/receipt-bytes.ts';
+import { readBackgroundPauseShare, withAdmissionOrigin } from '../persistence/admission-origin.ts';
 import { prepareDriftPage } from './file-drift.ts';
 
 /** Reconcile requests one policy run submits at most. */
@@ -45,23 +48,33 @@ export interface KeepDbPolicy { source_id: string; keep_db: string[] }
 export interface KeepDbRun {
   submitted: number;
   skipped_by_reason: Record<string, number>;
-  /** `rate_limit`: candidates remain past `limit`; `capacity`: the admission gate refused the next request. */
-  stopped?: 'rate_limit' | 'capacity';
+  /**
+   * `rate_limit`: candidates remain past `limit`; `capacity`: the admission gate refused the next request;
+   * `write_capacity_backpressure`: admission refused this background producer past the pause line, with no receipt.
+   */
+  stopped?: 'rate_limit' | 'capacity' | 'write_capacity_backpressure';
   sources: Array<KeepDbPolicy & { submitted: number }>;
 }
 
 /**
- * The admission seam for this background producer: a stop reason when it must not admit now. The default is the
- * repair core's 90% stop line on lifetime ids and receipt bytes; near-cap backpressure for background producers
- * plugs in here.
+ * The admission seam for this background producer: a stop reason when it must not admit now. The default stops at
+ * the repair core's 90% stop line on lifetime ids and receipt bytes (`capacity`) and, before that, at the background
+ * pause line (`persistence.capacity.background_pause_pct`, 80%) where admission would refuse this background request
+ * `write_capacity_backpressure`. Checking first keeps a refused attempt from retaining a reconcile backup under the
+ * page's deterministic request id; an admission-time refusal (another writer crossed the line meanwhile) also stops the run.
  */
-export type KeepDbAdmission = (engine: BrainEngine) => Promise<'capacity' | null>;
+export type KeepDbAdmission = (engine: BrainEngine) => Promise<'capacity' | 'write_capacity_backpressure' | null>;
 
-const headroom: KeepDbAdmission = async engine => (await capacity({ engine, remote: false } as OperationContext))
-  .some(c => c.used + (c.resource === 'lifetime_ids' ? 1 : RECEIPT_BYTES) > c.stop_at) ? 'capacity' : null;
+const headroom: KeepDbAdmission = async engine => {
+  const rows = await capacity({ engine, remote: false } as OperationContext);
+  const need = (resource: string) => resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR;
+  if (rows.some(c => c.used + need(c.resource) > c.stop_at)) return 'capacity';
+  const share = await readBackgroundPauseShare(engine);
+  return rows.some(c => c.used + need(c.resource) > Math.floor(c.limit * share)) ? 'write_capacity_backpressure' : null;
+};
 
 /** One request's receipt cost, as doctor `maintenance_write_drift` reports it for the matched pages. */
-export const keepDbReceiptCost = (pages: number) => ({ lifetime_ids: pages, receipt_bytes: pages * RECEIPT_BYTES });
+export const keepDbReceiptCost = (pages: number) => ({ lifetime_ids: pages, receipt_bytes: pages * RECEIPT_RESERVATION_FLOOR });
 
 /**
  * The effective policy of one source on this host: the `keep_db` prefixes of its canonical checkout's gbrain.yml,
@@ -103,14 +116,15 @@ async function reconcileWithDatabase(engine: BrainEngine, sourceId: string, slug
     const h = digest(['keep-db-policy-v1', sourceId, slug, page.preview.preconditions.revision, page.preview.preconditions.raw_file_hash]);
     const requestId = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
     if (await getWriteRequest(engine, writer.principal, requestId)) return 'already_submitted';
-    if (await admission(engine)) return 'capacity';
+    const stop = await admission(engine);
+    if (stop) return stop;
     try {
-      // TODO(#6696 PR A, A5): submit with PR A's `background` write origin once it is on master, so near-cap backpressure refuses
-      // this producer first; until then `admission` (default: the repair core's 90% stop line) is the only gate.
-      await runReconcileApply(engine, { source_id: sourceId, slug, preview: page.preview, request_id: requestId });
+      // #6696 A5: a background producer, so near-cap backpressure refuses it before any receipt and interactive writes keep the rest.
+      await withAdmissionOrigin('background', () => runReconcileApply(engine, { source_id: sourceId, slug, preview: page.preview, request_id: requestId }));
     } catch (error) {
       if (acceptedPendingReceipt(error)) return 'submitted';
       if (!(error instanceof OperationError)) throw error;
+      if (error.code === 'write_capacity_backpressure') return error.code;
       return await getWriteRequest(engine, writer.principal, requestId) ? 'submitted' : error.code;
     }
     return 'submitted';
@@ -137,7 +151,7 @@ export async function runKeepDbPolicy(engine: BrainEngine, opts: { hostId: strin
       let outcome: string;
       try { outcome = await reconcileWithDatabase(engine, sourceId, slug, opts.admission ?? headroom); }
       catch (error) { if (!(error instanceof OperationError)) throw error; outcome = error.code; }
-      if (outcome === 'capacity') { run.stopped = 'capacity'; return run; }
+      if (outcome === 'capacity' || outcome === 'write_capacity_backpressure') { run.stopped = outcome; return run; }
       if (outcome !== 'submitted') { skip(outcome); continue; }
       run.submitted++;
       entry.submitted++;

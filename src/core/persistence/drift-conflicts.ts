@@ -88,8 +88,9 @@ export async function liveFileDrift(engine: BrainEngine, sourceId: string, slug:
       ...(file.expectedBeforeHash ? { file_hash: file.expectedBeforeHash } : {}) };
   } catch (error) {
     if (!(error instanceof OperationError)) return { still_present: null, reason: 'error' };
-    if (error.detail === 'canonical_file_missing') return { still_present: null, reason: 'canonical_file_missing' };
     if (error.detail !== 'file_database_drift') {
+      // #6696 (A12): a recorded canonical file that is gone is its own reason; a producer refuses before admission on it.
+      if (error.detail === 'canonical_file_missing') return { still_present: null, reason: 'canonical_file_missing', db_revision: page.revision };
       return { still_present: null, reason: error.code === 'source_changed' ? 'file_missing' : error.code };
     }
     const path = await canonicalFilePath(engine, sourceId, root, page, slug);

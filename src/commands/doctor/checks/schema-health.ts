@@ -18,6 +18,7 @@ import { pgliteScaleCheck } from './engine-fit.ts';
 import { checkParkedEffects } from './parked-effects.ts';
 import { checkManagedGuardSchemaDrift, checkPublicationRefusals } from './managed-guard.ts';
 import { checkWorktreeRefreshStuck } from './worktree-refresh.ts';
+import { checkPersistenceCounterDrift } from './persistence-compaction.ts';
 import { checkPostgresCancellationDriver } from './postgres-cancellation.ts';
 import { checkProjectionReadiness } from './projection-readiness.ts';
 import type { Check } from '../../doctor.ts';
@@ -44,9 +45,9 @@ async function runPgvector(ctx: DoctorContext): Promise<Check[]> {
   checks.push(await pagesUpsertArbiterCheck(engine));
   checks.push(await checkProjectionReadiness(engine));
 
-  // 4a-bis. Parked postcommit effects (#5612); managed write capacity is an ops entry (checks/ops-sections.ts).
+  // 4a-bis. Parked postcommit effects (#5612) and receipt-bytes counter drift (#6696 A10); capacity and compaction are ops entries (checks/ops-sections.ts).
   progress.heartbeat('parked_effects');
-  checks.push(await checkParkedEffects(engine), await checkWorktreeRefreshStuck(engine));
+  checks.push(await checkPersistenceCounterDrift(engine), await checkParkedEffects(engine), await checkWorktreeRefreshStuck(engine));
   // #5983/#5974: schema drift on guarded tables and writes the database refused.
   checks.push(await checkManagedGuardSchemaDrift(engine), await checkPublicationRefusals(engine));
 
@@ -73,6 +74,7 @@ export const pgvectorEntry: DoctorEntry = {
     'postgres_cancellation_driver',
     'pages_upsert_arbiter',
     'text_projection_readiness',
+    'persistence_counter_drift',
     'parked_effects',
     'worktree_refresh_stuck',
     'managed_guard_schema_drift',

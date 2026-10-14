@@ -115,7 +115,7 @@ import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import {
   persistenceCapacityEntry,
   terminalFailuresEntry,
-  receiptCompactionEntry,
+  persistenceCompactionEntry,
   schemaPackConsistencyEntry,
 } from './checks/ops-sections.ts';
 import { STOP_DOCTOR, type DoctorContext, type DoctorEntry, type DoctorTier } from './context.ts';
@@ -154,7 +154,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   persistenceCapacityEntry,
   terminalFailuresEntry,
   managedSyncMovementEntry,
-  receiptCompactionEntry,
+  persistenceCompactionEntry,
   serveBuildDriftEntry,
   schemaPackConsistencyEntry,
   embeddingStateEntry,

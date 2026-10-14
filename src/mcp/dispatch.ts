@@ -6,6 +6,8 @@
  * + missing-context bugs; this module exists to prevent that recurring.
  */
 
+import { capacityNotices } from '../core/persistence/capacity-snapshot.ts';
+import { principalKey } from '../core/persistence/model.ts';
 import { affectsRecall } from '../core/types.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { operations, OperationError, enforceBoundClientOpAllowList, opError } from '../core/operations.ts';
@@ -158,6 +160,8 @@ export interface ToolResult {
 }
 
 export interface DispatchOpts {
+  /** #6696 (A5): set by the trusted transport for the user's own agent calls; never from wire params. */
+  admissionOrigin?: OperationContext['admissionOrigin'];
   /** Configuration selected by the resident transport, never populated from wire params. */
   config?: OperationContext['config'];
   /** Defaults to true (remote/untrusted). Local CLI callers (`gbrain call`) pass false. */
@@ -840,6 +844,7 @@ export function buildOperationContext(
     ...(opts.stdioSurface ? { stdioSurface: opts.stdioSurface } : {}),
     ...(opts.revealTools ? { revealTools: opts.revealTools } : {}),
     ...(opts.writeWaitMs !== undefined ? { writeWaitMs: opts.writeWaitMs } : {}),
+    ...(opts.admissionOrigin ? { admissionOrigin: opts.admissionOrigin } : {}),
     ...(opts.resultRows ? { resultRows: opts.resultRows } : {}),
     isCallable: (opName: string) => (render ??= dispatchRenderContext(opts)).isCallable(opName),
     auth: opts.auth,
@@ -1057,6 +1062,9 @@ export async function dispatchToolCall(
       : await op.handler(ctx, safeParams);
     // Hot memory built before a write (forget, remember, …) is never served after it, on every transport.
     if (op.mutating) invalidateHotMemoryForEngine(engine);
+    // #6696 (A4): a write's receipt carries the capacity notices, from the 60 s snapshot and at most once an hour per scope.
+    if (op.mutating) notices.push(...await capacityNotices(engine, { throttle: true,
+      scopes: ctx.remote === false ? undefined : ['brain', ...(ctx.auth?.principal ? [principalKey(ctx.auth.principal)] : [])] }).catch(() => []));
     // [E4] verb success metrics: budget drops + entity hit/miss when present.
     {
       const r = result as { dropped_count?: number; found?: boolean; status?: string } | null;
