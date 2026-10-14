@@ -10,17 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.227.0] - 2026-10-14
 
-**Search reranking costs 60% less: the default reranker is now Voyage `rerank-3-lite`, for brains that never set `search.reranker.model`.** In gbrain-evals #148 (v0.10.93), `rerank-3-lite` reranked the same 50 candidates × 1,400 tokens for $0.60 per 1,000 LongMemEval queries instead of $1.51 with `rerank-2.5`, and retrieval quality stayed within run-to-run noise (strict recall@10 298 vs 299 of 300 questions, recall@5 289 vs 288, reranker latency about the same). Voyage now lists `rerank-3` / `rerank-3-lite` as its current, generally available models and `rerank-2.5` as an older one. A brain that set `search.reranker.model` keeps its model, including brains created on v0.46.3–v0.47.10, where `gbrain init` wrote `voyage:rerank-2.5` explicitly. To go back to the previous default: `gbrain config set search.reranker.model voyage:rerank-2.5`.
+**`gbrain setup` on a new machine finishes about 0.7 s sooner, and the install guides for agents now start with `gbrain setup`.** When setup creates a new brain, it applies that brain's setup migrations. That step opened the brain's local database 8 times, and every open starts a small embedded Postgres. It now opens it 3 times. It applies the same migrations, writes the same records and prints the same lines; only the waiting is shorter. Separately, the agent install guides now name `gbrain setup claude-code` (or `codex`) as the command right after installing, keep `gbrain init --pglite --no-embedding` as the fallback for other harnesses, and explain why Bun's "Blocked 1 postinstall" message is safe to ignore on a new install.
+
+### The numbers that matter
+
+Same machine, interleaved runs, median of 5, fresh brain each time:
+
+| What ran | Before | After |
+|---|---|---|
+| `gbrain setup claude-code` on a new machine | 7438 ms | 6706 ms |
+| Its setup migration step on its own | 2692 ms | 2002 ms |
+| Brain opens during that step | 8 | 3 |
+
+### What you'd see
+
+Nothing different apart from the time. Setup still prints `[setup] Migrations: 14 recorded as not needed on a new brain; 5 setup migration(s) applied by setup without installing services (0.11.0, 0.14.0, 0.22.4, 0.28.0, 0.53.0); none pending.`, still holds v0.11.0 back when it would edit an existing `~/.claude/AGENTS.md`, `~/.openclaw/AGENTS.md` or OpenClaw cron manifest, and still keeps init's hand-off line plus the error code if the step fails. It starts no services and makes no network calls. An existing brain and `gbrain init` on its own are untouched.
 
 ### Itemized changes
 
-- **Default** (`src/core/ai/defaults.ts`, `src/core/ai/recipes/voyage.ts`): `DEFAULT_RERANKER_MODEL` and the Voyage recipe's reranker `default_model` are `rerank-3-lite`. Candidate count and the per-document token cap are unchanged. The recipe no longer calls the rerank-3 pair a preview, and its price note is re-verified against Voyage's pricing page.
-- **Estimates**: the tokenmax switch notice and the mode bundle's cost note now say about $0.0006 per query.
-- **Disclosure**: a one-time behavior-change notice on upgrade names the change and the rollback command.
-- **Test** (`test/reranker-default-explicit-config.test.ts`): runs a brain's config through mode resolution to the reranker request on the wire. A brain with no `search.reranker.model` sends `rerank-3-lite` (50 documents in tokenmax), and a brain that set `voyage:rerank-2.5` or `voyage:rerank-3` sends its own model.
-- Docs: search modes, embedding providers, retrieval architecture, install guides and README name the new default and the rollback.
+- **One brain open per run** (`src/commands/migrations/run-engine.ts`): `apply-migrations` runs inside a run session. The opt-out read, the migrations flagged `sharesRunEngine` (v0.11.0, v0.14.0, v0.22.4, v0.28.0, v0.53.0) and the closing schema check reuse one PGLite engine. It is closed before v0.11.0's `gbrain jobs smoke` check (which still runs), before any migration that doesn't share it, before `--list`, `--dry-run` or a consent prompt, and when the run ends, including after an error. On Postgres, and outside a run, every open is a new connection as before.
+- **The migration records are pinned**: a test compares the files a fresh setup leaves in `migrations/` (`completed.jsonl`, `pending-host-work.jsonl`, `v0.22.4-audit.json`) with a copy captured before this change, byte for byte apart from timestamps, paths and ids.
+- **Install guides** (`AGENTS.md`, `INSTALL_FOR_AGENTS.md`): after `bun install -g github:garrytan/gbrain`, run `gbrain setup claude-code` (Codex: `gbrain setup codex`). On any other harness, run `gbrain init --pglite --no-embedding`. The search-mode question that follows is unchanged.
+- **Bun's blocked postinstall**: Bun blocks gbrain's postinstall script on `bun install -g`. A new install can skip it. The script only repeats the refusal every gbrain command already prints on a Bun that is too old, and otherwise runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists. `gbrain setup` then creates the brain and applies its setup migrations.
 
 ## [0.60.226.0] - 2026-10-14
 
