@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 232698,
-    "stdoutSha256": "efcd4e38b964afc730f5c34369c4f9f3d8cec4ad1e885a6df5186b69830924e8",
+    "stdoutBytes": 233139,
+    "stdoutSha256": "6b05677e2fd7fdff3d75f1716208e473f63762b8c914702ab81ed26ac9ce7ee2",
     "toolNames": [
       "remember",
       "entity",
@@ -5927,9 +5927,11 @@
         "name": "context_pack",
         "parameters": {
           "budget_tokens": "number?",
+          "counterparty": "string?",
           "entities": "string?",
           "include_private": "boolean?",
           "include_quarantined": "boolean?",
+          "intent": "string?",
           "min_trust": "string?",
           "session_id": "string?",
           "since": "string?"
@@ -5940,6 +5942,10 @@
             "budget_tokens": {
               "description": "Token budget; cards pack first.",
               "type": "number"
+            },
+            "counterparty": {
+              "description": "Person or company (name or slug): adds a pulled brief of dated items about them.",
+              "type": "string"
             },
             "entities": {
               "description": "Comma-separated names or slugs (max 8).",
@@ -5952,6 +5958,14 @@
             "include_quarantined": {
               "description": "Admin or memory_confirm: quarantined cards.",
               "type": "boolean"
+            },
+            "intent": {
+              "description": "With counterparty: the task the brief is for.",
+              "enum": [
+                "meeting",
+                "reply"
+              ],
+              "type": "string"
             },
             "min_trust": {
               "description": "Lowest trust tier to return (the connection floor still applies).",
