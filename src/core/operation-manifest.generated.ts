@@ -357,7 +357,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "put_page",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
+    "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Pages over 256 KB: use edit_page; content under half such a page is refused (page_shrink_refused) unless allow_shrink:true. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
     "params": {
       "source_id": {
         "type": "string",
@@ -715,7 +715,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)"
     },
-    "description": "Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). Pass the id unchanged; it does not grant access. Legacy slug ids work only when unambiguous within your current read scope. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown. For fuzzy slugs, soft-delete recovery, or lossless edit round-trips, use get_page.",
+    "description": "Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). Pass the id unchanged; it does not grant access. Legacy slug ids work only when unambiguous within your current read scope. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown; a page over 256 KB returns the window around the searched chunk instead, with metadata.total_bytes and metadata.next_id (fetch it to read on). For fuzzy slugs, soft-delete recovery, or lossless edit round-trips, use get_page.",
     "params": {
       "id": {
         "type": "string",
@@ -756,7 +756,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "the diff is the caller's own authorized view of the page it just edited (the get_page boundary), secret-redacted when created because the receipt retains it"
     },
-    "description": "Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
+    "description": "Change part of a page: prefer this over put_page for small changes and for any page over 256 KB. expected_revision is the page's revision (get_page body:'none' returns just that). Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
     "params": {
       "slug": {
         "type": "string",
@@ -766,7 +766,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "expected_revision": {
         "type": "string",
         "required": true,
-        "description": "From get_page include_content:true."
+        "description": "From get_page (body:'none' is enough)."
       },
       "edits": {
         "type": "array",
@@ -2101,7 +2101,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. Returns version, engine kind, and page/chunk counts. Read-scope.",
+    "description": "Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. Returns version, engine kind, page/chunk counts and capabilities (large_pages_v1: windowed get_page). Read-scope.",
     "params": {},
     "scope": "read",
     "area": "identity"

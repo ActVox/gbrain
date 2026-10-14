@@ -1228,9 +1228,10 @@ export function stampEvidenceSafe(results: SearchResult[]): void {
 }
 
 export function stampDeepResearchIds(results: SearchResult[]): void {
-  // Large pages (T24): the id names the hit's chunk, so fetch can return that evidence from a page too large to send whole.
+  // Large pages (T24): a hit past the page's first chunk names its chunk, so fetch can return that evidence from a page too
+  // large to send whole (the first window already holds chunk 0, whose id stays the plain page id).
   for (const r of results) if (r.result_type !== 'fact') (r as SearchResult & { id?: string }).id = encodeDeepResearchId(r.source_id, r.slug,
-    Number.isSafeInteger(r.chunk_id) && r.chunk_id > 0 ? { chunkId: r.chunk_id } : undefined);
+    Number.isSafeInteger(r.chunk_id) && r.chunk_id > 0 && r.chunk_index > 0 ? { chunkId: r.chunk_id } : undefined);
 }
 
 /** T4 — shared eval-capture for the `search` op (keyword-only + cheap-hybrid paths). */
