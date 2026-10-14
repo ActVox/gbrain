@@ -23,6 +23,7 @@
  * evaluates second.
  */
 
+import { recordFunnelEvent, recordRememberOutcome } from './funnel.ts';
 import type { Operation } from './operations.ts';
 import { WRITE_RECEIPT_SCHEMA, WRITE_REQUEST_PARAM, AGENT_CONTENT_PARAMS, CONTENT_ORIGIN_PARAM } from './persistence/params.ts';
 import { WRITE_ERROR_CODES } from './persistence/types.ts';
@@ -203,7 +204,7 @@ const remember: Operation = {
       const { privateFactNotice } = await import('./interop-notices.ts');
       ctx.emitNotice?.(privateFactNotice((result as { id?: string | number } | null)?.id));
     }
-    (await import('./funnel.ts')).recordRememberOutcome(result);
+    recordRememberOutcome(result);
     return result;
   },
   cliHints: { name: 'remember', positional: ['fact'] },
@@ -458,7 +459,7 @@ const forget: Operation = {
     const { submitForgetMutation } = await import('./persistence/memory-mutations.ts');
     const { runMemoryWrite } = await import('./persistence/verb-errors.ts');
     const out = await runMemoryWrite(() => submitForgetMutation(ctx, 'forget', { ...p, id: rawId, ...(reason ? { reason } : {}) }));
-    (await import('./funnel.ts')).recordFunnelEvent('withdrawal');
+    recordFunnelEvent('withdrawal');
     return out;
   },
   // NO cliHints: `gbrain forget` is a CLI_ONLY command (recall.ts runForget)
