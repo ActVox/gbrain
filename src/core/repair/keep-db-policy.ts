@@ -105,6 +105,8 @@ async function reconcileWithDatabase(engine: BrainEngine, sourceId: string, slug
     if (await getWriteRequest(engine, writer.principal, requestId)) return 'already_submitted';
     if (await admission(engine)) return 'capacity';
     try {
+      // TODO(#6696 PR A, A5): submit with PR A's `background` write origin once it is on master, so near-cap backpressure refuses
+      // this producer first; until then `admission` (default: the repair core's 90% stop line) is the only gate.
       await runReconcileApply(engine, { source_id: sourceId, slug, preview: page.preview, request_id: requestId });
     } catch (error) {
       if (acceptedPendingReceipt(error)) return 'submitted';
