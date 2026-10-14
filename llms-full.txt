@@ -427,9 +427,13 @@ put_pages with one request_id per batch and wait_ms 25000."*
   `gbrain config set mcp.remote_auto_links false`.
 - **Embedding** runs after the commit. New text is searchable by keyword
   immediately and by meaning once its embedding effect finishes.
-- **Request size.** `gbrain serve --http` reads the whole request; the
-  simpler HTTP transport caps a request at `GBRAIN_HTTP_MAX_BODY_BYTES`
-  (1 MiB by default) and its 413 reply tells the agent to split the batch.
+- **Request size.** HTTP carries less than the 24 MiB page ceiling:
+  `gbrain serve --http` reads at most 4 MiB per request (the MCP SDK
+  default), and the simpler HTTP transport caps a request at
+  `GBRAIN_HTTP_MAX_BODY_BYTES`. A batch goes in smaller `put_pages` calls; a
+  page over the transport limit goes by file on the brain host (sync,
+  `gbrain import` or `gbrain put`), never split by hand. Every limit is in
+  [limits per entry point](memory-boundaries.md#large-page-limits).
 
 ## PGLite brains
 
@@ -10213,6 +10217,7 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/tro
 | `gbrain init` or `gbrain upgrade` stops with `schema_lock_blocked` naming a pid (or, before #5227, sat in `wait_event_type=Lock` with no output) | let the named session finish, or with the user's agreement end it on the database host: `SELECT pg_terminate_backend(<pid>)`; then rerun the same command ([ENGINES.md](../ENGINES.md#schema-lock-blocked)) | brain host, after the user agrees | `destructive` when it ends another session | the rerun completes; `gbrain doctor --json` shows the schema at head |
 | [`queue_capacity`, `persistence_capacity` or `persistence_request_growth`](#write-capacity) | run the printed `gbrain config set persistence.limits.<limit> <value>` | brain host | none | `gbrain doctor --only persistence_capacity,persistence_request_growth --json` |
 | [`dream_paid_loop`, or dream keeps skipping one transcript](#dream-paid-loop) | fix the cause, then `gbrain dream reset-key --list` and `gbrain dream reset-key '<key>'` | agent, after the user agrees | `paid` (the key is retried) | `gbrain doctor --only dream_paid_loop --json` |
+| [A page exists (`gbrain get <slug>` returns it) but search never finds text from it](memory-boundaries.md#large-pages) | find the cause: `gbrain reindex --oversized --dry-run --json` lists pages stored before the upgrade with a size-based `embed_skip` marker (run it without `--dry-run` to keyword-index them, free); a page above an operator-lowered `content_sanity.bytes_block` keeps its marker until the operator raises or unsets it; a page the content-quality gate quarantined as junk shows in `gbrain quarantine list`, and `gbrain quarantine clear <slug>` re-checks it once the user agrees; a file over the 24 MiB page ceiling was never stored ([`file_too_large`](write-refusals.md#file_too_large)). Embedding the re-indexed pages is a separate paid step: `gbrain embed --held --max-usd <N>` | agent for the reindex; the user decides embedding spend, a `bytes_block` change and a quarantine clear | none for the reindex (CPU only); `paid` for `gbrain embed` | `gbrain reindex --oversized --dry-run --json` lists nothing; `gbrain doctor --json`; `gbrain search "<phrase from deep in the page>"` returns the page |
 | [Search answers look keyword-only on a large Postgres brain](#hybrid-search-returns-only-keyword-hits) | read doctor's `vector_plan`; run the index command it prints | brain host | none | `gbrain doctor --only vector_plan --json` |
 | [Broad keyword queries take about 8 s and come back vector-only (`keyword_arm_failed`) on a large Postgres brain](#keyword-search-times-out-on-a-large-postgres-brain) | read doctor's `keyword_plan`; narrow with `--source-id`, or raise `search.keyword_statement_timeout_ms` on the brain host and restart the serving process | brain host | none | `gbrain doctor --only keyword_plan --json` |
 | A second `gbrain serve` cannot open the brain | the readiness `harness_wiring` fix: every session shares one `gbrain serve --http` | user | `persistent_install`, `credentials` | `gbrain doctor --only harness_wiring --json` |

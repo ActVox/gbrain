@@ -241,7 +241,7 @@ export async function settleContentDisposition(engine: BrainEngine, parsed: Pars
       disposition: 'warn',
     });
     process.stderr.write(
-      `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold, consider splitting\n`,
+      `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold; stored and searchable, no action needed\n`,
     );
   }
   const gate = ctx.writeGate ? await applyTrustAllowRules(engine, assessPageForGate(parsed, ctx.writeGate, sanityCfg.writeGate ?? DEFAULT_WRITE_GATE_CONFIG),
@@ -435,6 +435,9 @@ export function screenImportContent(input: ImportScreenInput): ImportScreenResul
   return { status: 'importable', parsed, ...(fences ? { fences } : {}) };
 }
 
+/** The next step of a page write over the page limit; a page under it never needs splitting. */
+export const PAGE_OVER_LIMIT_SUGGESTION = `The content is over the ${MAX_FILE_SIZE}-byte page limit, so it refuses on every retry. Every page under the limit is stored and searchable; only content over it must become several pages, each submitted with its own request_id.`;
+
 /**
  * The typed refusal a publication path throws. `legacy_error` keeps the wire
  * `error` the site always returned, so stored receipts keep matching
@@ -478,7 +481,7 @@ export function contentRefusalFromReceipt(code: string | null | undefined, messa
     : typed === 'content_rejected' ? 'The content-sanity gate rejects this content under the operator\'s junk_disposition=reject setting. Remove the matched junk, then submit with a new request_id.'
     : typed === 'purged_content' ? 'This content was purged by the owner and stays out of the brain. Do not resubmit it; write new content, or ask the user to clear the tombstone on the brain host (gbrain pages unpurge).'
     : typed === 'write_gate_rejected' ? 'The write gate refuses this external instruction-like content under the operator\'s write_gate.external_mode=reject setting, so it refuses on every retry. Tell the user; changing that setting is their decision.'
-    : 'The content is over the import size limit. Split it into smaller pages, then submit each with its own request_id.';
+    : PAGE_OVER_LIMIT_SUGGESTION;
   return { code: typed, ...(reason ? { reason } : {}), ...(key ? { key } : {}), ...(line !== undefined ? { line } : {}), suggestion };
 }
 

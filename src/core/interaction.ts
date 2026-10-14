@@ -11,7 +11,6 @@
 
 import { fstatSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { PAGE_MAX_BYTES } from './page-size-policy.ts';
 
 export interface InteractiveProbe {
   env?: NodeJS.ProcessEnv;
@@ -195,7 +194,7 @@ export interface StdinReadOptions {
 const DEFAULT_FIRST_BYTE_MS = 30_000;
 const FIRST_BYTE_NOTICE_MS = 5_000;
 const DEFAULT_INACTIVITY_MS = 60_000;
-export const DEFAULT_STDIN_MAX_BYTES = PAGE_MAX_BYTES;
+export const DEFAULT_STDIN_MAX_BYTES = 5_000_000;
 
 function firstByteDeadlineMs(explicit: number | undefined): number {
   if (explicit !== undefined) return explicit;
@@ -204,7 +203,7 @@ function firstByteDeadlineMs(explicit: number | undefined): number {
 }
 
 const tooLarge = (maxBytes: number, bytes: number): StdinRead =>
-  ({ kind: 'error', error: new Error(`stdin exceeds ${maxBytes} bytes, the input limit`), bytes });
+  ({ kind: 'error', error: new Error(`stdin exceeds ${maxBytes} bytes, the most this command reads from stdin; nothing was read`), bytes });
 
 /**
  * fd 0 as a regular file or a non-TTY character device (`< file`, `< /dev/null`)
