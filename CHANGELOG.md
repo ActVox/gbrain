@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.226.0] - 2026-10-14
 
 **The Ubicloud gate's `verify` typecheck runs warm from a worktree whose `node_modules` is a symlink.** Verify's typecheck on #6673's gate timed out at 121 s against its 120 s cap; the rerun passed at 113 s. That gate ran from a `git worktree` whose `node_modules` is a symlink to the main checkout's, a common way to skip a `bun install` per worktree. tsc records each source file relative to the buildinfo's directory, but it records the files it reaches through node_modules by their real path: the TypeScript lib files and bun-types' globals, 990 entries in all. In that layout, those entries point out of the checkout (`../../../../../../../../workspace/gbrain/node_modules/typescript/lib/lib.es5.d.ts`). On the VM they resolve to nothing, the global declarations count as changed, and tsc rechecks every file. All four of that worktree's gates logged `verify's typecheck runs warm`, but the typecheck took 84, 85, 113 and 121 s, the same as a cold one. The 120 s cap is unchanged.
 
