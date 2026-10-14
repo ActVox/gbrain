@@ -8,7 +8,8 @@ import { opError, type OperationError } from '../core/ops/contract.ts';
 import { writeCliError } from '../cli/cli-error.ts';
 import { VERSION } from '../version.ts';
 import type { InteractiveProbe } from '../core/interaction.ts';
-import { migrationLedgerSummary } from '../core/migration-ledger.ts';
+import { forwardProgressPast, migrationLedgerSummary } from '../core/migration-ledger.ts';
+import { loadCompletedMigrations } from '../core/preferences.ts';
 import { MIGRATIONS_RUNNING_EXIT_CODE, readMigrationLockHolder } from '../core/migration-orchestration-lock.ts';
 import {
   BUN_FLOOR_EXIT_CODE,
@@ -383,7 +384,8 @@ export async function describeMigrationFailure(error: unknown, newVersion: strin
     return `Migrations: running (host ${holder?.host ?? 'unknown'}, pid ${holder?.pid ?? 'unknown'}) in another apply-migrations. `
       + 'Wait for it to finish; `gbrain doctor` shows migration progress.';
   }
-  const wedged = newVersion ? migrationLedgerSummary(newVersion).wedged : [];
+  const ledger = newVersion ? loadCompletedMigrations() : [];
+  const wedged = newVersion ? migrationLedgerSummary(newVersion).wedged.filter(v => forwardProgressPast(v, ledger) === null) : [];
   if (wedged.length > 0) {
     return `Migrations: wedged (${wedged.map(v => `v${v}`).join(', ')} ended partial 3+ times in a row). Fix the cause in ~/.gbrain/upgrade-errors.jsonl, then run: `
       + `${wedged.map(v => `gbrain apply-migrations --force-retry ${v}`).join(' && ')} && gbrain apply-migrations --yes`;

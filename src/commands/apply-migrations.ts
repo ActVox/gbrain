@@ -31,6 +31,7 @@ import {
   statusForVersion as ledgerStatusForVersion,
   freshInstallVersion,
   isFreshInstallStamp,
+  forwardProgressPast,
   isPendingFreshInstall,
   MAX_CONSECUTIVE_PARTIALS,
 } from '../core/migration-ledger.ts';
@@ -226,6 +227,8 @@ interface Plan {
   pending_fresh_install: Migration[];
   skippedFuture: Migration[];
   wedged: Migration[];
+  /** #6696 C5: wedged in the ledger, but a newer migration ran past it (doctor's forward-progress rule): history, not outstanding work. */
+  wedged_superseded: Migration[];
   /** #6466: declined by the brain's config (`Migration.optOut`); never run, listed as `declined`. */
   declined: Migration[];
 }
@@ -248,7 +251,8 @@ interface Plan {
  * skip v0.11.0 when running v0.11.1. Compare against completed.jsonl.
  */
 function buildPlan(idx: CompletedIndex, installed: string, filterVersion?: string, declined: ReadonlySet<string> = new Set()): Plan {
-  const plan: Plan = { applied: [], partial: [], pending: [], pending_fresh_install: [], skippedFuture: [], wedged: [], declined: [] };
+  const plan: Plan = { applied: [], partial: [], pending: [], pending_fresh_install: [], skippedFuture: [], wedged: [], wedged_superseded: [], declined: [] };
+  const ledger = [...idx.byVersion.values()].flat();
   for (const m of migrations) {
     if (filterVersion && m.version !== filterVersion) continue;
     if (compareVersions(m.version, installed) > 0) {
@@ -259,7 +263,7 @@ function buildPlan(idx: CompletedIndex, installed: string, filterVersion?: strin
     const status = statusForVersion(m.version, idx);
     if (status === 'complete') plan.applied.push(m);
     else if (status === 'partial') plan.partial.push(m);
-    else if (status === 'wedged') plan.wedged.push(m);
+    else if (status === 'wedged') (forwardProgressPast(m.version, ledger) === null ? plan.wedged : plan.wedged_superseded).push(m);
     else if (isPendingFreshInstall(m.version, idx.freshVersion)) plan.pending_fresh_install.push(m);
     else plan.pending.push(m);
   }
@@ -292,7 +296,7 @@ function listRows(plan: Plan): Array<{ status: string; m: Migration }> {
   return [
     ...plan.applied.map(m => ({ status: 'applied', m })),
     ...plan.partial.map(m => ({ status: 'partial', m })),
-    ...plan.wedged.map(m => ({ status: 'wedged', m })),
+    ...[...plan.wedged, ...plan.wedged_superseded].map(m => ({ status: 'wedged', m })),
     ...plan.pending.map(m => ({ status: 'pending', m })),
     ...plan.pending_fresh_install.map(m => ({ status: 'pending_fresh_install', m })),
     ...plan.declined.map(m => ({ status: 'declined', m })),
@@ -675,8 +679,8 @@ async function runLockedMigrations(
 
   doc.database = dbProbe;
   doc.plan = Object.fromEntries(Object.entries(plan).map(([state, entries]) => [state, entries.map((migration: Migration) => migration.version)]));
-  reportWedgedMigrations(plan.wedged);
   report.wedged = plan.wedged;
+  reportWedgedMigrations(plan.wedged, plan.wedged_superseded, completed);
 
   if (cli.specificMigration && plan.applied.length + plan.partial.length + plan.pending.length + plan.pending_fresh_install.length + plan.skippedFuture.length + plan.declined.length === 0) {
     console.error(`No migration registered with version "${cli.specificMigration}". Run \`gbrain apply-migrations --list\` to see registered versions.`);
@@ -697,7 +701,7 @@ async function runLockedMigrations(
   if (cli.list) { printList(plan, installed, dbProbe); return listExit; }
   if (cli.dryRun) {
     const previews: Array<{ version: string; preview?: unknown; error?: string }> = [];
-    for (const migration of [...plan.applied, ...plan.partial, ...plan.pending, ...plan.pending_fresh_install, ...plan.wedged]) {
+    for (const migration of [...plan.applied, ...plan.partial, ...plan.pending, ...plan.pending_fresh_install, ...plan.wedged, ...plan.wedged_superseded]) {
       if (!migration.preview) continue;
       try { previews.push({ version: migration.version, preview: await migration.preview(orchestratorOptsFrom(cli)) }); }
       catch (error) { previews.push({ version: migration.version, error: error instanceof Error ? error.message : 'Inventory unavailable.' }); }
@@ -967,7 +971,11 @@ function failWedged(report: RunReport): number | undefined {
 }
 
 /** Bug 3 — surface wedged migrations as a loud, actionable error; the run continues (applied/partial/pending are still reported and run). */
-function reportWedgedMigrations(wedged: readonly Migration[]): void {
+function reportWedgedMigrations(wedged: readonly Migration[], superseded: readonly Migration[], completed: readonly CompletedMigrationEntry[]): void {
+  for (const m of superseded) {
+    console.error(`\nMigration v${m.version} has ${MAX_CONSECUTIVE_PARTIALS}+ consecutive partial runs, but v${forwardProgressPast(m.version, completed)} completed after it, `
+      + 'so it is history, not outstanding work. Nothing to do.');
+  }
   for (const m of wedged) {
     console.error(
       `\nMigration v${m.version} is WEDGED (${MAX_CONSECUTIVE_PARTIALS}+ consecutive partials with no completion). ` +
