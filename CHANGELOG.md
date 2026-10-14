@@ -10,6 +10,34 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.232.0] - 2026-10-14
+
+**MCP `list_write_conflicts` refuses a source outside the caller's grant and bounds its window to that source's own requests (#6643 follow-up).** A remote caller that named a source outside its grant used to get an empty report back. The response's `window` sequences were also brain-wide, so polling one granted source showed write activity in sources the caller cannot see. Both were found by GBRA-60's D5 agent smoke.
+
+### Itemized changes
+
+- **Out-of-grant `source_id`** (`src/core/ops/persistence.ts`): the op checks an explicit `source_id` with `resolveRequestedScope`, like the other source-scoped reads. A remote caller outside its grant gets `permission_denied`, whether or not the source exists.
+- **Source-scoped window** (`src/core/persistence/drift-conflicts.ts`):
+  - The window ends at the source's own newest request in its current incarnation, read through the `(source_incarnation, sequence)` index, and the scan reads only that incarnation.
+  - A cursor naming a later sequence is clamped.
+  - A source the caller may not read returns before anything is computed.
+- **Tests:** `test/maintenance-file-drift-6643.test.ts` covers the refusal for a real and an unregistered source, a window that does not move when another source is written, and the clamped forged cursor. Each half fails on the previous code.
+
+## [0.60.231.0] - 2026-10-14
+
+**Reading a large page no longer pulls the whole page into a response: `get_page` returns an outline and a window, and every remote window is cut from the privacy-sanitized view of the page (large pages Wave A, part 1).** Before, `get_page` of a 100 MB page built a 204 MB JSON-RPC frame. That is over the MCP SDK's 10 MiB stdio limit and far over the 25k tokens a harness accepts. Evidence delivery also read the whole body for every conversation hit: 2 s and +622 MB per hit at 100 MB. Now an MCP client that is not the thin client gets the full body up to the inline threshold, and above it an outline plus the first window with the exact call to read on. Windows, outlines and short leads all slice one projection with withdrawals applied, takes/facts fences stripped and credentials projected. A partial response never fills `compiled_truth`, `timeline` or `content`, so a read followed by a write cannot shrink a page by accident. Another guard backs this up: a remote `put_page` that would cut a large page to under half refuses unless `allow_shrink: true`. Pages up to today's ingest limits read as before through the local CLI and the thin client. The ceiling increase and searchability of large pages come in the next Wave A PR.
+
+### Itemized changes
+
+- **Body modes** (`src/core/ops/get-page-body.ts`, `src/core/page-window/`): `get_page` takes `body: auto|full|none|outline|window` and the selectors `lines`, `bytes` (UTF-8, snapped to code-point and line starts), `around_chunk_id` and a revision-bound `cursor`. A stale cursor returns `revision_changed`, whose fix reads on from the same offset. The default window is 40,000 bytes, measured as the final encoded frame.
+- **Exact chunk spans** (migration v244, `src/core/chunkers/recursive.ts`): `content_chunks.projected_byte_start/end` record each chunk's position in projected UTF-8 coordinates at chunk time. A differential oracle test proves chunk text and indexes are byte-identical to the previous chunker over 160 seeded documents and 6 option sets.
+- **Paging** (`src/core/ops/chunks.ts`, `src/core/ops/admin.ts`, `src/core/ops/read-paging.ts`): `get_chunks` pages 50 rows at a time and returns `total_chunks`. `get_versions` returns the newest 20, metadata only, by default.
+- **fetch and evidence** (`src/core/ops/pages.ts`, `src/core/search/evidence-delivery.ts`): on pages over 256 KB, `fetch` returns the window around the searched chunk with a `next_id` continuation, and the evidence `page` unit becomes a window. Above 1 MiB, hits are placed by stored spans only.
+- **Egress backstop** (`src/core/egress-budget.ts`, `src/mcp/dispatch.ts`): a read result over `mcp.max_result_bytes_stdio` (4 MiB) or `_http` (1 MiB), measured on the final frame, returns `result_too_large` with a fix.
+- **Bounded leads** (`src/core/page-window/bounded-lead.ts`): search snippets, synopses, entity cards and think rows read a 64 KiB prefix through the withdrawal overlay instead of the whole body.
+- **Thin CLI and capability** (`src/cli/page-render.ts`): `gbrain get` pages the round-trip markdown to the end, verifies size and sha256, and never prints a partial body as whole. `get_brain_identity` advertises `large_pages_v1`.
+- **Docs**: new `docs/guides/windowed-reads.md`, plus error-registry entries for `page_too_large_for_inline`, `result_too_large`, `revision_changed` and `page_shrink_refused`.
+
 ## [0.60.230.0] - 2026-10-14
 
 **The entity-card latency test no longer fails on a busy CI machine while the card itself is fast (test and CI only, no product change).** The test checks that a card's p99 stays under 100 ms. On Ubicloud it failed at 107-125 ms whenever other memory-heavy tests shared its VM, or the hypervisor took CPU time from the guest, while the same calls took 36-41 ms run alone. It now measures the call's own thread CPU time, runs alone on its VM and re-times a call that hypervisor steal crossed. The 100 ms budget and every assertion are unchanged, and a 90 ms slowdown injected into the reference read still fails it.
