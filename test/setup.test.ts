@@ -105,10 +105,23 @@ describe('gbrain setup claude-code: install lifecycle', () => {
     const block = r.stdout.indexOf('[AGENT]');
     expect(next).toBeGreaterThan(-1);
     expect(block).toBeGreaterThan(next);
-    expect(r.stdout.match(/\[AGENT\]/g)).toHaveLength(1);
-    expect(r.stdout.slice(block)).toContain('in the reply that reports this install');
-    expect(r.stdout.slice(block)).toContain('(id: search_mode)');
+    expect(r.stdout.match(/\[AGENT\]/g)).toHaveLength(2);
+    const hosted = r.stdout.indexOf('[hosted_option]');
+    expect(r.stdout.indexOf('[first_run_decisions]')).toBeGreaterThan(next);
+    expect(hosted).toBeGreaterThan(r.stdout.indexOf('[first_run_decisions]'));
+    expect(r.stdout.slice(block, hosted)).toContain('in the reply that reports this install');
+    expect(r.stdout.slice(block, hosted)).toContain('(id: search_mode)');
+    expect(r.stdout.slice(hosted)).toContain('https://gbrain.io/?ref=cli-setup');
     expect(r.stdout.trimEnd().endsWith('[/AGENT]')).toBe(true);
+  });
+
+  test('hosted_option rides only the run that created the brain', async () => {
+    const b = box();
+    const first = await setup(b, ['claude-code', '--json']);
+    expect(first.doc.notices.map((n: any) => n.code)).toEqual(['first_run_decisions', 'hosted_option']);
+    expect(first.doc.notices[1].user_message).toContain('https://gbrain.io/?ref=cli-setup');
+    const second = await setup(b, ['claude-code', '--json']);
+    expect(second.doc.notices.map((n: any) => n.code)).not.toContain('hosted_option');
   });
 
   test('#6606: after Next, setup names remember as the way to save a fact and what reaches new sessions', async () => {
