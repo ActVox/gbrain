@@ -222,7 +222,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)"
     },
-    "description": "Read a page by slug. To edit, pass include_content:true and send `content` to put_page, or use edit_page.",
+    "description": "Read a page by slug. Pages over 256 KB come back as an outline plus a first window, never a partial body in compiled_truth/content: read on with body: 'window' (lines, bytes, around_chunk_id from a search hit, or next_cursor). body: 'none' returns just the revision and size for edit_page/put_page. Whole markdown for a round trip: include_content:true (refused when the page does not fit this connection).",
     "params": {
       "slug": {
         "type": "string",
@@ -235,11 +235,78 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_content": {
         "type": "boolean",
-        "description": "Full markdown + revision, for editing."
+        "description": "Full markdown + revision (body: 'full')."
       },
       "content_only": {
         "type": "boolean",
         "description": "Round-trip fields only."
+      },
+      "body": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "full",
+          "none",
+          "outline",
+          "window"
+        ],
+        "description": "auto (default: whole body up to 256 KB, else outline + first window), full, none (revision + size only), outline, window."
+      },
+      "lines": {
+        "type": "object",
+        "description": "Window selector: 1-based lines.",
+        "properties": {
+          "from": {
+            "type": "number",
+            "required": true
+          },
+          "count": {
+            "type": "number",
+            "required": true
+          }
+        }
+      },
+      "bytes": {
+        "type": "object",
+        "description": "Window selector: UTF-8 bytes, snapped to line starts.",
+        "properties": {
+          "offset": {
+            "type": "number",
+            "required": true
+          },
+          "length": {
+            "type": "number",
+            "required": true
+          }
+        }
+      },
+      "around_chunk_id": {
+        "type": "number",
+        "description": "Window selector: center on a search hit chunk_id."
+      },
+      "context_lines": {
+        "type": "number",
+        "description": "Lines around around_chunk_id (default 20)."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "Window selector: next_cursor from the previous window."
+      },
+      "max_bytes": {
+        "type": "number",
+        "description": "Window size in bytes (default 40000)."
+      },
+      "view": {
+        "type": "string",
+        "enum": [
+          "read",
+          "markdown"
+        ],
+        "description": "Window text: read (default) or markdown (round-trip content)."
+      },
+      "outline_from": {
+        "type": "number",
+        "description": "Outline entry to start from (next_from_index)."
       },
       "include_deleted": {
         "type": "boolean",
@@ -332,6 +399,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "boolean",
         "required": false,
         "description": "Allow emptying the page."
+      },
+      "allow_shrink": {
+        "type": "boolean",
+        "required": false,
+        "description": "Allow content under half a >256 KB page."
       },
       "drop_timeline": {
         "type": "boolean",
@@ -758,6 +830,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
             "allow_empty": {
               "type": "boolean",
               "description": "Allow emptying a non-empty page."
+            },
+            "allow_shrink": {
+              "type": "boolean",
+              "description": "Allow content under half a >256 KB page."
             },
             "drop_timeline": {
               "type": "boolean",

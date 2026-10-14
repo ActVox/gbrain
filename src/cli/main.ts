@@ -49,7 +49,7 @@ import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usage
 import type { Notice } from '../core/agent-output.ts';
 import { opError, opOwnsSource } from '../core/ops/contract.ts';
 import { opParamValue } from './op-param-values.ts';
-import { serializeMarkdown } from '../core/markdown.ts';
+import { formatGetPage, readWholePageMarkdown, remoteErrorCode, wantsWholePage } from './page-render.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from '../core/cli-options.ts';
 import { runCliPreflight } from '../core/cli-preflight.ts';
 import { isBooleanLiteral, isKnownOpFlag } from '../core/op-flag-tokens.ts';
@@ -793,7 +793,13 @@ async function runThinClientRouted(
       timeoutMs,
       signal: sigintController.signal,
       ...(op.mutating ? { writeWaitMs: currentCliWriteWait().waitMs } : {}),
+    }).catch(async (e: unknown) => { // large pages: a page too big for one response is paged to its end, verified, then printed
+      if (op.name !== 'get_page' || remoteErrorCode(e) !== 'page_too_large_for_inline' || !wantsWholePage(params)) throw e;
+      const paged = await readWholePageMarkdown(async p => unpackToolResult(await callRemoteTool(cfg, 'get_page', p, { timeoutMs, signal: sigintController.signal })), params);
+      await writeStdoutFinal(params.json === true ? JSON.stringify({ slug: params.slug, revision: paged.revision, content: paged.markdown, windows: paged.windows }) + '\n' : paged.markdown);
+      return null;
     });
+    if (raw === null) return;
     // T15/FOV-1: lift the server's retrieval meta off the envelope before
     // unpacking (old servers lack _meta — capture is simply skipped).
     const envelopeMeta = extractResponseMeta(raw);
@@ -1626,15 +1632,7 @@ export function formatResult(
       if (!pages.length) return 'Nothing volunteered (no entity cleared the confidence gate).\n';
       return pages.map((p) => formatVolunteeredPage(p)).join('\n') + '\n';
     }
-    case 'get_page': {
-      const r = result as any;
-      if (r.error === 'ambiguous_slug') {
-        return `Ambiguous slug. Did you mean:\n${r.candidates.map((c: string) => `  ${c}`).join('\n')}\n`;
-      }
-      return serializeMarkdown(r.frontmatter || {}, r.compiled_truth || '', r.timeline || '', {
-        type: r.type, title: r.title, tags: r.tags || [],
-      });
-    }
+    case 'get_page': return formatGetPage(result as Record<string, any>);
     case 'list_pages': {
       const pages = result as any[];
       if (pages.length === 0) return 'No pages found.\n';

@@ -17,6 +17,7 @@ import { decodeDeepResearchId, deepResearchPageUrl } from '../deep-research-id.t
 import { PageSnapshotAmbiguousError, type PageSnapshot } from '../page-state/types.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { pageTrustForRead, projectFetchText, projectGetPage, readQuarantined } from './get-page-projection.ts';
+import { assertLargePageAdmission } from '../persistence/large-page-guard.ts';
 import { assertFullReadFits, bodyBytes, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody } from './get-page-body.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
@@ -322,6 +323,7 @@ const put_page: Operation = {
     slug: { type: 'string', description: 'Page slug.', required: true },
     content: { type: 'string', required: true, description: 'Complete markdown (get_page include_content:true).' },
     allow_empty: { type: 'boolean', required: false, description: 'Allow emptying the page.' },
+    allow_shrink: { type: 'boolean', required: false, description: 'Allow content under half a >256 KB page.' },
     drop_timeline: { type: 'boolean', required: false, description: 'No Timeline in content: delete its entries.' },
     wait_ms: WRITE_WAIT_PARAM,
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
@@ -347,6 +349,7 @@ const put_page: Operation = {
       }
       return { dry_run: true, action: 'put_page', slug: p.slug };
     }
+    if (ctx.remote !== false && typeof p.slug === 'string') await assertLargePageAdmission(ctx.engine, p.slug, sourceId, p);
     return submitPageMutation(ctx, { operation: 'put_page', params: p }).catch(error => rethrowNamingRevisionSource(ctx, sourceId, p, error));
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
