@@ -1,19 +1,25 @@
 import { jsonBytes } from './digest.ts';
 
-/** The smallest terminal reservation an admission takes; the receipt is sized down at commit (true-up). */
+/** The smallest terminal reservation an admission takes; the receipt is sized down once it settles (true-up). */
 export const RECEIPT_RESERVATION_FLOOR = 16_384;
 /** Slack a trued-up receipt keeps while it can still change (effect re-arms, redaction markers). */
 export const RECEIPT_HEADROOM_BYTES = 4096;
 /** Slack a compacted receipt keeps: the 1 KiB compaction always kept (a compacted put_page measures about 3.9 KB). */
 export const COMPACTED_HEADROOM_BYTES = 1024;
-/** Bumped when the retained-bytes formula changes; `receipt-true-up` previews bind it. */
-export const RECEIPT_FORMULA_VERSION = 1;
+/** Space an admission reserves beyond its intent and authority: the outcome, error, effect rows and headroom a completion may add. */
+export const RECEIPT_COMPLETION_BYTES = 12_288;
 /** Bytes one effect row holds on its receipt; the SQL twin of `effectBytes`. */
 export const EFFECT_BYTES_SQL = 'octet_length(data::text)+octet_length(kind)+1024';
 
-/** What an admission reserves: the floor, or the authority plus 8 KiB when that is larger, plus `extra`. */
-export function receiptReservation(authority: unknown, extra = 0): number {
-  return Math.max(RECEIPT_RESERVATION_FLOOR, jsonBytes(authority) + 8192) + extra;
+/**
+ * What an admission reserves: the serialized intent and authority the receipt
+ * retains until compaction, plus RECEIPT_COMPLETION_BYTES, never below the
+ * floor, plus a caller's `extra` (edit_page's diff). A 100 KB page body
+ * reserves its 100 KB, so the counters never hold less than the row keeps.
+ */
+export function receiptReservation(fields: { intent?: unknown; authority?: unknown }, extra = 0): number {
+  const json = (value: unknown) => value === null || value === undefined ? 0 : jsonBytes(value);
+  return Math.max(RECEIPT_RESERVATION_FLOOR, json(fields.intent) + json(fields.authority) + RECEIPT_COMPLETION_BYTES) + extra;
 }
 
 /** The receipt fields that stay on the row, by name. */

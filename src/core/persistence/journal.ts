@@ -233,7 +233,7 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
   const requestId = requireUuid(input.requestId ?? randomUUID());
   const fingerprint = intentDigest(input);
   const bytes = jsonBytes(input.intent) + jsonBytes(input.authority);
-  const terminalBytes = input.terminalReservation ?? receiptReservation(input.authority);
+  const terminalBytes = Math.max(input.terminalReservation ?? 0, receiptReservation(input));
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   const stamp = writerStamp();
   const origin = resolveAdmissionOrigin(input.origin);
@@ -315,7 +315,7 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
   }
   const stamp = writerStamp();
   const items = inputs.map(input => ({ input, requestId: requireUuid(input.requestId ?? randomUUID()), fingerprint: intentDigest(input),
-    bytes: jsonBytes(input.intent) + jsonBytes(input.authority), terminalBytes: input.terminalReservation ?? receiptReservation(input.authority) }));
+    bytes: jsonBytes(input.intent) + jsonBytes(input.authority), terminalBytes: Math.max(input.terminalReservation ?? 0, receiptReservation(input)) }));
   assertMutationProtocol({ target_kind: 'page', protocol_version: 1 });
   const ids = items.map(item => item.requestId);
   // #5984: the checks are independent reads and share locks, so they go out back to back in the order they always

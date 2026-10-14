@@ -22,7 +22,7 @@ export async function priorTopologyChange(engine:BrainEngine,principal:string,re
 }
 export async function recordTopologyChange(tx:BrainEngine, input:{principal:string;requestId:string;intent:unknown;operation:string;sourceId:string;incarnation:string|null;worktrees:string[]},
   outcome:Record<string,unknown>, recovery:Record<string,unknown>|null=null,recoveryBytes=0):Promise<TopologyChange> {
-  const reservation=receiptReservation(null);
+  const reservation=receiptReservation({});
   const intentBytes=recovery?jsonBytes(input.intent):0;
   if(Buffer.byteLength(JSON.stringify(outcome))+1024>reservation) throw opError('request_too_large','Lifecycle outcome exceeds its retained receipt capacity.',
     `The ${input.operation} of source ${input.sourceId} would record an outcome over ${reservation - 1024} bytes, so nothing was recorded. Report this to the user with the request id ${input.requestId}; it is not a caller mistake.`);

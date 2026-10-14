@@ -266,7 +266,7 @@ export async function assertConversationAdmissionHeadroom(engine: BrainEngine, a
   }
   // #6696 (A5): the cumulative caps follow the background pause, with the host-only, resource-specific fix: waiting frees no request id.
   const pause = await readBackgroundPauseShare(engine);
-  const reservation = receiptReservation(authority.writer);
+  const reservation = receiptReservation({ authority: authority.writer });
   const key = principalKey(authority.writer.principal);
   for (const r of [
     { resource: 'terminal_bytes' as const, setting: 'principalTerminalBytes' as const, used: Number(counter?.terminal_bytes ?? 0), per: reservation },
