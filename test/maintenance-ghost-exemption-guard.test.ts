@@ -34,6 +34,7 @@ function preparerText(file: string, name: string): string {
 }
 
 test('the ghost-refusal exemptions are exactly the maintenance kinds whose preparer passes allowMissingFile', () => {
+  // test-reads-source-ok[structural]: the exemption set must match the dispatcher's preparers that pass allowMissingFile; enumerating dispatch branches is the only way to catch a new kind that is missing from it.
   const dispatcher = functionBody(readFileSync(DISPATCH_FILE, 'utf8'), 'prepareMaintenanceKind')!;
   const branch = /row\.intent\?\.kind === '([a-z_]+)'(?:\s*\|\|\s*row\.intent\?\.kind === '([a-z_]+)')?\)\s*(?:\{\s*)?return\s+(?:\(await import\('([^']+)'\)\)\.)?(\w+)\(/g;
   const dispatched = new Map<string, boolean>();
