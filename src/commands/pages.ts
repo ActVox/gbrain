@@ -2,6 +2,7 @@
  * gbrain pages — page-level operator commands. v0.26.5+.
  *
  * The first subcommand: `pages purge-deleted [--older-than HOURS|Nh|Nd] [--dry-run] [--json] [--yes]`.
+ * `pages unsearchable` (#6696 B3) lists embedding-state rows; its body is pages-unsearchable.ts.
  * Manual escape hatch alongside the autopilot purge phase. Hard-deletes pages
  * whose `deleted_at` is older than the cutoff; cascades to content_chunks,
  * page_links, chunk_relations via existing FKs.
@@ -102,6 +103,13 @@ Subcommands:
                                     Asks first: a TTY prompt, --yes, or exit 3 with the
                                     consent payload. Preview with --dry-run --json.
                                     Mirror of the autopilot purge phase.
+  unsearchable --source <id> [--state <state>] [--limit N] [--json]
+                                    Read-only: pages search cannot fully see, one row per
+                                    page and embedding state (pending, keyword_only,
+                                    quarantined, empty, deleted_page_chunks,
+                                    chunkless_healable; embedded only via --state) with
+                                    reason, chunks, bytes and each state's fix. --limit
+                                    defaults to 50; complete:false means more rows exist.
 
 Notes:
   Soft-delete a page via \`gbrain delete <slug> --force\`; restore via \`gbrain restore <slug> --force\`
@@ -118,6 +126,7 @@ export async function runPages(engine: BrainEngine, args: string[]): Promise<voi
   switch (sub) {
     case 'purge-deleted': return runPurgeDeleted(engine, args.slice(1));
     case 'purges': case 'unpurge': return (await import('./pages-purges.ts')).runPagePurges(engine, sub, args.slice(1));
+    case 'unsearchable': return (await import('./pages-unsearchable.ts')).runPagesUnsearchable(engine, args.slice(1));
     case undefined:
       printUsage();
       return;

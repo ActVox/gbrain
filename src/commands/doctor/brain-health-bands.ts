@@ -14,6 +14,7 @@
 import type { BrainEngine } from '../../core/engine.ts';
 import { capacityBands, readCapacityView, type CapacityBand, type DaysBand } from '../../core/persistence/capacity-view.ts';
 import { cachedTerminalSummary } from '../serve-http-metrics.ts';
+import { readEmbeddingState } from '../../core/embedding-state.ts';
 
 export const BRAIN_HEALTH_TTL_MS = 60_000;
 export type CountBand = 'none' | '1-9' | '10-99' | '100-999' | '1000+' | 'unknown';
@@ -28,6 +29,8 @@ export interface BrainHealthBands {
   status: 'ok' | 'attention' | 'unknown';
   capacity: { band: CapacityBand | 'unknown'; days: DaysBand; max_pct_band: '<80' | '80-95' | '>=95' | 'unknown'; forecast: 'available' | 'unavailable' };
   write_failures: { band: CountBand; active_blockers: CountBand; window_days: number | null };
+  /** Chunks search cannot fully see (ops-mode, index-backed: `lower_bound` when some states were not counted). */
+  unsearchable: { band: CountBand; lower_bound: boolean };
   /** The read-only command an operator runs on the brain host for the full report. */
   host_command: string[];
 }
@@ -47,7 +50,7 @@ export function readBrainHealthBands(engine: BrainEngine, opts: { sourceIds?: st
 }
 
 async function computeBands(engine: BrainEngine, sourceIds: string[] | undefined): Promise<BrainHealthBands> {
-  const [capacity, failures] = await Promise.all([
+  const [capacity, failures, unsearchable] = await Promise.all([
     readCapacityView(engine).then((view) => ({ ...capacityBands(view), forecast: view.forecast ? 'available' as const : 'unavailable' as const }))
       .catch(() => ({ capacity: 'unknown' as const, days: 'unknown' as const, max_pct_band: 'unknown' as const, forecast: 'unavailable' as const })),
     cachedTerminalSummary(engine).then((summary) => {
@@ -56,8 +59,11 @@ async function computeBands(engine: BrainEngine, sourceIds: string[] | undefined
       return { band: countBand(visible.reduce((n, s) => n + s.unresolved.rows, 0)), active_blockers: countBand(visible.reduce((n, s) => n + s.active_blockers.length, 0)),
         window_days: summary.window_days };
     }),
+    readEmbeddingState(engine, { mode: 'ops', ...(sourceIds ? { sourceIds } : {}) })
+      .then((state) => state.status === 'unknown' ? { band: 'unknown' as const, lower_bound: false } : { band: countBand(state.unsearchable), lower_bound: state.unsearchable_complete === false })
+      .catch(() => ({ band: 'unknown' as const, lower_bound: false })),
   ]);
-  const bands = { capacity: { band: capacity.capacity, days: capacity.days, max_pct_band: capacity.max_pct_band, forecast: capacity.forecast }, write_failures: failures };
+  const bands = { capacity: { band: capacity.capacity, days: capacity.days, max_pct_band: capacity.max_pct_band, forecast: capacity.forecast }, write_failures: failures, unsearchable };
   const unknown = bands.capacity.band === 'unknown' || failures.band === 'unknown';
   const attention = bands.capacity.band === 'low' || bands.capacity.band === 'critical' || (failures.active_blockers !== 'none' && failures.active_blockers !== 'unknown');
   return { schema_version: 1, status: attention ? 'attention' : unknown ? 'unknown' : 'ok', ...bands, host_command: ['gbrain', 'doctor', '--tier', 'ops', '--json'] };

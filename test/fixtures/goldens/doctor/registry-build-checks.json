@@ -274,6 +274,10 @@
         "name": "schema_pack_consistency"
       },
       {
+        "category": "brain",
+        "name": "embedding_state"
+      },
+      {
         "category": "ops",
         "name": "pgvector"
       },

@@ -47,6 +47,7 @@ import {
   rlsEventTriggerEntry,
   embeddingsEntry,
 } from './checks/schema-health.ts';
+import { embeddingStateEntry } from './checks/embedding-state.ts';
 import {
   embeddingProviderEntry,
   alternativeProvidersEntry,
@@ -155,6 +156,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   receiptCompactionEntry,
   serveBuildDriftEntry,
   schemaPackConsistencyEntry,
+  embeddingStateEntry,
   pgvectorEntry,
   rlsEntry,
   schemaVersionEntry,

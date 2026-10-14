@@ -45,7 +45,9 @@ describe('day-zero keyless doctor', () => {
     expect(report.health_score).toBeGreaterThanOrEqual(90);
     expect(report.capped_by).toEqual(['embeddings_disabled']);
     const info = new Set(report.checks.filter(c => c.severity === 'info').map(c => c.name));
-    for (const name of ['embeddings', 'embedding_provider', 'takes_count', 'retrieval_reflex_health', 'skill_preconditions', 'cycle_freshness', 'backup_coverage']) {
+    // #6696 B3: embedding_state runs on day zero and stays info on a keyless brain.
+    expect(report.checks.find(c => c.name === 'embedding_state')).toMatchObject({ status: 'ok', severity: 'info' });
+    for (const name of ['embeddings', 'embedding_provider', 'embedding_state', 'takes_count', 'retrieval_reflex_health', 'skill_preconditions', 'cycle_freshness', 'backup_coverage']) {
       if (report.checks.some(c => c.name === name)) expect(info.has(name), name).toBe(true);
     }
   }, 120_000);
