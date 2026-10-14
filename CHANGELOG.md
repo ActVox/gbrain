@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.219.0] - 2026-10-14
+## [0.60.220.0] - 2026-10-14
 
 **Writes that ended without committing are now summarized and explained, and the few that block work are named (#6650).** Every write leaves a receipt, and receipts that ended `failed`, `conflict` or `cancelled` used to pile up with no summary: an agent couldn't tell the one that holds a root from hundreds a later write already superseded or an older build left behind. gbrain now classifies each such receipt at read time (category, class, safe actions, whether a person decides, a structured fix) and stores nothing new. A new doctor check, `persistence_terminal_failures`, warns when a receipt blocks work now (a publication recovery record or a sync checkpoint blocker) or when an unresolved receipt is a gbrain-defect class. A 24-hour spike warns only when nothing else does, and a spike written by builds older than the fix says so, names the build and points at the write owner to upgrade or restart. Superseded rows and rows from builds older than their fixing release count as historical and never warn.
 
@@ -24,6 +24,33 @@ identifiers and attribution are available in the pre-removal Git revision
 - **`/metrics`** (admin only) adds per-source gauges `gbrain_writer_terminal_failures_{active_blockers,unresolved,historical,new_24h,defects}` and `_known`, from one aggregate shared by every scrape for 60 s. `/health` is unchanged.
 - **Fact-fence step** (`src/core/facts/unfenced-facts.ts`): the up-front lifetime-ID check counts only pages that will submit, so a page suppressed by a recent identical refusal, or one with nothing adoptable, no longer pushes the whole step to the cap and refuses it.
 - Docs: [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures), the troubleshooting row, write-refusals and the maintain skill.
+
+## [0.60.219.0] - 2026-10-14
+
+**A new brain made by `gbrain setup` is finished when setup ends, and a plain-English question to `gbrain recall` now finds facts on a brain without embeddings.** Before, `gbrain setup claude-code` (or `codex`) created a brain and then printed a line telling you to run `gbrain apply-migrations --yes --no-autopilot-install` yourself, so a fresh install still had setup migrations pending and `gbrain doctor` said so. Setup now runs those migrations itself, on the brain it just created, and says which ones it ran. Separately, on a brain with no embeddings, `gbrain recall "how does the user take their coffee"` printed "No matching facts." even when a fact about coffee existed, because recall looked for an entity with that whole sentence as its name. Now it ranks the facts against the sentence as a question and tells you it did.
+
+### What you'd see
+
+| You run | Before | Now |
+|---|---|---|
+| `gbrain setup claude-code` on a new machine | `[init] Migrations: ...` plus a hand-off command to run | `[setup] Migrations: 14 recorded as not needed on a new brain; 5 setup migration(s) applied by setup without installing services (0.11.0, 0.14.0, 0.22.4, 0.28.0, 0.53.0); none pending.` |
+| `gbrain setup claude-code` on a brain that already exists | the hand-off line | the same hand-off line, nothing run |
+| `gbrain recall "how does the user take their coffee"` on a brain without embeddings | `No matching facts.` | the coffee fact, ranked first, with a note on stderr |
+| the same on a brain with embeddings | `No matching facts.` | `No matching facts.`, plus a stderr hint naming `gbrain recall --question "<q>"` |
+| `gbrain recall --help` | the generic one-line stub | recall's own usage, including `--question` |
+
+### What to watch for after you upgrade
+
+- On a brain without embeddings, a multi-word `gbrain recall "<text>"` that matches no entity and no fact text now prints ranked facts instead of "No matching facts." Scripts that relied on the empty result should pass `--grep` or check the stderr note. Brains with embeddings return exactly what they did before.
+- If `~/.claude/AGENTS.md`, `~/.openclaw/AGENTS.md` or an OpenClaw cron manifest already exists, setup does not run v0.11.0 (which would edit that file). It leaves that one migration pending and names the file and the command to run it.
+- `gbrain init` on its own is unchanged and still prints the hand-off line.
+
+### Itemized changes
+
+- **Setup finishes a brain it created** (`src/commands/setup-migrations.ts`, called from `src/commands/setup.ts` only when this run created the brain): one `gbrain apply-migrations --yes --no-autopilot-install --json` child, bounded at 60 s, with `GBRAIN_NO_AUTOPILOT_INSTALL=1`. These migrations are local ledger, schema and file work: no provider calls, no paid work, no services installed, and they run offline. The summary line replaces init's `[init] Migrations:` line. If the run fails, init's line stays with `(setup ran it and it failed: <code>)` appended. Verify output is unchanged.
+- **Host files are never edited silently** (`src/commands/migrations/v0_11_0.ts` `hostRewriteTargets`): setup holds back v0.11.0 when any file its host phase would rewrite already exists.
+- **Keyless question fallback** (`src/commands/recall.ts`, `src/core/facts/keyword-only.ts` `factRecallIsKeywordOnly`): applies only when fact recall is keyword-only (embedding opted out or no provider configured) and the positional has several words and matched nothing. It ranks with the same path as `recall --question` and writes `[recall] no entity or fact text matched '<q>'; ranked facts by relevance to it as a question (keyword-only: this brain has no embeddings).` to stderr.
+- **`gbrain recall --help`** prints `Usage: gbrain recall [<entity>] [options]` with every option, and works without a configured brain.
 
 ## [0.60.218.0] - 2026-10-14
 
