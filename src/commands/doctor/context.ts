@@ -18,6 +18,13 @@ import type { Check } from '../doctor.ts';
 /** Returned by an entry to end the run; the checks gathered so far are the result. */
 export const STOP_DOCTOR: unique symbol = Symbol('STOP_DOCTOR');
 
+/**
+ * #6696 B1: `--tier ops|standard|deep`. `ops` runs only the entries tagged
+ * `ops` (observational, under one absolute deadline); `standard` (default) runs
+ * ops entries first, then the rest; `deep` adds the entries tagged `deep`.
+ */
+export type DoctorTier = 'ops' | 'standard' | 'deep';
+
 export interface DoctorEntry {
   /** The entry's primary check name (an entry that only stops names the check it gates on). */
   name: string;
@@ -29,6 +36,14 @@ export interface DoctorEntry {
    * fails when an engine-only name is not declared.
    */
   engineChecks?: readonly string[];
+  /** The lowest tier that runs this entry (default `standard`). */
+  tier?: DoctorTier;
+  /**
+   * #6696 B1: an `ops` entry whose reads go past counters, config and catalog on
+   * PGLite. Under `--tier ops` on PGLite it reports `not_applicable` instead of
+   * running, and the ops report stays complete.
+   */
+  opsPglite?: 'not_applicable';
   run(ctx: DoctorContext): Promise<Check[] | typeof STOP_DOCTOR>;
 }
 
@@ -55,6 +70,8 @@ export interface DoctorContext {
   connectionFailed: boolean;
   /** `--only <check>[,…]`: run only the entries that emit these checks (plus the connection lane). */
   only?: ReadonlySet<string> | null;
+  /** #6696 B1: the tier this run selected (default `standard`). */
+  tier: DoctorTier;
 }
 
 /**

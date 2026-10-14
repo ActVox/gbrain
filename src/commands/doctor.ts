@@ -455,6 +455,7 @@ export async function buildChecks(
     schemaVersion: 0,
     connectionFailed: false,
     only: parseOnlyChecks(args),
+    tier: 'standard',
   };
 
   return runDoctorRegistry(ctx);
