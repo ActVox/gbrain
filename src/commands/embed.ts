@@ -1380,7 +1380,7 @@ async function embedAll(
     }
     page = prepared.snapshot.page;
     const chunks = prepared.chunks;
-    const toEmbed = chunks; // staleOnly path handled above via embedAllStale
+    let toEmbed = chunks; // staleOnly path handled above via embedAllStale
 
     result.total_chunks += chunks.length;
     result.skipped += chunks.length - toEmbed.length;
@@ -1400,6 +1400,19 @@ async function embedAll(
       return;
     }
 
+    // A large page is metered as a whole under embed.max_usd_per_page (page-embedding-budget.ts).
+    const decision = await planPageEmbedding(engine, page, toEmbed, { signature });
+    const grant = decision.kind === 'grant' ? decision.grant : undefined;
+    if (grant) toEmbed = toEmbed.filter(c => grant.chunkIndexes.has(c.chunk_index));
+    if (decision.kind === 'held' || toEmbed.length === 0) {
+      await grant?.settle({ ok: true });
+      serr(`\n  ${page.slug}: embedding ${decision.kind === 'held' ? `held (${decision.reason})` : 'stopped by the per-page cap'}; approve with: gbrain embed --slugs ${page.slug} --max-usd <N>`);
+      processed++;
+      result.pages_processed++;
+      onProgress?.(processed, pages.length, result.embedded);
+      return;
+    }
+
     try {
       // #3507: reproduce the page's stored wrapping convention (see embedPage).
       // #3037: per-chunk failure isolation — one bad chunk costs one chunk,
@@ -1408,7 +1421,7 @@ async function embedAll(
       const { embeddings, failed, firstError } = await embedPageTexts(
         wrapChunkTextsForStoredMode(page, toEmbed),
         signal ? { abortSignal: signal } : {},
-      );
+      ).finally(() => grant?.settle({ ok: true }));
       // Build a map of new embeddings by chunk_index
       const embeddingMap = new Map<number, Float32Array>();
       for (let j = 0; j < toEmbed.length; j++) {
@@ -1428,8 +1441,9 @@ async function embedAll(
       // Partial failures retain their old context; a full completion stamps
       // its vectors and title-tier convention in the same guarded transaction.
       if (!await observed(pacer, () => engine.transaction(async tx => {
-        if (!await installPageEmbeddings(tx, prepared, updated, failed === 0 ? signature : undefined)) return false;
-        if (failed === 0) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, page.slug, pageSourceId);
+        const complete = failed === 0 && toEmbed.length === chunks.length;
+        if (!await installPageEmbeddings(tx, prepared, updated, complete ? signature : undefined)) return false;
+        if (complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, page.slug, pageSourceId);
         return true;
       }))) {
         recordFailure(result, toEmbed.length, page.slug, EMBED_UNAVAILABLE_MESSAGE);

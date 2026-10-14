@@ -11,6 +11,7 @@
 
 import { fstatSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { PAGE_MAX_BYTES } from './page-size-policy.ts';
 
 export interface InteractiveProbe {
   env?: NodeJS.ProcessEnv;
@@ -182,7 +183,7 @@ export interface StdinReadOptions {
   firstByteMs?: number;
   /** Silence allowed between chunks once data flows; reset on every chunk. Default 60 s. */
   inactivityMs?: number;
-  /** Byte cap; more input is an error, never a truncated success. Default 5 MB. */
+  /** Byte cap; more input is an error, never a truncated success. Default: the 24 MiB page ceiling. */
   maxBytes?: number;
   signal?: AbortSignal;
   /** Also return the undecoded bytes as `raw` on a `data` result. */
@@ -194,7 +195,7 @@ export interface StdinReadOptions {
 const DEFAULT_FIRST_BYTE_MS = 30_000;
 const FIRST_BYTE_NOTICE_MS = 5_000;
 const DEFAULT_INACTIVITY_MS = 60_000;
-export const DEFAULT_STDIN_MAX_BYTES = 5_000_000;
+export const DEFAULT_STDIN_MAX_BYTES = PAGE_MAX_BYTES;
 
 function firstByteDeadlineMs(explicit: number | undefined): number {
   if (explicit !== undefined) return explicit;

@@ -124,7 +124,7 @@ wrong with the page.
 | --- | --- | --- |
 | Markdown import and sync (`gbrain import`, `gbrain sync`, the managed sync blob read) | 24 MiB | — |
 | CLI stdin (`gbrain put`, `gbrain capture --stdin`) | 24 MiB (was 5 MB) | — |
-| MCP stdio (local agents) | the MCP SDK reads at most 10 MiB per JSON-RPC message, and the page travels JSON-escaped | write the file into the brain repository and run `gbrain sync`, or run `gbrain import <file>` or `gbrain put <slug> < file` on the brain host |
+| MCP stdio (local agents, `gbrain serve`) | 64 MiB per JSON-RPC message (the MCP SDK default of 10 MiB is raised), so a JSON-escaped page at the ceiling fits | — |
 | MCP over HTTP (`gbrain serve --http`) | 4 MiB request body (the MCP SDK default) | the same: sync or the CLI on the brain host (chunked uploads arrive in a later release) |
 | Legacy HTTP transport | 1 MiB (`GBRAIN_HTTP_MAX_BODY_BYTES`) | the same |
 | `put_pages` batch | 8 MiB per batch | send large pages one per `put_page`, or by file |
@@ -145,8 +145,11 @@ describes how to read the next window.
 **Cost.** Chunking and keyword indexing run locally and cost nothing.
 Embedding a large page costs about $0.15 per 10 MB at the default embedding
 model, so a page at the 24 MiB ceiling costs about $0.40. Each page has a paid
-spend cap, `embed.max_usd_per_page` (default $2), covering its embedding,
-per-chunk contextual synopsis and conversation facts. When several caps apply,
+spend cap, `embed.max_usd_per_page` (default $2), covering its embedding at
+every paid entry point (the stale sweep, `gbrain embed`, the post-write
+embedding job). A large page uses the free title context tier, never paid
+per-chunk synopses; conversation facts keep their own 25 MiB input bound and
+are not yet metered by this cap. When several caps apply,
 the lowest wins: the per-page cap, the run's consent cap (`--max-usd`),
 `embed.backfill_max_usd` and `embed.backfill_max_usd_per_source_24h`. A page
 over its cap is still keyword-searchable, and its newest chunks are embedded
@@ -156,14 +159,17 @@ is the user's call.
 
 <a id="large-pages-upgrade"></a>
 **After upgrading.** Older releases stored a page over 500 KB with an
-`embed_skip` marker (reason `oversized`) and no chunks. `gbrain upgrade` and
-`gbrain apply-migrations --yes` re-chunk and keyword-index those pages
-themselves, on the CPU, on keyless brains too. The backfill is idempotent and
+`embed_skip` marker (reason `oversized`) and no chunks. `gbrain upgrade` (its
+`gbrain post-upgrade` step) re-chunks and keyword-indexes those pages itself
+for up to two minutes, on the CPU, on keyless brains too, and prints a receipt;
+`gbrain reindex --oversized` does the rest. The backfill is idempotent and
 resumes where it stopped. It removes only gate-written markers whose reason is
 `oversized`, and the matching `content_flag: oversized`; a page above the
-operator's effective `bytes_block` keeps both. The backfill never embeds:
-backfilled pages are held for consent. The post-upgrade notice and doctor show
-how many pages are held and what embedding them would cost.
+operator's effective `bytes_block` keeps both. The backfill never embeds.
+Backfilled pages over 1 MiB are held for consent; the post-upgrade notice and
+doctor's `partial_embedding` check show how many are held and what embedding
+them would cost. Pages between 500 KB and 1 MiB cost a cent or two each and
+embed through the normal sweep under the existing caps.
 
 ```bash
 gbrain reindex --oversized --dry-run --json      # preview the backfill: free, no provider calls
