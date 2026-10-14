@@ -1,4 +1,5 @@
 import { searchAnswerFeedback } from '../feedback/record.ts';
+import { recordFunnelEvent, recordRecallOutcome } from '../funnel.ts';
 import { parseRelationalPlan } from '../search/relational-plan.ts';
 import { loadSearchModeConfig, resolveSearchMode } from '../search/mode.ts';
 import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
@@ -570,7 +571,7 @@ const recall: Operation = {
 
     const budgetPacking = recallBudgetPacking(p.budget_policy, queryText, budgetTokens, { rows, packedFacts, searchResults, packedResults }, recallResultCost(delivery));
 
-    return {
+    const out = {
       facts: await withFactDateHeaders(ctx.engine, await stampRowTrust(ctx.engine, 'facts', packedFacts.map(r => ({ // #5575 A6: + trust_tier, origin, unconfirmed
         id: r.id,
         fact: r.fact,
@@ -635,6 +636,8 @@ const recall: Operation = {
       ...(budgetPacking ? { budget_packing: budgetPacking } : {}),
       ...(delivery ? { delivery } : {}),
     };
+    recordRecallOutcome(out);
+    return out;
   },
 };
 
@@ -1244,7 +1247,9 @@ const forget_fact: Operation = {
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'forget_fact', id: p.id };
     const { submitForgetMutation } = await import('../persistence/memory-mutations.ts');
-    return submitForgetMutation(ctx, 'forget_fact', p);
+    const out = await submitForgetMutation(ctx, 'forget_fact', p);
+    recordFunnelEvent('withdrawal');
+    return out;
   },
 };
 

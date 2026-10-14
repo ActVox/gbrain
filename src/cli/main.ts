@@ -2257,6 +2257,7 @@ async function routeEngineFreeSubcommands(command: string, args: string[]): Prom
   // through to the engine-connected dispatch path below. (`args` here is the
   // subArgs slice already — no need to re-slice past the command.)
   if (command === 'status') {
+    if (args.includes('--funnel')) { setCliExitVerdict((await import('../commands/status-funnel.ts')).runStatusFunnel(args).exitCode); return true; }
     const cfgPre = loadConfig();
     if (cfgPre && isThinClient(cfgPre)) {
       const { runStatus } = await import('../commands/status.ts');
