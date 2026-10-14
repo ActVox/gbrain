@@ -782,6 +782,10 @@
         "name": "fence_integrity"
       },
       {
+        "category": "brain",
+        "name": "extraction_input_truncated"
+      },
+      {
         "category": "ops",
         "name": "search_mode"
       },

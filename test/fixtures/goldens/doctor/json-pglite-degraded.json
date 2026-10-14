@@ -535,7 +535,7 @@
         },
         {
           "category": "meta",
-          "message": "1115 column(s) verified against live schema",
+          "message": "1122 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
@@ -2201,6 +2201,15 @@
           },
           "message": "No malformed facts or takes fence is held, stored or waiting in a checkout (1 source(s) scanned).",
           "name": "fence_integrity",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "groups": []
+          },
+          "message": "Every page extraction read all of its input (no head-only, tail-window or size-skip receipts).",
+          "name": "extraction_input_truncated",
           "status": "ok"
         },
         {
