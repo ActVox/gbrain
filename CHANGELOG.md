@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
-**Sync, reconcile and repair loops that used to go round forever now end, or tell you exactly what ends them (#6696).** A sync handed to a running `gbrain serve` refused to resume an unfinished run unless you retyped its options, and flags a managed source can't honor failed late with an unrelated error. A run that had finished could still report itself blocked. A wedged migration printed "WEDGED" and then "All migrations up to date". Writes to a page whose file is gone were told to retry a sync that can never import that file. Hundreds of derived pages that disagreed with their files could only be reconciled one at a time. Each of these now finishes, or names the one command that finishes it.
+**Sync, reconcile and repair loops that used to go round forever now end, or tell you exactly what ends them (#6696).** A sync handed to a running `gbrain serve` refused to resume an unfinished run unless you retyped its options, and flags a managed source can't honor failed late with an unrelated error. A run that had finished could still report itself blocked. A wedged migration printed "WEDGED" and then "All migrations up to date". Writes to a page whose file is gone were told to retry a sync that can never import that file. Hundreds of derived pages that disagreed with their files could only be reconciled one at a time. Each of these now finishes, or names the one command that finishes it. And `gbrain doctor --tier ops` now shows what is wrong in seconds on a brain of any size, with anything it could not finish reported as unknown instead of clear.
 
 ### How to use it
 
@@ -20,6 +20,8 @@ identifiers and attribution are available in the pre-removal Git revision
 - Let the brain's own serve keep derived folders on the database copy: add `keep_db:` under `storage:` in the source's `gbrain.yml` (for example `keep_db: [concepts/]`). It is off until you add it.
 - See whether serve runs an older build than your checkout: `gbrain doctor --only serve_build_drift --json`.
 - Clear a wedged migration after fixing its cause: `gbrain apply-migrations --force-retry <version>`, then `gbrain apply-migrations --yes`.
+- See what is wrong in seconds: `gbrain doctor --tier ops --json` (capacity, write failures, sync movement, receipt compaction, serve build, schema pack) under a 4 s deadline; `--budget-ms <n>` changes it, `--tier deep` runs the full scans.
+- From an agent without admin scope: MCP `get_brain_health` returns the same health as bands; `gbrain doctor --tier ops` from a thin client uses it when the token is not admin.
 
 ### What you'd see
 
@@ -30,6 +32,9 @@ identifiers and attribution are available in the pre-removal Git revision
 | a run whose checkpoint committed, then a long link tail | `blocked` / `no_admission`, "move to port 5432" | `synced` |
 | a migration that ended partial 3+ times, nothing newer ran | "All migrations up to date", exit 0 | `migrations_pending` reason `wedged`, exit 1, fix asks the user |
 | `remember` on a page with an extracted fact row past the fence | `storage_error` | commits at the next free row number |
+| `gbrain doctor` on a large brain | every check ran to completion, minutes with no output | ops sections first; a check past `doctor.entry_budget_ms` (15 s) reports unknown (`reason: budget`) instead of holding the run |
+| `orphan_ratio` above 50,000 pages | a full scan | a sampled estimate marked `estimated`; `--tier deep` scans fully |
+| thin client `gbrain doctor --only persistence_capacity` with a read token | the thin-client connectivity checks, `--only` ignored | the `get_brain_health` capacity band, or `doctor_tier_unavailable` from an older serve |
 
 ### Itemized changes
 
@@ -46,6 +51,11 @@ identifiers and attribution are available in the pre-removal Git revision
 - **Slug-conflict repair agrees with sync** (`src/core/repair/slug-conflicts.ts`, `src/core/persistence/sync-screen.ts`, `src/core/persistence/file-repair.ts`): `gbrain repair content` judges a held `frontmatter_slug_conflict` file with the screen managed sync froze it with. A file sync would accept as it is imports unchanged and its hold clears, bound to the hold it read (a newer hold stays, with a retry); a source in a Git subfolder loses its stray `slug:` line; a file sync would hold whatever the repair writes is `slug_page_mismatch`, naming both slugs and the edit.
 - **`remember` row numbers** (`src/core/persistence/memory-prepare.ts`): a remembered fact is numbered past both the page's fence rows and the facts rows recorded for the page, and a collision names the fact holding the row.
 - **Terminal receipts** (`src/core/persistence/terminal-classify.ts`): a write refused because its page's file is missing is category `canonical_file_missing`, whose fix previews `gbrain repair ghost-pages --source <id>`. A `fence_unrenderable` adoption refusal is its own category, historical when written by a build older than 0.60.218.0. `docs/guides/write-refusals.md` tells SQL readers that `error_message` is the short form and that `gbrain sources writer failures` carries the exit.
+- **Doctor tiers and budgets** (`src/commands/doctor/budget.ts`, `registry.ts`, `context.ts`, `src/cli/commands/doctor.ts`): `--tier ops|standard|deep` and `--budget-ms`. The ops sections run first in every tier; `--tier ops` runs only them under one deadline (default 4000 ms) that also bounds each Postgres statement (`executeRaw` `deadlineAt`, re-read after the pool wait). Other tiers bound each check by `doctor.entry_budget_ms` (default 15000). A check that did not finish is a warn with `details.health: "unknown"`, `reason: "budget"` and a rerun-alone fix; the report adds `tier`, `complete`, `unknown_sections`, `elapsed_ms` and `budget_ms` when a tier or budget is given, and every check carries `elapsed_ms`. On PGLite, ops sections that need a Postgres serve read `not_applicable` (info) and the report stays complete. `getHealth` runs once per doctor run.
+- **Receipt compaction freshness** (`src/commands/doctor/checks/ops-sections.ts`): new ops check `receipt_compaction` warns when the last compaction (`persistence.maintenance.last_compaction`) is older than 24 hours while a persistence consumer is live.
+- **Sampled orphan ratio** (`src/commands/doctor/checks/orphan-estimate.ts`, `graph-health.ts`): above `doctor.orphan_ratio.full_scan_max_pages` (default 50000) `orphan_ratio` estimates from a `TABLESAMPLE` of about 2,000 pages and says so (`estimated: true`, `exact: false`); `--tier deep` scans fully.
+- **Health for agents without admin** (`src/commands/doctor/brain-health-bands.ts`, `src/core/ops/admin.ts`): new read-scope MCP op `get_brain_health` returns capacity as `ok|low|critical` with a days band and write failures as count bands for the caller's readable sources, with no slugs or exact counters, cached 60 s. It is the MCP verify of the capacity and `maintenance_backpressure` fixes (`src/core/persistence/capacity-view.ts`).
+- **Ops tier over MCP and the thin client** (`src/commands/doctor/remote-tier.ts`, `src/core/doctor-remote-tier.ts`): `run_doctor` takes `tier: "ops"` and `only`. A thin client's `gbrain doctor --tier ops` or `--only <check>` uses them when the serve lists them, falls back to `get_brain_health` bands for a read token, and otherwise refuses with the new `doctor_tier_unavailable` (run doctor on the brain host); it never runs the full remote report instead. `/admin/api/ops` serves one ops run a minute (`ops-snapshot.ts`).
 
 ## [0.60.230.0] - 2026-10-14
 

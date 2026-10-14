@@ -819,6 +819,16 @@ More: [docs/guides/ambient-recall.md#replay-after-a-degraded-wake](../../docs/gu
 |---|---|---|---|---|---|---|
 | Commit or stash canonical skill edits before optimization. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### doctor_tier_unavailable
+
+<a id="doctor_tier_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The remote serve cannot answer this doctor tier or check for this client, so the thin client ran nothing. | A serve older than the doctor ops tier does not advertise run_doctor's tier and only parameters or get_brain_health, and a token without admin scope cannot call run_doctor; the thin client never falls back to the full report. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --tier ops --json | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#doctor-ops-tier](../../docs/guides/troubleshooting.md#doctor-ops-tier)
+
 ### drain_stalled
 
 <a id="drain_stalled"></a>
@@ -1773,7 +1783,7 @@ More: [docs/guides/open-loops.md#two-detectors](../../docs/guides/open-loops.md#
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Managed maintenance stopped admitting requests because this writer's outstanding requests, reserved receipt bytes or permanent request ids would pass 80% of their limit; nothing more was submitted. | Each page of a maintenance run publishes as its own request under the local CLI writer the user's own CLI writes share. Stopping at 80% leaves room for those writes: reserved receipt bytes free only when receipts compact, request ids never. | Wait briefly, then retry the same request (writes: reuse the same request_id). Run: gbrain sources writer status --source '{source_id}' --json | agent | `repeat the read that failed` | 12 | yes |
+| Managed maintenance stopped admitting requests because this writer's outstanding requests, reserved receipt bytes or permanent request ids would pass 80% of their limit; nothing more was submitted. | Each page of a maintenance run publishes as its own request under the local CLI writer the user's own CLI writes share. Stopping at 80% leaves room for those writes: reserved receipt bytes free only when receipts compact, request ids never. | Wait briefly, then retry the same request (writes: reuse the same request_id). Run: gbrain sources writer status --source '{source_id}' --json | agent | `gbrain doctor --only persistence_capacity --json` | 12 | yes |
 
 More: [docs/guides/write-refusals.md#maintenance_backpressure](../../docs/guides/write-refusals.md#maintenance_backpressure)
 
