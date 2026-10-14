@@ -10,6 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.227.0] - 2026-10-14
+
+**`gbrain setup` on a new machine finishes about 0.7 s sooner, and the install guides for agents now start with `gbrain setup`.** When setup creates a new brain, it applies that brain's setup migrations. That step opened the brain's local database 8 times, and every open starts a small embedded Postgres. It now opens it 3 times. It applies the same migrations, writes the same records and prints the same lines; only the waiting is shorter. Separately, the agent install guides now name `gbrain setup claude-code` (or `codex`) as the command right after installing, keep `gbrain init --pglite --no-embedding` as the fallback for other harnesses, and explain why Bun's "Blocked 1 postinstall" message is safe to ignore on a new install.
+
+### The numbers that matter
+
+Same machine, interleaved runs, median of 5, fresh brain each time:
+
+| What ran | Before | After |
+|---|---|---|
+| `gbrain setup claude-code` on a new machine | 7438 ms | 6706 ms |
+| Its setup migration step on its own | 2692 ms | 2002 ms |
+| Brain opens during that step | 8 | 3 |
+
+### What you'd see
+
+Nothing different apart from the time. Setup still prints `[setup] Migrations: 14 recorded as not needed on a new brain; 5 setup migration(s) applied by setup without installing services (0.11.0, 0.14.0, 0.22.4, 0.28.0, 0.53.0); none pending.`, still holds v0.11.0 back when it would edit an existing `~/.claude/AGENTS.md`, `~/.openclaw/AGENTS.md` or OpenClaw cron manifest, and still keeps init's hand-off line plus the error code if the step fails. It starts no services and makes no network calls. An existing brain and `gbrain init` on its own are untouched.
+
+### Itemized changes
+
+- **One brain open per run** (`src/commands/migrations/run-engine.ts`): `apply-migrations` runs inside a run session. The opt-out read, the migrations flagged `sharesRunEngine` (v0.11.0, v0.14.0, v0.22.4, v0.28.0, v0.53.0) and the closing schema check reuse one PGLite engine. It is closed before v0.11.0's `gbrain jobs smoke` check (which still runs), before any migration that doesn't share it, before `--list`, `--dry-run` or a consent prompt, and when the run ends, including after an error. On Postgres, and outside a run, every open is a new connection as before.
+- **The migration records are pinned**: a test compares the files a fresh setup leaves in `migrations/` (`completed.jsonl`, `pending-host-work.jsonl`, `v0.22.4-audit.json`) with a copy captured before this change, byte for byte apart from timestamps, paths and ids.
+- **Install guides** (`AGENTS.md`, `INSTALL_FOR_AGENTS.md`): after `bun install -g github:garrytan/gbrain`, run `gbrain setup claude-code` (Codex: `gbrain setup codex`). On any other harness, run `gbrain init --pglite --no-embedding`. The search-mode question that follows is unchanged.
+- **Bun's blocked postinstall**: Bun blocks gbrain's postinstall script on `bun install -g`. A new install can skip it. The script only repeats the refusal every gbrain command already prints on a Bun that is too old, and otherwise runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists. `gbrain setup` then creates the brain and applies its setup migrations.
+
 ## [0.60.226.0] - 2026-10-14
 
 **The Ubicloud gate's `verify` typecheck runs warm from a worktree whose `node_modules` is a symlink.** Verify's typecheck on #6673's gate timed out at 121 s against its 120 s cap; the rerun passed at 113 s. That gate ran from a `git worktree` whose `node_modules` is a symlink to the main checkout's, a common way to skip a `bun install` per worktree. tsc records each source file relative to the buildinfo's directory, but it records the files it reaches through node_modules by their real path: the TypeScript lib files and bun-types' globals, 990 entries in all. In that layout, those entries point out of the checkout (`../../../../../../../../workspace/gbrain/node_modules/typescript/lib/lib.es5.d.ts`). On the VM they resolve to nothing, the global declarations count as changed, and tsc rechecks every file. All four of that worktree's gates logged `verify's typecheck runs warm`, but the typecheck took 84, 85, 113 and 121 s, the same as a cold one. The 120 s cap is unchanged.
