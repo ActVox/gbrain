@@ -10,32 +10,143 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.217.0] - 2026-10-14
+## [0.60.223.0] - 2026-10-14
 
-**Shell-out reads on a local PGLite brain start about 110 ms faster.** Every `gbrain call get_page`, `gbrain get`, `gbrain list` or `gbrain search` on a local brain used to spend part of its startup preparing database features the command never used: a 128 MB page cache that one read never fills, and the vector and fuzzy-match extensions loaded before the first query whether or not the command touched them. One-shot reads now open with a smaller cache, the extensions load the first time a query needs them, and `gbrain call` starts preparing the database engine while the rest of the command loads, as `get` and `list` already did. Results are identical. `gbrain serve`, imports and every write keep the full cache.
-
-| Command (local PGLite brain, fresh process) | 85 pages, before | after | 5,000 pages, before | after |
-|---|---|---|---|---|
-| `gbrain call get_page` | 714–731 ms | 598–607 ms | 716–722 ms | 601–606 ms |
-| `gbrain list` | 575–616 ms | 514–533 ms | 597–605 ms | 507–516 ms |
-| MCP stdio start + first `get_page` | 863–865 ms | 840–894 ms | 865–874 ms | 857–861 ms |
-
-Medians (p50) of two runs of 20 cold processes each, on a 4-vCPU cloud machine. MCP start is unchanged within noise: serve keeps the full cache, and its boot touches a vector table, so the extension load only moves. Postgres brains are unchanged.
-
-## To take advantage of v0.60.217.0
-
-Nothing to do: `gbrain upgrade` is enough. There is no migration and no config.
+**On Linux, a managed sync no longer stalls for six minutes after a gbrain process on the same machine is killed (#6650).** When a `gbrain sync` client was killed, its consumer heartbeat row still read as live for up to 30 s (and as the elected owner for up to 60 s). So the next sync didn't hand its catch-up to the running `gbrain serve`: it ran its own consumer next to the serve. When the write owner was killed mid-catch-up, the requests it had claimed stayed claimed until their publication lease ran out, about 365 s with the default ceiling. Now a process proves from `/proc` that a same-machine owner is dead (its pid is gone, or now belongs to a process that started later) and stops waiting for it. In the new convergence harness (seed 6650) the worst stall after an owner kill went from 356 s and 362 s to 0 s with no injected latency, and from 364 s to 30 s at 50 ms; the catch-up after a serve kill went from 385 s to 29 s. Where `/proc` is unavailable (macOS) the time-based rules are unchanged.
 
 ### Itemized changes
 
-- **Smaller buffer pool for one-shot reads** (`core/engine-connect.ts`, `core/pglite-embedded-assets.ts` `withSharedBuffers`, `EngineConfig.pglite_shared_buffers`). PGLite's backend zero-fills its whole `shared_buffers` pool when it starts, about 55 ms for the data directory's 128MB default. A CLI process that runs one read-scope operation (the shared-op path, `gbrain call <read op>`, `search`, `sources list`) now opens with `-c shared_buffers=32MB` (`ONE_SHOT_READ_SHARED_BUFFERS`), which keeps about 90% of that saving. Serve, writes, admin ops and every other command keep the default. Measured first-query cost after a fresh open on a 5,000-page brain moves by ±5 ms.
-- **Extensions load on first use** (`core/pglite-embedded-assets.ts` `lazyExtension`, `readExtensionFiles`). The `vector` and `pg_trgm` bundles are gunzipped and untarred in memory and written into PGLite's filesystem in the extension's `init`, after the backend starts, instead of PGLite streaming them through gunzip and compiling and linking both libraries before startup. Postgres loads each library on its first call into it. Open drops about 30 ms; the first query that needs `vector.so` pays about 1–4 ms more. The tarballs are no longer copied to a temp directory.
-- **`gbrain call`, `capture` and `forget` prewarm the PGLite WASM compile** while their modules load (`cli/main.ts`), as shared-op and post-connect commands already did.
+- **Heartbeat rows** (`src/core/persistence/consumer-heartbeat.ts`, migration v243): each `persistence_consumers` row records its process's kernel boot id and start time (`/proc/<pid>/stat` field 22). `consumerProvablyDead` is true only for an owner under this boot and pid namespace whose pid is gone or reused. A process whose `/proc` numbers another pid namespace's processes records no start time and proves nothing. The owner probe behind serve-delegated sync and the waiter election (`consumer-election.ts` `electOwner`) skip such a row at once. A row from another host or container, or from an older gbrain without the new columns, keeps the time-only rule.
+- **Claims of a dead owner** (`src/core/persistence/consumer.ts`, `claim-phase.ts`): the claim stamp records the same boot id and start time. Every 5 s (Postgres), including while the consumer is idle, it looks up the distinct owners of running claims on its own roots. The expired-claim reclaim takes a claim at once when its stamp of the current token names an owner proven dead, instead of when its lease (up to the publication ceiling plus about 65 s) runs out. A claim re-taken by a live owner since the scan carries a new stamp and is never touched. The same guards as for an expired claim apply: no recovery record and no publication started. An owner that is alive, however slow, or on another host or container keeps its full lease. The idle scan runs on the idle probe's reserved connection, so an idle pool still drains.
+- **Convergence harness** (`test/sync-convergence.serial.test.ts`, `bun run test:convergence`, quarantined): kills the resident serve and a sync client at seeded fault points behind a transaction-mode PgBouncer and checks that a plain sync converges. Named checks cover delegation after a client kill and a stall bound of 70 s (consumer liveness window plus one renewal plus 30 s). See `scripts/persistence/README.md`.
 
-### For contributors
+## [0.60.222.0] - 2026-10-14
 
-- `scripts/bench/efficiency/probe-pglite-open.ts` times `PGlite.create` on a copy of a data directory: stock (eager) versus lazy extensions at 128MB and 32MB, one fresh process per sample, plus the first query that loads `vector.so`. On the 85-page brain: 202 / 239 ms stock at 128MB, 120 / 153 ms lazy at 32MB (p50 / p95, N=20).
-- Tests: `test/engine-connect.test.ts` pins 32MB for a one-shot read connect and 128MB otherwise, and that `gbrain call` asks for it only for read-scope tools; `test/pglite-embedded-assets.test.ts` pins the bundle contents, refuses an unsupported tar entry, and installs and queries both extensions through an HNSW and a trigram index.
+**Writes that ended without committing are now summarized and explained, and the few that block work are named (#6650).** Every write leaves a receipt, and receipts that ended `failed`, `conflict` or `cancelled` used to pile up with no summary: an agent couldn't tell the one that holds a root from hundreds a later write already superseded or an older build left behind. gbrain now classifies each such receipt at read time (category, class, safe actions, whether a person decides, a structured fix) and stores nothing new. A new doctor check, `persistence_terminal_failures`, warns when a receipt blocks work now (a publication recovery record or a sync checkpoint blocker) or when an unresolved receipt is a gbrain-defect class. A 24-hour spike warns only when nothing else does, and a spike written by builds older than the fix says so, names the build and points at the write owner to upgrade or restart. Superseded rows and rows from builds older than their fixing release count as historical and never warn.
+
+### Itemized changes
+
+- **Classifier** (`src/core/persistence/terminal-classify.ts`): `classifyTerminal` routes each receipt by its recovery record, its typed knock-on marker, and the origin or cause it recorded. A receipt whose code and origin don't say what happened is `diagnosis_required`, and its fix is read-only writer status, never a guess. It also owns the supersession rule `gbrain repair failed-writes` uses.
+- **Bounded readers** (`src/core/persistence/terminal-failures.ts`): one set-based aggregate with a 5 s statement deadline and a 2 s connection deadline; past either the result is `unknown`, never an empty pile. The drill-down scans at most 2,000 receipts per call and pages with a cursor. Thresholds: `persistence.terminal_failures.window_days` (default 7, clamped to `persistence.receipt_retention_days`), `spike_factor` (3) and `spike_min` (25).
+- **`gbrain write-request <id>`** adds `write_error_reason`, `suggestion` and a `diagnosis` with a rendered `fix` for such receipts.
+- **`gbrain sync status`** adds `terminal_failures` (active blockers, unresolved, historical, the drill-down command) and names a recovery record as `next` when nothing else is.
+- **`gbrain sources writer failures <source>`** (read-only) lists the receipts or groups them (`--group-by category`), each group with an exact drill-down filter; a table by default, JSON with `--json`. A resident owner advertises the operation in a new `administration_extensions` capability key, so older clients and owners interoperate.
+- **`/metrics`** (admin only) adds per-source gauges `gbrain_writer_terminal_failures_{active_blockers,unresolved,historical,new_24h,defects}` and `_known`, from one aggregate shared by every scrape for 60 s. `/health` is unchanged.
+- **Fact-fence step** (`src/core/facts/unfenced-facts.ts`): the up-front lifetime-ID check counts only pages that will submit, so a page suppressed by a recent identical refusal, or one with nothing adoptable, no longer pushes the whole step to the cap and refuses it.
+- Docs: [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures), the troubleshooting row, write-refusals and the maintain skill.
+
+## [0.60.221.0] - 2026-10-14
+
+**When a file you edited by hand blocks every write to its source, one command now shows you both versions and lets you pick which one to keep (#6650).** If you edit a page file while gbrain is publishing a write to that same file, gbrain can no longer tell whether it is safe to put the file back. It used to stop there and leave every later write to that source pending, and the only ways out were deleting the file or editing the database by hand. `gbrain repair stuck-recovery` previews the blocked file with a diff of the version from before the write against what is on disk now. You then choose: `--keep prior` restores the old version so the write publishes again, or `--keep disk` keeps your edit and drops the write. Either way, both versions are backed up first.
+
+### How to use it
+
+```bash
+gbrain repair stuck-recovery --source notes                        # preview: each blocked file, its diff, the choices
+gbrain repair stuck-recovery --source notes --keep prior --apply --expect <hash> --yes
+gbrain repair stuck-recovery --source notes --keep disk --apply --expect <hash> --yes
+gbrain sources reconcile notes <slug> --brain host --preview       # after --keep disk: bring the page in line with your file
+```
+
+Run it on the host that owns the source. Only you choose: there is no default `--keep`, and `--all`, `gbrain doctor --remediate` and remediation plans never run it.
+
+### What each choice does
+
+| Your choice | Your file afterwards | The write that was publishing | The page in the database |
+|---|---|---|---|
+| `--keep prior` | The version from before the write | Queued again and published on the next pass (or ended with the failure it already had) | Updated by that publication |
+| `--keep disk` | Your edit, unchanged | Ended as a conflict (`source_changed`), or with the failure it already had | Unchanged until you reconcile it |
+
+### Things to watch
+
+- `--keep prior` discards your edit, and the write that was publishing then overwrites the file again. Check the diff and keep a copy if you need the edit.
+- A write that already finished is never changed. If its recovery is still waiting, the preview lists it as refused (`recovery_choice_refused`), because changing it would roll back committed content.
+- Shared-skill bundle recoveries (`recovery_bundle_unsupported`) and withdrawal-mirror recoveries (`recovery_effect_unsupported`) are listed and left alone, because either choice could undo a withdrawal.
+- If the file or the page changes after the preview, the apply refuses with `preview_changed`. Preview again and apply the new hash.
+
+### Itemized changes
+
+- **New repair kind `stuck-recovery`** (`src/core/repair/stuck-recovery.ts`, `src/core/persistence/recovery-resolve.ts`):
+  - It is explicit-only, preview-bound and needs destructive consent. A non-interactive apply without `--yes` exits 3 with the consent payload.
+  - `--request-id <uuid>` narrows the preview or apply to one request.
+  - The preview prints each file's prior and disk fingerprints (hash, size, mode), plus what recovery sees. It writes the prior, disk and unified-diff files with mode 0600 under `~/.gbrain/backups/stuck-recovery/<request>/<digest>/` and prints the `diff -u` command that reproduces the diff.
+  - The preview hash binds the recovery identity, the disk bytes and the page's database revision.
+- **Resolution behavior:**
+  - The apply takes the worktree lock with a bounded 10-second wait and refuses `writer_lock_unavailable` with nothing changed.
+  - `--keep prior` writes the prior bytes through the writer's own durable, confined publication, staged at the recovery's reserved restoration path. An older recovery first reserves that path within the recovery budget, and the apply refuses `queue_capacity` with nothing changed when the budget is full.
+  - `--keep disk` ends the request and leaves its recovery record unchanged, so the recovery bytes it reserved are released when the record is cleared.
+  - Each step is journaled in `op_checkpoints` (op `stuck-recovery-resolution`). A run killed at any point resumes with the same command, an identical apply replays its recorded result, and a resident writer of any version can finish a resolution this command started.
+- **New error codes:** `recovery_bundle_unsupported`, `recovery_choice_refused` and `recovery_effect_unsupported`, each with a section in `docs/guides/repair.md`.
+- **Tests:**
+  - `test/repair-stuck-recovery.test.ts` (PGLite) covers the preview, both choices on live requests with and without a recorded failure, terminal and effect refusals, the bounded lock wait, staging and byte accounting, kills at every step, mixed-version finish, replay and the consent exit.
+  - `test/e2e/repair-stuck-recovery-postgres.test.ts` covers a SIGKILL at each step on real Postgres.
+
+## [0.60.220.0] - 2026-10-14
+
+**New users who'd rather not run GBrain themselves now hear about hosted GBrain at gbrain.io, in the docs and in one CLI line at the moments self-hosting is hardest.** The README shows the official wordmark and a tip under the intro. Agents installing for a first-time user, or for someone with no machine that stays online, mention gbrain.io once in the install reply and never hold up a local install. The CLI prints one muteable `hosted_option` line when `gbrain setup` or an in-agent install creates a brain, when `gbrain mcp expose` writes its first receipt, and when expose stops at a Tailscale or service step.
+
+### Itemized changes
+
+- **Docs.** README: the wordmark from gbrain.io/branding (`docs/images/brand/gbrain-wordmark{,-light}.svg`, light variant in dark mode), a `[!TIP]` pointing first-time and no-server users at gbrain.io, and free setup help at support@gbrain.io. Two README paragraphs that repeat linked docs were shortened to stay under the 45,000-byte cap. AGENTS.md and INSTALL_FOR_AGENTS.md tell installing agents when to mention hosted. INSTALL.md, the personal-brain and company-brain tutorials and the remote-MCP guide each get one callout. The Grok Bot and Muse guides gain a hosted row in their path tables. Every link carries a `?ref=` tag for attribution.
+- **`hosted_option` coaching notice** (`src/core/onboard/hosted-option.ts`). A terminal gets one stderr line: `Hosted option: gbrain.io runs GBrain for you, nothing to keep online: <link>  (hide: gbrain notices mute hosted_option)`. An agent reading the output gets the standard notice block. It shows once on `gbrain setup <harness>` that created the brain (`ref=cli-setup`), once on an in-agent install that created the brain, naming that install's own launcher in the mute hint (`cli-in-agent`), once on the `gbrain mcp expose` run that writes the first receipt (`cli-mcp-expose`), and at each expose Tailscale or service friction exit (`cli-mcp-expose-friction`). It never shows on bare `gbrain init`, consent-pending, `--dry-run`, `--status`, `--remove`, a re-publish or a muted install, and it is never part of a consent request. No network call and no telemetry.
+- **Mute.** `gbrain notices mute hosted_option`, or `mute_notice` on stdio. `gbrain notices --help`, `notices list --json` (`muteable`) and the `mute_notice` `invalid_params` list now include it.
+- **Output changes.** `gbrain setup` on a new brain: `notices[]` is now `[first_run_decisions, hosted_option]`, and non-TTY human output gains a second `[AGENT]` block. `gbrain mcp expose --json` gains an optional `notices` key on the first-receipt run and at friction exits; the consent payload is unchanged.
+- **Flake fix.** `test/page-purge-journal-timeout-6511.test.ts` "[R2] a carrying request admitted and cancelled…" slept a fixed 50 ms before reading the queued write's row. On a slow CI Postgres the row wasn't there yet, the hook threw, and the purge ended `storage_error`. It now polls (bounded at 10 s) until the row exists and still asserts `queued`. Forcing the sleep to 0 reproduces the failure on the old code.
+- **Tests.** `test/hosted-option.test.ts` (new) covers the copy, the ref table, muting and both output forms. `test/setup.test.ts` and `test/mcp-expose.test.ts` pin where the notice shows and where it never does.
+
+## [0.60.219.0] - 2026-10-14
+
+**A new brain made by `gbrain setup` is finished when setup ends, and a plain-English question to `gbrain recall` now finds facts on a brain without embeddings.** Before, `gbrain setup claude-code` (or `codex`) created a brain and then printed a line telling you to run `gbrain apply-migrations --yes --no-autopilot-install` yourself, so a fresh install still had setup migrations pending and `gbrain doctor` said so. Setup now runs those migrations itself, on the brain it just created, and says which ones it ran. Separately, on a brain with no embeddings, `gbrain recall "how does the user take their coffee"` printed "No matching facts." even when a fact about coffee existed, because recall looked for an entity with that whole sentence as its name. Now it ranks the facts against the sentence as a question and tells you it did.
+
+### What you'd see
+
+| You run | Before | Now |
+|---|---|---|
+| `gbrain setup claude-code` on a new machine | `[init] Migrations: ...` plus a hand-off command to run | `[setup] Migrations: 14 recorded as not needed on a new brain; 5 setup migration(s) applied by setup without installing services (0.11.0, 0.14.0, 0.22.4, 0.28.0, 0.53.0); none pending.` |
+| `gbrain setup claude-code` on a brain that already exists | the hand-off line | the same hand-off line, nothing run |
+| `gbrain recall "how does the user take their coffee"` on a brain without embeddings | `No matching facts.` | the coffee fact, ranked first, with a note on stderr |
+| the same on a brain with embeddings | `No matching facts.` | `No matching facts.`, plus a stderr hint naming `gbrain recall --question "<q>"` |
+| `gbrain recall --help` | the generic one-line stub | recall's own usage, including `--question` |
+
+### What to watch for after you upgrade
+
+- On a brain without embeddings, a multi-word `gbrain recall "<text>"` that matches no entity and no fact text now prints ranked facts instead of "No matching facts." Scripts that relied on the empty result should pass `--grep` or check the stderr note. Brains with embeddings return exactly what they did before.
+- If `~/.claude/AGENTS.md`, `~/.openclaw/AGENTS.md` or an OpenClaw cron manifest already exists, setup does not run v0.11.0 (which would edit that file). It leaves that one migration pending and names the file and the command to run it.
+- `gbrain init` on its own is unchanged and still prints the hand-off line.
+
+### Itemized changes
+
+- **Setup finishes a brain it created** (`src/commands/setup-migrations.ts`, called from `src/commands/setup.ts` only when this run created the brain): one `gbrain apply-migrations --yes --no-autopilot-install --json` child, bounded at 60 s, with `GBRAIN_NO_AUTOPILOT_INSTALL=1`. These migrations are local ledger, schema and file work: no provider calls, no paid work, no services installed, and they run offline. The summary line replaces init's `[init] Migrations:` line. If the run fails, init's line stays with `(setup ran it and it failed: <code>)` appended. Verify output is unchanged.
+- **Host files are never edited silently** (`src/commands/migrations/v0_11_0.ts` `hostRewriteTargets`): setup holds back v0.11.0 when any file its host phase would rewrite already exists.
+- **Keyless question fallback** (`src/commands/recall.ts`, `src/core/facts/keyword-only.ts` `factRecallIsKeywordOnly`): applies only when fact recall is keyword-only (embedding opted out or no provider configured) and the positional has several words and matched nothing. It ranks with the same path as `recall --question` and writes `[recall] no entity or fact text matched '<q>'; ranked facts by relevance to it as a question (keyword-only: this brain has no embeddings).` to stderr.
+- **`gbrain recall --help`** prints `Usage: gbrain recall [<entity>] [options]` with every option, and works without a configured brain.
+
+## [0.60.218.0] - 2026-10-14
+
+**Fencing legacy facts no longer leaks, loops or blocks.** When a legacy fact is adopted into a fence row that an earlier, interrupted run left behind, the row is now rebuilt from the stored fact, so the fact's own kind, dates, confidence, visibility and speaker attribution are kept. Before, a leftover row with a different visibility made the adoption refuse every time, and one with the same visibility overwrote the fact's metadata. A managed adoption that gbrain refused as a planning defect is no longer resubmitted every cycle, so the writer stops collecting one identical failed request per page per cycle. And one fact that can't be fenced now holds up only its own page: the phantom-redirect pass runs for the rest of the source.
+
+### Itemized changes
+
+- **Leftover fence rows** (`src/core/facts/unfenced-facts.ts`): a leftover row is reused only when that can't widen its visibility (a private row is never reused for a world fact; the world fact gets its own row), and the reused row is re-rendered from the legacy fact. A newly fenced fact keeps its `attributed_to`.
+- **One read-back check** (`src/core/facts-fence.ts` `fenceCellReadBackProblem`): the planner runs the publisher's own check on the whole rendered fence before it submits. A page that fails is reported as unadoptable (class `whole_fence`) and nothing is submitted.
+- **No resubmission loop** (`src/core/persistence/prepared-maintenance.ts`): a `fence_unrenderable` refusal of the same intent in the last day is not resubmitted. The page is reported as unadoptable (class `prior_refusal`). It gets one more try after a day, or right away once the adoption planner changes (its revision is part of the request identity).
+- **Phantom redirects** (`src/core/cycle/extract-facts.ts`, `src/core/cycle/phantom-redirect.ts`): the pass holds only top-level pages that own legacy fact rows, or that are the provenance page of an ontology observation, instead of waiting for the whole source. Held pages are excluded before the per-pass cap, so they never crowd out other phantoms. The count is `phantoms_held_legacy_rows` in the cycle report.
+- **Stale plans** (`src/core/facts/unfenced-facts.ts`): when a legacy fact changed between planning and submission, the page is skipped and replanned next run, so an older plan never writes old metadata back over the newer row.
+- **Census** (`scripts/diagnose/fence-adoption-census.sql`): a read-only query that counts failed adoptions by build, code and message (first and last seen, last 24 hours) and shows how many of those pages still hold legacy facts.
+
+## [0.60.217.0] - 2026-10-13
+
+**Pages whose writes keep refusing `source_changed` can now be listed, resolved and measured, and maintenance stops adding to the pile (#6643).** A page whose canonical file differs from its database copy refuses every coordinated write with `source_changed` (`file_database_drift`) until someone reconciles it. Nothing listed those pages, nothing resolved them in bulk, and `synthesize_concepts` paid for a new narrative for each drifted concept on every cycle and left another conflict receipt each time. Now the audit groups the receipts by page, maintenance checks the file before it spends or admits anything, `gbrain repair file-drift` resolves the pages through canonical reconciliation, and doctor counts what is left.
+
+### Itemized changes
+
+- `gbrain sources reconcile <source> --audit --conflicts [--window <n>]` (read-only) lists conflict receipts grouped by slug: receipt and drift-receipt counts, first and last seen, producers, the last committed write, whether the file still differs (checked live on the canonical owner host), the source path, git tracked/committed state and the drift class. It reads a bounded window of request sequences (100,000 by default, at most 1,000,000), paginates by slug and says whether the window covered all history.
+- MCP `list_write_conflicts` (read scope) returns the database-derived part of the same audit to remote callers, filtered by source grant, slug fence and page visibility in the SQL that counts. No paths, hashes, revisions or live checks leave the host.
+- `synthesize_concepts` skips a drifted concept before any provider call or admission, on every cycle, records the skip in `dream.concepts.drift_skips` (a separate key from the retry bound) and releases it when the file and database agree. The phase reports `warn` with `skipped_file_drift` and the commands to run.
+- A prepared maintenance write to a drifted page refuses `source_changed` / `file_database_drift` before admission, without a request row. A replay of an earlier request id still returns its receipt.
+- `gbrain repair file-drift --source <id> (--slug <s>... | --request <id>... | --all-drifted [--class <name>]) --prefer file|database` is explicit-only and preview-bound. The preferred side wins inside reconcile's protections (protected metadata, the tag union, protected takes and private fact rows), and each page's preview lists its `exceptions`. `--all-drifted` refuses a selection that mixes drift classes unless `--class` keeps one. `--apply --expect <hash>` applies exactly the previewed set under derived request ids, resumes an interrupted apply, and reports `repaired`, `refused` or `changed_since_preview` per page.
+- Doctor `maintenance_write_drift` (ops) counts drifted pages behind the newest 20,000 request sequences and the recorded concept skips, and names the audit and the repair preview.
+- Docs: [file drift](docs/guides/repair.md#file-drift), the troubleshooting row and [maintenance write drift](docs/guides/troubleshooting.md#maintenance-write-drift), and `list_write_conflicts` in the MCP tool reference.
 
 ## [0.60.216.0] - 2026-10-13
 
