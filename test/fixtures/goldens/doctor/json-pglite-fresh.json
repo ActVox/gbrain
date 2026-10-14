@@ -599,6 +599,100 @@
         },
         {
           "category": "brain",
+          "details": {
+            "active_column": "embedding",
+            "basis": "exact",
+            "counts": {
+              "chunkless_healable": 0,
+              "deleted_page_chunks": 0,
+              "embedded": 0,
+              "empty": 0,
+              "keyword_only": 0,
+              "pending": 0,
+              "quarantined": 0
+            },
+            "coverage": {
+              "basis": "exact",
+              "eligible": 0,
+              "embedded": 0,
+              "ratio": null
+            },
+            "covering_index": null,
+            "deleted_page_chunks": {
+              "past_window": 0,
+              "window_hours": 72,
+              "within_window": 0
+            },
+            "embeddings_enabled": false,
+            "exact": true,
+            "keyword_only": {
+              "marker_bytes": 0,
+              "pages": 0,
+              "reason": "embed_skip",
+              "threshold_bytes": 500000
+            },
+            "mode": "full",
+            "omitted_states": [],
+            "reason": "embeddings_disabled",
+            "status": "known",
+            "units": "content_chunks rows, plus one unit per page with no chunk rows",
+            "unsearchable": 0,
+            "unsearchable_complete": true,
+            "unstamped_pending": {
+              "count": 0,
+              "created_at_lower_bound": null,
+              "writer_version": "<version>"
+            }
+          },
+          "fix": {
+            "actor": "user",
+            "argv": [
+              "gbrain",
+              "init",
+              "--force",
+              "--embedding-model",
+              "voyage:voyage-4",
+              "--embedding-dimensions",
+              "1024",
+              "--path",
+              "<home>/.gbrain/brain.pglite"
+            ],
+            "command": "gbrain init --force --embedding-model voyage:voyage-4 --embedding-dimensions 1024 --path <home>/.gbrain/brain.pglite",
+            "consent": [
+              "credentials",
+              "paid"
+            ],
+            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/search-modes.md",
+            "inputs": [
+              {
+                "how": "Ask the user for an API key for Voyage AI; store it with `gbrain config set voyage_api_key <key>` (every gbrain process reads it), or export VOYAGE_API_KEY in the environment of every gbrain process. Then run the command.",
+                "name": "VOYAGE_API_KEY"
+              }
+            ],
+            "next": "tell_user_to_run",
+            "requires_exclusive": true,
+            "user_message": "Semantic search needs an embedding API key. Voyage AI works with this brain; if you add a key (VOYAGE_API_KEY), I can turn it on. Embedding costs a little per page; your notes and facts stay as they are.",
+            "verify": {
+              "argv": [
+                "gbrain",
+                "doctor",
+                "--only",
+                "embeddings",
+                "--json",
+                "--brain",
+                "host"
+              ]
+            },
+            "why": "Embeddings are off, so search is keyword-only, and no configured embedding key fits this brain. Once the key is set this turns on voyage:voyage-4 (1024d) for the PGLite brain at <home>/.gbrain/brain.pglite. Pages, facts and keyword search are kept; existing chunks and facts are queued for vectors, which `gbrain embed --stale` (or the next maintenance cycle) fills."
+          },
+          "message": "Embedding state (exact, column 'embedding'): 0 embedded, 0 pending, 0 keyword-only, 0 quarantined, 0 empty, 0 on deleted pages, 0 chunkless (healable); 0 unsearchable.",
+          "name": "embedding_state",
+          "readiness_state": "disabled_by_choice",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
           "fix": {
             "actor": "user",
             "argv": [

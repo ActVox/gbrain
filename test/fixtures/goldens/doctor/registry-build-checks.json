@@ -311,6 +311,10 @@
       },
       {
         "category": "brain",
+        "name": "embedding_state"
+      },
+      {
+        "category": "brain",
         "name": "embedding_provider"
       },
       {

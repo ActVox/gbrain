@@ -173,12 +173,13 @@ export function embeddingStateVerify(sourceId: string, state: EmbeddingState): {
 /**
  * The exit for one state, built only from existing commands (agent operator
  * protocol: argv, consent, actor, why, requires_exclusive, read-only verify,
- * docs). Null for `embedded`, which needs none.
+ * docs). Null for `embedded`, which needs none. Without `sourceId` the
+ * commands run brain-wide; pass `verify` then (doctor verifies with itself).
  */
-export function embeddingStateFix(state: EmbeddingState, ctx: { sourceId: string; slug?: string; markerBytes?: number | null; embeddingsEnabled: boolean; verify?: { argv: string[] } }): Action | null {
-  const verify = ctx.verify ?? embeddingStateVerify(ctx.sourceId, state);
+export function embeddingStateFix(state: EmbeddingState, ctx: { sourceId?: string; slug?: string; markerBytes?: number | null; embeddingsEnabled: boolean; verify?: { argv: string[] } }): Action | null {
+  const verify = ctx.verify ?? embeddingStateVerify(ctx.sourceId ?? 'default', state);
   const base = { verify, docs: EMBEDDING_STATE_DOCS, requires_exclusive: false };
-  const source = ['--source', ctx.sourceId];
+  const source = ctx.sourceId ? ['--source', ctx.sourceId] : [];
   switch (state) {
     case 'embedded':
       return null;
@@ -204,12 +205,12 @@ export function embeddingStateFix(state: EmbeddingState, ctx: { sourceId: string
         then: reimport };
     }
     case 'quarantined':
-      return { ...base, ask_user: true, argv: ctx.slug ? ['gbrain', 'quarantine', 'clear', ctx.slug, '--source-id', ctx.sourceId, '--force'] : ['gbrain', 'quarantine', 'list', '--json'],
+      return { ...base, ask_user: true, argv: ctx.slug ? ['gbrain', 'quarantine', 'clear', ctx.slug, ...(ctx.sourceId ? ['--source-id', ctx.sourceId] : []), '--force'] : ['gbrain', 'quarantine', 'list', '--json'],
         preview_argv: ['gbrain', 'quarantine', 'list', '--json'], consent: ctx.slug ? ['paid'] : [], actor: 'user',
         why: 'The content-quality gate hid this page as junk, so it has no searchable chunks. Clearing is the owner\'s judgement for a false positive; it re-imports and embeds the page.',
         user_message: 'A page was hidden from search as junk. Review it and clear it if it is a false positive?' };
     case 'empty':
-      return { ...base, ask_user: true, argv: ctx.slug ? ['gbrain', 'delete', ctx.slug, '--source', ctx.sourceId, '--force'] : ['gbrain', 'list', '--json'],
+      return { ...base, ask_user: true, argv: ctx.slug ? ['gbrain', 'delete', ctx.slug, ...source, '--force'] : ['gbrain', 'list', '--json'],
         consent: ['destructive'], actor: 'user',
         why: 'The page has no body text, so there is nothing to index. Writing content to it chunks it on the next write; delete it only if it is a stub nobody needs (soft delete, restorable).',
         user_message: 'A page is empty, so there is nothing to search. Add content to it, or delete the empty stub?' };

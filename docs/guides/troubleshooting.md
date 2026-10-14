@@ -360,6 +360,42 @@ completes in seconds on an 80K-page PGLite brain.
 
 <a id="maintenance-write-drift"></a>**Writes to the same pages keep refusing `source_changed` with `file_database_drift`, or doctor `maintenance_write_drift` warns?** Each of those pages has a canonical file that differs from its database copy, usually from an edit outside a coordinated write, so every coordinated write to it refuses and leaves a conflict receipt. Maintenance now checks the file first: `synthesize_concepts` skips a drifted concept before any model call (the phase warns and names the commands below) and other maintenance writes refuse before admission, so the pile stops growing. To list the pages, run `gbrain sources reconcile <id> --brain host --audit --conflicts` (read-only; receipts per slug, whether the file still differs, its drift class and producer; MCP `list_write_conflicts` gives remote readers the database-derived part). Then preview `gbrain repair file-drift --source <id> --all-drifted --prefer file` (add `--class <name>` when the preview reports mixed classes, narrow it with `--only '<path glob>'` / `--skip '<path glob>'` over the canonical file paths, or pick pages with `--slug`), show the user the per-page `exceptions`, and after they agree run the printed `--apply --expect <hash>` command exactly as printed. For derived pages under one directory, such as regenerated concepts: (6) preview `gbrain repair file-drift --source default --all-drifted --only 'concepts/**' --prefer database`, show the user the count and the exceptions, and after they agree run the apply command it prints, which applies exactly the previewed pages. To keep resolving such a directory with the database copy from now on, the user can declare it under `storage:` `keep_db:` in the source's gbrain.yml; the owner host's serve, jobs or autopilot consumer then reconciles drifted pages there at most 10 every 10 minutes, and doctor echoes the policy with its matched count and receipt cost ([keep_db](repair.md#file-drift-keep-db)). `--keep` is refused here: use `--prefer database` or `--prefer file`. See [file drift](repair.md#file-drift). **Say to your agent:** *"Which pages keep refusing source_changed? Preview resolving them and show me before you apply."*
 
+## Embedding state
+
+**Symptom.** Doctor `embedding_state` warns, `get_brain_health` reports
+`unsearchable` above zero, or a page you know exists never shows up in search.
+
+**Say to your agent:** *"Which pages can search not see, and why?"* The agent
+runs `gbrain pages unsearchable --source <id> --json` (read-only) and follows
+each row's `fix`.
+
+Every chunk, and every live page with no chunk row, is in exactly one state,
+derived from the rows against the active embedding column (no stored status):
+
+| State | What it means | Exit (each row's `fix`) |
+|---|---|---|
+| `embedded` | The chunk has a vector in the active column. | None. |
+| `pending` | The embed job will embed it (no vector, page live, no `embed_skip`). Doctor `embeddings` ages this backlog and owns its warning. | `gbrain embed --stale --catch-up --source <id> --yes` (paid; preview with `--dry-run`). On a brain keyless by choice keyword search reads these chunks and they do not count as unsearchable. |
+| `keyword_only` | The page carries `embed_skip`: the import gate found its body over `content_sanity.bytes_block` (info, by design; its chunks still feed keyword search and are never purged). Removing the marker alone is undone on the next import. | Split the page, or, after the operator approves, `gbrain config set content_sanity.bytes_block <bytes>` then `gbrain sync --source <id> --full`, which re-imports and embeds it. |
+| `quarantined` | The content-quality gate hid the page as junk; it has no searchable chunks. Doctor `quarantined_pages` owns its warning. | Review with `gbrain quarantine list --json`; clear a false positive with `gbrain quarantine clear <slug> --source-id <id> --force` (the owner's call). |
+| `empty` | A live page with no body text: nothing to index. | Write content to it, or delete the stub (`gbrain delete <slug> --source <id> --force`, restorable) after the user agrees. |
+| `deleted_page_chunks` | Chunks of a soft-deleted page. Search never reads them; the purge lifecycle removes them after 72 h (info until then, a warning past it, code `deleted_page_chunks_overdue`). | `gbrain pages purge-deleted --dry-run --json`, then `gbrain pages purge-deleted --yes` once the user agrees (brain-wide, irreversible). |
+| `chunkless_healable` | A live page with body text but no chunk rows (written without the chunking step). Doctor warns on a keyed brain (code `chunkless_pages_healable`). | `gbrain embed --stale --catch-up --source <id> --yes` chunks and embeds it (paid). |
+
+`unsearchable` sums `pending`, `quarantined`, `empty` and `chunkless_healable`;
+`keyword_only` and `deleted_page_chunks` never count. The doctor's ops tier
+reads only index-backed counts: vector-less chunks through the partial index
+`WHERE <active column> IS NULL` (`content_chunks_stale_idx` for the default
+`embedding` column), gated and deleted pages through their indexes, and
+`embedded` as a planner estimate (`basis: estimated`); it omits `empty` and
+`chunkless_healable` (`unsearchable_complete: false`). A registry-routed brain
+whose active column has no such index reports `unknown` there (code
+`embedding_state_unknown`, never a slow scan); the standard tier
+(`gbrain doctor --only embedding_state --json`) counts every state exactly.
+Pending chunks written by a binary older than the pending-age stamp carry no
+age: `details.unstamped_pending` gives their count, this writer's version and
+a `created_at` lower bound, and never warns on its own.
+
 ## Hybrid search returns only keyword hits
 
 **Symptom.** On a large Postgres brain, `gbrain query` answers look keyword-only,

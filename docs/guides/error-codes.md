@@ -417,6 +417,16 @@ Reasons: `auto_chronicle_off`, `auto_chronicle_invalid`, `slug_bound_client`, `o
 
 More: [docs/guides/life-chronicle.md#skip-and-failure-codes](../../docs/guides/life-chronicle.md#skip-and-failure-codes)
 
+### chunkless_pages_healable
+
+<a id="chunkless_pages_healable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Live pages have body text but no chunk rows, so search cannot read their body. | A page written without the chunking step (an enrichment stub, an interrupted write) has nothing for search to match; `gbrain embed --stale` chunks it first, which makes paid embedding calls. | List them with `gbrain pages unsearchable --state chunkless_healable --json`, then run `gbrain embed --stale --catch-up --yes` once embedding spend is approved. Run: gbrain pages unsearchable --state chunkless_healable --json | agent | `gbrain doctor --only embedding_state --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#embedding-state](../../docs/guides/troubleshooting.md#embedding-state)
+
 ### claim_already_used
 
 <a id="claim_already_used"></a>
@@ -761,6 +771,16 @@ Reasons: `pending`, `timeout`, `error`.
 
 More: [docs/ENGINES.md#serve-deep-health](../../docs/ENGINES.md#serve-deep-health)
 
+### deleted_page_chunks_overdue
+
+<a id="deleted_page_chunks_overdue"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Chunks of pages soft-deleted longer than the purge window (72h) are still stored. | Search never reads them; the purge lifecycle (`gbrain pages purge-deleted`, the autopilot purge phase) hard-deletes such pages and their chunks. The purge is brain-wide and irreversible, so it needs the user. | Preview with `gbrain pages purge-deleted --dry-run --json`, then run `gbrain pages purge-deleted --yes` once the user agrees. Run: gbrain pages purge-deleted --dry-run --json | agent | `gbrain doctor --only embedding_state --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#embedding-state](../../docs/guides/troubleshooting.md#embedding-state)
+
 ### delta_cursor_upgrade_required
 
 <a id="delta_cursor_upgrade_required"></a>
@@ -906,6 +926,16 @@ More: [docs/guides/write-refusals.md#embedding_auth_failed](../../docs/guides/wr
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Embedding plane split. | A capability this request needs is not configured or not reachable on this brain. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. | agent | `gbrain doctor --json` | 1 | no |
+
+### embedding_state_unknown
+
+<a id="embedding_state_unknown"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The ops tier could not count embedding state: the active embedding column has no covering partial index, and the ops tier never scans. | Without an index on `WHERE <active column> IS NULL`, counting vector-less chunks means a full table scan, which the bounded ops tier refuses. | Run the standard tier (`gbrain doctor --only embedding_state --json`) for exact counts. Run: gbrain doctor --only embedding_state --json | agent | `gbrain doctor --only embedding_state --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#embedding-state](../../docs/guides/troubleshooting.md#embedding-state)
 
 ### embedding_storage_unavailable
 
