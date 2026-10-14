@@ -43,6 +43,7 @@ test/fact-fence-adoption-exits.test.ts
 test/fact-purge-lookup-timeout-6511.test.ts
 test/fence-repair-receipts.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
+test/get-chunks-paging.test.ts
 test/graduation-copy.test.ts
 test/graduation-digest.test.ts
 test/graduation-drain.test.ts
