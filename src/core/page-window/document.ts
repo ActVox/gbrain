@@ -30,6 +30,9 @@ import { loadFenceChunkOverlay, markFenceChunk, splitFenceOverlay, type FenceChu
 /** Separator serializeMarkdown writes between compiled truth and timeline. */
 export const TIMELINE_SEPARATOR = '\n\n<!-- timeline -->\n\n';
 
+/** Pages whose read body is over this many bytes are read in windows by default (mcp.inline_body_bytes moves it for get_page). */
+export const DEFAULT_INLINE_BODY_BYTES = 256 * 1024;
+
 /** Raw prefix a bounded-prefix reader sanitizes (64 KiB of the overlaid body). */
 export const BOUNDED_PREFIX_BYTES = 64 * 1024;
 

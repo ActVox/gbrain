@@ -750,7 +750,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
          AND p.deleted_at IS NULL AND ${trustedSql(currentTextProjectionFilter('p'))} AND NOT s.archived
          AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)} ${privateSql} ${safeSql}
     ), chunk_rows AS (
-      SELECT cc.page_id, cc.id AS chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source, a.prio
+      SELECT cc.page_id, cc.id AS chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.projected_byte_start, cc.projected_byte_end, a.prio
         FROM auth a
         JOIN content_chunks cc ON cc.page_id = a.id
        WHERE a.sealed
@@ -763,11 +763,12 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
     SELECT 'page' AS kind, a.id AS page_id, a.slug, a.source_id, a.type, a.revision, a.sealed, a.prio,
            (SELECT MAX(c2.chunk_index) FROM content_chunks c2 WHERE c2.page_id = a.id) AS max_chunk_index,
            a.compiled_truth, a.timeline,
-           NULL::int AS chunk_id, NULL::int AS chunk_index, NULL::text AS chunk_text, NULL::text AS chunk_source
+           NULL::int AS chunk_id, NULL::int AS chunk_index, NULL::text AS chunk_text, NULL::text AS chunk_source,
+           NULL::bigint AS projected_byte_start, NULL::bigint AS projected_byte_end
       FROM auth a
     UNION ALL
     SELECT 'chunk' AS kind, c.page_id, NULL, NULL, NULL, NULL, NULL, c.prio,
-           NULL, NULL, NULL, c.chunk_id, c.chunk_index, c.chunk_text, c.chunk_source
+           NULL, NULL, NULL, c.chunk_id, c.chunk_index, c.chunk_text, c.chunk_source, c.projected_byte_start, c.projected_byte_end
       FROM chunk_rows c
   `);
   return mapChunkWindowRows(rows, maxRows);

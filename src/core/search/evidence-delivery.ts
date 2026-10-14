@@ -31,7 +31,7 @@ import { currentTextProjectionFilter, safeChunksFilter, requiresSafeChunks } fro
 import { resolveExcludePrivatePages } from './private-visibility.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import { loadFenceChunkOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
-import { projectPageText, TIMELINE_SEPARATOR } from '../page-window/document.ts';
+import { chunkDocumentSpan, DEFAULT_INLINE_BODY_BYTES, projectPageText, spanHoldsChunk, TIMELINE_SEPARATOR } from '../page-window/document.ts';
 import { stripChunkHeader } from '../chunkers/code.ts';
 import { OperationError } from '../ops/contract.ts';
 import { blockDateHeaders, evidenceDateHeaderEnabled } from './evidence-date.ts';
@@ -414,7 +414,7 @@ function squeeze(text: string): { s: string; map: number[] } {
  * match ignores whitespace differences; consecutive chunks overlap, so each
  * search starts just after the previous chunk's start. Unlocated chunks are absent.
  */
-export function locateChunks(text: string, chunks: Array<{ id: number; chunk_index: number; chunk_text: string }>): Array<{ id: number; chunk_index: number; start: number; end: number }> {
+export function locateChunks(text: string, chunks: Array<{ id: number; chunk_index: number; chunk_text: string }>, fold = true): Array<{ id: number; chunk_index: number; start: number; end: number }> {
   let body: ReturnType<typeof squeeze> | null = null;
   const out: Array<{ id: number; chunk_index: number; start: number; end: number }> = [];
   let from = 0;
@@ -428,6 +428,7 @@ export function locateChunks(text: string, chunks: Array<{ id: number; chunk_ind
       from = at + 1;
       continue;
     }
+    if (!fold) continue;
     body ??= squeeze(text);
     const needle = squeeze(exact).s;
     let lo = 0;
@@ -584,12 +585,12 @@ export function pageEvidenceText(page: { compiled_truth: string; timeline: strin
   return projectPageText(page, includeTimeline);
 }
 
-function locateAnchor(doc: Doc, hit: SearchResult): Anchor {
+function locateAnchor(doc: Doc, hit: SearchResult, fold: boolean): Anchor {
   const byId = hit.chunk_id > 0 ? doc.spans.find(x => x.id === hit.chunk_id) : undefined;
   if (byId) return { chunk_id: hit.chunk_id, mapped: true, pieces: piecesOverlapping(doc, byId.start, byId.end), start: byId.start, end: byId.end, chunkIndex: byId.chunk_index };
   const text = hitPageText(hit).trim();
   if (text.length >= 16) {
-    const found = locateChunks(doc.text, [{ id: hit.chunk_id, chunk_index: hit.chunk_index, chunk_text: text }])[0];
+    const found = locateChunks(doc.text, [{ id: hit.chunk_id, chunk_index: hit.chunk_index, chunk_text: text }], fold)[0];
     if (found) {
       // A fenced_code chunk_index follows every prose chunk, so it says nothing
       // about position: the window grows from the prose chunk holding the fence,
@@ -647,19 +648,50 @@ function sectionCandidates(doc: Doc, anchors: Anchor[], conversation: boolean): 
   return set.size === 0 ? null : [...set].sort((x, y) => x - y);
 }
 
+/** Large pages: above this size hits are located by their stored spans only (no whole-text whitespace folding). */
+const SPAN_ONLY_LOCATE_BYTES = 1024 * 1024;
+/** fallback_reason when a 'page' (or auto) unit was cut to a window because the page is over the inline read size. */
+export const PAGE_OVER_INLINE_BYTES = 'page_over_inline_bytes';
+
+/**
+ * Locate chunks by their recorded projected byte spans, verified against the
+ * text; one forward pass converts byte offsets to the string's UTF-16
+ * offsets. Chunks without a span (or with a stale one) stay unlocated.
+ */
+function locateByStoredSpans(text: string, timelineAt: number, chunks: ChunkWindowPage['chunks']): Array<{ id: number; chunk_index: number; start: number; end: number }> {
+  const doc = { bytes: Buffer.from(text, 'utf8'), timelineByte: timelineAt < 0 ? -1 : Buffer.byteLength(text.slice(0, timelineAt), 'utf8') };
+  const found: Array<{ id: number; chunk_index: number; start: number; end: number }> = [];
+  for (const c of chunks) {
+    const span = chunkDocumentSpan(doc, c);
+    if (span && spanHoldsChunk(doc, span, c.chunk_text)) found.push({ id: c.id, chunk_index: c.chunk_index, start: span.start, end: span.end });
+  }
+  const positions = [...new Set(found.flatMap(f => [f.start, f.end]))].sort((a, b) => a - b);
+  const toChar = new Map<number, number>();
+  let byte = 0;
+  let char = 0;
+  for (const pos of positions) {
+    char += doc.bytes.subarray(byte, pos).toString('utf8').length;
+    byte = pos;
+    toChar.set(pos, char);
+  }
+  return found.map(f => ({ ...f, start: toChar.get(f.start)!, end: toChar.get(f.end)! })).sort((a, b) => a.chunk_index - b.chunk_index);
+}
+
 function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePlan, includeTimeline: boolean): PlannedBlock {
   const best = hits[0];
   if (!page.sealed) return fallbackBlock(best, hits, 'unsealed_page');
   if (page.chunks.length === 0 && page.row_limited) return fallbackBlock(best, hits, 'row_limit');
   const { text, timelineAt } = pageEvidenceText(page, includeTimeline);
+  const textBytes = Buffer.byteLength(text, 'utf8');
   const truthChunks = page.chunks.filter(c => c.chunk_source === 'compiled_truth');
   const timelineChunks = page.chunks.filter(c => c.chunk_source === 'timeline');
-  const spans = [
+  // Large pages: above 1 MiB the text is never whitespace-folded whole; hits are anchored by their stored spans only.
+  const spans = textBytes > SPAN_ONLY_LOCATE_BYTES ? locateByStoredSpans(text, timelineAt, page.chunks) : [
     ...locateChunks(timelineAt < 0 ? text : text.slice(0, timelineAt - TIMELINE_SEPARATOR.length), truthChunks),
     ...(timelineAt < 0 ? [] : locateChunks(text.slice(timelineAt), timelineChunks).map(sp => ({ ...sp, start: sp.start + timelineAt, end: sp.end + timelineAt }))),
   ];
   const doc = buildDoc(text, spans);
-  const anchors = hits.map(h => locateAnchor(doc, h));
+  const anchors = hits.map(h => locateAnchor(doc, h, textBytes <= SPAN_ONLY_LOCATE_BYTES));
   if (anchors.every(a => a.pieces.length === 0)) {
     return fallbackBlock(best, hits, page.row_limited ? 'row_limit' : page.chunks.length === 0 ? 'no_text_chunks' : 'anchor_not_located');
   }
@@ -669,6 +701,8 @@ function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePl
   let unit: DeliveredUnit = plan.unit === 'auto' ? 'page' : plan.unit;
   let fallbackReason: string | undefined;
   let candidates: number[];
+  // Large pages (T18): a page over the inline read size is never delivered whole; it becomes the window around its hits.
+  if (unit === 'page' && textBytes > DEFAULT_INLINE_BODY_BYTES) { unit = 'window'; fallbackReason = PAGE_OVER_INLINE_BYTES; }
   if (unit === 'page') {
     candidates = doc.pieces.map((_, i) => i);
   } else if (unit === 'section') {
@@ -1153,7 +1187,7 @@ export async function deliverEvidence(
       truncated,
       ...(b.revision ? { revision: b.revision } : {}),
       ...(out.unmapped.length > 0 ? { unmapped_chunk_ids: out.unmapped } : {}),
-      ...(b.fallbackReason && b.unit === 'chunk' ? { fallback_reason: b.fallbackReason } : {}),
+      ...(b.fallbackReason && (b.unit === 'chunk' || b.fallbackReason === PAGE_OVER_INLINE_BYTES) ? { fallback_reason: b.fallbackReason } : {}),
       ...(b.reason ? { reason: b.reason } : {}),
     };
     return { ...b.hit, title: b.title, chunk_text: text, delivered };

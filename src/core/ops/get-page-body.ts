@@ -34,7 +34,7 @@ import { opError } from './contract.ts';
 import { invalidParam, readFix } from './op-fix.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { encodedFrameBytes, EGRESS_CAP_CONFIG_KEYS, egressTransport, FRAME_RESERVE_BYTES, resultByteCap } from '../egress-budget.ts';
-import { chunkDocumentSpan, readPageDocument, spanHoldsChunk, type PageDocument } from '../page-window/document.ts';
+import { DEFAULT_INLINE_BODY_BYTES, chunkDocumentSpan, readPageDocument, spanHoldsChunk, type PageDocument } from '../page-window/document.ts';
 import {
   DEFAULT_CONTEXT_LINES, DEFAULT_OUTLINE_LIMIT, DEFAULT_WINDOW_BYTES, MAX_CONTEXT_LINES, MAX_OUTLINE_LIMIT, MAX_WINDOW_BYTES,
   decodeCursor, encodeCursor, pageOutline, sha256Hex, totalLines, windowAround, windowForBytes, windowForLines, windowFrom,
@@ -47,11 +47,14 @@ export const BODY_MODES = ['auto', 'full', 'none', 'outline', 'window'] as const
 export type BodyMode = typeof BODY_MODES[number];
 export const INLINE_BODY_BYTES_KEY = 'mcp.inline_body_bytes';
 /** `auto` returns the whole body up to this many bytes of compiled truth plus timeline. */
-export const DEFAULT_INLINE_BODY_BYTES = 256 * 1024;
+export { DEFAULT_INLINE_BODY_BYTES };
 /** Room a partial response keeps for its metadata, notices and escaping inside the egress cap. */
 const ENVELOPE_RESERVE_BYTES = 64 * 1024;
 /** The first window `auto` returns next to the outline. */
 const AUTO_WINDOW_BYTES = 16_000;
+
+/** Advertised in get_brain_identity.capabilities: this host speaks the windowed get_page contract (body modes, cursors, view markdown + sha256). */
+export const LARGE_PAGES_CAPABILITY = 'large_pages_v1';
 
 export const GET_PAGE_BODY_PARAMS: Record<string, ParamDef> = {
   body: { type: 'string', enum: [...BODY_MODES], description: "auto (default: whole body up to 256 KB, else outline + first window), full, none (revision + size only), outline, window." },

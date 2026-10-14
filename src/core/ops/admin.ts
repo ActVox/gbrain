@@ -18,6 +18,7 @@ import { enforceClientSlugFence, sourceScopeOpts } from './context.ts';
 import { VERSION } from '../../version.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../search/embedding-column.ts';
 import { memoizedHealth } from '../health-memo.ts';
+import { LARGE_PAGES_CAPABILITY } from './get-page-body.ts';
 
 // --- Admin ---
 
@@ -107,7 +108,7 @@ const get_brain_identity: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. Returns version, engine kind, and page/chunk counts. Read-scope.',
+  description: 'Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. Returns version, engine kind, page/chunk counts and capabilities (large_pages_v1: windowed get_page). Read-scope.',
   params: {},
   handler: async (ctx) => {
     // #4592: read-scope + unscoped counters made this op the quiet third
@@ -138,6 +139,7 @@ const get_brain_identity: Operation = {
       last_sync_iso: null as string | null,
       update_available,
       latest_version,
+      capabilities: [LARGE_PAGES_CAPABILITY],
     };
   },
   scope: 'read',
