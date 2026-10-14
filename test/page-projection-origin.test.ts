@@ -52,9 +52,9 @@ async function seed(engine: BrainEngine, slug: string, seal = true) {
 async function embedCurrent(engine: BrainEngine, slug: string) {
   const prepared = (await readProjectionSnapshot(engine, slug, sourceId))!;
   const vector = new Float32Array(1536); vector[0] = 0.75;
-  expect(await installPageEmbeddings(engine, prepared, prepared.chunks.map(c => ({
+  expect((await installPageEmbeddings(engine, prepared, prepared.chunks.map(c => ({
     chunk_index: c.chunk_index, chunk_source: c.chunk_source, chunk_text: c.chunk_text, embedding: vector,
-  })))).toBe(true);
+  })))).complete).toBe(true);
   return engine.getChunks(slug, { sourceId, includeEmbedding: true });
 }
 
@@ -209,7 +209,7 @@ test('a column switch after context validation cannot redirect vectors into the 
         });
         const vector = new Float32Array(1536); vector[0] = 0.75;
         if (installation === 'embeddings') {
-          expect(await installPageEmbeddings(raced, origin, [{ ...chunk(body), embedding: vector }])).toBe(true);
+          expect((await installPageEmbeddings(raced, origin, [{ ...chunk(body), embedding: vector }])).complete).toBe(true);
         } else {
           await installPageProjection(raced, origin, [{ ...chunk(body), embedding: vector }], { seal: true });
         }

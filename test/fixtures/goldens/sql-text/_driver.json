@@ -661,9 +661,18 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -743,9 +752,18 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -816,9 +834,18 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -889,7 +916,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
               "simple": false
@@ -970,9 +997,18 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"

@@ -881,7 +881,7 @@ export async function importFromContent(
         const signature = currentEmbeddingSignature();
         await embedChunks();
         const installed = await installPageEmbeddings(engine, persistedProjection, chunks, embeddingPartial ? undefined : signature ?? undefined);
-        return { status: installed ? 'embedded' : 'superseded' };
+        return { status: installed.complete ? 'embedded' : 'superseded' };
       } catch {
         return { status: 'failed', error: 'Page content was saved, but embedding failed. Check the embedding provider and database on the brain host, then run gbrain embed --stale --source <source-id>.' };
       }

@@ -113,7 +113,7 @@ for (const kind of testBackends()) {
     check('already-complete projection uses provenance without reading vectors or calling the provider', async () => {
       const f = await fixture();
       const prepared = (await readProjectionSnapshot(engine, 'page', f.sourceId))!;
-      expect(await installPageEmbeddings(engine, prepared, [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Current', embedding: vectors()[0], model }], signature)).toBe(true);
+      expect((await installPageEmbeddings(engine, prepared, [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Current', embedding: vectors()[0], model }], signature)).complete).toBe(true);
       expect((await readProjectionSnapshot(engine, 'page', f.sourceId))!.chunks[0].embedding).toBeNull();
       let calls = 0;
       await run(async () => { calls++; return vectors(); });
