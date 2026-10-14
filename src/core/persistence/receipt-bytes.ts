@@ -19,7 +19,11 @@ export const EFFECT_BYTES_SQL = 'octet_length(data::text)+octet_length(kind)+102
  */
 export function receiptReservation(fields: { intent?: unknown; authority?: unknown }, extra = 0): number {
   const json = (value: unknown) => value === null || value === undefined ? 0 : jsonBytes(value);
-  return Math.max(RECEIPT_RESERVATION_FLOOR, json(fields.intent) + json(fields.authority) + RECEIPT_COMPLETION_BYTES) + extra;
+  return reservationForRetained(json(fields.intent) + json(fields.authority), extra);
+}
+/** The same reservation from the retained bytes alone (a sync preflight estimates them from file sizes before it builds intents). */
+export function reservationForRetained(retained: number, extra = 0): number {
+  return Math.max(RECEIPT_RESERVATION_FLOOR, retained + RECEIPT_COMPLETION_BYTES) + extra;
 }
 
 /** The receipt fields that stay on the row, by name. */

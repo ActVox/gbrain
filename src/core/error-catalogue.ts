@@ -90,6 +90,7 @@ export const ERROR_CATALOGUE = {
   sync_drain_preparation_systemic: { code: 'preparation_systemic', docs: 'docs/guides/write-refusals.md#preparation_systemic' },
   sync_drain_write_capacity: { code: 'queue_capacity', docs: 'docs/guides/write-refusals.md#drain-write-capacity' },
   sync_drain_connection_lost: { code: 'connection_lost', docs: 'docs/guides/write-refusals.md#drain-connection-lost' },
+  sync_drain_capacity_paused: { code: 'capacity_paused', docs: 'docs/guides/write-refusals.md#drain-capacity-paused' },
   sync_drain_head_blocked: { code: 'drain_stalled', docs: 'docs/guides/write-refusals.md#head-blocked' },
   // D8 `gbrain setup <harness>` (src/commands/setup.ts).
   setup_harness_unsupported: { code: 'setup_harness_unsupported', docs: 'docs/guides/repair.md#setup-harness-unsupported' },

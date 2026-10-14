@@ -80,6 +80,8 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // #6696 (A5): a background sync paused near a cumulative cap; interactive writes keep the rest and the pause lifts as capacity returns.
   { code: 'write_capacity_backpressure', class: 'connection', safe_actions: ['retry'], needs_human: false,
     escalate: 'reason lifetime_ids (request ids never free, so only the host raise lifts it), or the pause outlasts a day' },
+  { code: 'capacity_paused', class: 'connection', safe_actions: ['retry'], needs_human: false,
+    escalate: 'reason lifetime_ids (only the host raise resumes it), or the same pause after the raise' },
   { code: 'storage_error', class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: 'the same error after a rerun (then it is not a dropped connection)' },
   // #6513: the engine-graduation fence (SQLSTATE 55000) refuses every write until the move finishes; the cursor and manifest stand.
   { code: 'graduation_in_progress', class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: 'gbrain migrate --status --json reports no running move and the fence still refuses' },

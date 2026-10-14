@@ -363,6 +363,18 @@ More: [docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover](../../
 |---|---|---|---|---|---|---|
 | The write was cancelled before it committed. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### capacity_paused
+
+<a id="capacity_paused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync passed its capacity preflight, then a cumulative write cap (or the background pause line) refused its next admission, so the drain stopped resumable with its cursor and accepted writes intact; nothing failed. | Another writer used the capacity the preflight counted on. Request ids never free, so only the brain host's reversible config raise resumes an ids pause; receipt bytes also free as receipts compact. | Run the gbrain config set the drain report names on the brain host (gbrain doctor --only persistence_capacity --json prints it), then rerun the same gbrain sync; it resumes at the stored cursor. | host_admin | `gbrain doctor --json` | 1 | no |
+
+Reasons: `lifetime_ids`, `terminal_bytes`.
+
+More: [docs/guides/write-refusals.md#drain-capacity-paused](../../docs/guides/write-refusals.md#drain-capacity-paused)
+
 ### catalog_capacity_exceeded
 
 <a id="catalog_capacity_exceeded"></a>
