@@ -77,7 +77,8 @@ const HISTORICAL_BY_BUILD = (b: string) => `COALESCE(${Object.values(TERMINAL_HI
 const BUILD = (r: string) => `COALESCE(${r}.error_detail->'attempt'->>'consumer_version', ${r}.admitter_version)`;
 const ENDED = (r: string) => `COALESCE(${r}.completed_at, ${r}.updated_at)`;
 const TERMINAL = (r: string) => `${r}.state IN ('failed','conflict','cancelled')`;
-const RECOVERY = (r: string) => `(${r}.recovery IS NOT NULL AND ${r}.state IN ('committed','failed','conflict','cancelled'))`;
+/** A request holding a publication recovery record outside an in-flight claim: it blocks its root. `recovering` is the durable parked state (a blocked restore). */
+const RECOVERY = (r: string) => `(${r}.recovery IS NOT NULL AND ${r}.state IN ('committed','recovering','failed','conflict','cancelled'))`;
 
 interface KeyColumns { source_id: string; state: string; error_code: string | null; origin: string | null; reason: string | null; cause: string | null; operation: string;
   has_recovery: boolean; blocked_reason: string | null; compacted: boolean; knock_on: boolean; routed_message: string | null; build: string | null }
@@ -123,7 +124,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
   checkpointBlockers?: Map<string, Array<{ request_id: string; slug: string; knock_on: boolean; recovery: boolean }>> } = {}): Promise<TerminalSummary> {
   const t = opts.thresholds ?? await readTerminalThresholds(engine);
   const span = Math.max(t.windowDays, 8);
-  const days = Array.from({ length: 7 }, (_, i) => `count(*) FILTER (WHERE state<>'committed' AND ended_at <= now()-interval '${i + 1} day' AND ended_at > now()-interval '${i + 2} day')::int AS d${i + 2}`).join(',\n      ');
+  const days = Array.from({ length: 7 }, (_, i) => `count(*) FILTER (WHERE state IN ('failed','conflict','cancelled') AND ended_at <= now()-interval '${i + 1} day' AND ended_at > now()-interval '${i + 2} day')::int AS d${i + 2}`).join(',\n      ');
   const rows = await bounded<KeyColumns & { set: number; resolved: boolean | null; rows: number; in_window: number; n_24h: number; oldest: string | null; oldest_age: number | null;
     distinct_slugs: number; distinct_intents: number; recovery_ids: string[] | null; recovery_slugs: string[] | null } & Record<string, number>>(engine,
     `WITH base AS (
@@ -142,7 +143,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
     )
     SELECT GROUPING(state) AS set, source_id, state, error_code, origin, reason, cause, operation, has_recovery, blocked_reason, compacted, knock_on, routed_message, build, resolved,
       count(*) FILTER (WHERE in_window)::int AS rows, count(*) FILTER (WHERE in_window)::int AS in_window,
-      count(*) FILTER (WHERE state<>'committed' AND ended_at > now()-interval '1 day')::int AS n_24h,
+      count(*) FILTER (WHERE state IN ('failed','conflict','cancelled') AND ended_at > now()-interval '1 day')::int AS n_24h,
       ${days},
       to_char(min(ended_at) FILTER (WHERE in_window) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS oldest,
       floor(EXTRACT(EPOCH FROM now()-min(ended_at) FILTER (WHERE in_window)))::bigint AS oldest_age,

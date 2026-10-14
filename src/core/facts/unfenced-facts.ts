@@ -63,6 +63,7 @@ import { assertSourceFilesystemActive, hasSourceFilesystemLock, withSourceFilesy
 import { withPageLock } from '../page-lock.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { assertLifetimeIdHeadroom } from '../persistence/journal.ts';
+import { OperationError } from '../ops/contract.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { maintenancePreflight, planFactFenceAdoption, submitPlannedFactFenceAdoption, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
 import { contentHash } from '../utils.ts';
@@ -414,12 +415,14 @@ async function fenceManaged(engine: BrainEngine, plan: UnfencedFactsPlan): Promi
     if (!authorities.has(sourceId)) authorities.set(sourceId, (await maintenancePreflight(engine, sourceId))!);
   }
   // One admission per page that will submit: refuse up front, before any page publishes, when the permanent
-  // request-ID caps cannot cover them. A read-only pre-pass counts them, so a page that is suppressed (an
-  // identical adoption was refused within the day), unadoptable or gone never pushes the step over the cap.
+  // request-ID caps cannot cover them. Every page fitting is the common case and costs one read; only when it
+  // would refuse does a read-only pre-pass count the pages that will actually submit, so a page that is suppressed
+  // (an identical adoption was refused within the day), unadoptable or gone never pushes the step over the cap.
   // The submit loop below plans each page again right before it submits, so the plan it publishes is never
   // older than its own read (the facts-changed-since-planning guard keeps its short window).
   const [first] = authorities.values();
-  if (first) {
+  if (first) await assertLifetimeIdHeadroom(engine, first.writer.principal, groups.size).catch(async (error: unknown) => {
+    if (!(error instanceof OperationError) || error.code !== 'queue_capacity') throw error;
     let submitting = 0;
     for (const [key, group] of groups) {
       const [sourceId, entitySlug] = key.split('\0');
@@ -427,7 +430,7 @@ async function fenceManaged(engine: BrainEngine, plan: UnfencedFactsPlan): Promi
       catch { submitting++; }
     }
     await assertLifetimeIdHeadroom(engine, first.writer.principal, submitting);
-  }
+  });
   for (const [key, group] of groups) {
     const [sourceId, entitySlug] = key.split('\0');
     try {

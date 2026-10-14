@@ -138,9 +138,9 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
   };
 }
 
-/** A receipt the terminal classifier reads: ended without committing, or still holding a publication recovery record. */
+/** A receipt the terminal classifier reads: ended without committing, or holding a publication recovery record outside an in-flight claim (committed or parked `recovering`). */
 function isTerminalOrRecovering(row: WriteRequest): boolean {
-  return ['failed', 'conflict', 'cancelled'].includes(row.state) || (row.state === 'committed' && row.recovery != null);
+  return ['failed', 'conflict', 'cancelled'].includes(row.state) || ((row.state === 'committed' || row.state === 'recovering') && row.recovery != null);
 }
 
 function requiredRequestId(value: unknown): string {

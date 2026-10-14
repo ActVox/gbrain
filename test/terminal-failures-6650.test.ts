@@ -185,6 +185,25 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     expect(validateTerminalConfigValue('persistence.terminal_failures.spike_factor', '2.5')).toBeNull();
   });
 
+  test('a request parked recovering with its record (a blocked restore) is an active blocker everywhere, never a 24 h failure', async () => {
+    const parked = await seed({ slug: 'notes/parked', state: 'recovering', code: 'storage_error', detail: { origin: 'owner_exception' },
+      recovery: { version: 1, path: '/nonexistent/p.md', root: '/nonexistent', beforeHash: null, afterHash: 'a' }, blocked: 'unexpected_file_bytes' });
+    await seed({ slug: 'notes/flight', state: 'running', recovery: { version: 1, path: '/nonexistent/f.md', root: '/nonexistent', beforeHash: null, afterHash: 'b' } });
+    const summary = await readTerminalFailureSummary(engine);
+    if (summary.status !== 'ok') throw new Error('unknown');
+    const s = summary.sources.find(x => x.source_id === SOURCE)!;
+    // An in-flight claim's record is publication in progress, not a blocker.
+    expect(s.active_blockers).toEqual([expect.objectContaining({ kind: 'recovery', request_id: parked, slug: 'notes/parked', category: 'recovery_blocked', needs_human: true })]);
+    expect(s.new_last_24h).toBe(0);
+    expect(s.unresolved.rows).toBe(0);
+    const check = (await terminalFailuresCheck(engine))!;
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain(`recovery record ${parked} (notes/parked)`);
+    const listing = await readTerminalFailures(engine, { sourceId: SOURCE });
+    if (listing.status !== 'ok') throw new Error('unknown');
+    expect(listing.rows!.map(r => [r.request_id, r.blocking, r.category])).toEqual([[parked, true, 'recovery_blocked']]);
+  });
+
   test('a spike an older write owner drives says so and names its build, instead of reading as a new defect', async () => {
     await engine.setConfig('persistence.terminal_failures.spike_min', '3');
     for (let i = 0; i < 4; i++) await seed({ slug: `notes/k${i}`, operation: 'submit_job', state: 'cancelled', code: 'cancelled', detail: knockOnDetail('window_predecessor', null), build: '0.60.200.0', hoursAgo: 1 });

@@ -61,6 +61,22 @@ test('a compacted storage_error with no recorded origin is diagnosis_required, w
   expect(receipt.diagnosis.human_reason).toContain('does not record enough to name a fix');
 });
 
+test('a receipt parked recovering with its record is diagnosed as the blocked recovery it is', async () => {
+  const requestId = randomUUID();
+  await withVerifiedLocalRegistration(engine, owner, async () => {
+    const [s] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [SOURCE]);
+    const authority = await submissionAuthority(context(), 'put_page', SOURCE, s.incarnation, 'notes/parked');
+    await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page', sourceId: SOURCE, sourceIncarnation: s.incarnation, slug: 'notes/parked', requestId,
+      callerIntent: { content: 'z' }, intent: { content: 'z' } });
+  });
+  await engine.executeRaw(`UPDATE persistence_requests SET state='recovering', blocked_reason='unexpected_file_bytes',
+    recovery='{"version":1,"path":"/nonexistent/p.md","root":"/nonexistent","beforeHash":null,"afterHash":"a"}'::jsonb WHERE request_id=$1::uuid`, [requestId]);
+  const op = operations.find(operation => operation.name === 'get_write_request')!;
+  const receipt = await withVerifiedLocalRegistration(engine, owner, () => op.handler(context(), { request_id: requestId })) as Record<string, any>;
+  expect(receipt.diagnosis).toMatchObject({ category: 'recovery_blocked', needs_human: true });
+  expect(receipt.diagnosis.fix.argv.slice(0, 4)).toEqual(['gbrain', 'sources', 'writer', 'status']);
+});
+
 test('a committed receipt carries no diagnosis', async () => {
   const requestId = randomUUID();
   await withVerifiedLocalRegistration(engine, owner, async () => {
