@@ -25,7 +25,14 @@ in with the real source and slug where the code knows them, sometimes with
 placeholders such as `<source>` or `<brain>` to fill in, and sometimes an
 inspection instruction. A failed write receipt (`gbrain write-request <id>`) carries the error code as
 `write_error` and its diagnostic message as `write_error_message`; managed
-sync and memory-verb errors add the specific reason.
+sync and memory-verb errors add the specific reason. Since #6650 a receipt that
+ended `failed`, `conflict` or `cancelled` (or still holds a recovery record)
+also carries `write_error_reason` (this page's reason), the same `suggestion`,
+and a `diagnosis`: its category, class, safe actions, whether a person decides,
+whether it is historical, and a structured `fix` (`fix.next`, `fix.command`).
+To see every such receipt of a source at once, grouped with a fix per group:
+`gbrain sources writer failures <source> --group-by category`
+([terminal write failures](troubleshooting.md#terminal-write-failures)).
 Run recovery commands on the brain host unless the row says otherwise.
 
 Keep the original `request_id`. Unless a row says to use a new one, retry the

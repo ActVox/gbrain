@@ -24,6 +24,7 @@ import { resolveInflightTimeoutSeconds, resolveSessionTimeouts } from '../core/d
 import { poolHealthSnapshot, type PoolHealthSnapshot } from '../core/postgres-engine/pool-stats.ts';
 import { CODES } from '../core/error-registry.ts';
 import { persistenceConsumerStatus } from '../core/persistence/service.ts';
+import { readCheckpointBlockerMap, readTerminalFailureSummary, type TerminalSourceSummary, type TerminalSummary } from '../core/persistence/terminal-failures.ts';
 import { consumerRestartRequired, selfExitSuppressed, serveTransport, type ServeTransport } from './serve-health.ts';
 import { VERSION } from '../version.ts';
 import type { ServeHttpContext } from './serve-http.ts';
@@ -69,6 +70,36 @@ export function metricsTrackingMiddleware(counters: MetricsCounters): RequestHan
     });
     next();
   };
+}
+
+/**
+ * #6650: writer terminal-failure gauges per source, from the same bounded aggregate doctor reads. Admin-gated with the
+ * rest of /metrics, never on /health. A read that did not finish sets `gbrain_writer_terminal_failures_known 0` and
+ * emits no per-source series, so a scraper sees unknown rather than zero.
+ */
+export function renderTerminalFailureMetrics(summary: TerminalSummary): string {
+  const known = summary.status === 'ok';
+  const lines = [
+    '# HELP gbrain_writer_terminal_failures_known 1 when the terminal-failure aggregate finished within its deadline, 0 when unknown.',
+    '# TYPE gbrain_writer_terminal_failures_known gauge',
+    `gbrain_writer_terminal_failures_known ${known ? 1 : 0}`,
+    '',
+  ];
+  if (!known) return lines.join('\n');
+  const series: Array<[string, string, (s: TerminalSourceSummary) => number]> = [
+    ['active_blockers', 'Write receipts blocking their root now (a recovery record or a sync checkpoint blocker).', s => s.active_blockers.length],
+    ['unresolved', `Unresolved terminal write receipts in the last ${summary.window_days} days (not superseded, not historical, not blocking).`, s => s.unresolved.rows],
+    ['historical', `Non-blocking terminal write receipts in the last ${summary.window_days} days that a later write superseded or a fixed release explains.`, s => s.historical_rows],
+    ['new_24h', 'Terminal write receipts that ended in the last 24 hours.', s => s.new_last_24h],
+    ['defects', 'Unresolved terminal write receipts of a gbrain defect class.', s => s.defects.reduce((n, d) => n + d.rows, 0)],
+  ];
+  const label = (id: string) => id.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n');
+  for (const [name, help, value] of series) {
+    lines.push(`# HELP gbrain_writer_terminal_failures_${name} ${help}`, `# TYPE gbrain_writer_terminal_failures_${name} gauge`);
+    for (const source of summary.sources) lines.push(`gbrain_writer_terminal_failures_${name}{source="${label(source.source_id)}"} ${value(source)}`);
+    lines.push('');
+  }
+  return lines.join('\n');
 }
 
 export function renderPrometheusMetrics(
@@ -315,8 +346,11 @@ export function mountMetrics(app: Express, ctx: ServeHttpContext): void {
   // #3893 (reimplemented from @y2688): Prometheus exposition. Admin-gated —
   // request/error/latency series profile a personal brain's usage, so this
   // is not a public surface (the original PR served it unauthenticated).
-  app.get('/metrics', requireAdmin, (_req: Request, res: Response) => {
+  app.get('/metrics', requireAdmin, async (_req: Request, res: Response) => {
+    const summary: TerminalSummary = await readCheckpointBlockerMap(ctx.engine)
+      .then(checkpointBlockers => readTerminalFailureSummary(ctx.engine, { checkpointBlockers }))
+      .catch(error => ({ status: 'unknown' as const, window_days: 0, reason: error instanceof Error ? error.message : String(error) }));
     res.set('Content-Type', 'text/plain; version=0.0.4');
-    res.send(renderPrometheusMetrics(metricsCounters));
+    res.send(renderPrometheusMetrics(metricsCounters) + renderTerminalFailureMetrics(summary));
   });
 }
