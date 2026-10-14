@@ -119,6 +119,7 @@ test/persistence-skill-bundles.serial.test.ts
 test/persistence-skill-crash.slow.test.ts
 test/persistence-skip-cost.test.ts
 test/persistence-sync-cursor-options.test.ts
+test/persistence-sync-cursor-strategy-6696.test.ts
 test/persistence-sync-fence-holds.test.ts
 test/persistence-sync-holds.test.ts
 test/persistence-write-stall.test.ts
@@ -157,6 +158,7 @@ test/sync-full-cursor-slices-6349.test.ts
 test/sync-full-untracked-import-5459.test.ts
 test/sync-group-member-order.test.ts
 test/sync-legacy-holds.test.ts
+test/sync-legacy-retry-actions-6696.test.ts
 test/sync-origin-live-wins-6517.test.ts
 test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
