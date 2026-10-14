@@ -225,7 +225,7 @@ function route(input: TerminalInput): Partial_ {
         human_reason: 'The page\'s Git file and its database copy differ; a person chooses which version wins.', escalate: 'always: the file and the database page diverge',
         action: { argv: ['gbrain', 'sources', 'reconcile', source, input.slug, '--preview'], consent: [], actor: 'agent', requires_exclusive: false,
           why: 'Previews both versions of the page and writes nothing; apply the resolved preview, then resubmit the write with a new request id.',
-          verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#source_changed' } };
+          verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#file_database_drift' } };
     }
     if (known === 'source_binding_changed' || known === 'unsafe_file_target') return diagnosis(input, code, known, `The write was refused source_changed (${known}).`);
     return fromTable('sync_fault', code, origin ?? known, syncRetry(source, `The file changed under the write (${known}); a sync imports the current bytes.`), known === 'pinned_git_worktree_conflict' ? known : 'source_changed');
