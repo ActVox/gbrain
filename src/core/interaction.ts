@@ -203,7 +203,7 @@ function firstByteDeadlineMs(explicit: number | undefined): number {
 }
 
 const tooLarge = (maxBytes: number, bytes: number): StdinRead =>
-  ({ kind: 'error', error: new Error(`stdin exceeds ${maxBytes} bytes; split the input into smaller pieces`), bytes });
+  ({ kind: 'error', error: new Error(`stdin exceeds ${maxBytes} bytes, the most this command reads from stdin; nothing was read`), bytes });
 
 /**
  * fd 0 as a regular file or a non-TTY character device (`< file`, `< /dev/null`)

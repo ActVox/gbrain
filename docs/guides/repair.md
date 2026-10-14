@@ -1294,7 +1294,7 @@ Each file gets one minimal line change in one class:
 | --- | --- | --- |
 | `safe` | Quote a value exactly as gbrain already reads it, strip NUL bytes, swap the outer quotes of a nested quoted value. Every parsed value stays the same. | Included. |
 | `interpretive` | Fold unquoted continuation lines into the value above, keep the later of a duplicated key, quote an unclosed `[`/`{` or a `#`-leading title, insert a missing closing `---`, remove a `slug:` line that names another page, re-import a page from its file, re-bind a held rename to the old page's current revision. | Only with `--include-ambiguous`. |
-| `needs_review` | No rule fixes it (mis-indented YAML, a protected key such as `visibility`, an import that would keep page data the file does not carry, a file over 5 MB). | Never written. The preview names the exact manual fix. |
+| `needs_review` | No rule fixes it (mis-indented YAML, a protected key such as `visibility`, an import that would keep page data the file does not carry, a file over the [page size limit](memory-boundaries.md#large-page-limits)). | Never written. The preview names the exact manual fix. |
 
 Two passes: when interpretive candidates exist, the safe preview's
 `next_actions` carry both the safe apply and the `--include-ambiguous` preview.

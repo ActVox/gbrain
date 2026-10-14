@@ -218,7 +218,7 @@ function syncContentRefusal(refusal: ContentRefusal, row: WriteRequest, p: SyncI
   const where = refusal.line !== undefined ? `line ${refusal.line}${refusal.key ? ` (key "${refusal.key}")` : ''} of ${p.sourcePath}` : p.sourcePath;
   const cause = refusal.code === 'invalid_fence' ? `Edit ${fenceWhere(refusal.fence)} in ${p.sourcePath} as the message says and commit the change${p.companyApproval ? ' to the repository (a company-brain source never rewrites repository files and never holds a file)' : ''}.`
     : refusal.code === 'frontmatter_slug_conflict' ? 'Correct the frontmatter `slug:` in the file and commit the change.'
-    : refusal.code === 'file_too_large' ? `${p.sourcePath} is over the import size limit; split it into smaller files or add it to sync.exclude, then commit.`
+    : refusal.code === 'file_too_large' ? `${p.sourcePath} is over the page size limit; add it to sync.exclude, or split it into files under the limit and commit.`
     : refusal.code === 'content_rejected' ? `The content-sanity gate rejects ${p.sourcePath} under junk_disposition=reject; remove the matched junk and commit.`
     : refusal.code === 'purged_content' ? `${p.sourcePath} still carries purged content; delete or edit the file and commit, or the owner clears the tombstone with gbrain pages unpurge.`
     : refusal.code === 'write_gate_rejected' ? `The write gate refuses ${p.sourcePath}: external instruction-like content under write_gate.external_mode=reject. Tell the user; changing that setting or the file is their decision.`
