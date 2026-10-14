@@ -172,7 +172,7 @@ export async function upsertChunksOnce(
     // #4246: embedded_text_hash records md5(chunk_text) AT EMBED TIME so a
     // later text rewrite that keeps the vector is detectable as content
     // drift (invalidateContentDriftEmbeddings). NULL when no embedding lands.
-    const cols = `(page_id, chunk_index, chunk_text, chunk_source, ${writeColId}, model, token_count, embedded_at, embedded_text_hash, embedding_input_hash, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image, embedding_pending_since)`;
+    const cols = `(page_id, chunk_index, chunk_text, chunk_source, ${writeColId}, model, token_count, embedded_at, embedded_text_hash, embedding_input_hash, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image, embedding_pending_since, projected_byte_start, projected_byte_end)`;
     let resolvedModel: string | null = gatewayModel;
     if (!resolvedModel) resolvedModel = (await modelRows)?.[0]?.value ?? null;
     resolvedModel = writeCol.embeddingModel || resolvedModel;
@@ -206,6 +206,8 @@ export async function upsertChunksOnce(
         symbol_name_qualified: chunk.symbol_name_qualified || null,
         modality: chunk.modality ?? 'text',
         embedding_image: chunk.embedding_image ? '[' + Array.from(chunk.embedding_image).join(',') + ']' : null,
+        projected_byte_start: chunk.projected_byte_start ?? null,
+        projected_byte_end: chunk.projected_byte_end ?? null,
       };
     });
 
@@ -253,10 +255,12 @@ export async function upsertChunksOnce(
          CASE WHEN c.embedding IS NULL THEN NULL ELSE md5(c.chunk_text) END,
          c.embedding_input_hash, c.language, c.symbol_name, c.symbol_type, c.start_line, c.end_line,
          c.parent_symbol_path, c.doc_comment, c.symbol_name_qualified, c.modality, c.embedding_image::vector,
-         CASE WHEN c.embedding IS NULL THEN now() ELSE NULL END
+         CASE WHEN c.embedding IS NULL THEN now() ELSE NULL END,
+         c.projected_byte_start, c.projected_byte_end
        FROM jsonb_to_recordset(${JSON.stringify(incoming)}::text::jsonb) AS c(chunk_index int, chunk_text text, chunk_source text,
          embedding text, model text, token_count int, embedding_input_hash text, language text, symbol_name text, symbol_type text,
-         start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text, modality text, embedding_image text)
+         start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text, modality text, embedding_image text,
+         projected_byte_start bigint, projected_byte_end bigint)
        ON CONFLICT (page_id, chunk_index) DO UPDATE SET
          chunk_text = EXCLUDED.chunk_text,
          chunk_source = EXCLUDED.chunk_source,
@@ -310,6 +314,8 @@ export async function upsertChunksOnce(
          doc_comment = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.doc_comment ELSE COALESCE(EXCLUDED.doc_comment, content_chunks.doc_comment) END,
          symbol_name_qualified = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.symbol_name_qualified ELSE COALESCE(EXCLUDED.symbol_name_qualified, content_chunks.symbol_name_qualified) END,
          modality = EXCLUDED.modality,
+         projected_byte_start = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.projected_byte_start ELSE COALESCE(EXCLUDED.projected_byte_start, content_chunks.projected_byte_start) END,
+         projected_byte_end = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.projected_byte_end ELSE COALESCE(EXCLUDED.projected_byte_end, content_chunks.projected_byte_end) END,
          embedding_image = COALESCE(EXCLUDED.embedding_image, content_chunks.embedding_image),
          embedding_pending_since = CASE
            WHEN EXCLUDED.${col} IS NOT NULL THEN NULL

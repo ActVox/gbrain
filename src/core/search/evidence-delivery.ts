@@ -30,9 +30,8 @@ import { pageReadFilter } from './read-policy-sql.ts';
 import { currentTextProjectionFilter, safeChunksFilter, requiresSafeChunks } from './safe-chunks.ts';
 import { resolveExcludePrivatePages } from './private-visibility.ts';
 import { safeSplitIndex } from '../text-safe.ts';
-import { sanitizeRemoteBody } from '../remote-body.ts';
-import { credentialSafeProjection } from '../credential-projection.ts';
-import { loadFenceChunkOverlay, markFenceChunk, splitFenceOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
+import { loadFenceChunkOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
+import { projectPageText, TIMELINE_SEPARATOR } from '../page-window/document.ts';
 import { stripChunkHeader } from '../chunkers/code.ts';
 import { OperationError } from '../ops/contract.ts';
 import { blockDateHeaders, evidenceDateHeaderEnabled } from './evidence-date.ts';
@@ -384,8 +383,7 @@ function sliceToTokenCount(text: string, max: number, tokenizer: 'cl100k' | 'heu
 // Locating chunks in the sanitized body
 // ---------------------------------------------------------------------------
 
-/** Separator serializeMarkdown writes between compiled truth and timeline. */
-export const TIMELINE_SEPARATOR = '\n\n<!-- timeline -->\n\n';
+export { TIMELINE_SEPARATOR };
 
 /** Whitespace runs collapsed to one space, with a map back to original offsets. */
 function squeeze(text: string): { s: string; map: number[] } {
@@ -574,24 +572,16 @@ function fallbackBlock(hit: SearchResult, hits: SearchResult[], reason: string):
 }
 
 /**
- * The page text evidence is cut from: the complete stored body, sanitized
- * with the strict protected-body boundary BEFORE any slicing (Takes, non-world
- * and withdrawn Facts rows, malformed protected tails, materialized markers),
- * compiled truth and timeline each sanitized whole, run through the same
- * credential-safe projection the chunkers cut from (private-key spans become
- * newline-padded tokens), and joined the way serializeMarkdown joins them.
- * Frontmatter is not part of it.
+ * The page text evidence is cut from: the one projected page text every
+ * windowed read slices (page-window/document.ts): the complete stored body,
+ * sanitized with the strict protected-body boundary BEFORE any slicing (Takes,
+ * non-world and withdrawn Facts rows, malformed protected tails, materialized
+ * markers), compiled truth and timeline each sanitized whole, run through the
+ * same credential-safe projection the chunkers cut from, and joined the way
+ * serializeMarkdown joins them. Frontmatter is not part of it.
  */
 export function pageEvidenceText(page: { compiled_truth: string; timeline: string; fenceOverlay?: FenceChunkOverlay }, includeTimeline: boolean): { text: string; timelineAt: number } {
-  // #5575 ENG-1: the page's chunks were cut through its fence overlay; the document is too (held and purged rows
-  // out, rows below the page tier after the truth under their trust marker, the way the marked chunks hold them).
-  const ownTruth = splitFenceOverlay(page.compiled_truth ?? '', page.fenceOverlay);
-  const ownTimeline = splitFenceOverlay(page.timeline ?? '', page.fenceOverlay);
-  const truth = [credentialSafeProjection(sanitizeRemoteBody(ownTruth.main)), ...[...ownTruth.lowTier, ...(includeTimeline ? ownTimeline.lowTier : [])]
-    .map(({ tier, unconfirmed, body }) => markFenceChunk(tier, credentialSafeProjection(sanitizeRemoteBody(body)), unconfirmed))].join('\n\n');
-  const timeline = includeTimeline ? credentialSafeProjection(sanitizeRemoteBody(ownTimeline.main)) : '';
-  if (!timeline.trim()) return { text: truth, timelineAt: -1 };
-  return { text: truth + TIMELINE_SEPARATOR + timeline, timelineAt: truth.length + TIMELINE_SEPARATOR.length };
+  return projectPageText(page, includeTimeline);
 }
 
 function locateAnchor(doc: Doc, hit: SearchResult): Anchor {
