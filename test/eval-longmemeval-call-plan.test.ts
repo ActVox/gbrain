@@ -16,6 +16,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEvalLongMemEval } from '../src/commands/eval-longmemeval.ts';
+import { enableDecideEvalOverride } from '../src/core/ai/decide/config.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { countCJKAwareWords } from '../src/core/cjk.ts';
 import { CALL_PLAN_CHARS_PER_TOKEN, gateCommand, shellQuote } from '../src/eval/longmemeval/call-plan.ts';
@@ -228,7 +229,11 @@ describe('eval longmemeval --call-plan', () => {
 
   test('lanes it cannot bound refuse with nothing written', async () => {
     expect(await refusal(['--via-operation', 'query'])).toContain('cannot bound --via-operation');
-    expect(await withEnv({ GBRAIN_DECIDE_SLOTS: undefined }, () => refusal(['--decide', 'intent=on', '--no-trajectory']))).toContain('cannot bound the decide lane');
+    try {
+      expect(await withEnv({ GBRAIN_DECIDE_SLOTS: undefined }, () => refusal(['--decide', 'intent=on', '--no-trajectory']))).toContain('cannot bound the decide lane');
+    } finally {
+      enableDecideEvalOverride(false);
+    }
     expect(await refusal(['--search-pin', 'search.cross_modal.llm_intent=true'])).toContain('llm_intent');
     configureGateway({ ...GATEWAY, expansion_model: 'openai:gpt-5.6' });
     try {
