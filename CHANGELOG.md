@@ -10,6 +10,16 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.224.0] - 2026-10-14
+
+**When a gbrain process that was running a group of writes is killed, its queued group members are now reclaimed with the rest of its claims, within about 5 s, instead of after their 30 s claim lease (#6650 follow-up).** On Linux, a consumer on the same machine already took back the claims of a write owner it could prove dead. But the members of a group the owner had claimed and not yet started carried no record of their owner, so they waited out their lease and held up the rest of the catch-up behind them. Now each member records its owner when it is claimed. Members that the owner had started, and any member with a recovery record or a publication in progress, are handled exactly as before. In the convergence harness (seed 6650, 50 ms latency) the worst stall after the round-1 serve kill went from 30 s to 21 s.
+
+### Itemized changes
+
+- **Follower claims record their owner** (`src/core/persistence/journal.ts` `claimGroupFollowers`): a group follower's claim stamp holds its own token and the claiming process's identity (pid, nonce, pid namespace, boot id, start time), with no phase until its wave dispatches it. The dead-owner reclaim (`consumer.ts`) matches it by owner like any other claim. Because it has no `preparing` phase, the reclaim charges it no preparation attempt, as before.
+- **Readers of a follower stamp** (`claim-phase.ts` `claimStateOf`, `sync-drain.ts` `drainClaimOf`): a stamp with an owner and no phase reads as unrecorded for its phase and stall window, as an unstamped follower did, and now names its owner. Doctor ages it from when it was claimed, and `gbrain sources writer status` does not count its wait against the preparation budget it has not started.
+- **Owner probe** (`consumer-heartbeat.ts` `probeLiveFullConsumer`): the probe reads every live row of the host before it skips rows it can prove dead, so a live serve listed after eight dead rows is still found. Before, it read the first eight rows and could answer "no owner".
+
 ## [0.60.223.0] - 2026-10-14
 
 **On Linux, a managed sync no longer stalls for six minutes after a gbrain process on the same machine is killed (#6650).** When a `gbrain sync` client was killed, its consumer heartbeat row still read as live for up to 30 s (and as the elected owner for up to 60 s). So the next sync didn't hand its catch-up to the running `gbrain serve`: it ran its own consumer next to the serve. When the write owner was killed mid-catch-up, the requests it had claimed stayed claimed until their publication lease ran out, about 365 s with the default ceiling. Now a process proves from `/proc` that a same-machine owner is dead (its pid is gone, or now belongs to a process that started later) and stops waiting for it. In the new convergence harness (seed 6650) the worst stall after an owner kill went from 356 s and 362 s to 0 s with no injected latency, and from 364 s to 30 s at 50 ms; the catch-up after a serve kill went from 385 s to 29 s. Where `/proc` is unavailable (macOS) the time-based rules are unchanged.
