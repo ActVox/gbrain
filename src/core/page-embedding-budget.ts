@@ -135,16 +135,16 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
     reserved += reservedUsd;
     const state: PageBudgetState = deferred > 0 ? 'capped' : 'open';
     await tx.executeRaw(`UPDATE page_embedding_budget SET state = $2, reason = $3, embedding_signature = COALESCE($4, embedding_signature),
-        spent_usd = $5, reserved_usd = $6, reserved_at = CASE WHEN $6 > 0 THEN now() ELSE NULL END,
-        cap_usd = $7, updated_at = now() WHERE page_id = $1`,
+        spent_usd = $5::float8, reserved_usd = $6::float8, reserved_at = CASE WHEN $6::float8 > 0 THEN now() ELSE NULL END,
+        cap_usd = $7::float8, updated_at = now() WHERE page_id = $1`,
     [page.id, state, deferred > 0 ? 'cap_reached' : null, opts.signature ?? null, spent, reserved,
       approved && Number.isFinite(capUsd) ? capUsd : row.cap_usd]);
     const grant: PageEmbedGrant = {
       chunkIndexes, reservedUsd, deferred, capUsd,
       settle: async ({ ok }) => {
         if (reservedUsd === 0) return;
-        await engine.executeRaw(`UPDATE page_embedding_budget SET reserved_usd = GREATEST(0, reserved_usd - $2),
-            spent_usd = spent_usd + $3, unpriced_calls = unpriced_calls + $4, updated_at = now() WHERE page_id = $1`,
+        await engine.executeRaw(`UPDATE page_embedding_budget SET reserved_usd = GREATEST(0, reserved_usd - $2::float8),
+            spent_usd = spent_usd + $3::float8, unpriced_calls = unpriced_calls + $4::int, updated_at = now() WHERE page_id = $1`,
         [page.id, reservedUsd, ok ? reservedUsd : 0, ok && !priced ? 1 : 0]);
       },
     };

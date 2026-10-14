@@ -903,7 +903,8 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
   const keylessConfig = loadConfig();
   if (isKeylessStaleRefusal(args, keylessConfig?.embedding_disabled)) {
     const enable = (await import('../core/readiness.ts')).embeddingEnablement(keylessConfig!).argv ?? ['gbrain', 'init', '--force', '--embedding-model', '<provider:model>'];
-    process.stderr.write('[embed] Embeddings are disabled on this brain (keyless install). Nothing to backfill; keyword search keeps working. '
+    process.stderr.write('[embed] Embeddings are disabled on this brain (keyless install), so there are no vectors to compute. Keyword search covers every chunked page; '
+      + 'pages an older gbrain skipped for size become keyword-searchable with gbrain reindex --oversized (free). '
       + `Turn on semantic search (pages and facts are kept): ${(await import('../core/agent-output.ts')).shellQuote(enable)}\n`);
     return {
       embedded: 0, skipped: 0, would_embed: 0, total_chunks: 0,

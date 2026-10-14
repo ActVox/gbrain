@@ -149,6 +149,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_ratio',
   'oversized_pages',
   'parked_effects',
+  'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
   'raw_provenance',
