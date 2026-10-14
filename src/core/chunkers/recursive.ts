@@ -462,7 +462,12 @@ function greedyMerge(pieces: Piece[], target: number): Run[] {
     const pieceStats = wordStats(pieces[i].text);
     const combinedStats = concatWordStats(currentStats, pieceStats);
     if (wordCountOf(combinedStats) <= limit) {
-      current = joinRuns(current, runOf(pieces[i]));
+      // `current` is this loop's own run: extend it in place (copying its segs per merge is quadratic in
+      // pieces per chunk), and grow the last seg when the piece follows it directly in the projected text.
+      const last = current.segs[current.segs.length - 1];
+      if (last.s + last.n === pieces[i].s) last.n += pieces[i].text.length;
+      else current.segs.push({ t: current.text.length, s: pieces[i].s, n: pieces[i].text.length });
+      current.text += pieces[i].text;
       currentStats = combinedStats;
     } else {
       result.push(current);
