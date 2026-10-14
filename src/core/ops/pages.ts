@@ -13,12 +13,12 @@ import { assertPurgeParams } from '../persistence/purge-params.ts';
 
 import { clampSearchLimit, type BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
-import { decodeDeepResearchId, deepResearchPageUrl } from '../deep-research-id.ts';
+import { decodeDeepResearchAnchor, decodeDeepResearchId, deepResearchPageUrl } from '../deep-research-id.ts';
 import { PageSnapshotAmbiguousError, type PageSnapshot } from '../page-state/types.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { pageTrustForRead, projectFetchText, projectGetPage, readQuarantined } from './get-page-projection.ts';
 import { assertLargePageAdmission } from '../persistence/large-page-guard.ts';
-import { assertFullReadFits, bodyBytes, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody } from './get-page-body.ts';
+import { assertFullReadFits, bodyBytes, fetchWindowResult, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody } from './get-page-body.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
@@ -243,7 +243,7 @@ const fetch_page: Operation = {
   name: 'fetch',
   idempotent: true,
   outputRedaction: { exempt: 'explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)' },
-  description: "Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). Pass the id unchanged; it does not grant access. Legacy slug ids work only when unambiguous within your current read scope. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown. For fuzzy slugs, soft-delete recovery, or lossless edit round-trips, use get_page.",
+  description: "Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). Pass the id unchanged; it does not grant access. Legacy slug ids work only when unambiguous within your current read scope. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown; a page over 256 KB returns the window around the searched chunk instead, with metadata.total_bytes and metadata.next_id (fetch it to read on). For fuzzy slugs, soft-delete recovery, or lossless edit round-trips, use get_page.",
   params: {
     id: { type: 'string', required: true, description: 'Opaque result id from a prior `search` call. Pass unchanged. Unambiguous legacy slugs are also accepted.' },
     include_quarantined: { type: 'boolean', description: 'Admin: quarantined body.' },
@@ -293,6 +293,9 @@ const fetch_page: Operation = {
     // Same boundaries as get_page: untrusted readers never see takes or private facts fences, nor a quarantined body (#6259).
     const visibleBody = ctx.remote === false ? page : stripPrivacyFencesForRemoteReader(page);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true);
+    if (ctx.remote !== false && !quarantined?.body_omitted && bodyBytes(visibleBody) > await inlineBodyBytes(ctx)) {
+      return fetchWindowResult(ctx, { page, visibleBody: visibleBody as Page, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, extras: {} }, id, identity ? decodeDeepResearchAnchor(id) : null);
+    }
     return {
       id: identity ? id : page.slug,
       title: page.title,

@@ -30,9 +30,10 @@
  */
 import type { Page } from '../types.ts';
 import type { OperationContext, ParamDef } from './contract.ts';
-import { opError } from './contract.ts';
+import { opError, OperationError } from './contract.ts';
 import { invalidParam, readFix } from './op-fix.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
+import { deepResearchPageUrl, encodeDeepResearchId } from '../deep-research-id.ts';
 import { encodedFrameBytes, EGRESS_CAP_CONFIG_KEYS, egressTransport, FRAME_RESERVE_BYTES, resultByteCap } from '../egress-budget.ts';
 import { DEFAULT_INLINE_BODY_BYTES, chunkDocumentSpan, readPageDocument, spanHoldsChunk, type PageDocument } from '../page-window/document.ts';
 import {
@@ -351,3 +352,49 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
   return out;
 }
 
+
+/**
+ * Large pages (T24): fetch's window for a page over the inline read size, on
+ * the search/fetch-only surface. A chunk anchor (from the search result id)
+ * centers the window on that hit; a cursor anchor reads on. A chunk that is no
+ * longer on the page falls back to the first window, and a cursor from an
+ * older revision reads on from the same byte offset, so a fetch-only client
+ * can always finish the page.
+ */
+export async function readFetchWindow(ctx: OperationContext, input: PartialReadInput, anchor: { chunkId?: number; cursor?: string } | null):
+  Promise<{ partial: Record<string, any>; anchorStatus: 'chunk' | 'cursor' | 'start' | 'chunk_not_current' | 'cursor_rebased' }> {
+  const req = (selector?: Selector): BodyRequest => ({ mode: 'window', view: 'read', contextLines: DEFAULT_CONTEXT_LINES, outlineFrom: 0, legacyThin: false, ...(selector ? { selector } : {}) });
+  const stale = (e: unknown) => e instanceof OperationError && (e.canonical ?? e.code) === 'revision_changed';
+  if (anchor?.chunkId !== undefined) {
+    try { return { partial: await readPartialBody(ctx, input, req({ kind: 'around', chunkId: anchor.chunkId })), anchorStatus: 'chunk' }; }
+    catch (e) { if (!stale(e)) throw e; return { partial: await readPartialBody(ctx, input, req()), anchorStatus: 'chunk_not_current' }; }
+  }
+  if (anchor?.cursor !== undefined) {
+    try { return { partial: await readPartialBody(ctx, input, req({ kind: 'cursor', raw: anchor.cursor })), anchorStatus: 'cursor' }; }
+    catch (e) {
+      const c = decodeCursor(anchor.cursor);
+      if (!stale(e) || !c) throw e;
+      return { partial: await readPartialBody(ctx, input, req({ kind: 'bytes', offset: c.offset, length: c.max_bytes })), anchorStatus: 'cursor_rebased' };
+    }
+  }
+  return { partial: await readPartialBody(ctx, input, req()), anchorStatus: 'start' };
+}
+
+/** fetch's response for a windowed page: the window as `text`, its position and the continuation id in metadata. */
+export async function fetchWindowResult(ctx: OperationContext, input: PartialReadInput, id: string, anchor: { chunkId?: number; cursor?: string } | null): Promise<Record<string, unknown>> {
+  const { page, revision, tags, quarantined, trust } = input;
+  const { partial, anchorStatus } = await readFetchWindow(ctx, input, anchor);
+  const w = partial.window ?? { text: '' };
+  return {
+    id,
+    title: page.title,
+    text: w.text,
+    url: deepResearchPageUrl(page.source_id, page.slug),
+    metadata: {
+      revision, type: page.type, source_id: page.source_id, updated_at: page.updated_at, tags, ...(quarantined ? { quarantined } : {}), ...(trust ?? {}),
+      truncated: true, total_bytes: partial.size?.total_bytes, anchor: anchorStatus,
+      ...(typeof w.byte_start === 'number' ? { window: { byte_start: w.byte_start, byte_end: w.byte_end, line_start: w.line_start, line_end: w.line_end } } : {}),
+      ...(partial.next_cursor ? { next_id: encodeDeepResearchId(page.source_id, page.slug, { cursor: partial.next_cursor }) } : {}),
+    },
+  };
+}
