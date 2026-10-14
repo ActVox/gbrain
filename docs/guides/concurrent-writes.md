@@ -927,6 +927,24 @@ gbrain doctor --only persistence_capacity,persistence_request_growth --json
 
 **Say to your agent:** *"How many days of write capacity does my brain have left?"*
 
+<a id="counter-drift"></a>
+### Counter drift and compaction health
+
+Two read-only doctor checks watch the receipt-bytes accounting:
+
+- `persistence_counter_drift` compares each `persistence_counters` row
+  (brain and every principal) with what the receipts hold
+  (`terminal_reservation` per request plus lifecycle receipts) in one
+  statement, and reports `persistence.true_up.clamped`, the number of
+  settle-time decrements that were clamped at zero. A positive delta charges
+  capacity no receipt holds; a negative one under-counts. It changes nothing.
+- `persistence_compaction` reads `persistence.maintenance.last_compaction`,
+  the record each resident consumer's compaction pass writes (`at`,
+  `host_id`, `compacted`, `freed_bytes`, `skipped_by_reason`), and warns when
+  a full consumer has run longer than
+  `persistence.maintenance.compaction_stale_hours` (default 24) without a
+  pass. Its fix previews `gbrain repair receipt-compaction --json`.
+
 <a id="quota-near-exhaustion"></a>
 ### Quota near exhaustion
 
