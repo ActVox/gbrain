@@ -2118,6 +2118,20 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/troubleshooting.md#serve-build-drift",
+            "newer": [],
+            "older": [],
+            "owner": null,
+            "this_version": "<version>"
+          },
+          "message": "No live gbrain consumer on this host writes a heartbeat row. A serve that predates heartbeats writes none; consumers_without_heartbeat names it when it holds claims.",
+          "name": "serve_build_drift",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "code": "held_failed",
