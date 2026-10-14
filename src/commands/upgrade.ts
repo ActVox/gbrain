@@ -384,10 +384,11 @@ export async function describeMigrationFailure(error: unknown, newVersion: strin
       + 'Wait for it to finish; `gbrain doctor` shows migration progress.';
   }
   const wedged = newVersion ? migrationLedgerSummary(newVersion).wedged : [];
-  const command = wedged.length > 0
-    ? `${wedged.map(v => `gbrain apply-migrations --force-retry ${v}`).join(' && ')} && gbrain apply-migrations --yes`
-    : 'gbrain apply-migrations --yes';
-  return `Migrations: failed. Run: ${command}`;
+  if (wedged.length > 0) {
+    return `Migrations: wedged (${wedged.map(v => `v${v}`).join(', ')} ended partial 3+ times in a row). Fix the cause in ~/.gbrain/upgrade-errors.jsonl, then run: `
+      + `${wedged.map(v => `gbrain apply-migrations --force-retry ${v}`).join(' && ')} && gbrain apply-migrations --yes`;
+  }
+  return 'Migrations: failed. Run: gbrain apply-migrations --yes';
 }
 
 export function resolveBunGlobalRoot(): string {

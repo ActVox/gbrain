@@ -29,6 +29,8 @@ start here.
    only when the schema is at head; exit 1 with `migrations_pending` means the schema is still behind, and another
    `--yes` repeats the failure, so run `gbrain doctor --json` and fall back to the deterministic install:
    `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && bun install && bun link`.
+   `migrations_pending` with reason `wedged` is different: a migration failed three or more times in a row, so
+   relay its `fix` (ask the user) instead of reinstalling: fix the cause, then `gbrain apply-migrations --force-retry <version>`.
 2. Init keyless memory: `gbrain init --pglite --no-embedding` (zero-config). For 1000+ files or
    multi-machine sync, init suggests Postgres + pgvector via Supabase.
 3. **STOP — ask the user about search mode.** `gbrain init` auto-applied a

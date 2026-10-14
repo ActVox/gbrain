@@ -187,7 +187,9 @@ Exit codes:
   1  An orchestrator failed, the migration lease stopped matching this run
      (migration_lease_lost), or the run left the schema behind
      (migrations_pending: not_applied → apply them with --yes; still_behind or
-     schema_unreadable → run gbrain doctor --json and report, not --yes again).
+     schema_unreadable → run gbrain doctor --json and report, not --yes again;
+     wedged → a migration ended partial 3+ times in a row: ask the user, fix
+     the cause, then --force-retry <version>).
      An unreachable Postgres stays 0 (GBRAIN_DB_ACCESS on stderr) unless --require-db.
   2  Invalid arguments.
   3  confirmation_required: a migration installs the autopilot service and the
@@ -314,7 +316,8 @@ function printList(plan: Plan, installed: string, dbProbe: DbProbeOutcome): void
   const needsWork = plan.pending.length + plan.partial.length;
   const setup = plan.pending_fresh_install.length;
   for (const m of plan.declined) console.log(`v${m.version} is declined by config (${m.optOut?.key} is false); turn it back on: gbrain config set ${m.optOut?.key} true`);
-  if (needsWork === 0 && setup === 0) {
+  for (const m of plan.wedged) console.log(`v${m.version} is wedged (${MAX_CONSECUTIVE_PARTIALS}+ consecutive partial runs). Fix the cause in ~/.gbrain/upgrade-errors.jsonl, then: ${shellQuote(forceRetryArgv(m.version))}`);
+  if (needsWork === 0 && setup === 0 && plan.wedged.length === 0) {
     console.log('All migrations up to date.');
     return;
   }
@@ -340,6 +343,7 @@ function listJson(plan: Plan, idx: CompletedIndex, installed: string, dbProbe: D
       ...(r.status === 'declined' && r.m.optOut ? { opt_out: { key: r.m.optOut.key } } : {}),
     })),
     needs_action: plan.pending.length + plan.partial.length,
+    ...(plan.wedged.length ? { wedged: plan.wedged.map(m => ({ version: m.version, fix: { argv: forceRetryArgv(m.version), command: shellQuote(forceRetryArgv(m.version)) } })) } : {}),
     pending_fresh_install: plan.pending_fresh_install.length,
     ...(outstanding > 0 ? { next: { argv: FINISH_SETUP_ARGV, command: shellQuote(FINISH_SETUP_ARGV) } } : {}),
   };
@@ -444,6 +448,8 @@ const COMMAND = 'apply-migrations';
 interface RunReport {
   doc: Record<string, unknown>;
   failure?: OperationError;
+  /** #6696 C5: wedged migrations the run cannot clear itself; a run that otherwise succeeds fails `migrations_pending` reason `wedged`. */
+  wedged?: readonly Migration[];
 }
 
 function unknownMigrationError(version: string): OperationError {
@@ -670,6 +676,7 @@ async function runLockedMigrations(
   doc.database = dbProbe;
   doc.plan = Object.fromEntries(Object.entries(plan).map(([state, entries]) => [state, entries.map((migration: Migration) => migration.version)]));
   reportWedgedMigrations(plan.wedged);
+  report.wedged = plan.wedged;
 
   if (cli.specificMigration && plan.applied.length + plan.partial.length + plan.pending.length + plan.pending_fresh_install.length + plan.skippedFuture.length + plan.declined.length === 0) {
     console.error(`No migration registered with version "${cli.specificMigration}". Run \`gbrain apply-migrations --list\` to see registered versions.`);
@@ -727,6 +734,7 @@ async function runLockedMigrations(
   }
   const toRun: Migration[] = [...pendingWork, ...plan.applied.filter(migration => migration.reconcile)]
     .sort((left, right) => compareVersions(left.version, right.version));
+  if (toRun.length === 0 && plan.wedged.length) return failWedged(report);
   if (toRun.length === 0) {
     console.log('All migrations up to date.');
     doc.status = 'up_to_date';
@@ -870,7 +878,7 @@ async function runLockedMigrations(
 
 /** #6089: the run leaves the schema behind → `migrations_pending`, exit 1; undefined (success) when it does not. */
 function failSchemaBehind(report: RunReport, args: readonly string[], pending: SchemaPending | null): number | undefined {
-  if (!pending) return undefined;
+  if (!pending) return failWedged(report);
   report.doc.status = 'schema_behind';
   report.doc.schema_pending = pending;
   report.failure = schemaPendingError(pending, rerunFix(args, 'Applies the pending schema migrations (no consent effect; it migrates the brain\'s own schema).', true));
@@ -936,6 +944,26 @@ async function preflightSchema(
     };
   }
   return { schemaBehind, dbProbe };
+}
+
+/** #6696 C5: the clearing step for a wedged migration; it needs the user, since the cause behind the partial runs must be fixed first. */
+function forceRetryArgv(version: string): string[] { return ['gbrain', COMMAND, '--force-retry', version]; }
+
+/** #6696 C5: a run that leaves a wedged migration fails `migrations_pending` (reason `wedged`, exit 1); undefined when none is wedged. */
+function failWedged(report: RunReport): number | undefined {
+  const wedged = report.wedged ?? [];
+  if (!wedged.length) return undefined;
+  const versions = wedged.map(m => `v${m.version}`).join(', ');
+  report.doc.status = 'wedged';
+  report.doc.wedged = wedged.map(m => m.version);
+  report.failure = opError('migrations_pending',
+    `Migration ${versions} is wedged (${MAX_CONSECUTIVE_PARTIALS}+ consecutive partial runs with no completion), so the run did not complete every migration.`,
+    `Read ~/.gbrain/upgrade-errors.jsonl for the last failure, fix its cause, then clear it with \`${shellQuote(forceRetryArgv(wedged[0]!.version))}\` and run \`gbrain apply-migrations --yes\` again. Ask the user first.`,
+    { reason: 'wedged', fix: { ask_user: true, argv: forceRetryArgv(wedged[0]!.version), consent: [], actor: 'agent', requires_exclusive: true,
+      why: `Writes a 'retry' marker so the next run re-attempts v${wedged[0]!.version}; without fixing the cause the run partials again.`,
+      user_message: `gbrain migration ${versions} failed ${MAX_CONSECUTIVE_PARTIALS} or more times in a row. Fix the cause named in ~/.gbrain/upgrade-errors.jsonl, then clear it with ${shellQuote(forceRetryArgv(wedged[0]!.version))} and run gbrain apply-migrations --yes. Clear it now?`,
+      verify: { argv: ['gbrain', COMMAND, '--list', '--json'] } } });
+  return 1;
 }
 
 /** Bug 3 — surface wedged migrations as a loud, actionable error; the run continues (applied/partial/pending are still reported and run). */
