@@ -5,6 +5,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts } from '../../commands/sync.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { OperationError, opError } from '../ops/contract.ts';
+import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-flags.ts';
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
@@ -162,8 +163,8 @@ export async function resolveManagedSyncContext(engine: BrainEngine, opts: SyncO
   const sourceId = opts.sourceId ?? 'default';
   if (!opts.noPull && !opts.dryRun) throw managedSyncRefusal(sourceId, 'Managed sync requires skipping the Git pull (CLI `--no-pull`, sync_brain `no_pull: true`); Git pull/rebase needs an explicit drained maintenance window.',
     `Sync without pulling to import the checkout as it is (CLI: gbrain sync --no-pull --source ${sourceId}; MCP: sync_brain with no_pull: true), or fast-forward and sync the checkout with gbrain sources refresh ${sourceId}.`);
-  if (opts.includeGitignored || opts.skipFailed) throw managedSyncRefusal(sourceId, 'Managed sync cannot bypass ignored-file or failed-receipt guards.',
-    `Run gbrain sync --no-pull --source ${sourceId} without --include-gitignored or --skip-failed; resolve failed files with --retry-failed after fixing them.`);
+  const forbidden = managedForbiddenFlag(opts);
+  if (forbidden) throw managedSyncFlagRefusal(forbidden, sourceId, ['--source', sourceId, '--no-pull']);
   const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null; last_commit: string | null; config: Record<string, unknown> }>(
     'SELECT incarnation,archived,local_path,last_commit,config FROM sources WHERE id=$1', [sourceId]);
   const binding = await getWorktreeBinding(engine, sourceId);

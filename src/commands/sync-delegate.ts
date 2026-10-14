@@ -539,6 +539,10 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
   // 1. Only a managed source has the two-consumer problem; classic sync keeps its own path.
   const { readManagedMode } = await import('../core/persistence/managed-mode.ts');
   if (!await readManagedMode(engine)) return own('not_managed');
+  // #6696 C2: a flag the managed source refuses never reaches the serve; the refusal names it before any probe or socket call.
+  const { managedForbiddenFlag, managedSyncFlagRefusal } = await import('../core/persistence/managed-sync-flags.ts');
+  const forbidden = managedForbiddenFlag(opts);
+  if (forbidden) throw managedSyncFlagRefusal(forbidden, sourceId, args);
   // 2. The owner probe: the B3 heartbeat row, through the database (the persistence socket does not exist on Postgres).
   let owner: ConsumerRow | null;
   try {

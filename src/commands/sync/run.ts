@@ -24,7 +24,7 @@ import { composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { acknowledgeFailures, unacknowledgedSyncFailures } from '../../core/sync.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
 import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags } from './args.ts';
-import { implyManagedNoPull } from './managed-no-pull.ts';
+import { implyManagedNoPull, refuseManagedForbiddenFlags } from './managed-no-pull.ts';
 import { legacyLedgerRows } from '../../core/persistence/legacy-sync-failures.ts';
 import type { SyncFlags, SyncFanoutFlags } from './args.ts';
 import { manageGitignoreAtGitRoot } from './gitignore.ts';
@@ -93,6 +93,7 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
   if (breakLock || forceBreakLock) return await runSyncBreakLock(engine, args, { syncAll, jsonOut, forceBreakLock, maxAgeSeconds });
 
   const fanout = parseSyncFanoutFlags(args, syncAll);
+  await refuseManagedForbiddenFlags(engine, flags, args);
 
   // --skip-failed: acknowledge pre-existing unacked failures BEFORE the sync
   // runs, not only ones the current run produces. Without this, the common
