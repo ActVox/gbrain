@@ -4,6 +4,7 @@ import { digest, jsonBytes } from './digest.ts';
 import { lockCounters } from './journal.ts';
 import { journalLimitKey, readJournalLimits } from './limits.ts';
 import { principalKey } from './model.ts';
+import { receiptReservation, retainedReceiptBytes } from './receipt-bytes.ts';
 
 export interface TopologyChange {
   id:string; principal_id:string; request_id:string; digest:string; operation:string; source_id:string;
@@ -21,10 +22,12 @@ export async function priorTopologyChange(engine:BrainEngine,principal:string,re
 }
 export async function recordTopologyChange(tx:BrainEngine, input:{principal:string;requestId:string;intent:unknown;operation:string;sourceId:string;incarnation:string|null;worktrees:string[]},
   outcome:Record<string,unknown>, recovery:Record<string,unknown>|null=null,recoveryBytes=0):Promise<TopologyChange> {
-  const terminalBytes=16_384;
+  const reservation=receiptReservation(null);
   const intentBytes=recovery?jsonBytes(input.intent):0;
-  if(Buffer.byteLength(JSON.stringify(outcome))+1024>terminalBytes) throw opError('request_too_large','Lifecycle outcome exceeds its retained receipt capacity.',
-    `The ${input.operation} of source ${input.sourceId} would record an outcome over ${terminalBytes - 1024} bytes, so nothing was recorded. Report this to the user with the request id ${input.requestId}; it is not a caller mistake.`);
+  if(Buffer.byteLength(JSON.stringify(outcome))+1024>reservation) throw opError('request_too_large','Lifecycle outcome exceeds its retained receipt capacity.',
+    `The ${input.operation} of source ${input.sourceId} would record an outcome over ${reservation - 1024} bytes, so nothing was recorded. Report this to the user with the request id ${input.requestId}; it is not a caller mistake.`);
+  // #6696 (A1): a change recorded committed keeps only its outcome, so it is trued up at insert; a recovering one keeps the reservation.
+  const terminalBytes=recovery?reservation:Math.min(reservation,retainedReceiptBytes({outcome},{stage:'terminal'}));
   const limits=await readJournalLimits(tx);
   const key=principalKey({kind:'local_cli',id:input.principal});
   const counters=await lockCounters(tx,['brain',key,...input.worktrees.map(id=>`worktree:${id}`)]);

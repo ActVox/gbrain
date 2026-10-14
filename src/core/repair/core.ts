@@ -34,6 +34,7 @@ import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 import type { RepairKindSpec } from './registry.ts';
 import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
 import { repairAdmissionWindow, repairPublicationOwner, settleRepairReceipts, type PendingRepair } from './settle.ts';
+import { RECEIPT_RESERVATION_FLOOR } from '../persistence/receipt-bytes.ts';
 
 export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'take-supersession', 'orphan-bindings', 'embedding-effects', 'attribution-backfill', 'planner-stats', 'google-file-modes', 'stale-atoms', 'extractor-facts', 'conversation-labels', 'captured-facts', 'loop-facts', 'ontology-facts', 'orphan-children', 'failed-writes', 'frontmatter', 'fences', 'slug-conflicts', 'timeline-comments', 'managed-sync-orphans', 'frontmatter-keys', 'file-drift', 'stuck-recovery'] as const;
 export type RepairKind = typeof REPAIR_KINDS[number];
@@ -177,7 +178,6 @@ export interface RepairResult {
   details?: Record<string, unknown>;
 }
 
-const RECEIPT_BYTES = 16_384;
 const STOP_RATIO = 0.9;
 const SAMPLE = 10;
 
@@ -299,7 +299,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   const result: RepairResult = {
     kind: handler.kind, mode: opts.apply ? 'apply' : 'dry_run', scope, affected: plan.items.length,
     sample: plan.items.slice(0, SAMPLE).map(item => `${item.source_id}:${item.slug}`), residuals: plan.residuals,
-    cost: { lifetime_ids: admits, receipt_bytes: admits * RECEIPT_BYTES, embedding_pages: handler.embeds === false ? 0 : pending.length,
+    cost: { lifetime_ids: admits, receipt_bytes: admits * RECEIPT_RESERVATION_FLOOR, embedding_pages: handler.embeds === false ? 0 : pending.length,
       embedding_usd: embeddingUsd(pending.reduce((sum, item) => sum + item.chars, 0), opts.embeddingModel),
       ...(llm ? { llm_usd: opts.apply || !plan.llm ? 0 : plan.llm.usd === null ? null
         : pending.some(item => item.llm_usd !== undefined) ? pending.reduce((sum, item) => sum + (item.llm_usd ?? 0), 0) : plan.llm.usd,
@@ -381,9 +381,9 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
         + `${llmSpent >= opts.maxLlmUsd! ? 'is used up' : `cannot cover its estimate ($${item.llm_usd!.toFixed(4)})`} `
         + `($${llmSpent.toFixed(4)} spent of $${opts.maxLlmUsd!.toFixed(4)}; ${remaining} item(s) still pending). Rerun \`${result.apply_command}\` to resume.` });
     }
-    const full = admits ? (await capacity(ctx)).find(c => c.used + (c.resource === 'lifetime_ids' ? 1 : RECEIPT_BYTES) > c.stop_at) : undefined;
+    const full = admits ? (await capacity(ctx)).find(c => c.used + (c.resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR) > c.stop_at) : undefined;
     if (full) {
-      const perItem = full.resource === 'lifetime_ids' ? 1 : RECEIPT_BYTES;
+      const perItem = full.resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR;
       const needed = Math.ceil((full.used + remaining * perItem) / STOP_RATIO) + 1;
       return stopAfterSettle({ reason: 'capacity', message: `Stopped before crossing 90% of ${full.scope} ${full.resource} (${full.used} of ${full.limit} used; `
         + `${remaining} item(s) still need ${remaining * perItem} more). Run: gbrain config set ${full.config_key} ${needed} — then rerun \`${result.apply_command}\` to resume.` });

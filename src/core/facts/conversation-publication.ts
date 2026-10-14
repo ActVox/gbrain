@@ -60,6 +60,7 @@ import { opError, OperationError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { authorizeStoredRequest, authorizeWrite } from '../persistence/authority.ts';
 import { digest, jsonBytes } from '../persistence/digest.ts';
+import { receiptReservation } from '../persistence/receipt-bytes.ts';
 import { getWriteRequestById } from '../persistence/journal.ts';
 import { readJournalLimits } from '../persistence/limits.ts';
 import { principalKey } from '../persistence/model.ts';
@@ -262,7 +263,7 @@ export async function assertConversationAdmissionHeadroom(engine: BrainEngine, a
       `Conversation fact extraction stopped admitting: ${outstanding} of this writer's ${limits.principalOutstanding} outstanding requests are still pending.`,
       `Let the pending requests settle (gbrain sources writer status --source ${sourceId} --json shows them; a resident gbrain serve or the next CLI run publishes them), then rerun the same command. Pages already published keep their facts.`);
   }
-  const reservation = Math.max(16_384, jsonBytes(authority.writer) + 8192);
+  const reservation = receiptReservation(authority.writer);
   const cumulative = [
     { resource: 'reserved receipt bytes', key: 'persistence.limits.principal_terminal_bytes', used: Number(counter?.terminal_bytes ?? 0),
       limit: limits.principalTerminalBytes, per: reservation,

@@ -37,3 +37,11 @@ export function retainedReceiptBytes(row: ReceiptBytesFields, opts: { stage: 'te
   const dropped = opts.stage === 'terminal' ? json(row.intent) + Buffer.byteLength(row.error_message ?? '') : 0;
   return kept + dropped + (opts.effects ?? 0) + RECEIPT_HEADROOM_BYTES;
 }
+
+/** Config row counting true-up decrements clamped at a counter below the delta (counter drift); doctor reports it. */
+export const TRUE_UP_CLAMPED_KEY = 'persistence.true_up.clamped';
+/** A `clamped` CTE adding the clamp count `countSql` selects to `TRUE_UP_CLAMPED_KEY`; it writes nothing when no decrement was clamped. */
+export function TRUE_UP_CLAMP_SQL(countSql: string): string {
+  return `clamped AS (INSERT INTO config(key,value) SELECT '${TRUE_UP_CLAMPED_KEY}',k.n::text FROM (${countSql}) AS k(n) WHERE k.n>0
+      ON CONFLICT (key) DO UPDATE SET value=(CASE WHEN config.value ~ '^[0-9]+$' THEN config.value::bigint ELSE 0 END+EXCLUDED.value::bigint)::text)`;
+}

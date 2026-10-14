@@ -11,6 +11,7 @@ import { journalLimitKey, oneYearCapacity, readJournalLimits, readReceiptRetenti
 import { outstandingCapacityDetail, retryWriteAdmission } from './admission-retry.ts';
 import { PreadmitBrainChanged } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
+import { EFFECT_BYTES_SQL, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
@@ -175,7 +176,7 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
   const requestId = requireUuid(input.requestId ?? randomUUID());
   const fingerprint = intentDigest(input);
   const bytes = jsonBytes(input.intent) + jsonBytes(input.authority);
-  const terminalBytes = input.terminalReservation ?? Math.max(16_384,jsonBytes(input.authority)+8192);
+  const terminalBytes = input.terminalReservation ?? receiptReservation(input.authority);
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   const stamp = writerStamp();
   return { requestId, apply: async (tx: BrainEngine): Promise<WriteRequest> => {
@@ -255,7 +256,7 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
   }
   const stamp = writerStamp();
   const items = inputs.map(input => ({ input, requestId: requireUuid(input.requestId ?? randomUUID()), fingerprint: intentDigest(input),
-    bytes: jsonBytes(input.intent) + jsonBytes(input.authority), terminalBytes: input.terminalReservation ?? Math.max(16_384, jsonBytes(input.authority) + 8192) }));
+    bytes: jsonBytes(input.intent) + jsonBytes(input.authority), terminalBytes: input.terminalReservation ?? receiptReservation(input.authority) }));
   assertMutationProtocol({ target_kind: 'page', protocol_version: 1 });
   const ids = items.map(item => item.requestId);
   // #5984: the checks are independent reads and share locks, so they go out back to back in the order they always
@@ -770,19 +771,27 @@ export async function completeWrite(tx: SqlEngine, row: WriteRequest, state: 'co
   // releases its outstanding counters; no row means the encoding exceeds the reservation and nothing changed.
   const resultBytes = jsonBytes(outcome) + jsonBytes(current.authority) + 1024 + Buffer.byteLength(error?.message ?? '') + (error?.detail ? jsonBytes(error.detail) : 0);
   const probePurges = intentCarriesContent(current.intent);
-  const [terminal] = await tx.executeRaw<WriteRequest & { purge_has_facts?: boolean; purge_has_pages?: boolean }>(`WITH effects AS (SELECT COALESCE(SUM(octet_length(data::text)+octet_length(kind)+1024),0) AS bytes
-      FROM persistence_effects WHERE request_id=$1::uuid),
+  // #6696 (A1): the true-up sizes the reservation down to what the receipt keeps, once no effect is unfinished.
+  const retained = retainedReceiptBytes({ intent: current.intent, authority: current.authority, outcome, error_message: error?.message ?? null,
+    error_detail: error?.detail ?? current.error_detail, client_request_id: current.client_request_id }, { stage: 'terminal' });
+  const [terminal] = await tx.executeRaw<WriteRequest & { purge_has_facts?: boolean; purge_has_pages?: boolean }>(`WITH effects AS (SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0) AS bytes,
+      COALESCE(bool_or(state<>'committed'),false) AS unfinished FROM persistence_effects WHERE request_id=$1::uuid),
     done AS (UPDATE persistence_requests SET state=$2,outcome=$3::text::jsonb,
       error_code=$4,error_message=$5,error_detail=COALESCE($8::text::jsonb,error_detail),completed_at=now(),updated_at=now(),claim_expires_at=NULL,blocked_reason=NULL,
       consumer_version=CASE WHEN $2='committed' THEN $6 ELSE consumer_version END,
       consumer_host_id=CASE WHEN $2='committed' THEN $7::uuid ELSE consumer_host_id END,
       published_at=CASE WHEN $2='committed' THEN now() ELSE published_at END,
-      preparation_attempts=CASE WHEN $2='committed' THEN 0 ELSE preparation_attempts END
+      preparation_attempts=CASE WHEN $2='committed' THEN 0 ELSE preparation_attempts END,
+      terminal_reservation=CASE WHEN (SELECT unfinished FROM effects) THEN terminal_reservation
+        ELSE LEAST(terminal_reservation,$12::bigint+(SELECT bytes FROM effects)) END
       WHERE id=$1::uuid AND $9::bigint+(SELECT bytes FROM effects)<=terminal_reservation RETURNING *),
-    released AS (UPDATE persistence_counters SET outstanding_count=outstanding_count-1,intent_bytes=intent_bytes-$11
-      WHERE key=ANY($10::text[]) AND EXISTS (SELECT 1 FROM done))
+    released AS (UPDATE persistence_counters c SET outstanding_count=c.outstanding_count-1,intent_bytes=c.intent_bytes-$11,
+      terminal_bytes=c.terminal_bytes-LEAST($13::bigint-done.terminal_reservation,c.terminal_bytes)
+      FROM done WHERE c.key=ANY($10::text[])),
+    ${TRUE_UP_CLAMP_SQL('SELECT count(*) FROM persistence_counters c, done WHERE c.key=ANY($10::text[]) AND $13::bigint-done.terminal_reservation>c.terminal_bytes')}
     SELECT done.*${probePurges ? `, ${PURGE_PRESENCE_COLUMNS}` : ''} FROM done`, [row.id, state, JSON.stringify(outcome), error?.code ?? null, error?.message ?? null, stamp.version, stamp.hostId,
-      error?.detail ? JSON.stringify(error.detail) : null, resultBytes, ['brain', principalKey(requestPrincipal(row))], Number(current.intent_bytes)]);
+      error?.detail ? JSON.stringify(error.detail) : null, resultBytes, ['brain', principalKey(requestPrincipal(row))], Number(current.intent_bytes),
+      retained, Number(current.terminal_reservation)]);
   if (!terminal) throw capacityError('terminal result and effects exceed their reserved bounded encoding');
   const { purge_has_facts: purgeFacts, purge_has_pages: purgePages, ...doneRow } = terminal;
   const done = doneRow as WriteRequest;
@@ -790,7 +799,15 @@ export async function completeWrite(tx: SqlEngine, row: WriteRequest, state: 'co
   // reason first, or committed as a no-op after the overlay dropped the purged rows) keeps no copy of it; replay answers
   // from the stored outcome, and the intent bytes were released above.
   if (error && PURGED_REFUSAL.test(`${error.code}: ${error.message}`) || probePurges && await intentCarriesPurgedContent(tx as BrainEngine, current, { facts: purgeFacts === true, pages: purgePages === true })) {
-    const [redacted] = await tx.executeRaw<WriteRequest>('UPDATE persistence_requests SET intent=NULL,compacted=true WHERE id=$1::uuid RETURNING *', [row.id]);
+    // #6696: the redaction compacts the receipt, so its reservation shrinks to what is left (no intent) once no effect is unfinished.
+    const left = retainedReceiptBytes({ ...done, intent: null }, { stage: 'terminal' });
+    const [redacted] = await tx.executeRaw<WriteRequest>(`WITH effects AS (SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0) AS bytes,
+        COALESCE(bool_or(state<>'committed'),false) AS unfinished FROM persistence_effects WHERE request_id=$1::uuid),
+      r AS (UPDATE persistence_requests SET intent=NULL,compacted=true,terminal_reservation=CASE WHEN (SELECT unfinished FROM effects) THEN terminal_reservation
+        ELSE LEAST(terminal_reservation,$2::bigint+(SELECT bytes FROM effects)) END WHERE id=$1::uuid RETURNING *),
+      released AS (UPDATE persistence_counters c SET terminal_bytes=c.terminal_bytes-LEAST($3::bigint-r.terminal_reservation,c.terminal_bytes)
+        FROM r WHERE c.key=ANY($4::text[]))
+      SELECT * FROM r`, [row.id, left, Number(done.terminal_reservation), ['brain', principalKey(requestPrincipal(row))]]);
     return redacted ?? done;
   }
   // Recovery bytes remain reserved until physical cleanup has been verified.
@@ -859,7 +876,12 @@ export async function vacuumPersistenceQueues(engine: BrainEngine): Promise<numb
   return Number(requests?.rows ?? 0);
 }
 
+/** What one compaction pass did (#6696 A11): receipts compacted, reservation bytes it freed, candidates it left and why. */
+export interface ReceiptCompactionResult { compacted: number; freed_bytes: number; skipped_by_reason: Record<string, number> }
 export async function compactWriteReceipts(engine: BrainEngine, retentionDays?: number): Promise<number> {
+  return (await compactWriteReceiptsDetailed(engine, retentionDays)).compacted;
+}
+export async function compactWriteReceiptsDetailed(engine: BrainEngine, retentionDays?: number): Promise<ReceiptCompactionResult> {
   retentionDays ??= await readReceiptRetentionDays(engine);
   if (!Number.isFinite(retentionDays) || retentionDays < 0) throw new TypeError('Invalid receipt retention.');
   // Receipts with unfinished effects stay retained; filtering them before the
@@ -869,23 +891,26 @@ export async function compactWriteReceipts(engine: BrainEngine, retentionDays?: 
     AND completed_at < now()-($1::double precision*interval '1 day')
     AND NOT EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.state<>'committed')
     ORDER BY sequence LIMIT 100`, [retentionDays]);
-  let count=0;
-  for(const row of rows) count+=await engine.transaction(async tx=>{
+  const result: ReceiptCompactionResult = { compacted: 0, freed_bytes: 0, skipped_by_reason: {} };
+  const skip = (reason: string) => { result.skipped_by_reason[reason] = (result.skipped_by_reason[reason] ?? 0) + 1; return 0; };
+  for(const row of rows) result.freed_bytes+=await engine.transaction(async tx=>{
     await declarePersistenceProtocol(tx);
     const keys=['brain',principalKey(requestPrincipal(row))];
     await lockCounters(tx,keys);
     const [current]=await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE',[row.id]);
-    if(!current || current.compacted || current.recovery || !isTerminal(current)) return 0;
+    if(!current || current.compacted || current.recovery || !isTerminal(current)) return skip('changed');
     const unfinished=await tx.executeRaw("SELECT 1 FROM persistence_effects WHERE request_id=$1::uuid AND state<>'committed' LIMIT 1",[row.id]);
-    if(unfinished.length) return 0;
-    const [effects]=await tx.executeRaw<{bytes:string}>(`SELECT COALESCE(SUM(octet_length(data::text)+octet_length(kind)+1024),0)::text AS bytes
+    if(unfinished.length) return skip('unfinished_effect');
+    const [effects]=await tx.executeRaw<{bytes:string}>(`SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0)::text AS bytes
       FROM persistence_effects WHERE request_id=$1::uuid`,[row.id]);
-    const retained=Math.min(Number(current.terminal_reservation),jsonBytes(current.authority)+jsonBytes(current.outcome??{})+(current.error_detail?jsonBytes(current.error_detail):0)+(current.client_request_id?.length??0)+Number(effects.bytes)+1024);
+    const retained=Math.min(Number(current.terminal_reservation),retainedReceiptBytes(current,{stage:'compacted',effects:Number(effects.bytes)}));
+    const freed=Number(current.terminal_reservation)-retained;
     await tx.executeRaw('UPDATE persistence_requests SET intent=NULL,compacted=true,error_message=NULL,terminal_reservation=$2 WHERE id=$1::uuid',[row.id,retained]);
-    for(const key of keys) await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-$2 WHERE key=$1',[key,Number(current.terminal_reservation)-retained]);
-    return 1;
+    await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-LEAST($2::bigint,terminal_bytes) WHERE key=ANY($1::text[])',[keys,freed]);
+    result.compacted++;
+    return freed;
   });
-  return count;
+  return result;
 }
 export function receiptFor(row: WriteRequest, facts?: WriteHealthFacts, now = Date.now()) {
   return {

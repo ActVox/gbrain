@@ -15,6 +15,7 @@ import { computeContentHash } from '../ingestion/types.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { scannerSlugRootMode, scannerSourcePath } from '../write-through.ts';
 import { sha256 } from './digest.ts';
+import { receiptReservation } from './receipt-bytes.ts';
 import { assertPersistenceAccepting, estimatedRetryAfterMs, waiterOnlyOwner, onPersistenceLane, waitForWrite, writeResponse } from './service.ts';
 import { parseWireWriteWaitMs } from './write-wait.ts';
 import { assertTimelineNotOmitted, isTimelineSection, timelineSectionOf, type TimelineSection } from './timeline-omission.ts';
@@ -391,7 +392,6 @@ export async function preparePageAdmission(ctx: OperationContext,
   }
   return { typeWarning, slugAdvisory, admission: { principal, operation: input.operation, sourceId, sourceIncarnation: source.incarnation,
     slug, pageId: snapshot?.page.id ?? null, requestId, clientRequestId: input.batch ? undefined : clientRequestIdOf(params.request_id), callerIntent, intent, authority,
-    ...(input.operation === 'edit_page' ? { terminalReservation: Math.max(16_384, Buffer.byteLength(JSON.stringify(authority)) + 8192)
-      + (await import('./page-edit.ts')).EDIT_PAGE_RECEIPT_RESERVE } : {}),
+    ...(input.operation === 'edit_page' ? { terminalReservation: receiptReservation(authority, (await import('./page-edit.ts')).EDIT_PAGE_RECEIPT_RESERVE) } : {}),
     worktreeId: writeThrough ? binding?.worktree_id : null, topologyGeneration: writeThrough ? binding?.topology_generation : null } };
 }
