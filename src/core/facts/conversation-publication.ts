@@ -279,7 +279,7 @@ export async function assertConversationAdmissionHeadroom(engine: BrainEngine, a
     throw backgroundPaused(key, r.resource, r.used, limit, pause, journalLimitKey(r.setting),
       await oneYearCapacity(engine, key, r.resource === 'lifetime_ids' ? 'LifetimeIds' : 'TerminalBytes', r.used, limit), {
         what: `Conversation fact extraction stopped before admitting ${needed > 1 ? `${needed} planned` : 'the next'} request(s)`,
-        hint: room > 0 ? `A smaller batch fits: gbrain extract-conversation-facts --source-id ${authority.writer.sourceId} --limit ${room}.` : undefined });
+        alternative: room > 0 ? `A smaller batch fits: gbrain extract-conversation-facts --source-id ${authority.writer.sourceId} --limit ${room}.` : undefined });
   }
 }
 

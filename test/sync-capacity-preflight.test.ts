@@ -42,7 +42,7 @@ describe('capacity_paused in the drain', () => {
     let passes = 0;
     const result = await runDrain({ backoffMs: 5, pass: async () => { if (++passes === 1) return base; throw exhausted(); } });
     expect(result).toMatchObject({ added: 1, drain: { outcome: 'resumable', stop_reason: 'capacity_paused', remaining: 2,
-      capacity_pause: { code: 'write_quota_exhausted', reason: 'lifetime_ids', fix_argv: ['gbrain', 'config', 'set', 'persistence.limits.principal_lifetime_ids', '100'] } } });
+      capacity_pause: { code: 'write_quota_exhausted', reason: 'lifetime_ids', fix: { argv: ['gbrain', 'config', 'set', 'persistence.limits.principal_lifetime_ids', '100'], actor: 'host_admin' } } } });
     const next = drainNext(result, RESUME, 's')!;
     expect(next).toMatchObject({ command: RESUME, code: 'capacity_paused', docs: ERROR_CATALOGUE.sync_drain_capacity_paused.docs });
     expect(next.why).toContain('gbrain config set persistence.limits.principal_lifetime_ids 100');

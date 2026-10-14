@@ -42,8 +42,8 @@ export type DrainStopReason = 'deadline' | 'drain_stalled' | 'database_contentio
   | 'connection_lost'
   /** #6696 (A7): a cumulative write cap (or the background pause line) refused the next admission after the preflight passed; resumable once capacity returns. */
   | 'capacity_paused';
-/** #6696 (A7): the refusal that paused the drain (`capacity_paused`); `fix_argv` is the host's config raise. */
-export interface DrainCapacityPause { code: string; reason: string | null; detail: string | null; message: string; fix_argv?: string[] }
+/** #6696 (A7): the refusal that paused the drain (`capacity_paused`); `fix` is the host's config raise. */
+export interface DrainCapacityPause { code: string; reason: string | null; detail: string | null; message: string; fix?: Action }
 /** A capacity refusal raised by an admission after the run's preflight (the preflight's own refusal stops the command up front). */
 export function isCapacityPause(error: unknown): boolean {
   return error instanceof OperationError && ['write_quota_exhausted', 'write_capacity_backpressure', 'write_quota_insufficient'].includes(error.code)
@@ -494,7 +494,7 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
         if (isCapacityPause(error)) {
           const e = error as OperationError;
           return finish(last ?? NO_PASS_RESULT, 'resumable', 'capacity_paused', { capacity_pause: { code: e.code, reason: e.reason ?? null, detail: e.detail ?? null,
-            message: e.message, ...(e.fix?.argv ? { fix_argv: e.fix.argv } : {}) } });
+            message: e.message, ...(e.fix ? { fix: e.fix } : {}) } });
         }
         if (isWriteCapacityWait(error) && !signal?.aborted) {
           capacity ??= { since: clock(), attempts: 0 };
@@ -854,7 +854,7 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
   const docs = d?.stop_reason ? ERROR_CATALOGUE[STOP_DOCS[d.stop_reason]].docs : undefined;
   if (outcome === 'resumable' && d?.stop_reason === 'capacity_paused') {
     const pause = d.capacity_pause;
-    const raise = pause?.fix_argv?.join(' ');
+    const raise = pause?.fix?.argv?.join(' ');
     return { command: resumeCommand, safe_to_loop: false, retry_after_ms: 0, ...estimate, code: 'capacity_paused',
       why: `The sync paused: ${pause?.message ?? 'a cumulative write cap refused its next admission'} Nothing failed; the cursor and every accepted write are intact. `
         + `${pause?.reason === 'lifetime_ids' ? 'Request ids never free, so ' : ''}${raise ? `the brain host runs ${raise} (reversible)` : 'the brain host raises the cap gbrain doctor --only persistence_capacity --json names'}`

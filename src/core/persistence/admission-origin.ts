@@ -58,11 +58,11 @@ export async function readBackgroundPauseShare(engine: SqlEngine): Promise<numbe
  * is the host's config raise; receipt bytes also free as receipts compact.
  */
 export function backgroundPaused(scopeKey: string, resource: 'lifetime_ids' | 'terminal_bytes', used: number, limit: number, share: number,
-  configKey: string, value: number, context: { what?: string; hint?: string } = {}): OperationError {
+  configKey: string, value: number, context: { what?: string; alternative?: string } = {}): OperationError {
   const raise = `gbrain config set ${configKey} ${value}`;
   return opError('write_capacity_backpressure',
     `${context.what ?? 'Background writes are paused'}: ${scopeKey} ${resource} is at ${used} of ${limit}, past the ${Math.round(share * 100)}% pause line (${BACKGROUND_PAUSE_KEY}).`,
-    `Nothing was submitted; interactive writes keep the rest of ${configKey}. ${context.hint ? `${context.hint} ` : ''}${resource === 'lifetime_ids'
+    `Nothing was submitted; interactive writes keep the rest of ${configKey}. ${context.alternative ? `${context.alternative} ` : ''}${resource === 'lifetime_ids'
       ? `Request ids are never freed, so background work resumes only after the brain host runs ${raise} (covers about one more year; undo with gbrain config unset ${configKey}).`
       : `Background work resumes as retained receipts compact, or at once after the brain host runs ${raise} (covers about one more year; undo with gbrain config unset ${configKey}).`}`,
     { reason: resource, detail: configKey.slice('persistence.limits.'.length), docs: 'docs/guides/write-refusals.md#write_capacity_backpressure',
