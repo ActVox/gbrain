@@ -373,14 +373,15 @@ export async function readPageStatusByRef(engine: BrainEngine, refs: Array<{ sou
 
 /**
  * The record metadata of referring pages: `page_status` from frontmatter,
- * `amends` and `supersedes` links to pages the caller can see (link origins
- * under the same privacy rule as the referrer read), and each amends link's
+ * `amends` and `supersedes` links to pages the caller can see (targets in the
+ * caller's referrer sources, link origins under the same privacy rule as the
+ * referrer read), and each amends link's
  * `since` from the temporal relationship state for the caller's scope
  * (`world` for untrusted callers, so a date whose only evidence is private
  * stays hidden).
  */
 export async function readRecordMetadata(engine: BrainEngine, pageIds: number[],
-  scope: Pick<ReferrerScope, 'excludePrivate' | 'includeQuarantined'>): Promise<Map<number, RecordMetadata>> {
+  scope: Pick<ReferrerScope, 'referrerSources' | 'excludePrivate' | 'includeQuarantined'>): Promise<Map<number, RecordMetadata>> {
   const out = new Map<number, RecordMetadata>();
   if (!pageIds.length) return out;
   const linkPriv = scope.excludePrivate ? ` AND ${privateLinkOriginFilterFragment('l')}` : '';
@@ -391,11 +392,11 @@ export async function readRecordMetadata(engine: BrainEngine, pageIds: number[],
     engine.executeRaw<{ from_id: number; slug: string; link_type: string; since: string | null }>(
       `SELECT DISTINCT l.from_page_id AS from_id, t.slug, l.link_type,
               CASE WHEN l.link_type = 'amends' THEN to_char(r.first_start, 'YYYY-MM-DD') END AS since
-         FROM links l JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL${targetPriv}${targetQuarantine}
+         FROM links l JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL AND t.source_id = ANY($3::text[])${targetPriv}${targetQuarantine}
          LEFT JOIN link_relationships r ON r.from_page_id = l.from_page_id AND r.to_page_id = l.to_page_id
               AND r.link_type = l.link_type AND r.scope = $2
         WHERE l.from_page_id = ANY($1::int[]) AND l.link_type IN ('amends', 'supersedes')${linkPriv}
-        ORDER BY l.from_page_id, t.slug`, [pageIds, scope.excludePrivate ? 'world' : 'all']).catch(() => []),
+        ORDER BY l.from_page_id, t.slug`, [pageIds, scope.excludePrivate ? 'world' : 'all', scope.referrerSources]).catch(() => []),
   ]);
   for (const row of status) {
     const value = pageStatusValue(row.status);
@@ -500,7 +501,7 @@ export async function readTargetReferences(engine: BrainEngine,
 }
 
 async function hydrateRecords(engine: BrainEngine, rows: RecordCandidate[],
-  scope: Pick<ReferrerScope, 'excludePrivate' | 'includeQuarantined'>): Promise<RecordRow[]> {
+  scope: Pick<ReferrerScope, 'referrerSources' | 'excludePrivate' | 'includeQuarantined'>): Promise<RecordRow[]> {
   if (!rows.length) return [];
   const ids = [...new Set(rows.map(r => Number(r.id)))];
   const [pages, meta] = await Promise.all([

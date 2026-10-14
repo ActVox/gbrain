@@ -449,3 +449,32 @@ export async function recordsKeepPageStatusWithRowKeyOff(engine: BrainEngine): P
     await engine.unsetConfig('entity.row_page_status');
   }
 }
+
+/** An `amends` or `supersedes` target outside the caller's sources never reaches a record row (names, card, context_pack, continuation). */
+export async function recordLinksStayInSources(engine: BrainEngine): Promise<void> {
+  await seedRecordsWorld(engine);
+  const OTHER = 'restricted-example';
+  await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`, [OTHER]);
+  await engine.putPage('contracts/restricted-original', { type: 'contract' as never, title: 'Restricted original', compiled_truth: 'Restricted original.', timeline: '', frontmatter: {} }, { sourceId: OTHER });
+  for (const [from, type] of [['contracts/acme-amend-1', 'amends'], ['contracts/acme-msa-v2', 'supersedes']] as const) {
+    await engine.executeRaw(
+      `INSERT INTO links (from_page_id, to_page_id, link_type, link_source, origin_page_id)
+       SELECT f.id, t.id, $3, 'markdown', f.id FROM pages f JOIN pages t ON t.slug = 'contracts/restricted-original' AND t.source_id = $4
+        WHERE f.slug = $1 AND f.source_id = $2`, [from, SRC, type, OTHER]);
+  }
+  await engine.setConfig('entity.record_types', 'contract');
+  for (const remote of [true, false]) {
+    const names = (await call(engine, 'entity', { names: ['CRM record: Acme Example'] }, remote)).body.results[0];
+    const card = (await call(engine, 'entity', { name: 'crm/acme-example' }, remote)).body.card;
+    const pack = (await call(engine, 'context_pack', { entities: 'crm/acme-example' }, remote)).body;
+    const continued = (await call(engine, 'get_backlinks', { slug: 'crm/acme-example', type: 'contract', group: 'page', limit: 50 }, remote)).body;
+    for (const out of [names.records, card.records, pack.cards[0].records, continued.rows]) {
+      expect(JSON.stringify(out)).toContain('contracts/acme-msa');
+      expect(JSON.stringify(out)).not.toContain('restricted-original');
+    }
+    const amend1 = continued.rows.find((r: { slug: string }) => r.slug === 'contracts/acme-amend-1');
+    expect(amend1.amends).toEqual([{ slug: 'contracts/acme-msa', since: '2025-07-01' }]);
+    const v2 = continued.rows.find((r: { slug: string }) => r.slug === 'contracts/acme-msa-v2');
+    expect(v2.supersedes).toEqual([{ slug: 'contracts/acme-msa' }]);
+  }
+}
