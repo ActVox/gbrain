@@ -60,7 +60,7 @@ describe('caps', () => {
 describe('dispatch backstop', () => {
   test('an oversized read is result_too_large with the measured size, nothing cut', async () => {
     const config = { engine: 'pglite', mcp: { max_result_bytes_stdio: EGRESS_CAP_MIN } } as any;
-    const out = await dispatchToolCall(engine, 'get_chunks', { slug: 'logs/wide' }, { remote: true, transport: 'stdio', sourceId: 'default', config });
+    const out = await dispatchToolCall(engine, 'get_chunks', { slug: 'logs/wide', limit: 500 }, { remote: true, transport: 'stdio', sourceId: 'default', config });
     expect(out.isError).toBe(true);
     const env = JSON.parse(out.content[0].text);
     expect(env.code ?? env.error).toBe('result_too_large');
