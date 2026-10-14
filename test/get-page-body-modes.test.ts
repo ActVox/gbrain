@@ -98,7 +98,7 @@ describe('mode resolution', () => {
     expect(typeof r.compiled_truth).toBe('string');
     const c = await get(ctx(), { slug: 'logs/big', include_content: true });
     expect(typeof c.content).toBe('string');
-    const only = await get(ctx(), { slug: 'logs/big', content_only: true });
+    const only = await get(ctx(), { slug: 'logs/big', include_content: true, content_only: true });
     expect(typeof only.content).toBe('string');
     expect(only.compiled_truth).toBeUndefined();
   });

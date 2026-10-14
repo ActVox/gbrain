@@ -15,6 +15,7 @@
  */
 import type { BrainEngine } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
+import { opError, type OperationError } from './ops/contract.ts';
 
 export type EgressTransport = 'stdio' | 'http';
 
@@ -70,4 +71,33 @@ export async function resultByteCap(caller: EgressCaller): Promise<number> {
 /** Bytes of the complete JSON-RPC response frame carrying `result`, plus the framing reserve. */
 export function encodedFrameBytes(result: unknown): number {
   return Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 0, result }), 'utf8') + FRAME_RESERVE_BYTES;
+}
+
+/** The measured frame and the cap it broke, or null when `result` fits this connection. */
+export async function frameOverCap(result: unknown, caller: EgressCaller): Promise<{ bytes: number; cap: number; transport: EgressTransport } | null> {
+  const transport = egressTransport(caller);
+  if (transport === null) return null;
+  const cap = await resultByteCap(caller);
+  const bytes = encodedFrameBytes(result);
+  return bytes > cap ? { bytes, cap, transport } : null;
+}
+
+/**
+ * The dispatcher's backstop refusal: a read whose final frame is over the
+ * connection's cap. Nothing is cut; the caller asks again for less. Reads
+ * only: a write's result is its receipt and is never replaced.
+ */
+export function resultTooLargeError(op: string, params: Record<string, unknown>, over: { bytes: number; cap: number; transport: EgressTransport }): OperationError {
+  const slug = typeof params.slug === 'string' ? params.slug : undefined;
+  const sourceId = typeof params.source_id === 'string' ? params.source_id : undefined;
+  return opError('result_too_large',
+    `${op} produced a ${over.bytes}-byte response; this connection carries at most ${over.cap} bytes per result (${EGRESS_CAP_CONFIG_KEYS[over.transport]}).`,
+    "Ask for less in one call: a window (get_page body: 'window'), a page of rows (limit / cursor), or metadata only. Nothing was returned or cut.",
+    {
+      legacy_error: 'invalid_params',
+      detail: JSON.stringify({ op, result_bytes: over.bytes, max_result_bytes: over.cap, transport: over.transport, config_key: EGRESS_CAP_CONFIG_KEYS[over.transport] }),
+      ...(slug ? { fix: { argv: ['gbrain', 'get', ...(sourceId ? ['--source', sourceId] : []), '--', slug],
+        mcp: { tool: 'get_page', arguments: { slug, ...(sourceId ? { source_id: sourceId } : {}), body: 'outline' } },
+        consent: [], actor: 'agent' as const, why: "Returns the page's size and outline, which name the windows to read.", requires_exclusive: false } } : {}),
+    });
 }

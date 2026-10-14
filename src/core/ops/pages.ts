@@ -90,7 +90,7 @@ const get_page: Operation = {
     slug: { type: 'string', description: 'Page slug.', required: true },
     fuzzy: { type: 'boolean', description: 'Fuzzy slug match.' },
     include_content: { type: 'boolean', description: "Full markdown + revision (body: 'full')." },
-    content_only: { type: 'boolean', description: 'Round-trip fields only (implies include_content).' },
+    content_only: { type: 'boolean', description: 'Round-trip fields only.' },
     ...GET_PAGE_BODY_PARAMS,
     include_deleted: { type: 'boolean', description: 'Include soft-deleted pages.' },
     include_timeline_entries: { type: 'boolean', description: 'Also return timeline rows.' },
@@ -106,7 +106,7 @@ const get_page: Operation = {
     // Large pages: resolve the body mode first, so a malformed selector fails before any read.
     const bodyRequest = parseBodyRequest(ctx, p);
     const contentOnly = p.content_only === true;
-    const includeContent = p.include_content === true || contentOnly;
+    const includeContent = p.include_content === true;
     const includeTimelineEntries = (p.include_timeline_entries as boolean) === true;
     // #4329: honor a per-call source_id (pre-fix it was silently dropped).
     // resolveRequestedScope (inside federatedSearchScope) enforces the remote
