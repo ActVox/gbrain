@@ -55,7 +55,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { withLegacySyncDelegation } from './persistence/sync-authority.ts';
+import { typedSyncProcessing, withLegacySyncDelegation } from './persistence/sync-authority.ts';
 import { verifyLocalWriter, withVerifiedLocalRegistration } from './persistence/identity.ts';
 import { readManagedMode } from './persistence/managed-mode.ts';
 import { OperationError } from './ops/contract.ts';
@@ -67,7 +67,6 @@ import {
   isSyncStartRegistration,
   toWireSyncResult,
   validateDelegatedSyncOptions,
-  DELEGATED_SYNC_PROCESSING_KEYS,
   type DelegatedSyncOptions,
   type DelegatedSyncState,
   type SyncAbortResponse,
@@ -343,7 +342,7 @@ async function startVerifiedDelegatedSync(
           ...(managed
             ? { drain: true, noBulk: options.noBulk, lanes: options.lanes, noEmbed: options.noEmbed, embedDeferred: options.embedDeferred,
               // #6696: an older CLI omits the list but still sends true for each processing flag its user typed.
-              explicitProcessing: options.explicitProcessing ?? DELEGATED_SYNC_PROCESSING_KEYS.filter(key => options[key] === true) }
+              explicitProcessing: options.explicitProcessing ?? typedSyncProcessing(options) }
             : { noEmbed: true }),
           signal: job.controller.signal,
           onProgress: (p) => {
