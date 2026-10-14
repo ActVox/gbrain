@@ -1803,6 +1803,12 @@ export class PGLiteEngine implements BrainEngine {
     return chunksImpl.getChunks(scopedRead(this.engineSql), column, slug, { sourceIds, sourceId }, opts);
   }
 
+  async getChunkPage(slug: string, opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean; fromIndex: number; limit: number }) {
+    const sourceIds = opts.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
+    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    return chunksImpl.getChunkPage(scopedRead(this.engineSql), column, slug, { sourceIds, sourceId: opts.sourceId ?? 'default' }, opts);
+  }
+
   /** S2: quoted identifier of the registry-ACTIVE embedding column for the
    *  health plane (getStats / getHealth) — read-only sites pass fallbackToLegacy
    *  so a broken registry row can't crash diagnostics. Callers prefix the
