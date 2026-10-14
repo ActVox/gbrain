@@ -10,6 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.225.0] - 2026-10-14
+
+**A worker whose memory watchdog fires while a claim is mid-flight now aborts that job too.** `gracefulShutdown` aborted only the jobs already registered in `inFlight`; a claim whose `UPDATE … RETURNING` had committed but whose result had not reached the poll loop launched afterwards with a live per-job signal, ran unaborted through the 30 s drain, and ended on the SIGTERM path (`worker_shutdown` hand-back, or the handler's own text for an `UnrecoverableError`) instead of `aborted: watchdog`. This was the `worker-shutdown-error-matrix` CI flake: the test observed `active` on a second Postgres connection and fired the watchdog inside that round trip.
+
+### Itemized changes
+
+- `src/core/minions/worker.ts` (+3 lines, ceiling 1777): `gracefulShutdown` records its reason; `launchJob` aborts a job it registers after the shutdown fired with that reason, so the job takes the same abort path as one that was already in flight (attempt burned, `delayed`; `UnrecoverableError` dead).
+- `test/worker-shutdown-error-matrix.test.ts`: a forced case holds the committed claim's result until the watchdog has fired (both engines; fails on the previous worker, passes now).
+- Docs: `docs/architecture/key-files/core-minions-2.md` worker entry.
+- `test/progress.test.ts` cpu_ms flake, second mechanism: run 38588222510 billed 105 ms to the thread inside its 200 ms wait with the VM-wide steal counter at 0. KVM counts only runnable waiting as steal; a vCPU asleep in the host (a guest page the host still had to back, under host memory throttling) advances the guest clock while the guest thread is current and is billed to that thread with no steal recorded. Reproduced on a nested-KVM guest (virtio-balloon cycle to leave guest pages host-unbacked, host `memory.high` on the VM): master's test failed 4/10 runs with the CI signature, `steal 0 ms` included. The window check now also treats CPU charged to the thread while it was blocked in the futex (≥ 10 ms; 0.2–2.2 ms across 500 clean windows on three hosts) as a stall and re-measures; the bound is unchanged, and a run with no clean window in 5 attempts fails with each window's charge, wait overrun and steal. Doc sentence on `cpu_ms` widened accordingly.
+- `test/e2e/supervisor-stop-drain-5062.test.ts` flake: the test read each barrier pid file as soon as it existed, but `echo $$ > f` creates the file before the pid lands in it, so an empty read gave pid 0 and `process.kill(0, 0)` (this test's own process group) reported it alive after the drain. The reader now waits for a parsed pid, `alive` refuses a non-positive pid, and the barrier job forces the window (create, 300 ms, write) on every run. Root cause reported from the Cat 40 Hard wave (#6668).
+
 ## [0.60.224.0] - 2026-10-14
 
 **Shell-out reads on a local PGLite brain start about 110 ms faster.** Every `gbrain call get_page`, `gbrain get`, `gbrain list` or `gbrain search` on a local brain used to spend part of its startup preparing database features the command never used: a 128 MB page cache that one read never fills, and the vector and fuzzy-match extensions loaded before the first query whether or not the command touched them. One-shot reads now open with a smaller cache, the extensions load the first time a query needs them, and `gbrain call` starts preparing the database engine while the rest of the command loads, as `get` and `list` already did. Results are identical. `gbrain serve`, imports and every write keep the full cache.
