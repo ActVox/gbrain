@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.220.0] - 2026-10-14
+## [0.60.222.0] - 2026-10-14
 
 **Writes that ended without committing are now summarized and explained, and the few that block work are named (#6650).** Every write leaves a receipt, and receipts that ended `failed`, `conflict` or `cancelled` used to pile up with no summary: an agent couldn't tell the one that holds a root from hundreds a later write already superseded or an older build left behind. gbrain now classifies each such receipt at read time (category, class, safe actions, whether a person decides, a structured fix) and stores nothing new. A new doctor check, `persistence_terminal_failures`, warns when a receipt blocks work now (a publication recovery record or a sync checkpoint blocker) or when an unresolved receipt is a gbrain-defect class. A 24-hour spike warns only when nothing else does, and a spike written by builds older than the fix says so, names the build and points at the write owner to upgrade or restart. Superseded rows and rows from builds older than their fixing release count as historical and never warn.
 
@@ -24,6 +24,65 @@ identifiers and attribution are available in the pre-removal Git revision
 - **`/metrics`** (admin only) adds per-source gauges `gbrain_writer_terminal_failures_{active_blockers,unresolved,historical,new_24h,defects}` and `_known`, from one aggregate shared by every scrape for 60 s. `/health` is unchanged.
 - **Fact-fence step** (`src/core/facts/unfenced-facts.ts`): the up-front lifetime-ID check counts only pages that will submit, so a page suppressed by a recent identical refusal, or one with nothing adoptable, no longer pushes the whole step to the cap and refuses it.
 - Docs: [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures), the troubleshooting row, write-refusals and the maintain skill.
+
+## [0.60.221.0] - 2026-10-14
+
+**When a file you edited by hand blocks every write to its source, one command now shows you both versions and lets you pick which one to keep (#6650).** If you edit a page file while gbrain is publishing a write to that same file, gbrain can no longer tell whether it is safe to put the file back. It used to stop there and leave every later write to that source pending, and the only ways out were deleting the file or editing the database by hand. `gbrain repair stuck-recovery` previews the blocked file with a diff of the version from before the write against what is on disk now. You then choose: `--keep prior` restores the old version so the write publishes again, or `--keep disk` keeps your edit and drops the write. Either way, both versions are backed up first.
+
+### How to use it
+
+```bash
+gbrain repair stuck-recovery --source notes                        # preview: each blocked file, its diff, the choices
+gbrain repair stuck-recovery --source notes --keep prior --apply --expect <hash> --yes
+gbrain repair stuck-recovery --source notes --keep disk --apply --expect <hash> --yes
+gbrain sources reconcile notes <slug> --brain host --preview       # after --keep disk: bring the page in line with your file
+```
+
+Run it on the host that owns the source. Only you choose: there is no default `--keep`, and `--all`, `gbrain doctor --remediate` and remediation plans never run it.
+
+### What each choice does
+
+| Your choice | Your file afterwards | The write that was publishing | The page in the database |
+|---|---|---|---|
+| `--keep prior` | The version from before the write | Queued again and published on the next pass (or ended with the failure it already had) | Updated by that publication |
+| `--keep disk` | Your edit, unchanged | Ended as a conflict (`source_changed`), or with the failure it already had | Unchanged until you reconcile it |
+
+### Things to watch
+
+- `--keep prior` discards your edit, and the write that was publishing then overwrites the file again. Check the diff and keep a copy if you need the edit.
+- A write that already finished is never changed. If its recovery is still waiting, the preview lists it as refused (`recovery_choice_refused`), because changing it would roll back committed content.
+- Shared-skill bundle recoveries (`recovery_bundle_unsupported`) and withdrawal-mirror recoveries (`recovery_effect_unsupported`) are listed and left alone, because either choice could undo a withdrawal.
+- If the file or the page changes after the preview, the apply refuses with `preview_changed`. Preview again and apply the new hash.
+
+### Itemized changes
+
+- **New repair kind `stuck-recovery`** (`src/core/repair/stuck-recovery.ts`, `src/core/persistence/recovery-resolve.ts`):
+  - It is explicit-only, preview-bound and needs destructive consent. A non-interactive apply without `--yes` exits 3 with the consent payload.
+  - `--request-id <uuid>` narrows the preview or apply to one request.
+  - The preview prints each file's prior and disk fingerprints (hash, size, mode), plus what recovery sees. It writes the prior, disk and unified-diff files with mode 0600 under `~/.gbrain/backups/stuck-recovery/<request>/<digest>/` and prints the `diff -u` command that reproduces the diff.
+  - The preview hash binds the recovery identity, the disk bytes and the page's database revision.
+- **Resolution behavior:**
+  - The apply takes the worktree lock with a bounded 10-second wait and refuses `writer_lock_unavailable` with nothing changed.
+  - `--keep prior` writes the prior bytes through the writer's own durable, confined publication, staged at the recovery's reserved restoration path. An older recovery first reserves that path within the recovery budget, and the apply refuses `queue_capacity` with nothing changed when the budget is full.
+  - `--keep disk` ends the request and leaves its recovery record unchanged, so the recovery bytes it reserved are released when the record is cleared.
+  - Each step is journaled in `op_checkpoints` (op `stuck-recovery-resolution`). A run killed at any point resumes with the same command, an identical apply replays its recorded result, and a resident writer of any version can finish a resolution this command started.
+- **New error codes:** `recovery_bundle_unsupported`, `recovery_choice_refused` and `recovery_effect_unsupported`, each with a section in `docs/guides/repair.md`.
+- **Tests:**
+  - `test/repair-stuck-recovery.test.ts` (PGLite) covers the preview, both choices on live requests with and without a recorded failure, terminal and effect refusals, the bounded lock wait, staging and byte accounting, kills at every step, mixed-version finish, replay and the consent exit.
+  - `test/e2e/repair-stuck-recovery-postgres.test.ts` covers a SIGKILL at each step on real Postgres.
+
+## [0.60.220.0] - 2026-10-14
+
+**New users who'd rather not run GBrain themselves now hear about hosted GBrain at gbrain.io, in the docs and in one CLI line at the moments self-hosting is hardest.** The README shows the official wordmark and a tip under the intro. Agents installing for a first-time user, or for someone with no machine that stays online, mention gbrain.io once in the install reply and never hold up a local install. The CLI prints one muteable `hosted_option` line when `gbrain setup` or an in-agent install creates a brain, when `gbrain mcp expose` writes its first receipt, and when expose stops at a Tailscale or service step.
+
+### Itemized changes
+
+- **Docs.** README: the wordmark from gbrain.io/branding (`docs/images/brand/gbrain-wordmark{,-light}.svg`, light variant in dark mode), a `[!TIP]` pointing first-time and no-server users at gbrain.io, and free setup help at support@gbrain.io. Two README paragraphs that repeat linked docs were shortened to stay under the 45,000-byte cap. AGENTS.md and INSTALL_FOR_AGENTS.md tell installing agents when to mention hosted. INSTALL.md, the personal-brain and company-brain tutorials and the remote-MCP guide each get one callout. The Grok Bot and Muse guides gain a hosted row in their path tables. Every link carries a `?ref=` tag for attribution.
+- **`hosted_option` coaching notice** (`src/core/onboard/hosted-option.ts`). A terminal gets one stderr line: `Hosted option: gbrain.io runs GBrain for you, nothing to keep online: <link>  (hide: gbrain notices mute hosted_option)`. An agent reading the output gets the standard notice block. It shows once on `gbrain setup <harness>` that created the brain (`ref=cli-setup`), once on an in-agent install that created the brain, naming that install's own launcher in the mute hint (`cli-in-agent`), once on the `gbrain mcp expose` run that writes the first receipt (`cli-mcp-expose`), and at each expose Tailscale or service friction exit (`cli-mcp-expose-friction`). It never shows on bare `gbrain init`, consent-pending, `--dry-run`, `--status`, `--remove`, a re-publish or a muted install, and it is never part of a consent request. No network call and no telemetry.
+- **Mute.** `gbrain notices mute hosted_option`, or `mute_notice` on stdio. `gbrain notices --help`, `notices list --json` (`muteable`) and the `mute_notice` `invalid_params` list now include it.
+- **Output changes.** `gbrain setup` on a new brain: `notices[]` is now `[first_run_decisions, hosted_option]`, and non-TTY human output gains a second `[AGENT]` block. `gbrain mcp expose --json` gains an optional `notices` key on the first-receipt run and at friction exits; the consent payload is unchanged.
+- **Flake fix.** `test/page-purge-journal-timeout-6511.test.ts` "[R2] a carrying request admitted and cancelled…" slept a fixed 50 ms before reading the queued write's row. On a slow CI Postgres the row wasn't there yet, the hook threw, and the purge ended `storage_error`. It now polls (bounded at 10 s) until the row exists and still asserts `queued`. Forcing the sleep to 0 reproduces the failure on the old code.
+- **Tests.** `test/hosted-option.test.ts` (new) covers the copy, the ref table, muting and both output forms. `test/setup.test.ts` and `test/mcp-expose.test.ts` pin where the notice shows and where it never does.
 
 ## [0.60.219.0] - 2026-10-14
 

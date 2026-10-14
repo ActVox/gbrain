@@ -16,8 +16,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runEvalLongMemEval } from '../src/commands/eval-longmemeval.ts';
-import { enableDecideEvalOverride } from '../src/core/ai/decide/config.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { enableDecideEvalOverride } from '../src/core/ai/decide/config.ts';
 import { countCJKAwareWords } from '../src/core/cjk.ts';
 import { CALL_PLAN_CHARS_PER_TOKEN, gateCommand, shellQuote } from '../src/eval/longmemeval/call-plan.ts';
 import { withEnv } from './helpers/with-env.ts';
