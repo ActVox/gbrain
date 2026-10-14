@@ -5040,6 +5040,20 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "boolean",
         "description": "Admin or memory_confirm: quarantined cards.",
         "fullSurfaceOnly": true
+      },
+      "counterparty": {
+        "type": "string",
+        "description": "Person or company (name or slug): adds a pulled brief of dated items about them.",
+        "fullSurfaceOnly": true
+      },
+      "intent": {
+        "type": "string",
+        "enum": [
+          "meeting",
+          "reply"
+        ],
+        "description": "With counterparty: the task the brief is for.",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",
