@@ -2741,7 +2741,7 @@
   "test/session-seat-synthesize.test.ts": 6746,
   "test/session-state-gc.test.ts": 511,
   "test/setup-branching.test.ts": 0,
-  "test/setup.test.ts": 130863,
+  "test/setup.test.ts": 276000,
   "test/shared-content-freshness.test.ts": 694,
   "test/shared-skills-adapter.test.ts": 6074,
   "test/shared-skills-admin-intent.test.ts": 1697,
