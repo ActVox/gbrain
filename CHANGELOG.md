@@ -23,6 +23,25 @@ identifiers and attribution are available in the pre-removal Git revision
 - **Sync**: a capacity preflight refuses `write_quota_insufficient` before the first admission; a later cap refusal ends the drain `resumable` / `capacity_paused`.
 - **Compaction**: `gbrain repair receipt-compaction` (explicit-only, preview-bound) compacts on demand, floored at the configured retention unless `--force`; compaction skips open sync runs and the newest sync receipt per worktree; the consumer records each pass (`persistence.maintenance.last_compaction`); doctor adds `persistence_compaction` and `persistence_counter_drift`.
 - **Known-failing writes**: maintenance refuses a page whose canonical file is gone before admission (`canonical_file_missing`) and holds back a write refused three times in a day (`persistence.maintenance.refusal_breaker_threshold`); doctor `maintenance_write_drift` lists them.
+## [0.60.230.0] - 2026-10-14
+
+**The entity-card latency test no longer fails on a busy CI machine while the card itself is fast (test and CI only, no product change).** The test checks that a card's p99 stays under 100 ms. On Ubicloud it failed at 107-125 ms whenever other memory-heavy tests shared its VM, or the hypervisor took CPU time from the guest, while the same calls took 36-41 ms run alone. It now measures the call's own thread CPU time, runs alone on its VM and re-times a call that hypervisor steal crossed. The 100 ms budget and every assertion are unchanged, and a 90 ms slowdown injected into the reference read still fails it.
+
+### Itemized changes
+
+- **CPU-time gate** (`test/entity-card-perf.slow.test.ts`): the p99 budget applies to the call's thread CPU time. PGLite runs every query in-process with no I/O, so that time is the card's latency on an idle machine, and it leaves out time spent waiting for a CPU. Wall-clock p99 is still logged, along with the five slowest samples (wall, thread CPU, heap change).
+- **Runs alone** (`scripts/run-slow-tests.sh`, `scripts/ci-ubicloud.ts`): `run-slow-tests.sh --dry-run-list-exclusive` lists latency contracts, and `ci:ubicloud` runs them as control items with nothing else on that VM, as GitHub CI's dedicated perf runner already does. A full GC before each measured loop keeps corpus-seeding garbage out of the window.
+- **Steal guard** (`test/helpers/hypervisor-steal.ts`): on guest kernels that bill steal to the running thread (Ubuntu 6.8 generic on GitHub and Ubicloud runners), the test reads the VM-wide steal counter around each call and times it again, at most 5 times, until steal did not move. Unit-tested with a stubbed `/proc/stat` (`test/hypervisor-steal.test.ts`).
+
+## [0.60.229.0] - 2026-10-14
+
+**When a gbrain process that was running a group of writes is killed, its queued group members are now reclaimed with the rest of its claims, within about 5 s, instead of after their 30 s claim lease (#6650 follow-up).** On Linux, a consumer on the same machine already took back the claims of a write owner it could prove dead. But the members of a group the owner had claimed and not yet started carried no record of their owner, so they waited out their lease and held up the rest of the catch-up behind them. Now each member records its owner when it is claimed. Members that the owner had started, and any member with a recovery record or a publication in progress, are handled exactly as before. In the convergence harness (seed 6650, 50 ms latency) the worst stall after the round-1 serve kill went from 30 s to 21 s.
+
+### Itemized changes
+
+- **Follower claims record their owner** (`src/core/persistence/journal.ts` `claimGroupFollowers`): a group follower's claim stamp holds its own token and the claiming process's identity (pid, nonce, pid namespace, boot id, start time), with no phase until its wave dispatches it. The dead-owner reclaim (`consumer.ts`) matches it by owner like any other claim. Because it has no `preparing` phase, the reclaim charges it no preparation attempt, as before.
+- **Readers of a follower stamp** (`claim-phase.ts` `claimStateOf`, `sync-drain.ts` `drainClaimOf`): a stamp with an owner and no phase reads as unrecorded for its phase and stall window, as an unstamped follower did, and now names its owner. Doctor ages it from when it was claimed, and `gbrain sources writer status` does not count its wait against the preparation budget it has not started.
+- **Owner probe** (`consumer-heartbeat.ts` `probeLiveFullConsumer`): the probe reads every live row of the host before it skips rows it can prove dead, so a live serve listed after eight dead rows is still found. Before, it read the first eight rows and could answer "no owner".
 
 ## [0.60.228.0] - 2026-10-14
 
