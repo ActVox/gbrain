@@ -61,6 +61,7 @@ import { plannerStatsRepair } from './planner-stats.ts';
 import { fencesRepair } from './fences.ts';
 import { slugConflictsRepair } from './slug-conflicts.ts';
 import { frontmatterKeysRepair } from './frontmatter-keys.ts';
+import { fileDriftRepair } from './file-drift.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -267,6 +268,15 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'to 1,000 pages, no file, body or embedding change. Each swept page advances its knowledge_revision once (a client holding an older revision '
       + 'gets one revision_conflict). Preview-bound: --apply --expect <hash> sweeps exactly the previewed set; runs only when named.',
   },
+  'file-drift': {
+    handler: fileDriftRepair, embeds: 'effect', checks: ['maintenance_write_drift'], explicit_only: true, preview_bound: true,
+    summary: 'Resolve pages whose canonical file differs from the database (source_changed / file_database_drift, #6643) through canonical reconciliation: '
+      + '--prefer file or --prefer database wins every ordinary field, within reconcile\'s protections (protected metadata stays as stored, tags are '
+      + 'the union, protected takes and private fact rows are kept; the preview lists each page\'s exceptions). Select with --slug <slug>, --request '
+      + '<conflict request id> or --all-drifted (refused across mixed drift classes unless --class <name> keeps one). Needs --source. The preview '
+      + 'writes each resolved result to a private artifact; --apply --expect <hash> applies exactly that set with request ids derived from the hash, '
+      + 'resumable, per page repaired, refused or changed_since_preview. Backups are reconcile\'s own. Trusted local CLI only; runs only when named.',
+  },
 };
 
 export const REPAIR_REGISTRY: readonly RepairKindSpec[] = REPAIR_KINDS.map(kind => ({ kind, ...SPECS[kind] }));
@@ -349,13 +359,14 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
      * `maxLlmUsd`: what this run may spend on a paid chat model (`spends: 'llm'` kinds; undefined = no run cap).
      */
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[];
-      slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number } = {}): Promise<RepairResult> {
+      slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number;
+      prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind, opts.registry);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag, spec,
         embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : [],
         explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
-        maxLlmUsd: run.maxLlmUsd, deadline: run.deadline });
+        maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass });
     },
   };
 }

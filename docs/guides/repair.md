@@ -141,6 +141,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `orphan-children` | `child_table_orphans` (also a `storage_corrupt` error) | Explicit-only. Deletes rows of page child tables (chunks, versions, tags, takes, raw data, timeline, links) whose page row no longer exists, and clears dangling `links.origin_page_id` and `files.page_id` references, each in one statement that rechecks the orphan condition. See [orphan children](#orphan-children). | `torn_pages`: page rows whose stored body cannot be read (torn TOAST). The preview names them; the repair never changes them. |
 | `planner-stats` | `planner_stats_stale` | Runs `ANALYZE` on the hot tables (pages, links, facts, takes, content_chunks, timeline_entries) whose planner statistics are stale, so search and graph reads stop planning as slow nested loops. PGLite also resets each table's pending row count; Postgres runs each `ANALYZE` with a 60 s statement timeout and a 2 s lock timeout. No journal admission, no user data changes, brain-wide. | none |
 | `contextual-mode` | `contextual_retrieval_coverage` (pages with no recorded mode) | Stamps the contextual retrieval mode on markdown pages imported without one (for example by a large `--no-embed` sync, or by a connector source on an older gbrain), exactly as a fresh import of the page would: the page, source and brain settings decide, and the per-chunk synopsis tier lands at the free title tier. It rebuilds projections only: no page write, no new page version and no request ID. A page whose stored vectors already match the stamped convention keeps them and queues no re-embedding; a page whose embedding input changes has only those vectors cleared and is re-embedded once, unless you pass `--no-embed`. | `unsealed_projection`: pages whose chunks lag their text; `gbrain embed --stale` or `safe-chunks` seals them first, and the next run stamps them. `embed_skip`: pages marked to skip embedding keep their stored vectors and are not stamped. |
+| `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one. See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -869,6 +870,65 @@ apply never writes it twice (`pending_elsewhere` when another writer holds that
 request). Attribution names the original writer. A replay the
 brain refuses reports `refused` with the code. The failed receipts stay as
 history.
+
+<a id="file-drift"></a>
+### File drift
+
+A page whose canonical file differs from its database copy refuses every
+coordinated write with `source_changed` (detail `file_database_drift`) until
+someone resolves it. Before #6643 nothing resolved them in bulk, and
+`synthesize_concepts` paid for a new narrative for each drifted concept on
+every cycle, then left another conflict receipt behind. Now maintenance checks
+the file before it spends or admits anything: a drifted concept is skipped
+(recorded in `dream.concepts.drift_skips`, released once the file and database
+agree), and a maintenance write to a drifted page refuses before admission
+without a request row. Doctor's `maintenance_write_drift` counts the drifted
+pages and the skips.
+
+`gbrain repair file-drift` resolves them through the same canonical
+reconciliation as `gbrain sources reconcile`, preferring one side. It is
+explicit-only, preview-bound and runs only from the trusted local CLI on the
+canonical owner host.
+
+**Say to your agent:** *"List the pages whose writes keep refusing
+source_changed, preview resolving them with the file winning, show me the
+exceptions, then apply after I agree."*
+
+```bash
+gbrain sources reconcile <id> --brain host --audit --conflicts   # read-only: receipts per slug, still drifted?, class
+gbrain repair file-drift --source <id> --slug notes/a --prefer file        # preview one page
+gbrain repair file-drift --source <id> --all-drifted --class structurally_additive --prefer file
+gbrain repair file-drift --source <id> --all-drifted --class structurally_additive --prefer file --apply --expect <hash>
+```
+
+Select pages with `--slug` (repeatable), `--request <id>` (a conflict receipt,
+repeatable) or `--all-drifted` (every page the conflict audit still finds
+drifted, up to 1,000). `--prefer file` takes the canonical file, `--prefer
+database` the database copy. The preferred side wins the title, type, body,
+timeline and ordinary frontmatter (a key only the other side has is dropped)
+inside reconcile's existing protections: protected metadata (provenance,
+trust, source and scan fields) stays as the database holds it, tags are the
+union of both sides, and protected takes and private fact rows are kept as
+stored. Each page's preview lists `exceptions`, the places where the result
+differs from the preferred side and why (`protected_metadata`, `scan_state`,
+`tags_union`, `protected_takes_or_private_facts`).
+
+The audit gives every drifted page one class: `structurally_additive`,
+`additive_with_suggestions`, `review_required`, `formatting_only` or `error`.
+`--all-drifted` refuses a selection that mixes classes (the message counts
+each one) unless `--class <name>` keeps exactly one, so a single `--prefer`
+never resolves differently shaped drift in bulk. Review `review_required`
+pages one at a time with `--slug`.
+
+The preview writes each page's resolved result to a private artifact under
+the gbrain config directory (`repair-previews/file-drift/<hash>.json`,
+outside every checkout) and prints the hash. `--apply --expect <hash>`
+applies exactly that set through the reconcile apply, with its preimage
+checks and retained backups, under request ids derived from the hash, so an
+interrupted apply resumes and never writes a page twice. Each page reports
+`repaired`, `refused` (with the code) or `changed_since_preview` (the file or
+the page changed after the preview; preview again). A changed set refuses
+with `preview_changed`.
 
 <a id="held-files"></a>
 ### Held files
@@ -1847,7 +1907,7 @@ Each heading below is the `docs` anchor a refusal carries.
 ### Explicit-only repair kinds
 
 `google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts`,
-`loop-facts` and `ontology-facts` run only when named: `gbrain repair <kind>` previews, and
+`loop-facts`, `ontology-facts` and `file-drift` run only when named: `gbrain repair <kind>` previews, and
 `gbrain repair <kind> --apply` applies (every kind but `google-file-modes`
 also needs `--expect <hash>`, so it applies exactly the previewed set; `google-file-modes` re-checks each file's owner,
 type and mode at apply time). They are excluded everywhere else:

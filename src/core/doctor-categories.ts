@@ -267,6 +267,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #6650: terminal write receipts that block work or are a gbrain-defect class (doctor/checks/persistence-requests.ts).
   'persistence_terminal_failures',
   'stale_frontmatter_keys',
+  'maintenance_write_drift',
   'managed_sync_not_moving',
   'persistence_session_timeouts',
   // #6317: consumer heartbeat rows and host identity (doctor/checks/persistence-consumers.ts).
