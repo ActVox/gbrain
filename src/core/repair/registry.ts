@@ -274,7 +274,8 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     summary: 'Resolve pages whose canonical file differs from the database (source_changed / file_database_drift, #6643) through canonical reconciliation: '
       + '--prefer file or --prefer database wins every ordinary field, within reconcile\'s protections (protected metadata stays as stored, tags are '
       + 'the union, protected takes and private fact rows are kept; the preview lists each page\'s exceptions). Select with --slug <slug>, --request '
-      + '<conflict request id> or --all-drifted (refused across mixed drift classes unless --class <name> keeps one). Needs --source. The preview '
+      + '<conflict request id> or --all-drifted (refused across mixed drift classes unless --class <name> keeps one), narrowed by --only/--skip '
+      + 'canonical file path globs (* within a segment, ** across; bound into the hash and the apply command). Needs --source. The preview '
       + 'writes each resolved result to a private artifact; --apply --expect <hash> applies exactly that set with request ids derived from the hash, '
       + 'resumable, per page repaired, refused or changed_since_preview. Backups are reconcile\'s own. Trusted local CLI only; runs only when named.',
   },
