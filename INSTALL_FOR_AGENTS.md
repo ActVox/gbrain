@@ -72,8 +72,8 @@ key ([Step 3](#step-3-create-the-brain)). On any other harness, `gbrain init --p
 > git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain
 > bun install && bun link
 > ```
->
-> Bun blocks gbrain's postinstall on `bun install -g` (`Blocked 1 postinstall`); a new install can skip it: the script only repeats the refusal every gbrain command prints on a Bun below the floor and runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists, and `gbrain setup` creates the brain and applies its setup migrations.
+
+Bun blocks gbrain's postinstall on `bun install -g` (`Blocked 1 postinstall`); a new install can skip it: the script only repeats the refusal every gbrain command prints on a Bun below the floor and runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists, and `gbrain setup` creates the brain and applies its setup migrations.
 
 ## Step 2: API Keys
 
