@@ -31,7 +31,12 @@ start here.
    `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && bun install && bun link`.
    `migrations_pending` with reason `wedged` is different: a migration failed three or more times in a row, so
    relay its `fix` (ask the user) instead of reinstalling: fix the cause, then `gbrain apply-migrations --force-retry <version>`.
-2. Init keyless memory: `gbrain init --pglite --no-embedding` (zero-config). For 1000+ files or
+
+Bun blocks gbrain's postinstall on `bun install -g` (`Blocked 1 postinstall`); a new install can skip it: the script only repeats the refusal every gbrain command prints on a Bun below the floor and runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists, and `gbrain setup` creates the brain and applies its setup migrations.
+
+2. Set up keyless memory for the harness: `gbrain setup claude-code` (on Codex, `gbrain setup codex`)
+   creates the brain if none exists, wires MCP and verifies it. Otherwise, or for any other harness, init keyless
+   memory: `gbrain init --pglite --no-embedding` (zero-config). For 1000+ files or
    multi-machine sync, init suggests Postgres + pgvector via Supabase.
 3. **STOP — ask the user about search mode.** `gbrain init` auto-applied a
    default but printed a 9-cell cost matrix (mode × downstream model)

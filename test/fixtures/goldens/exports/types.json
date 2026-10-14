@@ -5864,7 +5864,7 @@
           "private formatAbortMeta",
           "private formatEvictionTelemetry",
           "private gracefulShutdown",
-          "private gracefulShutdownFired",
+          "private gracefulShutdownReason",
           "private handleQuietHoursDefer",
           "private handlers",
           "private inFlight",

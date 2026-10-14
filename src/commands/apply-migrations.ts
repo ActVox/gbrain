@@ -25,6 +25,7 @@ import {
 } from '../core/migration-orchestration-lock.ts';
 import { loadCompletedMigrations, appendCompletedMigration, type CompletedMigrationEntry } from '../core/preferences.ts';
 import { migrations, compareVersions, type Migration, type OrchestratorOpts } from './migrations/index.ts';
+import { setRunEngineSharing, withRunEngineSession } from './migrations/run-engine.ts';
 import { migrationDeclinedError, readDeclinedMigrations } from './migrations/opt-out.ts';
 import {
   indexCompletedEntries,
@@ -550,7 +551,7 @@ export async function applyMigrations(args: string[]): Promise<{ exitCode: numbe
   let exitCode: number | undefined;
   try {
     await holdLock();
-    exitCode = await runLockedMigrations(cli, installed, holdLock, () => held.lock, report, args);
+    exitCode = await withRunEngineSession(() => runLockedMigrations(cli, installed, holdLock, () => held.lock, report, args));
   } catch (error) {
     if (error instanceof MigrationLeaseLostError) {
       console.error(`apply-migrations stopped: ${error.message}`);
@@ -674,6 +675,7 @@ async function runLockedMigrations(
 
   const completed = loadCompletedMigrations();
   const idx = indexCompleted(completed);
+  await setRunEngineSharing(true);
   const declined = await readDeclinedMigrations(loadConfig()!);
   const plan = buildPlan(idx, installed, cli.specificMigration, declined);
 
@@ -697,6 +699,7 @@ async function runLockedMigrations(
   // of a filesystem-only plan that renders identically to a clean database.
   const listExit = cli.requireDb && dbProbe.status === 'unreachable' ? 1 : 0;
   if (listExit) fail('database_unreachable', requireDbError(dbProbe));
+  if (cli.list || cli.dryRun) await setRunEngineSharing(false);
   if (cli.list && cli.json) { Object.assign(doc, listJson(plan, idx, installed, dbProbe)); doc.status = listExit ? doc.status : 'listed'; return listExit; }
   if (cli.list) { printList(plan, installed, dbProbe); return listExit; }
   if (cli.dryRun) {
@@ -738,12 +741,7 @@ async function runLockedMigrations(
   }
   const toRun: Migration[] = [...pendingWork, ...plan.applied.filter(migration => migration.reconcile)]
     .sort((left, right) => compareVersions(left.version, right.version));
-  if (toRun.length === 0 && plan.wedged.length) return failWedged(report);
-  if (toRun.length === 0) {
-    console.log('All migrations up to date.');
-    doc.status = 'up_to_date';
-    return 0;
-  }
+  if (toRun.length === 0) return upToDateOrWedged(report);
   if (!schemaBehind && pendingWork.length === 0) {
     console.log('All migrations up to date. This covers orchestrator checkpoints only; host publication and client activation are being rechecked.');
   }
@@ -753,6 +751,7 @@ async function runLockedMigrations(
   // --non-interactive mapping (persistent_install only), a preapproval, or a
   // TTY prompt. Refused: nothing runs, exit 3 with the consent payload.
   const consent = migrationConsentRequest(cli, toRun, args);
+  if (consent) await setRunEngineSharing(false);
   if (consent && !(await consentGate(consent, { json: cli.json }))) {
     doc.status = 'confirmation_required';
     return 3;
@@ -784,6 +783,7 @@ async function runLockedMigrations(
   for (const m of toRun) {
     // A lease lost while an earlier orchestrator ran stops the chain here.
     await holdLock();
+    await setRunEngineSharing(m.sharesRunEngine === true);
     const recordCheckpoint = !m.reconcile || !plan.applied.includes(m);
     console.log(`\n=== Applying migration v${m.version}: ${m.featurePitch.headline} ===`);
     try {
@@ -874,6 +874,7 @@ async function runLockedMigrations(
   }
 
   if (failed) return 1;
+  await setRunEngineSharing(true);
   // #6089: an orchestrator may migrate the schema itself, so read it again.
   return failSchemaBehind(report, args, await checkSchemaAfterOrchestrators({
     cfg: loadConfig()!, authorized, preflightVersion: dbProbe.status === 'connected' ? dbProbe.schemaVer : null, apply: migrateSchema,
@@ -952,6 +953,15 @@ async function preflightSchema(
 
 /** #6696 C5: the clearing step for a wedged migration; it needs the user, since the cause behind the partial runs must be fixed first. */
 function forceRetryArgv(version: string): string[] { return ['gbrain', COMMAND, '--force-retry', version]; }
+
+/** #6696 C5: nothing left to run is up to date only when no migration is wedged. */
+function upToDateOrWedged(report: RunReport): number {
+  const wedged = failWedged(report);
+  if (wedged !== undefined) return wedged;
+  console.log('All migrations up to date.');
+  report.doc.status = 'up_to_date';
+  return 0;
+}
 
 /** #6696 C5: a run that leaves a wedged migration fails `migrations_pending` (reason `wedged`, exit 1); undefined when none is wedged. */
 function failWedged(report: RunReport): number | undefined {
