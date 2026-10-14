@@ -309,12 +309,14 @@ export async function embedStalePages(
         )).map(r => r.chunk_index),
       );
       if (staleIdx.size === 0) continue;
-      const stale = existing.filter(c => staleIdx.has(c.chunk_index));
       const pageRow = prepared.snapshot.page;
-      const embeddings = await embedFn(
+      const metered = await meterPageBatch(engine, pageRow, existing.filter(c => staleIdx.has(c.chunk_index)), { signature: opts.embeddingSignature ?? null });
+      if (!metered) continue;
+      const stale = metered.chunks;
+      const embeddings = await spendGrant(metered.grant, () => embedFn(
         wrapChunkTextsForStoredMode(pageRow, stale),
         { abortSignal: opts.signal },
-      );
+      ));
       const staleIdxToEmbedding = new Map<number, Float32Array>();
       for (let j = 0; j < stale.length; j++) {
         staleIdxToEmbedding.set(stale[j].chunk_index, embeddings[j]);

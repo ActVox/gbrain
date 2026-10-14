@@ -204,7 +204,7 @@ export async function meterPageBatch<C extends { chunk_index: number; chunk_text
   }
   const { grant } = decision;
   const chunks = candidates.filter(c => grant.chunkIndexes.has(c.chunk_index));
-  if (grant.deferred) process.stderr.write(`[embed] ${page.slug}: per-page cap $${grant.capUsd} reached; ${grant.deferred} older chunk(s) stay keyword-only until it rises (${approve})\n`);
+  if (grant.deferred) process.stderr.write(`[embed] ${page.slug}: per-page cap $${grant.capUsd.toFixed(2)} reached; ${grant.deferred} older chunk(s) stay keyword-only until it rises (${approve})\n`);
   if (chunks.length) return { grant, chunks };
   await grant.settle({ ok: true });
   return null;
