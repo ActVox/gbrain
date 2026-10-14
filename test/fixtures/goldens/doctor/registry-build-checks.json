@@ -543,6 +543,10 @@
       },
       {
         "category": "brain",
+        "name": "partial_embedding"
+      },
+      {
+        "category": "brain",
         "name": "scraper_junk_pages"
       },
       {
@@ -780,6 +784,10 @@
       {
         "category": "brain",
         "name": "fence_integrity"
+      },
+      {
+        "category": "brain",
+        "name": "extraction_input_truncated"
       },
       {
         "category": "ops",

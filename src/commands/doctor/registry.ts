@@ -110,6 +110,7 @@ import { behaviorChangesEntry } from './checks/behavior-changes.ts';
 import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
+import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
 import { STOP_DOCTOR, type DoctorContext, type DoctorEntry } from './context.ts';
 import type { Check } from '../doctor.ts';
 import { infoCheck } from './check-fix.ts';
@@ -197,6 +198,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   persistenceConsumersEntry,
   atomHeldFailedEntry,
   fenceIntegrityEntry,
+  extractionInputTruncatedEntry,
   searchModeEntry,
 ];
 

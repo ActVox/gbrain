@@ -118,6 +118,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #6325: managed atom origins held after repeated extraction failures.
   'extract_atoms_held_failed',
   'extract_health',
+  // Large pages A7: page extractions that read only part of their input.
+  'extraction_input_truncated',
   'facts_embedding_width_consistency',
   'facts_extraction_health',
   'facts_health',

@@ -1252,6 +1252,18 @@ CREATE TABLE IF NOT EXISTS dream_synthesis_completions (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, idempotency_key)
 );
+CREATE TABLE IF NOT EXISTS page_extraction_state (
+  page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  pipeline TEXT NOT NULL CHECK (pipeline IN ('facts_backstop','extract_atoms','conversation_facts')),
+  pipeline_version INTEGER NOT NULL,
+  watermark_bytes BIGINT CHECK (watermark_bytes >= 0),
+  watermark_sha256 TEXT,
+  input_truncated JSONB,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, pipeline)
+);
+CREATE INDEX IF NOT EXISTS page_extraction_state_truncated_idx
+  ON page_extraction_state (pipeline, page_id) WHERE input_truncated IS NOT NULL;
 
 -- Durable concurrent persistence (migration 151).
 CREATE TABLE IF NOT EXISTS persistence_brain (
