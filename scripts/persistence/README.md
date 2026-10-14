@@ -559,8 +559,8 @@ class; elapsed times and the longest stall each sync printed are
 `[convergence]` lines.
 
 It skips unless `GBRAIN_TEST_CONVERGENCE=1`, no CI lane sets that, and a run
-takes about half an hour at 50 ms. Run it against the E2E Postgres plus a
-PgBouncer in front of it:
+takes about 18 minutes at 50 ms (under 2 at 0 ms). Run it against the E2E
+Postgres plus a PgBouncer in front of it:
 
 ```bash
 docker network create gbtest
