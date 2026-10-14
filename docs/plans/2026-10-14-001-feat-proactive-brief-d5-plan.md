@@ -375,7 +375,8 @@ a default-on flip (D6 gate).
 - Four-section issues: 9.
 - Critical gaps: 0.
 - Outside Voice: 12 findings, all accepted.
-- Unresolved decisions: 2 (below).
+- Unresolved decisions: 0 (the two open at review time were decided by the
+  owner, below).
 
 ## GSTACK REVIEW REPORT
 
@@ -394,9 +395,13 @@ a default-on flip (D6 gate).
   approval gate is pending for the owner (covered by the standing rule of
   2026-10-12).
 
-**UNRESOLVED DECISIONS:**
-- Deferring the "one certified contradiction" item from the owner's D5 brief
-  to D9, for the privacy and certification reasons above.
-- Whether the new `context_pack` parameter descriptions (model-visible on the
-  full and verbs surfaces) need the plan's preregistered Cat 40 smoke before
-  merge. That smoke is a paid run, and D5 is $0.
+**Owner decisions** (auto-approved under Garry's standing rule, 2026-10-12;
+recorded 2026-10-14):
+- The "one certified contradiction" item is deferred to D9, because stored
+  probe reports copy private takes verbatim and carry no source identity.
+- The Stop-hook "used" scorer is deferred to D6, whose T0 scorer measures
+  uptake.
+- The preregistered Cat 40 smoke runs before merge, against this PR's head
+  (lane 30, paid). The head is held still until it finishes.
+
+NO UNRESOLVED DECISIONS
