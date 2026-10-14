@@ -1,0 +1,64 @@
+/**
+ * #6696 B2 (Garry decision d2b): what a remote agent without admin scope may
+ * see of brain health — bands, never exact counters, slugs, paths, request ids
+ * or principal identities. Served by the read-scope operation
+ * `get_brain_health` and the thin client's `gbrain doctor --only
+ * persistence_capacity` when its token lacks admin.
+ *
+ * Capacity is brain-wide host state (one band for the brain and every
+ * principal); write failures are scoped to the caller's readable sources. A
+ * section that could not be read is `unknown`, never a clear band. Answers are
+ * cached per engine and scope for 60 s, so a polling agent costs one read a
+ * minute.
+ */
+import type { BrainEngine } from '../../core/engine.ts';
+import { capacityBands, readCapacityView, type CapacityBand, type DaysBand } from '../../core/persistence/capacity-view.ts';
+import { cachedTerminalSummary } from '../serve-http-metrics.ts';
+
+export const BRAIN_HEALTH_TTL_MS = 60_000;
+export type CountBand = 'none' | '1-9' | '10-99' | '100-999' | '1000+' | 'unknown';
+
+export function countBand(n: number | null | undefined): CountBand {
+  if (n === null || n === undefined || !Number.isFinite(n) || n < 0) return 'unknown';
+  return n === 0 ? 'none' : n < 10 ? '1-9' : n < 100 ? '10-99' : n < 1000 ? '100-999' : '1000+';
+}
+
+export interface BrainHealthBands {
+  schema_version: 1;
+  status: 'ok' | 'attention' | 'unknown';
+  capacity: { band: CapacityBand | 'unknown'; days: DaysBand; max_pct_band: '<80' | '80-95' | '>=95' | 'unknown'; forecast: 'available' | 'unavailable' };
+  write_failures: { band: CountBand; active_blockers: CountBand; window_days: number | null };
+  /** The read-only command an operator runs on the brain host for the full report. */
+  host_command: string[];
+}
+
+const cache = new WeakMap<BrainEngine, Map<string, { at: number; value: Promise<BrainHealthBands> }>>();
+
+/** `sourceIds`: the sources this caller may read (undefined: every source). */
+export function readBrainHealthBands(engine: BrainEngine, opts: { sourceIds?: string[] } = {}, now = Date.now()): Promise<BrainHealthBands> {
+  const key = opts.sourceIds ? [...opts.sourceIds].sort().join('\u0000') : '*';
+  const perEngine = cache.get(engine) ?? new Map();
+  cache.set(engine, perEngine);
+  const hit = perEngine.get(key);
+  if (hit && now - hit.at < BRAIN_HEALTH_TTL_MS) return hit.value;
+  const value = computeBands(engine, opts.sourceIds);
+  perEngine.set(key, { at: now, value });
+  return value;
+}
+
+async function computeBands(engine: BrainEngine, sourceIds: string[] | undefined): Promise<BrainHealthBands> {
+  const [capacity, failures] = await Promise.all([
+    readCapacityView(engine).then((view) => ({ ...capacityBands(view), forecast: view.forecast ? 'available' as const : 'unavailable' as const }))
+      .catch(() => ({ capacity: 'unknown' as const, days: 'unknown' as const, max_pct_band: 'unknown' as const, forecast: 'unavailable' as const })),
+    cachedTerminalSummary(engine).then((summary) => {
+      if (summary.status !== 'ok') return { band: 'unknown' as const, active_blockers: 'unknown' as const, window_days: null };
+      const visible = summary.sources.filter((s) => !sourceIds || sourceIds.includes(s.source_id));
+      return { band: countBand(visible.reduce((n, s) => n + s.unresolved.rows, 0)), active_blockers: countBand(visible.reduce((n, s) => n + s.active_blockers.length, 0)),
+        window_days: summary.window_days };
+    }),
+  ]);
+  const bands = { capacity: { band: capacity.capacity, days: capacity.days, max_pct_band: capacity.max_pct_band, forecast: capacity.forecast }, write_failures: failures };
+  const unknown = bands.capacity.band === 'unknown' || failures.band === 'unknown';
+  const attention = bands.capacity.band === 'low' || bands.capacity.band === 'critical' || (failures.active_blockers !== 'none' && failures.active_blockers !== 'unknown');
+  return { schema_version: 1, status: attention ? 'attention' : unknown ? 'unknown' : 'ok', ...bands, host_command: ['gbrain', 'doctor', '--tier', 'ops', '--json'] };
+}

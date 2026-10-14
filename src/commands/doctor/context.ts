@@ -14,6 +14,8 @@ import type { AutoFixReport } from '../../core/dry-fix.ts';
 import type { createProgress } from '../../core/progress.ts';
 import type { resolveSkillsDir } from '../check-resolvable.ts';
 import type { Check } from '../doctor.ts';
+import type { DoctorDeadline } from './budget.ts';
+import type { BrainHealth } from '../../core/types.ts';
 
 /** Returned by an entry to end the run; the checks gathered so far are the result. */
 export const STOP_DOCTOR: unique symbol = Symbol('STOP_DOCTOR');
@@ -72,6 +74,23 @@ export interface DoctorContext {
   only?: ReadonlySet<string> | null;
   /** #6696 B1: the tier this run selected (default `standard`). */
   tier: DoctorTier;
+  /** #6696 B1: the run's absolute deadline (absent in tests that build a context by hand). */
+  deadline?: DoctorDeadline;
+  /** #6696 B2: the remote caller's readable sources (run_doctor tier/only); undefined: brain-wide or `--source`. */
+  sourceIds?: string[];
+  /** #6696 B1: one `getHealth()` per run, shared by every entry that reads it (`doctorHealth`). */
+  healthMemo?: Promise<BrainHealth>;
+}
+
+/** #6696 B2: the source scope of a source-aware section: the remote caller's sources, else `--source`, else brain-wide. */
+export function doctorSourceIds(ctx: DoctorContext): string[] | undefined {
+  return ctx.sourceIds ?? (ctx.orphanRatioSourceId ? [ctx.orphanRatioSourceId] : undefined);
+}
+
+/** #6696 B1: the brain health of this run, read once (graph coverage and the embeddings check both use it). */
+export function doctorHealth(ctx: DoctorContext): Promise<BrainHealth> {
+  ctx.healthMemo ??= connectedEngine(ctx).getHealth();
+  return ctx.healthMemo;
 }
 
 /**

@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 232698,
-    "stdoutSha256": "efcd4e38b964afc730f5c34369c4f9f3d8cec4ad1e885a6df5186b69830924e8",
+    "stdoutBytes": 233904,
+    "stdoutSha256": "d5850e9b9c861afa85440c8f3c47adb3ce22998c744278f19fec262bebe08e42",
     "toolNames": [
       "remember",
       "entity",
@@ -47,6 +47,7 @@
       "get_stats",
       "get_health",
       "run_doctor",
+      "get_brain_health",
       "get_versions",
       "revert_version",
       "get_brain_identity",
@@ -2340,11 +2341,44 @@
         "scope": "admin"
       },
       {
-        "description": "Run brain health checks and return a structured DoctorReport (thin-client doctor surface).",
+        "description": "Run brain health checks and return a structured DoctorReport (thin-client doctor surface). tier \"ops\": only the operational sections under a 4 s deadline; only: just the named checks.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
         "name": "run_doctor",
+        "parameters": {
+          "only": "array?",
+          "tier": "string?"
+        },
+        "required_scopes": [],
+        "schema": {
+          "properties": {
+            "only": {
+              "description": "Run just these checks (doctor check names, for example persistence_capacity).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "tier": {
+              "description": "ops: capacity, write failures, embedding state, sync movement, compaction, serve build and schema pack, under one 4 s deadline. Omit for the focused remote report.",
+              "enum": [
+                "ops"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "scope": "admin"
+      },
+      {
+        "description": "Brain health as bands for agents without admin scope: write capacity (ok|low|critical with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.",
+        "idempotent": true,
+        "local_only": false,
+        "mutating": false,
+        "name": "get_brain_health",
         "parameters": {},
         "required_scopes": [],
         "schema": {
@@ -2352,7 +2386,7 @@
           "required": [],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "read"
       },
       {
         "description": "Page version history, newest snapshot first. Trusted local and admin callers also get written_by and archived_by (who wrote each snapshot and whose write archived it). `limit` returns only the newest N; `include_body: false` returns metadata only.",

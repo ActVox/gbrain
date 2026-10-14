@@ -50,6 +50,21 @@ describe('day-zero keyless doctor', () => {
     }
   }, 120_000);
 
+  test('doctor --tier ops --json (#6696): no WARN or FAIL, complete, PGLite-skipped sections not_applicable', async () => {
+    const run = await runGbrain(h, ['doctor', '--tier', 'ops', '--json']);
+    expect(run.exitCode).toBe(0);
+    const report = run.json as Report & { tier?: string; complete?: boolean; unknown_sections?: string[]; budget_ms?: number };
+    const notOk = report.checks.filter(c => c.status !== 'ok').map(c => `${c.status} ${c.name}: ${c.message}`);
+    expect(notOk).toEqual([]);
+    expect(report.tier).toBe('ops');
+    expect(report.complete).toBe(true);
+    expect(report.unknown_sections).toEqual([]);
+    expect(report.budget_ms).toBe(4000);
+    const skipped = report.checks.filter(c => (c as { details?: { health?: string } }).details?.health === 'not_applicable');
+    expect(skipped.length).toBeGreaterThan(0);
+    for (const c of skipped) expect(c.severity, c.name).toBe('info');
+  }, 120_000);
+
   test('human doctor on a pipe keeps the heartbeat within 10 stderr lines', async () => {
     const run = await runGbrain(h, ['doctor']);
     expect(run.exitCode).toBe(0);

@@ -257,6 +257,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'oauth_confidential_client_health',
   'orphan_clones',
   'persistence_capacity',
+  // #6696 B1: receipt compaction freshness, an ops-tier section (doctor/checks/ops-sections.ts).
+  'receipt_compaction',
   'worktree_refresh_stuck',
   'managed_guard_schema_drift',
   'publication_refusals',

@@ -170,5 +170,6 @@ async function runServeBuildDrift(ctx: DoctorContext): Promise<Check[]> {
 export const serveBuildDriftEntry: DoctorEntry = {
   name: 'serve_build_drift',
   emits: ['serve_build_drift'],
+  tier: 'ops',
   run: runServeBuildDrift,
 };
