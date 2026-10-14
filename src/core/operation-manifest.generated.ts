@@ -222,7 +222,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)"
     },
-    "description": "Read a page by slug. Pages over 256 KB come back as an outline plus a first window, never a partial body in compiled_truth/content: read on with body: 'window' (lines, bytes, around_chunk_id from a search hit, or next_cursor). body: 'none' returns just the revision and size for edit_page/put_page. Whole markdown for a round trip: include_content:true (refused when the page does not fit this connection).",
+    "description": "Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.",
     "params": {
       "slug": {
         "type": "string",
@@ -235,7 +235,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_content": {
         "type": "boolean",
-        "description": "Full markdown + revision (body: 'full')."
+        "description": "Markdown + revision, to edit."
       },
       "content_only": {
         "type": "boolean",
@@ -250,11 +250,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "outline",
           "window"
         ],
-        "description": "auto (default: whole body up to 256 KB, else outline + first window), full, none (revision + size only), outline, window."
+        "description": "auto: whole up to 256 KB, else outline + window. none: revision + size.",
+        "fullSurfaceOnly": true
       },
       "lines": {
         "type": "object",
-        "description": "Window selector: 1-based lines.",
+        "description": "Window: 1-based lines.",
         "properties": {
           "from": {
             "type": "number",
@@ -264,11 +265,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
             "type": "number",
             "required": true
           }
-        }
+        },
+        "fullSurfaceOnly": true
       },
       "bytes": {
         "type": "object",
-        "description": "Window selector: UTF-8 bytes, snapped to line starts.",
+        "description": "Window: UTF-8 bytes (snapped to a line start).",
         "properties": {
           "offset": {
             "type": "number",
@@ -278,23 +280,28 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
             "type": "number",
             "required": true
           }
-        }
+        },
+        "fullSurfaceOnly": true
       },
       "around_chunk_id": {
         "type": "number",
-        "description": "Window selector: center on a search hit chunk_id."
+        "description": "Window around a search hit chunk_id.",
+        "fullSurfaceOnly": true
       },
       "context_lines": {
         "type": "number",
-        "description": "Lines around around_chunk_id (default 20)."
+        "description": "Lines around around_chunk_id (20).",
+        "fullSurfaceOnly": true
       },
       "cursor": {
         "type": "string",
-        "description": "Window selector: next_cursor from the previous window."
+        "description": "next_cursor: read on.",
+        "fullSurfaceOnly": true
       },
       "max_bytes": {
         "type": "number",
-        "description": "Window size in bytes (default 40000)."
+        "description": "Window bytes (40000).",
+        "fullSurfaceOnly": true
       },
       "view": {
         "type": "string",
@@ -302,19 +309,21 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "read",
           "markdown"
         ],
-        "description": "Window text: read (default) or markdown (round-trip content)."
+        "description": "markdown: page the round-trip content.",
+        "fullSurfaceOnly": true
       },
       "outline_from": {
         "type": "number",
-        "description": "Outline entry to start from (next_from_index)."
+        "description": "Outline next_from_index.",
+        "fullSurfaceOnly": true
       },
       "include_deleted": {
         "type": "boolean",
-        "description": "Include soft-deleted pages."
+        "description": "Soft-deleted too."
       },
       "include_timeline_entries": {
         "type": "boolean",
-        "description": "Also return timeline rows."
+        "description": "Timeline rows too."
       },
       "grammar_diagnostics": {
         "type": "boolean",
@@ -357,7 +366,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "put_page",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Pages over 256 KB: use edit_page; content under half such a page is refused (page_shrink_refused) unless allow_shrink:true. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
+    "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
     "params": {
       "source_id": {
         "type": "string",
@@ -403,7 +412,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "allow_shrink": {
         "type": "boolean",
         "required": false,
-        "description": "Allow content under half a >256 KB page."
+        "description": "Allow content under half a >256 KB page.",
+        "fullSurfaceOnly": true
       },
       "drop_timeline": {
         "type": "boolean",
@@ -756,7 +766,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "the diff is the caller's own authorized view of the page it just edited (the get_page boundary), secret-redacted when created because the receipt retains it"
     },
-    "description": "Change part of a page: prefer this over put_page for small changes and for any page over 256 KB. expected_revision is the page's revision (get_page body:'none' returns just that). Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
+    "description": "Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
     "params": {
       "slug": {
         "type": "string",
@@ -766,7 +776,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "expected_revision": {
         "type": "string",
         "required": true,
-        "description": "From get_page (body:'none' is enough)."
+        "description": "From get_page include_content:true."
       },
       "edits": {
         "type": "array",

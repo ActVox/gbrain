@@ -11,10 +11,10 @@ const edit_page: Operation = {
   name: 'edit_page',
   idempotent: true,
   outputRedaction: { exempt: "the diff is the caller's own authorized view of the page it just edited (the get_page boundary), secret-redacted when created because the receipt retains it" },
-  description: "Change part of a page: prefer this over put_page for small changes and for any page over 256 KB. expected_revision is the page's revision (get_page body:'none' returns just that). Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
+  description: 'Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.',
   params: {
     slug: { type: 'string', description: 'Page slug.', required: true },
-    expected_revision: { type: 'string', required: true, description: "From get_page (body:'none' is enough)." },
+    expected_revision: { type: 'string', required: true, description: 'From get_page include_content:true.' },
     edits: {
       type: 'array', required: true,
       description: `1 to ${EDIT_PAGE_MAX_EDITS} {old_text, new_text} replacements.`,

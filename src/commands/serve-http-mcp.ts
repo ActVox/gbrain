@@ -407,7 +407,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
       // D2: a callable tool the advertised surface leaves out of tools/list (same rule as listMcpTools).
       isListed: async op => !!authInfo.surface || advertisedOps([op], surface, await resolveAdvertisedSurface(engine, ctx.config)).length > 0,
       resultRows,
-      thinClient,
+      ...(thinClient ? { thinClient: true } : {}),
       // v0.31 follow-up fix: thread auth so the whoami op (and any
       // future scope-aware handlers) can introspect the caller. The
       // original D12/eE1 refactor moved dispatch into dispatchToolCall

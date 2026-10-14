@@ -40,8 +40,11 @@ contract in `get_brain_identity` as `capabilities: ["large_pages_v1"]`.
 Passing two selectors, a selector with `body: "outline"`, or `include_content`
 with a partial mode is `invalid_params` with an example. A window response
 carries `window {text, byte_start, byte_end, line_start, line_end}`,
-`size {total_bytes, total_lines}`, `truncated` and `next_cursor` when more
-follows. A line longer than the window is cut on a character boundary and
+`size {total_bytes, total_lines}`, `truncated`, and when more follows
+`next_cursor` plus `next`, the exact `get_page` call that reads on. The starter
+MCP surface advertises none of the window parameters (its tool list has a fixed
+size budget); it accepts all of them, so following `next` or a refusal's fix works
+there too. A line longer than the window is cut on a character boundary and
 marked `forced_cut`.
 
 `around_chunk_id` uses the chunk's recorded position (`anchor: "stored_span"`).

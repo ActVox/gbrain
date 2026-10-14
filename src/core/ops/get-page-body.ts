@@ -58,15 +58,15 @@ const AUTO_WINDOW_BYTES = 16_000;
 export const LARGE_PAGES_CAPABILITY = 'large_pages_v1';
 
 export const GET_PAGE_BODY_PARAMS: Record<string, ParamDef> = {
-  body: { type: 'string', enum: [...BODY_MODES], description: "auto (default: whole body up to 256 KB, else outline + first window), full, none (revision + size only), outline, window." },
-  lines: { type: 'object', description: 'Window selector: 1-based lines.', properties: { from: { type: 'number', required: true }, count: { type: 'number', required: true } } },
-  bytes: { type: 'object', description: 'Window selector: UTF-8 bytes, snapped to line starts.', properties: { offset: { type: 'number', required: true }, length: { type: 'number', required: true } } },
-  around_chunk_id: { type: 'number', description: 'Window selector: center on a search hit chunk_id.' },
-  context_lines: { type: 'number', description: 'Lines around around_chunk_id (default 20).' },
-  cursor: { type: 'string', description: 'Window selector: next_cursor from the previous window.' },
-  max_bytes: { type: 'number', description: 'Window size in bytes (default 40000).' },
-  view: { type: 'string', enum: ['read', 'markdown'], description: "Window text: read (default) or markdown (round-trip content)." },
-  outline_from: { type: 'number', description: 'Outline entry to start from (next_from_index).' },
+  body: { type: 'string', enum: [...BODY_MODES], description: 'auto: whole up to 256 KB, else outline + window. none: revision + size.', fullSurfaceOnly: true },
+  lines: { type: 'object', description: 'Window: 1-based lines.', properties: { from: { type: 'number', required: true }, count: { type: 'number', required: true } }, fullSurfaceOnly: true },
+  bytes: { type: 'object', description: 'Window: UTF-8 bytes (snapped to a line start).', properties: { offset: { type: 'number', required: true }, length: { type: 'number', required: true } }, fullSurfaceOnly: true },
+  around_chunk_id: { type: 'number', description: 'Window around a search hit chunk_id.', fullSurfaceOnly: true },
+  context_lines: { type: 'number', description: 'Lines around around_chunk_id (20).', fullSurfaceOnly: true },
+  cursor: { type: 'string', description: 'next_cursor: read on.', fullSurfaceOnly: true },
+  max_bytes: { type: 'number', description: 'Window bytes (40000).', fullSurfaceOnly: true },
+  view: { type: 'string', enum: ['read', 'markdown'], description: 'markdown: page the round-trip content.', fullSurfaceOnly: true },
+  outline_from: { type: 'number', description: 'Outline next_from_index.', fullSurfaceOnly: true },
 };
 
 type Selector =
@@ -262,6 +262,12 @@ async function aroundChunk(ctx: OperationContext, page: Page, doc: PageDocument,
   return { window: null, chunkText: row.chunk_text, anchor: 'chunk_only' };
 }
 
+/** next_cursor plus `next`, the exact call that reads on (the starter surface does not advertise `cursor`; dispatch accepts it). */
+function setNext(out: Record<string, unknown>, page: Page, cursor: string, markdown: boolean): void {
+  out.next_cursor = cursor;
+  out.next = { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, cursor, ...(markdown ? { view: 'markdown' } : {}) } };
+}
+
 /**
  * The partial (none / outline / window / auto-above-threshold) response. Never
  * carries compiled_truth, timeline or content.
@@ -303,7 +309,7 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
       const first = windowFrom(doc.bytes, 0, await windowBudget(ctx, req.maxBytes, AUTO_WINDOW_BYTES));
       out.window = { ...first, text: envelopeText(first.text, quarantined, trust) };
       out.truncated = true;
-      if (first.byte_end < doc.bytes.length) out.next_cursor = encodeCursor({ page_id: page.id, revision, view: 'read', offset: first.byte_end, max_bytes: req.maxBytes ?? DEFAULT_WINDOW_BYTES });
+      if (first.byte_end < doc.bytes.length) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: 'read', offset: first.byte_end, max_bytes: req.maxBytes ?? DEFAULT_WINDOW_BYTES }), false);
       out.auto_reason = 'over_inline_bytes';
       return out;
     }
@@ -350,8 +356,8 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
     if (!win) return { ...out, truncated: true };
     out.window = { ...win, text: envelopeText(win.text, quarantined, trust) };
     out.truncated = win.byte_start > 0 || win.byte_end < doc.bytes.length;
-    if (win.byte_end < doc.bytes.length) out.next_cursor = encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax });
-    else delete out.next_cursor;
+    if (win.byte_end < doc.bytes.length) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax }), markdown);
+    else { delete out.next_cursor; delete out.next; }
     if (!Number.isFinite(cap) || attempt >= 6) return out;
     const frame = encodedFrameBytes({ content: [{ type: 'text', text: JSON.stringify(out) }] }) + ENVELOPE_RESERVE_BYTES - FRAME_RESERVE_BYTES;
     if (frame <= cap || win.byte_end - win.byte_start <= 1) return out;

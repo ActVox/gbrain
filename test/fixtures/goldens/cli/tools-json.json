@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 236893,
-    "stdoutSha256": "0d987d4cf6f92c722d85d254f20b45ad12d35e225a3d5087bec80b949f0302a3",
+    "stdoutBytes": 236239,
+    "stdoutSha256": "9f6aab59c8b33e9f2318241460f39bafd43ad8aaeeafa2e88cea1bf9e808b2db",
     "toolNames": [
       "remember",
       "entity",
@@ -393,7 +393,7 @@
         "scope": "write"
       },
       {
-        "description": "Read a page by slug. Pages over 256 KB come back as an outline plus a first window, never a partial body in compiled_truth/content: read on with body: 'window' (lines, bytes, around_chunk_id from a search hit, or next_cursor). body: 'none' returns just the revision and size for edit_page/put_page. Whole markdown for a round trip: include_content:true (refused when the page does not fit this connection).",
+        "description": "Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -423,11 +423,11 @@
         "schema": {
           "properties": {
             "around_chunk_id": {
-              "description": "Window selector: center on a search hit chunk_id.",
+              "description": "Window around a search hit chunk_id.",
               "type": "number"
             },
             "body": {
-              "description": "auto (default: whole body up to 256 KB, else outline + first window), full, none (revision + size only), outline, window.",
+              "description": "auto: whole up to 256 KB, else outline + window. none: revision + size.",
               "enum": [
                 "auto",
                 "full",
@@ -439,7 +439,7 @@
             },
             "bytes": {
               "additionalProperties": false,
-              "description": "Window selector: UTF-8 bytes, snapped to line starts.",
+              "description": "Window: UTF-8 bytes (snapped to a line start).",
               "properties": {
                 "length": {
                   "type": "number"
@@ -459,11 +459,11 @@
               "type": "boolean"
             },
             "context_lines": {
-              "description": "Lines around around_chunk_id (default 20).",
+              "description": "Lines around around_chunk_id (20).",
               "type": "number"
             },
             "cursor": {
-              "description": "Window selector: next_cursor from the previous window.",
+              "description": "next_cursor: read on.",
               "type": "string"
             },
             "fuzzy": {
@@ -475,11 +475,11 @@
               "type": "boolean"
             },
             "include_content": {
-              "description": "Full markdown + revision (body: 'full').",
+              "description": "Markdown + revision, to edit.",
               "type": "boolean"
             },
             "include_deleted": {
-              "description": "Include soft-deleted pages.",
+              "description": "Soft-deleted too.",
               "type": "boolean"
             },
             "include_quarantined": {
@@ -487,12 +487,12 @@
               "type": "boolean"
             },
             "include_timeline_entries": {
-              "description": "Also return timeline rows.",
+              "description": "Timeline rows too.",
               "type": "boolean"
             },
             "lines": {
               "additionalProperties": false,
-              "description": "Window selector: 1-based lines.",
+              "description": "Window: 1-based lines.",
               "properties": {
                 "count": {
                   "type": "number"
@@ -508,7 +508,7 @@
               "type": "object"
             },
             "max_bytes": {
-              "description": "Window size in bytes (default 40000).",
+              "description": "Window bytes (40000).",
               "type": "number"
             },
             "min_trust": {
@@ -524,7 +524,7 @@
               "type": "string"
             },
             "outline_from": {
-              "description": "Outline entry to start from (next_from_index).",
+              "description": "Outline next_from_index.",
               "type": "number"
             },
             "slug": {
@@ -536,7 +536,7 @@
               "type": "string"
             },
             "view": {
-              "description": "Window text: read (default) or markdown (round-trip content).",
+              "description": "markdown: page the round-trip content.",
               "enum": [
                 "read",
                 "markdown"
@@ -552,7 +552,7 @@
         "scope": "read"
       },
       {
-        "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Pages over 256 KB: use edit_page; content under half such a page is refused (page_shrink_refused) unless allow_shrink:true. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
+        "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -986,7 +986,7 @@
         "scope": "read"
       },
       {
-        "description": "Change part of a page: prefer this over put_page for small changes and for any page over 256 KB. expected_revision is the page's revision (get_page body:'none' returns just that). Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
+        "description": "Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -1024,7 +1024,7 @@
               "type": "array"
             },
             "expected_revision": {
-              "description": "From get_page (body:'none' is enough).",
+              "description": "From get_page include_content:true.",
               "type": "string"
             },
             "request_id": {
