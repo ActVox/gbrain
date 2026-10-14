@@ -187,6 +187,7 @@
       "  [OK] host_identity_mismatch: This process's host identity (<home>/.gbrain/persistence/host.json) owns every binding this filesystem holds.",
       "  [OK] extract_atoms_held_failed: No managed atom page or transcript is held after repeated extraction failures.",
       "  [OK] fence_integrity: No malformed facts or takes fence is held, stored or waiting in a checkout (2 source(s) scanned).",
+      "  [OK] ghost_pages: No live page is missing its canonical file (5 page(s) inspected).",
       "  [OK] search_mode: Mode: conservative (no per-key overrides — mode bundle is canonical).",
       "  [OK] hidden_by_search_policy: No pages hidden by search-exclude policy.",
       "  [OK] eval_drift: No retrieval-affecting files changed in working tree.",

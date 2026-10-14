@@ -15,6 +15,7 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { capacityBands, readCapacityView, type CapacityBand, type DaysBand } from '../../core/persistence/capacity-view.ts';
 import { cachedTerminalSummary } from '../serve-http-metrics.ts';
 import { readEmbeddingState } from '../../core/embedding-state.ts';
+import { readGhostPages } from '../../core/ghost-pages.ts';
 
 export const BRAIN_HEALTH_TTL_MS = 60_000;
 export type CountBand = 'none' | '1-9' | '10-99' | '100-999' | '1000+' | 'unknown';
@@ -31,6 +32,8 @@ export interface BrainHealthBands {
   write_failures: { band: CountBand; active_blockers: CountBand; window_days: number | null };
   /** Chunks search cannot fully see (ops-mode, index-backed: `lower_bound` when some states were not counted). */
   unsearchable: { band: CountBand; lower_bound: boolean };
+  /** Live pages whose canonical file is gone on the owner host; `reason` when not counted here (for example not_owner_host). */
+  ghost_pages: { band: CountBand; reason?: string };
   /** The read-only command an operator runs on the brain host for the full report. */
   host_command: string[];
 }
@@ -50,7 +53,7 @@ export function readBrainHealthBands(engine: BrainEngine, opts: { sourceIds?: st
 }
 
 async function computeBands(engine: BrainEngine, sourceIds: string[] | undefined): Promise<BrainHealthBands> {
-  const [capacity, failures, unsearchable] = await Promise.all([
+  const [capacity, failures, unsearchable, ghostPages] = await Promise.all([
     readCapacityView(engine).then((view) => ({ ...capacityBands(view), forecast: view.forecast ? 'available' as const : 'unavailable' as const }))
       .catch(() => ({ capacity: 'unknown' as const, days: 'unknown' as const, max_pct_band: 'unknown' as const, forecast: 'unavailable' as const })),
     cachedTerminalSummary(engine).then((summary) => {
@@ -62,9 +65,13 @@ async function computeBands(engine: BrainEngine, sourceIds: string[] | undefined
     readEmbeddingState(engine, { mode: 'ops', ...(sourceIds ? { sourceIds } : {}) })
       .then((state) => state.status === 'unknown' ? { band: 'unknown' as const, lower_bound: false } : { band: countBand(state.unsearchable), lower_bound: state.unsearchable_complete === false })
       .catch(() => ({ band: 'unknown' as const, lower_bound: false })),
+    readGhostPages(engine, { sampleLimit: 0, ...(sourceIds ? { sourceIds } : {}) })
+      .then((g): { band: CountBand; reason?: string } => g.status === 'known' ? { band: countBand(g.count) } : { band: 'unknown', ...(g.reason ? { reason: g.reason } : {}) })
+      .catch(() => ({ band: 'unknown' as const })),
   ]);
-  const bands = { capacity: { band: capacity.capacity, days: capacity.days, max_pct_band: capacity.max_pct_band, forecast: capacity.forecast }, write_failures: failures, unsearchable };
+  const bands = { capacity: { band: capacity.capacity, days: capacity.days, max_pct_band: capacity.max_pct_band, forecast: capacity.forecast }, write_failures: failures, unsearchable, ghost_pages: ghostPages };
   const unknown = bands.capacity.band === 'unknown' || failures.band === 'unknown';
-  const attention = bands.capacity.band === 'low' || bands.capacity.band === 'critical' || (failures.active_blockers !== 'none' && failures.active_blockers !== 'unknown');
+  const attention = bands.capacity.band === 'low' || bands.capacity.band === 'critical' || (failures.active_blockers !== 'none' && failures.active_blockers !== 'unknown')
+    || (ghostPages.band !== 'none' && ghostPages.band !== 'unknown');
   return { schema_version: 1, status: attention ? 'attention' : unknown ? 'unknown' : 'ok', ...bands, host_command: ['gbrain', 'doctor', '--tier', 'ops', '--json'] };
 }

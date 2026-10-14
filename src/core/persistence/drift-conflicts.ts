@@ -88,6 +88,7 @@ export async function liveFileDrift(engine: BrainEngine, sourceId: string, slug:
       ...(file.expectedBeforeHash ? { file_hash: file.expectedBeforeHash } : {}) };
   } catch (error) {
     if (!(error instanceof OperationError)) return { still_present: null, reason: 'error' };
+    if (error.detail === 'canonical_file_missing') return { still_present: null, reason: 'canonical_file_missing' };
     if (error.detail !== 'file_database_drift') {
       return { still_present: null, reason: error.code === 'source_changed' ? 'file_missing' : error.code };
     }

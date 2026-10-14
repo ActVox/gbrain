@@ -2493,6 +2493,28 @@
           "status": "ok"
         },
         {
+          "category": "brain",
+          "details": {
+            "by_source": [
+              {
+                "count": 0,
+                "source_id": "default",
+                "status": "known"
+              }
+            ],
+            "count": 0,
+            "docs": "docs/guides/repair.md#ghost-pages",
+            "exact": true,
+            "inspected": 0,
+            "samples": [],
+            "truncated": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No live page is missing its canonical file (0 page(s) inspected).",
+          "name": "ghost_pages",
+          "status": "ok"
+        },
+        {
           "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "Mode: conservative (no per-key overrides — mode bundle is canonical).",

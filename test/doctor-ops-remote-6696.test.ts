@@ -86,6 +86,7 @@ describe('get_brain_health bands', () => {
     expect(acme.capacity.forecast).toBe('unavailable');
     expect(['none', '1-9', '10-99', '100-999', '1000+', 'unknown']).toContain(acme.unsearchable.band);
     expect(typeof acme.unsearchable.lower_bound).toBe('boolean');
+    expect(['none', '1-9', '10-99', '100-999', '1000+', 'unknown']).toContain(acme.ghost_pages.band);
     expect(acme.host_command).toEqual(['gbrain', 'doctor', '--tier', 'ops', '--json']);
     const wire = JSON.stringify([acme, fund, all]);
     expect(wire).not.toMatch(/alice-example|"12"|:12\b|:15\b|:3\b/);
