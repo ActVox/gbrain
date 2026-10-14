@@ -538,7 +538,7 @@
                   "window_days": 1
                 }
               ],
-              "table_bytes": 262144,
+              "table_bytes": "<volatile>",
               "thresholds": {
                 "fail_days": 7,
                 "fail_pct": 95,
@@ -1329,6 +1329,7 @@
             "docs": "docs/guides/troubleshooting.md#maintenance-write-drift",
             "repair": "file-drift",
             "sources": [],
+            "suppressed": [],
             "window_sequences": 20000
           },
           "message": "No page whose writes refuse source_changed still has a canonical file that differs from the database.",
