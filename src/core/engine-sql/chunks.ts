@@ -22,7 +22,8 @@ import { assertPageRevision } from '../page-state/types.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { Chunk, ChunkInput, ChunklessPageRow, ResolvedColumn, StaleChunkRow } from '../types.ts';
 import { rowToChunk, validateSlug } from '../utils.ts';
-import { sanitizeText } from '../batch-rows.ts';
+import { createHash } from 'node:crypto';
+import { jsonRowBatches, sanitizeText } from '../batch-rows.ts';
 import {
   normalizeEngineColumn,
   vectorCastSuffix,
@@ -31,7 +32,7 @@ import {
   COLUMN_NAME_REGEX,
   EmbeddingColumnNotRegisteredError,
 } from '../search/embedding-column.ts';
-import { chunkWriteInvalidation, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from '../search/safe-chunks.ts';
+import { chunkWriteInvalidations, currentTextProjectionFilter, movableChunkSql, requiresSafeChunks, safeChunksFilter } from '../search/safe-chunks.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import { splitEmbeddingSignature, lockEmbeddingSources } from '../embedding-invalidation.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from '../embed-skip.ts';
@@ -116,14 +117,10 @@ export async function upsertChunksOnce(
     if (seal === undefined) {
       // A fragment write cannot certify the full-body fence boundary. Import seals
       // only after its complete replacement succeeds in the same transaction.
-      const invalidation = chunkWriteInvalidation(pageId, chunks);
-      await exec.unsafe(invalidation.sql, invalidation.params);
-
-      // Remove chunks that no longer exist (chunk_index beyond new count)
-      const newIndices = chunks.map(c => c.chunk_index);
-      if (newIndices.length > 0) {
-        await exec.run(sqlFragment`DELETE FROM content_chunks WHERE page_id = ${pageId} AND chunk_index != ALL(${newIndices})`);
-      } else {
+      for (const invalidation of chunkWriteInvalidations(pageId, chunks)) {
+        if ((await exec.unsafe(invalidation.sql, invalidation.params)).rows.length > 0) break;
+      }
+      if (chunks.length === 0) {
         await exec.run(sqlFragment`DELETE FROM content_chunks WHERE page_id = ${pageId}`);
         return;
       }
@@ -168,6 +165,8 @@ export async function upsertChunksOnce(
     const writeColId = quoteIdentifier(writeCol.name);
     const writeCast = vectorCastSuffix(writeCol);
     const col = trustedSql(writeColId);
+    // Prune once, before any insert batch: a later batch never deletes an earlier one.
+    if (seal === undefined) await moveDisplacedChunksAndPrune(exec, pageId, chunks, writeColId);
 
     // #4246: embedded_text_hash records md5(chunk_text) AT EMBED TIME so a
     // later text rewrite that keeps the vector is detectable as content
@@ -181,9 +180,10 @@ export async function upsertChunksOnce(
     }
     if (!resolvedModel) resolvedModel = 'unconfigured';
 
-    // #5984: one statement text per brain whatever the chunk count (the rows bind as one
+    // #5984: one statement text per brain whatever the chunk count (each batch binds as one
     // JSON document), so a prepared connection pays no describe round trip per page.
-    const incoming = chunks.map(chunk => {
+    // A3: rows are encoded one bounded batch at a time (jsonRowBatches), never the whole page.
+    const batches = jsonRowBatches(chunks, chunk => {
       const embedding = chunk.embedding ? '[' + Array.from(chunk.embedding).join(',') + ']' : null;
       return {
         chunk_index: chunk.chunk_index,
@@ -247,14 +247,14 @@ export async function upsertChunksOnce(
     // embedding_pending_since follows the vector that wins: NULL when one
     // lands, kept while the row stays without one, now() when this write
     // NULLs it (doctor ages the embedding backlog from it).
-    const { text, params } = renderFragment(sqlFragment`INSERT INTO content_chunks ${trustedSql(cols)}
+    const insertBatch = (json: string) => renderFragment(sqlFragment`INSERT INTO content_chunks ${trustedSql(cols)}
        SELECT ${pageId}::int, c.chunk_index, c.chunk_text, c.chunk_source, c.embedding${trustedSql(writeCast)}, c.model, c.token_count,
          CASE WHEN c.embedding IS NULL THEN NULL ELSE now() END,
          CASE WHEN c.embedding IS NULL THEN NULL ELSE md5(c.chunk_text) END,
          c.embedding_input_hash, c.language, c.symbol_name, c.symbol_type, c.start_line, c.end_line,
          c.parent_symbol_path, c.doc_comment, c.symbol_name_qualified, c.modality, c.embedding_image::vector,
          CASE WHEN c.embedding IS NULL THEN now() ELSE NULL END
-       FROM jsonb_to_recordset(${JSON.stringify(incoming)}::text::jsonb) AS c(chunk_index int, chunk_text text, chunk_source text,
+       FROM jsonb_to_recordset(${json}::text::jsonb) AS c(chunk_index int, chunk_text text, chunk_source text,
          embedding text, model text, token_count int, embedding_input_hash text, language text, symbol_name text, symbol_type text,
          start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text, modality text, embedding_image text)
        ON CONFLICT (page_id, chunk_index) DO UPDATE SET
@@ -317,11 +317,66 @@ export async function upsertChunksOnce(
            WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN now()
            ELSE content_chunks.embedding_pending_since
          END`);
-    if (sealed === undefined || opts?.deferSeal) { await exec.query(text, params); return; }
-    const [{ rows }] = await pipelined({ kind: exec.dialect }, [sealPage, () => exec.query(text, params)]) as [{ rows: Array<{ id: number }> }];
-    if (rows.length === 0) throw new Error(`Page not found: ${slug} (source=${sourceId})`);
-    if (Number(rows[0]!.id) !== Number(sealed)) throw new Error(`Page ${slug} (source=${sourceId}) is not the page this transaction wrote`);
+    const write = (json: string) => { const { text, params } = insertBatch(json); return exec.query(text, params); };
+    // Every batch runs in the caller's transaction, so a failure in any batch rolls back the whole replacement.
+    const first = batches.next().value as string;
+    if (sealed === undefined || opts?.deferSeal) await write(first);
+    else {
+      const [{ rows }] = await pipelined({ kind: exec.dialect }, [sealPage, () => write(first)]) as [{ rows: Array<{ id: number }> }];
+      if (rows.length === 0) throw new Error(`Page not found: ${slug} (source=${sourceId})`);
+      if (Number(rows[0]!.id) !== Number(sealed)) throw new Error(`Page ${slug} (source=${sourceId}) is not the page this transaction wrote`);
+    }
+    for (const json of batches) await write(json);
   }
+
+/**
+ * A4: content-keyed reuse for a write that replaces a page's chunks in place
+ * (the rebuild paths), then the one prune of the write. A stored row follows
+ * its exact chunk (source and text), not its index: each movable row whose
+ * chunk the new set holds at another index, where that index does not already
+ * hold it, moves there with its id, vector, metadata, timestamps and #5553
+ * input provenance, so a top insert keeps the vectors (and code edges) of
+ * shifted chunks instead of re-embedding them. A legacy vector without a text
+ * hash never moves. Rows park at negative indices, rows that
+ * left the set or sit on a move target are deleted, and the parked rows land;
+ * the insert batches then find their text unchanged and keep the vector under
+ * the D24 rule. Validity against the page context stays with the caller
+ * (installPageProjection nulls vectors whose recorded input no longer matches
+ * before it writes; the recorded input does not depend on the index).
+ */
+async function moveDisplacedChunksAndPrune(exec: SqlExecutor, pageId: number, chunks: ChunkInput[], writeColId: string): Promise<void> {
+  const newIndices = chunks.map(c => c.chunk_index);
+  const { rows } = await exec.run<{ id: number; chunk_index: number; chunk_source: string | null; text_md5: string; movable: boolean }>(sqlFragment`
+    SELECT id, chunk_index, chunk_source, md5(chunk_text) AS text_md5, ${trustedSql(movableChunkSql(writeColId))} AS movable
+    FROM content_chunks WHERE page_id = ${pageId} ORDER BY chunk_index`);
+  const key = (source: string | null | undefined, md5: string) => JSON.stringify([source ?? null, md5]);
+  const incoming = new Map(rows.some(r => r.movable) ? chunks.map(c => [c.chunk_index, key(c.chunk_source, createHash('md5').update(c.chunk_text).digest('hex'))]) : []);
+  const candidates = new Map<string, Array<{ id: number }>>();
+  for (const row of rows.filter(r => r.movable)) {
+    const own = key(row.chunk_source, row.text_md5);
+    if (incoming.get(Number(row.chunk_index)) === own) continue;
+    const queue = candidates.get(own);
+    if (queue) queue.push({ id: Number(row.id) });
+    else candidates.set(own, [{ id: Number(row.id) }]);
+  }
+  const held = new Map(rows.map(row => [Number(row.chunk_index), key(row.chunk_source, row.text_md5)]));
+  const ids: number[] = [];
+  const targets: number[] = [];
+  for (const [index, wanted] of incoming) {
+    if (held.get(index) === wanted) continue;
+    const row = candidates.get(wanted)?.shift();
+    if (row) { ids.push(row.id); targets.push(index); }
+  }
+  if (ids.length === 0) {
+    await exec.run(sqlFragment`DELETE FROM content_chunks WHERE page_id = ${pageId} AND chunk_index != ALL(${newIndices})`);
+    return;
+  }
+  await exec.run(sqlFragment`UPDATE content_chunks c SET chunk_index = -1 - m.target
+    FROM unnest(${ids}::int[], ${targets}::int[]) AS m(id, target) WHERE c.page_id = ${pageId} AND c.id = m.id`);
+  await exec.run(sqlFragment`DELETE FROM content_chunks WHERE page_id = ${pageId} AND chunk_index >= 0
+    AND (chunk_index != ALL(${newIndices}) OR chunk_index = ANY(${targets}::int[]))`);
+  await exec.run(sqlFragment`UPDATE content_chunks SET chunk_index = -1 - chunk_index WHERE page_id = ${pageId} AND chunk_index < 0`);
+}
 
 export async function getChunks(
   exec: ScopedRead,

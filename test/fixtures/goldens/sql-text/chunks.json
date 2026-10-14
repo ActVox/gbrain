@@ -662,10 +662,20 @@
             "params": [
               "number",
               "number",
-              "string"
+              "array<number>",
+              "string",
+              "number"
             ],
-            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS ( SELECT 1 FROM (SELECT * FROM content_chunks WHERE page_id = $2) cc FULL JOIN jsonb_to_recordset($3::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) ON incoming.chunk_index = cc.chunk_index WHERE cc.id IS NULL OR incoming.chunk_index IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) ))",
-            "textSha256": "6db2c904feb7479e571d913076af75cc9c32170451bfa4afa47e7e60724db006"
+            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = $2 AND cc.chunk_index <> ALL($3::int[])) OR EXISTS ( SELECT 1 FROM jsonb_to_recordset($4::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) LEFT JOIN content_chunks cc ON cc.page_id = $5 AND cc.chunk_index = incoming.chunk_index WHERE cc.id IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) )) RETURNING id",
+            "textSha256": "45390784bf03117ba45ef1e224d394d346bc274e2103481e357397ff7ec76451"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number"
+            ],
+            "sql": "SELECT id, chunk_index, chunk_source, md5(chunk_text) AS text_md5, (\"embedding\" IS NOT NULL AND embedded_text_hash IS NOT DISTINCT FROM md5(chunk_text)) AS movable FROM content_chunks WHERE page_id = $1 ORDER BY chunk_index",
+            "textSha256": "b4071d9374604e925cefb4ab2f0324b59411c79a3b9ace1dd1ea2a8496425954"
           },
           {
             "lane": "tx",
@@ -750,10 +760,20 @@
             "params": [
               "number",
               "number",
-              "string"
+              "array<number>",
+              "string",
+              "number"
             ],
-            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS ( SELECT 1 FROM (SELECT * FROM content_chunks WHERE page_id = $2) cc FULL JOIN jsonb_to_recordset($3::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) ON incoming.chunk_index = cc.chunk_index WHERE cc.id IS NULL OR incoming.chunk_index IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) ))",
-            "textSha256": "6db2c904feb7479e571d913076af75cc9c32170451bfa4afa47e7e60724db006"
+            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = $2 AND cc.chunk_index <> ALL($3::int[])) OR EXISTS ( SELECT 1 FROM jsonb_to_recordset($4::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) LEFT JOIN content_chunks cc ON cc.page_id = $5 AND cc.chunk_index = incoming.chunk_index WHERE cc.id IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) )) RETURNING id",
+            "textSha256": "45390784bf03117ba45ef1e224d394d346bc274e2103481e357397ff7ec76451"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number"
+            ],
+            "sql": "SELECT id, chunk_index, chunk_source, md5(chunk_text) AS text_md5, (\"embedding\" IS NOT NULL AND embedded_text_hash IS NOT DISTINCT FROM md5(chunk_text)) AS movable FROM content_chunks WHERE page_id = $1 ORDER BY chunk_index",
+            "textSha256": "b4071d9374604e925cefb4ab2f0324b59411c79a3b9ace1dd1ea2a8496425954"
           },
           {
             "lane": "tx",
@@ -832,10 +852,20 @@
             "params": [
               "number",
               "number",
-              "string"
+              "array<number>",
+              "string",
+              "number"
             ],
-            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS ( SELECT 1 FROM (SELECT * FROM content_chunks WHERE page_id = $2) cc FULL JOIN jsonb_to_recordset($3::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) ON incoming.chunk_index = cc.chunk_index WHERE cc.id IS NULL OR incoming.chunk_index IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) ))",
-            "textSha256": "6db2c904feb7479e571d913076af75cc9c32170451bfa4afa47e7e60724db006"
+            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = $2 AND cc.chunk_index <> ALL($3::int[])) OR EXISTS ( SELECT 1 FROM jsonb_to_recordset($4::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) LEFT JOIN content_chunks cc ON cc.page_id = $5 AND cc.chunk_index = incoming.chunk_index WHERE cc.id IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) )) RETURNING id",
+            "textSha256": "45390784bf03117ba45ef1e224d394d346bc274e2103481e357397ff7ec76451"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number"
+            ],
+            "sql": "SELECT id, chunk_index, chunk_source, md5(chunk_text) AS text_md5, (\"embedding_voyage\" IS NOT NULL AND embedded_text_hash IS NOT DISTINCT FROM md5(chunk_text)) AS movable FROM content_chunks WHERE page_id = $1 ORDER BY chunk_index",
+            "textSha256": "f7ab7c9cef4efbb5088a72eb81eab87d438868abccc5e1bea71e91788b3e9dbe"
           },
           {
             "lane": "tx",
@@ -914,10 +944,12 @@
             "params": [
               "number",
               "number",
-              "string"
+              "array<>",
+              "string",
+              "number"
             ],
-            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS ( SELECT 1 FROM (SELECT * FROM content_chunks WHERE page_id = $2) cc FULL JOIN jsonb_to_recordset($3::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) ON incoming.chunk_index = cc.chunk_index WHERE cc.id IS NULL OR incoming.chunk_index IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) ))",
-            "textSha256": "6db2c904feb7479e571d913076af75cc9c32170451bfa4afa47e7e60724db006"
+            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = $2 AND cc.chunk_index <> ALL($3::int[])) OR EXISTS ( SELECT 1 FROM jsonb_to_recordset($4::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) LEFT JOIN content_chunks cc ON cc.page_id = $5 AND cc.chunk_index = incoming.chunk_index WHERE cc.id IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) )) RETURNING id",
+            "textSha256": "45390784bf03117ba45ef1e224d394d346bc274e2103481e357397ff7ec76451"
           },
           {
             "lane": "tx",
@@ -1003,10 +1035,20 @@
             "params": [
               "number",
               "number",
-              "string"
+              "array<number>",
+              "string",
+              "number"
             ],
-            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS ( SELECT 1 FROM (SELECT * FROM content_chunks WHERE page_id = $2) cc FULL JOIN jsonb_to_recordset($3::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) ON incoming.chunk_index = cc.chunk_index WHERE cc.id IS NULL OR incoming.chunk_index IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) ))",
-            "textSha256": "6db2c904feb7479e571d913076af75cc9c32170451bfa4afa47e7e60724db006"
+            "sql": "UPDATE pages SET chunker_version = -1 WHERE id = $1 AND ( NOT (COALESCE(pages.chunker_version, 0) >= 4) OR EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = $2 AND cc.chunk_index <> ALL($3::int[])) OR EXISTS ( SELECT 1 FROM jsonb_to_recordset($4::text::jsonb) AS incoming( chunk_index int, chunk_text text, chunk_source text, modality text, language text, symbol_name text, symbol_type text, start_line int, end_line int, parent_symbol_path text[], doc_comment text, symbol_name_qualified text) LEFT JOIN content_chunks cc ON cc.page_id = $5 AND cc.chunk_index = incoming.chunk_index WHERE cc.id IS NULL OR cc.chunk_text IS DISTINCT FROM incoming.chunk_text OR cc.chunk_source IS DISTINCT FROM incoming.chunk_source OR cc.modality IS DISTINCT FROM COALESCE(incoming.modality, 'text') OR cc.language IS DISTINCT FROM COALESCE(incoming.language, cc.language) OR cc.symbol_name IS DISTINCT FROM COALESCE(incoming.symbol_name, cc.symbol_name) OR cc.symbol_type IS DISTINCT FROM COALESCE(incoming.symbol_type, cc.symbol_type) OR cc.start_line IS DISTINCT FROM COALESCE(incoming.start_line, cc.start_line) OR cc.end_line IS DISTINCT FROM COALESCE(incoming.end_line, cc.end_line) OR cc.parent_symbol_path IS DISTINCT FROM COALESCE(incoming.parent_symbol_path, cc.parent_symbol_path) OR cc.doc_comment IS DISTINCT FROM COALESCE(incoming.doc_comment, cc.doc_comment) OR cc.symbol_name_qualified IS DISTINCT FROM COALESCE(incoming.symbol_name_qualified, cc.symbol_name_qualified) )) RETURNING id",
+            "textSha256": "45390784bf03117ba45ef1e224d394d346bc274e2103481e357397ff7ec76451"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number"
+            ],
+            "sql": "SELECT id, chunk_index, chunk_source, md5(chunk_text) AS text_md5, (\"embedding\" IS NOT NULL AND embedded_text_hash IS NOT DISTINCT FROM md5(chunk_text)) AS movable FROM content_chunks WHERE page_id = $1 ORDER BY chunk_index",
+            "textSha256": "b4071d9374604e925cefb4ab2f0324b59411c79a3b9ace1dd1ea2a8496425954"
           },
           {
             "lane": "tx",
