@@ -32,8 +32,7 @@ import { pickDecideConfig } from '../ai/decide/config.ts';
 import { getRecipe } from '../ai/recipes/index.ts';
 // #3657 seam: the runtime/mode-bundle reranker default has ONE code home
 // (ai/defaults.ts — a leaf module, no SDK loads). The three bundles below
-// resolve through DEFAULT_RERANKER_MODEL (voyage:rerank-3-lite; was
-// voyage:rerank-2.5 from v0.48.2).
+// resolve through DEFAULT_RERANKER_MODEL (voyage:rerank-3-lite, gbrain-evals #148).
 import { DEFAULT_RERANKER_MODEL } from '../ai/defaults.ts';
 import { normalizeExpansionVariantBudget } from './fusion-lists.ts';
 import { DEFAULT_RELATIONAL_RERANK_PIN, normalizeRelationalRerankPin } from './relational-rerank-pin.ts';
@@ -609,8 +608,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // tokenmax is the high-cost-tolerant tier that already pays for LLM
     // expansion + 50-result payloads. Reranker is the natural capstone:
     // better ordering of a large candidate set is where rerankers earn
-    // their fee. ~$0.0006/query at this shape with rerank-3-lite (gbrain-evals
-    // #148: $0.60 per 1k LongMemEval queries); rounding error vs the
+    // their fee. ~$0.0006/query at this shape (rerank-3-lite); rounding error vs the
     // tier's $700/mo @ Opus pairing per CLAUDE.md cost matrix.
     reranker_enabled: true,
     reranker_model: DEFAULT_RERANKER_MODEL,
