@@ -10,7 +10,7 @@ import type { Action } from '../agent-output.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import { fenceOperationError, scanCanonicalFences } from '../fence-repair/refusal.ts';
-import { normalizeClaimWhitespace, parseFactsFence } from '../facts-fence.ts';
+import { fenceCellReadBackProblem, parseFactsFence } from '../facts-fence.ts';
 import { submissionAuthority, authorizeStoredRequest, authorizeWrite } from './authority.ts';
 import { currentVerifiedLocalWriter, localHostId, registerLocalWriter } from './identity.ts';
 import { getWorktreeBinding, managedPersistenceEnabled, type WorktreeBinding } from './ownership.ts';
@@ -42,7 +42,7 @@ function ownerStatusFix(sourceId: string): Action {
     { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] });
 }
 
-function receiptFix(row: WriteRequest): Action {
+function receiptFix(row: Pick<WriteRequest, 'request_id'>): Action {
   return readFix('The receipt is the record of what this maintenance request did; read it before planning another.',
     { argv: ['gbrain', 'write-request', '--', row.request_id] });
 }
@@ -311,20 +311,71 @@ export interface FactFenceAssignment { id: number; row_num: number; hash: string
  * and adopt the legacy rows in place, so the canonical projection matches
  * them by (source, page, row_num) instead of inserting duplicates.
  */
-export async function submitFactFenceAdoption(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
-  options: { content: string; expectedRevision: string; assignments: Array<{ id: number; row_num: number }>; file: boolean }): Promise<Record<string, unknown>> {
+const MALFORMED_ADOPTION = 'A fact adoption assigns one fact or fence position twice.';
+/**
+ * The fact-fence adoption planner's revision, part of every adoption intent
+ * and so of its request identity: bump it when the planner or the publisher's
+ * read-back check changes, and every held-back page gets a fresh attempt.
+ */
+export const FACT_FENCE_PLANNER = 2;
+/** How long a refused adoption is held back; the owner that refused it may since have restarted onto code that adopts it. */
+const ADOPTION_REFUSAL_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/** The refusals a fact-fence adoption gets again for the same inputs (#6650). */
+function deterministicAdoptionRefusal(prior: Pick<WriteRequest, 'error_code' | 'error_message'>): boolean {
+  return prior.error_code === 'fence_unrenderable' || (prior.error_code === 'invalid_params' && prior.error_message === MALFORMED_ADOPTION);
+}
+
+/** What `planFactFenceAdoption` decided: submit (or replay) `requestId`, or skip because this build already refused these inputs. */
+export type FactFenceAdoptionPlan =
+  | { kind: 'submit'; requestId: string; intent: Record<string, unknown>; facts: FactSnapshot[] }
+  | { kind: 'suppressed'; prior: WriteRequest };
+
+/**
+ * Choose the request for one page's adoption. A pending or committed receipt
+ * for the same inputs is replayed. After a terminal refusal the same inputs
+ * get a fresh attempt identity (a drifted file, a conflict), except a
+ * deterministic refusal of the same intent (same planner revision) in the
+ * last day: retrying it would only mint another identical failed request
+ * every cycle, so the page waits a day or a planner change.
+ */
+export async function planFactFenceAdoption(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
+  options: { content: string; expectedRevision: string; assignments: Array<{ id: number; row_num: number }> }): Promise<FactFenceAdoptionPlan> {
   const current = await readFacts(engine, authority.writer.sourceId, options.assignments.map(a => a.id));
   const facts: FactFenceAssignment[] = options.assignments.map(a => ({ ...a, hash: digest(current.find(f => f.id === a.id)?.value ?? null) }));
   const intent = { kind: 'managed_maintenance_adopt_fact_fence', expected_revision: options.expectedRevision,
-    source_incarnation: authority.writer.sourceIncarnation, content: options.content, facts };
-  // A retry replays a pending or committed receipt; after a terminal refusal
-  // (a drifted file, a conflict) the same inputs get a fresh attempt identity.
+    source_incarnation: authority.writer.sourceIncarnation, content: options.content, facts, planner: FACT_FENCE_PLANNER };
   for (let attempt = 0; ; attempt++) {
     const requestId = maintenanceRequestId({ authority: authority.writer, slug, intent, ...(attempt ? { attempt } : {}) });
     const prior = await getWriteRequest(engine, authority.writer.principal, requestId);
-    if (!prior || prior.state === 'committed' || !isTerminal(prior)) return submitMaintenance(engine, authority, slug, intent, requestId, options.file);
+    if (!prior || prior.state === 'committed' || !isTerminal(prior)) return { kind: 'submit', requestId, intent, facts: current };
+    if (prior.state === 'failed' && deterministicAdoptionRefusal(prior)
+      && Date.now() - new Date(prior.completed_at ?? prior.updated_at).getTime() < ADOPTION_REFUSAL_HOLD_MS) {
+      return { kind: 'suppressed', prior };
+    }
   }
 }
+
+export async function submitPlannedFactFenceAdoption(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
+  plan: Extract<FactFenceAdoptionPlan, { kind: 'submit' }>, file: boolean): Promise<Record<string, unknown>> {
+  return submitMaintenance(engine, authority, slug, plan.intent, plan.requestId, file);
+}
+
+export async function submitFactFenceAdoption(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
+  options: { content: string; expectedRevision: string; assignments: Array<{ id: number; row_num: number }>; file: boolean }): Promise<Record<string, unknown>> {
+  const plan = await planFactFenceAdoption(engine, authority, slug, options);
+  if (plan.kind === 'suppressed') {
+    throw opError('fence_unrenderable', 'The same fact-fence adoption was already refused.',
+      `Fact-fence adoption request ${plan.prior.request_id} for ${slug} was refused with ${plan.prior.error_code} for the same inputs in the last day, so it was not submitted again; nothing changed. It is retried once a day has passed, or right away by a gbrain build whose adoption planner changed.`,
+      { fix: receiptFix(plan.prior) });
+  }
+  return submitPlannedFactFenceAdoption(engine, authority, slug, plan, options.file);
+}
+
+const READ_BACK_TEXT: Record<NonNullable<ReturnType<typeof fenceCellReadBackProblem>>, string> = {
+  row_missing: 'the row is missing from the rendered fence', struck: 'it reads back struck', empty: 'it reads back empty',
+  visibility: 'its visibility differs', text: 'its text differs by more than whitespace',
+};
 
 /**
  * `clock` (#6278): the claim's phase clock; the adoption's await boundaries (read facts, parse, occupied rows, the page) name
@@ -338,7 +389,7 @@ async function prepareFactFenceAdoption(unbounded: BrainEngine, row: WriteReques
     `Source ${row.source_id} was replaced after fact-fence adoption request ${row.request_id} for ${row.slug} was accepted, so nothing was published. Read the receipt with gbrain write-request -- ${row.request_id}; the next fact backfill run plans against the current source.`,
     { fix: receiptFix(row) });
   if (new Set(facts.map(f => f.id)).size !== facts.length || new Set(facts.map(f => f.row_num)).size !== facts.length) {
-    throw opError('invalid_params', 'A fact adoption assigns one fact or fence position twice.',
+    throw opError('invalid_params', MALFORMED_ADOPTION,
       `Fact-fence adoption request ${row.request_id} for ${row.slug} in ${row.source_id} was refused before publication; nothing changed. The plan itself is malformed, so report the request ID to the user rather than running the same backfill again.`,
       { fix: receiptFix(row) });
   }
@@ -359,11 +410,10 @@ async function prepareFactFenceAdoption(unbounded: BrainEngine, row: WriteReques
       // #6278: the fence codec trims and folds line endings, so the cell is
       // compared with the legacy text modulo that whitespace; the cell's text
       // is what the projection expects and is written back on apply.
-      const cell = fence.get(assignment.row_num);
-      if (!cell?.active || cell.claim === '' || normalizeClaimWhitespace(cell.claim) !== normalizeClaimWhitespace(String(fact.value.fact))
-        || cell.visibility !== fact.value.visibility) {
+      const problem = fenceCellReadBackProblem(fence.get(assignment.row_num), { fact: String(fact.value.fact), visibility: String(fact.value.visibility) });
+      if (problem) {
         throw opError('fence_unrenderable', 'The adopted fence row does not render its legacy fact.',
-          `Fact-fence adoption request ${row.request_id} for ${row.slug} in ${row.source_id} was refused before publication; nothing changed. Fence row ${assignment.row_num} does not read back as legacy fact ${assignment.id} (${!cell ? 'the row is missing from the rendered fence' : !cell.active ? 'it reads back struck' : cell.claim === '' ? 'it reads back empty' : cell.visibility !== fact.value.visibility ? 'its visibility differs' : 'its text differs by more than whitespace'}). This is a gbrain planning defect, not caller input: report the request ID with the gbrain version; the legacy fact stays active and searchable and nothing is lost.`,
+          `Fact-fence adoption request ${row.request_id} for ${row.slug} in ${row.source_id} was refused before publication; nothing changed. Fence row ${assignment.row_num} does not read back as legacy fact ${assignment.id} (${READ_BACK_TEXT[problem]}). This is a gbrain planning defect, not caller input: report the request ID with the gbrain version; the legacy fact stays active and searchable and nothing is lost.`,
           { fix: receiptFix(row) });
       }
     }
