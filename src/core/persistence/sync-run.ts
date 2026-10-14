@@ -7,10 +7,9 @@ import { readFix } from '../ops/op-fix.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { currentSourceFilesystemSignal } from '../minions/source-filesystem.ts';
 import { throwIfAborted } from '../abort-check.ts';
-import { digest, jsonBytes, sha256 } from './digest.ts';
-import { getWriteRequest, admitWriteInTransaction, assertWriteHeadroom, foregroundPriority, intentDigest, receiptFor } from './journal.ts';
-import { readBackgroundPauseShare, resolveAdmissionOrigin } from './admission-origin.ts';
-import { reservationForRetained } from './receipt-bytes.ts';
+import { digest, sha256 } from './digest.ts';
+import { getWriteRequest, admitWriteInTransaction, foregroundPriority, intentDigest, receiptFor } from './journal.ts';
+import { preflightSyncCapacity } from './sync-capacity-preflight.ts';
 import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
@@ -24,7 +23,6 @@ import { startClaimPhase } from './claim-phase.ts';
 import { screeningRequest } from './noop-kernel.ts';
 import { stampDrainStep } from './drain-step.ts';
 import { noopWaiversEnabled, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waiverBatchEnabled, type NoopWaiver, type WaiverRunEntry } from './sync-waivers.ts';
-import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { currentCompanyBrainSync, getCompanyBrainProfile, readCompanyBrainPlan } from '../company-brain/profile.ts';
 import { readCommittedBlob } from '../company-brain/revision.ts';
@@ -1391,26 +1389,6 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
   }
 }
 
-/**
- * #6696 (A7): before a run's first admission, its remaining manifest entries (one request id each, and the
- * admission reservation estimator over each file's size and the writer authority) must fit the capacity left under the caller's line: the background pause
- * for a background run, the cap for an operator's. A shortfall refuses `write_quota_insufficient` (writes still
- * work) with the raise that covers the run; the refusal is marked so the drain stops the command instead of
- * pausing it.
- */
-/** An intent's fields beside the file content (kind, paths, hashes, revision), estimated. */
-const PREFLIGHT_INTENT_FIELDS_BYTES = 512;
-async function preflightSyncCapacity(engine: BrainEngine, cursor: Cursor): Promise<void> {
-  const remaining = cursor.entries.slice(cursor.index);
-  if (!remaining.length) return;
-  const authority = jsonBytes(cursor.authority.writer);
-  const size = (path: string) => { try { return statSync(resolve(cursor.root, path)).size; } catch { return 0; } };
-  const bytes = remaining.reduce((n, entry) => n + reservationForRetained(authority + PREFLIGHT_INTENT_FIELDS_BYTES + (entry.action === 'import' ? size(entry.path) : 0)), 0);
-  const share = resolveAdmissionOrigin() === 'background' ? await readBackgroundPauseShare(engine) : 1;
-  try { await assertWriteHeadroom(engine, cursor.authority.writer.principal, { ids: remaining.length, bytes }, share); }
-  catch (error) { throw Object.assign(error as object, { capacityPreflight: true as const }); }
-}
-
 async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxPages: number; maxMs: number } | undefined, state: HoldRunState): Promise<SyncResult> {
   await assertManagedSyncActive(engine);
   if (opts.sourceId && !currentCompanyBrainSync(opts.sourceId) && await getCompanyBrainProfile(engine, opts.sourceId)) {
@@ -1544,7 +1522,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     const sliceStarted = performance.now(), sliceFirstIndex = cursor.index, drainStartedAt = opts.drainStartedAt ?? Date.now();
     const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
     const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig);
-    if (opts.capacityPreflight && !cursor.done) await preflightSyncCapacity(engine, cursor);
+    if (opts.capacityPreflight && !cursor.done) await preflightSyncCapacity(engine, { root: cursor.root, writer: cursor.authority.writer, entries: cursor.entries.slice(cursor.index) });
     opts.onProgress?.({ phase: 'managed_sync.start', bankedFiles: cursor.index, total: cursor.entries.length });
     while (!cursor.done) {
       assertActive();

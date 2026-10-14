@@ -459,8 +459,7 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
       OPERATION_MANIFEST.find(o => o.name === name)?.mutating === true,
     );
     return finishResult(await dispatchToolCall(engine, name, params, {
-      remote: true,
-      admissionOrigin: 'interactive',
+      remote: true, admissionOrigin: 'interactive',
       // #1061: mark the transport so whoami can report {transport: 'stdio'}
       // instead of throwing unknown_transport. Trust posture unchanged —
       // stdio stays remote/untrusted.
