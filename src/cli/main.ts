@@ -1180,7 +1180,7 @@ export async function applyStdinParam(
  * Legacy-signature shim over interaction.ts readStdinBounded (A5): the full
  * stdin content, '' for a readable-but-empty stdin, or null for anything else
  * (first-byte or inactivity timeout, stream error, closed fd). No byte cap
- * here: applyStdinParam keeps its own 5MB check and message.
+ * here: applyStdinParam keeps its own page-ceiling check and message.
  */
 export async function readStdinBounded(): Promise<string | null> {
   const r = await readStdinPayload({ maxBytes: Infinity });
