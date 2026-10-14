@@ -10,6 +10,15 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**You can turn query expansion off for a whole brain with one command: `gbrain config set search.expansion false` (docs and tests only, no behavior change).** The setting already worked: `gbrain query` over the CLI, MCP and `gbrain serve --http` all skip the expansion LLM call when a call leaves `expand` unset, and an explicit `--expand` / `expand: true` still expands. It was just not written down where people look. On a 300-question LongMemEval run, expansion added about 1.8 s per query with no measurable quality gain. The init mode picker, the search-modes guide and the install guide now name the command, and say that the brain host sets it (a thin client can't) on gbrain v0.60.188.0 or later.
+
+### Itemized changes
+
+- **Docs** (`src/core/search/mode-advice.ts`, `docs/guides/search-modes.md`, `INSTALL_FOR_AGENTS.md`): the per-brain off switch, how to undo it (`gbrain config unset search.expansion`), and who can set it on a hosted brain.
+- **Tests** (`test/search/operation-expansion-contract.serial.test.ts`): `gbrain config set search.expansion false` followed by CLI-parsed `query` calls: unset expands in `tokenmax`, `false` does not, `false` plus `--expand` does, and unsetting the key restores expansion. `recall` never expands, even with `search.expansion=true`.
+
 ## [0.60.231.0] - 2026-10-14
 
 **Reading a large page no longer pulls the whole page into a response: `get_page` returns an outline and a window, and every remote window is cut from the privacy-sanitized view of the page (large pages Wave A, part 1).** Before, `get_page` of a 100 MB page built a 204 MB JSON-RPC frame. That is over the MCP SDK's 10 MiB stdio limit and far over the 25k tokens a harness accepts. Evidence delivery also read the whole body for every conversation hit: 2 s and +622 MB per hit at 100 MB. Now an MCP client that is not the thin client gets the full body up to the inline threshold, and above it an outline plus the first window with the exact call to read on. Windows, outlines and short leads all slice one projection with withdrawals applied, takes/facts fences stripped and credentials projected. A partial response never fills `compiled_truth`, `timeline` or `content`, so a read followed by a write cannot shrink a page by accident. Another guard backs this up: a remote `put_page` that would cut a large page to under half refuses unless `allow_shrink: true`. Pages up to today's ingest limits read as before through the local CLI and the thin client. The ceiling increase and searchability of large pages come in the next Wave A PR.
