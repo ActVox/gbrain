@@ -569,7 +569,8 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "engine?: \"postgres\" | \"pglite\" | undefined",
-          "keyword_statement_timeout_ms?: number | undefined"
+          "keyword_statement_timeout_ms?: number | undefined",
+          "pglite_shared_buffers?: string | undefined"
         ],
         "name": "EngineConfig"
       },
@@ -5863,7 +5864,7 @@
           "private formatAbortMeta",
           "private formatEvictionTelemetry",
           "private gracefulShutdown",
-          "private gracefulShutdownFired",
+          "private gracefulShutdownReason",
           "private handleQuietHoursDefer",
           "private handlers",
           "private inFlight",
@@ -8324,7 +8325,8 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "engine?: \"postgres\" | \"pglite\" | undefined",
-          "keyword_statement_timeout_ms?: number | undefined"
+          "keyword_statement_timeout_ms?: number | undefined",
+          "pglite_shared_buffers?: string | undefined"
         ],
         "name": "EngineConfig"
       },
