@@ -10,6 +10,112 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.226.0] - 2026-10-14
+
+**The Ubicloud gate's `verify` typecheck runs warm from a worktree whose `node_modules` is a symlink.** Verify's typecheck on #6673's gate timed out at 121 s against its 120 s cap; the rerun passed at 113 s. That gate ran from a `git worktree` whose `node_modules` is a symlink to the main checkout's, a common way to skip a `bun install` per worktree. tsc records each source file relative to the buildinfo's directory, but it records the files it reaches through node_modules by their real path: the TypeScript lib files and bun-types' globals, 990 entries in all. In that layout, those entries point out of the checkout (`../../../../../../../../workspace/gbrain/node_modules/typescript/lib/lib.es5.d.ts`). On the VM they resolve to nothing, the global declarations count as changed, and tsc rechecks every file. All four of that worktree's gates logged `verify's typecheck runs warm`, but the typecheck took 84, 85, 113 and 121 s, the same as a cold one. The 120 s cap is unchanged.
+
+**The Zig compiler setup in the `native-locks` jobs fails with a named error instead of running into the job timeout.** On .223's master Test run, the `darwin-x64 / Bun 1.4.3` cell sat in `setup-toolchain.ts` from 15:57:37 until the 15-minute job timeout (job 115955272565; the log has expired). Its cache step restored the pinned archive (`zig-archive-macOS-X64`, cached since 2026-09-30, the same key the Bun 1.4.0 sibling restored that minute), so no download ran. The step was stuck in `tar -xf` or `zig version`, neither of which had a timeout. The download path had its own gap: a mirror trickling just above the 30 s stall rule could hold each of six sources for 240 s, 24 minutes in all. Every phase is now bounded and prints its duration, so the next hang names its phase.
+
+### Itemized changes
+
+- **`scripts/ubicloud/typecheck-state.ts` `portableBuildInfo`** writes the uploaded copy (`<run>/typecheck.tsbuildinfo`). It moves every entry under the real path of the checkout's `node_modules` back under the checkout's own `node_modules` path, which the VM's frozen install lays out the same way. A checkout with a real `node_modules` is copied unchanged. Only the `fileNames` table carries paths; everything else in tsc 5.9's buildinfo refers to files by index. tsc still checks every file's content hash, so a wrong mapping costs time, never correctness.
+- **`scripts/ci-ubicloud.ts`** uploads that copy. When it re-roots entries, the log line says how many. If an entry still resolves outside the checkout, the state is not uploaded, and the log says verify's typecheck runs cold and why, instead of claiming it runs warm.
+- **Proof.** Forced probe on a 16-vCPU gate VM, typecheck alone:
+  - The buildinfo written from a symlinked worktree took 84 s and 91 s.
+  - The same file re-rooted took 16 s and 15 s.
+  - The gate's own verify step, run from that worktree. Before: the log said `runs warm` and verify's typecheck took 90 s. After: the log said `990 entries re-rooted from the symlinked node_modules; verify's typecheck runs warm`, and the typecheck took 16 s.
+- **`test/scripts/ubicloud-typecheck-state.test.ts`** builds a worktree with a symlinked `node_modules` and the entries tsc 5.9 wrote there. It checks that lib and bun-types entries are re-rooted, sources are kept, a path outside both is counted, a plain checkout is unchanged, and a file without `fileNames` is refused.
+- **`scripts/native/setup-toolchain.ts`:**
+  - The download has one 300 s budget across all sources.
+  - A source is dropped when its rate over the last 15 s projects that the pinned size can't arrive before the budget ends, or when no bytes arrive for 30 s.
+  - A failure lists every source with its reason: `too slow: 100 KB/s leaves 45 MB for 285.0s of the download budget`, or `not tried` once the budget is spent.
+  - `tar -xf` runs under 90 s and `zig version` under 60 s, killed with SIGKILL on overrun with `<phase> did not finish within <n>s`.
+  - The script prints the download, extraction and version-check times.
+  - `GBRAIN_ZIG_SOURCES` and `GBRAIN_ZIG_DOWNLOAD_BUDGET_S` point it at a local mirror (and the tests).
+- **Shard weights refreshed** (`scripts/{test,serial,e2e}-weights.json` and their `.metadata.json`) from Test run 38587567819 (unit, serial) and the full E2E run 38521702276. Unweighted share, before → after, counted the way `check:weight-coverage` counts:
+
+  | Lane | Before | After |
+  | --- | --- | --- |
+  | unit | 24 of 3322 (0.7%) | 10 of 3322 (0.3%) |
+  | serial | 2 of 404 (0.5%) | 1 of 404 (0.2%) |
+  | e2e | 9 of 579 (1.6%) | 5 of 579 (0.9%) |
+
+  `check:weight-coverage` reports no dead entries.
+- **`native-locks.yml`:** both Zig setup steps are named and carry `timeout-minutes: 9`, which covers the script's 450 s worst case. The job timeout stays at 15 minutes.
+- **Forced probe (a loopback mirror serving the real 49 MB pinned archive, throttled):**
+  - Two sources at 100 KB/s, old script: 240 s on each, failed after 480 s.
+  - New script: each source dropped as too slow after 15 s, failed with the named error after 31 s.
+  - A 100 KB/s source, then a 400 KB/s source: the first was dropped; the second was kept (it fits the budget) and finished in 120 s; extraction took 2.9 s.
+- **`test/scripts/native-setup-toolchain.test.ts`** runs the real script against loopback mirrors:
+  - trickling sources are dropped by rate and fail named inside a 10 s budget;
+  - silent sources are dropped, and those past the budget are reported as not tried;
+  - `runWithin` kills and names an overrun;
+  - every Zig setup step's timeout covers the script's bounds and fits inside its job.
+
+## [0.60.225.0] - 2026-10-14
+
+**A worker whose memory watchdog fires while a claim is mid-flight now aborts that job too.** `gracefulShutdown` aborted only the jobs already registered in `inFlight`; a claim whose `UPDATE … RETURNING` had committed but whose result had not reached the poll loop launched afterwards with a live per-job signal, ran unaborted through the 30 s drain, and ended on the SIGTERM path (`worker_shutdown` hand-back, or the handler's own text for an `UnrecoverableError`) instead of `aborted: watchdog`. This was the `worker-shutdown-error-matrix` CI flake: the test observed `active` on a second Postgres connection and fired the watchdog inside that round trip.
+
+### Itemized changes
+
+- `src/core/minions/worker.ts` (+3 lines, ceiling 1777): `gracefulShutdown` records its reason; `launchJob` aborts a job it registers after the shutdown fired with that reason, so the job takes the same abort path as one that was already in flight (attempt burned, `delayed`; `UnrecoverableError` dead).
+- `test/worker-shutdown-error-matrix.test.ts`: a forced case holds the committed claim's result until the watchdog has fired (both engines; fails on the previous worker, passes now).
+- Docs: `docs/architecture/key-files/core-minions-2.md` worker entry.
+- `test/progress.test.ts` cpu_ms flake, second mechanism: run 38588222510 billed 105 ms to the thread inside its 200 ms wait with the VM-wide steal counter at 0. KVM counts only runnable waiting as steal; a vCPU asleep in the host (a guest page the host still had to back, under host memory throttling) advances the guest clock while the guest thread is current and is billed to that thread with no steal recorded. Reproduced on a nested-KVM guest (virtio-balloon cycle to leave guest pages host-unbacked, host `memory.high` on the VM): master's test failed 4/10 runs with the CI signature, `steal 0 ms` included. The window check now also treats CPU charged to the thread while it was blocked in the futex (≥ 10 ms; 0.2–2.2 ms across 500 clean windows on three hosts) as a stall and re-measures; the bound is unchanged, and a run with no clean window in 5 attempts fails with each window's charge, wait overrun and steal. Doc sentence on `cpu_ms` widened accordingly.
+- `test/e2e/supervisor-stop-drain-5062.test.ts` flake: the test read each barrier pid file as soon as it existed, but `echo $$ > f` creates the file before the pid lands in it, so an empty read gave pid 0 and `process.kill(0, 0)` (this test's own process group) reported it alive after the drain. The reader now waits for a parsed pid, `alive` refuses a non-positive pid, and the barrier job forces the window (create, 300 ms, write) on every run. Root cause reported from the Cat 40 Hard wave (#6668).
+
+## [0.60.224.0] - 2026-10-14
+
+**Shell-out reads on a local PGLite brain start about 110 ms faster.** Every `gbrain call get_page`, `gbrain get`, `gbrain list` or `gbrain search` on a local brain used to spend part of its startup preparing database features the command never used: a 128 MB page cache that one read never fills, and the vector and fuzzy-match extensions loaded before the first query whether or not the command touched them. One-shot reads now open with a smaller cache, the extensions load the first time a query needs them, and `gbrain call` starts preparing the database engine while the rest of the command loads, as `get` and `list` already did. Results are identical. `gbrain serve`, imports and every write keep the full cache.
+
+| Command (local PGLite brain, fresh process) | 85 pages, before | after | 5,000 pages, before | after |
+|---|---|---|---|---|
+| `gbrain call get_page` | 714–731 ms | 598–607 ms | 716–722 ms | 601–606 ms |
+| `gbrain list` | 575–616 ms | 514–533 ms | 597–605 ms | 507–516 ms |
+| MCP stdio start + first `get_page` | 863–865 ms | 840–894 ms | 865–874 ms | 857–861 ms |
+
+Medians (p50) of two runs of 20 cold processes each, on a 4-vCPU cloud machine. MCP start is unchanged within noise: serve keeps the full cache, and its boot touches a vector table, so the extension load only moves. Postgres brains are unchanged.
+
+## To take advantage of v0.60.224.0
+
+Nothing to do: `gbrain upgrade` is enough. There is no migration and no config.
+
+### Itemized changes
+
+- **Smaller buffer pool for one-shot reads** (`core/engine-connect.ts`, `core/pglite-embedded-assets.ts` `withSharedBuffers`, `EngineConfig.pglite_shared_buffers`). PGLite's backend zero-fills its whole `shared_buffers` pool when it starts, about 55 ms for the data directory's 128MB default. A CLI process that runs one read-scope operation (the shared-op path, `gbrain call <read op>`, `search`, `sources list`) now opens with `-c shared_buffers=32MB` (`ONE_SHOT_READ_SHARED_BUFFERS`), which keeps about 90% of that saving. Serve, writes, admin ops and every other command keep the default. Measured first-query cost after a fresh open on a 5,000-page brain moves by ±5 ms.
+- **Extensions load on first use** (`core/pglite-embedded-assets.ts` `lazyExtension`, `readExtensionFiles`). The `vector` and `pg_trgm` bundles are gunzipped and untarred in memory and written into PGLite's filesystem in the extension's `init`, after the backend starts, instead of PGLite streaming them through gunzip and compiling and linking both libraries before startup. Postgres loads each library on its first call into it. Open drops about 30 ms; the first query that needs `vector.so` pays about 1–4 ms more. The tarballs are no longer copied to a temp directory.
+- **`gbrain call`, `capture` and `forget` prewarm the PGLite WASM compile** while their modules load (`cli/main.ts`), as shared-op and post-connect commands already did.
+
+### For contributors
+
+- `scripts/bench/efficiency/probe-pglite-open.ts` times `PGlite.create` on a copy of a data directory: stock (eager) versus lazy extensions at 128MB and 32MB, one fresh process per sample, plus the first query that loads `vector.so`. On the 85-page brain: 202 / 239 ms stock at 128MB, 120 / 153 ms lazy at 32MB (p50 / p95, N=20).
+- Tests: `test/engine-connect.test.ts` pins 32MB for a one-shot read connect and 128MB otherwise, and that `gbrain call` asks for it only for read-scope tools; `test/pglite-embedded-assets.test.ts` pins the bundle contents, refuses an unsupported tar entry, and installs and queries both extensions through an HNSW and a trigram index.
+
+## [0.60.223.0] - 2026-10-14
+
+**On Linux, a managed sync no longer stalls for six minutes after a gbrain process on the same machine is killed (#6650).** When a `gbrain sync` client was killed, its consumer heartbeat row still read as live for up to 30 s (and as the elected owner for up to 60 s). So the next sync didn't hand its catch-up to the running `gbrain serve`: it ran its own consumer next to the serve. When the write owner was killed mid-catch-up, the requests it had claimed stayed claimed until their publication lease ran out, about 365 s with the default ceiling. Now a process proves from `/proc` that a same-machine owner is dead (its pid is gone, or now belongs to a process that started later) and stops waiting for it. In the new convergence harness (seed 6650) the worst stall after an owner kill went from 356 s and 362 s to 0 s with no injected latency, and from 364 s to 30 s at 50 ms; the catch-up after a serve kill went from 385 s to 29 s. Where `/proc` is unavailable (macOS) the time-based rules are unchanged.
+
+### Itemized changes
+
+- **Heartbeat rows** (`src/core/persistence/consumer-heartbeat.ts`, migration v243): each `persistence_consumers` row records its process's kernel boot id and start time (`/proc/<pid>/stat` field 22). `consumerProvablyDead` is true only for an owner under this boot and pid namespace whose pid is gone or reused. A process whose `/proc` numbers another pid namespace's processes records no start time and proves nothing. The owner probe behind serve-delegated sync and the waiter election (`consumer-election.ts` `electOwner`) skip such a row at once. A row from another host or container, or from an older gbrain without the new columns, keeps the time-only rule.
+- **Claims of a dead owner** (`src/core/persistence/consumer.ts`, `claim-phase.ts`): the claim stamp records the same boot id and start time. Every 5 s (Postgres), including while the consumer is idle, it looks up the distinct owners of running claims on its own roots. The expired-claim reclaim takes a claim at once when its stamp of the current token names an owner proven dead, instead of when its lease (up to the publication ceiling plus about 65 s) runs out. A claim re-taken by a live owner since the scan carries a new stamp and is never touched. The same guards as for an expired claim apply: no recovery record and no publication started. An owner that is alive, however slow, or on another host or container keeps its full lease. The idle scan runs on the idle probe's reserved connection, so an idle pool still drains.
+- **Convergence harness** (`test/sync-convergence.serial.test.ts`, `bun run test:convergence`, quarantined): kills the resident serve and a sync client at seeded fault points behind a transaction-mode PgBouncer and checks that a plain sync converges. Named checks cover delegation after a client kill and a stall bound of 70 s (consumer liveness window plus one renewal plus 30 s). See `scripts/persistence/README.md`.
+
+## [0.60.222.0] - 2026-10-14
+
+**Writes that ended without committing are now summarized and explained, and the few that block work are named (#6650).** Every write leaves a receipt, and receipts that ended `failed`, `conflict` or `cancelled` used to pile up with no summary: an agent couldn't tell the one that holds a root from hundreds a later write already superseded or an older build left behind. gbrain now classifies each such receipt at read time (category, class, safe actions, whether a person decides, a structured fix) and stores nothing new. A new doctor check, `persistence_terminal_failures`, warns when a receipt blocks work now (a publication recovery record or a sync checkpoint blocker) or when an unresolved receipt is a gbrain-defect class. A 24-hour spike warns only when nothing else does, and a spike written by builds older than the fix says so, names the build and points at the write owner to upgrade or restart. Superseded rows and rows from builds older than their fixing release count as historical and never warn.
+
+### Itemized changes
+
+- **Classifier** (`src/core/persistence/terminal-classify.ts`): `classifyTerminal` routes each receipt by its recovery record, its typed knock-on marker, and the origin or cause it recorded. A receipt whose code and origin don't say what happened is `diagnosis_required`, and its fix is read-only writer status, never a guess. It also owns the supersession rule `gbrain repair failed-writes` uses.
+- **Bounded readers** (`src/core/persistence/terminal-failures.ts`): one set-based aggregate with a 5 s statement deadline and a 2 s connection deadline; past either the result is `unknown`, never an empty pile. The drill-down scans at most 2,000 receipts per call and pages with a cursor. Thresholds: `persistence.terminal_failures.window_days` (default 7, clamped to `persistence.receipt_retention_days`), `spike_factor` (3) and `spike_min` (25).
+- **`gbrain write-request <id>`** adds `write_error_reason`, `suggestion` and a `diagnosis` with a rendered `fix` for such receipts.
+- **`gbrain sync status`** adds `terminal_failures` (active blockers, unresolved, historical, the drill-down command) and names a recovery record as `next` when nothing else is.
+- **`gbrain sources writer failures <source>`** (read-only) lists the receipts or groups them (`--group-by category`), each group with an exact drill-down filter; a table by default, JSON with `--json`. A resident owner advertises the operation in a new `administration_extensions` capability key, so older clients and owners interoperate.
+- **`/metrics`** (admin only) adds per-source gauges `gbrain_writer_terminal_failures_{active_blockers,unresolved,historical,new_24h,defects}` and `_known`, from one aggregate shared by every scrape for 60 s. `/health` is unchanged.
+- **Fact-fence step** (`src/core/facts/unfenced-facts.ts`): the up-front lifetime-ID check counts only pages that will submit, so a page suppressed by a recent identical refusal, or one with nothing adoptable, no longer pushes the whole step to the cap and refuses it.
+- Docs: [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures), the troubleshooting row, write-refusals and the maintain skill.
+
 ## [0.60.221.0] - 2026-10-14
 
 **When a file you edited by hand blocks every write to its source, one command now shows you both versions and lets you pick which one to keep (#6650).** If you edit a page file while gbrain is publishing a write to that same file, gbrain can no longer tell whether it is safe to put the file back. It used to stop there and leave every later write to that source pending, and the only ways out were deleting the file or editing the database by hand. `gbrain repair stuck-recovery` previews the blocked file with a diff of the version from before the write against what is on disk now. You then choose: `--keep prior` restores the old version so the write publishes again, or `--keep disk` keeps your edit and drops the write. Either way, both versions are backed up first.
