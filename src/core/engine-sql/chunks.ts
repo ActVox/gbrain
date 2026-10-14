@@ -329,18 +329,30 @@ export async function upsertChunksOnce(
     if (Number(rows[0]!.id) !== Number(sealed)) throw new Error(`Page ${slug} (source=${sourceId}) is not the page this transaction wrote`);
   }
 
+/** The by-slug chunk read predicate shared by getChunks and getChunkPage: scope, privacy, sealed text, safe chunks. */
+function chunkReadWhere(
+  slug: string,
+  scope: { sourceIds?: string[]; sourceId: string },
+  opts?: { excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean },
+): SqlFragment {
+  const scopeSql = scope.sourceIds
+    ? sqlFragment`p.source_id = ANY(${scope.sourceIds}::text[])`
+    : sqlFragment`p.source_id = ${scope.sourceId}`;
+  return sqlFragment`p.slug = ${slug} AND ${scopeSql}
+          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+          ${opts?.includeUnsealed ? sqlFragment`` : trustedSql(`AND ${currentTextProjectionFilter('p')}`)}
+          ${requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``}`;
+}
+
 export async function getChunks(
   exec: ScopedRead,
   column: string,
   slug: string,
   scope: { sourceIds?: string[]; sourceId: string },
-  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean },
+  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; indexRange?: { from: number; to: number } },
 ): Promise<Chunk[]> {
       const colId = trustedSql(quoteIdentifier(column));
       const includeEmbedding = opts?.includeEmbedding === true;
-      const scopeSql = scope.sourceIds
-        ? sqlFragment`p.source_id = ANY(${scope.sourceIds}::text[])`
-        : sqlFragment`p.source_id = ${scope.sourceId}`;
       // #2544: explicit non-vector column list — most callers discard
       // embeddings, so `cc.*` shipped every vector over the wire only to be
       // thrown away. `includeEmbedding` adds it back for the callers that
@@ -351,6 +363,8 @@ export async function getChunks(
       // rebuild NULLs vectors without touching embedded_at). S2: it reports
       // the registry-ACTIVE column's truth — `embed <page>` filters on it.
       const embedCol = includeEmbedding ? sqlFragment`, cc.${colId} AS embedding` : sqlFragment``;
+      const range = opts?.indexRange
+        ? sqlFragment`AND cc.chunk_index >= ${opts.indexRange.from} AND cc.chunk_index < ${opts.indexRange.to}` : sqlFragment``;
       const { rows } = await exec.run(sqlFragment`
         SELECT cc.id, cc.page_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
                cc.model, cc.token_count, cc.embedded_at, cc.language,
@@ -361,13 +375,36 @@ export async function getChunks(
                ${embedCol}
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
-        WHERE p.slug = ${slug} AND ${scopeSql}
-          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
-          ${opts?.includeUnsealed ? sqlFragment`` : trustedSql(`AND ${currentTextProjectionFilter('p')}`)}
-          ${requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``}
+        WHERE ${chunkReadWhere(slug, scope, opts)}
+          ${range}
         ORDER BY cc.chunk_index
       `);
       return rows.map((r) => rowToChunk(r, includeEmbedding));
+  }
+
+/**
+ * One page of a page's chunks for get_chunks: the chunks whose chunk_index
+ * falls in [fromIndex, fromIndex + limit) under the same predicate getChunks
+ * applies, plus the count of every chunk that predicate admits and the
+ * highest chunk_index, so the caller knows whether more remain. A range,
+ * not a row LIMIT, so a slug that matches one page in each of two federated
+ * sources never splits a chunk_index between two calls.
+ */
+export async function getChunkPage(
+  exec: ScopedRead,
+  column: string,
+  slug: string,
+  scope: { sourceIds?: string[]; sourceId: string },
+  opts: { fromIndex: number; limit: number; excludePrivate?: boolean; requireSafeChunks?: boolean },
+): Promise<{ chunks: Chunk[]; total_chunks: number; max_chunk_index: number | null }> {
+      const { rows } = await exec.run<{ total: number | string; max_index: number | null }>(sqlFragment`
+        SELECT count(*) AS total, max(cc.chunk_index) AS max_index
+        FROM content_chunks cc
+        JOIN pages p ON p.id = cc.page_id
+        WHERE ${chunkReadWhere(slug, scope, opts)}
+      `);
+      const chunks = await getChunks(exec, column, slug, scope, { ...opts, indexRange: { from: opts.fromIndex, to: opts.fromIndex + opts.limit } });
+      return { chunks, total_chunks: Number(rows[0]?.total ?? 0), max_chunk_index: rows[0]?.max_index == null ? null : Number(rows[0].max_index) };
   }
 
 /**

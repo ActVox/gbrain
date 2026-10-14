@@ -2027,7 +2027,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "full page version snapshots by slug; a page read governed by visibility like get_page (CEO-17)"
     },
-    "description": "Page version history, newest snapshot first. Trusted local and admin callers also get written_by and archived_by (who wrote each snapshot and whose write archived it). `limit` returns only the newest N; `include_body: false` returns metadata only.",
+    "description": "Page version history, newest snapshot first: metadata only (id, snapshot_at, title, type, tags, frontmatter) for the newest 20 versions by default. Pass include_body: true for each version's compiled_truth and timeline, and a larger limit (at most 100 over MCP) for older versions. Trusted local and admin callers also get written_by and archived_by (who wrote each snapshot and whose write archived it). revert_version takes the id field.",
     "params": {
       "slug": {
         "type": "string",
@@ -2036,11 +2036,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "limit": {
         "type": "number",
-        "description": "Return only the newest N versions (a positive integer). Omit for the full history."
+        "description": "Return only the newest N versions (a positive integer). Default 20; MCP callers are capped at 100."
       },
       "include_body": {
         "type": "boolean",
-        "description": "false omits compiled_truth and timeline from every version (metadata only). Default true."
+        "description": "true adds compiled_truth and timeline to every version. Default false (metadata only)."
       }
     },
     "scope": "read",
@@ -2940,7 +2940,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "explicit chunk read by slug, the page-read twin of get_page (CEO-17 raw-read exception)"
     },
-    "description": "Return a page's indexed content chunks (the units search ranks). Use when debugging why search did or did not match a page. Needs read scope. On page_not_found: resolve the slug with resolve_slugs.",
+    "description": "Return a page's indexed content chunks (the units search ranks), in chunk_index order, 50 at a time by default. Use when debugging why search did or did not match a page. A large page has more chunks than one call returns: _meta.pagination carries total_chunks and next_from_index, and a listing_truncated notice names the next call (from_index). Needs read scope. On page_not_found: resolve the slug with resolve_slugs.",
     "params": {
       "slug": {
         "type": "string",
@@ -2959,6 +2959,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ],
         "description": "Lowest trust tier to return (the connection floor still applies).",
         "fullSurfaceOnly": true
+      },
+      "from_index": {
+        "type": "number",
+        "description": "Return chunks from this chunk_index on (a non-negative integer). Default 0."
+      },
+      "limit": {
+        "type": "number",
+        "description": "How many chunk_index positions to return (a positive integer). Default 50; MCP callers are capped at 500."
       }
     },
     "scope": "read",

@@ -1758,9 +1758,9 @@ export function formatResult(
       const versions = result as any[];
       if (versions.length === 0) return 'No versions.\n';
       return versions.map(v => {
-        // Only elide when something was actually dropped — an unconditional
-        // ellipsis renders an 11-char body as `Short body....`.
-        const truth = v.compiled_truth ?? '';
+        // Only elide when something was actually dropped (no `Short body....`);
+        // metadata-only rows (get_versions' default) preview the title instead.
+        const truth = v.compiled_truth ?? v.title ?? '';
         const head = truth.slice(0, VERSION_TRUTH_PREVIEW_CHARS);
         const elided = truth.length > VERSION_TRUTH_PREVIEW_CHARS ? '...' : '';
         return `#${v.id}  ${v.snapshot_at?.toString().slice(0, 19) || '?'}  ${head}${elided}`;
