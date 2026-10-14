@@ -64,7 +64,8 @@ export async function readCapacityCounters(engine: BrainEngine): Promise<Counter
 export async function readCapacityView(engine: BrainEngine): Promise<CapacityView> {
   const counters = await readCapacityCounters(engine);
   const rows = capacityDiagnostics(counters, await readJournalLimits(engine));
-  return { rows, counters_read: counters.length, forecast: null, last_compaction: parseLastCompaction(await engine.getConfig(LAST_COMPACTION_KEY)) };
+  const [compaction] = await engine.executeRaw<{ value: string }>('SELECT value FROM config WHERE key = $1', [LAST_COMPACTION_KEY]);
+  return { rows, counters_read: counters.length, forecast: null, last_compaction: parseLastCompaction(compaction?.value ?? null) };
 }
 
 function parseLastCompaction(raw: string | null): LastCompaction | null {

@@ -322,6 +322,6 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     const [row] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_requests r JOIN persistence_requests c ON ${supersessionSql('r', 'c')} WHERE r.state='failed'`);
     expect(row!.n).toBe(1);
     expect(categorizeCheck('persistence_terminal_failures')).toBe('ops');
-    expect(WAVE_CHECKS.find(spec => spec.id === 'persistence_terminal_failures')).toMatchObject({ resolution: 'operator', registration: 'wave' });
+    expect(WAVE_CHECKS.find(spec => spec.id === 'persistence_terminal_failures')).toMatchObject({ resolution: 'operator', registration: 'doctor.ts' });
   });
 });
