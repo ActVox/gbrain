@@ -19,6 +19,7 @@
  * full scan (a run with no stored cursor, which every completed run leaves
  * behind) does, the same way a `revision_conflict` item is retried.
  */
+import { withAdmissionOrigin } from '../persistence/admission-origin.ts';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../ops/contract.ts';
@@ -275,6 +276,12 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
     spec?: Pick<RepairKindSpec, 'explicit_only' | 'consent' | 'spends'>; maxLlmUsd?: number; deadline?: number; now?: () => number;
     /** Test seam: who publishes this run's admissions (default: this process's consumer, else a live full one on this host). */
     publicationOwner?: () => Promise<{ alive: boolean; owner: string }> }): Promise<RepairResult> {
+  // #6696 (A5): an approved local repair is the operator's own write; a maintenance cycle's background scope still wins.
+  return withAdmissionOrigin('interactive', () => runRepairScoped(ctx, handler, scope, opts));
+}
+
+async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, scope: RepairScope,
+  opts: Parameters<typeof runRepair>[3]): Promise<RepairResult> {
   const { repairSpec, explicitKindRequired } = await import('./registry.ts');
   const spec = opts.spec ?? repairSpec(handler.kind);
   if (spec?.explicit_only && opts.explicit !== true) throw explicitKindRequired(handler.kind);

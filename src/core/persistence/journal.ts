@@ -11,7 +11,8 @@ import { journalLimitKey, oneYearCapacity, readJournalLimits, readReceiptRetenti
 import { outstandingCapacityDetail, retryWriteAdmission } from './admission-retry.ts';
 import { PreadmitBrainChanged } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
-import { EFFECT_BYTES_SQL, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
+import { backgroundPaused, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
+import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
@@ -47,6 +48,8 @@ export interface WriteAdmission {
   intent: Record<string, unknown>;
   authority: WriteAuthority;
   terminalReservation?: number;
+  /** #6696 (A5): who the write is for; unset is background unless a surrounding `withAdmissionOrigin` scope says otherwise. */
+  origin?: AdmissionOrigin;
   /** Phase 4.2: the brain the cached pre-admission reads came from; admission under another brain throws PreadmitBrainChanged. */
   brainId?: string;
 }
@@ -66,6 +69,20 @@ function ownerStatusFix(sourceId: string): Action {
 }
 const lifecycleIdConflict = (requestId: string) => opError('idempotency_conflict', 'This request_id belongs to a source lifecycle operation.',
   `Request ID ${requestId} is already recorded for a source lifecycle change of this CLI writer, so this page write was not admitted and nothing changed. Submit the page write with a new request_id.`);
+/** #6696 (A5): a background admission of `ids` requests and `bytes` reservation refuses past the pause line of any locked counter. */
+async function assertBackgroundRoom(tx: SqlEngine, counters: Counter[], limits: JournalLimits, ids: number, bytes: number): Promise<void> {
+  const share = await readBackgroundPauseShare(tx);
+  for (const row of counters) {
+    const scope = row.key === 'brain' ? 'brain' : 'principal';
+    for (const [resource, setting, used, need] of [['lifetime_ids', `${scope}LifetimeIds`, Number(row.lifetime_ids), ids],
+      ['terminal_bytes', `${scope}TerminalBytes`, Number(row.terminal_bytes), bytes]] as const) {
+      const limit = limits[setting];
+      if (used + need <= Math.floor(limit * share)) continue;
+      throw backgroundPaused(row.key, resource, used, limit, share, journalLimitKey(setting),
+        await oneYearCapacity(tx, row.key, resource === 'lifetime_ids' ? 'LifetimeIds' : 'TerminalBytes', used, limit));
+    }
+  }
+}
 /**
  * `outstanding` (#6278): the outstanding-request cap carries its counts on `detail`
  * (`outstandingCapacityDetail`), so a caller that can wait for the other
@@ -77,15 +94,30 @@ export function capacityError(resource: string, outstanding?: { used: number; li
   if (outstanding) error.detail = outstandingCapacityDetail(outstanding.used, outstanding.limit);
   return error;
 }
-/** Cumulative caps name their config key and a value that covers one more year at the current admission rate. */
+/**
+ * #6696 (A6): a cumulative cap refusal is `write_quota_exhausted` (host only;
+ * waiting does not free a permanent id, and receipt bytes free only as
+ * receipts compact). It names the config key and a value that covers one more
+ * year at the current admission rate; `detail` keeps the limit key, `reason`
+ * the resource.
+ */
 async function cumulativeCapacityError(tx: SqlEngine, resource: string, scope: string, setting: keyof JournalLimits, used: number, limit: number): Promise<OperationError> {
   const key = journalLimitKey(setting);
-  const value = await oneYearCapacity(tx, scope, setting.endsWith('LifetimeIds') ? 'LifetimeIds' : 'TerminalBytes', used, limit);
-  const error = new OperationError('queue_capacity', `Write capacity exhausted: ${resource} (${used} used of ${limit}).`,
-    `Run on the brain host: gbrain config set ${key} ${value} (covers about one more year at the current admission rate). ` +
-    'Keep the same request_id and retry after the change. Accepted request IDs and retained receipts are never evicted.');
-  error.detail = key.slice('persistence.limits.'.length);
-  return error;
+  const ids = setting.endsWith('LifetimeIds');
+  const value = await oneYearCapacity(tx, scope, ids ? 'LifetimeIds' : 'TerminalBytes', used, limit);
+  return quotaExhausted(resource, key, value, used, limit, ids ? 'lifetime_ids' : 'terminal_bytes');
+}
+/** The `write_quota_exhausted` refusal for config key `key`; the fix is the reversible raise, verified by the capacity check. */
+export function quotaExhausted(resource: string, key: string, value: number, used: number, limit: number, reason: 'lifetime_ids' | 'terminal_bytes'): OperationError {
+  return opError('write_quota_exhausted', `Write capacity exhausted: ${resource} (${used} used of ${limit}).`,
+    `Run on the brain host: gbrain config set ${key} ${value} (covers about one more year at the current admission rate; undo with gbrain config unset ${key}). ` +
+    `Keep the same request_id and retry after the change. Accepted request IDs and retained receipts are never evicted.${reason === 'terminal_bytes'
+      ? ' Then gbrain repair receipt-compaction previews the retained receipt bytes compaction would free.' : ''}`,
+    { reason, detail: key.slice('persistence.limits.'.length), docs: 'docs/guides/write-refusals.md#write_quota_exhausted',
+      fix: { argv: ['gbrain', 'config', 'set', key, String(value)], consent: [], actor: 'host_admin', requires_exclusive: false,
+        why: reason === 'lifetime_ids' ? 'Request ids are permanent, so only a larger cap admits more writes; the raise is reversible.'
+          : 'The raise unblocks writes at once and is reversible; compaction frees reserved bytes only over time.',
+        verify: { argv: ['gbrain', 'doctor', '--only', 'persistence_capacity', '--json'] }, docs: 'docs/guides/concurrent-writes.md#quota-near-exhaustion' } });
 }
 /**
  * Up-front refusal for a backfill that will admit `needed` new requests: when
@@ -94,16 +126,41 @@ async function cumulativeCapacityError(tx: SqlEngine, resource: string, scope: s
  * the caller mutates anything.
  */
 export async function assertLifetimeIdHeadroom(engine: SqlEngine, principal: Principal, needed: number): Promise<void> {
-  if (needed <= 0) return;
+  await assertWriteHeadroom(engine, principal, { ids: needed });
+}
+/**
+ * #6696 (A7): a bulk run's preflight. `needed` is the run's estimate (new
+ * request ids, and receipt bytes at `receiptReservation` each); `share` is the
+ * producer's pause line (`backgroundPauseShare`) or 1 for an interactive run.
+ * A cap already full refuses `write_quota_exhausted`; a cap that still admits
+ * writes but cannot cover the run refuses `write_quota_insufficient`, both
+ * with the config value that covers the run and one more year.
+ */
+export async function assertWriteHeadroom(engine: SqlEngine, principal: Principal, needed: { ids: number; bytes?: number }, share = 1): Promise<void> {
+  if (needed.ids <= 0 && !needed.bytes) return;
   const limits = await readJournalLimits(engine);
   const keys = ['brain', principalKey(principal)];
-  const rows = await engine.executeRaw<{ key: string; lifetime_ids: number | string }>(
-    'SELECT key,lifetime_ids FROM persistence_counters WHERE key=ANY($1::text[])', [keys]);
+  const rows = await engine.executeRaw<{ key: string; lifetime_ids: number | string; terminal_bytes: number | string }>(
+    'SELECT key,lifetime_ids,terminal_bytes FROM persistence_counters WHERE key=ANY($1::text[])', [keys]);
   for (const key of keys) {
     const scope = key === 'brain' ? 'brain' : 'principal';
-    const used = Number(rows.find(row => row.key === key)?.lifetime_ids ?? 0);
-    const limit = limits[`${scope}LifetimeIds`];
-    if (used + needed > limit) throw await cumulativeCapacityError(engine, `${scope} permanent request IDs`, key, `${scope}LifetimeIds`, used, limit);
+    for (const [resource, setting, need, label] of [['lifetime_ids', `${scope}LifetimeIds`, needed.ids, 'permanent request IDs'],
+      ['terminal_bytes', `${scope}TerminalBytes`, needed.bytes ?? 0, 'reserved receipt bytes']] as const) {
+      if (need <= 0) continue;
+      const used = Number(rows.find(row => row.key === key)?.[resource] ?? 0);
+      const limit = limits[setting];
+      if (used + need <= Math.floor(limit * share)) continue;
+      if (used + (resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR) > limit) {
+        throw await cumulativeCapacityError(engine, `${scope} ${label}`, key, setting, used, limit);
+      }
+      const configKey = journalLimitKey(setting);
+      const value = Math.max(Math.ceil((used + need) / share) + 1, await oneYearCapacity(engine, key, resource === 'lifetime_ids' ? 'LifetimeIds' : 'TerminalBytes', used, limit));
+      throw opError('write_quota_insufficient', `This run needs ${need} more ${scope} ${label} than the ${Math.floor(limit * share) - used} left before its limit (${used} used of ${limit}${share < 1 ? `, pausing at ${Math.round(share * 100)}%` : ''}).`,
+        `Nothing was started and other writes still work. Run on the brain host: gbrain config set ${configKey} ${value} (undo with gbrain config unset ${configKey}), then rerun the same command.`,
+        { reason: resource, detail: configKey.slice('persistence.limits.'.length), docs: 'docs/guides/write-refusals.md#write_quota_insufficient',
+          fix: { argv: ['gbrain', 'config', 'set', configKey, String(value)], consent: [], actor: 'host_admin', requires_exclusive: false,
+            why: 'Covers this run and about one more year at the current rate; reversible.', verify: { argv: ['gbrain', 'doctor', '--only', 'persistence_capacity', '--json'] } } });
+    }
   }
 }
 /** Creates and locks the counter rows in key order: two statements for any number of keys (#5984 round-trip diet). */
@@ -179,6 +236,7 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
   const terminalBytes = input.terminalReservation ?? receiptReservation(input.authority);
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   const stamp = writerStamp();
+  const origin = resolveAdmissionOrigin(input.origin);
   return { requestId, apply: async (tx: BrainEngine): Promise<WriteRequest> => {
     await declarePersistenceProtocol(tx);
     // The guards are sent together in lock order (worktree, source, writer, counters) and judged in
@@ -223,6 +281,7 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
       if (Number(row.terminal_bytes) + terminalBytes > limits[`${scope}TerminalBytes`]) throw await cumulativeCapacityError(tx, `${scope} reserved receipt bytes`,
         row.key, `${scope}TerminalBytes`, Number(row.terminal_bytes), limits[`${scope}TerminalBytes`]);
     }
+    if (origin === 'background') await assertBackgroundRoom(tx, counters, limits, 1, terminalBytes);
     // The request row and its counter reservation in one statement; the counters are already locked.
     const [row] = await tx.executeRaw<WriteRequest>(`WITH reserved AS (UPDATE persistence_counters SET outstanding_count=outstanding_count+1,
       intent_bytes=intent_bytes+$14,lifetime_ids=lifetime_ids+1,terminal_bytes=terminal_bytes+$15 WHERE key=ANY($20::text[]))
@@ -302,6 +361,7 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
       if (Number(row.terminal_bytes) + terminalBytes > limits[`${scope}TerminalBytes`]) throw await cumulativeCapacityError(tx, `${scope} reserved receipt bytes`,
         row.key, `${scope}TerminalBytes`, Number(row.terminal_bytes), limits[`${scope}TerminalBytes`]);
     }
+    if (resolveAdmissionOrigin(first.origin) === 'background') await assertBackgroundRoom(tx, counters, limits, fresh.length, terminalBytes);
     const [rows] = await pipelined(tx, [() => tx.executeRaw<WriteRequest>(`INSERT INTO persistence_requests
       (principal_kind,principal_id,request_id,operation,source_id,source_incarnation,page_id,slug,
        worktree_id,topology_generation,digest,intent,authority,intent_bytes,terminal_reservation,target_kind,protocol_version,

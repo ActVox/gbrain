@@ -3269,6 +3269,26 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/write-refusals.md#worktree_dirty](../../docs/guides/write-refusals.md#worktree_dirty)
 
+### write_capacity_backpressure
+
+<a id="write_capacity_backpressure"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A background producer (maintenance, conversation facts, an autopilot phase or an autopilot catch-up sync) stopped admitting writes because a cumulative write cap is past `persistence.capacity.background_pause_pct` (0.8); interactive writes keep the rest. Nothing was submitted and no receipt was written. | Near a cumulative cap the remaining request ids and receipt bytes are kept for the user's own writes (remember, put_page, edit_page, operator sync, approved repair). Request ids are never freed, so past the line on ids only the brain host's config raise resumes background work; receipt bytes also free as receipts compact. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --only persistence_capacity --json | agent | `gbrain doctor --json` | 12 | no |
+
+More: [docs/guides/write-refusals.md#write_capacity_backpressure](../../docs/guides/write-refusals.md#write_capacity_backpressure)
+
+### write_capacity_low
+
+<a id="write_capacity_low"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A cumulative write cap is at or past 80% or runs out within `persistence.capacity.warn_days` (30) days at its 7-day rate; writes still work. | Request ids are permanent and receipt bytes free only as receipts compact, so the cap is raised before admission refuses. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --only persistence_capacity --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#write_capacity_low](../../docs/guides/write-refusals.md#write_capacity_low)
+
 ### write_claim_lost
 
 <a id="write_claim_lost"></a>
@@ -3314,6 +3334,30 @@ More: [docs/guides/write-refusals.md#write_outcome_unknown](../../docs/guides/wr
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The write was accepted and is still pending; it may commit later. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 10 | yes |
+
+### write_quota_exhausted
+
+<a id="write_quota_exhausted"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A cumulative write cap (permanent request ids or reserved receipt bytes, for the principal or the brain) is full, so the write was not admitted and nothing changed. | Request ids are permanent replay protection and a receipt keeps its bytes until it compacts, so waiting does not free the cap; the brain host raises it with gbrain config set (reversible). | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --only persistence_capacity --json | agent | `gbrain doctor --json` | 12 | no |
+
+Reasons: `lifetime_ids`, `terminal_bytes`.
+
+More: [docs/guides/write-refusals.md#write_quota_exhausted](../../docs/guides/write-refusals.md#write_quota_exhausted)
+
+### write_quota_insufficient
+
+<a id="write_quota_insufficient"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A bulk run (managed sync catch-up, reclone or a repair) estimated more new receipts than the remaining write capacity allows before its producer's pause line, so it did not start; other writes still work. | Starting a run that the cap would stop part way leaves a long tail of pending pages; the preflight refuses up front with the config raise that covers the run. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --only persistence_capacity --json | agent | `gbrain doctor --json` | 12 | no |
+
+Reasons: `lifetime_ids`, `terminal_bytes`.
+
+More: [docs/guides/write-refusals.md#write_quota_insufficient](../../docs/guides/write-refusals.md#write_quota_insufficient)
 
 ### writer_admin_intent_required
 

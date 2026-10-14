@@ -465,7 +465,7 @@ async function recordFailure(engine: BrainEngine, effect: PersistenceEffect, err
 /** Waits that say nothing about the target never count toward parking. */
 const CONTENTION_CODES = ['projection_pending', 'revision_conflict', 'writer_busy', 'writer_pool_capacity', 'git_index_locked'];
 // #6305: writer_lock_unavailable is this process failing to open the lock file, not the effect failing; it never parks the effect.
-const DEPENDENCY_CODES = ['recovery_required', 'owner_unavailable', 'write_claim_lost', 'queue_capacity', 'writer_lock_unavailable'];
+const DEPENDENCY_CODES = ['recovery_required', 'owner_unavailable', 'write_claim_lost', 'queue_capacity', 'write_quota_exhausted', 'write_capacity_backpressure', 'writer_lock_unavailable'];
 
 /**
  * A scan sets its failing target aside and moves on; a single-target effect,

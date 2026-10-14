@@ -43,6 +43,7 @@
  * trigger lock acquisition.
  */
 
+import { withAdmissionOrigin } from './persistence/admission-origin.ts';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { gbrainPath, loadConfig } from './config.ts';
@@ -1893,6 +1894,14 @@ async function runRepairLanePhase(phase: typeof REPAIR_LANE_PHASES[number], engi
  * single-phase runs are always responsive even if another cycle is live.
  */
 export async function runCycle(
+  engine: BrainEngine | null,
+  opts: CycleOpts,
+): Promise<CycleReport> {
+  // #6696 (A5): every cycle phase is background work, even under an operator's command.
+  return withAdmissionOrigin('background', () => runCycleUnscoped(engine, opts));
+}
+
+async function runCycleUnscoped(
   engine: BrainEngine | null,
   opts: CycleOpts,
 ): Promise<CycleReport> {

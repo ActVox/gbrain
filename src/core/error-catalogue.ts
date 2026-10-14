@@ -62,6 +62,11 @@ export const ERROR_CATALOGUE = {
   timeline_rows_would_be_removed: { code: 'timeline_rows_would_be_removed', docs: 'docs/guides/write-refusals.md#timeline_rows_would_be_removed' },
   reconcile_private_facts: { code: 'permission_denied', docs: 'docs/guides/write-refusals.md#reconcile-private-facts' },
   maintenance_backpressure: { code: 'maintenance_backpressure', docs: 'docs/guides/write-refusals.md#maintenance_backpressure' },
+  // #6696: cumulative write caps (A5 background pause, A6 refusal at the cap, A7 bulk-run preflight).
+  write_capacity_backpressure: { code: 'write_capacity_backpressure', docs: 'docs/guides/write-refusals.md#write_capacity_backpressure' },
+  write_quota_exhausted: { code: 'write_quota_exhausted', docs: 'docs/guides/write-refusals.md#write_quota_exhausted' },
+  write_quota_insufficient: { code: 'write_quota_insufficient', docs: 'docs/guides/write-refusals.md#write_quota_insufficient' },
+  write_capacity_low: { code: 'write_capacity_low', docs: 'docs/guides/write-refusals.md#write_capacity_low' },
   // F0 `gbrain sources refresh` (worktree-wide coordinated ff-only refresh).
   refresh_not_managed: { code: 'refresh_not_managed', docs: 'docs/guides/write-refusals.md#refresh_not_managed' },
   refresh_not_owner: { code: 'refresh_not_owner', docs: 'docs/guides/write-refusals.md#refresh_not_owner' },

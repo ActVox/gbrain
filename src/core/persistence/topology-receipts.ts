@@ -1,8 +1,8 @@
 import type { BrainEngine } from '../engine.ts';
 import { opError } from '../ops/contract.ts';
 import { digest, jsonBytes } from './digest.ts';
-import { lockCounters } from './journal.ts';
-import { journalLimitKey, readJournalLimits } from './limits.ts';
+import { lockCounters, quotaExhausted } from './journal.ts';
+import { journalLimitKey, oneYearCapacity, readJournalLimits } from './limits.ts';
 import { principalKey } from './model.ts';
 import { receiptReservation, retainedReceiptBytes } from './receipt-bytes.ts';
 
@@ -41,8 +41,13 @@ export async function recordTopologyChange(tx:BrainEngine, input:{principal:stri
           `Too much lifecycle work is still pending, so the ${input.operation} of source ${input.sourceId} was not accepted. Let the pending work settle, then submit it again; raising ${journalLimitKey(brain?'brainOutstanding':'principalOutstanding')} is the user's call.`, { fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', input.sourceId, '--json'], consent: [], actor: 'agent', why: 'Shows the pending lifecycle and recovery work that holds this capacity.', requires_exclusive: false } });
       if(Number(counter.lifetime_ids)+1>(brain?limits.brainLifetimeIds:limits.principalLifetimeIds)
         ||Number(counter.terminal_bytes)+terminalBytes>(brain?limits.brainTerminalBytes:limits.principalTerminalBytes))
-        throw opError('queue_capacity','Permanent lifecycle receipts reached the configured capacity. Increase the quota; existing IDs are retained.',
-          `Retained lifecycle receipts reached ${journalLimitKey(brain?'brainLifetimeIds':'principalLifetimeIds')} or ${journalLimitKey(brain?'brainTerminalBytes':'principalTerminalBytes')}, so the ${input.operation} of source ${input.sourceId} was not accepted. Ask the user whether to raise the quota with gbrain config set; receipts are never evicted.`);
+      {
+        const ids=Number(counter.lifetime_ids)+1>(brain?limits.brainLifetimeIds:limits.principalLifetimeIds);
+        const setting=`${brain?'brain':'principal'}${ids?'LifetimeIds':'TerminalBytes'}` as const;
+        const used=Number(ids?counter.lifetime_ids:counter.terminal_bytes);
+        throw quotaExhausted(`${brain?'brain':'principal'} ${ids?'permanent request IDs':'reserved receipt bytes'} (lifecycle ${input.operation} of source ${input.sourceId})`,
+          journalLimitKey(setting),await oneYearCapacity(tx,counter.key,ids?'LifetimeIds':'TerminalBytes',used,limits[setting]),used,limits[setting],ids?'lifetime_ids':'terminal_bytes');
+      }
     }
     if(recoveryBytes && counter.key!==key && Number(counter.recovery_bytes)+recoveryBytes>(brain?limits.brainRecoveryBytes:limits.worktreeRecoveryBytes))
       throw opError('queue_capacity','The lifecycle recovery exceeds available brain/worktree capacity.',

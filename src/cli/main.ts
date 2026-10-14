@@ -1515,6 +1515,7 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
     // Local CLI invocation — the user owns the machine; do not apply remote-caller
     // confinement (e.g., cwd-locked file_upload).
     remote: false,
+    admissionOrigin: 'interactive', // #6696 (A5): the user's own CLI writes
     cliOpts: getCliOptions(),
     writeWaitMs: currentCliWriteWait().waitMs, // #5232
     // v0.34 D4: sourceId is REQUIRED at the type level. Fall back to 'default'
