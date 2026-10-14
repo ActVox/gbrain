@@ -109,6 +109,17 @@ describe('gbrain reindex --oversized (keyless upgrade path)', () => {
     });
   }, 120_000);
 
+  test('the time budget stops after the page in flight and the same command continues', async () => {
+    await withHome({ embedding_disabled: true }, async () => {
+      for (const slug of ['chats/a', 'chats/b', 'chats/c']) await seedSizeSkipped(slug, 600_000);
+      let clock = 0;
+      const first = await runOversizedBackfill(engine, { deadlineMs: 1_000, now: () => clock, onPage: () => { clock += 1_000; } });
+      expect(first).toMatchObject({ candidates: 3, reindexed: 1, remaining: 2 });
+      expect(first.commands.finish).toEqual(['gbrain', 'reindex', '--oversized']);
+      expect(await runOversizedBackfill(engine)).toMatchObject({ candidates: 2, reindexed: 2, remaining: 0 });
+    });
+  }, 120_000);
+
   test('a page over 1 MiB is re-indexed and held for embedding approval: the stale sweep skips it until the user approves', async () => {
     await withHome(null, async () => {
       await seedSizeSkipped('chats/big', 1_500_000);
