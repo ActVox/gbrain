@@ -1167,6 +1167,28 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 |---|---|---|---|---|---|---|
 | The eval gate found retrieval regressions or correctness below its thresholds. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### ghost_mass_delete_refused
+
+<a id="ghost_mass_delete_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair ghost-pages refused to soft-delete more than half of a source's file-backed pages; nothing was changed. | The sync mass-delete valve (#2828) applied to ghost pages: that many missing canonical files almost always means the checkout is the wrong path, unmounted or half-cloned, not that the files were deleted. | Check the source checkout on its owner host first. If removing these pages is genuinely intended, ask the user, then rerun the same apply command with GBRAIN_ALLOW_MASS_RECONCILE=1. Run: gbrain sources writer status --source '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-pages)
+
+### ghost_storage_unknown
+
+<a id="ghost_storage_unknown"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Ghost pages of a source cannot be classified because its canonical checkout cannot be read reliably; nothing was listed or changed. | A page is never reported or removed as a ghost while its file may only be unreadable: a missing or non-directory root (storage_unavailable), or a stat error, an invalid gbrain.yml or an inconclusive page check (ambiguous_storage), fails closed. | Inspect the source checkout on its owner host (writer status shows its root), fix it, then preview gbrain repair ghost-pages --source <id> again. Run: gbrain sources writer status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
+
+Reasons: `storage_unavailable`, `ambiguous_storage`.
+
+More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-pages)
+
 ### git_branch_unborn
 
 <a id="git_branch_unborn"></a>
@@ -2026,6 +2048,18 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The requested resource does not exist or is not visible to this caller. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### not_owner_host
+
+<a id="not_owner_host"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| This host does not own the source's active canonical worktree, so ghost pages (live pages whose canonical file is missing) cannot be checked or removed here; nothing was changed. | Whether a page's canonical file is missing is only known on the host that holds the source's checkout; another host would read its own disk. | Run gbrain repair ghost-pages --source <id> in a terminal on the source's canonical owner host (writer status names it). Run: gbrain sources writer status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
+
+Reasons: `not_owner_host`, `not_applicable`.
+
+More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-pages)
 
 ### overlapping_path
 

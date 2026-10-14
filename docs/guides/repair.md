@@ -143,6 +143,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `planner-stats` | `planner_stats_stale` | Runs `ANALYZE` on the hot tables (pages, links, facts, takes, content_chunks, timeline_entries) whose planner statistics are stale, so search and graph reads stop planning as slow nested loops. PGLite also resets each table's pending row count; Postgres runs each `ANALYZE` with a 60 s statement timeout and a 2 s lock timeout. No journal admission, no user data changes, brain-wide. | none |
 | `contextual-mode` | `contextual_retrieval_coverage` (pages with no recorded mode) | Stamps the contextual retrieval mode on markdown pages imported without one (for example by a large `--no-embed` sync, or by a connector source on an older gbrain), exactly as a fresh import of the page would: the page, source and brain settings decide, and the per-chunk synopsis tier lands at the free title tier. It rebuilds projections only: no page write, no new page version and no request ID. A page whose stored vectors already match the stamped convention keeps them and queues no re-embedding; a page whose embedding input changes has only those vectors cleared and is re-embedded once, unless you pass `--no-embed`. | `unsealed_projection`: pages whose chunks lag their text; `gbrain embed --stale` or `safe-chunks` seals them first, and the next run stamps them. `embed_skip`: pages marked to skip embedding keep their stored vectors and are not stamped. |
 | `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one; `--only`/`--skip` narrow by canonical file path glob. Opt-in `storage.keep_db` lets the owner host's resident consumer resolve drift under declared prefixes with the database copy. See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
+| `ghost-pages` | `ghost_pages` | Explicit-only, preview-bound, destructive consent. Soft-deletes live pages whose canonical file is missing on the owner host (ghost pages: every write refuses `canonical_file_missing` and no sync can import a file that is not there), through `delete_page` bound to the previewed owner, path and revision. `--apply --expect <hash> --yes`. See [ghost pages](#ghost-pages). | Declared db_only and never-filed derived pages (never listed); a page whose file came back before the apply (`file_restored`); pages changed after the preview (`changed_since_preview`). |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -607,6 +608,62 @@ runs finish a full pass and report exact counts. While the next pass is in
 progress, a clean finished pass keeps the check `ok` until a newer timeline row
 is written. A run that has neither says `scan incomplete` and is a lower bound;
 `gbrain repair timeline` (preview) counts the whole brain in one go.
+
+<a id="ghost-pages"></a>
+### Ghost pages
+
+A ghost page is a live page whose canonical file is gone on the source's owner
+host: the file was moved or deleted outside gbrain and the deletion was never
+imported. Every write to it refuses `source_changed` with reason
+`canonical_file_missing` ([write refusals](write-refusals.md#canonical_file_missing)),
+and no sync can import a file that is not there, so retrying never clears it.
+Doctor `ghost_pages` counts them on the owner host (off it, or on a brain with
+no source checkout, the check is `ok` and not applicable); `gbrain pages ghosts
+--source <id> [--json]` lists them, read-only. A person decides, per page,
+which is right:
+
+- **Keep the page**: restore its file at the recorded canonical path on the
+  owner host (from Git or a backup; gbrain has no automated file restore),
+  then run `gbrain sync --source <id>`. Do not apply the repair.
+- **Remove the page**: preview, then apply after the user agrees.
+
+```bash
+gbrain repair ghost-pages --source default        # preview: each ghost, its recorded path and revision, and a hash
+gbrain repair ghost-pages --source default --apply --expect <hash> --yes
+```
+
+The preview writes nothing and prints the apply command with its hash. The
+apply needs the user's consent: without `--yes` a terminal asks, and a
+non-interactive run exits 3 (`ask_user`) with the consent payload and changes
+nothing. It soft-deletes exactly the previewed set through `delete_page`, bound
+to the canonical owner the preview ran under (host, worktree, owner epoch,
+source incarnation), each page's revision and its recorded path. Each page is
+checked again before its request, again in preparation, and its file at
+filesystem publication: a page whose file came back is kept (`file_restored`)
+and the result asks for a new preview; anything else that moved is
+`changed_since_preview`. Soft-deleted pages are purged for good by the
+autopilot purge phase 72 h after deletion; until then `gbrain restore <slug>
+--force` undoes one page (per slug; it writes the file back).
+
+It refuses:
+
+- off the source's canonical owner host, [`not_owner_host`](error-codes.md#not_owner_host);
+- when the checkout is missing or cannot be read reliably (a stat error, an
+  invalid gbrain.yml, an inconclusive page check),
+  [`ghost_storage_unknown`](error-codes.md#ghost_storage_unknown): a page is
+  never removed while its file may only be unreadable;
+- when the ghosts are more than half of a source's file-backed pages (on a
+  source with more than 20 of them),
+  [`ghost_mass_delete_refused`](error-codes.md#ghost_mass_delete_refused):
+  that almost always means the wrong or an unmounted checkout. Check it first;
+  if the removal is genuinely intended, ask the user and rerun the apply with
+  `GBRAIN_ALLOW_MASS_RECONCILE=1`.
+
+Declared `storage.db_only` pages, never-filed derive-phase pages, read-only
+mirror pages and pages written while their source was unbound publish to the
+database only and are never ghosts. Doctor `undeclared_db_only_pages` is a
+separate audit. A preview lists at most 1,000 ghosts; apply them, then preview
+again for the rest. Sync never removes ghost pages by itself.
 
 ### Stale atoms
 
