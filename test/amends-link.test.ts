@@ -10,7 +10,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { setPackRelationSemantics } from '../src/core/link-validity.ts';
-import { linkTypeRanks, NON_RANKING_LINK_KINDS, NON_RANKING_LINK_TYPES, rankingLinkSql } from '../src/core/link-ranking-policy.ts';
+import { linkTypeRanks, NON_RANKING_LINK_TYPES, rankingLinkSql } from '../src/core/link-ranking-policy.ts';
 import { loadPackFromFile } from '../src/core/schema-pack/loader.ts';
 import { INVARIANCE_ROWS, amendmentsVersusReplacement, databaseToday, frontmatterRecordsSince, futureAmendsStayVisible,
   runInvarianceRow, useExamplePack } from './helpers/amends-ranking-scenarios.ts';
@@ -27,13 +27,12 @@ afterAll(async () => { await engine.disconnect(); resetGateway(); setPackRelatio
 beforeEach(async () => { await resetPgliteState(engine); configureGateway({ env: {} } as never); setPackRelationSemantics(new Map()); });
 
 describe('ranking participation policy', () => {
-  test('amends is the non-ranking link type and owner_phrase the non-ranking link kind; the SQL predicate inlines both', () => {
+  test('amends is the non-ranking link type; the SQL predicate inlines it', () => {
     expect(NON_RANKING_LINK_TYPES).toEqual(['amends']);
-    expect(NON_RANKING_LINK_KINDS).toEqual(['owner_phrase']);
     expect(linkTypeRanks('amends')).toBe(false);
     expect(linkTypeRanks('supersedes')).toBe(true);
     expect(linkTypeRanks('mentions')).toBe(true);
-    expect(rankingLinkSql('l')).toBe(`(l.link_type <> ALL(ARRAY['amends']::text[]) AND COALESCE(l.link_kind, '') <> ALL(ARRAY['owner_phrase']::text[]))`);
+    expect(rankingLinkSql('l')).toBe(`l.link_type <> ALL(ARRAY['amends']::text[])`);
   });
 
   test('the bundled example pack is a valid manifest declaring amends as an event mapped from frontmatter', () => {

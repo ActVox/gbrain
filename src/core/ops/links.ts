@@ -405,7 +405,7 @@ const get_backlinks: Operation = {
     source_id: LINK_SOURCE_ID_PARAM,
     all_sources: LINK_ALL_SOURCES_PARAM,
     type: { type: 'string', description: 'Referrer type.' },
-    group: { type: 'string', description: 'page or known_as.' },
+    group: { type: 'string', enum: ['page'], description: 'Per page.' },
     limit: { type: 'number', description: 'Max 500.' },
     cursor: { type: 'string', description: 'Paging.' },
   },

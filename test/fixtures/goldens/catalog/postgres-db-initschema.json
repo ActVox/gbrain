@@ -98,7 +98,7 @@
       "links.links_assertion_tense_check": "c CHECK (((assertion_tense IS NULL) OR (assertion_tense = ANY (ARRAY['present'::text, 'past'::text]))))",
       "links.links_from_page_id_fkey": "f FOREIGN KEY (from_page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "links.links_from_to_type_source_origin_unique": "u UNIQUE NULLS NOT DISTINCT (from_page_id, to_page_id, link_type, link_source, origin_page_id)",
-      "links.links_link_kind_check": "c CHECK (((link_kind IS NULL) OR (link_kind = ANY (ARRAY['plain'::text, 'typed_ner'::text, 'owner_phrase'::text]))))",
+      "links.links_link_kind_check": "c CHECK (((link_kind IS NULL) OR (link_kind = ANY (ARRAY['plain'::text, 'typed_ner'::text]))))",
       "links.links_link_source_check": "c CHECK (((link_source IS NULL) OR ((link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'::text) AND (char_length(link_source) <= 64))))",
       "links.links_origin_page_id_fkey": "f FOREIGN KEY (origin_page_id) REFERENCES pages(id) ON DELETE SET NULL",
       "links.links_pkey": "p PRIMARY KEY (id)",

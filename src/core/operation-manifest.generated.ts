@@ -1639,7 +1639,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "group": {
         "type": "string",
-        "description": "page or known_as."
+        "enum": [
+          "page"
+        ],
+        "description": "Per page."
       },
       "limit": {
         "type": "number",

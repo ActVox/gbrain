@@ -523,7 +523,7 @@
           },
           {
             "category": "ops",
-            "message": "RLS enabled on 137/137 public tables",
+            "message": "RLS enabled on 134/134 public tables",
             "name": "rls",
             "status": "ok"
           },
@@ -3608,7 +3608,7 @@
           },
           {
             "category": "ops",
-            "message": "RLS enabled on 137/137 public tables",
+            "message": "RLS enabled on 134/134 public tables",
             "name": "rls",
             "status": "ok"
           },
