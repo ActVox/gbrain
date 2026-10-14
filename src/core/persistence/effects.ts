@@ -362,9 +362,11 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
       await assertEmbeddingEffectEnabled(tx, config);
       signal.throwIfAborted();
       // A partially refused page keeps its signature unstamped so `gbrain embed --stale` finds the refused chunks.
-      const installed = await installPageEmbeddings(tx, prepared, pending.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
+      // A partial install (the page changed under the provider call) keeps the vectors whose chunk and input
+      // still match and settles like a superseded one: the newer revision's own effect embeds the rest.
+      const installed = (await installPageEmbeddings(tx, prepared, pending.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
         chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source, embedding: vectors[i] ?? undefined, model: opts.embedding?.model })),
-      refused ? undefined : signature);
+      refused ? undefined : signature)).complete;
       if (installed && refused) {
         // A refused chunk keeps no vector from an earlier convention, and the page reads as not fully embedded.
         const ids = refused.failures.map(f => pending[f.index]?.id).filter((id): id is number => id !== undefined);

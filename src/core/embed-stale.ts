@@ -325,13 +325,14 @@ export async function embedStalePages(
         embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
-      if (!await engine.transaction(async tx => {
-        if (!await installPageEmbeddings(tx, prepared, merged,
-          opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined)) return false;
-        if (stale.length === existing.length) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, sourceId);
-        return true;
-      })) continue;
-      result.embedded += stale.length;
+      const install = await engine.transaction(async tx => {
+        const installed = await installPageEmbeddings(tx, prepared, merged,
+          opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined);
+        if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, sourceId);
+        return installed;
+      });
+      if (!install.complete && install.installed === 0) continue;
+      result.embedded += install.installed;
       result.pagesProcessed += 1;
     } catch (e) {
       if (opts.signal?.aborted) {
@@ -577,18 +578,18 @@ export async function embedStaleForSource(
         }));
         // The keyset's last batch stamps complete DB provenance (#4825),
         // with context demotion in the same transaction as its vector writes.
-        if (!await observed(pacer, () => engine.transaction(async tx => {
+        const install = await observed(pacer, () => engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
           if (stopped()) throw new AbortError();
-          if (!await installPageEmbeddings(tx, prepared, merged)) return false;
+          const installed = await installPageEmbeddings(tx, prepared, merged);
           if (stamp) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
-          if (stale.length === existing.length) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
+          if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
           await opts.assertOwned?.(tx);
           if (stopped()) throw new AbortError();
-          return true;
-        }))) return;
-        result.embedded += stale.length;
-        result.pagesProcessed += 1;
+          return installed;
+        }));
+        result.embedded += install.installed;
+        if (install.complete || install.installed > 0) result.pagesProcessed += 1;
       } catch (e: unknown) {
         result.failures = (result.failures ?? 0) + stale.length;
         // Aborted mid-fetch is expected; treat as graceful exit.

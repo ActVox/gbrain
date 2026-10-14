@@ -324,8 +324,8 @@ export async function reembedPageWithContextualRetrieval(
         await tx.lockPageKeys([{ sourceId: page.source_id, slug: page.slug }]);
         if (digest(sourcePolicy(await loadSourceRow(tx, page.source_id))) !== digest(sourcePolicy(source))) return false;
         if (embedded) {
-          if (!await installPageEmbeddings(tx, prepared, embedded.map(chunk => ({ ...chunk, model: prepared.embeddingModel ?? undefined })),
-            undefined, { tier: mode, corpusGeneration: generation })) return false;
+          if (!(await installPageEmbeddings(tx, prepared, embedded.map(chunk => ({ ...chunk, model: prepared.embeddingModel ?? undefined })),
+            undefined, { tier: mode, corpusGeneration: generation })).complete) return false;
         } else {
           const current = await readProjectionSnapshot(tx, page.slug, page.source_id, { allowUnsealed: true });
           if (!sameProjection(prepared, current)) return false;

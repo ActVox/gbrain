@@ -1188,16 +1188,17 @@ async function embedPage(
   const fullyEmbedded = failed === 0 && toEmbed.length === chunks.length;
   // Vectors and their completion stamps share the page guard. A later
   // contextual rebuild must not be relabeled by this attempt's restamp.
-  if (!await engine.transaction(async tx => {
-    if (!await installPageEmbeddings(tx, prepared, updated,
-      fullyEmbedded ? currentEmbeddingSignature() ?? undefined : undefined)) return false;
-    if (fullyEmbedded) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, page.source_id);
-    return true;
-  })) {
+  const install = await engine.transaction(async tx => {
+    const installed = await installPageEmbeddings(tx, prepared, updated,
+      fullyEmbedded ? currentEmbeddingSignature() ?? undefined : undefined);
+    if (fullyEmbedded && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, page.source_id);
+    return installed;
+  });
+  if (!install.complete && install.installed === 0) {
     recordFailure(result, toEmbed.length, slug, EMBED_UNAVAILABLE_MESSAGE);
     return;
   }
-  result.embedded += toEmbed.length - failed;
+  result.embedded += install.installed;
   if (failed > 0) {
     recordFailure(result, failed, slug, firstError);
     serr(`  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${toEmbed.length - failed}`);
@@ -1372,15 +1373,16 @@ async function embedAll(
       }));
       // Partial failures retain their old context; a full completion stamps
       // its vectors and title-tier convention in the same guarded transaction.
-      if (!await observed(pacer, () => engine.transaction(async tx => {
-        if (!await installPageEmbeddings(tx, prepared, updated, failed === 0 ? signature : undefined)) return false;
-        if (failed === 0) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, page.slug, pageSourceId);
-        return true;
-      }))) {
+      const install = await observed(pacer, () => engine.transaction(async tx => {
+        const installed = await installPageEmbeddings(tx, prepared, updated, failed === 0 ? signature : undefined);
+        if (failed === 0 && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, page.slug, pageSourceId);
+        return installed;
+      }));
+      if (!install.complete && install.installed === 0) {
         recordFailure(result, toEmbed.length, page.slug, EMBED_UNAVAILABLE_MESSAGE);
         return;
       }
-      result.embedded += toEmbed.length - failed;
+      result.embedded += install.installed;
       if (failed > 0) {
         recordFailure(result, failed, page.slug, firstError);
         serr(`\n  ${page.slug}: ${failed} chunk(s) failed to embed; embedded the other ${toEmbed.length - failed}`);
@@ -2074,16 +2076,15 @@ async function embedAllStale(
           // The last batch stamps from complete DB provenance (#4825).
           // Keep both stamps with vector installation so later contextual
           // work cannot commit between installation and title-tier demotion.
-          if (!await observed(pacer, () => engine.transaction(async tx => {
+          const install = await observed(pacer, () => engine.transaction(async tx => {
             await staleOpts?.assertOwned?.(tx);
-            if (!await installPageEmbeddings(tx, prepared, merged)) return false;
+            const installed = await installPageEmbeddings(tx, prepared, merged);
             if (stamp && failed === 0) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
-            if (failed === 0 && stale.length === existing.length) {
-              await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
-            }
-            return true;
-          }))) return;
-          result.embedded += stale.length - failed;
+            if (failed === 0 && stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
+            return installed;
+          }));
+          if (!install.complete && install.installed === 0) return;
+          result.embedded += install.installed;
           if (failed > 0) {
             recordFailure(result, failed, slug, firstError);
             serr(`\n  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${stale.length - failed}`);
