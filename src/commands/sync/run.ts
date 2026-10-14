@@ -4,7 +4,8 @@ import { getCompanyBrainProfile } from '../../core/company-brain/profile.ts';
 import { slog, withSourcePrefix } from '../../core/console-prefix.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import { msysToNativePath } from '../../core/path-confine.ts';
-import { syncFailureJsonFields, readManagedSyncFailures, managedSyncRetryCommand } from '../../core/persistence/sync-failures.ts';
+import { syncFailureJsonFields, readManagedSyncFailures } from '../../core/persistence/sync-failures.ts';
+import { formatManagedRetryAction, managedRetryActions } from '../../core/persistence/managed-retry-actions.ts';
 import { managedSyncCursorKey } from '../../core/persistence/sync-run.ts';
 import { syncHoldJsonFields } from '../../core/persistence/sync-holds.ts';
 import { printHoldNotes } from '../sync-diagnostics.ts';
@@ -840,8 +841,8 @@ async function runSingleSourceSync(
       const other = key ? managed.filter(f => f.cursor_key !== key) : [];
       failures = key ? managed.filter(f => f.cursor_key === key) : managed;
       if (other.length) {
-        slog(`${other.length} previously-failed file(s) of this source belong to a run with different sync options and are not retried by this invocation. Retry them with:`);
-        for (const command of new Set(other.map(f => managedSyncRetryCommand(f)))) slog(`  ${command}`);
+        slog(`${other.length} previously-failed file(s) of this source belong to a run with different sync options and are not retried by this invocation. Each, with the action that settles it:`);
+        for (const action of await managedRetryActions(engine, opts, other)) slog(`  ${formatManagedRetryAction(action)}`);
       }
     }
     const legacyRows = managedBrain ? legacyLedgerRows(sourceId).length : 0;
