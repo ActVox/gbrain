@@ -14,6 +14,7 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { pageDocument } from '../src/core/page-window/document.ts';
 import { decodeCursor } from '../src/core/page-window/window.ts';
+import { encodedFrameBytes } from '../src/core/egress-budget.ts';
 import { normalizeLoweredClaim } from '../src/core/facts/withdrawal-schema.ts';
 
 let engine: PGLiteEngine;
@@ -209,6 +210,17 @@ describe('around_chunk_id', () => {
     expect(r.window.byte_start).toBeGreaterThan(doc.length * 0.8);
   });
 
+  test('whitespace the chunker folds still resolves to the exact stored span', async () => {
+    const para = (i: number) => `para ${i}:   spaced\t\ttext   with  runs    of whitespace   \t and trailing   `.repeat(12);
+    await put('logs/spaced', Array.from({ length: 300 }, (_, i) => para(i)).join('\n   \n\t\n  \n'));
+    const chunks = await engine.getChunks('logs/spaced', { sourceId: 'default' } as any);
+    const target = chunks[chunks.length - 2];
+    expect(target.chunk_text).not.toBe((await projection('logs/spaced')).subarray(target.projected_byte_start!, target.projected_byte_end!).toString('utf8'));
+    const r = await get(ctx(), { slug: 'logs/spaced', around_chunk_id: target.id, context_lines: 0 });
+    expect(r.anchor).toBe('stored_span');
+    expect(r.window.text.replace(/\s+/g, '')).toContain(target.chunk_text.replace(/\s+/g, ''));
+  });
+
   test('timeline chunks resolve inside the timeline', async () => {
     await put('logs/with-timeline', 'Overview of acme-example.', Array.from({ length: 2000 }, (_, i) => `- 2026-01-${String(1 + i % 28).padStart(2, '0')}: event ${i} happened at the widget plant`).join('\n'));
     const chunks = (await engine.getChunks('logs/with-timeline', { sourceId: 'default' } as any)).filter(c => c.chunk_source === 'timeline');
@@ -308,6 +320,15 @@ describe('egress', () => {
     const ok = await get(ctx({ transport: 'stdio' }), { slug: 'logs/huge', body: 'full' });
     expect(typeof ok.compiled_truth).toBe('string');
     await expectCode(get(ctx({ transport: 'http', thinClient: true }), { slug: 'logs/huge' }), 'page_too_large_for_inline');
+  });
+
+  test('escape-heavy text shrinks the window until the encoded frame fits the cap', async () => {
+    await put('blobs/escapes', Array.from({ length: 4000 }, (_, i) => `${i} ${'"\\'.repeat(60)}`).join('\n'));
+    const r = await get(ctx({ transport: 'http' }), { slug: 'blobs/escapes', body: 'window', max_bytes: 1_000_000 });
+    const frame = encodedFrameBytes({ content: [{ type: 'text', text: JSON.stringify(r) }] });
+    expect(frame).toBeLessThanOrEqual(1024 * 1024);
+    expect(Buffer.byteLength(r.window.text)).toBeGreaterThan(64 * 1024);
+    expect(typeof r.next_cursor).toBe('string');
   });
 
   test('windows stay under the cap the connection allows', async () => {

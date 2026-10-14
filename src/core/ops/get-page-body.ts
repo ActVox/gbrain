@@ -310,46 +310,53 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
     return { ...out, truncated: true };
   }
 
-  // window
-  const maxBytes = await windowBudget(ctx, req.maxBytes, DEFAULT_WINDOW_BYTES);
+  // window: chosen, then measured as the final encoded frame; text that escapes heavily shrinks the window until it fits.
   const sel = req.selector;
-  let win: WindowSlice | null;
   let cursorMax = req.maxBytes ?? DEFAULT_WINDOW_BYTES;
-  if (!sel) win = windowFrom(doc.bytes, 0, maxBytes);
-  else if (sel.kind === 'lines') win = windowForLines(doc.bytes, sel.from, sel.count, maxBytes);
-  else if (sel.kind === 'bytes') win = windowForBytes(doc.bytes, sel.offset, Math.min(sel.length, maxBytes));
-  else if (sel.kind === 'cursor') {
-    const c = decodeCursor(sel.raw);
-    if (!c || c.page_id !== page.id) {
-      throw invalidParam(ctx, 'get_page', 'cursor', `get_page: cursor is not a window cursor for page ${page.slug}.`, { example: 'gpw1.…' });
+  const select = async (maxBytes: number): Promise<WindowSlice | null> => {
+    if (!sel) return windowFrom(doc.bytes, 0, maxBytes);
+    if (sel.kind === 'lines') return windowForLines(doc.bytes, sel.from, sel.count, maxBytes);
+    if (sel.kind === 'bytes') return windowForBytes(doc.bytes, sel.offset, Math.min(sel.length, maxBytes));
+    if (sel.kind === 'cursor') {
+      const c = decodeCursor(sel.raw);
+      if (!c || c.page_id !== page.id) {
+        throw invalidParam(ctx, 'get_page', 'cursor', `get_page: cursor is not a window cursor for page ${page.slug}.`, { example: 'gpw1.…' });
+      }
+      if (c.view !== req.view) {
+        throw invalidParam(ctx, 'get_page', 'view', `get_page: this cursor pages view '${c.view}'; pass view: '${c.view}' with it.`, { choices: ['read', 'markdown'], example: c.view });
+      }
+      if (c.revision !== revision) {
+        const position = Math.min(c.offset, doc.bytes.length);
+        throw opError('revision_changed', `Page ${page.slug} changed since this cursor was issued (revision ${c.revision}, now ${revision}).`,
+          `Continue from the same byte offset at the current revision (bytes: { offset: ${position}, length: ${c.max_bytes} }), or start over from the outline.`,
+          { legacy_error: 'invalid_params', detail: JSON.stringify({ revision, cursor_revision: c.revision, offset: position }),
+            fix: readFix('Reads on from the same byte offset at the current revision.', { argv: ['gbrain', 'get', '--source', page.source_id, '--', page.slug],
+              mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'window', ...(markdown ? { view: 'markdown' } : {}), bytes: { offset: position, length: c.max_bytes } } } }) });
+      }
+      cursorMax = c.max_bytes;
+      return windowFrom(doc.bytes, c.offset, Math.min(c.max_bytes, maxBytes));
     }
-    if (c.view !== req.view) {
-      throw invalidParam(ctx, 'get_page', 'view', `get_page: this cursor pages view '${c.view}'; pass view: '${c.view}' with it.`, { choices: ['read', 'markdown'], example: c.view });
-    }
-    if (c.revision !== revision) {
-      const position = Math.min(c.offset, doc.bytes.length);
-      throw opError('revision_changed', `Page ${page.slug} changed since this cursor was issued (revision ${c.revision}, now ${revision}).`,
-        `Continue from the same byte offset at the current revision (bytes: { offset: ${position}, length: ${c.max_bytes} }), or start over from the outline.`,
-        { legacy_error: 'invalid_params', detail: JSON.stringify({ revision, cursor_revision: c.revision, offset: position }),
-          fix: readFix('Reads on from the same byte offset at the current revision.', { argv: ['gbrain', 'get', '--source', page.source_id, '--', page.slug],
-            mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'window', ...(markdown ? { view: 'markdown' } : {}), bytes: { offset: position, length: c.max_bytes } } } }) });
-    }
-    cursorMax = c.max_bytes;
-    win = windowFrom(doc.bytes, c.offset, Math.min(c.max_bytes, await windowBudget(ctx, c.max_bytes, DEFAULT_WINDOW_BYTES)));
-  } else {
     const around = await aroundChunk(ctx, page, doc, sel.chunkId, req.contextLines, maxBytes, revision);
     out.anchor = around.anchor;
     if (around.span) out.chunk_span = around.span;
-    if (!around.window) {
-      // T46: no exact position for the chunk, so no estimated neighborhood either: the chunk itself, without coordinates.
-      return { ...out, window: { text: envelopeText(around.chunkText, quarantined, trust) }, truncated: true };
-    }
-    win = around.window;
+    // T46: no exact position for the chunk, so no estimated neighborhood either: the chunk itself, without coordinates.
+    if (!around.window) out.window = { text: envelopeText(around.chunkText, quarantined, trust) };
+    return around.window;
+  };
+  const cap = await resultByteCap({ remote: ctx.remote, transport: ctx.transport, engine: ctx.engine, config: ctx.config });
+  let maxBytes = await windowBudget(ctx, req.maxBytes ?? (sel?.kind === 'cursor' ? decodeCursor(sel.raw)?.max_bytes : undefined), DEFAULT_WINDOW_BYTES);
+  for (let attempt = 0; ; attempt++) {
+    const win = await select(maxBytes);
+    if (!win) return { ...out, truncated: true };
+    out.window = { ...win, text: envelopeText(win.text, quarantined, trust) };
+    out.truncated = win.byte_start > 0 || win.byte_end < doc.bytes.length;
+    if (win.byte_end < doc.bytes.length) out.next_cursor = encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax });
+    else delete out.next_cursor;
+    if (!Number.isFinite(cap) || attempt >= 6) return out;
+    const frame = encodedFrameBytes({ content: [{ type: 'text', text: JSON.stringify(out) }] }) + ENVELOPE_RESERVE_BYTES - FRAME_RESERVE_BYTES;
+    if (frame <= cap || win.byte_end - win.byte_start <= 1) return out;
+    maxBytes = Math.max(1, Math.floor((win.byte_end - win.byte_start) * (cap / frame) * 0.9));
   }
-  out.window = { ...win, text: envelopeText(win.text, quarantined, trust) };
-  out.truncated = win.byte_start > 0 || win.byte_end < doc.bytes.length;
-  if (win.byte_end < doc.bytes.length) out.next_cursor = encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax });
-  return out;
 }
 
 
