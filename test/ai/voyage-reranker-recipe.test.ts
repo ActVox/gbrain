@@ -28,11 +28,11 @@ import {
 } from '../../src/core/ai/defaults.ts';
 
 describe('voyage reranker touchpoint (v0.46.3)', () => {
-  test('declares rerank-2.5 as the default reranker at /rerank with top_k', () => {
+  test('declares rerank-3-lite as the default reranker at /rerank with top_k', () => {
     const tp = voyage.touchpoints.reranker;
     expect(tp).toBeDefined();
     expect(tp!.models).toEqual(['rerank-2.5', 'rerank-2.5-lite', 'rerank-3', 'rerank-3-lite']);
-    expect(tp!.default_model).toBe('rerank-2.5');
+    expect(tp!.default_model).toBe('rerank-3-lite');
     expect(tp!.path).toBe('/rerank');
     expect(tp!.top_param).toBe('top_k');
     expect(tp!.max_payload_bytes).toBeGreaterThan(0);
@@ -44,7 +44,7 @@ describe('voyage reranker touchpoint (v0.46.3)', () => {
   });
 
   test('registry resolves the same recipe object', () => {
-    expect(getRecipe('voyage')?.touchpoints.reranker?.default_model).toBe('rerank-2.5');
+    expect(getRecipe('voyage')?.touchpoints.reranker?.default_model).toBe('rerank-3-lite');
   });
 });
 
@@ -65,11 +65,9 @@ describe('voyage rerank-3 allowlist (#4938)', () => {
     expect(models).toContain('rerank-3-lite');
   });
 
-  test('adding rerank-3 does NOT move the default off rerank-2.5', () => {
-    // Flipping default_model would silently migrate every install that
-    // resolves the recipe default instead of an explicit config row.
-    expect(voyage.touchpoints.reranker!.default_model).toBe('rerank-2.5');
-    expect(NEW_INSTALL_DEFAULT_RERANKER_MODEL).toBe('voyage:rerank-2.5');
+  test('rerank-3-lite is the default (gbrain-evals #148); the recipe and the constant agree', () => {
+    expect(voyage.touchpoints.reranker!.default_model).toBe('rerank-3-lite');
+    expect(NEW_INSTALL_DEFAULT_RERANKER_MODEL).toBe('voyage:rerank-3-lite');
   });
 
   test('the 2.5 pair is retained, not replaced', () => {
@@ -102,7 +100,7 @@ describe('voyage canonical embedding model (v0.46.3)', () => {
 
   test('new-install default constants point at voyage', () => {
     expect(NEW_INSTALL_DEFAULT_EMBEDDING_MODEL).toBe('voyage:voyage-4');
-    expect(NEW_INSTALL_DEFAULT_RERANKER_MODEL).toBe('voyage:rerank-2.5');
+    expect(NEW_INSTALL_DEFAULT_RERANKER_MODEL).toBe('voyage:rerank-3-lite');
   });
 });
 

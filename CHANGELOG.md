@@ -10,6 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Search reranking costs 60% less: the default reranker is now Voyage `rerank-3-lite`, for brains that never set `search.reranker.model`.** In gbrain-evals #148 (v0.10.93), `rerank-3-lite` reranked the same 50 candidates × 1,400 tokens for $0.60 per 1,000 LongMemEval queries instead of $1.51 with `rerank-2.5`, and retrieval quality stayed within run-to-run noise (strict recall@10 298 vs 299 of 300 questions, recall@5 289 vs 288, reranker latency about the same). Voyage now lists `rerank-3` / `rerank-3-lite` as its current, generally available models and `rerank-2.5` as an older one. A brain that set `search.reranker.model` keeps its model, including brains created on v0.46.3–v0.47.10, where `gbrain init` wrote `voyage:rerank-2.5` explicitly. To go back to the previous default: `gbrain config set search.reranker.model voyage:rerank-2.5`.
+
+### Itemized changes
+
+- **Default** (`src/core/ai/defaults.ts`, `src/core/ai/recipes/voyage.ts`): `DEFAULT_RERANKER_MODEL` and the Voyage recipe's reranker `default_model` are `rerank-3-lite`. Candidate count and the per-document token cap are unchanged. The recipe no longer calls the rerank-3 pair a preview, and its price note is re-verified against Voyage's pricing page.
+- **Estimates**: the tokenmax switch notice and the mode bundle's cost note now say about $0.0006 per query.
+- **Disclosure**: a one-time behavior-change notice on upgrade names the change and the rollback command.
+- **Test** (`test/reranker-default-explicit-config.test.ts`): runs a brain's config through mode resolution to the reranker request on the wire. A brain with no `search.reranker.model` sends `rerank-3-lite` (50 documents in tokenmax), and a brain that set `voyage:rerank-2.5` or `voyage:rerank-3` sends its own model.
+- Docs: search modes, embedding providers, retrieval architecture, install guides and README name the new default and the rollback.
+
 ## [0.60.223.0] - 2026-10-14
 
 **On Linux, a managed sync no longer stalls for six minutes after a gbrain process on the same machine is killed (#6650).** When a `gbrain sync` client was killed, its consumer heartbeat row still read as live for up to 30 s (and as the elected owner for up to 60 s). So the next sync didn't hand its catch-up to the running `gbrain serve`: it ran its own consumer next to the serve. When the write owner was killed mid-catch-up, the requests it had claimed stayed claimed until their publication lease ran out, about 365 s with the default ceiling. Now a process proves from `/proc` that a same-machine owner is dead (its pid is gone, or now belongs to a process that started later) and stops waiting for it. In the new convergence harness (seed 6650) the worst stall after an owner kill went from 356 s and 362 s to 0 s with no injected latency, and from 364 s to 30 s at 50 ms; the catch-up after a serve kill went from 385 s to 29 s. Where `/proc` is unavailable (macOS) the time-based rules are unchanged.
