@@ -176,6 +176,8 @@ export interface SyncOpts {
   noSchemaPack?: boolean;
   /** Processing options this caller set; an unfinished managed cursor supplies the rest (unset = all explicit). */
   explicitProcessing?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
+  /** #6696: a runtime paid-work constraint (the cost gate deferred this run's embedding); never a processing option, never lifted by cursor adoption. */
+  embedDeferred?: boolean;
   /**
    * v0.18.0 Step 5 — sync a specific named source. When set, sync reads
    * local_path + last_commit from the sources table (not the global

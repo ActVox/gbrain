@@ -54,6 +54,7 @@ export const DELEGATED_SYNC_OPTION_FIELDS = {
   noBulk: 'boolean',
   lanes: 'number',
   explicitProcessing: 'string[]',
+  embedDeferred: 'boolean',
   timeoutSeconds: 'number',
 } as const;
 
@@ -84,8 +85,10 @@ export interface DelegatedSyncOptions {
   noBulk?: boolean;
   /** #6317: `--lanes N` / `--no-lanes` (1..DELEGATED_SYNC_LANES_MAX) for the managed catch-up. */
   lanes?: number;
-  /** #6317: the processing options the caller set itself; the managed cursor supplies the rest. */
+  /** #6317: the processing options the caller set itself; the managed cursor supplies the rest. #6696: a missing list (an older CLI) means none. */
   explicitProcessing?: Array<typeof DELEGATED_SYNC_PROCESSING_KEYS[number]>;
+  /** #6696: the client's cost gate deferred this run's embedding; cursor adoption never lifts it. Sent only when true. */
+  embedDeferred?: boolean;
   /**
    * REQUIRED — the client always sends its resolved hard deadline so a job
    * whose client died stays bounded. `0` is the single unbounded encoding

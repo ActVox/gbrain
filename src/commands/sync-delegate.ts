@@ -62,6 +62,7 @@ import {
 } from '../core/context/resolve-ipc.ts';
 import {
   DELEGATED_SYNC_LANES_MAX,
+  DELEGATED_SYNC_PROCESSING_KEYS,
   type DelegatedSyncOptions,
   type SyncStartRegistration,
   type SyncStatusResponse,
@@ -145,8 +146,8 @@ export function parseDelegatedSyncArgs(args: string[]): ParsedDelegatedArgs {
     // --all, --watch, --exclude, --workers, …) and anything future.
     return { ok: false, refused: tok };
   }
-  const explicitProcessing = (['noEmbed', 'noExtract', 'noSchemaPack'] as const).filter(key => options[key] === true);
-  if (explicitProcessing.length) options.explicitProcessing = explicitProcessing;
+  // #6696: always sent, so a flagless run adopts an unfinished cursor's options on the serve as it does in-process.
+  options.explicitProcessing = (['noEmbed', 'noExtract', 'noSchemaPack'] as const).filter(key => options[key] === true);
   return { ok: true, options: options as Omit<DelegatedSyncOptions, 'timeoutSeconds'>, explicitSource };
 }
 
@@ -580,7 +581,10 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
     sourceId, timeoutSeconds,
     ...pick(opts, ['dryRun', 'full', 'noPull', 'noEmbed', 'noExtract', 'noSchemaPack', 'skipFailed', 'retryFailed', 'includeGitignored', 'noBulk'] as const),
     ...(opts.lanes !== undefined ? { lanes: opts.lanes } : {}),
-    ...(opts.explicitProcessing?.length ? { explicitProcessing: [...opts.explicitProcessing] } : {}),
+    // #6696: an empty list crosses the wire (a flagless run adopts the cursor's options); a caller that set none is strict, as in-process.
+    explicitProcessing: [...opts.explicitProcessing ?? DELEGATED_SYNC_PROCESSING_KEYS],
+    // Sent only when set, so a serve that predates the field keeps accepting every run without a deferral.
+    ...(opts.embedDeferred ? { embedDeferred: true } : {}),
   };
   const clientToken = randomUUID();
   const { probeLiveFullConsumer, consumerIdentity } = await import('../core/persistence/consumer-heartbeat.ts');

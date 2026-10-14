@@ -492,6 +492,8 @@ async function runSyncAll(
       repoPath: msysToNativePath(src.local_path!), // #2955: heal MSYS /c/... before joins
       dryRun, full, noPull,
       noEmbed: effectiveNoEmbed,
+      // #6696: a planned or cost-gate deferral (not the user's --no-embed) survives cursor adoption.
+      embedDeferred: effectiveNoEmbed && !noEmbed,
       noExtract,
       skipFailed, retryFailed, noSchemaPack, explicitProcessing,
       includeGitignored,
@@ -817,6 +819,8 @@ async function runSingleSourceSync(
       if (gate.stop) return;
       if (gate.autoDeferEmbeds) {
         opts.noEmbed = true;
+        // #6696: a runtime constraint, not an explicit flag: adopting an unfinished cursor's options must not lift it.
+        opts.embedDeferred = true;
         singleSourceAutoDefer = true;
       }
     }
