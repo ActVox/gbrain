@@ -2529,6 +2529,28 @@
         {
           "category": "brain",
           "details": {
+            "by_source": [
+              {
+                "count": 0,
+                "source_id": "default",
+                "status": "known"
+              }
+            ],
+            "count": 0,
+            "docs": "docs/guides/repair.md#ghost-pages",
+            "exact": true,
+            "inspected": 0,
+            "samples": [],
+            "truncated": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No live page is missing its canonical file (0 page(s) inspected).",
+          "name": "ghost_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/write-refusals.md#invalid_fence",
             "model_repair": {
               "max_usd_per_day": 1,
@@ -2602,28 +2624,6 @@
           "elapsed_ms": "<volatile>",
           "message": "No malformed facts or takes fence is held, stored or waiting in a checkout (1 source(s) scanned).",
           "name": "fence_integrity",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "details": {
-            "by_source": [
-              {
-                "count": 0,
-                "source_id": "default",
-                "status": "known"
-              }
-            ],
-            "count": 0,
-            "docs": "docs/guides/repair.md#ghost-pages",
-            "exact": true,
-            "inspected": 0,
-            "samples": [],
-            "truncated": false
-          },
-          "elapsed_ms": "<volatile>",
-          "message": "No live page is missing its canonical file (0 page(s) inspected).",
-          "name": "ghost_pages",
           "status": "ok"
         },
         {

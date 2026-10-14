@@ -43,7 +43,6 @@ export const help: CliHelpSpec = {
   examples: [
     'gbrain doctor --json',
     'gbrain doctor --only harness_wiring --json',
-    'gbrain doctor --tier ops --json',
     'gbrain doctor --remediation-plan --json',
     'gbrain doctor --remediate --yes --include-repairs --expect <plan_hash> --max-usd 5',
   ],

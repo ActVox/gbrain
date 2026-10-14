@@ -215,8 +215,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   coreMemoryEntry,
   persistenceConsumersEntry,
   atomHeldFailedEntry,
-  fenceIntegrityEntry,
   ghostPagesEntry,
+  fenceIntegrityEntry,
   searchModeEntry,
 ];
 

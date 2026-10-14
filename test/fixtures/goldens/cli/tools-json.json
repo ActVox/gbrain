@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 237445,
-    "stdoutSha256": "01f29ef770729b0a738319c1b0fc8dd5ba4526669f95d3c95a33ccc500531580",
+    "stdoutBytes": 237450,
+    "stdoutSha256": "0887ac72521b84dfb730c8cae62b512a813617c581101f7af7574823534b3824",
     "toolNames": [
       "remember",
       "entity",
@@ -2465,7 +2465,7 @@
         "scope": "admin"
       },
       {
-        "description": "Brain health as bands for agents without admin scope: write capacity (ok|low|critical with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.",
+        "description": "Brain health as bands for agents without admin scope: write capacity (ok, low or critical, with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,

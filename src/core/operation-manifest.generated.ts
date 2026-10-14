@@ -2050,9 +2050,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Brain health as bands for agents without admin scope: write capacity (ok|low|critical with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.",
+    "description": "Brain health as bands for agents without admin scope: write capacity (ok, low or critical, with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.",
     "params": {},
-    "scope": "read"
+    "scope": "read",
+    "area": "admin"
   },
   {
     "name": "get_versions",

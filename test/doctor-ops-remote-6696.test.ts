@@ -109,6 +109,13 @@ describe('get_brain_health bands', () => {
     expect(['1-9', 'unknown']).toContain(out.write_failures.band);
   });
 
+  test('a federated grant scopes the bands to its sources, never the brain', async () => {
+    const op = operations.find((o) => o.name === 'get_brain_health')!;
+    const band = async (allowedSources: string[]) => ((await op.handler(ctx({ sourceId: undefined, auth: { allowedSources } as never }), {})) as { write_failures: { band: string } }).write_failures.band;
+    expect(await band(['fund-b'])).toBe('1-9');
+    expect(await band(['acme-a'])).toBe('10-99');
+  });
+
   test('capacity fixes verify through MCP get_brain_health and the CLI', () => {
     expect(capacityVerify()).toMatchObject({ argv: ['gbrain', 'doctor', '--only', 'persistence_capacity', '--json'], mcp: { tool: 'get_brain_health', arguments: {} } });
   });
