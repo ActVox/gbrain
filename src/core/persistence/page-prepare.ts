@@ -126,7 +126,7 @@ function isNeverFiledDerivedPage(slug: string, page: { source_path?: string | nu
  * A live page whose canonical file is absent publishes to the database only
  * when its slug is a declared db_only path or a never-filed derive-phase page.
  */
-export function publishesDatabaseOnly(root: string, slug: string, snapshot: PageSnapshot | null): boolean {
+export function publishesDatabaseOnly(root: string, slug: string, snapshot: { page: Pick<PageSnapshot['page'], 'deleted_at' | 'source_path' | 'source_uri'> } | null): boolean {
   if (!snapshot || snapshot.page.deleted_at) return false;
   return isSourceDbOnlySlug(root, slug, 'refuse') || isNeverFiledDerivedPage(slug, snapshot.page);
 }
@@ -210,8 +210,8 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     // missing still refuses below.
     if (publishesDatabaseOnly(root, row.slug, snapshot)) return undefined;
     if (options.deleting === true && content === null && !snapshot.page.source_path && !capturedPath) return undefined;
-    throw new OperationError('source_changed', 'The canonical file was removed outside coordinated publication.',
-      'Import the local deletion or recover the canonical file before editing this page.');
+    throw Object.assign(new OperationError('source_changed', 'The canonical file was removed outside coordinated publication.',
+      'Import the local deletion or recover the canonical file before editing this page.'), { detail: 'canonical_file_missing' });
   }
   // A normal edit may replace only the bytes represented by its read snapshot.
   // Unknown local edits require explicit import/recovery, even for force writes.
