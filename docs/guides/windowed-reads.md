@@ -63,7 +63,7 @@ Evidence delivery (`return_unit` on search, query and `assemble_evidence`)
 never assembles a page over the inline size whole: a `page` unit becomes the
 window around the hits, with `delivered.fallback_reason: "page_over_inline_bytes"`.
 A truncated search snippet past the first chunk points at
-`get_page {slug, around_chunk_id}`.
+`get_page <slug> around_chunk_id=<id>`.
 
 ## Privacy
 
