@@ -84,7 +84,7 @@ GBrain is keyless. Explain these boundaries before enabling a capability; see
 [memory boundaries](docs/guides/memory-boundaries.md#where-text-goes).
 
 Skip API-key setup for the initial keyless memory path. If the user enables semantic retrieval or paid enrichment, configure the selected provider explicitly. GBrain defaults to the Voyage embedding + reranker stack
-(`voyage:voyage-4` @ 1024d + `voyage:rerank-2.5` — one key covers both); OpenAI is the
+(`voyage:voyage-4` @ 1024d + `voyage:rerank-3-lite` — one key covers both); OpenAI is the
 main alternative, chosen at init via `--embedding-model <provider:model>`.
 **Need to switch an existing brain's embedding or reranker model?** Follow
 the explicit-consent playbook at `skills/migrations/v0.46.3.0.md`. Preview the
