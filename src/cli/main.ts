@@ -688,6 +688,8 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
       }
     } else {
       rawResult = await op.handler(ctx, params);
+      // #6696 (A4): a local write's output carries the capacity notices (60 s snapshot, hourly per scope).
+      if (op.mutating) for (const notice of await (await import('../core/persistence/capacity-snapshot.ts')).capacityNotices(engine).catch(() => [])) captureOpNotice(notice);
     }
     // ENG-2 (renderer parity by data shape): JSON-round-trip the local-engine
     // path's return value so renderers see the same shape they'd see on the

@@ -489,6 +489,8 @@ export interface CycleReport {
      */
     phantoms_skipped_drift: number;
   };
+  /** #6696 (A4): `write_capacity_low` / `write_capacity_backpressure` when a cumulative write cap needs attention (every cycle, unthrottled). */
+  notices?: import('./agent-output.ts').Notice[];
 }
 
 export interface CycleOpts {
@@ -1898,7 +1900,10 @@ export async function runCycle(
   opts: CycleOpts,
 ): Promise<CycleReport> {
   // #6696 (A5): every cycle phase is background work, even under an operator's command.
-  return withAdmissionOrigin('background', () => runCycleUnscoped(engine, opts));
+  const report = await withAdmissionOrigin('background', () => runCycleUnscoped(engine, opts));
+  if (!engine || report.status === 'skipped' || opts.dryRun) return report;
+  const notices = await (await import('./persistence/capacity-snapshot.ts')).capacityNotices(engine, { throttle: false }).catch(() => []);
+  return notices.length ? { ...report, notices } : report;
 }
 
 async function runCycleUnscoped(

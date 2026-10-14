@@ -943,3 +943,40 @@ When `persistence_capacity` warns or fails, or a write is refused with
 
 Raising a receipt-bytes cap is safe: the counter tracks bytes that are really
 stored, and compaction frees the window's reservations as receipts age out.
+
+**Warnings before the wall.** A cap at or past 80%, or one that runs out
+within `persistence.capacity.warn_days` (default 30), adds the
+`[gbrain notice write_capacity_low]` notice (kind `info`) with the same
+`gbrain config set` command. Write and sync receipts carry it at most once an
+hour per process per scope (a remote client sees only the brain and its own
+principal); `gbrain sync status`, doctor and autopilot cycle output carry it
+every time. `gbrain notices mute write_capacity_low` mutes it on receipts;
+doctor still reports it. When a cap passes
+`persistence.capacity.background_pause_pct` (default 80) background
+producers pause and `[gbrain notice write_capacity_backpressure]` (kind
+`degraded`) fires once when the pause starts. Every notice reads a capacity
+snapshot that refreshes at most once a minute; no write computes a forecast.
+
+**Alerting (hosted operators).** The admin `/metrics` endpoint exports
+`gbrain_write_capacity_used`, `gbrain_write_capacity_limit` and
+`gbrain_write_capacity_days_to_exhaustion`, labelled `scope` and `resource`
+(`lifetime_ids` or `terminal_bytes`), from the same snapshot. The public
+`/health` probe is unchanged. A Prometheus rule that pages before the
+background pause and before the wall:
+
+```yaml
+groups:
+  - name: gbrain-write-capacity
+    rules:
+      - alert: GbrainWriteCapacityLow
+        expr: gbrain_write_capacity_used / gbrain_write_capacity_limit >= 0.8 or gbrain_write_capacity_days_to_exhaustion < 30
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.scope }} {{ $labels.resource }} write cap near exhaustion"
+          runbook: docs/guides/concurrent-writes.md#quota-near-exhaustion
+      - alert: GbrainWriteCapacityCritical
+        expr: gbrain_write_capacity_used / gbrain_write_capacity_limit >= 0.95 or gbrain_write_capacity_days_to_exhaustion < 7
+        for: 5m
+        labels: { severity: critical }
+```
