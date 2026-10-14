@@ -149,7 +149,7 @@ describe('large pages: a deep hit points at its own window', () => {
       { slug: 'chat/log-example', chunk_text: long, chunk_id: 42, chunk_index: 7 },
       { slug: 'chat/log-example', chunk_text: long, chunk_id: 41, chunk_index: 0 },
     ], 100);
-    expect(deep.chunk_text).toContain('get_page {"slug":"chat/log-example","around_chunk_id":42}');
+    expect(deep.chunk_text).toContain('get_page chat/log-example around_chunk_id=42]');
     expect(first.chunk_text).toContain('get_page chat/log-example for full text');
   });
 });

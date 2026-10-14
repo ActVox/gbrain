@@ -31,7 +31,7 @@ import { currentTextProjectionFilter, safeChunksFilter, requiresSafeChunks } fro
 import { resolveExcludePrivatePages } from './private-visibility.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import { loadFenceChunkOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
-import { chunkDocumentSpan, DEFAULT_INLINE_BODY_BYTES, projectPageText, spanHoldsChunk, TIMELINE_SEPARATOR } from '../page-window/document.ts';
+import { DEFAULT_INLINE_BODY_BYTES, locateChunksByStoredSpans, projectPageText, TIMELINE_SEPARATOR } from '../page-window/document.ts';
 import { stripChunkHeader } from '../chunkers/code.ts';
 import { OperationError } from '../ops/contract.ts';
 import { blockDateHeaders, evidenceDateHeaderEnabled } from './evidence-date.ts';
@@ -653,30 +653,6 @@ const SPAN_ONLY_LOCATE_BYTES = 1024 * 1024;
 /** fallback_reason when a 'page' (or auto) unit was cut to a window because the page is over the inline read size. */
 export const PAGE_OVER_INLINE_BYTES = 'page_over_inline_bytes';
 
-/**
- * Locate chunks by their recorded projected byte spans, verified against the
- * text; one forward pass converts byte offsets to the string's UTF-16
- * offsets. Chunks without a span (or with a stale one) stay unlocated.
- */
-function locateByStoredSpans(text: string, timelineAt: number, chunks: ChunkWindowPage['chunks']): Array<{ id: number; chunk_index: number; start: number; end: number }> {
-  const doc = { bytes: Buffer.from(text, 'utf8'), timelineByte: timelineAt < 0 ? -1 : Buffer.byteLength(text.slice(0, timelineAt), 'utf8') };
-  const found: Array<{ id: number; chunk_index: number; start: number; end: number }> = [];
-  for (const c of chunks) {
-    const span = chunkDocumentSpan(doc, c);
-    if (span && spanHoldsChunk(doc, span, c.chunk_text)) found.push({ id: c.id, chunk_index: c.chunk_index, start: span.start, end: span.end });
-  }
-  const positions = [...new Set(found.flatMap(f => [f.start, f.end]))].sort((a, b) => a - b);
-  const toChar = new Map<number, number>();
-  let byte = 0;
-  let char = 0;
-  for (const pos of positions) {
-    char += doc.bytes.subarray(byte, pos).toString('utf8').length;
-    byte = pos;
-    toChar.set(pos, char);
-  }
-  return found.map(f => ({ ...f, start: toChar.get(f.start)!, end: toChar.get(f.end)! })).sort((a, b) => a.chunk_index - b.chunk_index);
-}
-
 function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePlan, includeTimeline: boolean): PlannedBlock {
   const best = hits[0];
   if (!page.sealed) return fallbackBlock(best, hits, 'unsealed_page');
@@ -686,7 +662,7 @@ function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePl
   const truthChunks = page.chunks.filter(c => c.chunk_source === 'compiled_truth');
   const timelineChunks = page.chunks.filter(c => c.chunk_source === 'timeline');
   // Large pages: above 1 MiB the text is never whitespace-folded whole; hits are anchored by their stored spans only.
-  const spans = textBytes > SPAN_ONLY_LOCATE_BYTES ? locateByStoredSpans(text, timelineAt, page.chunks) : [
+  const spans = textBytes > SPAN_ONLY_LOCATE_BYTES ? locateChunksByStoredSpans(text, timelineAt, page.chunks) : [
     ...locateChunks(timelineAt < 0 ? text : text.slice(0, timelineAt - TIMELINE_SEPARATOR.length), truthChunks),
     ...(timelineAt < 0 ? [] : locateChunks(text.slice(timelineAt), timelineChunks).map(sp => ({ ...sp, start: sp.start + timelineAt, end: sp.end + timelineAt }))),
   ];

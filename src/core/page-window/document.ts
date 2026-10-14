@@ -135,3 +135,28 @@ export function boundedProjectedPrefix(body: string | null | undefined, maxBytes
   }
   return credentialSafeProjection(sanitizeRemoteBody(prefix));
 }
+
+/**
+ * Locate chunks in a projected page text (projectPageText) by their recorded
+ * byte spans, verified against the text; one forward pass converts byte offsets to the string's UTF-16
+ * offsets. Chunks without a span (or with a stale one) stay unlocated.
+ */
+export function locateChunksByStoredSpans(text: string, timelineAt: number,
+  chunks: ReadonlyArray<{ id: number; chunk_index: number; chunk_text: string; chunk_source: string; projected_byte_start?: number | null; projected_byte_end?: number | null }>): Array<{ id: number; chunk_index: number; start: number; end: number }> {
+  const doc = { bytes: Buffer.from(text, 'utf8'), timelineByte: timelineAt < 0 ? -1 : Buffer.byteLength(text.slice(0, timelineAt), 'utf8') };
+  const found: Array<{ id: number; chunk_index: number; start: number; end: number }> = [];
+  for (const c of chunks) {
+    const span = chunkDocumentSpan(doc, c);
+    if (span && spanHoldsChunk(doc, span, c.chunk_text)) found.push({ id: c.id, chunk_index: c.chunk_index, start: span.start, end: span.end });
+  }
+  const positions = [...new Set(found.flatMap(f => [f.start, f.end]))].sort((a, b) => a - b);
+  const toChar = new Map<number, number>();
+  let byte = 0;
+  let char = 0;
+  for (const pos of positions) {
+    char += doc.bytes.subarray(byte, pos).toString('utf8').length;
+    byte = pos;
+    toChar.set(pos, char);
+  }
+  return found.map(f => ({ ...f, start: toChar.get(f.start)!, end: toChar.get(f.end)! })).sort((a, b) => a.chunk_index - b.chunk_index);
+}

@@ -23,7 +23,7 @@ export const DEFAULT_AGENT_SNIPPET_CHARS = 300;
 export function buildSnippetMarker(slug: string | undefined, droppedChars: number, followUp?: { op: string; args: Record<string, string> }, chunkId?: number): string {
   // Large pages: a hit past the first chunk points at its own window (get_page around_chunk_id), not at the whole page.
   if (!followUp && slug && Number.isSafeInteger(chunkId) && (chunkId as number) > 0) {
-    return `… [truncated ${droppedChars} chars — get_page ${JSON.stringify({ slug, around_chunk_id: chunkId })} for the text around it]`;
+    return `… [truncated ${droppedChars} chars — get_page ${slug} around_chunk_id=${chunkId}]`;
   }
   const target = followUp ? `${followUp.op} ${JSON.stringify(followUp.args)}` : slug && slug.length > 0 ? `get_page ${slug}` : 'get_page <slug>';
   return `… [truncated ${droppedChars} chars — ${target} for full text]`;
