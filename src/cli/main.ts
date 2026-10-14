@@ -48,6 +48,7 @@ import { curatedFlagError } from './help/validate.ts';
 import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usageError, writeCliError, writeCliNotice, writeFatalCliError } from './cli-error.ts';
 import type { Notice } from '../core/agent-output.ts';
 import { opError, opOwnsSource } from '../core/ops/contract.ts';
+import { PAGE_MAX_BYTES } from '../core/page-size-policy.ts';
 import { opParamValue } from './op-param-values.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from '../core/cli-options.ts';
@@ -1156,7 +1157,7 @@ export async function applyStdinParam(
   params: Record<string, unknown>,
 ): Promise<void> {
   // Branch shape (stdin hint + missing param + `!process.stdin.isTTY` gate +
-  // 5MB cap) is pinned by the R4 regression test for PR #1325's Windows fix
+  // page-ceiling cap) is pinned by the R4 regression test for PR #1325's Windows fix
   // (test/cycle/regression-pr-wave-r1-r2-r4.test.ts) — keep the spelling.
   if (op.cliHints?.stdin && !params[op.cliHints.stdin] && !process.stdin.isTTY) {
     const content = await readStdinBounded();
@@ -1167,9 +1168,10 @@ export async function applyStdinParam(
     // empty write; leaving the param unset makes the required-param usage
     // error fire instead (same fail-fast as the #3513 timeout path).
     if (content.trim() === '') return;
-    const MAX_STDIN = 5_000_000; // 5MB
+    const MAX_STDIN = PAGE_MAX_BYTES; // the 24 MiB page ceiling
     if (Buffer.byteLength(content, 'utf-8') > MAX_STDIN) {
-      exitCliError(opError('payload_too_large', `stdin content exceeds ${MAX_STDIN} bytes.`, 'Split the content into smaller inputs.'), op.cliHints?.name ?? op.name);
+      exitCliError(opError('payload_too_large', `stdin content exceeds ${MAX_STDIN} bytes (the 24 MiB page ceiling).`,
+        'Nothing was written. A page larger than the ceiling cannot be stored in this version; see docs/guides/memory-boundaries.md#large-pages.'), op.cliHints?.name ?? op.name);
     }
     params[op.cliHints.stdin] = content;
   }

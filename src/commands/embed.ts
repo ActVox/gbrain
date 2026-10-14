@@ -50,6 +50,7 @@ import { resolveEmbedConcurrency } from '../core/embed-concurrency.ts';
 export { resolveEmbedConcurrency, _resetEmbedConcurrencyClampWarningForTest } from '../core/embed-concurrency.ts';
 import { isEmbeddingZeroNormError } from '../core/ai/embedding-guard.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
+import { estimatePageEmbedUsd, listBudgetLimitedPages, planPageEmbedding, type PageEmbedGrant } from '../core/page-embedding-budget.ts';
 import {
   restampIfDemotedToTitleTier,
   embedBatchWithBackoff,
@@ -148,6 +149,12 @@ export interface EmbedOpts {
   slugs?: string[];
   /** Embed a single page. */
   slug?: string;
+  /**
+   * The user's explicit `--max-usd N` on a `--slugs`/`--held` run: lifts a
+   * large page's embedding hold and raises its per-page cap by N
+   * (page-embedding-budget.ts). Set only by the foreground CLI.
+   */
+  approvedPageCapUsd?: number;
   /**
    * v0.31.12: scope to a specific source. When set, only pages from this
    * source are embedded. When omitted, all sources are processed (but
@@ -478,7 +485,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     for (const s of opts.slugs) {
       if (isAborted(opts.signal)) break; // #1737: stop the per-slug loop on abort
       try {
-        await embedPage(engine, s, !!opts.dryRun, result, opts.sourceId, opts.signal, opts.quiet);
+        await embedPage(engine, s, !!opts.dryRun, result, opts.sourceId, opts.signal, opts.quiet, opts.approvedPageCapUsd);
       } catch (e: unknown) {
         if (isAborted(opts.signal)) break; // shutdown, not a failure
         // #3037: a page-level error (not found, DB write) must not exit 0.
@@ -813,7 +820,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     return result;
   }
   if (opts.slug) {
-    await embedPage(engine, opts.slug, !!opts.dryRun, result, opts.sourceId, opts.signal, opts.quiet);
+    await embedPage(engine, opts.slug, !!opts.dryRun, result, opts.sourceId, opts.signal, opts.quiet, opts.approvedPageCapUsd);
     return result;
   }
   throw new Error('No embed target specified. Pass { slug }, { slugs }, { all }, or { stale }.');
@@ -905,6 +912,31 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
     };
   }
 
+  if (args.includes('--held')) {
+    const say = args.includes('--json') ? serr : slog;
+    if (args.includes('--background')) {
+      serr('[embed] --held runs in the foreground: the per-page approval is not carried into background jobs.');
+      process.exit(1);
+    }
+    const heldSourceIdx = args.indexOf('--source');
+    const limited = await listBudgetLimitedPages(engine, heldSourceIdx >= 0 ? { sourceId: args[heldSourceIdx + 1] } : {});
+    if (limited.length === 0) {
+      say('[embed] No large pages are held or capped by embed.max_usd_per_page.');
+      return { embedded: 0, skipped: 0, would_embed: 0, total_chunks: 0, pages_processed: 0, failures: 0, failure_samples: [], dryRun: args.includes('--dry-run'), chunkless_pages_healed: 0 };
+    }
+    const heldSignature = currentEmbeddingSignature();
+    for (const row of limited) {
+      say(`[embed] ${row.slug} (${row.source_id}): ${row.state}${row.reason ? ` (${row.reason})` : ''}, ${row.pending_chunks} chunk(s) without a vector, `
+        + `spent $${row.spent_usd.toFixed(2)}, about $${estimatePageEmbedUsd(row.pending_chars, heldSignature).toFixed(2)} to finish`);
+    }
+    const sources = [...new Set(limited.map(row => row.source_id))];
+    if (sources.length > 1) {
+      serr(`[embed] Held pages span ${sources.length} sources; one approval covers one source. Run per source: ${sources.map(id => `gbrain embed --held --source ${id} --max-usd <N>`).join('; ')}`);
+      process.exit(1);
+    }
+    const rest = args.filter((a, i) => a !== '--held' && a !== '--source' && args[i - 1] !== '--source');
+    return runEmbed(engine, [...rest, '--source', sources[0], '--slugs', ...limited.map(row => row.slug)], selectedConfig, consent);
+  }
   const authorization = consent?.authorization ?? null;
   const costCap = args.includes('--dry-run') || args.includes('--background') ? null : embedCostCap(authorization?.cap_usd, authorization?.cap_source);
   if (args.includes('--images')) return (await import('../core/embed-stale-images.ts')).runEmbedStaleImagesCli(engine, args, costCap); // lazy: keeps import-file out of embed's graph
@@ -971,14 +1003,15 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
 
   let opts: EmbedOpts;
   if (slugsIdx >= 0) {
-    opts = { slugs: slugsAfter(args, slugsIdx), dryRun, sourceId, batchSize, priority, catchUp };
+    const approvedPageCapUsd = authorization?.via === 'max_usd' && authorization.cap_usd !== null ? authorization.cap_usd : undefined;
+    opts = { slugs: slugsAfter(args, slugsIdx), dryRun, sourceId, batchSize, priority, catchUp, ...(approvedPageCapUsd !== undefined && { approvedPageCapUsd }) };
   } else if (all || stale) {
     // E-2: CLI-only single-flight for stale runs (the minion path locks itself).
     opts = { all, stale, dryRun, sourceId, batchSize, priority, catchUp, ...(pace && { pace }), ...(stale && { singleFlight: true }), ...(includeNullSignature && { includeNullSignature: true }) };
   } else {
     const slug = args.find(a => !a.startsWith('--'));
     if (!slug) {
-      serr('Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature] [--yes | --max-usd N] | --stale --images (gbrain embed --help: paid runs need the user\'s approval)');
+      serr('Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...|--held] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature] [--yes | --max-usd N] | --stale --images (gbrain embed --help: paid runs need the user\'s approval)');
       process.exit(1);
     }
     opts = { slug, dryRun, sourceId, batchSize, priority, catchUp };
@@ -1061,6 +1094,7 @@ async function embedPage(
   sourceId?: string,
   signal?: AbortSignal,
   quiet?: boolean,
+  approvedPageCapUsd?: number,
 ) {
   const opts = sourceId ? { sourceId } : undefined;
   const initial = await engine.readPageSnapshot(slug, opts);
@@ -1124,7 +1158,7 @@ async function embedPage(
   // keying on embedded_at alone silently no-ops ("all chunks already
   // embedded") on a rebuild-darkened page. Older callers that selected chunks
   // without the boolean fall back to embedded_at.
-  const toEmbed = chunks.filter(c => !c.embedded_at || c.embedding_is_null === true);
+  let toEmbed = chunks.filter(c => !c.embedded_at || c.embedding_is_null === true);
   result.total_chunks += chunks.length;
   result.skipped += chunks.length - toEmbed.length;
 
@@ -1156,6 +1190,24 @@ async function embedPage(
     recordFailure(result, toEmbed.length, slug, EMBED_UNAVAILABLE_MESSAGE);
     return;
   }
+  // A large page is metered as a whole under embed.max_usd_per_page (page-embedding-budget.ts).
+  const decision = await planPageEmbedding(engine, prepared.snapshot.page, toEmbed,
+    { signature: currentEmbeddingSignature(), ...(approvedPageCapUsd !== undefined && { approvedCapUsd: approvedPageCapUsd }) });
+  if (decision.kind === 'held') {
+    serr(`  ${slug}: embedding held (${decision.reason}); the page stays keyword-searchable. Approve with: gbrain embed --slugs ${slug} --max-usd <N>`);
+    result.pages_processed++;
+    return;
+  }
+  const grant = decision.kind === 'grant' ? decision.grant : undefined;
+  if (grant) {
+    toEmbed = toEmbed.filter(c => grant.chunkIndexes.has(c.chunk_index));
+    if (grant.deferred) serr(`  ${slug}: per-page cap $${grant.capUsd} reached; ${grant.deferred} older chunk(s) stay keyword-only until it rises (gbrain embed --slugs ${slug} --max-usd <N>)`);
+    if (toEmbed.length === 0) {
+      await grant.settle({ ok: true });
+      result.pages_processed++;
+      return;
+    }
+  }
   let embeddings: (Float32Array | null)[];
   let failed = 0;
   let firstError: unknown;
@@ -1164,7 +1216,9 @@ async function embedPage(
       wrapChunkTextsForStoredMode(prepared.snapshot.page, toEmbed),
       signal ? { abortSignal: signal } : {},
     ));
+    await grant?.settle({ ok: true });
   } catch (e: unknown) {
+    await grant?.settle({ ok: false }).catch(() => {});
     if (isAborted(signal)) throw e;
     recordFailure(result, toEmbed.length, slug, e);
     result.pages_processed++;
@@ -2008,6 +2062,7 @@ async function embedAllStale(
 
       async function embedOneKey(key: string) {
         let stale = byKey.get(key)!;
+        let grant: PageEmbedGrant | undefined;
         const census = stale.length;
         const keySourceId = stale[0]?.source_id ?? 'default';
         const slug = stale[0].slug;
@@ -2054,8 +2109,20 @@ async function embedAllStale(
             .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
           if (!stale.length) return;
           const pageRow = prepared.snapshot.page;
+          // Large pages are metered as a whole under embed.max_usd_per_page (page-embedding-budget.ts).
+          const decision = await planPageEmbedding(engine, pageRow, existing.filter(c => !c.embedded_at), { signature });
+          if (decision.kind === 'held') return;
+          grant = decision.kind === 'grant' ? decision.grant : undefined;
+          if (grant) {
+            const granted = grant.chunkIndexes;
+            stale = existing.filter(c => granted.has(c.chunk_index)).map(c => ({ ...(selected.get(c.chunk_index) ?? { source_id: keySourceId, slug, page_id: pageRow.id }), ...c }));
+            if (grant.deferred) serr(`\n  ${slug}: per-page cap reached; ${grant.deferred} older chunk(s) stay keyword-only until it rises (gbrain embed --slugs ${slug} --max-usd <N>)`);
+            if (!stale.length) { await grant.settle({ ok: true }); grant = undefined; return; }
+          }
           const { embeddings, failed, firstError } = await embedPageTexts(
             wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: effectiveSignal });
+          await grant?.settle({ ok: true });
+          grant = undefined;
           const staleIdxToEmbedding = new Map<number, Float32Array>();
           for (let j = 0; j < stale.length; j++) {
             const emb = embeddings[j];
@@ -2093,6 +2160,8 @@ async function embedAllStale(
           // embed failure throws) — progress, so the quarantine counter resets.
           _embedFailureCounts.delete(key);
         } catch (e: unknown) {
+          await grant?.settle({ ok: false }).catch(() => {});
+          grant = undefined;
           // Budget/abort-fired cancellations are expected on the way out; don't
           // spam per-page "Error embedding" lines when we're shutting down.
           if (effectiveSignal.aborted) return;

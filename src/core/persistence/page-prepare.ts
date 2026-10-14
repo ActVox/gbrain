@@ -63,6 +63,7 @@ import { withTrustKeep } from './context.ts';
 import { isFenceEditWrite, pageGateTrust, pageWriteTrust, recordAgentPageLowering, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
 import { suppliedTrustMarkerView } from '../trust/channel.ts';
 import { gateField, gateInput } from '../trust/gate-outcomes.ts';
+import { PUSH_SCAN_MAX_FILE_BYTES } from '../page-size-policy.ts';
 
 
 const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sourceId}'s canonical owner with its pending, failed and recovering requests, read-only.`,
@@ -161,6 +162,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     /** #6517: a delete whose file another live page of the source records owns no file; the census target and claimants are reported. */
     sharedOrigin?: { onShared: (shared: SharedOrigin) => void } } = {}): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
+  // A canonical file over the pre-push secret-scan cap would block every later push of the brain repo.
+  if (content !== null && Buffer.byteLength(content, 'utf-8') > PUSH_SCAN_MAX_FILE_BYTES) throw opError('request_too_large', 'The canonical file would exceed the pre-push secret-scan cap.',
+    `Nothing was written. The rendered file of ${row.slug} is over ${PUSH_SCAN_MAX_FILE_BYTES} bytes, which the pre-push secret scan cannot scan, so it would block every push of source ${row.source_id}. Keep the page under the 24 MiB page ceiling (docs/guides/memory-boundaries.md#large-pages).`);
   // #6212: a legacy slug (admitted only to delete or restore its existing row) never owns a file: its recorded
   // source_uri or source_path may name the file of another page, such as the one sync now slugs it to.
   if (!isOpPageSlug(row.slug)) return undefined;

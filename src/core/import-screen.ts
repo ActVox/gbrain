@@ -35,8 +35,15 @@ import type { FenceMessageLocation } from './fence-repair/reasons.ts';
 import { fenceIssuesWire, fenceStep, type FenceIssueWire } from './fence-repair/tier1.ts';
 import type { FenceCtx, FenceFix, FencePage, FenceReason } from './fence-repair/types.ts';
 import { effectiveVisibility } from './search/private-visibility.ts';
+import { CODE_FILE_MAX_BYTES, PAGE_MAX_BYTES } from './page-size-policy.ts';
 
-export const MAX_FILE_SIZE = 5_000_000; // 5MB
+/** Largest Markdown page import admits: the Wave A ceiling (page-size-policy.ts). */
+export const MAX_FILE_SIZE = PAGE_MAX_BYTES;
+
+/** The size bound for a file at `path`: code keeps its own 5 MB bound (no content sanity, tree-sitter and edge extraction). */
+export function importSizeLimit(path: string): number {
+  return isCodeFilePath(path) ? CODE_FILE_MAX_BYTES : MAX_FILE_SIZE;
+}
 
 type ContentSanityConfig = NonNullable<NonNullable<ReturnType<typeof loadConfig>>['content_sanity']>;
 
@@ -396,7 +403,7 @@ export function screenNormalized(result: ImportScreenResult): boolean {
 export function screenImportContent(input: ImportScreenInput): ImportScreenResult {
   if (input.published?.()) return { status: 'published' };
   const codeFile = isCodeFilePath(input.path);
-  const size = contentSizeHold(input.byteLength ?? Buffer.byteLength(input.content, 'utf-8'), MAX_FILE_SIZE, codeFile);
+  const size = contentSizeHold(input.byteLength ?? Buffer.byteLength(input.content, 'utf-8'), codeFile ? CODE_FILE_MAX_BYTES : MAX_FILE_SIZE, codeFile);
   if (size) return { status: 'refused', refusal: size };
   if (codeFile) return { status: 'importable', parsed: null };
   const parsed = parseMarkdown(input.content, input.path, { validate: true, ...(input.activePack ? { activePack: input.activePack } : {}) });

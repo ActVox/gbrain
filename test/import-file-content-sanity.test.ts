@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -229,6 +229,11 @@ describe('importFromContent — markup-heavy FLAG (Q1=A: warn, stay searchable)'
 });
 
 describe('importFromContent — soft-block (D9 transition + embed_skip)', () => {
+  // The default bytes_block is the 24 MiB page ceiling; an operator who lowers
+  // it gets the soft-block below.
+  beforeEach(async () => { await engine.setConfig('content_sanity.bytes_block', '500000'); });
+  afterEach(async () => { await engine.unsetConfig('content_sanity.bytes_block'); });
+
   test('soft-block writes page with embed_skip frontmatter marker', async () => {
     await withIsolatedHome(async () => {
       // 600K of clean text → soft-block (oversize but no junk pattern).
@@ -293,6 +298,20 @@ describe('importFromContent — soft-block (D9 transition + embed_skip)', () => 
       } finally {
         warnSpy.mockRestore();
       }
+    });
+  });
+});
+
+describe('importFromContent — large pages under the default ceiling', () => {
+  test('a 600K page is chunked with no embed_skip marker or oversized flag', async () => {
+    await withIsolatedHome(async () => {
+      const content = FRONTMATTER + 'Plain prose about acme-example. '.repeat(19_000);
+      const result = await importFromContent(engine, 'test/large-default', content, { noEmbed: true });
+      expect(result.status).toBe('imported');
+      expect(result.flag_reason).not.toBe('oversized');
+      const page = await engine.getPage('test/large-default');
+      expect(isEmbedSkipped(page!.frontmatter as Record<string, unknown>)).toBe(false);
+      expect((await engine.getChunks('test/large-default')).length).toBeGreaterThan(100);
     });
   });
 });

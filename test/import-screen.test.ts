@@ -17,6 +17,7 @@ import { importFromContent, MAX_FILE_SIZE } from '../src/core/import-file.ts';
 import { isContentRefusal, screenImportContent, type ImportSanityConfig } from '../src/core/import-screen.ts';
 import { managedImportContent, readImportBytes } from '../src/core/persistence/import-prepare.ts';
 import { readSyncFile } from '../src/core/persistence/sync-discovery.ts';
+import { SYNC_READ_BOUND } from '../src/core/persistence/sync-blobs.ts';
 import { frontmatterSlugConflictMessage } from '../src/core/persistence/verb-errors.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
 
@@ -122,7 +123,7 @@ describe('isContentRefusal', () => {
       try { readImportBytes(big); } catch (error) { importRefusal = error as OperationError; }
       expect(isContentRefusal(importRefusal!.code, importRefusal!.message)).toBe(true);
       const huge = join(dir, 'huge.md');
-      writeFileSync(huge, Buffer.alloc(10 * 1024 ** 2 + 1, 'a'));
+      writeFileSync(huge, Buffer.alloc(SYNC_READ_BOUND + 1, 'a'));
       let syncRefusal: OperationError | null = null;
       try { readSyncFile(dir, 'huge.md'); } catch (error) { syncRefusal = error as OperationError; }
       expect(syncRefusal!.code).toBe('request_too_large');

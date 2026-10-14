@@ -264,42 +264,34 @@ function recursiveSplit(text: string, level: number, target: number): string[] {
 /**
  * Split text at delimiter boundaries, preserving delimiters at the end
  * of the piece that precedes them (lossless).
+ *
+ * Linear: each delimiter's next occurrence is cached and searched again only
+ * once the cursor passes it, so a delimiter absent from the text costs one
+ * scan, not one per piece (a 24 MiB single-paragraph page used to rescan the
+ * whole remainder for every sentence).
  */
 function splitAtDelimiters(text: string, delimiters: string[]): string[] {
   const pieces: string[] = [];
-  let remaining = text;
+  const next = delimiters.map(delim => text.indexOf(delim));
+  let cursor = 0;
 
-  while (remaining.length > 0) {
+  while (cursor < text.length) {
     let earliest = -1;
-    let earliestDelim = '';
-
-    for (const delim of delimiters) {
-      const idx = remaining.indexOf(delim);
-      if (idx !== -1 && (earliest === -1 || idx < earliest)) {
-        earliest = idx;
-        earliestDelim = delim;
+    let earliestLength = 0;
+    for (let d = 0; d < delimiters.length; d++) {
+      if (next[d] !== -1 && next[d] < cursor) next[d] = text.indexOf(delimiters[d], cursor);
+      if (next[d] !== -1 && (earliest === -1 || next[d] < earliest)) {
+        earliest = next[d];
+        earliestLength = delimiters[d].length;
       }
     }
-
-    if (earliest === -1) {
-      pieces.push(remaining);
-      break;
-    }
-
-    // Include the delimiter with the preceding text
-    const piece = remaining.slice(0, earliest + earliestDelim.length);
-    if (piece.trim().length > 0) {
-      pieces.push(piece);
-    }
-    remaining = remaining.slice(earliest + earliestDelim.length);
+    const end = earliest === -1 ? text.length : earliest + earliestLength;
+    const piece = text.slice(cursor, end);
+    if (piece.trim().length > 0) pieces.push(piece);
+    cursor = end;
   }
 
-  // Handle trailing content
-  if (remaining.trim().length > 0 && !pieces.includes(remaining)) {
-    // Already added above
-  }
-
-  return pieces.filter(p => p.trim().length > 0);
+  return pieces;
 }
 
 /**

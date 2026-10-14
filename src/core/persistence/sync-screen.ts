@@ -177,7 +177,7 @@ export function managedImageHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 
 /** #5988: the hold of a file over the sync read bound, whose content is never read (#6529: shared with the image freeze). */
 export function oversizeHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld'>, slug: string, pageId: number | null, size: number | null, blob: TreeBlob | null | undefined): HeldEntry {
   return heldEntry(entry, slug, pageId, { code: 'file_too_large',
-    message: `File too large (${size ?? 'over 10485760'} bytes; the sync read bound is ${SYNC_READ_BOUND} bytes). Split the content into smaller files or leave it out of the source.` }, null, blob);
+    message: `File too large (${size ?? `over ${SYNC_READ_BOUND}`} bytes; the sync read bound is the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling). Pages up to the ceiling are chunked and searchable; leave this file out of the source (sync.exclude) or keep it outside the brain repo. See docs/guides/memory-boundaries.md#large-pages.` }, null, blob);
 }
 
 const purgeTombstonesByRun = new WeakMap<SyncScreenRun, Promise<Map<string, string>>>();

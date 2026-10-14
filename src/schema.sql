@@ -1904,6 +1904,22 @@ CREATE TABLE IF NOT EXISTS extract_atoms_page_state (
 CREATE INDEX IF NOT EXISTS extract_atoms_page_state_tombstoned_idx
   ON extract_atoms_page_state (source_incarnation, content_hash, page_id) WHERE tombstoned;
 CREATE INDEX IF NOT EXISTS extract_atoms_page_state_page_idx ON extract_atoms_page_state (page_id);
+-- (migration v244) Per-page embedding spend ledger for large pages
+-- (page-embedding-budget.ts): held pages wait for approval, capped pages are
+-- partially embedded up to embed.max_usd_per_page.
+CREATE TABLE IF NOT EXISTS page_embedding_budget (
+  page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'held', 'capped')),
+  reason TEXT,
+  embedding_signature TEXT,
+  spent_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
+  reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
+  reserved_at TIMESTAMPTZ,
+  unpriced_calls INTEGER NOT NULL DEFAULT 0 CHECK (unpriced_calls >= 0),
+  cap_usd DOUBLE PRECISION CHECK (cap_usd IS NULL OR cap_usd >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS page_embedding_budget_state_idx ON page_embedding_budget (state) WHERE state <> 'open';
 -- #5876 (migration chronicle_page_state): Life Chronicle ledger, the durable
 -- record of each page content's automatic-extraction decision and outcome.
 CREATE TABLE IF NOT EXISTS chronicle_page_state (

@@ -23,7 +23,7 @@ import { assertDistinctSyncOrigins, legacySyncOrigin, sameSyncOrigin, selectOrig
 import { assertManagedSyncActive } from './sync-authority.ts';
 import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances } from './sync-holds.ts';
-import { readBlobContents, readTreeBlobs } from './sync-blobs.ts';
+import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
 
@@ -101,8 +101,8 @@ export function readSyncFile(root: string, path: string): Buffer | null {
     }
     if (!lstatSync(absolute).isFile()) throw syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
       `${path} is not a regular file.`);
-    if (lstatSync(absolute).size > 10 * 1024 ** 2) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
-      `${path} is larger than the 10 MiB sync import bound, so nothing was imported from it. Shrink or split the file, or add it to the sync.exclude config, then sync its source again.`);
+    if (lstatSync(absolute).size > SYNC_READ_BOUND) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
+      `${path} is larger than the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling, so nothing was imported from it. Pages up to that size are chunked and searchable; above it, add the file to the sync.exclude config (or keep it outside the brain repo), then sync its source again. See docs/guides/memory-boundaries.md#large-pages.`);
     return readFileSync(absolute);
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }

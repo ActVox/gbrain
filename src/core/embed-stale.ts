@@ -34,6 +34,7 @@ import {
 import { type DbPacer, createNoopPacer, observed } from './db-pacer.ts';
 import { resolveStaleEmbedConcurrency } from './embed-concurrency.ts';
 import { AbortError } from './abort-check.ts';
+import { planPageEmbedding, type PageEmbedGrant } from './page-embedding-budget.ts';
 
 /**
  * W0 fix-wave (Tier-1 #3, CONFIRMED): the ONE carry-through field list for
@@ -520,6 +521,7 @@ export async function embedStaleForSource(
 
     async function embedOneKey(key: string): Promise<void> {
       let stale = byKey.get(key)!;
+      let grant: PageEmbedGrant | undefined;
       const keySourceId = stale[0]?.source_id ?? sourceId;
       const slug = stale[0].slug;
       try {
@@ -554,9 +556,21 @@ export async function embedStaleForSource(
           .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
         if (!stale.length) return;
         const pageRow = prepared.snapshot.page;
+        // A large page is metered as a whole (page-embedding-budget.ts): its
+        // newest stale chunks that fit the per-page cap, whatever batch listed it.
+        const decision = await planPageEmbedding(engine, pageRow, existing.filter(c => !c.embedded_at), { signature });
+        if (decision.kind === 'held') return;
+        grant = decision.kind === 'grant' ? decision.grant : undefined;
+        if (grant) {
+          const granted = grant.chunkIndexes;
+          stale = existing.filter(c => granted.has(c.chunk_index)).map(c => ({ ...(selected.get(c.chunk_index) ?? { source_id: keySourceId, slug, page_id: pageRow.id }), ...c }));
+          if (!stale.length) { await grant.settle({ ok: true }); grant = undefined; return; }
+        }
         await opts.assertOwned?.();
         if (stopped()) return;
         const embeddings = await embedFn(wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: signal });
+        await grant?.settle({ ok: true });
+        grant = undefined;
         if (stopped()) return;
         const dimensions = signature ? splitEmbeddingSignature(signature).dims
           : prepared.embeddingColumn.name === 'embedding' ? (await readContentChunksEmbeddingDim(engine)).dims : prepared.embeddingColumn.dimensions;
@@ -590,6 +604,8 @@ export async function embedStaleForSource(
         result.embedded += stale.length;
         result.pagesProcessed += 1;
       } catch (e: unknown) {
+        await grant?.settle({ ok: false }).catch(() => {});
+        grant = undefined;
         result.failures = (result.failures ?? 0) + stale.length;
         // Aborted mid-fetch is expected; treat as graceful exit.
         if (stopped()) return;
