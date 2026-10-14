@@ -1326,6 +1326,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.reranker.top_n_in',
   'search.reranker.top_n_out',
   'search.reranker.timeout_ms',
+  // W3: confidence-gated reranking (mode.ts reads; `off` | `shadow`, and δ in [0, 1]).
+  'search.reranker.gate',
+  'search.reranker.gate_min_gap',
   'search.floor_ratio',
   'search.title_boost',
   'search.evidence_cosine_floor',
@@ -1398,6 +1401,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.relational_orient_onehop',
   // Multi-hop chain slots: chain rows leading page 1 when a chain fired (mode.ts reads; 0..10).
   'search.relational_chain_slots',
+  'search.diverse_pool_depth', // session-diverse pool before the reranker (mode.ts reads; `off` | 0..100; 0 = off)
   // Ranker wave (Phase E2): keyword-arm confidence floor — weak keyword arm fuses at half weight (mode.ts reads; `off` | (0, 1]).
   'search.keyword_arm_confidence_floor',
   // Ranker wave (Phase E3): metadata boost gate — `lexical` skips post-fusion metadata boosts when the vector arm was the only voter (mode.ts reads; `always` | `lexical`).
@@ -1417,6 +1421,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.entity_anchoring', // entity-anchored retrieval for entity-scoped current-state query/search (default off; search/entity-anchor.ts)
   'search.query_facts_arm', // query adds matching active facts as rows in spare capacity (default on; search/facts-arm.ts)
   'search.temporal_fact_reserve', // temporal-cue queries reserve up to 15% of the token budget for question-ranked dated facts (default off; search/facts-arm.ts)
+  'search.page_rank_cut', // W5: whole_pages (default) | off — page unit + caller token_budget stops adding pages once their whole pages fill factor x the budget (search/page-rank-cut.ts)
+  'search.page_rank_cut_factor', // W5: whole_pages target = factor x the budget (default 1.5)
   'think.return_unit',
   'think.pages_budget_chars', // #5461: total chars for the synthesize pages block (4000-200000, default 12000; soft: the 600-char floor wins); think/pages-budget.ts
   'think.excerpt_ceiling_chars', // #5461: per-page excerpt cap for the synthesize pages block (600-200000, default 2400); think/pages-budget.ts
@@ -1733,6 +1739,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'sync.hold_escalate_count',
   'sync.hold_escalate_pct',
   'sync.parser_regression',
+  // #6643: knock-on re-freezes in a row at one index (default 3; 0 turns automatic re-freeze off) and per run (default 25).
+  'sync.knock_on_refreeze_limit',
+  'sync.knock_on_run_limit',
   'fences.normalize', // #6188: inline Tier 1 fence normalization (fence-repair/config.ts); default on
   'fences.repair.enabled', 'fences.repair.llm', // #6188: the fence_repair cycle phase and its Tier 3 model step (fence-repair/config.ts); default on
   'fences.repair.max_usd_per_page', 'fences.repair.max_usd_per_day', // #6188: Tier 3 fence repair caps; 0 = no model spend
@@ -1765,7 +1774,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'persistence.limits.brain_recovery_bytes', 'persistence.limits.worktree_recovery_bytes',
   'persistence.receipt_retention_days', 'persistence.unbound_write', 'persistence.max_claim_ms', // #5254: persistence/unbound-source.ts; #6176: persistence/claim-phase.ts
   'persistence.sync_preparation_ms', 'persistence.maintenance_preparation_ms', 'persistence.preparation_ceiling_ms', 'persistence.max_preparation_attempts', 'persistence.preparation_deadlines', // #6278: persistence/preparation-budget.ts, switches.ts
-  'persistence.publication_ceiling_ms', // #6405: persistence/sync-drain.ts (in-pass publication ceiling)
+  'persistence.publication_ceiling_ms', 'persistence.terminal_failures.window_days', 'persistence.terminal_failures.spike_factor', 'persistence.terminal_failures.spike_min', // #6405: persistence/sync-drain.ts (in-pass publication ceiling); #6650: persistence/terminal-failures.ts
   'persistence.single_consumer', // #6317: persistence/switches.ts, consumer-election.ts (one full consumer per host; off by default)
   // shared-skills migration inventory bounds (src/core/shared-skills/inventory-limits.ts)
   'shared_skills.inventory.max_files', 'shared_skills.inventory.max_total_bytes', 'shared_skills.inventory.max_file_bytes', 'shared_skills.inventory.max_entries', 'shared_skills.migration.enabled', // #6466: false declines the 0.53.0 migration (commands/migrations/opt-out.ts)

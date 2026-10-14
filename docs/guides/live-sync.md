@@ -23,9 +23,13 @@ command drains the whole backlog:
 gbrain sync --source <id> --no-pull --json
 ```
 
-`--no-pull` is required on managed brains: the checkout is fast-forwarded by
+Managed sync never pulls: the checkout is fast-forwarded by
 `gbrain sources refresh <id>`, never by sync. Sync then catches the index up
-to whatever the checkout holds.
+to whatever the checkout holds. The CLI implies `--no-pull` on a managed brain
+(single source, `--all` and serve-delegated runs alike) and prints one stderr
+line naming `gbrain sources refresh <id>`; `--json` stdout stays one document.
+An explicit pull through the library or MCP (`sync_brain` with
+`no_pull: false`) still refuses with `writer_coordinator_required`.
 
 The run prints one line before the first write and a progress line about
 every 10 seconds on stderr:
@@ -488,7 +492,7 @@ vars — incident-time escape hatches, not everyday knobs.
    `--include-gitignored` for those).
 
 8. **A managed brain pulls only through `gbrain sources refresh`.** Managed
-   sync refuses to pull (`gbrain sync` needs `--no-pull`) and a cycle asked to
+   sync never pulls (the CLI implies `--no-pull`) and a cycle asked to
    pull syncs the checkout as it is, because a Git merge rewrites files that
    accepted writes may be publishing into. To take new upstream commits, run
    on the owner host:

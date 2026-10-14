@@ -736,7 +736,7 @@ export class PostgresEngine implements BrainEngine {
   /** #5801: observe connection acquisition (see CheckoutGauge.onCheckout). Duck-typed like getPoolDiagnostics. */
   onCheckout(listener: () => void): () => void { return this.checkoutGauge.onCheckout(listener); }
 
-  getPoolDiagnostics(): { tracked: PoolGaugeSnapshot; poolMax: number | null; poisonedDiscards: number; stuckDiscards: number; buildFailures: number; desyncDiscards: number; pool: DriverPoolStats | null; prepare: boolean | null } | null {
+  getPoolDiagnostics(): { tracked: PoolGaugeSnapshot; poolMax: number | null; poisonedDiscards: number; stuckDiscards: number; buildFailures: number; desyncDiscards: number; recovered: number; recoveryFailed: number; pool: DriverPoolStats | null; prepare: boolean | null } | null {
     try {
       const max = (this.sql as unknown as { options?: { max?: number } }).options?.max;
       return {
@@ -745,7 +745,7 @@ export class PostgresEngine implements BrainEngine {
         poisonedDiscards: this.poisonedDiscards?.count ?? 0,
         stuckDiscards: this.poolIncidents?.stuckCount ?? 0,
         buildFailures: this.poolIncidents?.buildFailureCount ?? 0,
-        desyncDiscards: this.poolIncidents?.desyncCount ?? 0,
+        desyncDiscards: this.poolIncidents?.desyncCount ?? 0, recovered: this.poolIncidents?.recoveredCount ?? 0, recoveryFailed: this.poolIncidents?.recoveryFailedCount ?? 0,
         pool: driverPoolStats(this.sql),
         prepare: (this.sql as unknown as { options?: { prepare?: boolean } }).options?.prepare ?? null,
       };

@@ -195,7 +195,7 @@ test/gbrain-owned-page-types.test.ts	#5881 gbrain-owned page types are declared 
 test/get-page-federated-scope.test.ts	#2555 get_chunks federated scope	5	source-surface-helper
 test/get-page-federated-scope.test.ts	#4275 alias hop scope: archived sources, include_deleted, fuzzy precedence, grant precedence	5	source-surface-helper
 test/harness-onboarding.test.ts	harness identity and private handoff	6	readFileSync
-test/hook-command.serial.test.ts	user-prompt	16	source-surface-helper
+test/hook-command.serial.test.ts	user-prompt	17	source-surface-helper
 test/hook-push-spawn-env.test.ts	spawnDetachedPush env handoff	2	readFileSync
 test/hook-push-spawn-env.test.ts	tryExecAsync env handoff	1	readFileSync
 test/init-mode-picker.test.ts	cost matrix: newest models, priced from model-pricing	6	readFileSync
@@ -257,7 +257,7 @@ test/pglite-repair-command.serial.test.ts	gbrain pglite-repair — interactive c
 test/pglite-wal-repair.serial.test.ts	WAL auto-repair — real-brain regression (#223/#1670/#2575)	6	source-surface-helper
 test/physical-root-birth-tolerance-6501.test.ts	physical root birth drift (${kind})	5	readFileSync
 test/physical-root-birth-tolerance-6501.test.ts	samePhysicalBirth (#6501)	5	readFileSync
-test/postgres-driver-vendor.test.ts	vendored Postgres driver packaging	4	readFileSync
+test/postgres-driver-vendor.test.ts	vendored Postgres driver packaging	5	readFileSync
 test/postgres-engine.test.ts	postgres-engine / search date filtering	2	source-surface-helper
 test/postgres-engine.test.ts	postgres-engine / search path timeout isolation	7	source-surface-helper
 test/private-visibility.test.ts	shared private predicate lives once (#4352 remediation)	1	readFileSync
@@ -280,6 +280,7 @@ test/schema-pack/suggest.test.ts	runSuggest — source-text contract (structural
 test/scripts/build-schema-migrations.test.ts	generator diagnostics (FAIL/Why/Fix/See)	9	exec-scan
 test/scripts/build-schema-migrations.test.ts	out-of-order landing check	2	exec-scan
 test/scripts/check-function-size.test.ts	check-function-size.ts rules	11	readFileSync
+test/scripts/ci-bounded-run.test.ts	(file-level)	7	readFileSync
 test/scripts/ci-executed-counts.test.ts	CLI	2	readFileSync
 test/scripts/ci-gates.test.ts	CI execution evidence	6	readFileSync
 test/scripts/ci-gates.test.ts	test:full exit status	0	readFileSync
@@ -321,12 +322,15 @@ test/scripts/stress-plan.test.ts	execution profiles	3	readFileSync
 test/scripts/test-env-opt-ins-guard.test.ts	check-test-env-opt-ins	5	readFileSync
 test/scripts/test-shard.slow.test.ts	test-shard.sh — LPT balance contract	5	readFileSync
 test/scripts/test-shard.slow.test.ts	test-shard.sh — exclusion contract	7	readFileSync
+test/scripts/ubicloud-typecheck-state.test.ts	(file-level)	2	readFileSync
 test/search/graph-signals-wire-integration.test.ts	v0.40.4 — source-grep regression guard	1	source-surface-helper
+test/serve-behavior-notice-6543.test.ts	(file-level)	3	readFileSync
 test/serve-http-admin-route-guard.test.ts	(file-level)	6	readFileSync
 test/serve-http-github-webhook.test.ts	handler wiring (source pin)	1	source-surface-helper
 test/serve-http-mcp-transport-cleanup.test.ts	POST /mcp transport cleanup (#2844)	2	source-surface-helper
 test/serve-http-metrics.test.ts	serve-http.ts wiring (structural — the two defects of the original PR)	2	source-surface-helper
 test/serve-stdin-eof-drain.test.ts	serve-sync-runner stays off the boot path (#4409)	1	readFileSync
+test/setup.test.ts	gbrain setup: setup migrations on the brain it creates (Cat 41 run 4)	3	readFileSync
 test/shared-skills-catalog.test.ts	(file-level)	22	readFileSync
 test/shared-skills-export.serial.test.ts	(file-level)	7	readFileSync
 test/shared-skills-init.serial.test.ts	real combined brain initialization	4	readFileSync

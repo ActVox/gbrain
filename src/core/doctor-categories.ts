@@ -220,6 +220,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'chat_fallback_chain',
   // Agent operator wave: is an agent harness wired to this brain (registration read; --only adds the smoke test).
   'harness_wiring',
+  // Cat 41: the provider-use decision gbrain setup recorded; declined = no provider request (discovery, probe).
+  'provider_consent',
   'frontmatter_hook',
   // F4b: PGLite row-delta planner statistics / Postgres autovacuum ANALYZE lag on the hot tables.
   'planner_stats_stale',
@@ -262,7 +264,10 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'persistence_request_indexes',
   'persistence_write_stall',
   'lost_caller_writes',
+  // #6650: terminal write receipts that block work or are a gbrain-defect class (doctor/checks/persistence-requests.ts).
+  'persistence_terminal_failures',
   'stale_frontmatter_keys',
+  'maintenance_write_drift',
   'managed_sync_not_moving',
   'persistence_session_timeouts',
   // #6317: consumer heartbeat rows and host identity (doctor/checks/persistence-consumers.ts).

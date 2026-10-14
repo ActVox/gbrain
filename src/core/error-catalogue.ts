@@ -45,6 +45,12 @@ export const ERROR_CATALOGUE = {
   page_projection_conflict: { code: 'page_projection_conflict', docs: 'docs/guides/repair.md#page-projection-conflict' },
   explicit_kind_required: { code: 'explicit_kind_required', docs: 'docs/guides/repair.md#explicit-only-repair-kinds' },
   repair_kind_unavailable: { code: 'unavailable', docs: 'docs/guides/repair.md#explicit-only-repair-kinds' },
+  // #6650: gbrain repair stuck-recovery resolves page recovery records only; a shared-skill bundle record is refused.
+  recovery_bundle_unsupported: { code: 'recovery_bundle_unsupported', docs: 'docs/guides/repair.md#recovery-bundle-unsupported' },
+  // #6650: a (request state, --keep) pair stuck-recovery cannot make safe: a terminal request, or a choice the record cannot support.
+  recovery_choice_refused: { code: 'recovery_choice_refused', docs: 'docs/guides/repair.md#recovery-choice-refused' },
+  // #6650: a withdrawal-mirror effect recovery only finishes forward, so stuck-recovery lists it as refused.
+  recovery_effect_unsupported: { code: 'recovery_effect_unsupported', docs: 'docs/guides/repair.md#recovery-effect-unsupported' },
   colon_slug_windows_write_through: { code: 'colon_slug_windows_write_through', docs: 'docs/guides/write-refusals.md#colon_slug_windows_write_through' },
   embedding_auth_failed: { code: 'embedding_auth_failed', docs: 'docs/guides/write-refusals.md#embedding_auth_failed' },
   activation_source_path_missing: { code: 'source_changed', docs: 'docs/guides/write-refusals.md#activation_source_path_missing' },
@@ -79,6 +85,7 @@ export const ERROR_CATALOGUE = {
   sync_drain_preparation_systemic: { code: 'preparation_systemic', docs: 'docs/guides/write-refusals.md#preparation_systemic' },
   sync_drain_write_capacity: { code: 'queue_capacity', docs: 'docs/guides/write-refusals.md#drain-write-capacity' },
   sync_drain_connection_lost: { code: 'connection_lost', docs: 'docs/guides/write-refusals.md#drain-connection-lost' },
+  sync_drain_head_blocked: { code: 'drain_stalled', docs: 'docs/guides/write-refusals.md#head-blocked' },
   // D8 `gbrain setup <harness>` (src/commands/setup.ts).
   setup_harness_unsupported: { code: 'setup_harness_unsupported', docs: 'docs/guides/repair.md#setup-harness-unsupported' },
   setup_owner_conflict: { code: 'setup_owner_conflict', docs: 'docs/guides/repair.md#setup-owner-conflict' },

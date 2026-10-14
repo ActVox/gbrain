@@ -1929,8 +1929,6 @@ export async function importImageFile(
 
   const filename = basename(relativePath);
   const frontmatter: Record<string, unknown> = {
-    type: 'image',
-    title: filename,
     mime_type: decoded.mime,
     bytes: buf.byteLength,
     ...exif,

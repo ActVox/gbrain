@@ -131,8 +131,21 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
    * @default null
    */
   inflight_timeout: number | null;
-  /** GBrain: called once per connection the in-flight watchdog retired. */
-  onstuck: (stuck: { age_ms: number; queued: number; statement: string }) => void;
+  /**
+   * GBrain (#6543): seconds a head statement may run in total, whatever the server keeps sending, before the
+   * connection is retired with `CONNECTION_STUCK` (`reason: 'age'`). A statement after a declared
+   * `statement_timeout` above the budget gets that timeout plus `inflight_grace`; a declared 0 disables both clocks.
+   * @default null
+   */
+  inflight_max: number | null;
+  /** GBrain (#6543): seconds added to a declared statement_timeout that raises a statement's budget. @default null */
+  inflight_grace: number | null;
+  /** GBrain: called once per connection the in-flight watchdog retired; `reason` is `age` when bytes kept arriving, else `idle`. */
+  onstuck: (stuck: { age_ms: number; queued: number; statement: string; reason: 'age' | 'idle'; budget_ms: number }) => void;
+  /** GBrain (#6543): a connection retired by an incident (`stuck`, `desync`, `closed` under statements) completed a new startup. */
+  onrecovered: (recovered: { connection: number; cause: 'stuck' | 'desync' | 'closed' }) => void;
+  /** GBrain (#6543): the reconnect of a connection retired by an incident failed; it stays marked until one succeeds. */
+  onrecoveryfailed: (failed: { connection: number; cause: 'stuck' | 'desync' | 'closed'; code: string }) => void;
   /**
    * GBrain: called when a statement fails to build (`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`);
    * `statement` is its text with `$n` placeholders, never parameter values; `parameter` is the 1-based

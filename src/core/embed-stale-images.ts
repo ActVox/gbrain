@@ -14,18 +14,20 @@
  * (`importManagedFile`, the same coordinated path `gbrain import` takes) instead
  * of the legacy writer, which a managed brain refuses. A page whose
  * `source_path` was never recorded is looked up by its slug (an image slug is
- * its repo-relative path) and the import records `source_path`. A sweep that
+ * its repo-relative path) and the import records `source_path`. #6543 D3: the
+ * recorded path resolves through the shared case-insensitive resolver
+ * (`image-asset-resolver.ts`), so a lower-cased slug finds `IMG_1453.PNG` and the
+ * import records the real-case path; two case-fold matches refuse. A sweep that
  * finds no file for any candidate is a failure (non-zero exit) that names the
  * paths it tried; `missing_samples` names them on a partial sweep too. Plain
  * `embed --stale` runs this sweep first on a multimodal install
  * (`runStaleImageSweepFirst`), inside the run's cost cap.
  */
 
-import { existsSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { join } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { importImageFile } from './import-file.ts';
+import { resolveRecordedImageFile, type DirectoryListings, type RecordedImageFile } from './image-asset-resolver.ts';
 import { importManagedFile } from './persistence/import-mutations.ts';
 import { readManagedMode } from './persistence/managed-mode.ts';
 import { safeChunksFilter } from './search/safe-chunks.ts';
@@ -75,23 +77,26 @@ export async function embedStaleImages(
   const repoPath = await engine.getConfig('sync.repo_path').catch(() => null);
   const managed = await readManagedMode(engine);
   const gitRoots = new Map<string, string | null>();
+  const listings: DirectoryListings = new Map();
   const cap = opts.costCap;
   for (const row of rows) {
     // Fix wave 13 P1.18: the approved cap stops the sweep before the next image; a refused image is not a failure.
     if (cap?.hit()) break;
     const root = row.local_path ?? (row.source_id === 'default' ? repoPath : null);
     // An image slug is the lower-cased repo-relative path, so it names the file when the importer never recorded source_path.
-    const sourcePath = row.source_path ?? row.slug;
-    const located = root ? locateSourceFile(root, sourcePath, gitRoots) : null;
-    const file = located?.found ?? null;
-    if (!file) {
+    const located = root ? locateSourceFile(root, [row.source_path, row.slug], gitRoots, listings) : null;
+    if (located?.status === 'ambiguous') { fail(row, `ambiguous case-insensitive match for ${located.tried}: ${located.matches.join(', ')}; rename one, then rerun (nothing was imported)`); continue; }
+    if (located?.status === 'outside_root') { fail(row, `${located.tried} resolves outside source ${row.source_id}'s root ${root}; not imported`); continue; }
+    if (located?.status !== 'found') {
       result.missingFile++;
-      if (result.missing_samples.length < SAMPLE_CAP) result.missing_samples.push(`${row.source_id}:${row.slug}: no file at ${located ? located.direct : `<source ${row.source_id} has no local path>`}`);
+      if (result.missing_samples.length < SAMPLE_CAP) result.missing_samples.push(`${row.source_id}:${row.slug}: no file at ${located ? located.tried : `<source ${row.source_id} has no local path>`}`);
       continue;
     }
+    // The real-case path the file has on disk: the import and the recorded source_path use it.
+    const { abs: file, relative: sourcePath } = located;
     // A managed brain imports through the source's owner (the coordinated importer, as `gbrain import` does); the legacy writer refuses it.
     // The owner reads only files inside the source root: a subpath-scoped page found under the git root is reported, not copied in.
-    if (managed && file !== located!.direct) { fail(row, `${file} is outside source ${row.source_id}'s root ${root}; a managed brain imports only files inside the source root`); continue; }
+    if (managed && located.viaGitRoot) { fail(row, `${file} is outside source ${row.source_id}'s root ${root}; a managed brain imports only files inside the source root`); continue; }
     try {
       const run = () => managed ? importManagedFile(engine, file, sourcePath, { sourceId: row.source_id }) : importImageFile(engine, file, sourcePath, { sourceId: row.source_id });
       const imported = cap ? await cap.metered(run) : await run();
@@ -164,18 +169,20 @@ export async function runEmbedStaleImagesCli(engine: BrainEngine, args: string[]
   return result;
 }
 
-/** A page's source_path is relative to its source checkout (`direct`), or to the git root for subpath-scoped syncs; `found` is whichever exists. */
-function locateSourceFile(root: string, sourcePath: string, gitRoots: Map<string, string | null>): { direct: string; found: string | null } {
-  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- source_path is the repo-relative path the importer recorded for this page, joined under the source's own checkout
-  const direct = join(root, sourcePath);
-  if (existsSync(direct)) return { direct, found: direct };
+/**
+ * A page's recorded path is relative to its source checkout, or to the git root for subpath-scoped syncs; the shared
+ * resolver (#6543 D3) tries the checkout first, then the git root. A miss reports the path tried under the checkout.
+ */
+function locateSourceFile(root: string, candidates: Array<string | null>, gitRoots: Map<string, string | null>, listings: DirectoryListings): RecordedImageFile & { viaGitRoot?: boolean } {
+  const direct = resolveRecordedImageFile(root, candidates, listings);
+  if (direct.status !== 'missing') return direct;
   if (!gitRoots.has(root)) {
     try {
       gitRoots.set(root, execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { env: gitChildEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
     } catch { gitRoots.set(root, null); }
   }
   const gitRoot = gitRoots.get(root);
-  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- same recorded repo-relative path, joined under the checkout's git root
-  const viaGit = gitRoot ? join(gitRoot, sourcePath) : null;
-  return { direct, found: viaGit && existsSync(viaGit) ? viaGit : null };
+  if (!gitRoot || gitRoot === root) return direct;
+  const viaGit = resolveRecordedImageFile(gitRoot, candidates, listings);
+  return viaGit.status === 'missing' ? direct : { ...viaGit, viaGitRoot: true };
 }

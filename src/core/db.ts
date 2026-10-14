@@ -343,7 +343,10 @@ export function gbrainApplicationName(): string {
  * set per pool. `PoolHealthHooks` is what an engine passes to every pool it
  * opens; `poolHealthOptions` turns it into postgres.js options.
  */
-export interface StuckConnectionInfo { age_ms: number; queued: number; statement: string }
+/** #6543 (A4): `reason` is `age` when the statement kept receiving bytes past its budget, `idle` when nothing came back; `budget_ms` is that statement's own cap. */
+export interface StuckConnectionInfo { age_ms: number; queued: number; statement: string; reason?: 'age' | 'idle'; budget_ms?: number }
+/** #6543 (A6): a connection the driver retired for an incident (`stuck`, `desync`, `closed` under statements) reconnected, or failed to. */
+export interface ConnectionRecoveryInfo { connection: number; cause: 'stuck' | 'desync' | 'closed'; code?: string }
 export interface PoolHealthHooks {
   /** #5730: a connection came back to the pool inside a transaction and was discarded. */
   onpoisoned?: (status: string) => void;
@@ -353,6 +356,10 @@ export interface PoolHealthHooks {
   onbuilderror?: (code: string, statement: string, parameter?: number) => void;
   /** An answer arrived on a connection with no statement waiting for it; the driver retired the connection. */
   ondesync?: (info: DesyncConnectionInfo) => void;
+  /** #6543 (A6): a connection retired by an incident completed a new startup. */
+  onrecovered?: (info: ConnectionRecoveryInfo) => void;
+  /** #6543 (A6): the reconnect of a connection retired by an incident failed. */
+  onrecoveryfailed?: (info: ConnectionRecoveryInfo) => void;
 }
 export interface DesyncConnectionInfo { message: string; connection: number; statement: string }
 
@@ -370,32 +377,48 @@ export function gucMilliseconds(value: string | undefined): number | null {
 }
 
 /**
- * #6383: seconds a head statement may wait with nothing coming back before the
- * driver retires its connection: the pool's `statement_timeout` plus
- * `GBRAIN_PG_STUCK_GRACE_MS` (default 30000). Usually only a wedged connection
- * (a desynced pipeline, a pooler that swallowed a CancelRequest, a dead peer)
- * reaches it, but not always: behind a transaction-mode pooler the startup
- * statement_timeout never applies, so a slow statement can reach it too, and
- * the clock restarts on every byte, so a streaming statement never does (#6543).
- * Null, which disables the watchdog, when the statement timeout is off or the
- * grace is `0`/`off`.
+ * #6383: the pool's in-flight budget in seconds: its `statement_timeout` plus
+ * `GBRAIN_PG_STUCK_GRACE_MS` (default 30000). The driver retires a connection
+ * whose head statement waits that long with nothing coming back (`reason=idle`)
+ * or, since #6543, runs that long in total while bytes keep arriving
+ * (`reason=age`). A statement whose operation declared a longer
+ * `statement_timeout` on its connection gets that timeout plus the grace; a
+ * declared 0 has no cap. Null, which disables the watchdog, when the statement
+ * timeout is off or the grace is `0`/`off`.
  */
 export function resolveInflightTimeoutSeconds(statementTimeout: string | undefined): number | null {
-  const raw = process.env.GBRAIN_PG_STUCK_GRACE_MS;
-  if (raw === '0' || raw === 'off') return null;
-  const grace = raw !== undefined && Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : DEFAULT_STUCK_GRACE_MS;
+  const grace = resolveStuckGraceMs();
   const budget = gucMilliseconds(statementTimeout);
-  return budget === null ? null : Math.ceil((budget + grace) / 1000);
+  return budget === null || grace === null ? null : Math.ceil((budget + grace) / 1000);
 }
 
-/** The postgres.js options for `PoolHealthHooks` on a pool whose connections start with `connection.statement_timeout`. */
+/** `GBRAIN_PG_STUCK_GRACE_MS` (default 30000), or null when it is `0`/`off` (the watchdog is disabled). */
+export function resolveStuckGraceMs(): number | null {
+  const raw = process.env.GBRAIN_PG_STUCK_GRACE_MS;
+  if (raw === '0' || raw === 'off') return null;
+  return raw !== undefined && Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : DEFAULT_STUCK_GRACE_MS;
+}
+
+/**
+ * The postgres.js options for `PoolHealthHooks` on a pool whose connections start with `connection.statement_timeout`.
+ * #6543 (A4): the same budget caps a statement's total age (`inflight_max`, never reset by received bytes) and its
+ * silence (`inflight_timeout`). The driver raises both for a statement whose operation declared a longer
+ * `statement_timeout` on its connection (to that timeout plus `inflight_grace`) and drops both for a declared 0, so
+ * the budget travels with the operation and does not depend on a session `SET` reaching the backend.
+ */
 export function poolHealthOptions(hooks: PoolHealthHooks | undefined, statementTimeout: string | undefined): Record<string, unknown> {
+  const seconds = resolveInflightTimeoutSeconds(statementTimeout);
+  const grace = resolveStuckGraceMs();
   return {
     onpoisoned: hooks?.onpoisoned,
     onstuck: hooks?.onstuck,
     onbuilderror: hooks?.onbuilderror,
     ondesync: hooks?.ondesync,
-    inflight_timeout: resolveInflightTimeoutSeconds(statementTimeout),
+    onrecovered: hooks?.onrecovered,
+    onrecoveryfailed: hooks?.onrecoveryfailed,
+    inflight_timeout: seconds,
+    inflight_max: seconds,
+    inflight_grace: seconds === null || grace === null ? null : grace / 1000,
   };
 }
 

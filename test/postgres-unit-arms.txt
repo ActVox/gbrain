@@ -39,6 +39,7 @@ test/extract-atoms-input-truncated-6503.test.ts
 test/extract-endpoint-revision.serial.test.ts
 test/extract-entities-managed.test.ts
 test/extract-timeline-from-meetings-managed.test.ts
+test/fact-fence-adoption-exits.test.ts
 test/fact-purge-lookup-timeout-6511.test.ts
 test/fence-repair-receipts.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
@@ -125,7 +126,9 @@ test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts
 test/purge-fact.test.ts
 test/purge-global-marker.test.ts
+test/recall-page-fill.test.ts
 test/remediation-manual-only.test.ts
+test/repair-apply-pending-6543.test.ts
 test/repair-embedding-effects.test.ts
 test/repair-failed-writes-conflict-6429.test.ts
 test/repair-failed-writes-drift-w411.test.ts
@@ -133,6 +136,9 @@ test/repair-fences.test.ts
 test/repair-frontmatter-keys-sweep-6454.test.ts
 test/repair-frontmatter.test.ts
 test/scripts/test-stress-postgres.test.ts
+test/search/page-rank-cut.test.ts
+test/search/rerank-gate-hybrid.test.ts
+test/search/rerank-gate-telemetry.test.ts
 test/shared-content-freshness.test.ts
 test/shared-skills-catalog.test.ts
 test/shared-skills-retention-capacity.test.ts
@@ -142,6 +148,7 @@ test/source-retire-missing-checkout.test.ts
 test/source-row-diagnostics.test.ts
 test/stats-health-source-scope.test.ts
 test/sync-drain-claims.test.ts
+test/sync-drain-head-blocked-6543.test.ts
 test/sync-drain-inpass-stall.test.ts
 test/sync-drain-write-capacity.test.ts
 test/sync-frontmatter-recovery.test.ts
@@ -156,6 +163,7 @@ test/sync-status-failure-detail-6513.test.ts
 test/sync-waiver-budget.test.ts
 test/sync-waiver-run-imports.test.ts
 test/takes-vector-lifecycle-5885.serial.test.ts
+test/terminal-failures-6650.test.ts
 test/trust-channel-writes.test.ts
 test/trust-guarded-supersession.test.ts
 test/trust-owner-actions.test.ts

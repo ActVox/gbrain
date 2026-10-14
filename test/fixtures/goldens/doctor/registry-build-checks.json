@@ -215,6 +215,10 @@
       },
       {
         "category": "ops",
+        "name": "provider_consent"
+      },
+      {
+        "category": "ops",
         "name": "harness_wiring"
       },
       {
@@ -403,6 +407,10 @@
       },
       {
         "category": "ops",
+        "name": "persistence_terminal_failures"
+      },
+      {
+        "category": "ops",
         "name": "persistence_session_timeouts"
       },
       {
@@ -480,6 +488,10 @@
       {
         "category": "ops",
         "name": "stale_frontmatter_keys"
+      },
+      {
+        "category": "ops",
+        "name": "maintenance_write_drift"
       },
       {
         "category": "brain",

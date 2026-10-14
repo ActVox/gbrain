@@ -248,6 +248,12 @@ export async function runServe(
     console.error(`[gbrain serve] ignoring GBRAIN_SURFACE="${resolved.invalidEnv}" (use verbs | starter | full)`);
   }
   console.error(`[gbrain serve] surface=${surface} (source: ${SURFACE_SOURCE_LABEL[resolved.source]})`);
+  void (await import('../core/serve-behavior-notice.ts')).logServeBehaviorNotice(engine, loadConfig());
+  // #6543 (A6): serve's stuck, desync and recovery events go to the pool-recovery audit `doctor --only pool_reap_health` reads.
+  if (engine.kind === 'postgres') {
+    const { logPoolRecovery } = await import('../core/audit/pool-recovery-audit.ts');
+    (await import('../core/pool-gauge.ts')).setPoolIncidentAudit((kind, detail) => logPoolRecovery(kind, undefined, detail));
+  }
   // #6383: the pool stall line (Postgres only; the watch reports nothing for an engine without pool numbers).
   if (engine.kind === 'postgres') new PoolStallWatch(engine, (line) => console.error(line)).start();
   // #6543: the read pool's transport facts, logged once and kept for /health?deep=1; the opt-in unhealthy exit.

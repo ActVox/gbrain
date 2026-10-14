@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 231878,
-    "stdoutSha256": "b1d2ef871d92ce9360a547ac5cc1651136a6eb12a96799fcdd317459870690b9",
+    "stdoutBytes": 232698,
+    "stdoutSha256": "efcd4e38b964afc730f5c34369c4f9f3d8cec4ad1e885a6df5186b69830924e8",
     "toolNames": [
       "remember",
       "entity",
@@ -21,6 +21,7 @@
       "put_pages",
       "get_write_request",
       "list_write_requests",
+      "list_write_conflicts",
       "cancel_write_request",
       "search",
       "query",
@@ -1086,6 +1087,39 @@
           "type": "object"
         },
         "scope": "write"
+      },
+      {
+        "description": "Pages whose writes keep ending in a source_changed conflict, grouped by slug.",
+        "idempotent": true,
+        "local_only": false,
+        "mutating": false,
+        "name": "list_write_conflicts",
+        "parameters": {
+          "cursor": "string?",
+          "limit": "number?",
+          "source_id": "string?"
+        },
+        "required_scopes": [],
+        "schema": {
+          "properties": {
+            "cursor": {
+              "description": "Previous page's next.",
+              "type": "string"
+            },
+            "limit": {
+              "default": 25,
+              "description": "1-100 slugs (default 25).",
+              "type": "number"
+            },
+            "source_id": {
+              "description": "Default: yours.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "scope": "read"
       },
       {
         "description": "Cancel your accepted write before it publishes; returns the receipt.",
@@ -5770,7 +5804,7 @@
         "scope": "write"
       },
       {
-        "description": "MEMORY VERB (v1): read saved facts by entity, since or session_id; `query` also searches pages. Remote callers see world facts only. One card: entity; reasoning: synthesize.",
+        "description": "MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5817,7 +5851,7 @@
               "type": "string"
             },
             "include_expired": {
-              "description": "Include expired.",
+              "description": "Also expired; question ranks them.",
               "type": "boolean"
             },
             "include_pending": {
@@ -5860,7 +5894,7 @@
               "type": "string"
             },
             "return_window": {
-              "description": "Window size 1-3.",
+              "description": "Window 1-3.",
               "type": "number"
             },
             "session_id": {
@@ -5872,7 +5906,7 @@
               "type": "string"
             },
             "source_id": {
-              "description": "One source you may read.",
+              "description": "One readable source.",
               "type": "string"
             },
             "supersessions": {

@@ -6,6 +6,7 @@ import { resolveHoursEnv } from '../../../core/env-number.ts';
 import { makeRemediationStep } from '../../../core/remediation-step.ts';
 import { classifyManagedSyncOrphans, type ManagedSyncOrphan } from '../../../core/persistence/managed-sync-orphans.ts';
 import { readManagedMode } from '../../../core/persistence/ownership.ts';
+import { legacyLedgerNote } from '../../../core/persistence/legacy-sync-failures.ts';
 
 /** #6518 [R18 vi]: the fast check cannot verify a mirror row; a warning there is uncertainty, never recovery. */
 const MIRROR_UNVERIFIED = (count: number) => `${count} mirrored managed sync failure(s) could not be verified without a database connection: `
@@ -72,7 +73,8 @@ export async function checkSyncFailures(engine: BrainEngine | null, opts: { sour
   const recovery = requiresManagedRetry
     ? `${resumable.length || !orphans.length ? `Fix the cause, then run ${retries.length ? retries.join(' ; ') : 'gbrain sync --no-pull --retry-failed with the same source and options'}. Completed full runs do not resolve a different unfinished cursor.` : ''}${orphanNote}${unreadNote}`.trim()
     : `Fix the file(s) and re-run 'gbrain sync', or use 'gbrain sync --skip-failed' to acknowledge legacy file failures.${orphanNote}${unreadNote}`;
-  return { name: 'sync_failures', status: severity.status, message: `${summary} ${details.join('; ')} ${recovery}`,
+  const legacyNote = managedBrain ? legacyLedgerNote(unresolvedLegacy) : '';
+  return { name: 'sync_failures', status: severity.status, message: `${summary} ${details.join('; ')} ${recovery}${legacyNote}`,
     remediation, remediation_status: remediation ? 'remediable' : 'blocked', ...(orphans.length ? { details: { orphans } } : {}),
     ...(engine ? {} : { message: `${summary} Durable sync state is unavailable without a database connection; the local ledger is only a compatibility mirror.${mirrorNote}` }) };
 }

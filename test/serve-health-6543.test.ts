@@ -36,7 +36,7 @@ import { admission, fixtures, initializeFixtures, prepared, selectFixtureHost, t
 import { withEnv } from './helpers/with-env.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
-interface FakeState { oldest?: number; applied?: string; appName?: string; prepare?: boolean; maxPipeline?: number; url?: string; executeRaw?: () => Promise<unknown>; disconnect?: () => Promise<void> }
+interface FakeState { oldest?: number; overBudget?: number; applied?: string; appName?: string; prepare?: boolean; maxPipeline?: number; url?: string; executeRaw?: () => Promise<unknown>; disconnect?: () => Promise<void> }
 function fakeEngine(state: FakeState = {}) {
   const probes: string[] = [];
   const engine = {
@@ -53,7 +53,7 @@ function fakeEngine(state: FakeState = {}) {
     disconnect: state.disconnect ?? (() => Promise.resolve()),
     getPoolDiagnostics: () => ({
       poisonedDiscards: 0, stuckDiscards: 0, buildFailures: 0, desyncDiscards: 0,
-      pool: driverPoolStats({ pool: { max: 4, open: 3, busy: 1, full: 0, reserved: 0, connecting: 0, closed: 0, ended: 0, queued: 0, inflight_oldest_ms: state.oldest ?? 0, completed: 1 } }),
+      pool: driverPoolStats({ pool: { max: 4, open: 3, busy: 1, full: 0, reserved: 0, connecting: 0, closed: 0, ended: 0, queued: 0, inflight_oldest_ms: state.oldest ?? 0, completed: 1, ...(state.overBudget !== undefined ? { inflight_over_budget_ms: state.overBudget } : {}) } }),
     }),
   } as unknown as BrainEngine;
   return { engine, probes };
@@ -138,6 +138,15 @@ describe('/health?deep=1 codes', () => {
     expect(result.body.fix).toContain('Restart this gbrain serve');
     expect(result.body.fix).toContain('PGMAX_PIPELINE=0');
     expect(result.body.fix).toContain('transport');
+  });
+
+  test('#6543 A4: with per-statement budgets, a long statement within its own declared budget is not over budget; one past it is', async () => {
+    const declared = await probeDeepHealth(fakeEngine({ oldest: 900_000, overBudget: 0 }).engine, 'postgres', '1.2.3', 100, 330_000, healthy);
+    expect(declared.ok).toBe(true);
+    expect(declared.body.pool).toMatchObject({ inflight_oldest_ms: 900_000, inflight_over_budget_ms: 0 });
+    const past = await probeDeepHealth(fakeEngine({ oldest: 900_000, overBudget: 900_000 }).engine, 'postgres', '1.2.3', 100, 330_000, healthy);
+    if (past.ok) throw new Error('expected 503');
+    expect(past.body.code).toBe('pool_inflight_over_budget');
   });
 
   test('a probe that times out or fails carries deep_health_probe_failed with its reason', async () => {

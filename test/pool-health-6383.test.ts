@@ -139,7 +139,7 @@ function fakeEngine(state: { busy: number; queued: number; completed: number; ol
 describe('poolHealthSnapshot', () => {
   test('joins the driver numbers with the engine counters, and is null for an engine without pool numbers', () => {
     const snapshot = poolHealthSnapshot(fakeEngine({ busy: 1, queued: 2, completed: 10, oldest: 250 }));
-    expect(snapshot).toEqual({ checked_out: 1, max: 4, waiters: 2, inflight_oldest_ms: 250, completed: 10, poisoned_discards: 1, stuck_discards: 2, build_failures: 3, desync_discards: 4 });
+    expect(snapshot).toEqual({ checked_out: 1, max: 4, waiters: 2, inflight_oldest_ms: 250, completed: 10, poisoned_discards: 1, stuck_discards: 2, build_failures: 3, desync_discards: 4, recovered: 0, recovery_failed: 0 });
     expect(poolHealthSnapshot({ kind: 'pglite' })).toBeNull();
     expect(poolHealthSnapshot({ getPoolDiagnostics: () => { throw new Error('closed'); } })).toBeNull();
   });
@@ -169,7 +169,7 @@ describe('PoolStallWatch', () => {
     now += 30_000;
     expect(watch.tick()).toBeNull();
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toBe(formatPoolStalledWarning({ checked_out: 1, max: 4, waiters: 0, inflight_oldest_ms: 90_000, completed: 11, poisoned_discards: 1, stuck_discards: 2, build_failures: 3, desync_discards: 4 }, 60_000));
+    expect(lines[0]).toBe(formatPoolStalledWarning({ checked_out: 1, max: 4, waiters: 0, inflight_oldest_ms: 90_000, completed: 11, poisoned_discards: 1, stuck_discards: 2, build_failures: 3, desync_discards: 4, recovered: 0, recovery_failed: 0 }, 60_000));
     expect(lines[0]).toContain('code=pg_pool_stalled checked_out=1 max=4 waiters=0 inflight_oldest_ms=90000 completed_delta=0 stalled_ms=60000');
     expect(lines[1]).toContain('stalled_ms=90000');
     expect(lines[2]).toBe(formatPoolRecoveredInfo(120_000, 1));

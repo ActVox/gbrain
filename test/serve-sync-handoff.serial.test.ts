@@ -47,6 +47,7 @@ import {
   startDelegatedSync,
 } from '../src/core/serve-sync-runner.ts';
 import { maybeDelegateManagedSyncToServe, type ManagedDelegationDeps } from '../src/commands/sync-delegate.ts';
+import { implyManagedNoPull } from '../src/commands/sync/managed-no-pull.ts';
 import type { ConsumerRow } from '../src/core/persistence/consumer-heartbeat.ts';
 import type { SyncOpts } from '../src/commands/sync.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -381,5 +382,19 @@ describe('maybeDelegateManagedSyncToServe (the Postgres ladder, client half)', (
     const local = await registerLocalWriter(engine, 'cli');
     const rows = await engine.executeRaw<{ principal_id: string }>('SELECT DISTINCT principal_id FROM persistence_requests WHERE source_id=$1', [f.id]);
     expect(rows.map(r => r.principal_id)).toEqual([local.id]);
+  }), 180_000);
+
+  test('#6543 C1: `gbrain sync --source <id>` without --no-pull on a managed brain delegates with --no-pull implied and the serve drains it', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const f = await fixture(2);
+    const sock = await serveSocket();
+    const flags = { noPull: false, dryRun: false };
+    captureStderr();
+    await implyManagedNoPull(engine, flags, f.id);
+    const outcome = await maybeDelegateManagedSyncToServe(engine, ['--source', f.id, '--json'], { ...baseOpts(f.id), noPull: flags.noPull, noEmbed: undefined, explicitProcessing: [] }, deps({ sock }));
+    releaseStderr();
+    expect(captured.some(l => l.includes('--no-pull is implied') && l.includes(`gbrain sources refresh ${f.id}`))).toBe(true);
+    expect(outcome.kind).toBe('delegated');
+    if (outcome.kind !== 'delegated') throw new Error('unreachable');
+    expect(outcome.result).toMatchObject({ status: 'first_sync', added: 2 });
   }), 180_000);
 });

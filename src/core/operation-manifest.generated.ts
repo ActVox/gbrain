@@ -837,6 +837,33 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     }
   },
   {
+    "name": "list_write_conflicts",
+    "idempotent": true,
+    "outputRedaction": "no_stored_text",
+    "description": "Pages whose writes keep ending in a source_changed conflict, grouped by slug.",
+    "params": {
+      "source_id": {
+        "type": "string",
+        "description": "Default: yours."
+      },
+      "limit": {
+        "type": "number",
+        "default": 25,
+        "description": "1-100 slugs (default 25)."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "Previous page's next."
+      }
+    },
+    "scope": "read",
+    "mutating": false,
+    "area": "pages",
+    "cliHints": {
+      "name": "write-conflicts"
+    }
+  },
+  {
     "name": "cancel_write_request",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
@@ -4868,7 +4895,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ]
       }
     },
-    "description": "MEMORY VERB (v1): read saved facts by entity, since or session_id; `query` also searches pages. Remote callers see world facts only. One card: entity; reasoning: synthesize.",
+    "description": "MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.",
     "params": {
       "entity": {
         "type": "string",
@@ -4896,7 +4923,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "source_id": {
         "type": "string",
-        "description": "One source you may read."
+        "description": "One readable source."
       },
       "since": {
         "type": "string",
@@ -4908,7 +4935,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_expired": {
         "type": "boolean",
-        "description": "Include expired."
+        "description": "Also expired; question ranks them."
       },
       "supersessions": {
         "type": "boolean",
@@ -4939,7 +4966,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "return_window": {
         "type": "number",
-        "description": "Window size 1-3."
+        "description": "Window 1-3."
       },
       "min_trust": {
         "type": "string",
