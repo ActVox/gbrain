@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**The Ubicloud gate's `verify` typecheck runs warm from a worktree whose `node_modules` is a symlink.** Verify's typecheck on #6673's gate timed out at 121 s against its 120 s cap; the rerun passed at 113 s. That gate ran from a `git worktree` whose `node_modules` is a symlink to the main checkout's, a common way to skip a `bun install` per worktree. tsc records each source file relative to the buildinfo's directory, but it records the files it reaches through node_modules by their real path: the TypeScript lib files and bun-types' globals, 990 entries in all. In that layout, those entries point out of the checkout (`../../../../../../../../workspace/gbrain/node_modules/typescript/lib/lib.es5.d.ts`). On the VM they resolve to nothing, the global declarations count as changed, and tsc rechecks every file. All four of that worktree's gates logged `verify's typecheck runs warm`, but the typecheck took 84, 85, 113 and 121 s, the same as a cold one. The 120 s cap is unchanged.
+
+### Itemized changes
+
+- **`scripts/ubicloud/typecheck-state.ts` `portableBuildInfo`** writes the uploaded copy (`<run>/typecheck.tsbuildinfo`). It moves every entry under the real path of the checkout's `node_modules` back under the checkout's own `node_modules` path, which the VM's frozen install lays out the same way. A checkout with a real `node_modules` is copied unchanged. Only the `fileNames` table carries paths; everything else in tsc 5.9's buildinfo refers to files by index. tsc still checks every file's content hash, so a wrong mapping costs time, never correctness.
+- **`scripts/ci-ubicloud.ts`** uploads that copy. When it re-roots entries, the log line says how many. If an entry still resolves outside the checkout, the state is not uploaded, and the log says verify's typecheck runs cold and why, instead of claiming it runs warm.
+- **Proof.** Forced probe on a 16-vCPU gate VM, typecheck alone:
+  - The buildinfo written from a symlinked worktree took 84 s and 91 s.
+  - The same file re-rooted took 16 s and 15 s.
+  - The gate's own verify step, run from that worktree. Before: the log said `runs warm` and verify's typecheck took 90 s. After: the log said `990 entries re-rooted from the symlinked node_modules; verify's typecheck runs warm`, and the typecheck took 16 s.
+- **`test/scripts/ubicloud-typecheck-state.test.ts`** builds a worktree with a symlinked `node_modules` and the entries tsc 5.9 wrote there. It checks that lib and bun-types entries are re-rooted, sources are kept, a path outside both is counted, a plain checkout is unchanged, and a file without `fileNames` is refused.
+
 ## [0.60.219.0] - 2026-10-14
 
 **A new brain made by `gbrain setup` is finished when setup ends, and a plain-English question to `gbrain recall` now finds facts on a brain without embeddings.** Before, `gbrain setup claude-code` (or `codex`) created a brain and then printed a line telling you to run `gbrain apply-migrations --yes --no-autopilot-install` yourself, so a fresh install still had setup migrations pending and `gbrain doctor` said so. Setup now runs those migrations itself, on the brain it just created, and says which ones it ran. Separately, on a brain with no embeddings, `gbrain recall "how does the user take their coffee"` printed "No matching facts." even when a fact about coffee existed, because recall looked for an entity with that whole sentence as its name. Now it ranks the facts against the sentence as a question and tells you it did.
