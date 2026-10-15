@@ -5416,7 +5416,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "Stored contradiction reports are temporarily available only to trusted local callers without a source filter. Remote or source-scoped callers receive {contradictions: [], note} with an availability note. For eligible local callers, return suspected-contradiction findings from the most recent `gbrain eval suspected-contradictions` probe run, optionally filtered by slug and/or severity. Use this when the user asks 'what's inconsistent in my brain', 'show me contradictions about Acme', 'high-severity issues only', or wants to act on the probe's findings without re-running it. Returns {contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. An eligible read loads the stored run without triggering a new probe; users run `gbrain eval suspected-contradictions` for that.",
+    "description": "Return suspected-contradiction findings from the most recent `gbrain eval suspected-contradictions` probe run, optionally filtered by slug and/or severity. Use this when the user asks 'what's inconsistent in my brain', 'show me contradictions about Acme', 'high-severity issues only', or wants to act on the probe's findings without re-running it. Returns {contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. Remote, source-scoped or min_trust callers get only findings whose two sides they can read now (each side re-read live, with source_id, trust_tier and origin) and total_visible instead of the run total. Reads the stored run without triggering a new probe; users run `gbrain eval suspected-contradictions` for that.",
     "scope": "read",
     "params": {
       "slug": {
@@ -5435,6 +5435,19 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "limit": {
         "type": "number",
         "description": "Max findings to return. Default 20."
+      },
+      "min_trust": {
+        "type": "string",
+        "enum": [
+          "user_confirmed",
+          "operator_curated",
+          "tool_observed",
+          "agent_written",
+          "unknown",
+          "external_untrusted"
+        ],
+        "description": "Lowest trust tier to return (the connection floor still applies).",
+        "fullSurfaceOnly": true
       }
     },
     "cliHints": {
