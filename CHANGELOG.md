@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**`gbrain sync status --json` now always includes `checkpoint_blockers`, and managed sync has a convergence gate in CI (#6712).** `checkpoint_blockers` used to appear only while a run waited at its checkpoint, so an agent reading the status of a finished run, a run still mid-manifest or a source with no run could not tell "nothing blocks" from "not reported". It is now an array on every status, empty when no checkpoint is pending. Behind the scenes, every change to persistence, sync, projections or storage now has to pass a gate that kills sync clients and the serve at seeded points while other writers keep writing, then checks that one or two plain `gbrain sync --no-pull` runs bring every file and page back into agreement without losing an acknowledged write.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync status --source <id> --json` after a run finished, mid-run before the checkpoint, or with no run | no `checkpoint_blockers` field | `"checkpoint_blockers": []` |
+| the same while a run waits at its checkpoint behind a receipt | the blocking receipts | unchanged |
+
+### Itemized changes
+
+- `src/core/persistence/sync-status.ts`: `checkpoint_blockers` is always present (empty unless a checkpoint is pending); no other field changes. Test: `test/sync-status-checkpoint-blockers-shape.test.ts` (no cursor, unfinished, finished, recovery-record blocker).
+- `src/core/persistence/fault-points.ts`, `src/core/persistence/sync-run.ts`: a test-only `sync:after_freeze` seam after an import entry is frozen and before it is admitted (a no-op unless a test installs a hook).
+- Convergence gate (`test/sync-convergence.serial.test.ts`, `test/fixtures/convergence-fault-kill.ts`): a seeded kill loop (client and serve `kill -9` at six sync fault points), concurrent `put`, `remember` and maintenance writers, a DB-only competitor, out-of-band `git mv`/`git rm` with uncommitted deletions reported as ghosts, and two drainers, each on its own brain, with an acknowledged-write ledger and a field-present `sync status` oracle. Four modes that master fails are written and skipped until PR 1 of #6712: a mid-run uncommitted edit (no `worktree_dirty` hold is named), a pooler drop (publication stalls 356 s), one page refused inside a bulk group (the run's other 74 requests are cancelled and plain syncs stay blocked until `--retry-failed`) and a systemic trigger refusal (P0001 and 55000; plain syncs stay blocked after it is lifted). The fault preload has one action registry: kill, stall, edit, and throw with a given SQLSTATE. Every failure prints its seed, modes, fault plan and a repro command.
+- CI: a `convergence` job in `persistence-validation.yml` on both supported Bun versions (200 pages at 10 ms, 6 kills, fixed seed on pull requests, merge-queue runs and pushes), selected on pull requests by `scripts/ci-convergence-scope.sh`, which `bun.lock` and `vendor/postgres/` trigger and `package.json` alone does not. A separate `convergence-nightly.yml` workflow runs 2,000 pages at 50 ms with 20 kills and a rotating seed, outside `test-status`, and writes a failure summary carrying the seed.
+- Docs: `scripts/persistence/README.md` (managed-sync convergence gate), `docs/ci-event-parity.md`.
+
 ## [0.60.243.0] - 2026-10-15
 
 **Entity rows now point at the records behind an account.** Every found `entity names` row (and each identity sibling) carries `referenced_by_count` and a `next` to its full card, so an agent that resolved a batch of names knows which ones have pages to read and how to open them. With `entity.record_types` set (off by default), the rows, the full card and `context_pack` also list the referring contracts, amendments or other record types you enroll: newest page date first, each with its page date labeled as a page date, its `status`, the record it amends (with the terms-start date when the link records one) and what it replaces, bounded per page and per call, with continuations that return exactly the rest. The order never claims which record governs. A late or failed read is marked `references_unavailable` with a degraded notice, never shown as an empty list.
