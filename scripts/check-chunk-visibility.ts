@@ -44,7 +44,7 @@ const BASELINE_REL = 'scripts/chunk-visibility-baseline.tsv';
 const ANCHOR = 'scripts/check-chunk-visibility.ts (header)';
 const MARKER = 'chunk-visibility-ok';
 const READ = /(?<!\bdelete\s{1,40})\b(?:from|join)\s+content_chunks\b/i;
-const COVERED = /\bchunk(?:VisibleFilter|GenerationFilter|GenerationProbe)\(|\bbuildVisibilityClause\(\s*'\w+'\s*,\s*'\w+'\s*,(?:[^()]|\([^()]*\))*?,\s*'\w+'\s*\)/;
+const COVERED = /\bchunk(?:VisibleFilter|GenerationFilter|GenerationProbe)\(|\bbuildVisibilityClause\(\s*'\w+'\s*,\s*'\w+'\s*,(?:[^()]|\([^()]*\))*?\bchunkAlias:\s*'\w+'/;
 const SQL_MARKER = new RegExp(String.raw`--\s*${MARKER}:([^\n]*)`);
 
 export interface Statement {

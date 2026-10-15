@@ -62,7 +62,7 @@ describe('check-chunk-visibility.ts', () => {
         "const live = chunkGenerationFilter('p', 'cc');",
         'const where = `AND ${live}`;',
         'export const viaHelper = `SELECT 1 FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE true ${where}`;',
-        "export const clause = `SELECT 1 FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE ${buildVisibilityClause('p', 's', {}, 'cc')}`;",
+        "export const clause = `SELECT 1 FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE ${buildVisibilityClause('p', 's', { chunkAlias: 'cc' })}`;",
         "export const sqlMarker = 'SELECT count(*) FROM content_chunks -- chunk-visibility-ok: storage statistics';",
         '// chunk-visibility-ok: code pages are never segmented',
         "export const lineMarker = 'SELECT id FROM content_chunks WHERE symbol_name_qualified = $1';",

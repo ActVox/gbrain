@@ -1008,7 +1008,7 @@ export class PostgresEngine implements BrainEngine {
     if (hasCJK(query)) {
       return this._searchKeywordCJK(query, {
         limit, offset, innerLimit, sourceFactorCase, hardExcludeClause,
-        visibilityClause: buildVisibilityClause('p', 's', opts, 'cc'),
+        visibilityClause: buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' }),
         detailFilter: detailLow ? `AND cc.chunk_source = 'compiled_truth'` : '',
         opts, dedup: true,
       });
@@ -1080,7 +1080,7 @@ export class PostgresEngine implements BrainEngine {
     // archived sources. Joined `sources s` lets the predicate compile to a
     // column lookup. NOT bypassed by detail=high — soft-delete is a contract,
     // not a temporal preference.
-    const visibilityClause = buildVisibilityClause('p', 's', opts, 'cc');
+    const visibilityClause = buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' });
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();
@@ -1231,7 +1231,7 @@ export class PostgresEngine implements BrainEngine {
         limit, offset,
         innerLimit: 0,             // unused on chunk-grain (no inner CTE)
         sourceFactorCase, hardExcludeClause,
-        visibilityClause: buildVisibilityClause('p', 's', opts, 'cc'),
+        visibilityClause: buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' }),
         detailFilter: detailLow ? `AND cc.chunk_source = 'compiled_truth'` : '',
         opts, dedup: false,
       });
@@ -1293,7 +1293,7 @@ export class PostgresEngine implements BrainEngine {
     const offsetParam = `$${params.length}`;
 
     // v0.26.5: visibility filter for searchKeywordChunks (anchor primitive).
-    const visibilityClause = buildVisibilityClause('p', 's', opts, 'cc');
+    const visibilityClause = buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' });
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();

@@ -63,11 +63,11 @@ export const PAGE_STATE_SCHEMA_STATEMENTS = [
       IF NEW.compiled_truth IS NULL AND OLD.compiled_truth IS NULL THEN
         body_moved := NEW.body_generation IS DISTINCT FROM OLD.body_generation;
       END IF;
-      IF body_moved OR (NEW.source_id, NEW.slug, NEW.type, NEW.page_kind, NEW.title, NEW.compiled_truth,
+      IF (NEW.source_id, NEW.slug, NEW.type, NEW.page_kind, NEW.title, NEW.compiled_truth,
           NEW.timeline, NEW.frontmatter, NEW.deleted_at)
          IS DISTINCT FROM
          (OLD.source_id, OLD.slug, OLD.type, OLD.page_kind, OLD.title, OLD.compiled_truth,
-          OLD.timeline, OLD.frontmatter, OLD.deleted_at) THEN
+          OLD.timeline, OLD.frontmatter, OLD.deleted_at) OR body_moved THEN
         IF NEW.knowledge_revision = OLD.knowledge_revision AND NOT (
           COALESCE(current_setting('gbrain.materializing_revision', true), '') = OLD.knowledge_revision::text
           AND (NEW.source_id, NEW.slug, NEW.type, NEW.page_kind, NEW.title, NEW.frontmatter, NEW.deleted_at)

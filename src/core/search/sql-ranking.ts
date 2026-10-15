@@ -169,9 +169,6 @@ export function buildHardExcludeClause(slugColumn: string, prefixes: string[]): 
  * @param pageAlias   — page table alias (e.g. `'p'`)
  * @param sourceAlias — source table alias (e.g. `'s'`); the caller is
  *                      responsible for joining `sources` so this alias resolves.
- * @param chunkAlias  — chunk table alias when the statement reads `content_chunks`
- *                      rows joined to the page: adds the live body generation
- *                      predicate (`chunkVisibleFilter`, Wave B).
  *
  * @returns raw SQL fragment, e.g.
  *   `AND p.deleted_at IS NULL AND NOT s.archived AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine')`
@@ -194,8 +191,13 @@ export function buildVisibilityClause(
     /** #5575: the read floor and proactive activation control (eligibility/sql.ts), applied before LIMIT. */
     minTrust?: TrustTier;
     suppressFlagged?: boolean;
+    /**
+     * Wave B: the chunk table alias when the statement reads `content_chunks`
+     * rows joined to the page; adds the live body generation predicate
+     * (`chunkVisibleFilter`) in place of the page-only projection filter.
+     */
+    chunkAlias?: string;
   },
-  chunkAlias?: string,
 ): string {
   // Single source of truth for the quarantine SQL lives in quarantine.ts so
   // the marker key + filter can't drift from the search filter (#1699).
@@ -211,7 +213,7 @@ export function buildVisibilityClause(
   const pinnedQuestion = ` AND NOT (COALESCE(${pageAlias}.frontmatter, '{}'::jsonb) ? 'pinned_question')`;
   const trustClause = opts?.minTrust || opts?.suppressFlagged
     ? ` AND ${pageEligibleSql(pageAlias, { floor: opts.minTrust, suppressFlagged: opts.suppressFlagged })}` : '';
-  const projection = chunkAlias ? chunkVisibleFilter(pageAlias, chunkAlias) : currentTextProjectionFilter(pageAlias);
+  const projection = opts?.chunkAlias ? chunkVisibleFilter(pageAlias, opts.chunkAlias) : currentTextProjectionFilter(pageAlias);
   return `AND ${pageAlias}.deleted_at IS NULL AND ${projection} AND NOT ${sourceAlias}.archived AND ${quarantine}${pinnedQuestion}${privateClause}${chunksClause}${trustClause}`;
 }
 

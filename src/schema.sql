@@ -166,14 +166,6 @@ CREATE TABLE IF NOT EXISTS pages (
   CONSTRAINT pages_source_slug_key UNIQUE (source_id, slug)
 );
 
--- v0.40.3.0 cache invalidation trigger (migration v91; mirrored in
--- src/core/pglite-schema.ts). BEFORE INSERT OR UPDATE so every write path
--- bumps generation per D6 / codex #4. INSERT: pages get
--- COALESCE(MAX(generation), 0) + 1 so the bookmark gate fires for any
--- cache row stored before the new page existed. UPDATE: bumps only when
--- content columns IS DISTINCT FROM (allow-list widened per D6 + codex #3
--- to include title/type/page_kind/corpus_generation/content_hash) so
--- read-time mutations don't invalidate every cache row.
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_GENERATION_BUMP_FN_SQL). Edit that file, then run: bun run build:schema
 CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
@@ -1874,11 +1866,11 @@ CREATE OR REPLACE FUNCTION gbrain_advance_page_revision() RETURNS trigger LANGUA
       IF NEW.compiled_truth IS NULL AND OLD.compiled_truth IS NULL THEN
         body_moved := NEW.body_generation IS DISTINCT FROM OLD.body_generation;
       END IF;
-      IF body_moved OR (NEW.source_id, NEW.slug, NEW.type, NEW.page_kind, NEW.title, NEW.compiled_truth,
+      IF (NEW.source_id, NEW.slug, NEW.type, NEW.page_kind, NEW.title, NEW.compiled_truth,
           NEW.timeline, NEW.frontmatter, NEW.deleted_at)
          IS DISTINCT FROM
          (OLD.source_id, OLD.slug, OLD.type, OLD.page_kind, OLD.title, OLD.compiled_truth,
-          OLD.timeline, OLD.frontmatter, OLD.deleted_at) THEN
+          OLD.timeline, OLD.frontmatter, OLD.deleted_at) OR body_moved THEN
         IF NEW.knowledge_revision = OLD.knowledge_revision AND NOT (
           COALESCE(current_setting('gbrain.materializing_revision', true), '') = OLD.knowledge_revision::text
           AND (NEW.source_id, NEW.slug, NEW.type, NEW.page_kind, NEW.title, NEW.frontmatter, NEW.deleted_at)

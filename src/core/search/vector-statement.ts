@@ -324,7 +324,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
   const modalityFilter = resolvedCol.name === 'embedding_image' ? `AND cc.modality = 'image'`
     : resolvedCol.name === 'embedding_multimodal' ? '' : `AND cc.modality = 'text'`;
   // v0.26.5: visibility in the inner CTE so hidden rows never take candidate slots.
-  const visibilityClause = buildVisibilityClause('p', 's', opts, 'cc');
+  const visibilityClause = buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' });
   const pageVisibilityClause = buildVisibilityClause('p', 's', opts);
   const candidateFrom = (generation: string) => `FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id

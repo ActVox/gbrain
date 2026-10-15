@@ -11,9 +11,15 @@
  */
 
 /**
- * Query-cache generation bump (migration v91's trigger function). A segmented
- * page's body identity is `body_generation`: its body columns are NULL on both
- * sides of a flip, so the generation moves when body_generation does.
+ * Query-cache generation bump (v0.40.3.0, migration v91's trigger function).
+ * BEFORE INSERT OR UPDATE so every write path bumps generation (D6 / codex #4).
+ * INSERT: pages get COALESCE(MAX(generation), 0) + 1 so the bookmark gate
+ * fires for any cache row stored before the new page existed. UPDATE: bumps
+ * only when a content column IS DISTINCT FROM (allow-list widened per D6 +
+ * codex #3 to include title/type/page_kind/corpus_generation/content_hash) so
+ * read-time mutations don't invalidate every cache row. A segmented page's
+ * body identity is `body_generation`: its body columns are NULL on both sides
+ * of a flip, so the generation moves when body_generation does.
  */
 export const PAGE_GENERATION_BUMP_FN_SQL = `CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN

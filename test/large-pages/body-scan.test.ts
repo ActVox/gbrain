@@ -155,7 +155,7 @@ describe('body scan on files larger than the head bound', () => {
       const got = capture(() => scanMarkdownString(content, 'notes/x.md', { validate }));
       if (!('thrown' in got) && got.kind === 'frontmatter_head_unbounded') {
         refused++;
-        const head = content.slice(0, FRONTMATTER_HEAD_MAX_BYTES);
+        const head = new TextDecoder().decode(Buffer.from(content, 'utf8').subarray(0, FRONTMATTER_HEAD_MAX_BYTES), { stream: true });
         expect(!/\S/.test(head) || /^\s*-/.test(head)).toBe(true);
         return;
       }
