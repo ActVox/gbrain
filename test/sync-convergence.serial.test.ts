@@ -109,11 +109,13 @@ const MODES = {
   c: { title: 'concurrent writers: put, remember and a managed maintenance job', skip: null },
   'c-db': { title: 'a DB-only competitor', skip: null },
   d: { title: 'out-of-band git mv/git rm of committed files and deletion of uncommitted files', skip: null },
-  e: { title: 'a deterministic mid-run edit after freezeEntry', skip: PR1 },
+  e: { title: 'a deterministic mid-run edit after freezeEntry', skip: null },
+  // #6712 lane C: the page that loses its pooled connection mid-publication keeps its live owner's publication claim until
+  // that lease lapses (~366 s, "claim lapsed: owner missing"); one page's fate converges, the stall is the owner's (the drain lease).
   f: { title: 'a pooler drop mid-bulk', skip: PR1 },
   g: { title: 'two concurrent drainers: a --all run beside a serve', skip: null },
-  'knock-on': { title: 'one page failure inside a bulk group', skip: PR1 },
-  systemic: { title: 'a systemic database refusal: an unknown P0001 or a 55000 from a trigger on every page write', skip: PR1 },
+  'knock-on': { title: 'one page failure inside a bulk group', skip: null },
+  systemic: { title: 'a systemic database refusal: an unknown P0001 or a 55000 from a trigger on every page write', skip: null },
 } as const satisfies Record<string, { title: string; skip: string | null }>;
 type Mode = keyof typeof MODES;
 const requestedModes = process.env.GBRAIN_TEST_CONVERGENCE_MODES?.split(',').map(mode => mode.trim()).filter(Boolean);
@@ -807,8 +809,8 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
     } finally { rmSync(b.repo, { recursive: true, force: true }); }
   });
   test('modes master fails stay written and name the PR that turns them on', () => {
-    for (const mode of ['e', 'f', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toContain('PR 1 of #6712');
-    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'g'] as const) expect(MODES[mode].skip).toBeNull();
+    expect(MODES.f.skip).toContain('PR 1 of #6712');
+    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'g', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
   });
 });
 
