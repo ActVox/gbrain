@@ -590,8 +590,10 @@ The contract W1 adds for the ledger:
      naming the purge request. The needles are each purged claim with its
      fence-escaped and JSON-escaped forms, as `purge-verify.ts` already
      builds them. For a page purge the claim inventory is **exhaustive**:
-     every fact and take claim on the page and every claim in the page
-     lifetime's historical ledger events, enumerated in keyset batches.
+     every fact and take claim on the page, every fence claim in its retained
+     versions (claims from before coverage started live only there), and
+     every claim in the page lifetime's historical ledger events, enumerated
+     in keyset batches.
      `readPurgeClaims` is not that inventory: it reads at most 1,000 facts
      and takes, drops claims under 8 characters and keeps 32 needles
      (`page-purge.ts:64-66`), which suits its report and not a sweep. If
