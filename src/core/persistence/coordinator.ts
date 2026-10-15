@@ -43,6 +43,7 @@ import { fenceFailureDetail } from '../fence-repair/refusal.ts';
 import { withdrawalFailureDetail } from '../facts/withdrawal.ts';
 import { faultPoint, withFaultPoints } from './fault-points.ts';
 import { recordPublicationFenceTrend } from '../fence-repair/census-store.ts';
+import { segmentWriteScope } from '../page-body/ingest.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -73,6 +74,11 @@ interface PreparedMutationBase {
   validate?(tx: BrainEngine): Promise<void>;
   /** #5575: the tier and origin of the rows apply writes; absent: the request's channel tier (trust/channel.ts). */
   trust?: WriteTrust;
+  /**
+   * Wave B: runs once the publication committed and its recovery record is cleared (a segmented page's
+   * deferred projection and segment GC). Best effort: the projection queue and GC converge after a failure.
+   */
+  afterCommit?(engine: BrainEngine): Promise<void>;
 }
 /**
  * A page file target; `publishMode` (Google pages) is the exact mode it publishes with, and its created directories get 0700.
@@ -272,6 +278,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let recovery: RecoveryRecord | null = null;
   let published = false;
   let transactionBodyCompleted = false;
+  let afterCommitDue = false;
   const skill = prepared.target === 'skill_bundle';
   const files = skill ? prepared.files ?? [] : prepared.file ? [prepared.file] : [];
   try {
@@ -428,6 +435,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     });
     await hooks.boundary?.('after_commit', done);
     if (recovery) await clearResolvedRecovery(engine, row.id, done);
+    afterCommitDue = done.state === 'committed';
     return done;
   } catch (error) {
     if (recovery) {
@@ -450,7 +458,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       return (await getWriteRequestById(engine, row.id))!;
     }
     return finishUnpublishedFailure(engine, row, error);
-  } finally { releaseCapacity?.(); await lock?.release(); }
+  } finally {
+    releaseCapacity?.();
+    await lock?.release();
+    if (afterCommitDue) await prepared.afterCommit?.(engine).catch(() => undefined);
+  }
 }
 
 export async function recoverPublication(engine: BrainEngine, id: string, hostId = localHostId(), alreadyLocked = false,
@@ -548,6 +560,8 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       await faultPoint('publication_recovery:before_clear', { requestId: row.request_id, sourceId: row.source_id, operation: row.operation });
       await clearResolvedRecovery(engine, id);
       row = (await getWriteRequestById(engine, id))!;
+      const pageId = row.page_id === null || row.state !== 'committed' ? null : Number(row.page_id);
+      if (pageId !== null) await segmentWriteScope(engine, row.source_id).then(writes => writes(exec => exec.sweepSegments({ pageId }))).catch(() => undefined);
     }
     return row;
   } finally { releaseCapacity?.(); await lock?.release(); }

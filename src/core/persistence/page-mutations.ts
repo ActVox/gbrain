@@ -37,6 +37,7 @@ import { decideUnboundWrite, isUnboundSourcePage } from './unbound-source.ts';
 import { assertRestoreOrigin } from './detached-pages.ts';
 import { colonSlugWindowsRefusal, isWindowsColonTarget } from './native-file-target.ts';
 import { publishesDatabaseOnly } from './page-prepare.ts';
+import { materializedSnapshot } from './segmented-apply.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
@@ -349,7 +350,7 @@ export async function preparePageAdmission(ctx: OperationContext,
     const { applyPageEdits, assertEditRevision, parsePageEdits } = await import('./page-edit.ts');
     if (!snapshot || snapshot.page.deleted_at) throw new OperationError('page_not_found', `Page not found: ${slug}`, 'edit_page changes an existing page; create it with put_page.');
     assertEditRevision(snapshot.revision, p.expected_revision);
-    applyPageEdits(snapshot.page, snapshot.tags, ctx.remote !== false, parsePageEdits(p.edits));
+    applyPageEdits((await materializedSnapshot(ctx.engine, snapshot))!.page, snapshot.tags, ctx.remote !== false, parsePageEdits(p.edits));
   }
   let binding = boundAtStart;
   const sandbox = ctx.viaSubagent === true && !(ctx.allowedSlugPrefixes?.length);

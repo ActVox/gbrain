@@ -298,6 +298,14 @@ More: [docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database](../.
 |---|---|---|---|---|---|---|
 | Benchmark rule check unknown op. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### body_staging_expired
+
+<a id="body_staging_expired"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The staged body of a large-page write expired before it was published, so nothing was published. | A segmented write stages its segments first and publishes them in one flip; a staging idle past its deadline is collected by maintenance, and publishing without its segments would leave the page missing text. | Send the same write again; it stages a fresh copy. | agent | `repeat the read that failed` | 1 | yes |
+
 ### bootstrap_empty
 
 <a id="bootstrap_empty"></a>
@@ -428,7 +436,7 @@ More: [docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover](../../
 |---|---|---|---|---|---|---|
 | Automatic event extraction (auto_chronicle) skipped or failed this page; `reason` says why and `fix`, when present, is the next step. | A capability this request needs is not configured or not reachable on this brain. | Read the receipt or doctor `auto_chronicle` check: its `why` explains the reason and its `fix`, when present, is the next step (paid fixes need the user's agreement). | agent | `gbrain doctor --json` | 1 | no |
 
-Reasons: `auto_chronicle_off`, `auto_chronicle_invalid`, `slug_bound_client`, `operation_bound_client`, `no_extract`, `history`, `not_yet_happened`, `too_short`, `dream_generated`, `no_write_decision`, `not_chronicle_shaped`, `already_extracted`, `superseded`, `daily_limit`, `judge_llm_unavailable`, `no_pricing`, `budget_exhausted`, `campaign_exhausted`, `judge_chat_error`, `judge_truncated`, `judge_parse_failed`, `malformed_proposal`, `publish_error`, `judge_refused`, `page_missing`, `no_events`, `future_dated`, `date_imprecise`, `no_chat_provider`.
+Reasons: `auto_chronicle_off`, `auto_chronicle_invalid`, `slug_bound_client`, `operation_bound_client`, `no_extract`, `history`, `not_yet_happened`, `too_short`, `dream_generated`, `page_body_segmented`, `no_write_decision`, `not_chronicle_shaped`, `already_extracted`, `superseded`, `daily_limit`, `judge_llm_unavailable`, `no_pricing`, `budget_exhausted`, `campaign_exhausted`, `judge_chat_error`, `judge_truncated`, `judge_parse_failed`, `malformed_proposal`, `publish_error`, `judge_refused`, `page_missing`, `no_events`, `future_dated`, `date_imprecise`, `no_chat_provider`.
 
 More: [docs/guides/life-chronicle.md#skip-and-failure-codes](../../docs/guides/life-chronicle.md#skip-and-failure-codes)
 
@@ -2145,6 +2153,16 @@ More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-page
 Reasons: `host_mismatch`, `transfer_in_progress`, `clone_in_progress`, `binding_missing`, `incarnation_changed`, `coordination_path_missing`, `local_path_missing`, `not_sent`, `outcome_unknown`.
 
 More: [docs/guides/troubleshooting.md#owner-unavailable](../../docs/guides/troubleshooting.md#owner-unavailable)
+
+### page_body_segmented
+
+<a id="page_body_segmented"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| This page's body is stored in segments, and the path that hit it reads or writes the whole body as one string, so it stopped before reading or changing anything. | With pages.segmented_storage on, a page over 1 MiB keeps its body in segments instead of the page row; a whole-body path would otherwise see an empty body and could overwrite the page or drop the unread rest. Windowed reads and segment-aware writers replace these paths. | Read the page's revision and stored size with get_page body: 'none' (size.body_bytes); windowed reads of a segmented body arrive with the segment reader. Run: gbrain get --source '{source_id}' --body none -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/windowed-reads.md#page_body_segmented](../../docs/guides/windowed-reads.md#page_body_segmented)
 
 ### page_identity_changed
 
