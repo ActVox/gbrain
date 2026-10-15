@@ -255,7 +255,7 @@ or a physical projection that leaves attribution untouched):
 - `src/core/page-state/rename-alias.ts` (5): the fact slug rewrite runs inside its caller's `updateSlug` transaction, and `movePageIdReferences` (#5431: page_versions, timeline_entries and links moved to the row that materialized under a fallback rename) runs inside `carryRenameIdentity`'s `maintenanceTransaction`; every caller is attributed.
 - `src/core/page-state/versions.ts` (1): `createVersion` itself; the caller's scope supplies the actor.
 - `src/core/persistence/atom-maintenance.ts` (1): request preparer.
-- `src/core/persistence/canonical-projections.ts` (7): fence projection inside the request's publication.
+- `src/core/persistence/canonical-projections.ts` (8): fence projection inside the request's publication.
 - `src/core/persistence/connector-google-receipts.ts` (2): request preparer.
 - `src/core/persistence/connector-sync.ts` (2): connector publication inside `withCoordinatedWrite`.
 - `src/core/persistence/derived-facts.ts` (1): the gated conversation fact insert (`insertDerivedFacts`) on unmanaged brains, in `writeDerivedFacts`' `maintenanceTransaction` at the page's derived tier.
@@ -267,7 +267,7 @@ or a physical projection that leaves attribution untouched):
 - `src/core/persistence/memory-mutations.ts` (1): `forget` inside its request's coordinated write.
 - `src/core/persistence/memory-prepare.ts` (3): `remember` request preparer.
 - `src/core/persistence/page-prepare.ts` (6): page request preparer.
-- `src/core/persistence/prepared-maintenance.ts` (4): managed maintenance request preparer.
+- `src/core/persistence/prepared-maintenance.ts` (3): managed maintenance request preparer.
 - `src/core/persistence/semantic-pages.ts` (1): `add_timeline_entry` request preparer.
 - `src/core/persistence/sync-image.ts` (2): managed sync image request preparer; a Git rename retires the old page inside the same publication.
 - `src/core/persistence/sync-prepare.ts` (4): managed sync request preparer.
