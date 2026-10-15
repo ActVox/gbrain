@@ -182,6 +182,7 @@ test/takes-vector-lifecycle-5885.serial.test.ts
 test/terminal-failures-6650.test.ts
 test/trust-channel-writes.test.ts
 test/trust-guarded-supersession.test.ts
+test/trust-held-removals.test.ts
 test/trust-owner-actions.test.ts
 test/unbound-source-6536.test.ts
 test/withdrawal-overlay-concurrency.test.ts
