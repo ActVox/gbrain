@@ -183,6 +183,7 @@ test/facts-backstop-outcome.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HO
 test/facts-context-injection.serial.test.ts	global-state	global-state: process-wide test seams __resetHotMemoryCacheForTests
 test/facts-embedding-bare-model.serial.test.ts	global-state	global-state: configures the process-wide AI gateway (configureGateway/resetGateway) to name the gateway provider in the refusal
 test/facts-valid-from-context.serial.test.ts	R2	R2: mock.module(../src/core/facts/extract.ts) replaces modules for every file in the process
+test/file-claims-win32-6659.serial.test.ts	global-state	global-state: redefines process.platform as win32 to drive the Windows file-claim census
 test/filing-rules-resolution.serial.test.ts	R1	R1: mutates process.env (HOME, GBRAIN_HOME, GBRAIN_GIT_ALLOW_FILE_TRANSPORT)
 test/fix-wave-3-connector-loops.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests; configureGateway changes the process-wide AI gateway
 test/fix-wave-3-managed-embedding.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
