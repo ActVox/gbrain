@@ -38,6 +38,7 @@ const RECEIPT_COVERAGE: Record<string, Coverage> = {
   'src/core/page-state/materialize.ts': { sites: 1, tables: ['pages'], todo: 'TODO(receipts): derived page materialization should publish as a maintenance intent' },
   'src/core/timeline-extract.ts': { sites: 1, tables: ['timeline_entries'], todo: 'TODO(receipts): timeline retraction should publish like managed_maintenance_timeline_extract' },
   'src/commands/reindex-aliases.ts': { sites: 1, tables: ['page_aliases', 'slug_aliases'], todo: 'TODO(receipts): reindex --aliases should publish per page as a maintenance intent' },
+  'src/core/repair/aliases.ts': { sites: 1, tables: ['page_aliases', 'slug_aliases'], todo: 'TODO(receipts): gbrain repair aliases (#6619) deletes alias rows whose target page no longer exists (no page, no content column) in withCoordinatedWrite as explicit-only maintenance without a request; publish each item as a maintenance intent' },
   'src/core/repair/timeline-comments.ts': { sites: 1, tables: ['timeline_entries'], todo: 'TODO(receipts): gbrain repair timeline-comments row cleanup should publish per page as a maintenance intent' },
   'src/core/mentions/pass.ts': { sites: 1, tables: ['page_aliases'], todo: 'TODO(receipts): derived alias rows should publish per page as a maintenance intent' },
   'src/core/bootstrap/verify.ts': { sites: 1, tables: ['facts'], todo: 'TODO(receipts): bootstrap verify deletes its own probe facts without a request; publish the cleanup as a maintenance intent' },
