@@ -646,27 +646,27 @@ describe('master-red: push-to-master runs', () => {
     }) as typeof fetch;
     const slept: number[] = [];
     const client = restClient('o/r', 'token', async ms => { slept.push(ms); });
+    const statusOf = (p: Promise<unknown>) => p.then(() => 0, e => (e as { status?: number }).status);
     try {
       script = [502, 200];
-      expect(await client.request('GET', 'repos/{repo}/actions/runs/1/attempts/2/jobs')).toEqual({ jobs: [], total_count: 0 });
+      expect(await client.request<unknown>('GET', 'repos/{repo}/actions/runs/1/attempts/2/jobs')).toEqual({ jobs: [], total_count: 0 });
       expect(calls).toEqual(['GET https://api.github.com/repos/o/r/actions/runs/1/attempts/2/jobs', 'GET https://api.github.com/repos/o/r/actions/runs/1/attempts/2/jobs']);
       expect(slept).toEqual([GET_RETRY_DELAYS_MS[0]!]);
 
       calls.length = 0; slept.length = 0;
       script = [502, 502, 502, 502];
-      const err = await client.request('GET', 'repos/{repo}/actions/runs/1/attempts/2/jobs').catch(e => e as { status?: number });
-      expect(err.status).toBe(502);
+      expect(await statusOf(client.request('GET', 'repos/{repo}/actions/runs/1/attempts/2/jobs'))).toBe(502);
       expect(calls).toHaveLength(GET_RETRY_DELAYS_MS.length + 1);
       expect(slept).toEqual(GET_RETRY_DELAYS_MS);
 
       calls.length = 0;
       script = [404];
-      expect((await client.request('GET', 'repos/{repo}/actions/runs/9').catch(e => e as { status?: number })).status).toBe(404);
+      expect(await statusOf(client.request('GET', 'repos/{repo}/actions/runs/9'))).toBe(404);
       expect(calls).toHaveLength(1);
 
       calls.length = 0;
       script = [502];
-      expect((await client.request('POST', 'repos/{repo}/issues', { title: 't' }).catch(e => e as { status?: number })).status).toBe(502);
+      expect(await statusOf(client.request('POST', 'repos/{repo}/issues', { title: 't' }))).toBe(502);
       expect(calls).toHaveLength(1);
     } finally {
       globalThis.fetch = real;
