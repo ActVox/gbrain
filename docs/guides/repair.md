@@ -1039,6 +1039,47 @@ request). Attribution names the original writer. A replay the
 brain refuses reports `refused` with the code. The failed receipts stay as
 history.
 
+Since #6693 a `remember` refused because its page's file held a committed Git
+change sync had not imported (`pending_import`) or was held by sync
+(`sync_held`) is not left for this preview alone: after every managed sync the
+same replay runs by itself for those remembers whose page now matches its file
+(at most 50 per sync and 30 s; the sync result's `replayedRemembers` and one
+stderr line count them). A replay keeps the fact's original `valid_from` and
+expiry. `put_page` and `add_timeline_entry` refusals are only replayed here,
+after you preview them. Receipts refused before this release are not replayed
+automatically; this preview lists them.
+
+<a id="split-facts"></a>
+### Split facts
+
+A page whose `## Facts` fence lived below the timeline sentinel got a second
+fence above the sentinel from managed `remember` and `extract_facts` writes
+before this release (#6686). Writers now edit a lone timeline fence where it
+is, and `extract_facts` reconciles it there, but a page that is already split
+keeps two fences: `extract_facts` leaves its index as it is and warns
+`FACTS_FENCE_BELOW_SENTINEL` naming this repair. `gbrain repair split-facts`
+merges them. It is explicit-only and preview-bound and never runs from
+`--all`, doctor's remediation plan, the maintenance cycle or an upgrade.
+
+**Say to your agent:** *"Preview which pages have split facts fences, show me
+the list, then merge them after I agree."*
+
+```bash
+gbrain repair split-facts --source <id>                          # preview: merge / row_collision / unparsed / not_conserved
+gbrain repair split-facts --source <id> --apply --expect <hash>  # merges exactly the previewed pages
+```
+
+The merged fence stays below the sentinel and holds every row of both fences
+under its own row number, so each fact keeps its id; the body fence goes, with
+the `## Facts` heading above it when that heading holds nothing else. A page is
+kept and listed when a fence does not parse cleanly (`unparsed`: preview
+`gbrain repair fences`), when a row number appears in both fences
+(`row_collision`: edit the page so each number appears once, then preview
+again), or when the merged page would not read back exactly
+(`not_conserved`: merge by hand). Each merge is a revision-bound `put_page`;
+a page changed since the preview reports `changed_since_preview` and is kept.
+Undo a merge on a managed source with `git revert` of its commit.
+
 <a id="file-drift"></a>
 ### File drift
 

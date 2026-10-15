@@ -39,6 +39,75 @@ identifiers and attribution are available in the pre-removal Git revision
 - **Write-only import provenance (#6712 PR 0).** `sync-import-provenance` records gain `disk_sha256` and `disk_blob_oid` (the canonical writeback when sync rewrote the file, else the file's bytes; the blob id is what `git hash-object` returns), `revision` (the page revision of that publish) and `parser` (`parser_version` from `SYNC_IMPORT_PARSER_VERSION`: the import counter, frontmatter recovery and fence screen versions; `markdown_chunker`; `schema_pack`; never the release string, so the fingerprint holds across releases that change no parsing), written in the publish transaction. A no-op waiver (`src/core/persistence/sync-waivers.ts`, batched and per-entry) writes the same record in its waiver transaction, with the page's current revision, so an unchanged page carries one too; the per-entry waiver now also re-reads the file there and admits the entry when its raw hash moved, as the batched waiver already did. Nothing reads the fields yet; older records lack them and are replaced on the page's next import or waiver. Code and image pages still write no import provenance. `gitBlobOid` moved to `src/core/persistence/digest.ts`; the checkpoint publication moved to `applyManagedSyncCheckpoint` in `sync-prepare.ts`.
 - Tests: `test/sync-slug-root-mode-6694.test.ts` (root source in both pins, unpinned, subdirectory in both modes, the mismatch refusal and both of its exits, recovery of an already-failed checkpoint) and `test/sync-import-provenance-disk.test.ts` (plain import and update, canonical writeback, line-ending-only disk bytes, batched and per-entry waivers, a legacy record), each on PGLite and, with `DATABASE_URL`, Postgres (`test/postgres-unit-arms.txt`).
 
+## [0.60.245.0] - 2026-10-15
+
+**A fact your agent saves no longer disappears because a page edit was committed but not synced yet, and saving facts no longer splits a page's fact table in two.**
+
+Two things went wrong on brains where people and agents both edit pages in Git. First, if you committed a change to a page and your agent saved a fact about it before the next sync, gbrain refused the save as a conflicting edit and nothing ever retried it. The fact was simply gone. Now gbrain recognizes this case ("your commit is waiting to be imported"), tells the agent to wait instead of retrying, and replays the saved fact once, automatically, as soon as the sync brings that file in. Second, some pages keep their facts table at the bottom, under the timeline. Saving a fact to one of those pages used to add a second facts table at the top. Now gbrain writes into the existing table wherever it lives.
+
+## How to use it
+
+Nothing to turn on. After `gbrain sync`, check the replays:
+
+```bash
+gbrain sync --source <id> --json   # "replayedRemembers": examined, replayed, waiting, skipped, remaining
+gbrain repair failed-writes --source <id>   # anything that still needs you
+```
+
+Pages that already have two facts tables get an explicit repair. Preview it first, then apply:
+
+```bash
+gbrain repair split-facts --source <id>
+gbrain repair split-facts --source <id> --apply --expect <hash>
+```
+
+## What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| Agent saves a fact right after you commit that page | Refused, lost | Refused with "waiting for import", replayed after sync |
+| Agent saves a fact to a page whose facts sit under the timeline | Second table added at the top | Row added to the existing table |
+| Page already has two facts tables | Facts index frozen with a warning | Same warning, now naming `gbrain repair split-facts` |
+
+## Things to watch
+
+Only the saves refused after you upgrade are replayed automatically. Older refusals stay with `gbrain repair failed-writes`, which already lists them. Page edits (`put_page`) are never replayed automatically, because a whole-page write can overwrite your commit. The split-facts repair never runs on upgrade, from `repair --all`, or from doctor's remediation; it skips any page where both tables use the same row number and tells you why.
+
+Contributed by @javieraldape (the timeline facts test suite).
+
+### Itemized changes
+
+- **Refused while waiting for import.** When a write's file is exactly the committed `HEAD` blob but not the blob at the source's last imported commit, the refusal keeps code `source_changed` / `file_database_drift` and adds reason `pending_import` (`src/core/persistence/pending-import.ts`, read-only git). `remember` gets `fix.next: wait` with `gbrain sync status --source <id> --json`; other writes get a sync-then-resubmit fix. Refusals on a sync-held file carry reason `sync_held`. Both are recorded as `error_detail.origin` on the receipt.
+- **One automatic replay after each sync.** After every non-dry-run managed sync, caller `remember` receipts with origin `pending_import` or `sync_held` whose page now matches its file get one replay through the `repair failed-writes` path: same caller lane, live authority check, derived request id. Capped at 50 per sync and 30 seconds; counts land in `SyncResult.replayedRemembers`.
+- **Replays keep the fact's dates.** `repair failed-writes` replays now keep the original `valid_from` and expiry instead of resetting them.
+- **Facts tables stay where they are.** `remember`, `extract_facts` and supersede strikes edit a lone facts fence under the timeline sentinel in place, leave the body byte for byte, and number new rows past the index and both sections (`src/core/facts-fence.ts`, `memory-prepare.ts`, `facts-prepare.ts`). `extract_facts` reconciles a lone timeline fence instead of freezing it.
+- **`gbrain repair split-facts`** (explicit-only, preview-bound) merges a split page's two fences into the timeline fence, keeping every row number and fact id. It reports `row_collision`, `unparsed` and `not_conserved` pages instead of touching them (`src/core/repair/split-facts.ts`).
+- Docs: `docs/guides/write-refusals.md` (`pending_import`), `docs/guides/repair.md` (`#split-facts`, failed-writes replay).
+
+### For contributors
+
+- New tests: `test/remember-pending-import.test.ts`, `test/repair-split-facts.test.ts`, `test/managed-timeline-facts.serial.test.ts`, `test/e2e/managed-timeline-facts-postgres.test.ts`. `extract-facts-phase` and `e2e/system-of-record-invariant` assert the new timeline-fence contract. The explicit-only repair kind lists include `split-facts`.
+
+## [0.60.244.0] - 2026-10-15
+
+**More timing tests now measure the work instead of how busy the CI machine is, and the write-gate check at the 24 MiB page limit is back to a fair bound (tests only, no behavior change).** On #6738's CI, `write-gate-perf`'s 5 MB adversarial p95 read 1585 ms against its 1500 ms bound. The cause wasn't load. #6733 raised the page import limit (`MAX_FILE_SIZE`) to 24 MiB, and the check sized its test text by that constant, so it had been timing about 5x the bytes against bounds calibrated for 5 MB, with no change to the write-gate code (adversarial p95: 151 ms at ee922300, 777 ms at 44eb0493). The 5 MB check now uses 5 MB of text again, and a new linearity check covers the real 24 MiB limit. Ten awaited-PGLite timing asserts now measure the test thread's CPU time. Two size-ratio checks now alternate their sizes so a slow spell on a shared machine can't skew them. All bounds and correctness asserts are unchanged.
+
+### Itemized changes
+
+- **Ten asserts in six files now measure thread CPU time.** A new `cpuMsAsync(fn)` in `test/helpers/cpu-time.ts` measures thread CPU across an awaited span; PGLite's WASM engine runs on the calling thread. Converted:
+  - `write-gate-perf.slow`: repo docs <50 ms, 5 MB adversarial <1500 ms, 5 MB typical <500 ms
+  - `relational-chain-hub.slow`: <2000 ms
+  - `traverse-walk-cap`: paths <5000 ms, graph <1500 ms
+  - `traverse-paths-row-cap`: <60000 ms
+  - `sync-delete-batch.slow`: hard <5000 ms, soft <5000 ms
+  - `eval-longmemeval.slow`: p50
+
+  On an idle machine, thread CPU matched wall time within a few ms for every one. A busy loop injected inside each PGLite code path (the receipt insert, `runRelationalChain`, `traverseGraph`, `traversePathsDetailed`, `deletePages`, `softDeletePages`, `importFromContent`) failed all ten on master and after the change, for example write-gate adversarial 2379 / 1744 and sync-delete hard 13199 / 12924. Under 6 busy loops at nice 10 (5 runs per side), write-gate and sync-delete failed every run on master and pass every run now. `test/chunkers/code-lua.test.ts` stays on wall clock: it guards tree-sitter's wall-clock timeout (`GBRAIN_CHUNKER_TIMEOUT_MS`), which under load fires after less CPU than the bound, so CPU time would hide that regression.
+- **write-gate's 5 MB check uses 5 MB of text again.** The corpora are pinned at 5,000,000 bytes, and the p95 is back to about 156 ms locally and 253–266 ms on Ubicloud.
+- **New check at the 24 MiB page limit:** `page import limit (MAX_FILE_SIZE) scales linearly from 5 MB`. It alternates 24 MiB and 5 MB samples in one process, on thread CPU, and asserts the p50 ratio stays under 15x (linear is about 5x, quadratic about 25x). It reads 5.0–5.2x locally, 5.1x on Ubicloud and 4.7–5.2x under load (5/5 pass). An injected quadratic term fails (15.3x, 17.7x). An injected linear term passes (5.0x).
+- **`sync-delete-batch.slow` seeds its fixtures once, and the 30 s per-test timeout is unchanged.** Both 10K-page fixtures are inserted in `beforeAll` with one `generate_series` INSERT each, and `ANALYZE` runs after the first 100 rows. On an empty table, `bump_page_generation_fn`'s cached `MAX(generation)` plan is a seq scan, so a single-statement 10K-row seed went quadratic: about 6 s of CPU instead of 0.8 s. Under load each test takes 9–12 s and passes 5/5; before, seeding alone took up to 121 s of wall time.
+- **`chunker-spans-linear.slow` alternates its 2 MB and 4 MB runs.** The PR stress gate read the 4 MB run at 3.8x the 2 MB time on a 2-vCPU runner, because the three 4 MB runs came after the three 2 MB runs and a slow spell covered only the second half. CPU time still goes up when another tenant slows the core. The bound of 3 is unchanged. A simulated slowdown that doubles every run after the third fails on master (4.02) and passes now. A quadratic term still fails on both.
+
 ## [0.60.243.0] - 2026-10-15
 
 **Entity rows now point at the records behind an account.** Every found `entity names` row (and each identity sibling) carries `referenced_by_count` and a `next` to its full card, so an agent that resolved a batch of names knows which ones have pages to read and how to open them. With `entity.record_types` set (off by default), the rows, the full card and `context_pack` also list the referring contracts, amendments or other record types you enroll: newest page date first, each with its page date labeled as a page date, its `status`, the record it amends (with the terms-start date when the link records one) and what it replaces, bounded per page and per call, with continuations that return exactly the rest. The order never claims which record governs. A late or failed read is marked `references_unavailable` with a degraded notice, never shown as an empty list.

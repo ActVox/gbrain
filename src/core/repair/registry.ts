@@ -59,6 +59,7 @@ import { frontmatterRepair } from './frontmatter.ts';
 import { attributionBackfillRepair } from './attribution-backfill.ts';
 import { plannerStatsRepair } from './planner-stats.ts';
 import { fencesRepair } from './fences.ts';
+import { splitFactsRepair } from './split-facts.ts';
 import { slugConflictsRepair } from './slug-conflicts.ts';
 import { frontmatterKeysRepair } from './frontmatter-keys.ts';
 import { fileDriftRepair } from './file-drift.ts';
@@ -218,6 +219,14 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'or is pending (duplicate), or a later write or delete of the page committed (superseded). Writes gbrain itself produced (sync and file imports, '
       + 'reconcile, relink, maintenance) are counted with the command that produces them again. Preview-bound: --apply --expect <hash> replays exactly '
       + 'the previewed set under new request ids, after re-checking each write\'s original authority; the failed receipts stay as history.',
+  },
+  'split-facts': {
+    handler: splitFactsRepair, embeds: 'effect', checks: [], explicit_only: true,
+    summary: 'Merge the two ## Facts fences of a page whose fence lived below the timeline sentinel and to which a managed writer before this release '
+      + 'added a second fence above it (#6686). The merged fence stays below the sentinel and keeps every row of both fences under its own row number; '
+      + 'the body fence goes, with its ## Facts heading when that holds nothing else. A page is kept when a fence does not parse (unparsed), a row '
+      + 'number is in both fences (row_collision: a person chooses), or the merged page would not read back exactly (not_conserved). Preview-bound: '
+      + '--apply --expect <hash> merges exactly the previewed pages through revision-bound put_page (changed_since_preview when a page moved). Runs only when named.',
   },
   frontmatter: {
     handler: frontmatterRepair, embeds: 'effect', checks: ['git_held_files', 'frontmatter_repairable'], explicit_only: true, consent: 'destructive',
