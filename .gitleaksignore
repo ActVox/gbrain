@@ -39,3 +39,6 @@ e3ebcc4f7e15051ae6354c8e4313ef91fc06d9f2:test/size-state-receipts-6722.test.ts:g
 # Fix wave 17 lane 4 (#6587): the config key literal 'w17.6587.marker' in commit cb6a60a reads as generic-api-key;
 # the tree now binds it as a parameter. History-only fingerprint, not a secret.
 cb6a60abd59d51271acfa49346275107b97ed64f:test/e2e/migrate-embeddings-lease-heartbeat.test.ts:generic-api-key:60
+# Large pages PR 2 lane S: lane H's synthetic PEM header in commit a314083 (credential-reseal-segments.test.ts) reads as private-key;
+# the tree now builds the BEGIN/END lines at runtime. History-only fingerprint, not a secret.
+a3140831d22a944947ef9cbd72ff7129a3541951:test/large-pages/credential-reseal-segments.test.ts:private-key:31
