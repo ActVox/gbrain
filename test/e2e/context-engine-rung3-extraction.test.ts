@@ -12,7 +12,7 @@
  * Run: DATABASE_URL=... bun test test/e2e/context-engine-rung3-extraction.test.ts
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
@@ -125,7 +125,7 @@ describeE2E('context engine compact() rung 3 — DB-plane extraction model (#573
     });
   }
 
-  test('#6785: a segment with a failing window is left to the sweep: no model call, no sidecar', async () => {
+  test('#6785: a failed inline harvest is recorded once, and later compacts leave the segment to the sweep', async () => {
     const f = rung3Fixture('oc-rung3-failing');
     await getEngine().setConfig('facts.extraction_model', 'ollama:qwen2.5-coder:14b');
     let calls = 0;
@@ -133,25 +133,17 @@ describeE2E('context engine compact() rung 3 — DB-plane extraction model (#573
       calls++;
       throw Object.assign(new Error('provider down'), { code: 'provider_error' });
     });
-    // The first compact freezes the session's source; the second spools the segment the later ones reuse.
-    await compactOnce(f, 'oc-rung3-failing');
-    await compactOnce(f, 'oc-rung3-failing');
-    expect(calls).toBe(2);
+    const results = [];
+    for (let i = 0; i < 6; i++) results.push(await compactOnce(f, 'oc-rung3-failing'));
     const segments = segmentFiles(f.home);
     expect(segments.length).toBeGreaterThan(0);
+    // One paid attempt per segment file, each recorded; every later compact holds.
+    expect(calls).toBe(segments.length);
     for (const segment of segments) {
       expect(existsSync(segment + '.ingested')).toBe(false);
-      writeFileSync(segment + '.failures.json', JSON.stringify({
-        version: 1, key: 'k@0', source_incarnation: null, count: 2, first_at: Date.now(), last_at: Date.now(),
-        last_code: 'provider_error', fingerprint: null, rearmed: false,
-      }) + '\n');
+      expect(JSON.parse(readFileSync(segment + '.failures.json', 'utf8')).count).toBe(1);
     }
-
-    const r2 = await compactOnce(f, 'oc-rung3-failing');
-    expect(r2).toMatchObject({ status: 'banked', reason: 'corpus_window_backoff' });
-    expect(calls).toBe(2);
-    expect(segmentFiles(f.home)).toEqual(segments);
-    expect(segments.some((p) => existsSync(p + '.ingested'))).toBe(false);
+    expect(results.at(-1)).toMatchObject({ status: 'banked', reason: 'corpus_window_backoff' });
   }, 60_000);
 
   test('#6785: a claimed, not activated worktree is held before any model call', async () => {

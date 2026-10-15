@@ -928,6 +928,19 @@ async function rung3SegmentHold(fullPath: string, name: string): Promise<string 
   return failing.count >= segs.CORPUS_WINDOW_FAILURE_CAP ? 'corpus_window_dead_lettered' : 'corpus_window_backoff';
 }
 
+/**
+ * Rung 3, #6785: a failure after a paid call is recorded at the segment's
+ * frontier window, the record the sweep's cap reads, so every later compact
+ * leaves the segment to the sweep (rung3SegmentHold).
+ */
+async function rung3Counted<T>(engine: BrainEngine, fullPath: string, name: string, incarnation: string | null, signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+  const windows = await import('./context/corpus-windows.ts');
+  const { extractionConfigFingerprint } = await import('./facts/extraction-availability.ts');
+  const key = (await windows.corpusFrontierKey(fullPath, name)) ?? 'unreadable@0';
+  const fingerprint = await extractionConfigFingerprint(engine).catch(() => null);
+  return (await windows.extractUnderFailureCount({ full: fullPath, record: null, key, incarnation, fingerprint, nowMs: Date.now, signal }, run)).value;
+}
+
 /** Rung 3, #6785: the owner-readiness preflight; true when a claimed, not activated worktree holds the source. */
 async function rung3WriterHeld(engine: BrainEngine, sourceId: string): Promise<boolean> {
   try {
@@ -1245,7 +1258,7 @@ export function createGBrainContextEngine(ctx: {
       const deadlinePoll = setInterval(() => { if (deadlineHit()) abort.abort(); }, 250);
       let r: Awaited<ReturnType<typeof runFactsPipeline>>;
       try {
-        r = await runFactsPipeline(rendered.text, {
+        r = await rung3Counted(pg, fullPath, segName(w.hash), fileSource.incarnation, abort.signal, () => runFactsPipeline(rendered.text, {
           engine: pg,
           sourceId,
           sessionId,
@@ -1253,7 +1266,7 @@ export function createGBrainContextEngine(ctx: {
           mode: 'inline',
           remote: false,
           abortSignal: abort.signal,
-        });
+        }));
       } finally {
         clearTimeout(timer);
         clearInterval(deadlinePoll);

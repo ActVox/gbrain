@@ -32,11 +32,11 @@ import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MAX_TURN_TEXT_CHARS } from '../facts/extract.ts';
 import type { runFactsPipeline } from '../facts/backstop.ts';
-import { isAIInvocationPolicyError, withAIInvocationGuard } from '../ai/invocation-guard.ts';
+import { withAIInvocationGuard } from '../ai/invocation-guard.ts';
 import { parseCorpusTurns, type CorpusTurn } from './corpus-turns.ts';
 import {
   CORPUS_FAILURE_SUFFIX, CORPUS_NON_TERMINAL_SKIPS, CORPUS_PROGRESS_LOCK_SUFFIX, CORPUS_PROGRESS_SUFFIX, CORPUS_WINDOW_FAILURE_CAP,
-  corpusFileCompletion, corpusFileFinished, parseCorpusProgress, readCorpusFailure, type CorpusFailureRecord,
+  corpusFileCompletion, corpusFileFinished, parseCorpusProgress, parseWbFileName, readCorpusFailure, type CorpusFailureRecord,
 } from './corpus-segments.ts';
 
 export { parseCorpusTurns, type CorpusTurn };
@@ -444,35 +444,46 @@ export function corpusFileParked(full: string, fingerprint: string | null, nowMs
   return !!record && corpusFailureGate(record, record.key, record.source_incarnation, fingerprint, nowMs) !== 'run';
 }
 
-function isPolicyRefusal(e: unknown): boolean {
-  for (let cur: unknown = e, depth = 0; cur && depth < 8; cur = (cur as { cause?: unknown }).cause, depth++) {
-    if (isAIInvocationPolicyError(cur)) return true;
+/**
+ * The key of the window the next run of `full` starts at (the frontier a
+ * failure record names), or null when the file or its progress is
+ * unreadable. A writeback turn file's key is always CORPUS_TURN_FAILURE_KEY.
+ */
+export async function corpusFrontierKey(full: string, name: string): Promise<string | null> {
+  if (parseWbFileName(name)) return CORPUS_TURN_FAILURE_KEY;
+  try {
+    const turns = parseCorpusTurns(await readFile(full, 'utf-8'));
+    return windowKey(turns, resumePoint(turns, await readCorpusProgress(full)));
+  } catch {
+    return null;
   }
-  return false;
 }
 
 /**
  * #6785: run one extraction; when it throws after a chat model call was
  * admitted (the spend), count a failure against the window at `key`, then
- * rethrow. A throw before any admitted model call (a spend-policy refusal
- * included, however the extractor wraps it), an abort, or capture switched
- * off mid-call (the next sweep retires the file) costs nothing to retry and
- * is not counted.
+ * rethrow, whatever ended it (a later call the spend guard refused
+ * included). A throw before any admitted chat call (a refused first call
+ * included), an abort, or capture switched off mid-call (the next sweep
+ * retires the file) costs nothing to retry and is not counted. `paid` says
+ * whether a chat call was admitted, for a caller that must count a failure
+ * after the extraction returned.
  */
 export async function extractUnderFailureCount<T>(
   failure: { full: string; record: CorpusFailureRecord | null; key: string; incarnation: string | null; fingerprint: string | null; nowMs: () => number; signal?: AbortSignal },
   extract: () => Promise<T>,
-): Promise<T> {
-  let chatCalled = false;
+): Promise<{ value: T; paid: boolean }> {
+  let paid = false;
   try {
     // Inherit: an outer guard admits first, so this one only sees admitted calls.
-    return await withAIInvocationGuard(async (call) => {
-      if (call.kind === 'chat') chatCalled = true;
+    const value = await withAIInvocationGuard(async (call) => {
+      if (call.kind === 'chat') paid = true;
       return { settle: async () => {} };
     }, extract, { inherit: true });
+    return { value, paid };
   } catch (e) {
-    const counts = chatCalled && !failure.signal?.aborted && !(e instanceof Error && e.name === 'AbortError')
-      && !isPolicyRefusal(e) && (e as { code?: unknown } | null)?.code !== 'ambient_capture_off';
+    const counts = paid && !failure.signal?.aborted && !(e instanceof Error && e.name === 'AbortError')
+      && (e as { code?: unknown } | null)?.code !== 'ambient_capture_off';
     if (counts) {
       await recordCorpusFailure(failure.full, failure.record, failure.key, failure.incarnation, failure.fingerprint, failure.nowMs(), e).catch(() => {});
     }
@@ -546,7 +557,7 @@ export async function runCorpusTurn(opts: {
   const gate = corpusFailureGate(record, CORPUS_TURN_FAILURE_KEY, opts.incarnation, fingerprint, clock());
   if (gate !== 'run') return { status: gate };
   if (opts.attempted) opts.attempted.count++;
-  const result = await extractUnderFailureCount(
+  const { value: result } = await extractUnderFailureCount(
     { full: opts.full, record, key: CORPUS_TURN_FAILURE_KEY, incarnation: opts.incarnation, fingerprint, nowMs: clock, signal: opts.signal },
     opts.extract,
   );
@@ -629,6 +640,7 @@ export async function runCorpusWindows(opts: {
       const win = windows[w];
       const key = windowKey(turns, cursor);
       let r: PipelineResult | null = null;
+      let paid = false;
       if (win.text) {
         if (done >= opts.maxWindows) { status = 'partial'; break; }
         if (opts.overBudget() || signal.aborted) { status = 'aborted'; break; }
@@ -636,7 +648,9 @@ export async function runCorpusWindows(opts: {
         if (gate !== 'run') { status = gate; break; }
         const text = win.text;
         if (opts.attempted) opts.attempted.count++;
-        r = await extractUnderFailureCount({ full, record: failure, key, incarnation, fingerprint, nowMs: clock, signal }, () => opts.extract(text));
+        const attempt = await extractUnderFailureCount({ full, record: failure, key, incarnation, fingerprint, nowMs: clock, signal }, () => opts.extract(text));
+        r = attempt.value;
+        paid = attempt.paid;
         if (r.skipped_reason && CORPUS_NON_TERMINAL_SKIPS.includes(r.skipped_reason)) { status = 'unavailable'; break; }
       }
       if (signal.aborted) { status = 'aborted'; break; }
@@ -663,7 +677,7 @@ export async function runCorpusWindows(opts: {
         };
       });
       // #6785: a paid window whose progress did not commit is paid again next time; it counts like a thrown one.
-      const countUncommitted = (e: unknown) => r
+      const countUncommitted = (e: unknown) => paid
         ? recordCorpusFailure(full, failure, key, incarnation, fingerprint, clock(), e).catch(() => failure)
         : Promise.resolve(failure);
       let next: CorpusProgress | null;
@@ -679,7 +693,8 @@ export async function runCorpusWindows(opts: {
         break;
       }
       state = next;
-      if (failure?.key === key) {
+      // Any record left is this window's or stale (the frontier moved past it).
+      if (failure) {
         await clearCorpusFailure(full).catch(() => {});
         failure = null;
       }

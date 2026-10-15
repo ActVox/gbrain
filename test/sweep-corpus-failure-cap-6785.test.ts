@@ -19,7 +19,8 @@
  * healthy one; a thrown window counts against the sweep total; a paid
  * window that cannot commit counts as a failure and a refused call does not;
  * the writeback harvest honours the cap; the drain and the doctor backlog
- * classify files like the sweep.
+ * classify files like the sweep and ignore a stale record; a chat call
+ * followed by a refused one still counts, an unpaid replay never does.
  *
  * The preflight, drain and cost assertions import only modules that predate
  * #6785 and fail on the old tree. Hermetic in-memory PGLite + transport stubs.
@@ -455,10 +456,61 @@ describe('#6785: a window that keeps failing after its model call is capped', ()
     expect(drained).toBe(1);
 
     rmSync(file + CORPUS_INGESTED_SUFFIX);
-    stopped(file);
+    const { corpusFrontierKey } = await import('../src/core/context/corpus-windows.ts');
+    stopped(file, (await corpusFrontierKey(file, 'rewritten.txt'))!);
     const d3 = drain();
     await withEnv({ GBRAIN_HOME: home }, () => d3.tick());
     d3.cancel();
     expect(drained).toBe(1);
+
+    // The session is rewritten past the stopped window: that record no longer applies.
+    writeFileSync(file, turnsText(2, 10));
+    const d4 = drain();
+    await withEnv({ GBRAIN_HOME: home }, () => d4.tick());
+    d4.cancel();
+    expect(drained).toBe(2);
+  });
+
+  test('a failure after an admitted chat call counts even when a later call is refused; a result with no chat call does not', async () => {
+    const { extractUnderFailureCount } = await import('../src/core/context/corpus-windows.ts');
+    const { invokeAI } = await import('../src/core/ai/invocation-guard.ts');
+    const full = join(dir, 'chat-then-refused.txt');
+    const failure = { full, record: null, key: 'k@0', incarnation: null, fingerprint: null, nowMs: () => 1 };
+    const refuseEmbeddings = async (call: { kind: string }) => {
+      if (call.kind === 'embedding') throw Object.assign(new Error('embedding budget refused'), { code: 'budget_exceeded' });
+      return { settle: async () => {} };
+    };
+    const chatThenEmbed = async () => {
+      await invokeAI({ operation: 'extract', model: 'anthropic:test', kind: 'chat' }, async () => 'facts', () => null);
+      try {
+        await invokeAI({ operation: 'embed', model: 'openai:test', kind: 'embedding' }, async () => [0], () => null);
+      } catch (e) {
+        throw Object.assign(new Error('[facts-extract] wrapped'), { cause: e });
+      }
+    };
+    await expect(withAIInvocationGuard(refuseEmbeddings, () => extractUnderFailureCount(failure, chatThenEmbed))).rejects.toThrow('wrapped');
+    expect(JSON.parse(readFileSync(full + '.failures.json', 'utf8')).count).toBe(1);
+
+    const replay = join(dir, 'replayed.txt');
+    const unpaid = await extractUnderFailureCount({ ...failure, full: replay }, async () => 'cached receipt');
+    expect(unpaid).toEqual({ value: 'cached receipt', paid: false });
+  });
+
+  test('a replayed window (no model call) whose progress cannot commit is not counted', async () => {
+    const { corpusFileStat, runCorpusWindows } = await import('../src/core/context/corpus-windows.ts');
+    const { statSync } = await import('node:fs');
+    const file = join(dir, 'replay-contended.txt');
+    writeFileSync(file, turnsText(1));
+    const run = await runCorpusWindows({
+      full: file, raw: readFileSync(file, 'utf8'), fileStat: corpusFileStat(statSync(file)), maxWindows: 8,
+      overBudget: () => false, signal: new AbortController().signal,
+      extract: async () => {
+        writeFileSync(file + '.progress.lock', `${process.pid}\n`);
+        return { inserted: 0, duplicate: 1, superseded: 0, fact_ids: [], entity_slugs: [] };
+      },
+    });
+    rmSync(file + '.progress.lock', { force: true });
+    expect(run.status).toBe('contended');
+    expect(existsSync(file + '.failures.json')).toBe(false);
   });
 });

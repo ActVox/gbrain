@@ -1051,7 +1051,8 @@ export interface CorpusDrainOpts {
 /**
  * True when the corpus dir holds a `.txt` the sweep would extract: not
  * finished by the one classifier (#6786), and not stopped at the failure cap
- * (#6785; a backing-off file still counts). Missing dir = false.
+ * at the window it starts at now (#6785; a backing-off file still counts).
+ * Missing dir = false.
  */
 async function corpusHasPendingFiles(engine: BrainEngine): Promise<boolean> {
   let dir = await engine.getConfig('dream.synthesize.session_corpus_dir');
@@ -1060,12 +1061,13 @@ async function corpusHasPendingFiles(engine: BrainEngine): Promise<boolean> {
     dir = join(configDir(), 'transcripts', 'corpus');
   }
   const { CORPUS_FAILURE_SUFFIX, corpusFileAwaitsExtraction, corpusSpoolDir, readCorpusFailure } = await import('./context/corpus-segments.ts');
-  const { corpusFailureGate } = await import('./context/corpus-windows.ts');
+  const { corpusFailureGate, corpusFrontierKey } = await import('./context/corpus-windows.ts');
   const { extractionConfigFingerprint } = await import('./facts/extraction-availability.ts');
   let fingerprint: Promise<string | null> | null = null;
-  const stopped = async (full: string): Promise<boolean> => {
+  const stopped = async (full: string, name: string): Promise<boolean> => {
     const rec = readCorpusFailure(full);
-    if (!rec) return false;
+    // A record for a window the file no longer starts at (rewritten) is stale.
+    if (!rec || (await corpusFrontierKey(full, name)) !== rec.key) return false;
     fingerprint ??= extractionConfigFingerprint(engine).catch(() => null);
     return corpusFailureGate(rec, rec.key, rec.source_incarnation, await fingerprint, Date.now()) === 'dead_lettered';
   };
@@ -1074,7 +1076,7 @@ async function corpusHasPendingFiles(engine: BrainEngine): Promise<boolean> {
     const present = new Set(names);
     for (const n of names) {
       if (!n.endsWith('.txt') || !corpusFileAwaitsExtraction(join(base, n), n)) continue;
-      if (present.has(n + CORPUS_FAILURE_SUFFIX) && await stopped(join(base, n))) continue;
+      if (present.has(n + CORPUS_FAILURE_SUFFIX) && await stopped(join(base, n), n)) continue;
       return true;
     }
   }
