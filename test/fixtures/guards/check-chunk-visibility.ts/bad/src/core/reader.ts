@@ -1,4 +1,6 @@
-import { chunkVisibleFilter } from './safe-chunks.ts';
+function chunkVisibleFilter(p: string, c: string): string {
+  return `(${c}.body_generation IS NULL OR ${c}.body_generation <= ${p}.body_generation)`;
+}
 
 export const visibleSql = `SELECT c.chunk_text FROM content_chunks c JOIN pages p ON p.id = c.page_id WHERE ${chunkVisibleFilter('p', 'c')}`;
 
