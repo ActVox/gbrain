@@ -7296,6 +7296,7 @@ Every hold and error has three fields, from one table
 | `write_quota_exhausted` | systemic | none | yes | always |
 | `write_quota_insufficient` | systemic | none | yes | always |
 | `plan_stale` | systemic | none | yes | always |
+| `slug_root_mode_mismatch` | systemic | none | yes | always: the two modes give different slugs |
 | `invalid_params` | systemic | none | yes | always |
 | `cursor_incarnation_retired` | systemic | repair | no | the repair preview lists nothing to retire, or the same code returns after the apply |
 <!-- sync-fault-table:end -->
@@ -7379,6 +7380,18 @@ A retry alone changes nothing: the write owner is wedged
 (`preparation_systemic`, `drain_stalled`), the source binding changed, a
 company-brain approval drifted (`plan_stale`), or the principal may not sync.
 Page a person with `human_reason`; the fix is on the brain host.
+
+`slug_root_mode_mismatch` is the one systemic code that is a choice, not a
+repair: a source in a subdirectory of its repository pins one
+`slug_root_mode`, the run used the other, and the two give different slugs.
+Ask the user which mode the source keeps. Restoring the pin to the run's mode
+lets the next plain `gbrain sync --no-pull --source <id>` finish (the refused
+checkpoint is retried by itself); keeping the new pin takes
+`gbrain sync --no-pull --source <id> --retry-failed`, and the pages the refused
+run wrote keep their old slugs beside the new ones. A source rooted at its
+repository root never gets this code: both modes give it the same slugs, and
+a checkpoint an older release refused there as `revision_conflict` finishes on
+the next plain sync.
 
 ## Why the manifest is not re-frozen any more
 
