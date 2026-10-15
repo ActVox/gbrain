@@ -75,7 +75,7 @@ import { runSubagentsInline, runDrainRenewalTick, percentile, INLINE_LOCK_MS } f
 import { buildManifestContext, buildLinkManifest, type ManifestContext } from './link-manifest.ts';
 import { resolveCycleDate, utcDate } from './cycle-date.ts';
 import { throwIfAborted } from '../abort-check.ts';
-import { stampDreamProvenance } from './dream-provenance.ts';
+import { stampDreamProvenance, summaryProvenanceLines } from './dream-provenance.ts';
 import { putDerivedPage, summaryDerivation, withTranscriptTaint } from './dream-taint.ts';
 import { findLegacyCompletion, findSynthV2Completion, partitionCompletedSynthesis } from './synthesize-completion.ts';
 
@@ -3078,8 +3078,8 @@ async function writeSummaryPage(
   if (writtenSlugs.length > 0) {
     // #4337: deterministic, lexicographically sorted sample — small cycles
     // stay fully linked; large cycles list exactly SUMMARY_LINK_SAMPLE_LIMIT
-    // links while keeping exact totals above. The full child set stays
-    // recoverable via per-page provenance frontmatter (pointer below).
+    // links while keeping exact totals above. The provenance section below
+    // names the frontmatter query and what it misses (#6642).
     const sampledSlugs = [...writtenSlugs].sort().slice(0, SUMMARY_LINK_SAMPLE_LIMIT);
     lines.push(
       writtenSlugs.length > SUMMARY_LINK_SAMPLE_LIMIT
@@ -3090,14 +3090,7 @@ async function writeSummaryPage(
       '',
     );
     if (writtenSlugs.length > SUMMARY_LINK_SAMPLE_LIMIT) {
-      lines.push(
-        '## Full output provenance',
-        '',
-        `The complete ${writtenSlugs.length}-page set is recoverable in this source by querying page frontmatter for ` +
-          `\`dream_generated: true\` and \`dream_cycle_date: ${summaryDate}\`, excluding \`${summarySlug}\`. ` +
-          'Every child page carries those provenance fields; this summary intentionally links only the deterministic sample above.',
-        '',
-      );
+      lines.push(...await summaryProvenanceLines(engine, { sourceId, cycleDate: summaryDate, summarySlug, writtenSlugs }));
     }
   }
 
