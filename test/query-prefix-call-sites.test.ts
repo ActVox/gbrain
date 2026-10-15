@@ -6,33 +6,19 @@
  * while documents and hybrid search used the instruction, so those paths
  * compared an unprefixed query with a prefix-trained index.
  *
- * Each case records what the (stubbed, $0) embedding transport receives.
- *
- * Serial (*.serial.test.ts): mock.module on think/index.ts leaks across files
- * in a shared bun process (TESTING.md R2).
+ * Each case runs the real path on an in-memory PGLite brain and records what
+ * the (stubbed, $0) embedding transport receives: every query-side embed must
+ * carry the prefix, the question's own embed included. No chat key is
+ * configured, so think paths stop at their no-LLM result.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import * as realThink from '../src/core/think/index.ts';
 import { configureGateway, resetGateway, __setEmbedTransportForTests, __clearQueryEmbedCacheForTests } from '../src/core/ai/gateway.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const PREFIX = 'query: ';
 let engine: PGLiteEngine;
 let seen: string[] = [];
-let captured: Array<(q: string) => Promise<Float32Array | null>> = [];
-
-mock.module('../src/core/think/index.ts', () => ({
-  ...realThink,
-  runThink: async (_engine: unknown, opts: { embedQuestion?: (q: string) => Promise<Float32Array | null> }) => {
-    if (opts.embedQuestion) captured.push(opts.embedQuestion);
-    return {
-      answer: 'stub answer', citations: [], gaps: [], warnings: [], modelUsed: 'anthropic:claude-opus-4-7',
-      pagesGathered: 0, takesGathered: 0, synthesis_status: 'ok', usage: null,
-    };
-  },
-}));
-
 function configureEmbedding(): void {
   configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-fake' } });
   __setEmbedTransportForTests((async (args: { values: string[] }) => {
@@ -41,13 +27,10 @@ function configureEmbedding(): void {
   }) as never);
 }
 
-/** The embedQuestion callback the path handed runThink, invoked with a fresh probe text. */
-async function probeCaptured(): Promise<string[]> {
-  expect(captured.length).toBe(1);
-  seen = [];
-  __clearQueryEmbedCacheForTests();
-  await captured[0]!('probe question');
-  return seen;
+/** Every query-side embed the path made carried the prefix, the question's included. */
+function expectPrefixed(question: string): void {
+  expect(seen).toContain(`${PREFIX}${question}`);
+  expect(seen.filter(v => !v.startsWith(PREFIX))).toEqual([]);
 }
 
 async function quietly<T>(fn: () => Promise<T>): Promise<T> {
@@ -73,7 +56,6 @@ afterEach(async () => {
   __clearQueryEmbedCacheForTests();
   resetGateway();
   seen = [];
-  captured = [];
   for (const key of ['embedding_query_prefix', 'search.crag_think', 'dream.auto_think.enabled', 'dream.auto_think.questions']) {
     await engine.unsetConfig(key);
   }
@@ -84,8 +66,8 @@ describe('#3783: think entry points embed the question with the brain prefix', (
     configureEmbedding();
     await engine.setConfig('embedding_query_prefix', PREFIX);
     const { operationsByName } = await import('../src/core/operations.ts');
-    await operationsByName['synthesize']!.handler({ engine, remote: false } as never, { question: 'what changed?' });
-    expect(await probeCaptured()).toEqual([`${PREFIX}probe question`]);
+    await operationsByName['synthesize']!.handler({ engine, remote: false } as never, { question: 'what changed?' }).catch(() => {});
+    expectPrefixed('what changed?');
   });
 
   test('MCP think op', async () => {
@@ -93,7 +75,7 @@ describe('#3783: think entry points embed the question with the brain prefix', (
     await engine.setConfig('embedding_query_prefix', PREFIX);
     const { operationsByName } = await import('../src/core/operations.ts');
     await operationsByName['think']!.handler({ engine, remote: false } as never, { question: 'what changed?' });
-    expect(await probeCaptured()).toEqual([`${PREFIX}probe question`]);
+    expectPrefixed('what changed?');
   });
 
   test('CRAG think escalation on a weak query result', async () => {
@@ -102,7 +84,8 @@ describe('#3783: think entry points embed the question with the brain prefix', (
     await engine.setConfig('search.crag_think', 'true');
     const { operationsByName } = await import('../src/core/operations.ts');
     await operationsByName['query']!.handler({ engine, remote: false } as never, { query: 'nothing in this brain matches zebra' });
-    expect(await probeCaptured()).toEqual([`${PREFIX}probe question`]);
+    expectPrefixed('nothing in this brain matches zebra');
+    expect(seen.filter(v => v === `${PREFIX}nothing in this brain matches zebra`).length).toBeGreaterThan(0);
   });
 
   test('CLI think', async () => {
@@ -110,7 +93,7 @@ describe('#3783: think entry points embed the question with the brain prefix', (
     await engine.setConfig('embedding_query_prefix', PREFIX);
     const { runThinkCli } = await import('../src/commands/think.ts');
     await quietly(() => runThinkCli(engine, ['what changed?', '--json']));
-    expect(await probeCaptured()).toEqual([`${PREFIX}probe question`]);
+    expectPrefixed('what changed?');
   });
 
   test('dream auto-think', async () => {
@@ -120,14 +103,15 @@ describe('#3783: think entry points embed the question with the brain prefix', (
     await engine.setConfig('dream.auto_think.questions', JSON.stringify(['what changed?']));
     const { runPhaseAutoThink } = await import('../src/core/cycle/auto-think.ts');
     await runPhaseAutoThink(engine, { dryRun: false } as never);
-    expect(await probeCaptured()).toEqual([`${PREFIX}probe question`]);
+    expectPrefixed('what changed?');
   });
 
   test('a brain without a prefix still embeds the bare question', async () => {
     configureEmbedding();
     const { operationsByName } = await import('../src/core/operations.ts');
     await operationsByName['think']!.handler({ engine, remote: false } as never, { question: 'what changed?' });
-    expect(await probeCaptured()).toEqual(['probe question']);
+    expect(seen).toContain('what changed?');
+    expect(seen.filter(v => v.startsWith(PREFIX))).toEqual([]);
   });
 });
 
