@@ -330,16 +330,44 @@ test('a page edited after its freeze fails alone inside a lane group; the group 
   for (let i = 0; i < 40; i++) writeFileSync(join(f.root, `notes/n${pad(i)}.md`), revised(i, 'revised'));
   git(f.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qam', 'revise');
   const edited = 'notes/n013.md';
+  // The edited page's group is held in preparation until a later lane group has applied and waits for its turn behind it,
+  // so the refusal always lands while that group waits (the window CI hit only under load: the group sent back to the
+  // queue made every lane group waiting behind it yield, `predecessor_requeued`, and count as a fallback).
+  const requestRow = async (requestId: string | undefined) => (await engine!.executeRaw<{ slug: string; idx: number }>(
+    "SELECT slug, (intent->>'index')::int AS idx FROM persistence_requests WHERE request_id=$1::uuid", [requestId ?? null]))[0];
+  let behind: () => void = () => {};
+  const laterGroupWaiting = new Promise<void>(resolve => { behind = resolve; });
+  let waited = false, reached = false;
   installFaultHook(async (point, detail) => {
     if (point === 'sync:after_freeze' && detail.sourceId === f.id && detail.path === edited) writeFileSync(join(f.root, edited), revised(13, 'uncommitted'));
+    if (detail.sourceId !== f.id || !detail.requestId) return;
+    if (point === 'lane:applied' && ((await requestRow(detail.requestId))?.idx ?? -1) > 13) { reached = true; behind(); }
+    if (point === 'consumer:preparing' && !waited && (await requestRow(detail.requestId))?.slug === 'notes/n013') {
+      waited = true;
+      await Promise.race([laterGroupWaiting, new Promise(resolve => setTimeout(resolve, 20_000))]);
+    }
   });
+  // Every claim of this source that goes back to the queue, and why.
+  await engine.executeRaw(`CREATE TABLE lane_requeues(slug text, reason text);
+    CREATE FUNCTION lane_requeue_log() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      INSERT INTO lane_requeues VALUES (NEW.slug, NEW.blocked_reason); RETURN NEW; END $$;
+    CREATE TRIGGER lane_requeue_log AFTER UPDATE ON persistence_requests FOR EACH ROW
+      WHEN (OLD.state = 'running' AND NEW.state = 'queued' AND NEW.source_id = '${f.id}') EXECUTE FUNCTION lane_requeue_log()`);
   const stop = new AbortController(), timer = setTimeout(() => stop.abort(), 90_000);
-  let result;
-  try { result = await performSync(engine, { ...opts, signal: stop.signal }); }
-  finally { clearTimeout(timer); installFaultHook(undefined); }
+  let result, requeues: Array<{ slug: string; reason: string | null }> = [];
+  try {
+    result = await performSync(engine, { ...opts, signal: stop.signal });
+    requeues = await engine.executeRaw('SELECT slug, reason FROM lane_requeues ORDER BY slug');
+  } finally {
+    clearTimeout(timer); installFaultHook(undefined);
+    await engine.executeRaw('DROP TRIGGER lane_requeue_log ON persistence_requests; DROP FUNCTION lane_requeue_log(); DROP TABLE lane_requeues');
+  }
   expect(stop.signal.aborted).toBe(false);
+  expect(waited && reached).toBe(true);
+  // The refused page's group keeps its other members' claims and publishes them; none goes back to the queue.
+  expect(requeues).toEqual([]);
   expect(result.drain?.outcome).not.toBe('blocked');
-  // The refused page never sends its group to the single path (a lane fallback), which waits behind the lanes.
+  // The refused page never sends its group to the single path or back to the queue (a lane fallback each).
   expect(result.drain?.bulk?.lanes.fallbacks).toBe(0);
   const status = await readSyncStatus(engine, f.id);
   expect(status.holds.map(hold => `${hold.code}:${hold.path}`)).toEqual([`worktree_dirty:${edited}`]);

@@ -469,23 +469,30 @@ async function laneFallback(engine: BrainEngine, rows: WriteRequest[], reason: G
 
 /**
  * #6712 lanes: a lane group rolled back because one sync member's own check refused it (a file edited after admission,
- * an identity or origin refusal). That page takes its fate now, from the same refusal the single path would read again,
- * and the other members go back to the queue to publish as a group: on a lane root the single path's exclusive lock
- * waits behind the lanes, so publishing them one at a time here never gets the worktree. False when the member is no
- * longer this pass's to settle (its claim moved, or a recovery record holds it).
+ * an identity or origin refusal). That page takes its fate now, from the same refusal the single path would read again
+ * (`settled`), and the caller publishes the other members again as a lane group under the claims it still holds: on a
+ * lane root the single path's exclusive lock waits behind the lanes, and sending them back to the queue would make
+ * every later lane group waiting on this one's turn yield too (`predecessor_requeued`). `requeued` when the refusal
+ * sent the member back to the queue (a transient database failure: nothing after it may overtake it) or another
+ * member's claim already went back (a file restoration): the members still held are released behind it. False when the member is no longer this pass's to settle (its claim moved, or a recovery
+ * record holds it).
  */
-async function settleCulprit(engine: BrainEngine, rows: WriteRequest[], culprit: NonNullable<GroupPublication['culprit']>, run: GroupExecution): Promise<boolean> {
+async function settleCulprit(engine: BrainEngine, rows: WriteRequest[], culprit: NonNullable<GroupPublication['culprit']>, run: GroupExecution): Promise<'settled' | 'requeued' | false> {
   const row = rows[culprit.index];
   if (!row || !syncMember(row) || (culprit.error as { code?: string }).code === 'unexpected_file_bytes') return false;
   const current = await getWriteRequestById(engine, row.id);
   if (!current || current.state !== 'running' || current.execution_token !== row.execution_token || current.recovery) return false;
-  run.settled(await finishUnpublishedFailure(engine, current, culprit.error, 'publication'));
+  const done = await finishUnpublishedFailure(engine, current, culprit.error, 'publication');
+  run.settled(done);
+  const others: Array<{ other: WriteRequest; held: boolean }> = [];
   for (const other of rows) {
     if (other.id === row.id) continue;
     const live = await getWriteRequestById(engine, other.id);
-    if (live?.state === 'running' && live.execution_token === other.execution_token) await releaseUnpublishedClaim(engine, other, 'group_member_waiting');
+    others.push({ other, held: live?.state === 'running' && live.execution_token === other.execution_token });
   }
-  return true;
+  if (['committed', 'conflict', 'failed', 'cancelled'].includes(done.state) && others.every(({ held }) => held)) return 'settled';
+  for (const { other, held } of others) if (held) await releaseUnpublishedClaim(engine, other, 'group_member_waiting');
+  return 'requeued';
 }
 
 /**
@@ -720,19 +727,32 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
     if (run.publication) await holdClaimForPublication(lease, () => renewGroupClaims(engine, liveRows, publicationLeaseMs(run.publication!.ceilingMs), undefined,
       live.map(({ i }) => stampOf(i))));
     let requeued = new Set<string>();
+    // #6712 lanes: the members a member's own refusal left publish again as a group, at most once per member.
+    let publishing = live;
     if (live.every(({ i }) => 'ok' in prepared[i]!)) {
-      // #6278 lanes: a prefix publishes under the original group's order key, then drops its own begun mark.
-      const markOriginal = run.lane && liveRows.length < rows.length ? await awaitLaneBegin(run.lane, rows) : null;
-      const hooks = markOriginal ? { ...run.hooks, began: () => { markOriginal(); run.hooks?.began?.(); } } : run.hooks;
-      const result = await bounded(() => publishGroup(engine, liveRows, live.map(({ i }) => (prepared[i] as { ok: PreparedMutation }).ok), run.hostId, hooks, run.lane ?? null));
-      if (run.lane && liveRows.length < rows.length) run.lane.begun.delete(liveRows.at(-1)!.request_id);
-      if (result.done) { for (const row of result.done) run.settled(row); return true; }
-      requeued = new Set(result.requeued);
-      if (run.lane && result.culprit && await settleCulprit(engine, liveRows, result.culprit, run)) return true;
-      if (run.lane && await laneFallback(engine, liveRows, result.reason, run) !== null) return progressed;
+      for (;;) {
+        const publishRows = publishing.map(({ row }) => row);
+        // #6278 lanes: a prefix publishes under the original group's order key, then drops its own begun mark.
+        const markOriginal = run.lane && publishRows.length < rows.length ? await awaitLaneBegin(run.lane, rows) : null;
+        const hooks = markOriginal ? { ...run.hooks, began: () => { markOriginal(); run.hooks?.began?.(); } } : run.hooks;
+        const result = await bounded(() => publishGroup(engine, publishRows, publishing.map(({ i }) => (prepared[i] as { ok: PreparedMutation }).ok), run.hostId, hooks, run.lane ?? null));
+        if (run.lane && publishRows.length < rows.length) run.lane.begun.delete(publishRows.at(-1)!.request_id);
+        if (result.done) { for (const row of result.done) run.settled(row); return true; }
+        requeued = new Set(result.requeued);
+        const culprit = run.lane && result.culprit ? await settleCulprit(engine, publishRows, result.culprit, run) : false;
+        if (culprit === 'requeued') return true;
+        if (culprit === 'settled') {
+          progressed = true;
+          publishing = publishing.filter((_, k) => k !== result.culprit!.index);
+          if (!publishing.length) return true;
+          continue;
+        }
+        if (run.lane && await laneFallback(engine, publishRows, result.reason, run) !== null) return progressed;
+        break;
+      }
     } else if (run.lane && await laneFallback(engine, liveRows, 'failed', run) !== null) return progressed;
     let release = false;
-    for (const { row: member, i } of live) {
+    for (const { row: member, i } of publishing) {
       let row = member;
       let current = await getWriteRequestById(engine, row.id);
       // A claim the group's file restoration released is taken back, in order, while this pass still owns the worktree.
