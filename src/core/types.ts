@@ -1333,6 +1333,8 @@ export interface SearchOpts extends PageReadPolicy {
    * ignores this flag.
    */
   orFallback?: boolean;
+  /** #6495: hybrid's keyword arm opts in to the Postgres keyword timeout negative cache (postgres-engine/keyword-timeout-cache.ts); PGLite ignores it. */
+  keywordTimeoutCache?: boolean;
   /** Keyword `score` query (websearch syntax) while `query` decides the matches (alias fan-out); ignored on the CJK path. */
   rankQuery?: string;
   /**
@@ -1424,6 +1426,7 @@ export interface SearchOpts extends PageReadPolicy {
    * call. When undefined, the cache decision falls back to global config
    * (search.cache.enabled, default true). Set to `false` to force a fresh
    * search; set to `true` to opt in even when global config has it off.
+   * `false` also bypasses the keyword timeout negative cache (#6495).
    */
   useCache?: boolean;
   /**
@@ -2091,6 +2094,7 @@ export const DEGRADED_REASONS = [
   'iterative_scan_unavailable',
   'egress_denied', // System One: the Jev reranker skipped a query with a candidate from decide.egress.deny_sources
   'embedding_disabled', // the brain opted out of embedding: the query text was never sent to the provider
+  'skipped_after_timeout', // #6495: keyword_arm_failed; the same keyword statement timed out within search.keyword_timeout_negative_cache_seconds
 ] as const;
 export type DegradedReason = (typeof DEGRADED_REASONS)[number];
 
