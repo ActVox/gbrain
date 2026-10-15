@@ -19,6 +19,7 @@ import type { GetVersionsOpts, PageVersionRows } from '../page-state/version-typ
 import { PAGE_SORT_SQL } from '../types.ts';
 import type { PageWriteOptions } from '../page-state/types.ts';
 import { moveSlugBindings, recordRenameAlias } from '../page-state/rename-alias.ts';
+import { segmentedRevertRefusal } from '../page-state/versions.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion } from '../search/safe-chunks.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment } from '../search/private-visibility.ts';
@@ -902,6 +903,8 @@ const PAGE_VERSION_COLUMNS = trustedSql('pv.id, pv.page_id, pv.compiled_truth, p
   + 'pv.timeline, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path');
 const PAGE_VERSION_METADATA_COLUMNS = trustedSql('pv.id, pv.page_id, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, '
   + 'pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path');
+/** Wave B: the reference columns of a segmented version, kept only on segmented rows so inline rows stay as they were. */
+const PAGE_VERSION_SEGMENTED_COLUMNS = trustedSql('pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash');
 
 /**
  * Newest first (`pv.id` breaks snapshot_at ties). Scope and privacy
@@ -921,14 +924,19 @@ export async function getVersions<B extends boolean = true>(
     const columns = opts?.includeBody === false ? PAGE_VERSION_METADATA_COLUMNS : PAGE_VERSION_COLUMNS;
     const limit = opts?.limit !== undefined ? sqlFragment`LIMIT ${opts.limit}` : sqlFragment``;
     const { rows } = await exec.run(sqlFragment`
-      SELECT ${columns} FROM page_versions pv
+      SELECT ${columns}, ${PAGE_VERSION_SEGMENTED_COLUMNS} FROM page_versions pv
       JOIN pages p ON p.id = pv.page_id
       WHERE p.slug = ${slug} ${scope}
         ${privacy}
       ORDER BY pv.snapshot_at DESC, pv.id DESC
       ${limit}
     `);
-    return rows as PageVersionRows<B>;
+    return rows.map(row => {
+      const { body_storage, body_generation, body_bytes, content_hash, ...version } = row as Record<string, unknown>;
+      return body_storage === 'segmented'
+        ? { ...version, body_storage, body_generation: Number(body_generation), body_bytes: Number(body_bytes), content_hash }
+        : version;
+    }) as PageVersionRows<B>;
   }
 
 export async function revertToVersion(
@@ -937,6 +945,14 @@ export async function revertToVersion(
   versionId: number,
   opts?: { sourceId?: string },
 ): Promise<void> {
+    // Wave B: a segmented page or version is refused before anything is written (segment writer: PR 3).
+    const scope = opts?.sourceId ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
+    const { rows: segmented } = await exec.run(sqlFragment`
+      SELECT 1 FROM pages p JOIN page_versions pv ON pv.page_id = p.id
+      WHERE p.slug = ${slug} ${scope} AND pv.id = ${versionId}
+        AND (p.body_storage = 'segmented' OR pv.body_storage = 'segmented')
+    `);
+    if (segmented.length > 0) throw segmentedRevertRefusal(slug, versionId);
     // v0.31.8 (D12): two-branch. With opts.sourceId, scope BOTH the page lookup
     // AND the version reference. Without it, multi-source brains can revert
     // the wrong same-slug page.

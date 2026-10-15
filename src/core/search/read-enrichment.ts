@@ -1,6 +1,6 @@
 import type { PageReadScope, PageReadPolicy, AdjacencyRow, RelationalFanoutOpts, RelationalFanoutRow, ChainHopOpts, ChainHopEdge } from '../types.ts';
 import { unverifiedExtractionFragment } from '../extraction-review.ts';
-import { currentTextProjectionFilter, protectedBodyFilter, requiresSafeChunks, safeChunksFilter } from './safe-chunks.ts';
+import { chunkGenerationProbe, currentTextProjectionFilter, protectedBodyFilter, requiresSafeChunks, safeChunksFilter } from './safe-chunks.ts';
 import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
 import { relationshipFilterSql } from '../link-validity.ts';
 
@@ -70,7 +70,7 @@ export async function readRelationalFanout(query: ReadQuery, seeds: string[], op
         array_length(n.path, 1) ASC, array_to_string(n.path, chr(9)) ASC))[1] AS path_str,
       (array_agg(array_to_string(n.edges, chr(9)) ORDER BY n.depth ASC,
         array_length(n.path, 1) ASC, array_to_string(n.path, chr(9)) ASC))[1] AS edges_str,
-      (SELECT cc.id FROM content_chunks cc WHERE cc.page_id = n.id
+      (SELECT cc.id FROM content_chunks cc WHERE cc.page_id = n.id AND ${chunkGenerationProbe('cc')}
         ${requiresSafeChunks(opts) ? `AND EXISTS (SELECT 1 FROM pages cp WHERE cp.id = n.id AND ${safeChunksFilter('cp')})` : ''}
         ORDER BY cc.chunk_index ASC LIMIT 1) AS canonical_chunk_id
     FROM walk n WHERE n.depth > 0 GROUP BY n.source_id, n.slug, n.id
@@ -212,7 +212,7 @@ export async function readChainHop(query: ReadQuery, frontier: number[], opts: C
       r.link_ids, sf.slug AS stored_from_slug, st.slug AS stored_to_slug,
       CASE WHEN ev.id IS NOT NULL ${textGate} THEN el.context END AS context,
       el.origin_page_id, op.slug AS origin_slug, deg.degree AS from_degree, (r.per_frontier > $5) AS cap_hit,
-      (SELECT cc.id FROM content_chunks cc WHERE cc.page_id = r.next_id
+      (SELECT cc.id FROM content_chunks cc WHERE cc.page_id = r.next_id AND ${chunkGenerationProbe('cc')}
         ${requiresSafeChunks(policy) ? `AND EXISTS (SELECT 1 FROM pages cp WHERE cp.id = r.next_id AND ${safeChunksFilter('cp')})` : ''}
         ORDER BY cc.chunk_index ASC LIMIT 1) AS canonical_chunk_id
     FROM ranked r

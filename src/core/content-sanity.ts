@@ -361,7 +361,12 @@ export interface SampledJunkAssessment {
  */
 export function assessSampledJunk(body: string, opts: { max_markup_ratio?: number;
   extra_literals?: ReadonlyArray<OperatorLiteral>; disabled_patterns?: ReadonlyArray<string> }): SampledJunkAssessment {
-  const windows = sampleWindows(body);
+  return assessJunkWindows(sampleWindows(body), opts);
+}
+
+/** `assessSampledJunk` over windows the caller already sampled (a segmented page reads them from its segments). */
+export function assessJunkWindows(windows: string[], opts: { max_markup_ratio?: number;
+  extra_literals?: ReadonlyArray<OperatorLiteral>; disabled_patterns?: ReadonlyArray<string> }): SampledJunkAssessment {
   const markup_ratios = windows.map(window => assessProse(window).markup_ratio);
   const max = opts.max_markup_ratio ?? DEFAULT_MAX_MARKUP_RATIO;
   const hits = windows.filter(window => {

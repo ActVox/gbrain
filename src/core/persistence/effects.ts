@@ -17,6 +17,8 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { materializePageSnapshot } from '../page-state/materialize.ts';
 import { installPageEmbeddings, readProjectionSnapshot } from '../page-state/projections.ts';
+import { embedSegmentedPage, readSegmentedEmbedPage, type SegmentedEmbedPage } from '../page-body/segmented-embedding.ts';
+import { resolveProvenanceStamp, stampIfPageProvenanceComplete } from '../embed-stale.ts';
 import { currentEmbeddingSignature, embedBatch } from '../embedding.ts';
 import { assertEmbeddingEnabled, EmbeddingDisabledError } from '../embedding-dim-check.ts';
 import { validateEmbeddingCreds, EmbeddingCredentialError } from '../embed-preflight.ts';
@@ -47,6 +49,7 @@ import { nativeFileTarget } from './native-file-target.ts';
 import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { isLockOpenFailure } from './native-lock.ts';
 import { planPageEmbedding } from '../page-embedding-budget.ts';
+import { chunkGenerationFilter } from '../search/safe-chunks.ts';
 
 const effectStatusFix = (effect: Pick<PersistenceEffect, 'source_id'>): Action => readFix(
   `Shows source ${effect.source_id}'s canonical owner with its blocking, retrying and parked effects, read-only.`,
@@ -299,7 +302,7 @@ export async function readEmbeddingEffectProjection(engine: BrainEngine, effect:
     const completion = await tx.executeRaw<{ id: number; complete: boolean }>(`SELECT cc.id,
       p.embedding_signature=$2 AND cc.${quoteIdentifier(column.name)} IS NOT NULL AND cc.embedded_at IS NOT NULL
         AND cc.embedded_text_hash=md5(cc.chunk_text) AND cc.model IS NOT DISTINCT FROM $3 AS complete
-      FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1`,
+      FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1 AND ${chunkGenerationFilter('p', 'cc')}`,
     [snapshot.page.id, signature, embeddingCompletionModel(column, signature, model)]);
     const complete = new Set(completion.filter(chunk => chunk.complete === true).map(chunk => chunk.id));
     const pending = prepared.chunks.filter(chunk => !complete.has(chunk.id));
@@ -318,6 +321,8 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
     `Page ${snapshot.page.slug} in source ${effect.source_id} was saved but cannot be embedded: this brain has no embedding provider. Pages and keyword search keep working; check embedding readiness and ask the user before configuring a paid provider.`,
     { fix: embeddingsFix() });
   if (isEmbedSkipped(snapshot.page.frontmatter)) { await completeEffect(engine, effect, { embedding: 'skipped', reason: 'embed_skip' }); return; }
+  const segmented = await readSegmentedEmbedPage(engine, { id: snapshot.page.id });
+  if (segmented) { await embedSegmentedEffect(engine, config, effect, snapshot, segmented, signature, opts); return; }
   const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model);
   const { prepared } = projection;
   let pending = projection.pending;
@@ -416,6 +421,43 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
     }
     return;
   }
+  await finishPage(engine, effect, snapshot);
+}
+
+/**
+ * Wave B: a segmented page's embedding effect embeds only the rows of the
+ * occurrences its write added (`data.occurrence_ids`; every stale live row
+ * without them), by keyset and without reading the body. Each provider call
+ * renews the claim first, and each install re-checks the claim, the source and
+ * the embedding switch under the page guard.
+ */
+async function embedSegmentedEffect(engine: BrainEngine, config: GBrainConfig, effect: PersistenceEffect, snapshot: PageSnapshot,
+  page: SegmentedEmbedPage, signature: string, opts: EffectWorkerOptions): Promise<void> {
+  await assertEmbeddingEffectEnabled(engine, config);
+  if (effect.attempts - (effect.data.embedding_retry_base ?? effect.data.embedding_attempt_base ?? 0) > MAX_RATE_LIMIT_RETRIES) {
+    await failEffect(engine, effect, 'embedding_attempts_exhausted'); return;
+  }
+  if (!opts.embedding) validateEmbeddingCreds();
+  const claimLost = () => opError('write_claim_lost', 'The embedding claim changed.',
+    `Another worker took over the embedding of ${page.slug} in source ${effect.source_id}; this attempt stops without installing vectors and the owning claim finishes it.`,
+    { fix: effectStatusFix(effect) });
+  const embed = opts.embedding?.embed ?? embedBatch;
+  const result = await embedSegmentedPage(engine, page, { signature, signal: opts.signal, occurrenceIds: effect.data.occurrence_ids,
+    embedFn: (texts, o) => withAIInvocationPreflight(async () => {
+      opts.signal?.throwIfAborted();
+      if (!await renewPersistenceEffectClaim({ executeRaw: engine.executeRawDirect.bind(engine) }, effect)) throw claimLost();
+      await assertEmbeddingEffectEnabled(engine, config);
+    }, async () => (await embed(texts, { abortSignal: o.abortSignal, maxRetries: 0 })) as Float32Array[]),
+    beforeInstall: async tx => {
+      await guardEffectSource(tx, effect, opts.hostId);
+      const [claim] = await tx.executeRaw<PersistenceEffect>('SELECT state,execution_token FROM persistence_effects WHERE id=$1 FOR UPDATE', [effect.id]);
+      if (claim?.state !== 'running' || claim.execution_token !== effect.execution_token) throw claimLost();
+      await assertEmbeddingEffectEnabled(tx, config);
+    } });
+  if (result.stopped === 'budget') { await completeEffect(engine, effect, { embedding: 'skipped', reason: 'budget_capped' }); return; }
+  if (result.stopped === 'page_moved') { await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return; }
+  const stamp = await resolveProvenanceStamp(engine, signature);
+  if (stamp) await stampIfPageProvenanceComplete(engine, page.slug, page.source_id, stamp);
   await finishPage(engine, effect, snapshot);
 }
 
