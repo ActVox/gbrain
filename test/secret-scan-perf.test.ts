@@ -17,12 +17,14 @@
  * most cases below time the same input shape at two sizes SCALE (10x) apart,
  * back to back in this process, and require the larger to cost under
  * MAX_RATIO (30x) the smaller: linear work reads about 10x, the broken forms
- * about 100x. Both sides are process CPU time, which load on a shared CI VM
- * does not inflate, where an absolute wall-clock budget counted it (409 ms
- * against 400 at 32 busy slots). The echo-pass cases and the `high_entropy_assignment` case keep
+ * about 100x. The echo-pass cases and the `high_entropy_assignment` case keep
  * absolute bounds: their inputs are capped (64 dictionary values,
  * ECHO_MAX_VALUE_CHARS, 4096-char values), so what they guard is a constant
  * factor, which a size ratio cannot see.
+ *
+ * Every timing, ratio or bound, is process CPU time, which measures the work
+ * rather than how long the scheduler made it wait (a wall-clock 400 ms bound
+ * read 409 ms at 32 busy slots on a shared CI VM).
  *
  * Every credential-shaped value is synthetic and runtime-joined from >= 2
  * fragments; constant names keep scanner keywords away from the `=`.
@@ -39,12 +41,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'crypto';
 import { ECHO_MAX_UNIQUE, ECHO_MAX_VALUE_CHARS, privateKeySpans, redactFindings, scanText } from '../src/core/secret-scan.ts';
-
-function elapsedMs(fn: () => void): number {
-  const t0 = performance.now();
-  fn();
-  return performance.now() - t0;
-}
 
 const SCALE = 10;
 const MAX_RATIO = 30;
@@ -322,7 +318,7 @@ describe(`the echo pass is at most ${ECHO_MAX_UNIQUE} substring sweeps over the 
   test('64 unique bearer claims ahead of an 8 MB tail with no echo: redact < 400ms', () => {
     const text = vals.map((v) => `Bearer ${v}`).join(' ') + '\n' + 'x'.repeat(8 << 20);
     let result = { text: '', redactions: [] as ReturnType<typeof scanText> };
-    const ms = elapsedMs(() => { result = redactFindings(text); });
+    const ms = cpuMs(() => { result = redactFindings(text); });
     expect(result.redactions.length).toBe(ECHO_MAX_UNIQUE);
     expect(result.text.includes(OPAQUE)).toBe(false);
     expect(ms).toBeLessThan(400);
@@ -333,7 +329,7 @@ describe(`the echo pass is at most ${ECHO_MAX_UNIQUE} substring sweeps over the 
     // sweeps over 4 MB. Linear in the text, bounded by the cap.
     const text = vals.map((v) => `Bearer ${v}`).join(' ') + '\n' + 'opaqueT'.repeat((4 << 20) / 7);
     let result = { text: '', redactions: [] as ReturnType<typeof scanText> };
-    const ms = elapsedMs(() => { result = redactFindings(text); });
+    const ms = cpuMs(() => { result = redactFindings(text); });
     expect(result.redactions.length).toBe(ECHO_MAX_UNIQUE);
     expect(result.text.includes(OPAQUE)).toBe(false);
     expect(ms).toBeLessThan(1500);
@@ -351,7 +347,7 @@ describe(`the echo pass is at most ${ECHO_MAX_UNIQUE} substring sweeps over the 
     const tail = 'A'.repeat(1 << 20);
     const text = vals512.map((v) => `Bearer ${v}`).join(' ') + '\n' + tail;
     let result!: ReturnType<typeof redactFindings>;
-    const ms = elapsedMs(() => { result = redactFindings(text); });
+    const ms = cpuMs(() => { result = redactFindings(text); });
     expect(result.redactions.length).toBe(ECHO_MAX_UNIQUE);
     expect(result.redactions.every((r) => r.pattern === 'bearer')).toBe(true);
     // Every value joined the dictionary (exactly at the length cap) and the
@@ -374,7 +370,7 @@ describe(`the echo pass is at most ${ECHO_MAX_UNIQUE} substring sweeps over the 
     gc?.(true);
     const before = process.memoryUsage();
     let result!: ReturnType<typeof redactFindings>;
-    const ms = elapsedMs(() => { result = redactFindings(text); });
+    const ms = cpuMs(() => { result = redactFindings(text); });
     const after = process.memoryUsage();
     expect(result.redactions.length).toBe(ECHO_MAX_UNIQUE);
     expect(/A{20}/.test(result.text)).toBe(false);
@@ -526,14 +522,14 @@ describe('security fix wave shapes are linear (A1 walks, A2, A3, A5; ENG-15, ENG
   test('high_entropy_assignment: 250 quoted and 250 unquoted 4096-char values on one line, and 4100-char runs of trailing punctuation: < 300ms', () => {
     const quoted = Array.from({ length: 250 }, (_, i) => `password="${entropic(4096, i)}"`).join(' ');
     let result!: ReturnType<typeof redactFindings>;
-    let ms = elapsedMs(() => { result = redactFindings(quoted, { highEntropy: true }); });
+    let ms = cpuMs(() => { result = redactFindings(quoted, { highEntropy: true }); });
     expect(result.redactions.length).toBe(250);
     expect(ms).toBeLessThan(300);
     const unquoted = Array.from({ length: 250 }, (_, i) => `token=${entropic(4096, i).replace(/[<>]/g, '.')}`).join(' ');
-    ms = elapsedMs(() => { result = redactFindings(unquoted, { highEntropy: true }); });
+    ms = cpuMs(() => { result = redactFindings(unquoted, { highEntropy: true }); });
     expect(result.redactions.length).toBe(250);
     expect(ms).toBeLessThan(300);
-    ms = elapsedMs(() => { expect(scanText(`token=${'.'.repeat(4100)} `.repeat(250), { highEntropy: true })).toEqual([]); });
+    ms = cpuMs(() => { expect(scanText(`token=${'.'.repeat(4100)} `.repeat(250), { highEntropy: true })).toEqual([]); });
     expect(ms).toBeLessThan(300);
   });
 });
