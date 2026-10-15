@@ -20,6 +20,7 @@ Branch `capy/w18b-lane3`. These are the edits to files other lanes may also touc
 - `scripts/serial-files.tsv`: three R2 rows (mock.module): `test/cycle-patterns-timeline-appends.serial.test.ts`, `test/cycle-patterns-cadence.serial.test.ts`, `test/cycle-patterns-read-budget.serial.test.ts`.
 - `src/core/config.ts`: known config keys gain `dream.patterns.min_interval_hours` and `dream.patterns.child_read_budget_kb` (one line).
 - `scripts/module-size-limits.tsv`: ceiling bumps for `src/core/config.ts` (+1) and `src/core/cycle.ts` (+2).
+- `docs/architecture/canonical-writers.tsv`: `src/core/cycle/patterns.ts` ceiling 1 -> 2 (3.1 unmanaged-path timeline row delete for a quarantined append), rationale extended.
 - `TODOS.md`: the #6113 P2 free-relabel line now says the doctor check ships and the relabel stays parked.
 
 ## Docs edits that may collide
