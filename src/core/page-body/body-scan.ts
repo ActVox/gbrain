@@ -254,7 +254,7 @@ export class BodyScanner {
     const headBytes = complete ? all : all.subarray(0, FRONTMATTER_HEAD_MAX_BYTES);
     let text: string;
     try {
-      text = this.decoder.decode(headBytes, { stream: !complete });
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(headBytes, { stream: !complete });
     } catch {
       this.refusal = { kind: 'invalid_utf8', offset: firstInvalidUtf8(headBytes, complete) };
       return;

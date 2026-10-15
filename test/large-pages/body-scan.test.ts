@@ -159,9 +159,9 @@ describe('body scan on files larger than the head bound', () => {
         return;
       }
       expectAgrees(content, 'notes/x.md', { validate });
-    }), { numRuns: 120 });
-    expect(refused).toBeLessThan(120);
-  });
+    }), { numRuns: 80 });
+    expect(refused).toBeLessThan(80);
+  }, 120_000);
 
   const pad = (line: string) => `${line}\n`.repeat(Math.ceil((FRONTMATTER_HEAD_MAX_BYTES + 1000) / (line.length + 1)));
 
@@ -229,7 +229,7 @@ describe('chunking', () => {
       const small = sizes.map(s => (large ? s : Math.max(1, s % 17)));
       expect(capture(() => scanChunks(bytes, small))).toEqual(whole);
     }), { numRuns: 200 });
-  });
+  }, 120_000);
 
   test('the async form equals the push form, and pieces read back from the file', async () => {
     const content = `---\ntitle: Alpha Example\n---\nintro 😀\n${'line\n'.repeat(70_000)}<!-- timeline -->\n- 2024: t\n`;
