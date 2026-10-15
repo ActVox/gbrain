@@ -10,6 +10,55 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.245.0] - 2026-10-15
+
+**A fact your agent saves no longer disappears because a page edit was committed but not synced yet, and saving facts no longer splits a page's fact table in two.**
+
+Two things went wrong on brains where people and agents both edit pages in Git. First, if you committed a change to a page and your agent saved a fact about it before the next sync, gbrain refused the save as a conflicting edit and nothing ever retried it. The fact was simply gone. Now gbrain recognizes this case ("your commit is waiting to be imported"), tells the agent to wait instead of retrying, and replays the saved fact once, automatically, as soon as the sync brings that file in. Second, some pages keep their facts table at the bottom, under the timeline. Saving a fact to one of those pages used to add a second facts table at the top. Now gbrain writes into the existing table wherever it lives.
+
+## How to use it
+
+Nothing to turn on. After `gbrain sync`, check the replays:
+
+```bash
+gbrain sync --source <id> --json   # "replayedRemembers": examined, replayed, waiting, skipped, remaining
+gbrain repair failed-writes --source <id>   # anything that still needs you
+```
+
+Pages that already have two facts tables get an explicit repair. Preview it first, then apply:
+
+```bash
+gbrain repair split-facts --source <id>
+gbrain repair split-facts --source <id> --apply --expect <hash>
+```
+
+## What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| Agent saves a fact right after you commit that page | Refused, lost | Refused with "waiting for import", replayed after sync |
+| Agent saves a fact to a page whose facts sit under the timeline | Second table added at the top | Row added to the existing table |
+| Page already has two facts tables | Facts index frozen with a warning | Same warning, now naming `gbrain repair split-facts` |
+
+## Things to watch
+
+Only the saves refused after you upgrade are replayed automatically. Older refusals stay with `gbrain repair failed-writes`, which already lists them. Page edits (`put_page`) are never replayed automatically, because a whole-page write can overwrite your commit. The split-facts repair never runs on upgrade, from `repair --all`, or from doctor's remediation; it skips any page where both tables use the same row number and tells you why.
+
+Contributed by @javieraldape (the timeline facts test suite).
+
+### Itemized changes
+
+- **Refused while waiting for import.** When a write's file is exactly the committed `HEAD` blob but not the blob at the source's last imported commit, the refusal keeps code `source_changed` / `file_database_drift` and adds reason `pending_import` (`src/core/persistence/pending-import.ts`, read-only git). `remember` gets `fix.next: wait` with `gbrain sync status --source <id> --json`; other writes get a sync-then-resubmit fix. Refusals on a sync-held file carry reason `sync_held`. Both are recorded as `error_detail.origin` on the receipt.
+- **One automatic replay after each sync.** After every non-dry-run managed sync, caller `remember` receipts with origin `pending_import` or `sync_held` whose page now matches its file get one replay through the `repair failed-writes` path: same caller lane, live authority check, derived request id. Capped at 50 per sync and 30 seconds; counts land in `SyncResult.replayedRemembers`.
+- **Replays keep the fact's dates.** `repair failed-writes` replays now keep the original `valid_from` and expiry instead of resetting them.
+- **Facts tables stay where they are.** `remember`, `extract_facts` and supersede strikes edit a lone facts fence under the timeline sentinel in place, leave the body byte for byte, and number new rows past the index and both sections (`src/core/facts-fence.ts`, `memory-prepare.ts`, `facts-prepare.ts`). `extract_facts` reconciles a lone timeline fence instead of freezing it.
+- **`gbrain repair split-facts`** (explicit-only, preview-bound) merges a split page's two fences into the timeline fence, keeping every row number and fact id. It reports `row_collision`, `unparsed` and `not_conserved` pages instead of touching them (`src/core/repair/split-facts.ts`).
+- Docs: `docs/guides/write-refusals.md` (`pending_import`), `docs/guides/repair.md` (`#split-facts`, failed-writes replay).
+
+### For contributors
+
+- New tests: `test/remember-pending-import.test.ts`, `test/repair-split-facts.test.ts`, `test/managed-timeline-facts.serial.test.ts`, `test/e2e/managed-timeline-facts-postgres.test.ts`. `extract-facts-phase` and `e2e/system-of-record-invariant` assert the new timeline-fence contract. The explicit-only repair kind lists include `split-facts`.
+
 ## [0.60.244.0] - 2026-10-15
 
 **More timing tests now measure the work instead of how busy the CI machine is, and the write-gate check at the 24 MiB page limit is back to a fair bound (tests only, no behavior change).** On #6738's CI, `write-gate-perf`'s 5 MB adversarial p95 read 1585 ms against its 1500 ms bound. The cause wasn't load. #6733 raised the page import limit (`MAX_FILE_SIZE`) to 24 MiB, and the check sized its test text by that constant, so it had been timing about 5x the bytes against bounds calibrated for 5 MB, with no change to the write-gate code (adversarial p95: 151 ms at ee922300, 777 ms at 44eb0493). The 5 MB check now uses 5 MB of text again, and a new linearity check covers the real 24 MiB limit. Ten awaited-PGLite timing asserts now measure the test thread's CPU time. Two size-ratio checks now alternate their sizes so a slow spell on a shared machine can't skew them. All bounds and correctness asserts are unchanged.
