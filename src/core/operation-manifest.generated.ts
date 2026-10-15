@@ -2024,10 +2024,35 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Run brain health checks and return a structured DoctorReport (thin-client doctor surface).",
-    "params": {},
+    "description": "Run brain health checks and return a structured DoctorReport (thin-client doctor surface). tier \"ops\": only the operational sections under a 4 s deadline; only: just the named checks.",
+    "params": {
+      "tier": {
+        "type": "string",
+        "enum": [
+          "ops"
+        ],
+        "description": "ops: capacity, write failures, embedding state, sync movement, compaction, serve build and schema pack, under one 4 s deadline. Omit for the focused remote report."
+      },
+      "only": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Run just these checks (doctor check names, for example persistence_capacity)."
+      }
+    },
     "scope": "admin",
     "localOnly": false,
+    "area": "admin"
+  },
+  {
+    "name": "get_brain_health",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "no_stored_text",
+    "description": "Brain health as bands for agents without admin scope: write capacity (ok, low or critical, with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.",
+    "params": {},
+    "scope": "read",
     "area": "admin"
   },
   {
@@ -5133,6 +5158,20 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "include_quarantined": {
         "type": "boolean",
         "description": "Admin or memory_confirm: quarantined cards.",
+        "fullSurfaceOnly": true
+      },
+      "counterparty": {
+        "type": "string",
+        "description": "Person or company (name or slug): adds a pulled brief of dated items about them.",
+        "fullSurfaceOnly": true
+      },
+      "intent": {
+        "type": "string",
+        "enum": [
+          "meeting",
+          "reply"
+        ],
+        "description": "With counterparty: the task the brief is for.",
         "fullSurfaceOnly": true
       }
     },

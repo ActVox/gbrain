@@ -496,6 +496,46 @@
           }
         ]
       },
+      "listEmbeddingStateRows": {
+        "default": [
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
+            "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "number",
+              "array<string>",
+              "number"
+            ],
+            "sql": "SELECT r.slug, r.source_id, r.state, r.chunks, r.bytes, r.embed_skip_reason, r.marker_bytes, r.quarantine_reason, r.deleted_at, r.overdue FROM ( SELECT p.slug, p.source_id, CASE WHEN p.deleted_at IS NOT NULL THEN 'deleted_page_chunks' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN cc.\"embedding\" IS NOT NULL THEN 'embedded' WHEN p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'pending' ELSE 'keyword_only' END AS state, count(*)::bigint AS chunks, COALESCE(sum(octet_length(cc.chunk_text)), 0)::bigint AS bytes, p.frontmatter -> 'embed_skip' ->> 'reason' AS embed_skip_reason, CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number' THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END AS marker_bytes, p.frontmatter -> 'quarantine' ->> 'reason' AS quarantine_reason, p.deleted_at, COALESCE(p.deleted_at < now() - make_interval(hours => $1::int), false) AS overdue FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE TRUE GROUP BY p.id, 3 UNION ALL SELECT p.slug, p.source_id, CASE WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'keyword_only' WHEN p.deleted_at IS NULL AND (p.compiled_truth <> '' OR p.timeline <> '') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) THEN 'chunkless_healable' ELSE 'empty' END, 0::bigint, (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')))::bigint, p.frontmatter -> 'embed_skip' ->> 'reason', CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number' THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END, p.frontmatter -> 'quarantine' ->> 'reason', p.deleted_at, false FROM pages p WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) ) r WHERE r.state = ANY($2::text[]) ORDER BY r.state, r.source_id, r.slug LIMIT $3",
+            "textSha256": "9195ae4bc4427e2bc4f920dd5560a8883e153a4c0b0cffda020e04f9953eea30"
+          }
+        ],
+        "sourceIds": [
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
+            "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "number",
+              "array<string>",
+              "array<string>",
+              "array<string>",
+              "number"
+            ],
+            "sql": "SELECT r.slug, r.source_id, r.state, r.chunks, r.bytes, r.embed_skip_reason, r.marker_bytes, r.quarantine_reason, r.deleted_at, r.overdue FROM ( SELECT p.slug, p.source_id, CASE WHEN p.deleted_at IS NOT NULL THEN 'deleted_page_chunks' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN cc.\"embedding\" IS NOT NULL THEN 'embedded' WHEN p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'pending' ELSE 'keyword_only' END AS state, count(*)::bigint AS chunks, COALESCE(sum(octet_length(cc.chunk_text)), 0)::bigint AS bytes, p.frontmatter -> 'embed_skip' ->> 'reason' AS embed_skip_reason, CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number' THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END AS marker_bytes, p.frontmatter -> 'quarantine' ->> 'reason' AS quarantine_reason, p.deleted_at, COALESCE(p.deleted_at < now() - make_interval(hours => $1::int), false) AS overdue FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE TRUE AND p.source_id = ANY($2::text[]) GROUP BY p.id, 3 UNION ALL SELECT p.slug, p.source_id, CASE WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'keyword_only' WHEN p.deleted_at IS NULL AND (p.compiled_truth <> '' OR p.timeline <> '') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) THEN 'chunkless_healable' ELSE 'empty' END, 0::bigint, (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')))::bigint, p.frontmatter -> 'embed_skip' ->> 'reason', CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number' THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END, p.frontmatter -> 'quarantine' ->> 'reason', p.deleted_at, false FROM pages p WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) AND p.source_id = ANY($3::text[]) ) r WHERE r.state = ANY($4::text[]) ORDER BY r.state, r.source_id, r.slug LIMIT $5",
+            "textSha256": "171949d8dd45f600cc00a808e38acf0b2716359b6e642d8a2a91a8af19d76ff9"
+          }
+        ]
+      },
       "listStaleChunks": {
         "default": [
           {
@@ -610,6 +650,85 @@
             ],
             "sql": "SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.model, cc.token_count, p.source_id, cc.page_id, p.updated_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.\"embedding\" IS NULL AND p.deleted_at IS NULL AND p.source_id = $1 AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open') AND ( p.updated_at < $2::timestamptz OR (p.updated_at = $3::timestamptz AND p.id > $4) OR (p.updated_at = $5::timestamptz AND p.id = $6 AND cc.chunk_index > $7) ) ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC LIMIT $8",
             "textSha256": "e7d5d93ccb96ab546168596ee9ea4b15d2441d62bb0d05d4505f4dc1d10a8c98"
+          }
+        ]
+      },
+      "readEmbeddingStateCounts": {
+        "full": [
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
+            "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "number"
+            ],
+            "sql": "SELECT s.state, count(*)::bigint AS n, count(*) FILTER (WHERE s.eligible)::bigint AS eligible, count(*) FILTER (WHERE s.overdue)::bigint AS overdue, count(*) FILTER (WHERE s.unstamped)::bigint AS unstamped, min(s.created_at) FILTER (WHERE s.unstamped) AS unstamped_min FROM (SELECT CASE WHEN p.deleted_at IS NOT NULL THEN 'deleted_page_chunks' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN cc.\"embedding\" IS NOT NULL THEN 'embedded' WHEN p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'pending' ELSE 'keyword_only' END AS state, NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AS eligible, COALESCE((p.deleted_at < now() - make_interval(hours => $1::int)), false) AS overdue, cc.embedding_pending_since IS NULL AS unstamped, cc.created_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE TRUE) s GROUP BY s.state",
+            "textSha256": "71c9be80016724dfa58e92a4c5b2f5f364f275babcb26ad4c25334953636db9a"
+          },
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT count(*)::bigint AS pages, COALESCE(sum(CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number' THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END), 0)::bigint AS marker_bytes, count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id))::bigint AS chunkless FROM pages p WHERE p.frontmatter ? 'embed_skip' AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine')",
+            "textSha256": "9fc4b55b9f5316227a7ad722bef9f4e18cd48958ed8ca259390ddc5c0158489d"
+          },
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT s.state, count(*)::bigint AS n FROM (SELECT CASE WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'keyword_only' WHEN p.deleted_at IS NULL AND (p.compiled_truth <> '' OR p.timeline <> '') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) THEN 'chunkless_healable' ELSE 'empty' END AS state FROM pages p WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)) s GROUP BY s.state",
+            "textSha256": "b2d51df28315e0a7e6a7398d11744d4ffec51b3b539698b822782de61e7cf0de"
+          }
+        ],
+        "full+sourceIds": [
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
+            "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "number",
+              "array<string>"
+            ],
+            "sql": "SELECT s.state, count(*)::bigint AS n, count(*) FILTER (WHERE s.eligible)::bigint AS eligible, count(*) FILTER (WHERE s.overdue)::bigint AS overdue, count(*) FILTER (WHERE s.unstamped)::bigint AS unstamped, min(s.created_at) FILTER (WHERE s.unstamped) AS unstamped_min FROM (SELECT CASE WHEN p.deleted_at IS NOT NULL THEN 'deleted_page_chunks' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN cc.\"embedding\" IS NOT NULL THEN 'embedded' WHEN p.deleted_at IS NULL AND cc.\"embedding\" IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'pending' ELSE 'keyword_only' END AS state, NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AS eligible, COALESCE((p.deleted_at < now() - make_interval(hours => $1::int)), false) AS overdue, cc.embedding_pending_since IS NULL AS unstamped, cc.created_at FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE TRUE AND p.source_id = ANY($2::text[])) s GROUP BY s.state",
+            "textSha256": "cc791916e96432ab7a27cb9e08e851f3c288dfa67f22b9828ecb346b9773cd29"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "array<string>"
+            ],
+            "sql": "SELECT count(*)::bigint AS pages, COALESCE(sum(CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number' THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END), 0)::bigint AS marker_bytes, count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id))::bigint AS chunkless FROM pages p WHERE p.frontmatter ? 'embed_skip' AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') AND p.source_id = ANY($1::text[])",
+            "textSha256": "6ed9cefe65301945aa7ee791953c2b95daa9bcd55f9b6e24be69dbabc2fdaca2"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "array<string>"
+            ],
+            "sql": "SELECT s.state, count(*)::bigint AS n FROM (SELECT CASE WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') THEN 'quarantined' WHEN NOT NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') THEN 'keyword_only' WHEN p.deleted_at IS NULL AND (p.compiled_truth <> '' OR p.timeline <> '') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'quarantine') AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) THEN 'chunkless_healable' ELSE 'empty' END AS state FROM pages p WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id) AND p.source_id = ANY($1::text[])) s GROUP BY s.state",
+            "textSha256": "0d349e62d3ec1f08e76c1c2c38ad677566a42717f1bc965c293210eb2807b452"
+          }
+        ],
+        "ops": [
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
+            "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "string"
+            ],
+            "sql": "SELECT ic.relname AS name FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE t.relname = 'content_chunks' AND n.nspname = current_schema() AND i.indisvalid AND i.indpred IS NOT NULL AND pg_get_expr(i.indpred, i.indrelid) = '(' || quote_ident($1) || ' IS NULL)' ORDER BY ic.relname LIMIT 1",
+            "textSha256": "024a6c1f7deca626d307cb1f3566cdadb7c7ea81af23f13aeb816981efdfe79f"
           }
         ]
       },

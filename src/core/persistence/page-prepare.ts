@@ -130,7 +130,7 @@ function isNeverFiledDerivedPage(slug: string, page: { source_path?: string | nu
  * A live page whose canonical file is absent publishes to the database only
  * when its slug is a declared db_only path or a never-filed derive-phase page.
  */
-export function publishesDatabaseOnly(root: string, slug: string, snapshot: PageSnapshot | null): boolean {
+export function publishesDatabaseOnly(root: string, slug: string, snapshot: { page: Pick<PageSnapshot['page'], 'deleted_at' | 'source_path' | 'source_uri'> } | null): boolean {
   if (!snapshot || snapshot.page.deleted_at) return false;
   return isSourceDbOnlySlug(root, slug, 'refuse') || isNeverFiledDerivedPage(slug, snapshot.page);
 }

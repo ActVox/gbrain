@@ -20,6 +20,7 @@
 import type { PageKey, PageSnapshot, PageSnapshotOptions } from '../page-state/types.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import type { BrainEngine } from '../engine.ts';
+import type { EmbeddingState, EmbeddingStateCounts, EmbeddingStateRow } from '../embedding-state.ts';
 import type { Chunk, ChunkInput, ChunklessPageRow, ResolvedColumn, StaleChunkRow } from '../types.ts';
 import { rowToChunk, validateSlug } from '../utils.ts';
 import { createHash } from 'node:crypto';
@@ -43,6 +44,7 @@ import type { SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead, ScopedRead } from './brands.ts';
 import { joinFragments, renderFragment, sqlFragment, trustedSql, type SqlFragment } from './fragment.ts';
 import { pipelined } from '../page-state/transactions.ts';
+import { compileRowNormalizer } from './normalize.ts';
 
 /** The engine's page-state guards, run on the same (transaction) engine. */
 export interface ChunkPageGuards {
@@ -755,6 +757,184 @@ export async function listChunklessPagesWithContent(exec: ScopedRead, opts?: {
       timeline: (r.timeline as string | null) ?? '',
     }));
   }
+
+/** Every embedding state, in report order (re-exported by src/core/embedding-state.ts). */
+export const EMBEDDING_STATES: readonly EmbeddingState[] = ['embedded', 'pending', 'keyword_only', 'quarantined', 'empty', 'deleted_page_chunks', 'chunkless_healable'];
+
+/**
+ * #6696 B3 embedding-state classifier (contract in src/core/embedding-state.ts).
+ * A chunk's state, by precedence: soft-deleted page, quarantined page, a
+ * vector in the ACTIVE column, the embed job's own predicate
+ * (`staleChunkWhere`, so `pending` can never drift from what `embed --stale`
+ * selects), else a vector-less chunk on an embed_skip page.
+ */
+function chunkEmbeddingState(column: string): SqlFragment {
+  const colRef = trustedSql(`cc.${quoteIdentifier(column)}`);
+  return sqlFragment`CASE
+      WHEN p.deleted_at IS NOT NULL THEN 'deleted_page_chunks'
+      WHEN NOT ${trustedSql(QUARANTINE_FILTER_FRAGMENT)} THEN 'quarantined'
+      WHEN ${colRef} IS NOT NULL THEN 'embedded'
+      WHEN ${staleChunkWhere(column)} THEN 'pending'
+      ELSE 'keyword_only' END`;
+}
+
+/** A live page with no chunk row: gated (quarantine, embed_skip), healable (`chunklessPagesWhere`), else empty. */
+function chunklessPageState(): SqlFragment {
+  return sqlFragment`CASE
+      WHEN NOT ${trustedSql(QUARANTINE_FILTER_FRAGMENT)} THEN 'quarantined'
+      WHEN NOT ${trustedSql(EMBED_SKIP_FILTER_FRAGMENT)} THEN 'keyword_only'
+      WHEN ${chunklessPagesWhere()} THEN 'chunkless_healable'
+      ELSE 'empty' END`;
+}
+
+function embeddingStateScope(sourceIds?: string[]): SqlFragment {
+  return sourceIds ? sqlFragment` AND p.source_id = ANY(${sourceIds}::text[])` : sqlFragment``;
+}
+
+const NO_CHUNK_ROWS = sqlFragment`NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)`;
+const MARKER_BYTES = sqlFragment`CASE WHEN jsonb_typeof(p.frontmatter -> 'embed_skip' -> 'bytes') = 'number'
+      THEN (p.frontmatter -> 'embed_skip' ->> 'bytes')::numeric::bigint END`;
+
+const normalizeStateCount = compileRowNormalizer<{ state: EmbeddingState; n: number; eligible: number; overdue: number; unstamped: number; unstamped_min: Date | null }>(
+  { n: 'bigint', eligible: 'bigint', overdue: 'bigint', unstamped: 'bigint', unstamped_min: 'date' });
+const normalizeEmbedSkip = compileRowNormalizer<{ pages: number; marker_bytes: number; chunkless: number }>({ pages: 'bigint', marker_bytes: 'bigint', chunkless: 'bigint' });
+
+/**
+ * Counts per embedding state. `full`: two exact aggregates (every chunk, every
+ * chunkless live page). `ops`: only index-backed reads, and `basis: 'unknown'`
+ * when no valid partial index on content_chunks has the predicate
+ * `<active column> IS NULL` (never a slow scan): the vector-less chunks through
+ * that index, quarantined and embed_skip pages through the frontmatter GIN
+ * index, deleted pages through the purge index, and `embedded` as the
+ * planner's row estimate; `empty` and `chunkless_healable` need an anti-join
+ * over every live page and are omitted.
+ */
+export async function readEmbeddingStateCounts(exec: ScopedRead, column: string,
+  opts: { mode: 'ops' | 'full'; sourceIds?: string[]; purgeWindowHours: number }): Promise<EmbeddingStateCounts> {
+  const scope = embeddingStateScope(opts.sourceIds);
+  const colRef = trustedSql(`cc.${quoteIdentifier(column)}`);
+  let coveringIndex: string | null = null;
+  if (opts.mode === 'ops') {
+    const { rows } = await exec.run<{ name: string }>(sqlFragment`
+      SELECT ic.relname AS name
+        FROM pg_index i
+        JOIN pg_class ic ON ic.oid = i.indexrelid
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+       WHERE t.relname = 'content_chunks' AND n.nspname = current_schema()
+         AND i.indisvalid AND i.indpred IS NOT NULL
+         AND pg_get_expr(i.indpred, i.indrelid) = '(' || quote_ident(${column}) || ' IS NULL)'
+       ORDER BY ic.relname LIMIT 1`);
+    coveringIndex = rows[0]?.name ?? null;
+    if (!coveringIndex) {
+      return { active_column: column, basis: 'unknown', covering_index: null, counts: {}, omitted: [], eligible_embedded: null,
+        deleted_overdue: 0, embed_skip_pages: 0, embed_skip_marker_bytes: 0, unstamped_pending: 0, unstamped_created_at_min: null };
+    }
+  }
+  const counts: Partial<Record<EmbeddingState, number>> = {};
+  const add = (state: EmbeddingState, n: number) => { counts[state] = (counts[state] ?? 0) + n; };
+  const overdue = sqlFragment`(p.deleted_at < now() - make_interval(hours => ${opts.purgeWindowHours}::int))`;
+  const aggregate = (where: SqlFragment) => exec.run(sqlFragment`
+      SELECT s.state, count(*)::bigint AS n, count(*) FILTER (WHERE s.eligible)::bigint AS eligible,
+             count(*) FILTER (WHERE s.overdue)::bigint AS overdue,
+             count(*) FILTER (WHERE s.unstamped)::bigint AS unstamped,
+             min(s.created_at) FILTER (WHERE s.unstamped) AS unstamped_min
+        FROM (SELECT ${chunkEmbeddingState(column)} AS state, ${trustedSql(EMBED_SKIP_FILTER_FRAGMENT)} AS eligible,
+                     COALESCE(${overdue}, false) AS overdue, cc.embedding_pending_since IS NULL AS unstamped, cc.created_at
+                FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+               WHERE ${where}${scope}) s
+       GROUP BY s.state`);
+  const chunkRows = (await aggregate(opts.mode === 'ops' ? sqlFragment`${colRef} IS NULL` : sqlFragment`TRUE`)).rows.map(row => normalizeStateCount(row));
+  let pendingUnstamped = 0;
+  let unstampedMin: Date | null = null;
+  let eligibleEmbedded = 0;
+  let deletedOverdue = 0;
+  for (const row of chunkRows) {
+    if (row.state === 'pending') { pendingUnstamped = row.unstamped; unstampedMin = row.unstamped_min; }
+    if (row.state === 'embedded') eligibleEmbedded = row.eligible;
+    if (opts.mode === 'ops' && (row.state === 'quarantined' || row.state === 'deleted_page_chunks')) continue;
+    if (row.state === 'deleted_page_chunks') deletedOverdue = row.overdue;
+    add(row.state, row.n);
+  }
+  const embedSkip = normalizeEmbedSkip((await exec.run(sqlFragment`
+      SELECT count(*)::bigint AS pages, COALESCE(sum(${MARKER_BYTES}), 0)::bigint AS marker_bytes,
+             count(*) FILTER (WHERE ${NO_CHUNK_ROWS})::bigint AS chunkless
+        FROM pages p
+       WHERE p.frontmatter ? 'embed_skip' AND p.deleted_at IS NULL AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}${scope}`)).rows[0] ?? {});
+  const base = { active_column: column, covering_index: coveringIndex, embed_skip_pages: embedSkip.pages ?? 0, embed_skip_marker_bytes: embedSkip.marker_bytes ?? 0,
+    unstamped_pending: pendingUnstamped, unstamped_created_at_min: unstampedMin };
+  if (opts.mode === 'full') {
+    const { rows } = await exec.run(sqlFragment`
+      SELECT s.state, count(*)::bigint AS n
+        FROM (SELECT ${chunklessPageState()} AS state FROM pages p WHERE p.deleted_at IS NULL AND ${NO_CHUNK_ROWS}${scope}) s
+       GROUP BY s.state`);
+    for (const row of rows) add(row.state as EmbeddingState, Number(row.n));
+    for (const state of EMBEDDING_STATES) counts[state] ??= 0;
+    return { ...base, basis: 'exact', counts, omitted: [], eligible_embedded: eligibleEmbedded, deleted_overdue: deletedOverdue };
+  }
+  add('keyword_only', embedSkip.chunkless ?? 0);
+  const quarantined = await exec.run(sqlFragment`
+      SELECT COALESCE(sum(GREATEST((SELECT count(*) FROM content_chunks cc WHERE cc.page_id = p.id), 1)), 0)::bigint AS n
+        FROM pages p
+       WHERE p.frontmatter ? 'quarantine' AND p.deleted_at IS NULL${scope}`);
+  counts.quarantined = Number(quarantined.rows[0]?.n ?? 0);
+  const deleted = await exec.run(sqlFragment`
+      SELECT count(*)::bigint AS n, count(*) FILTER (WHERE ${overdue})::bigint AS overdue
+        FROM pages p JOIN content_chunks cc ON cc.page_id = p.id
+       WHERE p.deleted_at IS NOT NULL${scope}`);
+  counts.deleted_page_chunks = Number(deleted.rows[0]?.n ?? 0);
+  const plan = await exec.run<{ 'QUERY PLAN': unknown }>(sqlFragment`
+      EXPLAIN (FORMAT JSON) SELECT 1 FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+       WHERE ${colRef} IS NOT NULL AND p.deleted_at IS NULL AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}${scope}`);
+  counts.embedded = plannerRows(plan.rows[0]?.['QUERY PLAN']);
+  for (const state of ['pending', 'keyword_only'] as const) counts[state] ??= 0;
+  return { ...base, basis: 'estimated', counts, omitted: ['empty', 'chunkless_healable'], eligible_embedded: null,
+    deleted_overdue: Number(deleted.rows[0]?.overdue ?? 0) };
+}
+
+/** `EXPLAIN (FORMAT JSON)`'s top-level row estimate (postgres.js parses json; PGLite may hand back text). */
+function plannerRows(plan: unknown): number {
+  const parsed = typeof plan === 'string' ? JSON.parse(plan) as unknown : plan;
+  const rows = Array.isArray(parsed) ? (parsed[0] as { Plan?: { 'Plan Rows'?: unknown } } | undefined)?.Plan?.['Plan Rows'] : undefined;
+  return typeof rows === 'number' && Number.isFinite(rows) ? Math.max(0, Math.round(rows)) : 0;
+}
+
+const normalizeStateRow = compileRowNormalizer<EmbeddingStateRow>({ chunks: 'bigint', bytes: 'bigint', marker_bytes: 'bigint', deleted_at: 'date' });
+
+/**
+ * One row per (page, state) in `states`, ordered (state, source_id, slug):
+ * a page whose chunks sit in two states (some embedded, some pending) yields
+ * two rows; a page with no chunk row yields one row with `chunks: 0` and its
+ * body bytes. Exact (full scan); the caller passes `limit` (one more than it
+ * prints, to report completeness).
+ */
+export async function listEmbeddingStateRows(exec: ScopedRead, column: string,
+  opts: { sourceIds?: string[]; states: readonly EmbeddingState[]; limit: number; purgeWindowHours: number }): Promise<EmbeddingStateRow[]> {
+  const scope = embeddingStateScope(opts.sourceIds);
+  const { rows } = await exec.run(sqlFragment`
+    SELECT r.slug, r.source_id, r.state, r.chunks, r.bytes, r.embed_skip_reason, r.marker_bytes, r.quarantine_reason, r.deleted_at, r.overdue
+      FROM (
+        SELECT p.slug, p.source_id, ${chunkEmbeddingState(column)} AS state, count(*)::bigint AS chunks,
+               COALESCE(sum(octet_length(cc.chunk_text)), 0)::bigint AS bytes,
+               p.frontmatter -> 'embed_skip' ->> 'reason' AS embed_skip_reason, ${MARKER_BYTES} AS marker_bytes,
+               p.frontmatter -> 'quarantine' ->> 'reason' AS quarantine_reason, p.deleted_at,
+               COALESCE(p.deleted_at < now() - make_interval(hours => ${opts.purgeWindowHours}::int), false) AS overdue
+          FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+         WHERE TRUE${scope}
+         GROUP BY p.id, 3
+        UNION ALL
+        SELECT p.slug, p.source_id, ${chunklessPageState()}, 0::bigint,
+               (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')))::bigint,
+               p.frontmatter -> 'embed_skip' ->> 'reason', ${MARKER_BYTES},
+               p.frontmatter -> 'quarantine' ->> 'reason', p.deleted_at, false
+          FROM pages p
+         WHERE p.deleted_at IS NULL AND ${NO_CHUNK_ROWS}${scope}
+      ) r
+     WHERE r.state = ANY(${[...opts.states]}::text[])
+     ORDER BY r.state, r.source_id, r.slug
+     LIMIT ${opts.limit}`);
+  return rows.map(row => normalizeStateRow(row));
+}
 
 export async function deleteChunks(exec: SqlExecutor, slug: string, opts?: { sourceId?: string }): Promise<void> {
     const sourceId = opts?.sourceId ?? 'default';
