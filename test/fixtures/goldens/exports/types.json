@@ -4870,6 +4870,13 @@
         "name": "CodeRef"
       },
       {
+        "kind": "variable",
+        "name": "EXACT_SLUG_SHAPE_RE",
+        "signature": [
+          "RegExp"
+        ]
+      },
+      {
         "kind": "interface",
         "members": [
           "dir: string",
@@ -5091,6 +5098,13 @@
         "name": "deriveTimelineAnchor",
         "signature": [
           "(input: TimelineAnchorInput) => TimelineCandidate | null"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "exactSlugCandidates",
+        "signature": [
+          "(value: string) => string[]"
         ]
       },
       {

@@ -668,12 +668,14 @@
         "expectEvent"
       ],
       "./link-extraction": [
+        "EXACT_SLUG_SHAPE_RE",
         "FRONTMATTER_LINK_MAP",
         "LINK_EXTRACTOR_VERSION_TS",
         "WIKILINK_BASENAME_LINK_TYPE",
         "attendanceEvidenceRanges",
         "buildBasenameIndex",
         "deriveTimelineAnchor",
+        "exactSlugCandidates",
         "explainLinkType",
         "extractCodeRefs",
         "extractEntityRefs",
