@@ -135,6 +135,20 @@ export interface MarkdownCodeMap {
 }
 
 export function scanMarkdownCode(markdown: string): MarkdownCodeMap {
+  const { fenced, unclosedAt, mispaired, hasCR } = walkMarkdownCode(markdown);
+  return { body: markdown, fenced: mispaired || unclosedAt !== -1 ? [] : fenced, unclosedAt, hasCR, line: null };
+}
+
+/**
+ * Whether scanMarkdownCode trusts this body's fenced blocks: every opener
+ * closes and no block holds a line that could open a block as long as its own.
+ */
+export function markdownFenceTrusted(markdown: string): boolean {
+  const { unclosedAt, mispaired } = walkMarkdownCode(markdown);
+  return unclosedAt === -1 && !mispaired;
+}
+
+function walkMarkdownCode(markdown: string): { fenced: Array<[number, number]>; unclosedAt: number; mispaired: boolean; hasCR: boolean } {
   const fenced: Array<[number, number]> = [];
   const len = markdown.length;
   const hasCR = markdown.includes('\r');
@@ -167,11 +181,11 @@ export function scanMarkdownCode(markdown: string): MarkdownCodeMap {
       }
       // Unclosed: this is the block every fence writer must stay above. No
       // block is trusted any more, so there is nothing left to pair.
-      return { body: markdown, fenced: [], unclosedAt: start, hasCR, line: null };
+      return { fenced, unclosedAt: start, mispaired, hasCR };
     }
     start = next;
   }
-  return { body: markdown, fenced: mispaired ? [] : fenced, unclosedAt: -1, hasCR, line: null };
+  return { fenced, unclosedAt: -1, mispaired, hasCR };
 }
 
 /**
@@ -298,6 +312,13 @@ function pushInlineCodeRanges(s: string, start: number, end: number, out: Array<
     out.push([k, close + len]);
     k = close + len;
   }
+}
+
+/** Same-line inline code spans of one line (no line terminator), as `inlineCodeEndAt` computes them. */
+export function inlineCodeSpans(line: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  if (line.includes('`')) pushInlineCodeRanges(line, 0, line.length, spans);
+  return spans;
 }
 
 function insideRange(ranges: Array<[number, number]>, at: number): number {
