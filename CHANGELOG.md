@@ -10,48 +10,97 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.247.0] - 2026-10-15
+## [0.60.246.0] - 2026-10-15
 
-**The "Before you start" brief now also picks up changes you or your agent recorded by editing a person's page, not only saved facts (still off until you turn it on).** Some agents record a moved meeting or a corrected number by editing the contact's page instead of saving a fact. Until now the brief only read saved facts, so those agents got no brief at all. With the brief on, it now also looks at the newest dated change on the person's or company's page: the lines the latest edit added, or the newest timeline entry. That change becomes one of the brief's up-to-three items, with its date and the page it came from. If the same thing is already saved as a fact, you see it once, as the fact. Nothing changes for anyone who leaves the brief off.
+**Windows hosts can delete pages again, Chinese, Japanese and Korean searches show their match counts again, and Google sources stop re-reading old mail after an upgrade.**
 
-### How to turn it on
+Four bugs that each broke something people use every day. On Windows, every page delete (and every reconcile) failed with a database error before it did anything, because one query sent the database a value it never used. Every search in Chinese, Japanese or Korean said its keyword match count was unavailable, for a similar reason. A Google connector upgraded past v0.60.176.0 lost track of where it had stopped, so Gmail and contacts were read again from the start, captures could time out, and the old position could even be cleaned up as junk. And `gbrain sources writer movement --wait 5m` refused its own documented flag.
 
-Same switch as before:
+## How to use it
+
+Nothing to turn on. Upgrade, then:
 
 ```bash
-gbrain config set context.proactive_brief true
+gbrain search "혈당"                       # the count line shows a number again
+gbrain sync --source <google-source-id>    # resumes where it left off
+gbrain sources writer movement --source <id> --wait 5m
 ```
 
-### What you'd see
+## What you'd see
 
-| What happened earlier | The brain adds before the next reply or meeting |
-|---|---|
-| Your agent edited `people/alice-example`: "Next meeting: Tuesday, October 20 (moved from Friday, October 16)" | `[Ev88] 2026-10-14 · edit: “- Next meeting: Tuesday, October 20 (moved from Friday, October 16).”` → `people/alice-example` |
-| A timeline entry was added to the page: "Pricing review moved to Tuesday" | `[Et17] 2026-10-14 · timeline: “Pricing review moved to Tuesday”` |
-| The same change was also saved as a fact | only the fact (`[F…] … change: …`) |
-| The edit is older than 30 days | nothing from that edit |
+| Situation | Before | Now |
+|---|---|---|
+| Delete a page on Windows | Fails with Postgres error 42P18 | Works |
+| Search in Chinese, Japanese or Korean | "Keyword match count unavailable" | The count |
+| First Google sync after upgrading past v0.60.176.0 | Re-reads mail and contacts from the start | Continues from the saved position |
+| `writer movement --wait 5m` | Fails as an internal error | Judges movement over a 5-minute window |
+| `remember ... --wait 5m` | Internal error, exit 1 | Usage error naming seconds, exit 2 |
 
-### What to watch for
+## Things to watch
 
-- **Only shareable pages.** Edits on private pages, on pages derived from private notes, and timeline entries that come from private events are never shown. Rows in a page's facts table never count as an edit, so a private fact written into a shared page stays private.
-- **Remote callers get shareable edits too.** Remote callers of the pull form (`context_pack` with `counterparty`) get edit items from shareable pages only, the same text `get_versions` and `get_timeline` already return to them. Open loops stay withheld.
-- **Only recent changes.** An edit or timeline entry recorded more than 30 days ago is skipped, and so is a timeline entry dated more than 30 days ago.
-- **The person's own page only.** Edits to meeting or deal pages that link to the person are not used yet.
+Nothing is rewritten when you upgrade. A Google source keeps both of its saved positions, the pre-v0.60.176.0 one and the one written since, and its next sync picks the right one: the older one, unless the newer one finished its Gmail backfill and reached newer mail. That sync saves the position once under the original key. If an older cleanup already deleted the original position, that source reads its history once more. A malformed write `--wait` now exits 2 instead of 1.
+
+Contributed by @49ps5vwv5g-del (the Windows page-delete fix).
 
 ### Itemized changes
 
-- **Edit items** (`src/core/context/proactive-brief.ts`): a new `edit` item comes after the newest open loop and the newest fact. It is the page's newest revision (the narrative lines it added that the page still has, id `Ev<version id>`) or its newest timeline entry (`Et<entry id>`), whichever was recorded last.
-  - Facts and takes tables and headings are left out of the comparison.
-  - It reads at most four revisions of a page up to 64 KiB.
-  - It uses the same privacy, eligibility, redaction, 600/1,800-character and once-per-session rules as the other items.
-  - An edit whose words are at least 80% contained in a fact or open loop of the same brief is dropped.
-- **Telemetry:** delivered edit items log to `context_volunteer_events` with rationale `edit:<id>`. No schema change.
-- **Docs:** `docs/guides/push-context.md` and `docs/protocol/MEMORY_VERBS_v1.md` describe the edit item.
+- **Windows page deletes (#6659).** The file-claim census behind `delete_page`, the shared-origin check and reconcile now builds its query and parameters per platform (`fileClaimCandidatesQuery` in `src/core/persistence/file-claims.ts`), so every parameter it sends is one the query uses. A new test runs every exported query builder over its platforms and options and checks that each `$n` is referenced (`test/sql-bind-placeholders.test.ts`).
+- **CJK keyword counts.** `buildKeywordMatch` (`src/core/search/keyword-statement.ts`) puts the match and filter parameters first and the ranking parameters last; the count sends only the first group. `keyword_total` on hybrid search and `total` with `match: "keyword"` work for CJK queries on PGLite and Postgres, with type and source filters. A count failure that is not a timeout logs its SQLSTATE once per process.
+- **Google checkpoint key (#6561).** A connector config field added with a default that keeps the old behavior (Google `contactsDir: people`) no longer changes the checkpoint key (`elideWhen` in `src/core/persistence/connector-identity.ts`). The key written by v0.60.176.0 through v0.60.245.0 is kept as an alias: orphan cleanup, `gbrain repair connector-checkpoints` and the doctor check never delete a row under it (the repair preview counts them as `alias_protected`), the sync loader reads retry approvals under it, and writes admitted under it still publish. The loader resumes from the alias row when the original key has none, or when the alias row was written later and holds the newer completed Gmail backfill; every write goes to the original key.
+- **`--wait` on `sources writer movement` (#6625).** The global write-wait parser hands `--wait` back to `sources writer movement` (`WAIT_OWNING_ROUTES` in `src/core/cli-options.ts`), which reads durations like `5m`. A malformed write `--wait` is an `invalid_params` usage error (exit 2) whose message says seconds, no units.
 
 ### For contributors
 
-- `test/e2e/persistence-statement-budget.test.ts` no longer counts the consumer's dead-owner claim scan as preparation. Its warm-up also re-reads the write-switch snapshot and publication ceiling before each measured write, using `resetWriteSwitches` and the new test-only `_resetPublicationCeilingForTest`, so neither cache expires mid-write on a slow host. Budgets are unchanged.
-- `test/persistence-consumer-scheduling.test.ts`: the healthy-renewal case now prepares until the claim lease has renewed three times, instead of for a fixed 120 ms.
+- New tests: `test/file-claims-win32-6659.serial.test.ts`, `test/sql-bind-placeholders.test.ts`; #6561 cases in `test/connector-identity.test.ts` and `test/connector-checkpoint-identity.test.ts` (Postgres arm through `test/e2e/connector-wave3.test.ts`); CJK count cases in `test/search-keyword-paging.test.ts` and `test/e2e/search-keyword-paging-parity.test.ts`; `--wait` cases in `test/cli-options.test.ts`.
+
+## [0.60.245.0] - 2026-10-15
+
+**A fact your agent saves no longer disappears because a page edit was committed but not synced yet, and saving facts no longer splits a page's fact table in two.**
+
+Two things went wrong on brains where people and agents both edit pages in Git. First, if you committed a change to a page and your agent saved a fact about it before the next sync, gbrain refused the save as a conflicting edit and nothing ever retried it. The fact was simply gone. Now gbrain recognizes this case ("your commit is waiting to be imported"), tells the agent to wait instead of retrying, and replays the saved fact once, automatically, as soon as the sync brings that file in. Second, some pages keep their facts table at the bottom, under the timeline. Saving a fact to one of those pages used to add a second facts table at the top. Now gbrain writes into the existing table wherever it lives.
+
+## How to use it
+
+Nothing to turn on. After `gbrain sync`, check the replays:
+
+```bash
+gbrain sync --source <id> --json   # "replayedRemembers": examined, replayed, waiting, skipped, remaining
+gbrain repair failed-writes --source <id>   # anything that still needs you
+```
+
+Pages that already have two facts tables get an explicit repair. Preview it first, then apply:
+
+```bash
+gbrain repair split-facts --source <id>
+gbrain repair split-facts --source <id> --apply --expect <hash>
+```
+
+## What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| Agent saves a fact right after you commit that page | Refused, lost | Refused with "waiting for import", replayed after sync |
+| Agent saves a fact to a page whose facts sit under the timeline | Second table added at the top | Row added to the existing table |
+| Page already has two facts tables | Facts index frozen with a warning | Same warning, now naming `gbrain repair split-facts` |
+
+## Things to watch
+
+Only the saves refused after you upgrade are replayed automatically. Older refusals stay with `gbrain repair failed-writes`, which already lists them. Page edits (`put_page`) are never replayed automatically, because a whole-page write can overwrite your commit. The split-facts repair never runs on upgrade, from `repair --all`, or from doctor's remediation; it skips any page where both tables use the same row number and tells you why.
+
+Contributed by @javieraldape (the timeline facts test suite).
+
+### Itemized changes
+
+- **Refused while waiting for import.** When a write's file is exactly the committed `HEAD` blob but not the blob at the source's last imported commit, the refusal keeps code `source_changed` / `file_database_drift` and adds reason `pending_import` (`src/core/persistence/pending-import.ts`, read-only git). `remember` gets `fix.next: wait` with `gbrain sync status --source <id> --json`; other writes get a sync-then-resubmit fix. Refusals on a sync-held file carry reason `sync_held`. Both are recorded as `error_detail.origin` on the receipt.
+- **One automatic replay after each sync.** After every non-dry-run managed sync, caller `remember` receipts with origin `pending_import` or `sync_held` whose page now matches its file get one replay through the `repair failed-writes` path: same caller lane, live authority check, derived request id. Capped at 50 per sync and 30 seconds; counts land in `SyncResult.replayedRemembers`.
+- **Replays keep the fact's dates.** `repair failed-writes` replays now keep the original `valid_from` and expiry instead of resetting them.
+- **Facts tables stay where they are.** `remember`, `extract_facts` and supersede strikes edit a lone facts fence under the timeline sentinel in place, leave the body byte for byte, and number new rows past the index and both sections (`src/core/facts-fence.ts`, `memory-prepare.ts`, `facts-prepare.ts`). `extract_facts` reconciles a lone timeline fence instead of freezing it.
+- **`gbrain repair split-facts`** (explicit-only, preview-bound) merges a split page's two fences into the timeline fence, keeping every row number and fact id. It reports `row_collision`, `unparsed` and `not_conserved` pages instead of touching them (`src/core/repair/split-facts.ts`).
+- Docs: `docs/guides/write-refusals.md` (`pending_import`), `docs/guides/repair.md` (`#split-facts`, failed-writes replay).
+
+### For contributors
+
+- New tests: `test/remember-pending-import.test.ts`, `test/repair-split-facts.test.ts`, `test/managed-timeline-facts.serial.test.ts`, `test/e2e/managed-timeline-facts-postgres.test.ts`. `extract-facts-phase` and `e2e/system-of-record-invariant` assert the new timeline-fence contract. The explicit-only repair kind lists include `split-facts`.
 
 ## [0.60.244.0] - 2026-10-15
 
