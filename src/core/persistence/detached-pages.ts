@@ -15,6 +15,7 @@
  * managed sources on their owner host).
  */
 import { execFileSync } from '../spawn.ts';
+import { gitChildEnv } from '../git-env.ts';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -39,7 +40,7 @@ export function inSyncableTree(path: string): boolean {
   if (!existsSync(path)) return false;
   try {
     return execFileSync('git', ['-C', dirname(path), 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', basename(path)],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).length > 0;
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitChildEnv() }).length > 0;
   } catch {
     return true;
   }

@@ -37,6 +37,7 @@ test/backup-cli.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_B
 test/backup-coverage.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BRAIN_ID)
 test/backup-fsync.serial.test.ts	global-state	global-state: spyOn fs.fsyncSync, fs.openSync, privacy.protectNewBackupPath, childProcess.execFile
 test/backup-invalidation.serial.test.ts	R1	R1: mutates process.env (HOME, GBRAIN_HOME, GBRAIN_GIT_ALLOW_FILE_TRANSPORT, GBRAIN_ALLOW_UNVERIFIED_REMOTE (+2 more))
+test/backup-pending-continuation.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME); spyOn childProcess.execFile; process-wide test seam __setBackupStatusPathForTests
 test/backup-portability-native.serial.test.ts	R1	R1: mutates process.env (SystemRoot)
 test/backup-powershell-warmup.serial.test.ts	global-state	global-state: spyOn childProcess.execFile; redefines process.platform as win32; resets the module-level PowerShell warm-up
 test/backup-status-file.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK_DAYS, GBRAIN_BACKUP_CHECK, GBRAIN_FORCE_BACKUP_NAG (+2 more))

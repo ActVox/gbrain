@@ -366,6 +366,10 @@
         "name": "supersession_calibration"
       },
       {
+        "category": "brain",
+        "name": "fact_admission_floors"
+      },
+      {
         "category": "ops",
         "name": "chat_fallback_chain"
       },

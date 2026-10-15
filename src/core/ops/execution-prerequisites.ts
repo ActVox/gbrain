@@ -9,7 +9,8 @@
  * not change; test/grant-execution-prerequisites.test.ts pins every key to a
  * registered operation and to the enforcement it describes.
  */
-import { MEMORY_CONFIRM_SCOPE } from '../trust/confirm.ts';
+/** trust/confirm.ts MEMORY_CONFIRM_SCOPE; a literal keeps this table a leaf of the schema-migration import closure (v202 imports grants/legacy-token.ts). */
+const MEMORY_CONFIRM_SCOPE = 'memory_confirm';
 
 export type ExecutionPrerequisiteKind = 'owner_granted_scope' | 'explicit_operation_approval';
 

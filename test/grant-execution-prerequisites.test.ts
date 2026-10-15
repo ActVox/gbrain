@@ -31,6 +31,7 @@ describe('execution prerequisite table', () => {
     const names = new Set(operations.map(op => op.name));
     for (const op of Object.keys(EXECUTION_PREREQUISITES)) expect(names.has(op)).toBe(true);
     expect(EXECUTION_PREREQUISITES.confirm_memory).toMatchObject({ kind: 'owner_granted_scope', scope: MEMORY_CONFIRM_SCOPE });
+    // test-reads-source-ok[structural]: the membership ops' enforcement is the memberAuthority call sites; this pins that the prerequisite table names exactly those ops.
     const membershipSource = readFileSync(join(resolve(import.meta.dir, '..'), 'src/core/shared-skills/membership.ts'), 'utf8');
     const enforced = [...membershipSource.matchAll(/memberAuthority\(\w+, '([a-z_]+)'\)/g)].map(m => m[1]).sort();
     expect(enforced).toEqual(MEMBERSHIP);

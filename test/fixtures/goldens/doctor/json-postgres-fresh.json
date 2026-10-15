@@ -1019,6 +1019,15 @@
           "status": "ok"
         },
         {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "Embeddings are off on this brain, so facts are admitted by keyword and named entity only; no cosine floor applies.",
+          "name": "fact_admission_floors",
+          "readiness_state": "not_applicable",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
           "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "No chat_fallback_chain is set: every chat call uses only its own model.",

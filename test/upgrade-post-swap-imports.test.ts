@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+// test-reads-source-ok[structural]: #6604 is a post-swap module-graph hazard a hermetic upgrade run cannot reproduce; the guard pins that no dynamic import follows the swap.
 const SRC = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'upgrade.ts'), 'utf-8');
 const SWAP_MARKER = 'const newVersion = verifyUpgrade();';
 
@@ -54,6 +55,7 @@ describe('#6604 upgrade post-swap tail', () => {
   });
 
   test('the movement step constant lives in a leaf module with no imports', () => {
+    // test-reads-source-ok[structural]: the leaf must stay import-free so the post-swap step loads nothing from the new tree.
     const leaf = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'movement-step.ts'), 'utf-8');
     expect(new Bun.Transpiler({ loader: 'ts' }).scanImports(leaf)).toEqual([]);
     expect(SRC).toMatch(/^import \{ MOVEMENT_SUPERVISOR_STEP \} from '\.\/movement-step\.ts';$/m);

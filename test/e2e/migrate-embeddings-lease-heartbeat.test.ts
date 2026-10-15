@@ -57,7 +57,7 @@ describe.skipIf(skip)('migration lease transactions (#6587)', () => {
         await tx.executeRaw(`INSERT INTO config(key,value) VALUES('w17.6587.marker','written') ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`);
         await engine.executeRaw(`UPDATE gbrain_cycle_locks SET acquisition_token=gen_random_uuid() WHERE id=$1`, [lock.id]);
       })).rejects.toThrow('Migration lease lost');
-      expect(await engine.executeRaw(`SELECT value FROM config WHERE key='w17.6587.marker'`)).toEqual([]);
+      expect(await engine.executeRaw(`SELECT value FROM config WHERE key=$1`, ['w17.6587.marker'])).toEqual([]);
     } finally {
       await engine.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id=$1`, [lock.id]);
     }
