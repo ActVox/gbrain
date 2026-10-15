@@ -22,6 +22,8 @@ import { isValidSourceId } from './source-id.ts';
 import { isDatedTimelineLine, parseInlineCitationTimelineEntries, TIMELINE_LINE_RE, TIMELINE_LINE_RE_CN } from './timeline-citations.ts';
 import { isMaterializedMarkerLine } from './timeline-marker.ts';
 import { slugifyPath, slugifySegment } from './sync.ts';
+import { exactSlugCandidates } from './exact-slug-candidates.ts';
+export { EXACT_SLUG_SHAPE_RE, exactSlugCandidates } from './exact-slug-candidates.ts';
 import { SLUG_WORD_CHARS, SLUG_VARIATION_SELECTORS_RE } from './cjk.ts';
 import { foldNonDecomposingLatin } from './latin-fold.ts';
 import { isIdentityEntity, sameEntityName } from './entities/resolve.ts';
@@ -1668,25 +1670,6 @@ export function queryBasenameIndex(idx: Map<string, string[]>, name: string): st
   if (!trimmed) return [];
   const hit = idx.get(trimmed) ?? idx.get(trimmed.toLowerCase()) ?? idx.get(normalizeBasename(trimmed));
   return hit ? [...hit].sort(basenameSort) : [];
-}
-
-/** A value already in page-slug shape: lowercase alnum start, then alnum, `/`, `_`, `.`, `-`. */
-export const EXACT_SLUG_SHAPE_RE = /^[a-z0-9][a-z0-9/_.-]*$/;
-
-/**
- * The exact page slugs a path-shaped frontmatter value can name, in lookup
- * order: the value itself when it is slug-shaped (`companies/acme.io`,
- * `90-people/nicolai`), then `slugifyPath(value)`, the slug sync mints for
- * that file path (`sources/voice/2030-01-01 1200 Call with Mira` →
- * `sources/voice/2030-01-01-1200-call-with-mira`; strips `.md`). Values
- * without `/` get none: bare names go through the dir-hint and fuzzy steps.
- */
-export function exactSlugCandidates(value: string): string[] {
-  if (!value.includes('/')) return [];
-  const candidates = EXACT_SLUG_SHAPE_RE.test(value) ? [value] : [];
-  const minted = slugifyPath(value);
-  if (minted.includes('/') && !candidates.includes(minted)) candidates.push(minted);
-  return candidates;
 }
 
 /**
