@@ -175,6 +175,7 @@ export async function stageSegmentChunks(exec: SqlExecutor, pageId: number, gene
       // Lock-census: COMPLIANT — key is the page id, unique brain-wide.
       await tx.run(sqlFragment`SELECT pg_advisory_xact_lock(hashtextextended('gbrain:page-body-chunks:' || ${pageId}::text, 0))`);
     }
+    // chunk-visibility-ok: chunk_index is never reused, so the next index is past every row, staged and retired included
     const { rows } = await tx.run<{ next: unknown }>(sqlFragment`SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next FROM content_chunks WHERE page_id = ${pageId}`);
     const first = Number(rows[0]?.next ?? 0);
     const indexes = chunks.map((_, i) => first + i);
@@ -269,6 +270,7 @@ export async function flipBodyGeneration(exec: SqlExecutor, input: BodyFlipInput
         c.occurrence_id = ANY(${[...input.retireChunkOccurrences]}::bigint[])
         OR (${input.retireInlineChunks === true}::boolean AND c.body_generation IS NULL)
         OR (c.body_generation = ${input.newGeneration}::bigint AND c.occurrence_id NOT IN ${stagedOccurrences}))`;
+    // chunk-visibility-ok: the flip itself selects the rows it retires, across generations
     const { rows: counted } = await tx.run<{ n: unknown }>(sqlFragment`SELECT count(*)::bigint AS n FROM content_chunks c WHERE ${retire}`);
     const toRetire = Number(counted[0]?.n ?? 0);
     const retireDeferred = toRetire > input.retireMaxRows;

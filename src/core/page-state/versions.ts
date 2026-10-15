@@ -16,7 +16,7 @@ export { LARGE_PAGE_VERSIONS_KEPT };
 export async function createPageVersion(engine: BrainEngine, slug: string, sourceId: string, preimage?: PageSnapshot): Promise<PageVersion> {
   const insert = async (tx: BrainEngine, snapshot: PageSnapshot) => {
     const { page, tags, revision } = snapshot;
-    if ((page as { body_storage?: unknown }).body_storage === 'segmented') return insertSegmentedVersion(tx, snapshot);
+    if (isSegmentedSnapshotPage(page)) return insertSegmentedVersion(tx, snapshot);
     const rows = await tx.executeRaw<PageVersion>(`INSERT INTO page_versions
       (page_id,compiled_truth,frontmatter,knowledge_revision,timeline,title,type,tags,is_deleted,source_path)
       VALUES ($1,$2,$3::text::jsonb,$4::uuid,$5,$6,$7,$8::text::jsonb,$9,$10) RETURNING *`,
@@ -35,6 +35,17 @@ export async function createPageVersion(engine: BrainEngine, slug: string, sourc
     if (!snapshot) throw new Error(`createVersion failed: page "${slug}" (source=${sourceId}) not found`);
     return insert(tx, snapshot);
   });
+}
+
+/**
+ * A segmented page row: `body_storage` once the snapshot projects it (lane
+ * 1c's page shape), else the NULL body only a segmented row stores
+ * (`pages_body_storage_chk`). `body_storage` is read first, so lane 1c's body
+ * getters never fire here.
+ */
+export function isSegmentedSnapshotPage(page: PageSnapshot['page']): boolean {
+  const storage = (page as { body_storage?: unknown }).body_storage;
+  return storage === undefined ? page.compiled_truth == null : storage === 'segmented';
 }
 
 /**

@@ -17,6 +17,7 @@ import { jsonRowBatches } from '../batch-rows.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
 import { belowSafeChunkFence, movableChunkSql } from '../search/safe-chunks.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
+import { isSegmentedSnapshotPage } from './versions.ts';
 import { acceptedEmbeddingInputHashes, embeddingInputHash, plainEmbeddingTier, synopsisBodyHash,
   type EmbeddingInputContext, type EmbeddingTier } from '../embedding-input-hash.ts';
 
@@ -141,11 +142,6 @@ async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot, maxC
     corpusGeneration: projection?.corpus_generation ?? null };
 }
 
-/** Wave B: a segmented page's snapshot carries no body strings (lane 1c's `isSegmentedPage` shape). */
-function segmentedSnapshot(snapshot: PageSnapshot): boolean {
-  return (snapshot.page as { body_storage?: unknown }).body_storage === 'segmented';
-}
-
 /**
  * A short guarded read binds the exact chunk set and title/body revision.
  * Null for a segmented page: its projection is `buildSegmentedProjection` and
@@ -163,7 +159,7 @@ export async function readProjectionSnapshot(engine: BrainEngine, slug: string, 
 async function readGuardedProjectionSnapshot(tx: BrainEngine, slug: string, sourceId: string,
   opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean }): Promise<ProjectionSnapshot | null> {
   const snapshot = await tx.readPageSnapshot(slug, { sourceId, ...(opts.requireLiveSource && { requireLiveSource: true }) });
-  if (!snapshot || segmentedSnapshot(snapshot) || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
+  if (!snapshot || isSegmentedSnapshotPage(snapshot.page) || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
   const context = await indexingContext(tx, snapshot, opts.maxChunkTokens);
   const fenceOverlay = context.pageKind === 'markdown' ? await loadFenceChunkOverlay(tx, { sourceId, slug, compiled_truth: snapshot.page.compiled_truth, timeline: snapshot.page.timeline }) : undefined;
   return { snapshot, chunks: await tx.getChunks(slug, { sourceId, includeUnsealed: true }), indexingContext: context.key,
@@ -292,7 +288,7 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
     await tx.lockPageKeys([{ sourceId, slug }]);
     const current = await tx.readPageSnapshot(slug, { sourceId });
     if (!current || current.page.deleted_at || current.sourceIncarnation !== snapshot.sourceIncarnation || current.page.id !== snapshot.page.id
-      || current.page.text_projection_revision !== current.revision || segmentedSnapshot(current)) return refused;
+      || current.page.text_projection_revision !== current.revision || isSegmentedSnapshotPage(current.page)) return refused;
     const [source] = await tx.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]);
     if (!source || source.archived) return refused;
     const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);
