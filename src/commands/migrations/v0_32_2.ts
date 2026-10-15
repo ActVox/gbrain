@@ -241,8 +241,9 @@ async function phaseCVerify(
     // (chat-log shape is the source of truth). Same cli: exclusion as
     // extract_facts reconciliation. Counting them here fails every brain
     // that ran extract-conversation-facts.
-    const groups = await engine.executeRaw<{ source_id: string; source_markdown_slug: string; row_nums: number[] }>(
-      `SELECT source_id, source_markdown_slug, array_agg(row_num ORDER BY row_num) AS row_nums
+    const groups = await engine.executeRaw<{ source_id: string; source_markdown_slug: string; row_nums: number[]; all_expired: boolean }>(
+      `SELECT source_id, source_markdown_slug, array_agg(row_num ORDER BY row_num) AS row_nums,
+              bool_and(expired_at IS NOT NULL) AS all_expired
          FROM facts
         WHERE row_num IS NOT NULL
           AND COALESCE(source, '') NOT LIKE 'cli:%'
@@ -251,6 +252,10 @@ async function phaseCVerify(
 
     const mismatches: string[] = [];
     let pagesChecked = 0;
+    // #6685: a page deleted after all of its fenced rows expired leaves
+    // nothing to compare; like the backfill's skipped_no_page, it is not drift.
+    // A missing page that still has a live row is drift.
+    let skippedExpiredNoPage = 0;
     // Managed brains publish the fence through the coordinator, which writes
     // the canonical file in the same publication; the database copy is the
     // one every managed page has, database-only pages included.
@@ -261,7 +266,8 @@ async function phaseCVerify(
       if (managed) {
         const snapshot = await engine.readPageSnapshot(g.source_markdown_slug, { sourceId: g.source_id });
         if (!snapshot) {
-          mismatches.push(`${g.source_markdown_slug} (page missing)`);
+          if (g.all_expired) skippedExpiredNoPage += 1;
+          else mismatches.push(`${g.source_markdown_slug} (page missing)`);
           continue;
         }
         body = serializePageToMarkdown(snapshot.page, snapshot.tags);
@@ -270,7 +276,9 @@ async function phaseCVerify(
         if (!localPath) continue;
         const target = await resolvePageWriteTarget(engine, g.source_markdown_slug, g.source_id);
         if (!target.ok || !existsSync(target.filePath)) {
-          mismatches.push(`${g.source_markdown_slug} (file missing)`);
+          // Skip only an absent file; an unresolvable target is still drift.
+          if (target.ok && g.all_expired) skippedExpiredNoPage += 1;
+          else mismatches.push(`${g.source_markdown_slug} (file missing)`);
           continue;
         }
         body = readFileSync(target.filePath, 'utf-8');
@@ -301,7 +309,8 @@ async function phaseCVerify(
         detail: `${mismatches.length} pages drifted: ${mismatches.slice(0, 3).join(' | ')}${mismatches.length > 3 ? '...' : ''}`,
       };
     }
-    return { name: 'verify', status: 'complete', detail: `pages_checked=${pagesChecked}` };
+    const skipped = skippedExpiredNoPage > 0 ? ` skipped_expired_no_page=${skippedExpiredNoPage}` : '';
+    return { name: 'verify', status: 'complete', detail: `pages_checked=${pagesChecked}${skipped}` };
   } catch (e) {
     return { name: 'verify', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
   }
