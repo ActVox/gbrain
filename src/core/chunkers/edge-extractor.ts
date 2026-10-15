@@ -335,7 +335,7 @@ function statementBindingPrefix(stmt: any, language: SupportedCodeLanguage, rece
     // Check named imports + default + namespace imports for receiverName.
     const importText = (stmt.text ?? '') as string;
     // Cheap pre-filter: must mention receiverName as an identifier.
-    if (!new RegExp(`\\b${receiverName}\\b`).test(importText)) return null;
+    if (!mentionsWord(importText, receiverName)) return null;
     return source;
   }
   // Pattern 1 (Python): `from pkg import obj` / `import pkg`
@@ -345,13 +345,13 @@ function statementBindingPrefix(stmt: any, language: SupportedCodeLanguage, rece
       const module = moduleNode?.text;
       const importText = (stmt.text ?? '') as string;
       if (!module) return null;
-      if (!new RegExp(`\\b${receiverName}\\b`).test(importText)) return null;
+      if (!mentionsWord(importText, receiverName)) return null;
       return module;
     }
     if (stmt.type === 'import_statement') {
       // `import pkg` — receiver matches module name directly.
       const importText = (stmt.text ?? '') as string;
-      if (!new RegExp(`\\b${receiverName}\\b`).test(importText)) return null;
+      if (!mentionsWord(importText, receiverName)) return null;
       return receiverName;
     }
   }
@@ -362,7 +362,7 @@ function statementBindingPrefix(stmt: any, language: SupportedCodeLanguage, rece
     stmt.type === 'assignment'
   ) {
     const stmtText = (stmt.text ?? '') as string;
-    if (!new RegExp(`\\b${receiverName}\\b`).test(stmtText)) return null;
+    if (!mentionsWord(stmtText, receiverName)) return null;
     // Look for `new ClassName(...)` (JS/TS) or `ClassName(...)` (Python).
     const newMatch = stmtText.match(/=\s*new\s+([A-Za-z_][A-Za-z0-9_]*)/);
     if (newMatch) return newMatch[1]!;
@@ -388,6 +388,31 @@ const BINDING_STATEMENT_TYPES = new Set([
   'import_statement', 'import_from_statement', 'lexical_declaration', 'variable_declaration', 'assignment',
 ]);
 const WORD_NAME = /^\w+$/;
+
+function isWordChar(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95;
+}
+
+function isWordBoundary(text: string, at: number): boolean {
+  const before = at > 0 && isWordChar(text.charCodeAt(at - 1));
+  const after = at < text.length && isWordChar(text.charCodeAt(at));
+  return before !== after;
+}
+
+/**
+ * True when `name` occurs in `text` with a word boundary on both sides (JS
+ * `\b`, ASCII word characters). The receiver name comes from indexed source,
+ * so it is matched literally instead of being compiled into a RegExp.
+ *
+ * @internal exported for tests.
+ */
+export function mentionsWord(text: string, name: string): boolean {
+  if (name.length === 0) return false;
+  for (let i = text.indexOf(name); i !== -1; i = text.indexOf(name, i + 1)) {
+    if (isWordBoundary(text, i) && isWordBoundary(text, i + name.length)) return true;
+  }
+  return false;
+}
 
 /**
  * Top-level bindings of one file, built on first use. Every binding pattern
