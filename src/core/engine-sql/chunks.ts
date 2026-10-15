@@ -750,8 +750,9 @@ function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
     sqlFragment`p.deleted_at IS NULL`,
     // healChunklessPages chunks BOTH compiled_truth and timeline (mirrors
     // embedPage) — a timeline-only page (rare but schema-legal) has
-    // something to heal even with compiled_truth = ''.
-    sqlFragment`(p.compiled_truth <> '' OR p.timeline <> '')`,
+    // something to heal even with compiled_truth = ''. A segmented page's
+    // body columns are NULL; its body_bytes says it has one.
+    sqlFragment`(p.compiled_truth <> '' OR p.timeline <> '' OR (p.body_storage = 'segmented' AND p.body_bytes > 0))`,
     sqlFragment`${trustedSql(EMBED_SKIP_FILTER_FRAGMENT)}`,
     sqlFragment`${trustedSql(QUARANTINE_FILTER_FRAGMENT)}`,
     sqlFragment`NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)`,

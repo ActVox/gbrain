@@ -17,6 +17,9 @@ import { meterPageBatch, spendGrant } from '../page-embedding-budget.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../page-state/projections.ts';
 import { quoteIdentifier, vectorCastSuffix } from '../search/embedding-column.ts';
 import { chunkGenerationFilter, chunkVisibleFilter, currentTextProjectionFilter } from '../search/safe-chunks.ts';
+import { buildSegmentedProjection } from './projection.ts';
+import { isSegmentedPage } from './page-shape.ts';
+import type { BodyStorage } from './types.ts';
 
 /** Stale rows read and embedded per provider round trip. */
 export const SEGMENTED_EMBED_BATCH_ROWS = 500;
@@ -56,26 +59,47 @@ export async function readSegmentedEmbedPage(engine: Pick<BrainEngine, 'executeR
   return row ? { ...row, id: Number(row.id), body_storage: 'segmented', body_bytes: Number(row.body_bytes) } : null;
 }
 
-/** A dry run's counts: the page's live rows and those not yet embedded. */
+/**
+ * `readSegmentedEmbedPage` for a page row; with `build`, a live segmented page
+ * in a live source that is not sealed gets its projection built first (a
+ * create whose post-commit projection never ran or failed has no chunk rows
+ * to embed). Null for an inline page or one still not sealed.
+ */
+export async function readSealedSegmentedEmbedPage(engine: BrainEngine,
+  page: { slug: string; source_id: string; body_storage?: BodyStorage | null }, build: boolean): Promise<SegmentedEmbedPage | null> {
+  const ref = { sourceId: page.source_id, slug: page.slug };
+  const sealed = await readSegmentedEmbedPage(engine, ref);
+  if (sealed || !build || !isSegmentedPage(page)) return sealed;
+  const [unsealed] = await engine.executeRaw(`SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id
+    WHERE p.source_id = $1 AND p.slug = $2 AND p.body_storage = 'segmented' AND p.deleted_at IS NULL AND NOT s.archived`, [ref.sourceId, ref.slug]);
+  return unsealed && (await buildSegmentedProjection(engine, ref)).sealed ? readSegmentedEmbedPage(engine, ref) : null;
+}
+
+/** A dry run's counts: the page's live rows and those without a vector in the write column. */
 export async function countSegmentedEmbedRows(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<{ total: number; stale: number }> {
+  const col = quoteIdentifier((await embeddingWriteTarget(engine)).column.name);
   const [row] = await engine.executeRaw<{ total: number; stale: number }>(
-    `SELECT count(*)::int AS total, count(*) FILTER (WHERE cc.embedded_at IS NULL)::int AS stale
+    `SELECT count(*)::int AS total, count(*) FILTER (WHERE cc.${col} IS NULL)::int AS stale
        FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
       WHERE cc.page_id = $1 AND ${chunkVisibleFilter('p', 'cc')}`, [pageId]);
   return { total: Number(row?.total ?? 0), stale: Number(row?.stale ?? 0) };
 }
 
-/** Vector-less live rows of a segmented page after `afterChunkIndex`, in chunk_index order; `occurrenceIds` limits them to the occurrences a write added. */
+/**
+ * Vector-less live rows of a segmented page below `beforeChunkIndex` (null: from the newest), newest first, so a
+ * per-page cap spends on the newest rows; `occurrenceIds` limits them to the occurrences a write added,
+ * `includeEmbedded` takes rows that already hold a vector too (`gbrain embed --all`).
+ */
 export async function listSegmentedStaleRows(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, column: string,
-  opts: { afterChunkIndex: number; limit: number; occurrenceIds?: readonly number[] }): Promise<SegmentedStaleRow[]> {
+  opts: { beforeChunkIndex: number | null; limit: number; occurrenceIds?: readonly number[]; includeEmbedded?: boolean }): Promise<SegmentedStaleRow[]> {
   const col = quoteIdentifier(column);
   return engine.executeRaw<SegmentedStaleRow>(
     `SELECT cc.chunk_index, cc.chunk_text, cc.chunk_source
        FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
-      WHERE cc.page_id = $1 AND cc.${col} IS NULL AND cc.chunk_index > $2
+      WHERE cc.page_id = $1 AND ($5::boolean OR cc.${col} IS NULL) AND ($2::int IS NULL OR cc.chunk_index < $2::int)
         AND ($4::bigint[] IS NULL OR cc.occurrence_id = ANY($4::bigint[])) AND ${chunkVisibleFilter('p', 'cc')}
-      ORDER BY cc.chunk_index LIMIT $3`,
-    [pageId, opts.afterChunkIndex, opts.limit, opts.occurrenceIds ? [...opts.occurrenceIds] : null]);
+      ORDER BY cc.chunk_index DESC LIMIT $3`,
+    [pageId, opts.beforeChunkIndex, opts.limit, opts.occurrenceIds ? [...opts.occurrenceIds] : null, opts.includeEmbedded ?? false]);
 }
 
 /**
@@ -126,25 +150,28 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
 
 /**
  * Embed every vector-less live row of a segmented page (or only the rows of
- * `occurrenceIds`, the occurrences an append added), one keyset batch at a
- * time, until the rows run out (`complete`), the budget holds the page or
- * leaves no room (`stopped: 'budget'`), or the page moved under an install
- * (`stopped: 'page_moved'`).
+ * `occurrenceIds`, the occurrences an append added; every live row with
+ * `all`), newest first, one keyset batch at a time, until the rows run out
+ * (`complete`), the budget holds the page or leaves no room (`stopped:
+ * 'budget'`), or the page moved under an install (`stopped: 'page_moved'`).
+ * An approval (`approvedCapUsd`) raises the page's cap once per run: later
+ * batches keep the approval's lifted hold but spend under the cap it set.
  */
 export async function embedSegmentedPage(engine: BrainEngine, page: SegmentedEmbedPage,
-  opts: SegmentedEmbedOpts & { occurrenceIds?: readonly number[]; batchRows?: number }): Promise<{ embedded: number; complete: boolean; stopped?: 'budget' | 'page_moved' }> {
+  opts: SegmentedEmbedOpts & { occurrenceIds?: readonly number[]; batchRows?: number; all?: boolean }): Promise<{ embedded: number; complete: boolean; stopped?: 'budget' | 'page_moved' }> {
   const column = (await embeddingWriteTarget(engine)).column.name;
   const limit = opts.batchRows ?? SEGMENTED_EMBED_BATCH_ROWS;
   let embedded = 0;
-  for (let after = -1; ;) {
+  for (let before: number | null = null; ;) {
     opts.signal?.throwIfAborted();
-    const rows = await listSegmentedStaleRows(engine, page.id, column, { afterChunkIndex: after, limit, occurrenceIds: opts.occurrenceIds });
+    const rows = await listSegmentedStaleRows(engine, page.id, column, { beforeChunkIndex: before, limit, occurrenceIds: opts.occurrenceIds, includeEmbedded: opts.all });
     if (rows.length === 0) return { embedded, complete: true };
-    const installed = await embedSegmentedRows(engine, page, rows, opts);
+    const approvedCapUsd = opts.approvedCapUsd === undefined || before === null ? opts.approvedCapUsd : 0;
+    const installed = await embedSegmentedRows(engine, page, rows, { ...opts, approvedCapUsd });
     if (installed === null) return { embedded, complete: false, stopped: 'budget' };
     embedded += installed;
     if (installed === 0) return { embedded, complete: false, stopped: 'page_moved' };
     if (installed < rows.length) return { embedded, complete: false, stopped: 'budget' };
-    after = rows[rows.length - 1]!.chunk_index;
+    before = rows[rows.length - 1]!.chunk_index;
   }
 }
