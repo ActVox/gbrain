@@ -21,6 +21,8 @@ import { SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
 import { sameCanonicalImport } from '../page-state/import-guard.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { sealImportedPage, sealPageTextProjection } from '../page-state/projections.ts';
+import { abortSegmentedStaging, materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
+import { fenceBody, withoutBody } from '../page-body/page-shape.ts';
 import { pipelined, transactionMemo } from '../page-state/transactions.ts';
 import { prepareCanonicalProjections } from './canonical-projections.ts';
 import { digest, sha256 } from './digest.ts';
@@ -563,7 +565,7 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   if (p.kind === 'managed_sync_checkpoint') return { sourceExclusive: true, observedRevision: null, validate, apply: tx => applyManagedSyncCheckpoint(tx, row, p, root, releaseHold) };
   const source = { sourceId: row.source_id };
   enterClaimStep(clock, 'page_snapshot', undefined, 'db');
-  const snapshot = await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
+  const snapshot = await materializedSnapshot(engine, await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true }));
   assertPageRevision(snapshot, { expectedRevision: p.expected_revision }); // null asserts the admitted-absent page is still absent (#5385)
   const recordedOrigin = moved?.slug === row.slug ? moved.sourcePath : p.sourcePath!;
   const foreignOrigin = snapshot?.page.source_path != null && !sameSyncOrigin(snapshot.page.source_path, recordedOrigin, originScope, snapshot.page.slug);
@@ -601,10 +603,10 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   enterClaimStep(clock, 'schema_pack', undefined, 'db');
   const pack = p.processingOptions?.noSchemaPack ? undefined : schema ? (await checkApprovedSchemaForEngine(engine, { name: schema.name, identity: schema.identity, resolvedManifestHash: schema.resolved_digest },
     { remote: false, sourceId: row.source_id })).pack : await loadActivePackForEngine(engine, { remote: row.authority.remote, sourceId: row.source_id }).catch(() => null), activePack = pack?.manifest;
-  // A renamed page is prepared where it stands; publication moves it, then re-prepares at the new slug.
+  // A renamed page is prepared where it stands; publication moves it, then re-prepares at the new slug (reusing an unchanged segmented staging).
   const renamed = moved && moved.slug !== row.slug ? moved : undefined;
   if (renamed) enterClaimStep(clock, 'rename_source', undefined, 'db');
-  const base = renamed ? await engine.readPageSnapshot(renamed.slug, { ...source, includeDeleted: true }) : snapshot;
+  const base = renamed ? await materializedSnapshot(engine, await engine.readPageSnapshot(renamed.slug, { ...source, includeDeleted: true })) : snapshot;
   if (renamed && (base?.page.id !== renamed.pageId || base.revision !== renamed.revision || base.page.deleted_at != null)) {
     throw syncPublicationRefusal('revision_conflict', 'The renamed page changed after sync admission.', row, p,
       `Page ${renamed.slug}, which this file was renamed from, changed or was deleted after the sync was admitted.`);
@@ -625,10 +627,11 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   }
   let importContent = p.content;
   if (row.authority.remote) {
-    const compiled_truth = preserveProtectedTakes(parsedInput.compiled_truth, base?.page.compiled_truth ?? '');
-    const timeline = preserveProtectedTakes(parsedInput.timeline ?? '', base?.page.timeline ?? '');
+    const stored = base ? fenceBody(base.page) : null;
+    const compiled_truth = preserveProtectedTakes(parsedInput.compiled_truth, stored?.compiled_truth ?? '');
+    const timeline = preserveProtectedTakes(parsedInput.timeline ?? '', stored?.timeline ?? '');
     if (compiled_truth !== parsedInput.compiled_truth || timeline !== (parsedInput.timeline ?? '')) {
-      importContent = serializePageToMarkdown({ ...(base?.page ?? { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }),
+      importContent = serializePageToMarkdown({ ...(base ? withoutBody(base.page) : { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }),
         ...parsedInput, compiled_truth, timeline } as Page, parsedInput.tags);
     }
   }
@@ -637,7 +640,8 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   // #6188: the import reuses this screen's fence verdict for the same bytes (one fence scan per file at prepare).
   const importOptions = { ...source, noEmbed: true, remote: row.authority.remote, preserveGateMarkers: true, activePack, coordinated: true, fences: 'coordinated' as const, writeGate: await ownerGateInput(engine, row, parsedInput.frontmatter, p.sourcePath),
     ...(importContent === p.content && screen.status === 'importable' ? { fenceScreen: screen.fences ?? null } : {}),
-    filename: basename(p.sourcePath).replace(/\.mdx?$/i, ''), sourcePath: p.sourcePath, allowEmptyOverwrite: true };
+    filename: basename(p.sourcePath).replace(/\.mdx?$/i, ''), sourcePath: p.sourcePath, allowEmptyOverwrite: true,
+    segmentedOwner: { kind: 'sync' as const, principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: base?.revision ?? null } };
   const result = await importFromContent(engine, renamed?.slug ?? row.slug, importContent, { ...importOptions,
     prepare: async value => { prepared = value; return value.result; } }).catch(error => {
     if (!(error instanceof ContentSanityBlockError)) throw error;
@@ -657,7 +661,7 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   const parsed = parseMarkdown(p.content, `${row.slug}.md`, { activePack });
   resolveParsedSubtype(parsed, base?.page);
   const tags = [...new Set([...(base?.tags ?? []), ...ready.parsedPage.tags])].sort();
-  const renderedPage = { ...(base?.page ?? { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage } as Page;
+  const renderedPage = { ...(base ? withoutBody(base.page) : { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage } as Page;
   if (renamed && parsedInput.typeExplicit !== true) renderedPage.type = parsedInput.type;
   const canonical = (page: Pick<typeof parsed, 'type' | 'title' | 'compiled_truth' | 'timeline' | 'frontmatter'>, tags: string[]) => ({ type: page.type, title: page.title, body: page.compiled_truth,
     timeline: page.timeline ?? '', frontmatter: page.frontmatter, tags: [...new Set(tags)].sort() });
@@ -676,12 +680,15 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   const project = await prepareCanonicalProjections(engine, ready.parsedPage, row.slug, row.source_id, base, p.companyApproval ? 'immutable' : 'file');
   const importProvenance: SyncImportProvenanceBase = { source_id: row.source_id, incarnation: row.source_incarnation, origin: p.sourcePath!, raw_sha256: sha256(p.content!),
     ...(p.blobOid ? { blob_oid: p.blobOid } : {}), working: p.working === true, gbrain_version: VERSION, ...(recovery?.length ? { recovery } : {}), parser: syncImportParser(pack?.identity ?? null) };
+  // afterCommit follows the import that published: a rename publishes its re-preparation at the new slug.
+  let published = ready;
   const preparedImport: SyncPreparedMutation = { observedRevision: snapshot?.revision ?? null, trust: await ownerImportTrust(engine, row, ready.parsedPage.frontmatter, p.sourcePath), importProvenance,
     // Tells the #5470 screen the content is unchanged; publication still queues its effects.
     contentUnchanged: ready.noop && !moved && !writeback,
     ...(renamed ? { additionalPageKeys: [{ sourceId: row.source_id, slug: renamed.slug }] } : {}),
     validate: async tx => { await validate(tx); await ready.validate(tx); },
     deferEmbedding: p.processingOptions?.noEmbed || p.embedDeferred === true,
+    ...(ready.afterCommit || renamed ? { afterCommit: async (target: BrainEngine) => { await published.afterCommit?.(target); } } : {}),
     ...(writeback ? { file: { root, path: join(root, p.path), content: canonicalFile, expectedBeforeHash: p.rawHash } } : {}),
     ...(mirrorReadOnly ? { databaseOnlyReason: 'mirror_read_only' as const } : {}),
     apply: async (tx, preimage) => {
@@ -693,12 +700,15 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
           `Page ${renamed.slug} could not move to ${row.slug}.`);
         if (renamedType) await tx.executeRaw('UPDATE pages SET type=$3 WHERE source_id=$1 AND slug=$2', [row.source_id, row.slug, renamedType]);
         let movedImport: PreparedContentImport | undefined;
-        await importFromContent(tx, row.slug, importContent, { ...importOptions, prepare: async value => { movedImport = value; return value.result; } });
+        await importFromContent(tx, row.slug, importContent, { ...importOptions, reuseSegments: ready.segmented,
+          prepare: async value => { movedImport = value; return value.result; } });
         if (!movedImport || movedImport.slug !== row.slug) throw syncPublicationRefusal('page_identity_changed', 'The renamed page could not be prepared at its new slug.', row, p,
           `Page ${renamed.slug} could not be prepared at ${row.slug}.`);
+        if (movedImport.segmented?.prepared !== ready.segmented?.prepared) await abortSegmentedStaging(tx, ready.segmented?.prepared);
         await movedImport.validate(tx);
         applied = movedImport;
       }
+      published = applied;
       // A moved page is versioned from its own (rename source) read.
       const installed = await applied.apply(tx, renamed ? undefined : preimage);
       // Hash no-ops still repair a missing physical origin under the same guard (a page write records it itself).
@@ -716,7 +726,8 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
         async () => { if (!applied.noop || p.companyApproval) await project(tx, final?.page.id); },
         async () => {
           if (applied.noop) return;
-          if (installed?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, installed.chunkerSeal, installed.pageId);
+          if (installed?.segmented) { if (installed.segmented.complete && live) await sealSegmentedPage(tx, Number(live.page.id)); }
+          else if (installed?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, installed.chunkerSeal, installed.pageId);
           else if (live) await sealPageTextProjection(tx, row.slug, row.source_id, live);
         },
         () => releaseHold(tx),
