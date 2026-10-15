@@ -53,7 +53,7 @@ const findContradictions = (params: Record<string, unknown>) =>
   withEnv({ GBRAIN_SOURCE: undefined }, async () => {
     const ctx = await makeContext(engine, params);
     return operationsByName['find_contradictions'].handler(ctx, {}) as Promise<{
-      run_id?: string; contradictions: unknown[]; note?: string;
+      run_id?: string; ran_at?: unknown; contradictions: unknown[]; note?: string; total_visible?: number;
     }>;
   });
 
