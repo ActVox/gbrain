@@ -25,7 +25,7 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
@@ -34,6 +34,7 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { readGitHold, readSyncImportProvenance, SYNC_IMPORT_PARSER_VERSION, SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { readDriftSkips } from '../src/core/persistence/drift-conflicts.ts';
 import { SYNC_READ_BOUND } from '../src/core/persistence/sync-blobs.ts';
+import { resolveBulkSettings } from '../src/core/persistence/sync-group.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
@@ -109,6 +110,18 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect((await readSyncImportProvenance(engine, 'default', incarnation, await pageIdOf(engine, 'notes/b')))?.revision).toBe(await revisionOf(engine, 'notes/b'));
     const full = await performManagedSync(engine, { ...OPTS, full: true });
     expect(full).toMatchObject({ prescreened: 0, waived: { imports: SLUGS.length } });
+  }, { databaseUrl, setup }), 180_000);
+
+  test('in a bulk drain a prescreened entry between changed files ends the group and is passed by the kernel', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const bulk = await resolveBulkSettings(engine, false);
+    expect(bulk.enabled).toBe(engine.kind === 'postgres'); // bulk groups are Postgres-only
+    // a, c, e change; b, d, f change only their mode (same blob): one Git delta interleaves them.
+    for (const slug of ['notes/a', 'notes/c', 'notes/e']) writeFileSync(join(root, `${slug}.md`), note(slug, `A changed body of ${slug}.`));
+    for (const slug of ['notes/b', 'notes/d', 'notes/f']) chmodSync(join(root, `${slug}.md`), 0o755);
+    commit(root, 'interleave');
+    const delta = await performManagedSync(engine, { ...OPTS, bulk });
+    expect(delta).toMatchObject({ status: 'synced', prescreened: 3, modified: 3 });
   }, { databaseUrl, setup }), 180_000);
 
   test('a fingerprint that changes after discovery froze the prescreen falls through to the ordinary path', () => managedBrain(async ({ engine, root }) => {

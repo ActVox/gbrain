@@ -1005,7 +1005,7 @@ async function waiveRun(engine: BrainEngine, cursor: Cursor, head: Pending, key:
  * #6712 PR 1 (L1): the consecutive prescreened entries at the head (sync-prescreen.ts), passed by the guarded kernel's
  * bounded checks in one transaction (`waivePrescreenedRun`) without freezing or preparing them. Null when the head is
  * not a prescreened entry or the kernel passed none; `missed` then remembers the head, so the ordinary path freezes,
- * screens and imports it (the prescreen fails toward importing).
+ * screens and imports it (the prescreen fails toward importing). A bulk group stops before a prescreened entry (`freezeAt`).
  */
 async function prescreenRun(engine: BrainEngine, cursor: Cursor, key: string, run: { missed: Set<number>; limit: number; embeddingRequested: boolean;
   drainStartedAt: number; assertActive: () => void; signal?: AbortSignal; onProgress: SyncOpts['onProgress'] }): Promise<Cursor | null> {
@@ -1618,7 +1618,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
         continue;
       }
-      const freezeAt: FreezeAt = base => async index => { const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun); return 'hold' in frozen ? null : frozen; };
+      const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun); return 'hold' in frozen ? null : frozen; };
       if (bulk.settings.enabled && (bulk.foregroundFirst || !foregroundQueued) && !prior && !cursor.group && !pending.rebound && !pending.knockOn && groupableIntent(pending.intent)) cursor = await formGroup(engine, cursor, pending, key, bulk, config, freezeAt, assertActive);
       if (cursor.group?.[0]?.requestId === pending.requestId && cursor.pending?.requestId === pending.requestId) {
         const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000 }, drainStartedAt, opts.onProgress,
