@@ -208,9 +208,13 @@ export type TransactionRunner = <T>(fn: (tx: BrainEngine) => Promise<T>) => Prom
 const publishingBeside = new Set<string>();
 
 export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], prepared: PreparedMutation[], hostId = localHostId(),
-  hooks: GroupHooks = {}, lane: LaneState | null = null, transaction: TransactionRunner = fn => publicationTransaction(engine, fn)): Promise<{ done: WriteRequest[] | null; requeued: string[]; reason?: GroupFailure }> {
+  hooks: GroupHooks = {}, lane: LaneState | null = null, transaction: TransactionRunner = fn => publicationTransaction(engine, fn)): Promise<GroupPublication> {
   const head = rows[0];
-  const none: { done: null; requeued: string[]; reason?: GroupFailure } = { done: null, requeued: [] };
+  const none: GroupPublication = { done: null, requeued: [] };
+  // #6712: the member whose own check or write refused inside the transaction, so a lane group can settle that page alone.
+  const memberOf = new WeakMap<object, number>();
+  const tag = (error: unknown, i: number) => { if (error && typeof error === 'object' && !memberOf.has(error)) memberOf.set(error, i); return error; };
+  const culpritOf = (error: unknown) => error instanceof OperationError && memberOf.has(error) ? { culprit: { index: memberOf.get(error)!, error } } : {};
   if (!head?.worktree_id || rows.some((row, i) => row.worktree_id !== head.worktree_id || row.source_id !== head.source_id || !groupable(row, prepared[i]!)
     || rows.length > 1 && singleWrite(row))) return none;
   const binding = await getWorktreeBinding(engine, head.source_id, hostId);
@@ -320,40 +324,42 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
           const attribute = rows.length > 1;
           // #5984: a member's checks and reads are pipelined and run in their usual order, so the first failing one is reported.
           // A sync member validates alongside (read-only checks); a member that publishes a file sets its attribution after the file.
-          const [, snapshot] = await pipelined(tx, [
-            async () => { await previous?.(); },
-            async () => {
-              const [, , snapshot] = await (i === 0 ? first : lead(i));
-              await authorizePageVisibility(tx, row.authority, row.slug);
-              if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.', 'Read the page again and submit a new intent with a new request_id.');
-              await assertUnboundPublication(tx, row, snapshot?.page.source_path);
-              if ((snapshot?.revision ?? null) !== member.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
-              return snapshot;
-            },
-            async () => { if (sync) await member.validate?.(tx); },
-            async () => { if (!file && attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust)); },
-          ]) as [unknown, Awaited<ReturnType<BrainEngine['readPageSnapshot']>>];
-          if (!sync) await member.validate?.(tx);
-          if (file) {
-            if (persistenceFileHash(file.record.path) !== file.record.beforeHash) throw new OperationError('unexpected_file_bytes', 'The canonical file changed during preparation.', 'The members publish one at a time.');
-            await seam('before_publication', row);
-            await withFilesystemPublication([file.record.root], async () => publishPersistenceFile(member.file!, file.record.staging?.publication?.path));
-            await seam('after_publication', row);
-            if (attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust));
-          }
-          member.postimage = undefined;
-          const outcome = await member.apply(tx, snapshot);
-          await classifyUnboundPage(tx, row);
-          if (member.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
-          const final = await publicationPostimage(tx, row, member);
-          decoratePublicationOutcome(row, member, outcome, final, file ? 1 : 0, false);
-          effects = async () => {
-            await recordPublicationFenceTrend(tx, row, outcome);
-            await queuePublicationEffects(tx, row, final, outcome, member, singleWrite(row) ? {} : { deferBatchReconcile: true });
-          };
-          outcomes.push(outcome);
+          try {
+            const [, snapshot] = await pipelined(tx, [
+              async () => { try { await previous?.(); } catch (error) { throw tag(error, i - 1); } },
+              async () => {
+                const [, , snapshot] = await (i === 0 ? first : lead(i));
+                await authorizePageVisibility(tx, row.authority, row.slug);
+                if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.', 'Read the page again and submit a new intent with a new request_id.');
+                await assertUnboundPublication(tx, row, snapshot?.page.source_path);
+                if ((snapshot?.revision ?? null) !== member.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
+                return snapshot;
+              },
+              async () => { if (sync) await member.validate?.(tx); },
+              async () => { if (!file && attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust)); },
+            ]) as [unknown, Awaited<ReturnType<BrainEngine['readPageSnapshot']>>];
+            if (!sync) await member.validate?.(tx);
+            if (file) {
+              if (persistenceFileHash(file.record.path) !== file.record.beforeHash) throw new OperationError('unexpected_file_bytes', 'The canonical file changed during preparation.', 'The members publish one at a time.');
+              await seam('before_publication', row);
+              await withFilesystemPublication([file.record.root], async () => publishPersistenceFile(member.file!, file.record.staging?.publication?.path));
+              await seam('after_publication', row);
+              if (attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust));
+            }
+            member.postimage = undefined;
+            const outcome = await member.apply(tx, snapshot);
+            await classifyUnboundPage(tx, row);
+            if (member.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
+            const final = await publicationPostimage(tx, row, member);
+            decoratePublicationOutcome(row, member, outcome, final, file ? 1 : 0, false);
+            effects = async () => {
+              await recordPublicationFenceTrend(tx, row, outcome);
+              await queuePublicationEffects(tx, row, final, outcome, member, singleWrite(row) ? {} : { deferBatchReconcile: true });
+            };
+            outcomes.push(outcome);
+          } catch (error) { throw tag(error, i); }
         }
-        await effects?.();
+        try { await effects?.(); } catch (error) { throw tag(error, rows.length - 1); }
       }, publicationAttribution(head, prepared[0]!.trust));
       // #5984 lanes: applied concurrently, committed in manifest order.
       if (lane) { timed.apply?.turn(); await faultPoint('lane:applied', { requestId: head.request_id, sourceId: head.source_id, operation: head.operation }); await awaitLaneTurn(tx, lane, rows); timed.apply?.turned(); }
@@ -379,7 +385,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
     }
     return { done, requeued: [] };
   } catch (error) {
-    if (committed || !recorded.size) { await hooks.rolledBack?.(rows); return { ...none, reason: groupFailure(error) }; }
+    if (committed || !recorded.size) { await hooks.rolledBack?.(rows); return { ...none, reason: groupFailure(error), ...(committed ? {} : culpritOf(error)) }; }
     // Restore every file this group may have published and release those claims; a committed member (an uncertain commit) only cleans up.
     const requeued: string[] = [];
     for (const { row } of recorded.values()) {
@@ -390,7 +396,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
       } catch { /* the recovery record stays; the worktree waits for the recovery scan */ }
     }
     await hooks.rolledBack?.(rows);
-    return { done: null, requeued };
+    return { done: null, requeued, ...culpritOf(error) };
   } finally {
     timed.apply?.end(rows.length);
     releaseCapacity?.();
@@ -430,6 +436,8 @@ export async function publishSingleWrite(engine: BrainEngine, row: WriteRequest,
   return publishMutation(engine, current, prepared, hostId);
 }
 
+/** A group publication: its committed receipts, or why it did not commit and, for a member's own refusal, which member. */
+export type GroupPublication = { done: WriteRequest[] | null; requeued: string[]; reason?: GroupFailure; culprit?: { index: number; error: unknown } };
 /** Why a group transaction did not commit, for the lane fallback and step-down. */
 export type GroupFailure = 'busy' | 'predecessor_requeued' | 'wounded' | 'order_timeout' | 'lock_timeout' | 'statement_timeout' | 'failed';
 function groupFailure(error: unknown): GroupFailure {
@@ -457,6 +465,27 @@ async function laneFallback(engine: BrainEngine, rows: WriteRequest[], reason: G
   if (prior !== null && ['committed', 'failed', 'conflict', 'cancelled'].includes(prior) && reason !== 'busy') return null;
   for (const row of rows) await releaseUnpublishedClaim(engine, row, laneFault ? laneFaultBlockedReason(laneFault) : 'group_member_waiting');
   return false;
+}
+
+/**
+ * #6712 lanes: a lane group rolled back because one sync member's own check refused it (a file edited after admission,
+ * an identity or origin refusal). That page takes its fate now, from the same refusal the single path would read again,
+ * and the other members go back to the queue to publish as a group: on a lane root the single path's exclusive lock
+ * waits behind the lanes, so publishing them one at a time here never gets the worktree. False when the member is no
+ * longer this pass's to settle (its claim moved, or a recovery record holds it).
+ */
+async function settleCulprit(engine: BrainEngine, rows: WriteRequest[], culprit: NonNullable<GroupPublication['culprit']>, run: GroupExecution): Promise<boolean> {
+  const row = rows[culprit.index];
+  if (!row || !syncMember(row) || (culprit.error as { code?: string }).code === 'unexpected_file_bytes') return false;
+  const current = await getWriteRequestById(engine, row.id);
+  if (!current || current.state !== 'running' || current.execution_token !== row.execution_token || current.recovery) return false;
+  run.settled(await finishUnpublishedFailure(engine, current, culprit.error, 'publication'));
+  for (const other of rows) {
+    if (other.id === row.id) continue;
+    const live = await getWriteRequestById(engine, other.id);
+    if (live?.state === 'running' && live.execution_token === other.execution_token) await releaseUnpublishedClaim(engine, other, 'group_member_waiting');
+  }
+  return true;
 }
 
 /**
@@ -699,6 +728,7 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
       if (run.lane && liveRows.length < rows.length) run.lane.begun.delete(liveRows.at(-1)!.request_id);
       if (result.done) { for (const row of result.done) run.settled(row); return true; }
       requeued = new Set(result.requeued);
+      if (run.lane && result.culprit && await settleCulprit(engine, liveRows, result.culprit, run)) return true;
       if (run.lane && await laneFallback(engine, liveRows, result.reason, run) !== null) return progressed;
     } else if (run.lane && await laneFallback(engine, liveRows, 'failed', run) !== null) return progressed;
     let release = false;

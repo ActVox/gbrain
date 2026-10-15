@@ -20,6 +20,8 @@ import { withEnv } from './helpers/with-env.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { awaitLaneTurn, closeLaneRun, laneApplyBegin, laneClaim, laneOf, laneRoots, laneTask, openLanes } from '../src/core/persistence/sync-lanes.ts';
 import { lanesLimit } from '../src/core/persistence/sync-drain.ts';
+import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
+import { waitFor } from './helpers/wait-for.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-lanes-'));
 let engine: BrainEngine | undefined;
@@ -303,12 +305,45 @@ test('a failed page under lanes stops the run and cancels nothing: every other a
     .finally(() => engine!.unsetConfig('sync.holds'));
   expect(result.drain).toMatchObject({ outcome: 'blocked' });
   expect(result.managedWrite?.slug).toBe('notes/n030');
+  // The groups admitted after the failure keep publishing after the run returns.
+  await waitFor(async () => (await imports(engine!, f.id)).every(row => row.state !== 'queued' && row.state !== 'running'), { timeoutMs: 60_000, label: 'admitted pages settle' });
   const rows = await imports(engine, f.id);
   const failedAt = rows.findIndex(row => row.slug === 'notes/n030');
   expect(rows[failedAt]!.state).toBe('failed');
   expect(rows.filter((_, i) => i !== failedAt && rows[i]!.state !== 'committed').map(row => `${row.slug} ${row.state} group=${row.grp} lane=${row.lane}`)).toEqual([]);
   expect(rows.slice(failedAt + 1).length).toBeGreaterThan(0);
   for (const row of rows.slice(failedAt + 1)) expect(await engine.getPage(row.slug, { sourceId: f.id })).not.toBeNull();
+}), 300_000);
+
+/**
+ * #6712 (convergence mode e): a page edited after it was frozen is refused inside its lane group's transaction. That
+ * page alone takes its fate (held `worktree_dirty` once its deferrals run out) and the rest of the group still publishes;
+ * before, the whole group fell back to the single path, whose exclusive lock waits behind the lanes, and the drain
+ * released and re-claimed the group without end.
+ */
+test('a page edited after its freeze fails alone inside a lane group; the group still publishes and the run ends with the page held', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home, GBRAIN_SYNC_BULK_SIZE: '8' }, async () => {
+  if (!engine) return;
+  const f = await fixture(engine, notes(60));
+  const opts = { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true, drain: true, lanes: 4 };
+  expect((await performSync(engine, opts)).drain).toMatchObject({ outcome: 'synced' });
+  const revised = (i: number, word: string) => `---\ntitle: Note ${i}\n---\nA ${word} observation number ${i}.\n`;
+  for (let i = 0; i < 40; i++) writeFileSync(join(f.root, `notes/n${pad(i)}.md`), revised(i, 'revised'));
+  git(f.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qam', 'revise');
+  const edited = 'notes/n013.md';
+  installFaultHook(async (point, detail) => {
+    if (point === 'sync:after_freeze' && detail.sourceId === f.id && detail.path === edited) writeFileSync(join(f.root, edited), revised(13, 'uncommitted'));
+  });
+  const stop = new AbortController(), timer = setTimeout(() => stop.abort(), 90_000);
+  let result;
+  try { result = await performSync(engine, { ...opts, signal: stop.signal }); }
+  finally { clearTimeout(timer); installFaultHook(undefined); }
+  expect(stop.signal.aborted).toBe(false);
+  expect(result.drain?.outcome).not.toBe('blocked');
+  // The refused page never sends its group to the single path (a lane fallback), which waits behind the lanes.
+  expect(result.drain?.bulk?.lanes.fallbacks).toBe(0);
+  const status = await readSyncStatus(engine, f.id);
+  expect(status.holds.map(hold => `${hold.code}:${hold.path}`)).toEqual([`worktree_dirty:${edited}`]);
+  for (let i = 0; i < 40; i++) if (i !== 13) expect((await engine.getPage(`notes/n${pad(i)}`, { sourceId: f.id }))?.compiled_truth).toContain(`revised observation number ${i}`);
 }), 300_000);
 
 test('a crash right after a group is admitted and saved skips nothing and admits nothing twice; the first group is small', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_BULK_SIZE: '4' }, async () => {
