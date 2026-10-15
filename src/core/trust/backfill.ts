@@ -11,8 +11,9 @@
  * - pages.source_kind: webhook / file-watcher / inbox-folder / cron-scheduler
  *   (ingestion captures) external_untrusted; mcp:* / put_page / capture-cli
  *   agent_written;
- * - frontmatter transcript_import, provenance: auto-extracted, dream_generated:
- *   agent_written (model- or session-derived);
+ * - frontmatter transcript_import, provenance: auto-extracted, dream_generated,
+ *   extracted_by: extract_atoms-* (legacy atoms, #6533): agent_written (model-
+ *   or session-derived);
  * - facts.source lane tags (the facts backstop, conversation-facts and
  *   extract_facts lanes) and takes.source take_proposals#: agent_written;
  * - post-v193 rows through write_request_id -> persistence_requests (CEO-17):
@@ -42,7 +43,7 @@ import { CONNECTOR_SOURCE_KINDS } from '../persistence/connector-identity.ts';
 import { withCoordinatedWrite, withTrustBackfill } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
-import { frontmatterTrustCapsSql } from './channel.ts';
+import { EXTRACT_ATOMS_EXTRACTOR_PREFIX, frontmatterTrustCapsSql } from './channel.ts';
 import { claimedSourceSql, legacyRowSql, notConnectorSourceSql, readLegacyCeilings, type LegacyCeilings } from './claim-state.ts';
 import { TRUST_BACKFILL_COMPLETED_KEY, type TrustTable } from './schema.ts';
 import { TRUST_TIER_RANK, TRUST_TIERS, isTrustTier, trustRankSql, trustTierFromRankSql, type TrustTier } from './tier.ts';
@@ -163,7 +164,9 @@ function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilin
     if (cols.has('pages', 'frontmatter')) {
       signals.add('frontmatter_provenance');
       terms.push(`CASE WHEN ${p}.frontmatter ? 'transcript_import' OR ${p}.frontmatter->>'provenance' = 'auto-extracted'
-        OR ${p}.frontmatter->>'dream_generated' = 'true' THEN ${rank('agent_written')} END`);
+        OR ${p}.frontmatter->>'dream_generated' = 'true'
+        OR (CASE WHEN jsonb_typeof(${p}.frontmatter->'extracted_by') = 'string' THEN btrim(${p}.frontmatter->>'extracted_by', E' \\t\\n\\r') END)
+          LIKE '${EXTRACT_ATOMS_EXTRACTOR_PREFIX.replace(/_/g, '\\_')}%' THEN ${rank('agent_written')} END`);
     }
     if (cols.has('pages', 'revision_write_request_id')) { const q = request(r); if (q) terms.push(q); }
     return terms;
