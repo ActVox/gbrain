@@ -11,11 +11,12 @@
  * 3. Forced probe: the same ratio check run on an append path that
  *    resegments the whole prefix on each append (the quadratic variant)
  *    exceeds the bound, so the check can tell the two apart.
- * 4. Each size takes its best of three runs in thread CPU time (cpuMs).
+ * 4. After one warm-up run, each size takes its best of five runs in thread
+ *    CPU time (cpuMs).
  */
 import { describe, expect, test } from 'bun:test';
 import { initialEntryState } from '../../src/core/page-body/entry-state.ts';
-import { segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
+import { Segmenter, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
 import { cpuMs } from '../helpers/cpu-time.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
 import { bigPage, PEM_BLOCK, segmentOptions } from '../helpers/segment-bodies.ts';
@@ -26,13 +27,17 @@ const entry = () => initialEntryState({ region: 'truth' });
 
 function bestMs(fn: () => unknown): number {
   let best = Infinity;
-  for (let k = 0; k < 3; k++) best = Math.min(best, cpuMs(fn));
+  for (let k = 0; k < 5; k++) {
+    best = Math.min(best, cpuMs(fn));
+  }
   return best;
 }
 
 function ratio(make: (bytes: number) => string, small: number, run: (body: string) => unknown): number {
   const a = make(small);
   const b = make(2 * small);
+  run(a);
+  run(b);
   return bestMs(() => run(b)) / bestMs(() => run(a));
 }
 
@@ -40,7 +45,15 @@ const page = bigPage(mulberry32(7), 4.5 * MB);
 const prefix = (bytes: number) => page.slice(0, page.indexOf('\n', bytes) + 1);
 const segmentAll = (body: string) => segmentString(body, entry(), segmentOptions('trusted'));
 
-describe('segmentString scales linearly', () => {
+/** Segment `body` in 256 KiB pushes, keeping only a count (ingest streams segments out; holding them all would time the GC). */
+function segmentStreaming(body: string): number {
+  const seg = new Segmenter(entry(), segmentOptions('trusted'));
+  let n = 0;
+  for (let i = 0; i < body.length; i += 256 * 1024) n += seg.push(body.slice(i, i + 256 * 1024)).length;
+  return n + seg.finish().length;
+}
+
+describe('the segmenter scales linearly', () => {
   const shapes: Array<[string, (bytes: number) => string, number]> = [
     ['mixed page', prefix, 2 * MB],
     ['short lines', bytes => 'a\n'.repeat(bytes / 2), MB / 2],
@@ -51,7 +64,7 @@ describe('segmentString scales linearly', () => {
   ];
   for (const [name, make, small] of shapes) {
     test(`${name}: twice the input takes under ${BOUND}x the time`, () => {
-      const r = ratio(make, small, segmentAll);
+      const r = ratio(make, small, segmentStreaming);
       console.log(`[segmenter-linear] ${name}: ${r.toFixed(2)}x`);
       expect(r).toBeLessThan(BOUND);
     }, 120_000);
@@ -62,17 +75,13 @@ const STEP = 64 * 1024;
 
 /** Append `body` in STEP-char writes, each resegmenting only the last segment from its stored entry state. */
 function appendResuming(body: string): SegmentOut[] {
-  let segs: SegmentOut[] = [];
-  let stored = Buffer.alloc(0);
+  const segs: SegmentOut[] = [];
   for (let at = 0; at < body.length; at += STEP) {
-    const added = Buffer.from(body.slice(at, at + STEP), 'utf8');
     const last = segs.pop();
-    const start = last ? last.byteStart : 0;
-    const tail = Buffer.concat([stored.subarray(start), added]).toString('utf8');
-    segs = segs.concat(segmentString(tail, last ? last.entryState : entry(), segmentOptions('trusted', {
-      byteStart: start, lineStart: last ? last.lineStart : 0,
+    const tail = (last ? Buffer.from(last.bytes).toString('utf8') : '') + body.slice(at, at + STEP);
+    segs.push(...segmentString(tail, last ? last.entryState : entry(), segmentOptions('trusted', {
+      byteStart: last ? last.byteStart : 0, lineStart: last ? last.lineStart : 0,
     })));
-    stored = Buffer.concat([stored, added]);
   }
   return segs;
 }

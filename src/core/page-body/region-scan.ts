@@ -181,7 +181,7 @@ export function findTokens(carry: string, text: string, tokens: readonly string[
 // ---------------------------------------------------------------------------
 
 /** The open fenced code block: its fence character and run length, plus the mispairing flag. */
-export interface FenceWalk { fence: '`' | '~' | null; len: number; mispaired: boolean }
+export interface FenceRun { fence: '`' | '~' | null; len: number; mispaired: boolean }
 
 /** A fence-line judgement in progress: up to 3 spaces, a run of ` or ~, then the rest of the line. */
 export interface FenceProbe {
@@ -195,13 +195,13 @@ export interface FenceProbe {
   ws: boolean;
 }
 
-export function newFenceWalk(): FenceWalk { return { fence: null, len: 0, mispaired: false }; }
+function newFenceRun(): FenceRun { return { fence: null, len: 0, mispaired: false }; }
 
-export function newFenceProbe(): FenceProbe {
+function newFenceProbe(): FenceProbe {
   return { phase: 'indent', indent: 0, ch: null, run: 0, tick: false, sep: false, ws: true };
 }
 
-export function feedFenceProbe(p: FenceProbe, s: string): void {
+function feedFenceProbe(p: FenceProbe, s: string): void {
   for (let i = 0; i < s.length && p.phase !== 'none'; i++) {
     const c = s.charCodeAt(i);
     if (p.phase === 'indent') {
@@ -225,12 +225,12 @@ function probeOpens(p: FenceProbe): boolean {
   return (p.phase === 'run' || p.phase === 'rest') && p.run >= 3 && !p.sep && !(p.ch === '`' && p.tick);
 }
 
-function probeCloses(p: FenceProbe, walk: FenceWalk): boolean {
+function probeCloses(p: FenceProbe, walk: FenceRun): boolean {
   return (p.phase === 'run' || p.phase === 'rest') && p.ch === walk.fence && p.run >= walk.len && p.ws;
 }
 
 /** Advance the walk past a judged line. */
-export function advanceFenceWalk(walk: FenceWalk, p: FenceProbe): void {
+function advanceFenceRun(walk: FenceRun, p: FenceProbe): void {
   if (!walk.fence) {
     if (probeOpens(p)) { walk.fence = p.ch; walk.len = p.run; }
   } else if (probeCloses(p, walk)) {
@@ -242,7 +242,7 @@ export function advanceFenceWalk(walk: FenceWalk, p: FenceProbe): void {
 }
 
 /** The trust scanMarkdownCode would give the body scanned so far, were it to end here. */
-export function walkTrusted(walk: FenceWalk): boolean {
+export function walkTrusted(walk: FenceRun): boolean {
   return !walk.fence && !walk.mispaired;
 }
 
@@ -258,7 +258,7 @@ const MARKER_LEAD = MARKER_TEXTS.reduce((a, b) => { let k = 0; while (k < a.leng
 
 /** The region scanner's parser state at a line start (or inside a long line). JSON-safe. */
 export interface RegionTrack {
-  walk: FenceWalk;
+  walk: FenceRun;
   /** The open protected region: its pair index, stored-stream byte start and `read`. */
   open: { pair: number; start: number; read: boolean } | null;
   /** Byte where an ambiguous tail starts; everything from there to the end of the region is protected. */
@@ -285,7 +285,7 @@ export interface ScanOut {
 }
 
 export function newRegionTrack(): RegionTrack {
-  return { walk: newFenceWalk(), open: null, truncatedAt: null, long: null };
+  return { walk: newFenceRun(), open: null, truncatedAt: null, long: null };
 }
 
 /** Scan one whole line (no terminator in `text`) starting at stored byte `byteStart`. */
@@ -310,7 +310,7 @@ export function scanRegionLine(track: RegionTrack, trusted: boolean, text: strin
   }
   if (coverFrom !== -1) out.covers.push({ from: coverFrom, to: text.length, pair: track.open?.pair ?? -1, start: track.open?.start ?? track.truncatedAt! });
   out.coverTerm = coverFrom !== -1 && term !== '';
-  advanceFenceWalk(track.walk, probe);
+  advanceFenceRun(track.walk, probe);
 }
 
 /**
@@ -343,7 +343,7 @@ export function scanRegionPiece(track: RegionTrack, trusted: boolean, text: stri
   if (coverFrom !== -1) out.covers.push({ from: coverFrom, to: text.length, pair: track.open?.pair ?? -1, start: track.open?.start ?? track.truncatedAt! });
   out.coverTerm = coverFrom !== -1 && !!term;
   if (term !== null) {
-    advanceFenceWalk(track.walk, long.probe);
+    advanceFenceRun(track.walk, long.probe);
     track.long = null;
   }
 }
@@ -482,7 +482,7 @@ export function pemResolvedTo(st: PemScanState): number {
 
 /** Ask whether a cut at projection offset `at` is a clean resume point; answered once `at` is resolved. */
 export function markPemCut(st: PemScanState, at: number): void {
-  st.cuts.push({ at });
+  st.cuts.push(st.final ? { at, done: pemCutCheck(st, at) } : { at });
 }
 
 /** The answer for a marked cut (removing it), or null while unresolved. */

@@ -25,7 +25,7 @@ import { pickHeadPattern } from '../../src/core/conversation-parser/parse.ts';
 import { initialEntryState, isCleanResumePoint, readEntryState, timelineEntryState } from '../../src/core/page-body/entry-state.ts';
 import { PEM_CONTEXT_CHARS } from '../../src/core/page-body/region-scan.ts';
 import { SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES } from '../../src/core/page-body/limits.ts';
-import { regionFlags, segmentStream, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
+import { regionFlags, Segmenter, segmentStream, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
 import {
   bigPage, FACTS_BLOCK, joinedProjection, KEY_BODY, MARKER_BULLET, PEM_BLOCK, segmentOptions, segmentPieces, segmentShapeErrors, soup,
@@ -240,6 +240,18 @@ describe('forced cuts with open state', () => {
       expect(s.protectedRegions).toEqual([expect.objectContaining({ kind: 'tail', start: 0, end: s.bytes.length, open_start: Buffer.byteLength(lead) })]);
     }
     expect(joinedProjection(Buffer.from(body), segs)).toBe(credentialSafeProjection(sanitizeRemoteBody(body)));
+  });
+
+  test('after a truncated tail, closed segments are released without waiting for EOF', () => {
+    const lead = filler(200_000);
+    const body = lead + '<!--- gbrain:takes:begin -->\nsecret\n<!--- gbrain:facts:begin -->\n' + filler(4 * MAX);
+    const seg = new Segmenter(truthEntry(), segmentOptions('trusted'));
+    const early: SegmentOut[] = [];
+    for (let i = 0; i < body.length; i += 256 * 1024) early.push(...seg.push(body.slice(i, i + 256 * 1024)));
+    const all = [...early, ...seg.finish()];
+    expect(early.length).toBeGreaterThanOrEqual(3);
+    expect(all.map(fingerprint)).toEqual(segmentString(body, truthEntry(), segmentOptions('trusted')).map(fingerprint));
+    expect(regionFlags(all[all.length - 1]!.exitState, 'trusted').protectedTailFrom).toBe(Buffer.byteLength(lead));
   });
 
   test('a protected region crossing a forced cut keeps its full extent on both sides', () => {

@@ -361,7 +361,8 @@ export class Segmenter {
         char = b;
       }
       this.pemPending += projected;
-      if (this.pemPending.length >= PEM_FEED_CHARS) this.feedPem(false);
+      if (track.truncatedAt !== null) this.feedPem(true);
+      else if (this.pemPending.length >= PEM_FEED_CHARS) this.feedPem(false);
     }
   }
 
@@ -379,6 +380,7 @@ export class Segmenter {
   }
 
   private feedPem(final: boolean): void {
+    if (this.pem.final) return;
     const text = this.pemPending;
     this.pemPending = '';
     feedPemScan(this.pem, text, final, (s, e) => this.pemSpans.push({ start: this.rawAt(s, false), end: this.rawAt(e, true) }));
@@ -447,6 +449,7 @@ export class Segmenter {
       regions.push(region);
     }
     this.pemSpans = this.pemSpans.filter(s => s.end > segEnd);
+    for (const [start, end] of this.regionEnds) if (end <= segEnd) this.regionEnds.delete(start);
     regions.sort((a, b) => a.start - b.start || b.end - a.end);
     const parts = segmentProjectionParts(raw, regions, seg.byteStart);
     let projected = '';
