@@ -47,9 +47,13 @@ export const SEGMENTED_PAGE_CEILING_BYTES: Readonly<Record<'postgres' | 'pglite'
   pglite: 128 * 1024 ** 2,
 };
 
-/** Rows one staging statement may carry, by payload bytes (PGLite shares one connection, so smaller). */
+/**
+ * Rows one staging statement may carry, by payload bytes. A statement's transient memory is many times its payload
+ * (driver hex text, protocol buffers, decoded texts, chunk strings): at 16 MiB a 100 MiB Postgres import peaked
+ * ~400 MB above one at 4 MiB (scripts/bench-large-pages.ts), for 3% more ingest time.
+ */
 export const STAGE_BATCH_BYTES: Readonly<Record<'postgres' | 'pglite', number>> = {
-  postgres: 16 * 1024 ** 2,
+  postgres: 4 * 1024 ** 2,
   pglite: 4 * 1024 ** 2,
 };
 

@@ -5,9 +5,10 @@
  *
  * - `ingest_ms`: wall time of the streamed import (pass 1, pass 2, staging,
  *   flip, projection), no provider calls.
- * - `rss`: peak RSS of a fresh child process ingesting `--size` and one
- *   ingesting a page 2 MiB over PAGE_MAX_BYTES through the same path, and
- *   their difference (the slope: ingest memory must not grow with the page).
+ * - `rss`: peak RSS (VmHWM, reset after a full GC once the engine is open) of a fresh child
+ *   process importing `--size` through importFromFile, of one importing a
+ *   1 MiB page through it (the single-string path), and their difference
+ *   (target: under 500 MB at 100 MB; ingest memory must not grow with the page).
  * - `rows`: distinct segment texts and manifest rows of the live generation, and live chunk rows.
  * - `append_10kb`: time, and the manifest and chunk rows the new generation staged, of re-importing the file with 10 KB
  *   appended (only the tail should be restaged).
@@ -32,7 +33,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
-import { importFromContent } from '../src/core/import-file.ts';
+import { importFromContent, importFromFile } from '../src/core/import-file.ts';
 import { readPageBodyPolicy } from '../src/core/page-body/limits.ts';
 import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 import { importStreamedMarkdownFile } from '../src/core/page-body/streamed-import.ts';
@@ -160,14 +161,18 @@ async function flipRetireCells(engine: BrainEngine) {
   return cells;
 }
 
-/** Child mode: ingest `--file` in a fresh process (the parent generated it) and report its peak RSS. */
+/** Child mode: import `--file` in a fresh process (the parent generated it) and report its peak RSS from the open engine on. */
 async function child(file: string, kind: string): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-bench-large-'));
   const engine = await openEngine(kind, dir);
   try {
     await engine.setConfig('pages.segmented_storage', 'on');
     await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [SLUG]);
-    await ingest(engine, file);
+    const bodyPolicy = await readPageBodyPolicy(engine);
+    Bun.gc(true);
+    if (existsSync('/proc/self/clear_refs')) writeFileSync('/proc/self/clear_refs', '5');
+    const result = await importFromFile(engine, file, `${SLUG}.md`, { noEmbed: true, bodyPolicy });
+    if (result.status !== 'imported') throw new Error(`the bench page was not imported: ${result.error ?? result.status}`);
     process.stdout.write(JSON.stringify({ peak_rss_bytes: peakRssBytes() }) + '\n');
   } finally {
     await engine.disconnect();
@@ -233,12 +238,12 @@ async function main(): Promise<void> {
     const pct = (p: number) => latencies.length ? round(latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * p))]!) : null;
     const reference = join(dir, 'page-reference.md');
     writeFileSync(file, conversationPage(size, { seed: 1 }));
-    writeFileSync(reference, conversationPage(PAGE_MAX_BYTES + 2 * 1024 * 1024, { seed: 1 }));
+    writeFileSync(reference, conversationPage(1024 * 1024, { seed: 1 }));
     const rssLarge = childRss(file, kind);
     const rssSmall = childRss(reference, kind);
     const report = {
       engine: kind, size_bytes: statSync(file).size, ingest_ms: round(ingestMs),
-      rss: { peak_bytes: rssLarge, peak_reference_bytes: rssSmall, slope_bytes: rssLarge - rssSmall },
+      rss: { peak_bytes: rssLarge, peak_reference_bytes: rssSmall, delta_bytes: rssLarge - rssSmall },
       rows: { texts: rows.texts, manifest: rows.manifest, chunks: rows.chunks },
       append_10kb: { ms: round(appendMs), manifest: appended.manifestAtGeneration, chunks: appended.chunksAtGeneration },
       concurrent_small_put: { writes: latencies.length, p50_ms: pct(0.5), p95_ms: pct(0.95), max_ms: pct(1) },
