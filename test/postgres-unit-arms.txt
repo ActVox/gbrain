@@ -169,9 +169,11 @@ test/sync-full-cursor-slices-6349.test.ts
 test/sync-full-untracked-import-5459.test.ts
 test/sync-group-member-order.test.ts
 test/sync-handler-drain-6706.test.ts
+test/sync-import-provenance-disk.test.ts
 test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-origin-live-wins-6517.test.ts
+test/sync-slug-root-mode-6694.test.ts
 test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
 test/sync-waiver-budget.test.ts
