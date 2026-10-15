@@ -12,7 +12,7 @@ Branch `capy/w18b-lane3`. These are the edits to files other lanes may also touc
 - `docs/guides/error-codes.md`: regenerated (`bun run build:error-codes`) with the three codes above. The integrator regenerates again after merging.
 - `src/commands/doctor/registry.ts`: `embeddingIdentityEntry` registered right after `embeddingEnvOverrideEntry`.
 - `src/core/doctor-categories.ts`: category for `embedding_identity_unqualified`.
-- Doctor goldens: `test/fixtures/goldens/doctor/json-pglite-degraded.json`, `json-pglite-fresh.json`, `registry-build-checks.json` gain the new check (`GBRAIN_TEST_UPDATE_GOLDENS=1 bun test test/doctor-registry-golden.test.ts test/doctor-json-golden.test.ts`).
+- Doctor goldens: `test/fixtures/goldens/doctor/json-pglite-degraded.json`, `json-pglite-fresh.json`, `registry-build-checks.json`, `content-pglite-human.json`, `content-pglite-json.json`, `hot-checks-pglite-json.json`, and the Postgres E2E goldens `hot-checks-postgres-json.json`, `json-postgres-fresh.json` gain the new check (`GBRAIN_TEST_UPDATE_GOLDENS=1` on `test/doctor-registry-golden.test.ts`, `test/doctor-json-golden.test.ts`, `test/doctor-content-golden.test.ts`, `test/doctor-hot-checks-golden.test.ts`, `test/e2e/doctor-json-golden.test.ts`, `test/e2e/doctor-hot-checks-golden.test.ts`).
 - `test/fixtures/goldens/trust/help.txt`: the `--repair-unknown-markers` usage block.
 - `scripts/serial-files.tsv`: three R2 rows (mock.module): `test/cycle-patterns-timeline-appends.serial.test.ts`, `test/cycle-patterns-cadence.serial.test.ts`, `test/cycle-patterns-read-budget.serial.test.ts`.
 - `src/core/config.ts`: known config keys gain `dream.patterns.min_interval_hours` and `dream.patterns.child_read_budget_kb` (one line).
