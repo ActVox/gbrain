@@ -198,7 +198,10 @@ test('full sync cannot hide an older failed incremental cursor or repeat its com
     expect(await engine.executeRaw('SELECT id,state,intent,error_code FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [f.id])).toEqual(receipts);
     writeFileSync(join(f.root, 'bad.md'), 'Repaired valid source observation.\n');
     const fullTarget = commit(f.root);
-    expect(await performManagedSync(engine, { ...options, full: true })).toMatchObject({ status: 'synced', toCommit: fullTarget });
+    // #6712 PR 1: one cursor per source, so `--full` resumes the failed cursor instead of starting its own: it stays
+    // blocked on the same failure and moves nothing (before, a full run synced under a separate key beside it).
+    expect(fullTarget).not.toBe(target);
+    expect(await performManagedSync(engine, { ...options, full: true })).toMatchObject({ status: 'blocked_by_failures', runId: blocked.runId, toCommit: target });
     const [source] = await engine.executeRaw('SELECT last_commit,last_sync_at FROM sources WHERE id=$1', [f.id]);
     expect(await performManagedSync(engine, options)).toEqual(blocked);
     expect(await engine.executeRaw('SELECT last_commit,last_sync_at FROM sources WHERE id=$1', [f.id])).toEqual([source]);
@@ -279,7 +282,7 @@ test('managed failure retry hints name the failed cursor options locally, shell-
   }
 }), 120_000);
 
-test('--retry-failed counts only the failures of the cursor its own options select and names the others', async () => withEnv({ ...env, GBRAIN_BACKUP_CHECK: 'off', GBRAIN_SYNC_NO_EXTRACT_NUDGE: '1' }, async () => {
+test('--retry-failed counts every managed failure of the source, whatever options the failed run used (#6712 PR 1: one cursor key)', async () => withEnv({ ...env, GBRAIN_BACKUP_CHECK: 'off', GBRAIN_SYNC_NO_EXTRACT_NUDGE: '1' }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'bad.md': '---\ntitle: [broken\n---\nRetry count fixture.\n' });
     await engine.executeRaw("UPDATE sources SET config=jsonb_set(config,'{syncEnabled}','false'::jsonb) WHERE id<>$1", [f.id]);
@@ -288,12 +291,8 @@ test('--retry-failed counts only the failures of the cursor its own options sele
     expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(1);
 
     const other = await captureCli(() => runSync(engine, [...flags, '--retry-failed']));
-    expect(other).toContain('1 previously-failed file(s) of this source belong to a run with different sync options and are not retried by this invocation.');
-    expect(other).toContain(`gbrain sync --source ${f.id} --no-pull --retry-failed --no-embed --no-extract --no-schema-pack --exclude 'it'\\''s a dir/**'`);
-    expect(other).not.toContain('Retrying 1 previously-failed file(s)');
-
-    const same = await captureCli(() => runSync(engine, [...flags, '--exclude', QUOTED_EXCLUDE, '--retry-failed']));
-    expect(same).toContain('Retrying 1 previously-failed file(s)...');
+    expect(other).toContain('Retrying 1 previously-failed file(s)...');
+    expect(other).not.toContain('belong to a run with different sync options');
   }
 }), 120_000);
 

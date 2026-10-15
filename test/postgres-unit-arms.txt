@@ -127,10 +127,12 @@ test/persistence-reconcile-git-dirty-6138.test.ts
 test/persistence-skill-bundles.serial.test.ts
 test/persistence-skill-crash.slow.test.ts
 test/persistence-skip-cost.test.ts
+test/persistence-sync-cursor-adoption.test.ts
 test/persistence-sync-cursor-options.test.ts
 test/persistence-sync-cursor-strategy-6696.test.ts
 test/persistence-sync-fence-holds.test.ts
 test/persistence-sync-holds.test.ts
+test/persistence-sync-lease.test.ts
 test/persistence-write-stall.test.ts
 test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts

@@ -21,6 +21,18 @@ export interface SyncResult {
   managedWrite?: import('../core/persistence/sync-run.ts').ManagedSyncWriteDiagnostic;
   /** #6643: the request a `--retry-failed` rediscovery waits for (its producer and slug), instead of a silent no-op. */
   retryWait?: import('../core/persistence/sync-run.ts').RetryWait;
+  /** #6712 PR 1: another drainer holds (or took) the source's drain lease; `resumable`, nothing admitted by this run. */
+  leaseHeld?: import('../core/persistence/sync-lease.ts').DrainLeaseHeld;
+  /**
+   * #6712 PR 1 (#6552 §1): processing opt-outs this run kept from the unfinished cursor it resumed though the caller did
+   * not set them (`gbrain embed --stale` / `gbrain extract --stale` settle the pages they skipped).
+   */
+  inherited_options?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
+  /** #6712 PR 1: this run finished a cursor another writer, or an older key, started, under that run's frozen options (shown to local callers). */
+  cursorAdopted?: { writer_changed: boolean; legacy_key: boolean; sync_options?: import('../core/persistence/sync-prepare.ts').SyncCursorOptions | null;
+    processing_options?: import('../core/persistence/sync-authority.ts').SyncProcessingOptions | null };
+  /** #6712 PR 1: older-key cursors of the incarnation this run's fan-in folded (`retained`: left while a request under them is open). */
+  cursorFanIn?: { adopted: boolean; superseded: number; retained: number };
   /** #6693: caller remembers refused while their page's file awaited import (or was held), replayed after this sync imported it. */
   replayedRemembers?: import('../core/repair/failed-writes.ts').ImportReplayReport;
   /** #6722: pages this run left large or embed_skip (chunked, keyword-searchable) and their embedding state. */ size_states?: import('../core/page-embedding-budget.ts').SyncSizeStates;
@@ -92,7 +104,7 @@ export interface SyncResult {
    * cron operators can disambiguate timeout vs pull-timeout in monitoring; connector item failures / early stop exit 1 (isFailedPartial).
    */
   filesImported?: number;
-  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial';
+  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial' | 'drain_lease_held';
   /**
    * v0.42.x (#1794): cumulative file paths durably banked to the checkpoint
    * across THIS run + prior resumed runs. Surfaced on every partial/blocked
@@ -177,8 +189,6 @@ export interface SyncOpts {
   noSchemaPack?: boolean;
   /** #6696 (A7): server-only; the drain's first pass checks the run's estimated receipts against the capacity left before admitting. */
   capacityPreflight?: boolean;
-  /** Processing options this caller set; an unfinished managed cursor supplies the rest (unset = all explicit). */
-  explicitProcessing?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
   /** #6696: a runtime paid-work constraint (the cost gate deferred this run's embedding); never a processing option, never lifted by cursor adoption. */
   embedDeferred?: boolean;
   /**
@@ -351,6 +361,8 @@ export interface SyncOpts {
    * (src/core/persistence/sync-drain.ts). Set by the CLI, serve and the `sync` job (#6706); others stay single-pass.
    */
   drain?: boolean;
+  /** #6712 PR 1: who takes the source's drain lease (kind and id shown to a follower), and whether a busy lease is followed instead of refused. */
+  drainHolder?: import('../core/persistence/sync-lease.ts').DrainHolderRef; followDrainLease?: boolean;
   /** #6706: absolute epoch ms a managed drain stops before (`resumable / deadline`). */ deadlineAtMs?: number;
   /** #5984: wall-clock ms the current drain started; managed cursors measure their rate from it. */
   drainStartedAt?: number;

@@ -21,6 +21,7 @@ import type { WriteRequest } from './model.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import type { SyncIntent } from './sync-prepare.ts';
 import type { SyncAuthority } from './sync-authority.ts';
+import { assertDrainLease } from './sync-lease.ts';
 
 /** What sets a drain's lane ceiling: lanes off, the configured maximum, or the connection pool. */
 export type LanesCap = 'disabled' | 'maximum' | 'pool';
@@ -153,6 +154,7 @@ export async function admitGroup(engine: BrainEngine, members: WaiverEntry[], cu
         principal: cursor.authority.writer.principal, authority: cursor.authority.writer, callerIntent: member.intent, intent: member.intent }))),
     ]) as [unknown, WriteRequest[]];
     if (!await cursorHolds(tx)) throw new GroupMoved();
+    await assertDrainLease(tx, cursor.sourceId);
     return rows;
   }), undefined, error => engine.reconnect({ error })).catch(error => { if (error instanceof GroupMoved) return null; throw error; });
 }

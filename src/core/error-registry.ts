@@ -389,7 +389,7 @@ export const CODES = {
   profile_incompatible: { class: 'caller', summary: "The stored profile is incompatible with this operation." },
   projection_owner_resident: { class: 'host_only', summary: "A resident owner holds the projection." },
   // #6643, retired by #6712 (one page, one fate): no page waits on another page's fate any more, so nothing re-freezes knock-ons.
-  knock_on_exhausted: { class: 'server', retired_in: '0.60.249.0',
+  knock_on_exhausted: { class: 'server', retired_in: '0.60.250.0',
     summary: "Retired: an older gbrain stopped a managed sync that kept re-freezing a page cancelled only because another page of the same sync did not commit. This build never cancels a page for another page's failure, so the stop is superseded.",
     why: "Since #6712 each page of a sync has its own fate: a page that does not commit is held or stops the run on its own, and the pages after it still publish. A ledger row or receipt with this code was written by an older build.",
     docs: 'docs/guides/sync-unblock-runbook.md#decision-table',
@@ -492,6 +492,12 @@ export const CODES = {
     why: "Usually a dropped connection or a failed statement; the same error after a rerun is not transient. `detail: persistence_mode_unknown` (#6482): the persistence_brain singleton is missing, duplicated or carries a non-boolean `enabled`, so gbrain cannot tell whether the brain is managed and refuses every write, sync, connector run and activation step that depends on it rather than route a managed brain through the unmanaged writer; only a well-formed `enabled: false` row selects the unmanaged path.",
     suggestion: 'For persistence_mode_unknown: run gbrain sources writer status --probe --json on the brain host (it reports the malformed state instead of refusing), fix the persistence_brain row it names, then gbrain doctor --json.' },
   sync_not_applicable: { class: 'caller', summary: "Sync does not apply to this source: its directory is not a Git checkout.", why: "Sync imports changes between Git commits. A gbrain-owned content directory (created by init) holds files gbrain manages itself and is not a Git repository, so there is nothing to sync; gbrain never initializes Git on its own.", reasons: ['content_directory'] },
+  // #6712 PR 1: the drain lease (src/core/persistence/sync-lease.ts).
+  sync_drain_lease_held: { class: 'retryable', actor: 'provider',
+    summary: "Another process holds the source's drain lease and is still committing pages; this run followed it until its own budget ended, or lost the lease mid-pass, and stopped `resumable`.",
+    why: "One managed drainer per source: two drainers on one cursor raced each other's checkpoints. A follower counts the holder's commits as its own progress, takes the lease when the holder releases it, and stops `drain_stalled` (cause `no_progress`) instead when the holder commits nothing for 5 minutes, so a wedged holder never reads as a clean exit.",
+    docs: 'docs/guides/write-refusals.md#sync_drain_lease_held',
+    suggestion: 'Rerun next.command after next.retry_after_ms (safe_to_loop), or let the holder finish; Ctrl-C while following leaves the holder running.' },
   sync_in_progress: { class: 'retryable', summary: "A sync is running on this source, or a write in flight or the sync's frozen manifest still names the file a repair would write.",
     why: "A repair that changed a file the running sync admits later would make that entry refuse on its raw hash, and a file a write in flight names would be written twice; so the one candidate waits while the rest of the source is repaired. `candidate_in_flight`: the file is named; `busy_set_unreadable`: the busy set could not be read, so every candidate waited.",
     reasons: ['candidate_in_flight', 'busy_set_unreadable'],

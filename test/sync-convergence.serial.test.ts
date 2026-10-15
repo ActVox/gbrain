@@ -114,6 +114,7 @@ const MODES = {
   // that lease lapses (~366 s, "claim lapsed: owner missing"); one page's fate converges, the stall is the owner's (the drain lease).
   f: { title: 'a pooler drop mid-bulk', skip: PR1 },
   g: { title: 'two concurrent drainers: a --all run beside a serve', skip: null },
+  lease: { title: 'the drain-lease holder killed with two followers queued behind it', skip: null },
   'knock-on': { title: 'one page failure inside a bulk group', skip: null },
   systemic: { title: 'a systemic database refusal: an unknown P0001 or a 55000 from a trigger on every page write', skip: null },
 } as const satisfies Record<string, { title: string; skip: string | null }>;
@@ -813,7 +814,7 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
   });
   test('modes master fails stay written and name the PR that turns them on', () => {
     expect(MODES.f.skip).toContain('PR 1 of #6712');
-    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'g', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
+    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'g', 'lease', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
   });
 });
 
@@ -1091,6 +1092,43 @@ scenario(['g'], 'a --all run beside a serve draining the same source converges',
     await b.recover();
   }, SCENARIO_TIMEOUT_MS);
   afterAll(() => b.teardown(), 120_000);
+  oracleTests(b, () => ({ bigPage: false }));
+});
+
+// ---------------------------------------------------------------- (lease): the drain-lease holder dies with followers queued
+
+scenario(['lease'], 'a killed drain-lease holder is taken over by a queued follower and the source converges', () => {
+  const b = new Brain('lease-takeover', ['lease']);
+  const notes = Math.min(NOTES, 200);
+  const followers: Array<{ code: number; envelope: Record<string, unknown> | null; followed: boolean }> = [];
+  beforeAll(async () => {
+    await b.setup(brain => brain.writeNotes(Array.from({ length: notes }, (_, i) => i), 'Initial', 'fixture'));
+    b.writeNotes(Array.from({ length: Math.min(notes, 120) }, (_, i) => i), 'Round one', 'round one');
+    const tag = 'leader', release = join(b.home, 'release-leader');
+    b.plan = ['leader stalls at sync:lease_acquired #1; two --no-delegate followers queue behind it; the leader is SIGKILLed'];
+    const leader = b.sync(['--no-pull', '--no-delegate', '--json'], { point: 'sync:lease_acquired', nth: 1, marker: b.marker(tag), action: 'stall', release });
+    await until(() => existsSync(b.marker(tag)), 'the leader to take the drain lease', SYNC_TIMEOUT_MS);
+    const queued = [0, 1].map(() => b.sync(['--no-pull', '--no-delegate', '--json', '--timeout', '10m']));
+    // Both followers must be following the live leader before it dies (they print the holder once they see it).
+    await Bun.sleep(5_000);
+    leader.proc.kill('SIGKILL'); b.killedPids.add(leader.proc.pid);
+    const killed = await leader.result;
+    b.keepLog('leader.log', `${killed.out}\n${killed.err}`);
+    b.recordFault(tag, b.plan[0]);
+    for (const [i, run] of queued.entries()) {
+      const r = await run.result;
+      b.keepLog(`follower-${i + 1}.log`, `${r.out}\n${r.err}`);
+      followers.push({ code: r.code, envelope: lastJson(r.out), followed: r.err.includes('following it until it finishes') });
+      b.note(`follower ${i + 1}: exit ${r.code} in ${(r.ms / 1000).toFixed(1)}s outcome=${String(lastJson(r.out)?.outcome ?? 'none')}`);
+    }
+    await b.recover();
+  }, SCENARIO_TIMEOUT_MS);
+  afterAll(() => b.teardown(), 120_000);
+  test(as('wedge', 'a follower takes over the dead holder inside the lease TTL; no follower ends blocked'), () => b.verdict([
+    ...(followers.some(f => f.followed) ? [] : ['no follower reported following the live leader']),
+    ...(followers.some(f => f.code === 0 && f.envelope?.outcome === 'synced') ? [] : [`no follower finished the source: ${JSON.stringify(followers.map(f => [f.code, f.envelope?.outcome]))}`]),
+    ...followers.filter(f => f.envelope?.outcome === 'blocked').map(f => `a follower ended blocked: ${JSON.stringify(f.envelope?.next ?? f.envelope).slice(0, 400)}`),
+  ]));
   oracleTests(b, () => ({ bigPage: false }));
 });
 
