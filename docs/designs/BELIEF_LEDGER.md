@@ -12,7 +12,8 @@ answers to section 12 questions 1–3, 5, 6 and 8; purge redaction follows every
 carrying field (section 6.5); the active-memory purge policy and restore-time
 purge replay (sections 6.5 and 8). The pre-W1 integrity wave, #6789, fixes
 question 6's data loss and the purge read leaks the trust-tier review found
-in shipped code (section 6.5). Question 7 (storage) is still open.
+in shipped code (section 6.5). Question 7 (storage) is decided: one snapshot
+event per page at creation (section 9).
 
 ## 1. What the ledger is
 
@@ -187,7 +188,7 @@ change. Each case maps to exactly one rule.
 ### Event types (V1)
 
 Page: `page.published` (create or replace; carries `revision_before` and
-`revision_after`), `page.deleted`, `page.restored`, `page.reverted` (cause
+`revision_after`; a create is a **snapshot**, below), `page.deleted`, `page.restored`, `page.reverted` (cause
 carries the version's revision), `page.renamed`, `page.merged` (section 3),
 `page.visibility_changed`, `page.view_changed` (the effective page view
 changed without a publication: a withdrawal and its materialization, section
@@ -225,8 +226,21 @@ Identity (section 3): `fact.adopted` and `link.adopted`, when a page is
 created at a slug that page-less subjects already named.
 
 Coverage (section 7): `coverage.started`, `coverage.stopped`,
-`coverage.restored`, `baseline` (one per subject at activation), plus history
+`coverage.restored`, `baseline` (one snapshot per page at activation, or per
+subject where section 4 requires it), plus history
 rows of any type marked `origin = 'backfill'`.
+
+**A page creation is one snapshot event, not one event per subject**
+(section 12, question 7, decided). The create's `page.published` carries
+`snapshot: true`, the subject counts and `state_hash`, and no text. The
+values at creation are the page body at `revision_after`: the live page until
+the first edit, then that edit's preimage version (the same join W2 uses,
+section 10). Per-subject events start with each subject's first transition
+after creation, whose prior value is read from the snapshot's body. Three
+cases keep per-subject creation events, because no retained body holds their
+values: database-only facts (no page), subjects of a page over 1 MiB (only its
+newest five large versions are kept, `page-state/versions.ts:6-12`, so its
+creation body can be pruned), and page-less link endpoints.
 
 A page delete or restore emits one page event, not one event per fact, take
 and link: the beliefs of a deleted page end with it. This also keeps a
@@ -765,9 +779,11 @@ nothing records what already existed. Activation is a **baseline run**:
    run id).
 2. For each live page, under that page's key lock and with its revision
    checked in the same transaction (the same `revision_conflict` rule as a
-   publication), append one `baseline` event per subject of the page (the
-   page itself, its facts, takes and links) with the values as they are now,
-   and mint the page's lifetime. A publication that wins the lock first is
+   publication), append one `baseline` snapshot event for the page, in the
+   same form as a creation snapshot (section 4), with the subject counts and
+   `state_hash` as they are now, and mint the page's lifetime. A page over
+   1 MiB gets one `baseline` event per subject instead, for the same reason
+   as at creation. A publication that wins the lock first is
    simply recorded, and the baseline for that page runs after it. Purge
    takes the same lock, so a page cannot be purged in the middle of its
    baseline.
@@ -1007,8 +1023,9 @@ Medians are over 15 runs. The two engines produced identical counts.
 | one timeline row added | 1 / 27 | 1 / 257 |
 
 Canonical counts include timeline rows, which the ledger does not record
-(section 1). Without them, a create is 19 events typical and 246 large, and
-each edit adds one `page.published` event. A row-level capture would record
+(section 1). Without them, a create would be 19 events typical and 246 large
+as per-subject events; with the creation snapshot (section 4) it is one
+event. Each edit adds one `page.published` event. A row-level capture would record
 26 to 258 rows per edit to report at most one belief change. That is the
 quantitative case for section 2.
 
@@ -1027,20 +1044,45 @@ For comparison, median `put_page` latency through the same path was:
 - typical page: PGLite create 37.9 ms, edits 32.8–42.9 ms; Postgres create 33.5 ms, edits 33.7–37.6 ms;
 - large page: PGLite create 147 ms, edits 137–153 ms; Postgres create 130.5 ms, edits 124–180 ms.
 
-A typical edit appends about 2 events, under 0.3 ms (under 1%). A typical
-create appends 19, about 0.6 ms (under 2%). A large create appends 246, about
-5 ms (3–4%).
+A typical edit appends about 2 events, under 0.3 ms (under 1%). A create
+appends one snapshot event, under 0.2 ms. As per-subject events it would have
+appended 19 (about 0.6 ms) typical and 246 (about 5 ms, 3–4%) large; a page
+over 1 MiB still does (section 4).
 
 Not yet measured: the cost of computing the canonical diff. It runs in
 prepare, outside the lock, over data the projection already reads. W1's
 probe must time it.
 
-**Storage:** about 905 bytes per event on PGLite and 925 on Postgres,
-including indexes. A brain of 10,000 typical pages costs about 190,000
-creation events (about 170 MB), then about 2 events per edit. That is a
-real addition for a PGLite brain. Three options are open (section 12,
-question 7): trim `value` to the fields W4 shows, keep large-page creation
-as one summary event plus the page version, or accept the cost.
+**Storage** (section 12, question 7, decided). A second free bench inserted
+the creation events of 2,000 typical pages into a PGLite table with the full
+schema of section 8 (before `writer_tier`, `claim_fp` and `redacted_fields`
+were added) and measured `pg_total_relation_size` after `VACUUM ANALYZE`:
+
+| Creation as | Bytes per event (heap) | Per typical page | Per 10,000 pages |
+|---|---|---|---|
+| Per-subject events, TEXT hashes | 1,180 (795) | 21.9 KB | 224 MB |
+| Per-subject events, BYTEA hashes (as designed) | 1,105 (719) | 20.5 KB | **210 MB** |
+| Per-subject, non-belief fields trimmed to a hash | 1,035 (647) | 19.2 KB | 197 MB |
+| Trimmed, plus a hashed subject index | 877 (647) | 16.3 KB | 167 MB |
+| **One snapshot event per page** | 905 (512) | 0.9 KB | **9 MB** |
+
+The earlier estimate of about 170 MB used the first bench's narrower table
+(905 bytes per event); the designed schema costs about 210 MB. Edits cost the
+same in every option, about 2 events each. Page-at-time reads cost the same
+too: rebuilding a typical page from a 39-event stream took 0.22 ms median
+(p90 0.32), and from a snapshot plus a parse of its version body 0.25 ms
+(p90 0.35).
+
+**Why snapshots and not trimming.** About 900 bytes of each event is fixed
+row and index overhead (about 510 bytes of heap and 390 of indexes even with
+a tiny value), so trimming the non-belief fields saves only 7% (197 MB) and
+gives up the values W4 displays; trimming plus a narrower subject index saves
+20%. The snapshot removes the creation events themselves (96% less). W4's
+weekly diff and W2's page-at-time both run off edits and versions, which cost
+the same either way, and section 10 already reads page bodies from versions.
+The snapshot also holds no text, so purge has one fewer copy to redact. The
+cost: the creation-time value of a never-edited subject is read from the page
+body, not from an indexed event.
 
 ## 10. What W2's first slice needs from W1
 
@@ -1194,7 +1236,11 @@ reconstructed state, not counts**, on PGLite and Postgres:
     owner release; the same through `fact.adopted` and `fact.transferred`;
     a verbatim copy of Y's whole context into an unlinked fact → the
     marker;
-39. N1 unchanged (388/388, 0 stale).
+39. a page create → exactly one snapshot `page.published` and no
+    per-subject events; the first edit of one of its facts → one event whose
+    prior value matches the snapshot body; a database-only fact and a page
+    over 1 MiB → per-subject creation events;
+40. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
@@ -1251,8 +1297,7 @@ about 25 writers):
 ## 12. Open questions
 
 Questions 1–3 were for GBRA-58; the trust-tier review answered them and
-Garry accepted those answers. Questions 5, 6 and 8 are decided. Question 7
-is open.
+Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
 
 1. **Unguarded removals. Decided:** a lower-tier rewrite that removes
    higher-tier takes or timeline rows is contested, and the higher-tier
@@ -1279,11 +1324,11 @@ is open.
    #6789: a fence without resolution cells no longer touches the database
    grade, and a claim edited in place drops its old grade. Forced probes fail
    on master and pass with the fix on both engines.
-7. **Storage on PGLite** (about 0.9 KB per event; about 170 MB of creation
-   events for a 10,000-page brain). *Recommendation (needs Garry):* trim
-   `value` to W4's displayed fields, and record a large page's creation as
-   one summary event that points at its version. Measure again before
-   shipping.
+7. **Storage on PGLite. Decided:** one snapshot event per page at creation
+   (and at baseline), about 9 MB of creation events per 10,000 typical pages
+   instead of about 210 MB, with per-subject creation events kept where no
+   retained body holds the values (section 4). Trimming was measured and
+   skipped (section 9).
 8. **PLAN correction. Accepted;** Garry updates the PLAN. The default
    PGLite→Postgres route is graduation, which carries ids verbatim, and the
    legacy copier refuses journaled brains. So the ledger needs a graduation
