@@ -14,49 +14,40 @@
  * which measures the work rather than how long the scheduler made it wait.
  */
 
-import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { DELETE_BATCH_SIZE } from '../src/core/engine-constants.ts';
 import { cpuMsAsync } from './helpers/cpu-time.ts';
 
+const N = 10_000;
 let engine: PGLiteEngine;
 
+const seed = (prefix: string, from: number, to: number) => engine.executeRaw(
+  `INSERT INTO pages (source_id, slug, type, title, compiled_truth, timeline, frontmatter)
+   SELECT 'default', '${prefix}' || g, 'note', '${prefix}' || g, 'body', '', '{}'::jsonb
+   FROM generate_series(${from}, ${to}) g`,
+);
+
+// Both fixtures are seeded once, here, so each test's 30 s budget covers only
+// its delete loop. The first rows are ANALYZEd before the bulk insert: on an
+// empty table bump_page_generation_fn's cached MAX(generation) plan is a seq
+// scan, which makes a fresh-session 10K-row seed quadratic (~6 s of CPU
+// instead of ~0.8 s).
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  await seed('perf/page-', 0, 99);
+  await engine.executeRaw('ANALYZE pages');
+  await seed('perf/page-', 100, N - 1);
+  await seed('perf/soft-', 0, N - 1);
 });
 
 afterAll(async () => {
   await engine.disconnect();
 });
 
-beforeEach(async () => {
-  await resetPgliteState(engine);
-});
-
 test('10K-page batched delete completes in <5s on PGLite', async () => {
-  const N = 10_000;
-
-  // Seed N pages via bulk INSERT (single statement to keep setup fast).
-  // putPage one-at-a-time would dominate the test runtime.
-  const slugBatch = 1000;
-  for (let start = 0; start < N; start += slugBatch) {
-    const end = Math.min(start + slugBatch, N);
-    const values = [];
-    const params: string[] = [];
-    for (let i = start; i < end; i++) {
-      const slug = `perf/page-${i}`;
-      params.push(slug);
-      values.push(`('default', $${params.length}, 'note', $${params.length}, 'body', '', '{}'::jsonb)`);
-    }
-    await engine.executeRaw(
-      `INSERT INTO pages (source_id, slug, type, title, compiled_truth, timeline, frontmatter) VALUES ${values.join(',')}`,
-      params,
-    );
-  }
-
   // Confirm seed.
   const countRows = await engine.executeRaw<{ c: number }>(
     `SELECT COUNT(*)::int AS c FROM pages WHERE slug LIKE 'perf/page-%'`,
@@ -81,28 +72,11 @@ test('10K-page batched delete completes in <5s on PGLite', async () => {
   // Optional: report wallclock so future regressions show up in CI logs.
   // (bun:test doesn't have a metrics surface; just stderr-log.)
   process.stderr.write(`[sync-delete-batch perf] 10K deletes in ${elapsed.toFixed(0)}ms of thread CPU\n`);
-}, 300_000); // Hang guard only: the perf gate is the 5 s of thread CPU above. Seeding plus the deletes take ~7 s of wall time idle and 100-121 s under 6 busy loops at nice 10.
+}, 30_000); // 30s test timeout — perf gate of 5s with headroom for setup.
 
 test('#4587: 10K-page batched SOFT delete completes in <5s on PGLite', async () => {
   // Sync's delete lanes now run softDeletePages (UPDATE ... deleted_at),
   // so the loop's perf promise moves with them — same gate, same chunking.
-  const N = 10_000;
-  const slugBatch = 1000;
-  for (let start = 0; start < N; start += slugBatch) {
-    const end = Math.min(start + slugBatch, N);
-    const values = [];
-    const params: string[] = [];
-    for (let i = start; i < end; i++) {
-      const slug = `perf/soft-${i}`;
-      params.push(slug);
-      values.push(`('default', $${params.length}, 'note', $${params.length}, 'body', '', '{}'::jsonb)`);
-    }
-    await engine.executeRaw(
-      `INSERT INTO pages (source_id, slug, type, title, compiled_truth, timeline, frontmatter) VALUES ${values.join(',')}`,
-      params,
-    );
-  }
-
   const allSlugs = Array.from({ length: N }, (_, i) => `perf/soft-${i}`);
   let totalFlipped = 0;
   const elapsed = await cpuMsAsync(async () => {
@@ -124,4 +98,4 @@ test('#4587: 10K-page batched SOFT delete completes in <5s on PGLite', async () 
   expect(reFlipped).toBe(0);
 
   process.stderr.write(`[sync-delete-batch perf] 10K soft-deletes in ${elapsed.toFixed(0)}ms of thread CPU\n`);
-}, 300_000);
+}, 30_000);
