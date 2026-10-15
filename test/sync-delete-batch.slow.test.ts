@@ -9,12 +9,16 @@
  * The same machinery on Postgres + pgbouncer is faster per-batch (no WASM
  * overhead, real index-backed scans). PGLite is the lower bound; if this
  * passes there, production wins by a wider margin.
+ *
+ * The delete loop is timed in thread CPU time (PGLite runs on this thread),
+ * which measures the work rather than how long the scheduler made it wait.
  */
 
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { DELETE_BATCH_SIZE } from '../src/core/engine-constants.ts';
+import { cpuMsAsync } from './helpers/cpu-time.ts';
 
 let engine: PGLiteEngine;
 
@@ -61,14 +65,14 @@ test('10K-page batched delete completes in <5s on PGLite', async () => {
 
   // Batched delete, mirroring the sync loop's chunking.
   const allSlugs = Array.from({ length: N }, (_, i) => `perf/page-${i}`);
-  const start = Date.now();
   let totalDeleted = 0;
-  for (let i = 0; i < allSlugs.length; i += DELETE_BATCH_SIZE) {
-    const batch = allSlugs.slice(i, i + DELETE_BATCH_SIZE);
-    const deleted = await engine.deletePages(batch, { sourceId: 'default' });
-    totalDeleted += deleted.length;
-  }
-  const elapsed = Date.now() - start;
+  const elapsed = await cpuMsAsync(async () => {
+    for (let i = 0; i < allSlugs.length; i += DELETE_BATCH_SIZE) {
+      const batch = allSlugs.slice(i, i + DELETE_BATCH_SIZE);
+      const deleted = await engine.deletePages(batch, { sourceId: 'default' });
+      totalDeleted += deleted.length;
+    }
+  });
 
   expect(totalDeleted).toBe(N);
   // 10x headroom over 0.5s/1K → 5s for 10K. Generous for PGLite WASM.
@@ -76,8 +80,8 @@ test('10K-page batched delete completes in <5s on PGLite', async () => {
 
   // Optional: report wallclock so future regressions show up in CI logs.
   // (bun:test doesn't have a metrics surface; just stderr-log.)
-  process.stderr.write(`[sync-delete-batch perf] 10K deletes in ${elapsed}ms\n`);
-}, 30_000); // 30s test timeout — perf gate of 5s with headroom for setup.
+  process.stderr.write(`[sync-delete-batch perf] 10K deletes in ${elapsed.toFixed(0)}ms of thread CPU\n`);
+}, 300_000); // Hang guard only: the perf gate is the 5 s of thread CPU above. Seeding plus the deletes take ~7 s of wall time idle and 100-121 s under 6 busy loops at nice 10.
 
 test('#4587: 10K-page batched SOFT delete completes in <5s on PGLite', async () => {
   // Sync's delete lanes now run softDeletePages (UPDATE ... deleted_at),
@@ -100,14 +104,14 @@ test('#4587: 10K-page batched SOFT delete completes in <5s on PGLite', async () 
   }
 
   const allSlugs = Array.from({ length: N }, (_, i) => `perf/soft-${i}`);
-  const start = Date.now();
   let totalFlipped = 0;
-  for (let i = 0; i < allSlugs.length; i += DELETE_BATCH_SIZE) {
-    const batch = allSlugs.slice(i, i + DELETE_BATCH_SIZE);
-    const flipped = await engine.softDeletePages(batch, { sourceId: 'default' });
-    totalFlipped += flipped.length;
-  }
-  const elapsed = Date.now() - start;
+  const elapsed = await cpuMsAsync(async () => {
+    for (let i = 0; i < allSlugs.length; i += DELETE_BATCH_SIZE) {
+      const batch = allSlugs.slice(i, i + DELETE_BATCH_SIZE);
+      const flipped = await engine.softDeletePages(batch, { sourceId: 'default' });
+      totalFlipped += flipped.length;
+    }
+  });
 
   expect(totalFlipped).toBe(N);
   expect(elapsed).toBeLessThan(5000);
@@ -119,5 +123,5 @@ test('#4587: 10K-page batched SOFT delete completes in <5s on PGLite', async () 
   }
   expect(reFlipped).toBe(0);
 
-  process.stderr.write(`[sync-delete-batch perf] 10K soft-deletes in ${elapsed}ms\n`);
-}, 30_000);
+  process.stderr.write(`[sync-delete-batch perf] 10K soft-deletes in ${elapsed.toFixed(0)}ms of thread CPU\n`);
+}, 300_000);
