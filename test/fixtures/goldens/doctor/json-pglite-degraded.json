@@ -964,6 +964,22 @@
           "status": "ok"
         },
         {
+          "category": "brain",
+          "details": {
+            "evidence": null,
+            "facts_arm_cosine_min": 0.6,
+            "key": "openai:text-embedding-3-large@3072",
+            "measured": false,
+            "reserve_cosine_min": 0.5
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Fact admission floors (cosine 0.5 for recall questions, 0.6 for the query facts arm) are not measured for openai:text-embedding-3-large@3072. If this model scores unrelated text high, recall --question can return facts for a question nothing answers, so an empty facts list is the reliable signal only on a measured model.",
+          "name": "fact_admission_floors",
+          "readiness_state": "degraded",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
           "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "No chat_fallback_chain is set: every chat call uses only its own model.",

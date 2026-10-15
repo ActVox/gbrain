@@ -19,27 +19,31 @@ export const FACT_ADMISSION_FLOOR_EVIDENCE: Readonly<Record<string, string>> = {
 
 async function runFactAdmissionFloors(ctx: DoctorContext): Promise<Check[]> {
   const engine = connectedEngine(ctx);
+  const checks: Check[] = [];
   ctx.progress.heartbeat('fact_admission_floors');
   try {
     if (await embeddingsDisabled(engine)) {
-      return [{ name: 'fact_admission_floors', status: 'ok', severity: 'info', readiness_state: 'not_applicable',
-        message: 'Embeddings are off on this brain, so facts are admitted by keyword and named entity only; no cosine floor applies.' }];
+      checks.push({ name: 'fact_admission_floors', status: 'ok', severity: 'info', readiness_state: 'not_applicable',
+        message: 'Embeddings are off on this brain, so facts are admitted by keyword and named entity only; no cosine floor applies.' });
+      return checks;
     }
     const { getEmbeddingModel, getEmbeddingDimensions } = await import('../../../core/ai/gateway.ts');
     const key = calibrationKey(getEmbeddingModel(), getEmbeddingDimensions());
     const evidence = FACT_ADMISSION_FLOOR_EVIDENCE[key];
     const details = { key, reserve_cosine_min: RESERVE_COSINE_MIN, facts_arm_cosine_min: FACTS_ARM_COSINE_MIN, measured: evidence !== undefined, evidence: evidence ?? null };
     if (evidence) {
-      return [{ name: 'fact_admission_floors', status: 'ok', details,
-        message: `Fact admission floors (cosine ${RESERVE_COSINE_MIN} for recall questions, ${FACTS_ARM_COSINE_MIN} for the query facts arm) are measured for ${key} (${evidence}).` }];
+      checks.push({ name: 'fact_admission_floors', status: 'ok', details,
+        message: `Fact admission floors (cosine ${RESERVE_COSINE_MIN} for recall questions, ${FACTS_ARM_COSINE_MIN} for the query facts arm) are measured for ${key} (${evidence}).` });
+      return checks;
     }
-    return [{ name: 'fact_admission_floors', status: 'ok', severity: 'info', readiness_state: 'degraded', details,
+    checks.push({ name: 'fact_admission_floors', status: 'ok', severity: 'info', readiness_state: 'degraded', details,
       message: `Fact admission floors (cosine ${RESERVE_COSINE_MIN} for recall questions, ${FACTS_ARM_COSINE_MIN} for the query facts arm) are not measured for ${key}. `
-        + 'If this model scores unrelated text high, recall --question can return facts for a question nothing answers, so an empty facts list is the reliable signal only on a measured model.' }];
+        + 'If this model scores unrelated text high, recall --question can return facts for a question nothing answers, so an empty facts list is the reliable signal only on a measured model.' });
   } catch (error) {
-    return [{ name: 'fact_admission_floors', status: 'ok', severity: 'info', readiness_state: 'unknown',
-      message: `Could not resolve the embedding model for the fact admission floors: ${error instanceof Error ? error.message : String(error)}.` }];
+    checks.push({ name: 'fact_admission_floors', status: 'ok', severity: 'info', readiness_state: 'unknown',
+      message: `Could not resolve the embedding model for the fact admission floors: ${error instanceof Error ? error.message : String(error)}.` });
   }
+  return checks;
 }
 
 export const factAdmissionFloorsEntry: DoctorEntry = {
