@@ -5,95 +5,141 @@
  * 1. Protects: ingest of a 256 MB page and repeated appends to a large page
  *    stay O(bytes); a cut decision that rescans the open segment, or an
  *    append that resegments the page, would make both quadratic.
- * 2. Fails when: the growth exponent k in CPU time ~ bytes^k, measured at 4x
- *    the input, reaches 1.3 (linear 1, quadratic 2), for prose, short lines,
- *    one newline-free line, a giant fence, an unterminated protected region
- *    and key-dense text, or for the resuming append.
- * 3. Forced probes: the same exponent check run on a cut search that rescans
- *    everything pushed so far, and on an append path that resegments the whole
- *    prefix on each append (the quadratic variants), exceeds the bound, so the
- *    check can tell the two apart.
- * 4. After one warm-up run of each size, the ratio is the median of three
- *    rounds, each the best of three samples per size in thread CPU time; a
- *    sample repeats the call until it holds 200 ms (cpuScalingRatio).
- * 5. Why 4x and an exponent: at 2x with a 2.5x bound, linear shapes read up to
- *    2.54x and the rescanning probe as low as 2.66x on a loaded 4-core machine,
- *    and CI's stress gate failed 2 of 10 runs (newline-free line, whose 28 ms
- *    small call sits on the 4 ms thread-CPU step, and the unterminated region).
- *    Measuring at 4x halves the exponent error of the same noise.
- * 6. Measured (16 runs, 4 and 8 in parallel on a 4-core machine): every shape
- *    and the resuming append 0.95-1.06; the probes, the rescanning cut search
- *    1.59-1.68 and whole-page resegmenting per append 1.69-1.77.
+ * 2. Measures work, not time: `segmenterWork` (line and piece events; units the
+ *    per-line passes read: cut-candidate classifiers and gear hash, blockers,
+ *    line state, projection, long-piece fit and remainder; bookkeeping entries
+ *    visited; units each emitted segment's join, copy, hash, projection parts,
+ *    outline and dates read) and `regionScanWork` (units the line split, token
+ *    search with its carry, fence probe, byte counts and inline-code scan read;
+ *    projection units the PEM scan appends, searches, walks, claims and copies
+ *    on trim; PEM cut, claim and fence entries visited). Thread CPU time grows
+ *    when a co-tenant on a sibling vCPU slows one size (1.06-1.65x on CI), so a
+ *    time ratio flakes on linear code; counts are the same on every machine.
+ *    A new loop over the input or over carried state must count its work too.
+ * 3. Fails when: at n and 2n bytes, for prose, short lines, one newline-free
+ *    line, a giant fence, an unterminated protected region and key-dense text,
+ *    or for the resuming append, a counter exceeds its per-byte bound or (with
+ *    at least MIN_RATIO_COUNT counts at n) grows 2.1x or more.
+ * 4. Forced probes: a cut search that rescans everything pushed so far (the
+ *    whole prefix re-pushed into a fresh Segmenter before each 16 KiB push,
+ *    256 and 512 KiB of giant fence) and an append path that resegments the
+ *    whole page per 64 KiB append (256 and 512 KiB) both run through the
+ *    counted code, and their doubling ratios exceed the bound.
+ * 5. Inflation probe: the large size run while a co-tenant burns 60% extra
+ *    thread CPU gives the same counts and passes the same bounds. The old
+ *    CPU-time exponent at 4x read 1.34-1.48 there for every shape and the
+ *    resuming append (0.93-1.04 plain), past its 1.3 bound.
+ * 6. Measured (deterministic; per byte at n, doubling ratio x):
+ *    - mixed page (1 MiB): lines 0.014 x1.99, chars 3.55 x2.01, entries 0.043
+ *      x1.90, emitted 7.60 x2.01, region chars 11.4 x2.00, pem 3.06 x2.00.
+ *    - short lines (512 KiB): lines 0.50, chars 3.44 x2.02, entries 1.13,
+ *      emitted 8.0, region chars 11.0, pem 3.26 (x2.00 where not given).
+ *    - one newline-free line (4 MiB): chars 4.19 x2.02, emitted 8.0, region
+ *      chars 19.0, pem 3.11 x2.01; lines 14, entries 41 and region entries 21
+ *      sit under the ratio floor.
+ *    - giant fence (1 MiB): lines 0.107, chars 4.67, entries 0.24, emitted
+ *      8.0, region chars 11.7, pem 3.23 x2.01.
+ *    - unterminated protected region (1 MiB): lines 0.136, chars 2.61,
+ *      entries 0.27, emitted 4.0, region chars 8.64, pem 0.
+ *    - key-dense text (2 MiB): chars 3.92, entries 0.092 x2.02, emitted 5.69,
+ *      region chars 10.6, pem 4.38, region entries 0.045 x2.02.
+ *    - resuming append (2 MiB): lines 0.045 x2.01, chars 11.2, entries 0.126
+ *      x1.98, emitted 24.6, region chars 37.3, pem 9.78 x1.99 (region
+ *      entries 1,010, under the floor; at 1 MiB pem read x2.09, so this test
+ *      runs at 2 MiB, where the last segment's size averages out).
+ *    - probes: rescanning cut search lines x3.88, chars x4.22, region chars
+ *      x3.88, pem x3.97; whole-page resegmenting per append chars x3.19,
+ *      region chars x3.14.
  */
 import { describe, expect, test } from 'bun:test';
 import { initialEntryState } from '../../src/core/page-body/entry-state.ts';
-import { Segmenter, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
-import { cpuScalingRatio } from '../helpers/cpu-time.ts';
+import { regionScanWork } from '../../src/core/page-body/region-scan.ts';
+import { Segmenter, segmenterWork, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
 import { bigPage, PEM_BLOCK, segmentOptions } from '../helpers/segment-bodies.ts';
+import {
+  countWork, describeWork, linearityViolations, MAX_DOUBLING_RATIO, withCpuInflation, type Sample,
+} from '../helpers/work-counts.ts';
 
 const MB = 1024 * 1024;
-const SCALE = 4;
-const MAX_EXPONENT = 1.3;
 const entry = () => initialEntryState({ region: 'truth' });
 
-/** The growth exponent k in time ~ bytes^k, from the CPU-time ratio at SCALE times the input (linear 1, quadratic 2). */
-function exponent(make: (bytes: number) => string, small: number, run: (body: string) => unknown): number {
-  const a = make(small);
-  const b = make(SCALE * small);
-  return Math.log(cpuScalingRatio(() => run(a), () => run(b))) / Math.log(SCALE);
-}
+/** Per input byte, about 1.5-2x the largest measured value of any shape. */
+const SEGMENT_PER_BYTE = {
+  'segmenter.lines': 1, 'segmenter.chars': 8, 'segmenter.entries': 2, 'segmenter.emitted': 12,
+  'region.chars': 32, 'region.pem': 8, 'region.entries': 0.1,
+};
+/** The resuming append re-reads the last segment per 64 KiB append. */
+const APPEND_PER_BYTE = {
+  'segmenter.lines': 1, 'segmenter.chars': 16, 'segmenter.entries': 2, 'segmenter.emitted': 40,
+  'region.chars': 64, 'region.pem': 16, 'region.entries': 0.1,
+};
+
+const counters = { segmenter: segmenterWork, region: regionScanWork };
+const sample = (body: string, run: (body: string) => unknown): Sample => ({ bytes: Buffer.byteLength(body), work: countWork(counters, () => run(body)) });
 
 const page = bigPage(mulberry32(7), 4.5 * MB);
 const prefix = (bytes: number) => page.slice(0, page.indexOf('\n', bytes) + 1);
 const segmentAll = (body: string) => segmentString(body, entry(), segmentOptions('trusted'));
 
-/** Segment `body` in 256 KiB pushes, keeping only a count (ingest streams segments out; holding them all would time the GC). */
-function segmentStreaming(body: string): number {
+/** Segment `body` in `push`-char pushes, keeping only a count (ingest streams segments out). */
+function segmentStreaming(body: string, push = 256 * 1024): number {
   const seg = new Segmenter(entry(), segmentOptions('trusted'));
   let n = 0;
-  for (let i = 0; i < body.length; i += 256 * 1024) n += seg.push(body.slice(i, i + 256 * 1024)).length;
+  for (let i = 0; i < body.length; i += push) n += seg.push(body.slice(i, i + push)).length;
   return n + seg.finish().length;
 }
 
+const PROBE_PUSH = 16 * 1024;
+
 /**
- * The quadratic cut search: before each 4 KiB push it searches everything pushed so far for the last heading cut
- * candidate, as a cut decision that rescans the open input instead of carrying its scan state would.
+ * The quadratic cut search: before each 16 KiB push it re-reads everything pushed so far through a fresh
+ * Segmenter, as a cut decision that rescans the open input instead of carrying its scan state would.
  */
 function segmentRescanningCuts(body: string): number {
-  const seg = new Segmenter(entry(), segmentOptions('trusted'));
   let n = 0;
-  let candidates = 0;
-  for (let i = 0; i < body.length; i += 4 * 1024) {
-    const pushed = body.slice(0, i);
-    for (const cut = /\n## /g; cut.exec(pushed);) candidates++;
-    n += seg.push(body.slice(i, i + 4 * 1024)).length;
-  }
-  return n + seg.finish().length + (candidates & 0);
+  for (let at = PROBE_PUSH; at < body.length + PROBE_PUSH; at += PROBE_PUSH) n = segmentStreaming(body.slice(0, at), PROBE_PUSH);
+  return n;
 }
 
-describe('the segmenter scales linearly', () => {
-  const shapes: Array<[string, (bytes: number) => string, number]> = [
-    ['mixed page', prefix, 1 * MB],
-    ['short lines', bytes => 'a\n'.repeat(bytes / 2), MB / 2],
-    ['one newline-free line', bytes => 'x'.repeat(bytes), 4 * MB],
-    ['giant fence', bytes => '```\n' + '## not a heading\n\ncode line\n'.repeat(bytes / 28), 1 * MB],
-    ['unterminated protected region', bytes => '<!--- gbrain:takes:begin -->\n' + '## secret\n\nwords here\n'.repeat(bytes / 23), 1 * MB],
-    ['key-dense text', bytes => PEM_BLOCK.repeat(bytes / PEM_BLOCK.length), 2 * MB],
-  ];
+const shapes: Array<[string, (bytes: number) => string, number]> = [
+  ['mixed page', prefix, 1 * MB],
+  ['short lines', bytes => 'a\n'.repeat(bytes / 2), MB / 2],
+  ['one newline-free line', bytes => 'x'.repeat(bytes), 4 * MB],
+  ['giant fence', bytes => '```\n' + '## not a heading\n\ncode line\n'.repeat(bytes / 28), 1 * MB],
+  ['unterminated protected region', bytes => '<!--- gbrain:takes:begin -->\n' + '## secret\n\nwords here\n'.repeat(bytes / 23), 1 * MB],
+  ['key-dense text', bytes => PEM_BLOCK.repeat(bytes / PEM_BLOCK.length), 2 * MB],
+];
+
+describe('the segmenter does linear work', () => {
   for (const [name, make, small] of shapes) {
-    test(`${name}: growth exponent under ${MAX_EXPONENT}`, () => {
-      const k = exponent(make, small, segmentStreaming);
-      console.log(`[segmenter-linear] ${name}: exponent ${k.toFixed(2)}`);
-      expect(k).toBeLessThan(MAX_EXPONENT);
+    test(`${name}: work per byte is bounded and doubles with the input`, () => {
+      const a = sample(make(small), segmentStreaming);
+      const b = sample(make(2 * small), segmentStreaming);
+      console.log(`[segmenter-linear] ${name}: ${describeWork(a, b)}`);
+      expect(linearityViolations(a, b, SEGMENT_PER_BYTE)).toEqual([]);
     }, 120_000);
   }
 
   test('forced probe: a cut search that rescans the pushed input exceeds the bound', () => {
     const giantFence = shapes.find(([name]) => name === 'giant fence')!;
-    const k = exponent(giantFence[1], giantFence[2], segmentRescanningCuts);
-    console.log(`[segmenter-linear] giant fence, rescanning cut search (quadratic probe): exponent ${k.toFixed(2)}`);
-    expect(k).toBeGreaterThan(MAX_EXPONENT);
+    const a = sample(giantFence[1](MB / 4), segmentRescanningCuts);
+    const b = sample(giantFence[1](MB / 2), segmentRescanningCuts);
+    console.log(`[segmenter-linear] giant fence, rescanning cut search (quadratic probe): ${describeWork(a, b)}`);
+    expect(b.work['segmenter.chars']! / a.work['segmenter.chars']!).toBeGreaterThan(MAX_DOUBLING_RATIO);
+    expect(b.work['region.chars']! / a.work['region.chars']!).toBeGreaterThan(MAX_DOUBLING_RATIO);
+  }, 120_000);
+
+  test('inflation probe: 60% extra CPU on the large size cannot move the counts', () => {
+    const small = prefix(1 * MB);
+    const large = prefix(2 * MB);
+    const a = sample(small, segmentStreaming);
+    const plain = sample(large, segmentStreaming);
+    let cpu = { workMs: 0, totalMs: 0 };
+    const inflated = sample(large, body => { cpu = withCpuInflation(() => segmentStreaming(body), 0.6); });
+    console.log(`[segmenter-linear] mixed page, large size under a co-tenant: ${cpu.workMs.toFixed(0)} ms work, ${cpu.totalMs.toFixed(0)} ms thread CPU`);
+    expect(inflated.work).toEqual(plain.work);
+    expect(linearityViolations(a, inflated, SEGMENT_PER_BYTE)).toEqual([]);
   }, 120_000);
 });
 
@@ -127,15 +173,18 @@ describe('appends through a stored entry state', () => {
     expect(appendResuming(body).map(s => [s.byteStart, s.bytes.length, s.cutKind])).toEqual(segmentAll(body).map(s => [s.byteStart, s.bytes.length, s.cutKind]));
   });
 
-  test(`appended text: growth exponent under ${MAX_EXPONENT}`, () => {
-    const k = exponent(ascii, 1 * MB, appendResuming);
-    console.log(`[segmenter-linear] appends resuming: exponent ${k.toFixed(2)}`);
-    expect(k).toBeLessThan(MAX_EXPONENT);
+  test('appended text: work per byte is bounded and doubles with the input', () => {
+    const a = sample(ascii(2 * MB), appendResuming);
+    const b = sample(ascii(4 * MB), appendResuming);
+    console.log(`[segmenter-linear] appends resuming: ${describeWork(a, b)}`);
+    expect(linearityViolations(a, b, APPEND_PER_BYTE)).toEqual([]);
   }, 120_000);
 
   test('forced probe: resegmenting the whole page per append exceeds the bound', () => {
-    const k = exponent(ascii, MB / 4, appendResegmenting);
-    console.log(`[segmenter-linear] appends resegmenting (quadratic probe): exponent ${k.toFixed(2)}`);
-    expect(k).toBeGreaterThan(MAX_EXPONENT);
+    const a = sample(ascii(MB / 4), appendResegmenting);
+    const b = sample(ascii(MB / 2), appendResegmenting);
+    console.log(`[segmenter-linear] appends resegmenting (quadratic probe): ${describeWork(a, b)}`);
+    expect(b.work['segmenter.chars']! / a.work['segmenter.chars']!).toBeGreaterThan(MAX_DOUBLING_RATIO);
+    expect(b.work['region.chars']! / a.work['region.chars']!).toBeGreaterThan(MAX_DOUBLING_RATIO);
   }, 120_000);
 });
