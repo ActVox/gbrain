@@ -34,10 +34,16 @@ import { faultPoint } from './fault-points.ts';
 
 const BODY_KEYS = new Set(['compiled_truth', 'timeline', 'content']);
 
-/** A page row's storage class without touching its (possibly throwing) body getters. */
+/**
+ * A page row's storage class without touching its (possibly throwing) body
+ * getters. A row read without `body_storage` is segmented when its
+ * `compiled_truth` is a stored NULL, which the storage CHECK allows only there.
+ */
 export function bodyStorageOf(page: object | null | undefined): 'inline' | 'segmented' | null {
   if (!page) return null;
-  return (page as { body_storage?: string }).body_storage === 'segmented' ? 'segmented' : 'inline';
+  const storage = (page as { body_storage?: string }).body_storage;
+  if (storage !== undefined) return storage === 'segmented' ? 'segmented' : 'inline';
+  return Object.getOwnPropertyDescriptor(page, 'compiled_truth')?.value === null ? 'segmented' : 'inline';
 }
 
 /** The live page a segmented write diffs against, read by id (metadata only). */
@@ -60,8 +66,10 @@ export async function materializedPage<T extends Page>(engine: BrainEngine, page
 export async function materializedPage<T extends Page>(engine: BrainEngine, page: T | null): Promise<T | null>;
 export async function materializedPage<T extends Page>(engine: BrainEngine, page: T | null): Promise<T | null> {
   if (!page || bodyStorageOf(page) !== 'segmented' || typeof Object.getOwnPropertyDescriptor(page, 'compiled_truth')?.value === 'string') return page;
-  if (Number((page as { body_bytes?: number | string | null }).body_bytes ?? 0) > PAGE_MAX_BYTES) return page;
-  const copy: Record<string, unknown> = {};
+  const bytes = (page as { body_bytes?: number | string | null }).body_bytes
+    ?? (await engine.executeRaw<{ body_bytes: string }>('SELECT body_bytes::text AS body_bytes FROM pages WHERE id=$1', [page.id]))[0]?.body_bytes;
+  if (Number(bytes ?? 0) > PAGE_MAX_BYTES) return page;
+  const copy: Record<string, unknown> = { body_storage: 'segmented' };
   for (const key of Object.keys(page)) if (!BODY_KEYS.has(key)) copy[key] = (page as Record<string, unknown>)[key];
   Object.assign(copy, await materializeSegmentedBody(engine, Number(page.id), page.source_id));
   return copy as T;

@@ -274,6 +274,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let recovery: RecoveryRecord | null = null;
   let published = false;
   let transactionBodyCompleted = false;
+  let afterCommitDue = false;
   const skill = prepared.target === 'skill_bundle';
   const files = skill ? prepared.files ?? [] : prepared.file ? [prepared.file] : [];
   try {
@@ -430,13 +431,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     });
     await hooks.boundary?.('after_commit', done);
     if (recovery) await clearResolvedRecovery(engine, row.id, done);
-    if (done.state === 'committed' && prepared.afterCommit) {
-      releaseCapacity?.();
-      releaseCapacity = null;
-      await lock?.release();
-      lock = null;
-      await prepared.afterCommit(engine).catch(() => undefined);
-    }
+    afterCommitDue = done.state === 'committed';
     return done;
   } catch (error) {
     if (recovery) {
@@ -459,7 +454,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       return (await getWriteRequestById(engine, row.id))!;
     }
     return finishUnpublishedFailure(engine, row, error);
-  } finally { releaseCapacity?.(); await lock?.release(); }
+  } finally {
+    releaseCapacity?.();
+    await lock?.release();
+    if (afterCommitDue) await prepared.afterCommit?.(engine).catch(() => undefined);
+  }
 }
 
 export async function recoverPublication(engine: BrainEngine, id: string, hostId = localHostId(), alreadyLocked = false,

@@ -354,7 +354,7 @@ export async function queuePageProjection(engine: Pick<BrainEngine, 'executeRaw'
 /** #5050/#5247: whether a live page's installed chunks predate the safe-chunk fence. */
 export async function projectionBelowSafeFence(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<boolean> {
   const [row] = await engine.executeRaw<{ chunker_version: number | null }>(
-    'SELECT chunker_version FROM pages WHERE id=$1 AND deleted_at IS NULL', [pageId]) ?? [];
+    "SELECT chunker_version FROM pages WHERE id=$1 AND deleted_at IS NULL AND body_storage IS DISTINCT FROM 'segmented'", [pageId]) ?? [];
   return row !== undefined && belowSafeChunkFence(row.chunker_version === null ? null : Number(row.chunker_version));
 }
 

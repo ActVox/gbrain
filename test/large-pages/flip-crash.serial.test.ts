@@ -121,3 +121,26 @@ describe('create: a crash after the projection staged its chunks', () => {
     expect(await perOccurrence()).toEqual(once);
   }, 180_000);
 });
+
+describe('replace of a page whose projection never ran', () => {
+  test('the rewrite chunks every kept occurrence with the flip and seals the page', async () => {
+    const created = conversationPage(2 * 1024 * 1024, { seed: 41, needles: [{ at: 0.2, word: NEEDLE }] });
+    crashAt('segmented:projection_staged');
+    await importFromContent(engine, 'notes/unchunked', created, { sourceId: 'default', noEmbed: true });
+    installFaultHook(undefined);
+    const unsealed = (await livePage('notes/unchunked'))!;
+    expect(unsealed.text_projection_revision).not.toBe(unsealed.knowledge_revision);
+
+    const appended = `${created.trimEnd()}\n\n${conversationBody(16 * 1024, { seed: 42 })}\n`;
+    expect((await importFromContent(engine, 'notes/unchunked', appended, { sourceId: 'default', noEmbed: true })).status).toBe('imported');
+    const sealed = (await livePage('notes/unchunked'))!;
+    expect(sealed.body_generation).toBe(2);
+    expect(sealed.text_projection_revision).toBe(sealed.knowledge_revision);
+    const bare = await engine.executeRaw(`SELECT m.occurrence_id FROM page_body_manifest m WHERE m.page_id=$1 AND m.staging_id IS NULL
+        AND m.gen_from <= $2 AND (m.gen_to IS NULL OR m.gen_to > $2)
+        AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=m.page_id AND c.occurrence_id=m.occurrence_id
+          AND c.body_generation <= $2 AND (c.retired_generation IS NULL OR c.retired_generation > $2))`, [sealed.id, sealed.body_generation]);
+    expect(bare).toEqual([]);
+    expect(await searchHits(NEEDLE, 'notes/unchunked')).toBe(1);
+  }, 180_000);
+});
