@@ -25,6 +25,9 @@ import { ACTIVE_REFRESH_STATES_SQL, refreshFenceClear } from './worktree-refresh
 import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertGraduationAdmission } from './graduation-custody.ts';
 import { CAPACITY_VERIFY } from './capacity-verify.ts';
+import { readManagedMode } from './managed-mode.ts';
+import { localHostId } from './identity.ts';
+import { segmentWriteScope } from '../page-body/ingest.ts';
 import {
   isTerminal, principalKey, requestPrincipal, recoveryFiles,
   type JournalLimits, type Principal, type RecoveryRecord, type RequestState,
@@ -946,12 +949,21 @@ export async function vacuumPersistenceQueues(engine: BrainEngine): Promise<numb
  * vacuum: expires body stagings past their deadlines (their staged manifest
  * and chunk rows go with them), deletes retired chunk rows and manifest rows
  * no retained generation needs, and unreferenced segment texts past the grace
- * window. A brain that never staged a segment pays one existence probe.
+ * window. On a managed brain it collects only the sources this host owns, each
+ * in a coordinated write. A brain that never staged a segment pays one
+ * existence probe.
  */
 export async function sweepSegmentStorage(engine: BrainEngine): Promise<void> {
   const [row] = await engine.executeRaw<{ present: boolean }>(
     'SELECT EXISTS (SELECT 1 FROM page_body_stagings) OR EXISTS (SELECT 1 FROM page_segment_texts) AS present');
-  if (row?.present) await engine.sweepSegments({ expireStagings: true });
+  if (!row?.present) return;
+  if (!await readManagedMode(engine)) { await engine.sweepSegments({ expireStagings: true }); return; }
+  const owned = await engine.executeRaw<{ source_id: string }>(`SELECT s.source_id FROM persistence_source_bindings s
+    JOIN persistence_worktrees w ON w.id=s.worktree_id WHERE w.owner_host_id=$1::uuid AND w.state='active'`, [localHostId()]);
+  for (const { source_id: sourceId } of owned) {
+    const writes = await segmentWriteScope(engine, sourceId);
+    await writes(exec => exec.sweepSegments({ sourceId, expireStagings: true }));
+  }
 }
 
 /**

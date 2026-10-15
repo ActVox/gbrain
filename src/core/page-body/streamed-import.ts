@@ -31,11 +31,15 @@
  *   (the string path decodes it lossily); a deleted existing page (a restore
  *   rewrites it through the inline writer); a file that changes between passes.
  */
-import { open, type FileHandle } from 'node:fs/promises';
+import { createHash, type Hash } from 'node:crypto';
+import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { ImportResult } from '../import-file.ts';
+import type { PreparedContentImport } from '../persistence/prepared-import.ts';
+import type { PageSnapshot } from '../page-state/types.ts';
+import { opError } from '../ops/contract.ts';
 import { BodyScanner, type BodyPiece, type BodyScan } from './body-scan.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES, SEGMENT_MAX_BYTES, type PageBodyPolicy } from './limits.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
@@ -65,7 +69,7 @@ import { isEmbedSkipped } from '../embed-skip.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { applySegmentedBody, sealSegmentedPage, segmentedLivePage } from '../persistence/segmented-apply.ts';
 import { buildSegmentedProjection } from './projection.ts';
-import { prepareSegmentedBody, utf8Prefix } from './ingest.ts';
+import { prepareSegmentedBody, segmentWriteScope, utf8Prefix, type SegmentedStagingOwner } from './ingest.ts';
 import type { JsonObject } from './types.ts';
 
 const READ_BYTES = 1024 * 1024;
@@ -78,7 +82,18 @@ type StreamedImportOptions = {
   forceRechunk?: boolean;
   activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string> }> };
   firstCommitAt?: Date;
+  /**
+   * A managed import's preparation (import-prepare.ts): the file must hash to
+   * `sha256` (the admitted bytes), the page base is the caller's snapshot, and
+   * instead of publishing, the prepared write goes to `prepare`, whose apply
+   * runs in the coordinator's publication transaction.
+   */
+  coordinated?: { snapshot: PageSnapshot | null; owner: SegmentedStagingOwner; sha256: string;
+    prepare(prepared: StreamedPreparedImport): Promise<ImportResult> };
 };
+
+/** A coordinated streamed import ready to publish: no parsed body strings exist, only the page's frontmatter. */
+export type StreamedPreparedImport = Omit<PreparedContentImport, 'parsedPage'> & { frontmatter: Record<string, unknown> };
 
 /** Today's refusal of a file over the single-string ceiling, naming the step that needs the whole body. */
 function hold(slug: string, size: number, reason: string): ImportResult {
@@ -151,11 +166,14 @@ class CodeRefLines {
   }
 }
 
-/** Pass 1 over the virtual stream; `prefix` is inferred frontmatter (empty when none). */
-async function scanFile(file: FileHandle, bom: number, prefix: Uint8Array, size: number, relativePath: string, opts: StreamedImportOptions) {
+/** Pass 1 over the virtual stream; `prefix` is inferred frontmatter (empty when none). `hash` receives the file's bytes after its BOM. */
+async function scanFile(file: FileHandle, bom: number, prefix: Uint8Array, size: number, relativePath: string, opts: StreamedImportOptions, hash: Hash | null) {
   const scanner = new BodyScanner(relativePath, { validate: true, ...(opts.activePack ? { activePack: opts.activePack } : {}) });
   if (prefix.length) scanner.push(prefix);
-  for await (const part of readVirtual(file, bom, new Uint8Array(0), 0, size - bom)) scanner.push(part);
+  for await (const part of readVirtual(file, bom, new Uint8Array(0), 0, size - bom)) {
+    hash?.update(part);
+    scanner.push(part);
+  }
   return scanner.finish();
 }
 
@@ -177,7 +195,7 @@ export async function importStreamedMarkdownFile(engine: BrainEngine, filePath: 
     return { slug: '', status: 'skipped', skip_reason: 'malformed_path', chunks: 0,
       error: `Path "${relativePath}" contains bracket or control characters and cannot be imported. Rename the file to import it.` };
   }
-  await assertUnmanagedCanonicalWriter(engine, 'direct content import');
+  if (!opts.coordinated) await assertUnmanagedCanonicalWriter(engine, 'direct content import');
   const expectedSlug = slugifyPath(relativePath);
   const file = await open(assertSourceFilePath(filePath), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -189,7 +207,10 @@ export async function importStreamedMarkdownFile(engine: BrainEngine, filePath: 
     const bom = bomBytes[0] === 0xef && bomBytes[1] === 0xbb && bomBytes[2] === 0xbf ? 3 : 0;
     const prefix = opts.inferFrontmatter !== false ? await inferredPrefix(file, bom, size, relativePath) : new Uint8Array(0);
     if (!prefix) return hold(expectedSlug, size, 'frontmatter inference reads the first 20 lines, and they are not within the file head');
-    const scan = await scanFile(file, bom, prefix, size, relativePath, opts);
+    const hash = opts.coordinated ? createHash('sha256').update(bomBytes.subarray(0, bom)) : null;
+    const scan = await scanFile(file, bom, prefix, size, relativePath, opts, hash);
+    if (hash && hash.digest('hex') !== opts.coordinated!.sha256) throw opError('source_changed', 'The input file changed after import admission.',
+      `${relativePath} no longer has the bytes its import request admitted, so the request published nothing. Import it again to publish the current bytes.`);
     if (scan.kind === 'frontmatter_head_unbounded') {
       return { slug: expectedSlug, status: 'skipped', chunks: 0, error: scan.message, refusal: { code: 'invalid_frontmatter', message: scan.message }, skip_reason: 'invalid_frontmatter' };
     }
@@ -235,7 +256,7 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   const truthHead = await regionHead(scan.truth, read, SCAN_HEAD_BYTES * 4);
   const head = { ...parsed, compiled_truth: truthHead, timeline: truthHead.length >= SCAN_HEAD_BYTES ? '' : await regionHead(scan.timeline, read, SCAN_HEAD_BYTES * 4) };
   const disposition = await settleContentDisposition(engine, head, { slug, sourceId, stripped: false, writeGate, bodyBytes });
-  const existing = await engine.getPage(slug, { sourceId, includeDeleted: true });
+  const existing = opts.coordinated ? opts.coordinated.snapshot?.page ?? null : await engine.getPage(slug, { sourceId, includeDeleted: true });
   if (existing?.deleted_at) return hold(slug, size, 'restoring a deleted page rewrites its body through the inline writer');
   if (existing) stabilizeSafetyAssessments(parsed.frontmatter, existing.frontmatter);
   const sourceRoot = resolve(input.filePath, ...relativePath.split(/[\\/]/).map(() => '..'));
@@ -257,7 +278,12 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   if (typeof fmId === 'string' && fmId.length > 0) return hold(slug, size, 'identity dedup by frontmatter id compares whole bodies');
   parsed.tags.sort();
   const { mode, corpusGeneration } = await resolveImportContextualMode(engine, sourceId, parsed.frontmatter, false);
-  const { principal } = await maintenanceAttribution(engine);
+  let owner: SegmentedStagingOwner;
+  if (opts.coordinated) owner = opts.coordinated.owner;
+  else {
+    const { principal } = await maintenanceAttribution(engine);
+    owner = { kind: 'import', principalKind: principal.kind, principalId: principal.id, baseRevision: existing?.knowledge_revision ?? null };
+  }
   const live = existing ? await segmentedLivePage(engine, Number(existing.id)) : null;
   let fenced = false;
   const codeRefs = new CodeRefLines();
@@ -274,7 +300,7 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
     timeline: (async function* () { codeRefs.end(); carry = ''; yield* regionStream(scan.timeline, read, inspect); })(),
     hasTimeline: scan.timelineBytes > 0, flags: { fence_trust: scan.bodyFlags.fence_trust, timeline_fence_trust: scan.bodyFlags.timeline_fence_trust, timeline_split: scan.bodyFlags.timeline_split },
     declaredBytes: scan.truthBytes + scan.timelineBytes,
-    owner: { kind: 'import', principalKind: principal.kind, principalId: principal.id, baseRevision: existing?.knowledge_revision ?? null },
+    owner,
     chunking: { quarantined: disposition.quarantined, corpusGeneration, tier: mode === 'title' ? 'title' : 'none' } });
   codeRefs.end();
   const abort = async () => { await engine.setBodyStagingState(prepared.stagingId, 'aborted').catch(() => undefined); };
@@ -285,7 +311,9 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   if (existing && !existing.deleted_at && !opts.forceRechunk && existing.content_hash === hash && existing.text_projection_revision === existing.knowledge_revision
     && isEmbedSkipped(existing.frontmatter) === isEmbedSkipped(parsed.frontmatter) && !trustMarkerChanged(existing.frontmatter, parsed.frontmatter)) {
     await abort();
-    return { slug, status: 'skipped', chunks: 0, ...(typeWarning ? { type_warning: typeWarning } : {}) };
+    const skipped: ImportResult = { slug, status: 'skipped', chunks: 0, ...(typeWarning ? { type_warning: typeWarning } : {}) };
+    return opts.coordinated ? opts.coordinated.prepare({ slug, observedRevision: opts.coordinated.snapshot?.revision ?? null, noop: true, result: skipped, frontmatter: parsed.frontmatter,
+      validate: async () => {}, apply: async () => {} }) : skipped;
   }
   const identity = await decideImportIdentity(engine, { sourceId, slug, hash, frontmatterId: null, sourcePath: relativePath, sourceRoot, body: { title: parsed.title, compiled_truth: '', timeline: '' } });
   if (identity.kind === 'shared_hash') process.stderr.write(`[import] WARNING: ${relativePath} shares content_hash with ${identity.dupSlug} in source ${sourceId}. Indexing both.\n`);
@@ -300,9 +328,8 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
     source_kind: null, source_uri: fileOriginUri(existing?.source_uri, sourceRoot, relativePath), ingested_via: null };
   const linkOpts = { fromSourceId: sourceId, toSourceId: sourceId, originSourceId: sourceId };
   const refs = prepared.body.body_flags.has_protected ? [] : [...codeRefs.refs.values()];
-  const applied = await maintenanceTransaction(engine, async tx => {
-    await assertImportBase(tx, slug, sourceId, existing);
-    if (existing) await tx.createVersion(slug, { sourceId });
+  const apply = async (tx: BrainEngine, preimage?: PageSnapshot | null) => {
+    if (existing) await tx.createVersion(slug, preimage ? { sourceId, preimage } : { sourceId });
     const result = await applySegmentedBody(tx, { slug, sourceId, pageId: live?.id ?? null, prepared, meta, promotion: live?.storage === 'inline', retireMaxRows: input.policy.flipRetireMaxRows });
     await tx.updatePageContextualRetrievalState(slug, sourceId, mode, corpusGeneration);
     await tx.executeRaw(`DELETE FROM tags t USING pages p WHERE p.id = t.page_id AND p.source_id = $1 AND p.slug = $2
@@ -319,10 +346,32 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
     await verifyPageReadable(tx, slug, hash, sourceId, 'importStreamedMarkdownFile');
     await disposition.persistReceipt(tx, { existed: !!existing });
     return result;
-  }, writeTrustOfGate(writeGate)).catch(async error => { await abort(); throw error; });
-  if (!applied.complete) await buildSegmentedProjection(engine, { sourceId, slug }).catch(() => undefined);
-  await engine.sweepSegments({ pageId: applied.pageId }).catch(() => undefined);
-  return { slug, status: 'imported', chunks: prepared.rows.chunks,
+  };
+  const afterCommit = async (target: BrainEngine, applied: { pageId: number; complete: boolean }) => {
+    if (!applied.complete) await buildSegmentedProjection(target, { sourceId, slug }).catch(() => undefined);
+    await segmentWriteScope(target, sourceId).then(writes => writes(exec => exec.sweepSegments({ pageId: applied.pageId }))).catch(() => undefined);
+  };
+  const imported: ImportResult = { slug, status: 'imported', chunks: prepared.rows.chunks,
     ...(disposition.quarantined ? { quarantined: true } : {}), ...(disposition.flagged ? { flagged: true, flag_reason: disposition.flagReason } : {}),
     ...(disposition.gate ? { gate: disposition.gate } : {}), ...(typeWarning ? { type_warning: typeWarning } : {}) };
+  if (opts.coordinated) {
+    let applied: { pageId: number; complete: boolean } | null = null;
+    return opts.coordinated.prepare({ slug, observedRevision: opts.coordinated.snapshot?.revision ?? null, noop: false, contentHash: hash, result: imported, frontmatter: parsed.frontmatter,
+      validate: async () => {
+        const now = await lstat(input.filePath);
+        if (now.size !== size || now.mtimeMs !== input.stat.mtimeMs) throw opError('source_changed', 'The input file changed after import preparation.',
+          `${relativePath} changed after its import request was prepared, so the request published nothing. Import it again to publish the current bytes.`);
+      },
+      apply: async (tx, preimage) => {
+        applied = await apply(tx, preimage);
+        return { pageId: applied.pageId, sealed: applied.complete, segmented: { complete: applied.complete } };
+      },
+      afterCommit: async target => { if (applied) await afterCommit(target, applied); } });
+  }
+  const applied = await maintenanceTransaction(engine, async tx => {
+    await assertImportBase(tx, slug, sourceId, existing);
+    return apply(tx);
+  }, writeTrustOfGate(writeGate)).catch(async error => { await abort(); throw error; });
+  await afterCommit(engine, applied);
+  return imported;
 }
