@@ -310,14 +310,26 @@ export async function purgeDeletedPages(
       }));
       return { slugs: pages.map((p) => p.slug), count: pages.length, pages };
     }
-    const { rows } = await exec.run<{ slug: string }>(sqlFragment`
-      DELETE FROM pages
-      WHERE deleted_at IS NOT NULL
-        AND deleted_at < now() - (${hours} || ' hours')::interval
-      RETURNING slug
-    `);
-    const slugs = rows.map((r) => r.slug);
-    return { slugs, count: slugs.length };
+    // Wave B (spec 11): segment texts only the purged pages' manifests reference go in the same purge, not by later GC.
+    return exec.transaction(async (tx) => {
+      const { rows: texts } = await tx.run<{ source_id: string; sha: string }>(sqlFragment`
+        SELECT DISTINCT m.source_id, encode(m.sha256, 'hex') AS sha FROM page_body_manifest m JOIN pages p ON p.id = m.page_id
+        WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - (${hours} || ' hours')::interval`);
+      const { rows } = await tx.run<{ slug: string; source_id: string }>(sqlFragment`
+        DELETE FROM pages
+        WHERE deleted_at IS NOT NULL
+          AND deleted_at < now() - (${hours} || ' hours')::interval
+        RETURNING slug, source_id
+      `);
+      if (rows.length) await tx.run(sqlFragment`DELETE FROM page_body_stagings s USING unnest(${rows.map(r => r.source_id)}::text[], ${rows.map(r => r.slug)}::text[]) AS d(source_id, slug)
+        WHERE s.source_id = d.source_id AND s.slug = d.slug`);
+      if (texts.length) await tx.run(sqlFragment`DELETE FROM page_segment_texts t
+        USING unnest(${texts.map(r => r.source_id)}::text[], ${texts.map(r => r.sha)}::text[]) AS d(source_id, sha)
+        WHERE t.source_id = d.source_id AND t.sha256 = decode(d.sha, 'hex')
+          AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id = t.source_id AND m.sha256 = t.sha256)`);
+      const slugs = rows.map((r) => r.slug);
+      return { slugs, count: slugs.length };
+    });
   }
 
 export async function refreshPageBody(
