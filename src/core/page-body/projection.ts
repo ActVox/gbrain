@@ -25,7 +25,6 @@ import type { JsonObject } from './types.ts';
 
 export interface SegmentedProjectionResult { chunks: number; retired: number; sealed: boolean }
 
-
 interface ProjectionPage {
   id: number; body_generation: number | string; knowledge_revision: string; text_projection_revision: string | null;
   title: string; frontmatter: JsonObject | null; body_flags: JsonObject | null; timeline_lead: string | null;
