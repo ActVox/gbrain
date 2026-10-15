@@ -64,6 +64,7 @@ test/import-revision-concurrency.test.ts
 test/keyword-statement-timeout-knob-6495.test.ts
 test/lane-apply-pipelining.test.ts
 test/large-pages/chunk-visibility.test.ts
+test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
