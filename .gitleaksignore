@@ -36,3 +36,6 @@ e3ebcc4f7e15051ae6354c8e4313ef91fc06d9f2:test/size-state-receipts-6722.test.ts:g
 8c9c65f60b0a2a4924525883e2c7179c355ec671:test/large-pages/region-scan.test.ts:private-key:26
 8c9c65f60b0a2a4924525883e2c7179c355ec671:test/helpers/segment-bodies.ts:generic-api-key:17
 8c9c65f60b0a2a4924525883e2c7179c355ec671:test/helpers/segment-bodies.ts:private-key:18
+# Fix wave 17 lane 4 (#6587): the config key literal 'w17.6587.marker' in commit cb6a60a reads as generic-api-key;
+# the tree now binds it as a parameter. History-only fingerprint, not a secret.
+cb6a60abd59d51271acfa49346275107b97ed64f:test/e2e/migrate-embeddings-lease-heartbeat.test.ts:generic-api-key:60

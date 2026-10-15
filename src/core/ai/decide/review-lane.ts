@@ -31,7 +31,7 @@ import { resolveSlotPolicy, type SlotPolicy } from './policy.ts';
 import { writeReceipts } from './receipts.ts';
 import { reviewWithdrawOn } from '../../facts/withdrawal.ts';
 import { flushDecideWrites, hmacRef, listCalibrations, receiptSalt, recentResolvedModels } from './store.ts';
-import { DecideError, type ChoiceAnswer, type DecideQuestion, type EvidenceItem } from './types.ts';
+import { DecideError, partialOf, type ChoiceAnswer, type DecideQuestion, type EvidenceItem } from './types.ts';
 
 export const REVIEW_KINDS = ['withdraw', 'duplicate_page', 'duplicate_entity'] as const;
 export type ReviewKind = typeof REVIEW_KINDS[number];
@@ -322,7 +322,7 @@ export async function runReviewLane(engine: BrainEngine, opts: { kind: ReviewKin
         provider: policy.provider, lane: 'background', signal: opts.signal }, { engine, config: cfg, sourceId });
     } catch (err) {
       const reason = err instanceof DecideError ? err.reason : 'provider_error';
-      receipts.push(writeReceipts(engine, { ...base, mode, provider: policy.provider, policy, questions, outcomes: {}, fallbackOutcome: 'error', reason }));
+      receipts.push(writeReceipts(engine, { ...base, mode, provider: policy.provider, policy, questions, outcomes: {}, fallbackOutcome: 'error', reason, partial: partialOf(err) }));
       result.skipped++;
       if (PERMANENT_FAILURES.has(reason)) await clearQueue(engine, row);
       else { await deferQueue(engine, row, reason); result.deferred++; }

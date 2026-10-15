@@ -435,11 +435,12 @@ const restore_page: Operation = {
   name: 'restore_page',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'Restore a soft-deleted page (clear deleted_at) and re-create its markdown file on disk (the counterpart to delete_page removing it; the result write_through field reports the outcome). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.',
+  description: 'Restore a soft-deleted page (clear deleted_at) and re-create its markdown file on disk (the counterpart to delete_page removing it; the result write_through field reports the outcome). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag. A restore that writes no file refuses (source_changed, detail canonical_file_absent) when the page\'s recorded file is gone from the checkout, because the next full sync would delete it again; the user chooses between putting the file back and detach: true.',
   params: {
     ...PAGE_MUTATION_PARAMS,
     slug: { type: 'string', required: true, description: "Slug of the soft-deleted page to restore, e.g. 'people/alice-example'." },
     source_id: { type: 'string', description: "#4329: source holding the row to restore (a multi-source brain can hold the same slug in several sources). Defaults to ctx.sourceId. Remote callers may only target their write source — federated read grants do not confer restore access." },
+    detach: { type: 'boolean', description: 'Restore a page whose recorded canonical file is gone from the checkout as a database-only page: it forgets the file, so sync never deletes it again. Only accepted when a plain restore refuses with canonical_file_absent; ask the user first.' },
   },
   mutating: true,
   scope: 'write',

@@ -95,6 +95,7 @@ import { factsDrainEntry } from './checks/facts-drain.ts';
 import { factTakeVectorsEntry } from './checks/vector-coverage.ts';
 import { decideHealthEntry } from './checks/decide.ts';
 import { supersessionCalibrationEntry } from './checks/supersession-calibration.ts';
+import { factAdmissionFloorsEntry } from './checks/fact-admission-floors.ts';
 import { unlinkedFactsEntry } from './checks/unlinked-facts.ts';
 import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
@@ -110,6 +111,7 @@ import { providerConsentEntry } from './checks/provider-consent.ts';
 import { behaviorChangesEntry } from './checks/behavior-changes.ts';
 import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
+import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
@@ -170,6 +172,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   embeddingColumnRegistryEntry,
   embeddingEnvOverrideEntry,
   supersessionCalibrationEntry,
+  factAdmissionFloorsEntry,
   chatFallbackChainEntry,
   behaviorChangesEntry,
   graphCoverageEntry,
@@ -218,6 +221,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   atomHeldFailedEntry,
   extractionInputTruncatedEntry,
   ghostPagesEntry,
+  missingRecordedFilesEntry,
   fenceIntegrityEntry,
   searchModeEntry,
 ];

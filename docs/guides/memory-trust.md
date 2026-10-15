@@ -120,6 +120,14 @@ shows the claimed source's remaining rows as "your notes".
 Each lifted row keeps `write_origin.channel = "trust_claim"`. The source
 records when it was claimed and when its lift finished.
 
+Atoms extracted before gbrain recorded `extracted_by` as an agent signal
+could be lifted to "your notes" by an earlier claim (#6533).
+`gbrain trust claim-sources --relower --dry-run` lists the claim-lifted rows
+whose own signals now say lower, and `gbrain trust claim-sources --relower`
+lowers them. It only lowers: it never raises a row, it touches only rows with
+`write_origin.channel = "trust_claim"`, rows on a lowered page follow it, and
+each lowered row records `write_origin.channel = "trust_relower"`.
+
 `gbrain sources set-trust <id> <lower tier>` or `--clear` ends a claim. Rows
 it already lifted keep their tier.
 
@@ -143,7 +151,9 @@ Claim your own sources first, so your notes are not treated as unverified.
 - `trust_sources_unclaimed` warns while unclaimed, non-connector sources hold
   rows from before trust tiers, with `fix.next: tell_user_to_run` naming
   `gbrain trust claim-sources`. It also warns, with the resume command, while
-  a claim's lift has not finished. A fresh or empty brain is ok.
+  a claim's lift has not finished, and names `gbrain trust claim-sources
+  --relower` while claim-lifted rows rank above their own signals. A fresh or
+  empty brain is ok.
 - `trust_scan` warns while older rows at "written by an agent" or below have
   not been scanned. Its fix is yours to run (`tell_user_to_run`).
 - `trust_tiers` reports the tier mix and recommends `gbrain trust backfill`.

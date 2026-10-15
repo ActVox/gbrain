@@ -105,9 +105,21 @@ the startup Bun check, unlike `--version`). If the new release does not
 start, the upgrade exits non-zero and prints recovery: `bun upgrade`, then
 `gbrain post-upgrade`; or return to the previous release with
 `git -C <clone> checkout <previous sha> && bun install` (bun-link) or
-`bun remove -g gbrain && bun add -g github:garrytan/gbrain#v<previous>` (package; an in-place tag swap fails or silently corrupts the global lock on current Bun, #5034). Nothing is
+`git ls-remote --exit-code --tags https://github.com/garrytan/gbrain refs/tags/v<previous> && bun remove -g gbrain && bun add -g github:garrytan/gbrain#v<previous>` (package; an in-place tag swap fails or silently corrupts the global lock on current Bun, #5034). Nothing is
 rolled back automatically, and the autopilot channel records that version as
 failed.
+
+Tag-pinned package installs (`github:garrytan/gbrain#v<x>`) stay pinned through
+`bun update`, so `gbrain upgrade` prints a reinstall instead. Every printed
+reinstall checks that the release tag exists before `bun remove -g gbrain`
+runs, and ends with the line that restores the previous version if the add
+fails. The target is the newest published release tag: master's `VERSION` is
+stamped before the release checks pass and the tag is created, so a version
+can be announced before its tag exists. When the requested version's tag is
+missing, upgrade says `v<x> is not published yet`, removes nothing, and offers
+the newest published release if it is newer than yours (#6662). Windows
+PowerShell 5.1 has no `&&`, so on Windows the steps print one per line; run
+them in order and stop if the tag check fails.
 
 Recovery when autopilot is holding an upgrade:
 

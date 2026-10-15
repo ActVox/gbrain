@@ -888,13 +888,17 @@ function printTokenRescope(result: RescopeTokenResult, json: boolean) {
   }
   if (result.migrated) console.log('  Migrated to the unified grant columns; the permissions JSON is kept as a mirror for older gbrain binaries.');
   if (result.refresh) {
-    const { available, added, unregistered } = result.refresh;
-    console.log(`  New operations available: ${available.length ? available.join(', ') : 'none'}`);
+    const { available, added, unregistered, materialized } = result.refresh;
+    if (materialized) {
+      console.log('  This token has no operation snapshot: it reaches every operation its scopes allow except membership operations, which need explicit approval.');
+      console.log('  Adding one writes a snapshot of every operation its scopes allow today plus the ones you add; operations later upgrades add then need --refresh-operations.');
+    }
+    console.log(`  ${materialized ? 'Operations that need approval' : 'New operations available'}: ${available.length ? available.join(', ') : 'none'}`);
     if (unregistered.length) console.log(`  Granted but no longer registered: ${unregistered.join(', ')}`);
     if (added.length) console.log(`  Added: ${added.join(', ')}`);
     else if (available.length) {
       const add = available.length <= 8 ? `--add ${available.join(',')}` : '--add <op,...>';
-      console.log(`  Nothing widened. Grant them with: gbrain auth rescope --token ${result.name} --refresh-operations ${add} (or --all-new)`);
+      console.log(`  Nothing widened. Grant them with: gbrain auth rescope --token ${result.name} --refresh-operations ${add}${materialized ? '' : ' (or --all-new)'}`);
     }
   }
   if (result.changed && !result.dryRun) console.log('Grants apply on the next request; the token secret is unchanged.');

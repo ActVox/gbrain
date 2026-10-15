@@ -746,6 +746,41 @@ describe('outside-voice hardening (X-batch)', () => {
     expect(readHarnessReceiptState(f.home)).toEqual({ state: 'absent' });
   });
 
+  // #6661 (D25): the refusal's pre-mint carries the harness grant; a bare `--scopes read,write` token got join_brain refused.
+  test('LIVE_SERVE refusal prints the stop/mint/rescope/start/--token sequence with the full harness grant', async () => {
+    const f = makeFake({
+      pgliteLive: true,
+      hookSourceError: new Error("GBrain's local database is already open through `gbrain serve` (MCP, PID 4242)."),
+    });
+    const err = await applyHarness(flags(['--harness', 'codex']), f.deps).then(() => null, (e: unknown) => e as { code: string; message: string; details: { steps: string[]; scopes: string[]; operations: string[] } });
+    expect(err?.code).toBe('LIVE_SERVE');
+    const { steps, scopes, operations } = err!.details;
+    expect(scopes).toEqual(['read', 'write', 'skills_member_self']);
+    expect(operations).toEqual(expect.arrayContaining(['join_brain', 'sync_brain_skills', 'leave_brain', 'put_page', 'query']));
+    const { operations: all } = await import('../src/core/operations.ts');
+    const byName = new Map(all.map(op => [op.name, op]));
+    expect(operations.filter(name => byName.get(name)?.localOnly || !['read', 'write'].includes(byName.get(name)?.scope ?? ''))).toEqual([]);
+    expect(steps).toEqual([
+      'stop the serve that holds this brain',
+      'gbrain auth create bootstrap-harness --scopes read,write,skills_member_self',
+      `gbrain auth rescope --token bootstrap-harness --operations ${operations.join(',')}`,
+      'start `gbrain serve --http` again',
+      're-run this `gbrain bootstrap harness` command with --token <the token step 2 printed>',
+    ]);
+    for (const step of steps) expect(err!.message).toContain(step);
+    expect(f.mintCalls).toHaveLength(0);
+  });
+
+  test('LIVE_SERVE refusal on a memory-only re-run with --source carries the memory-only grant and the source floor', async () => {
+    const f = makeFake({ pgliteLive: true, mintQueue: [] });
+    const err = await applyHarness(flags(['--harness', 'codex', '--skills', 'memory-only', '--source', 'wiki', '--token-name', 'hx']), f.deps)
+      .then(() => null, (e: unknown) => e as { code: string; details: { steps: string[]; operations: string[] } });
+    expect(err?.code).toBe('LIVE_SERVE');
+    expect(err!.details.steps[1]).toBe('gbrain auth create hx --scopes read,write');
+    expect(err!.details.steps[2]).toMatch(/^gbrain auth rescope --token hx --operations \S+ --sources wiki$/);
+    expect(err!.details.operations).not.toContain('join_brain');
+  });
+
   test('live PGLite serve + --token + no --source: wires unpinned with a warning (the documented PGLite lane)', async () => {
     const f = makeFake({
       pgliteLive: true,

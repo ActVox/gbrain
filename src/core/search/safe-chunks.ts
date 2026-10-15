@@ -87,9 +87,14 @@ export function belowSafeChunkFence(chunkerVersion: number | null | undefined): 
   return (chunkerVersion ?? 0) < SAFE_FENCE_CHUNKER_VERSION;
 }
 
-/** Older fragments lack trustworthy provenance, even if markers were removed later. */
+/**
+ * Older fragments lack trustworthy provenance, even if markers were removed
+ * later. `pages.chunker_version` is `smallint NOT NULL` at head on both
+ * engines (v054), so the bare column compares and keeps its statistics (#6632:
+ * a COALESCE gets the default 1/3 selectivity and misleads the count plan).
+ */
 export function safeChunksFilter(alias: string): string {
-  return `COALESCE(${alias}.chunker_version, 0) >= ${SAFE_FENCE_CHUNKER_VERSION}`;
+  return `${alias}.chunker_version >= ${SAFE_FENCE_CHUNKER_VERSION}`;
 }
 
 /**

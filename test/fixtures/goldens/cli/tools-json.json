@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 237965,
-    "stdoutSha256": "b60d0f2305e16e2337858abac409a0a4d971dac5b014e0afb7ae4726083d774a",
+    "stdoutBytes": 238577,
+    "stdoutSha256": "acff0492f087336a874aaa738286b4cb0143681ea6d0303d886f180ef6a2de8d",
     "toolNames": [
       "remember",
       "entity",
@@ -765,12 +765,13 @@
         "scope": "read"
       },
       {
-        "description": "Restore a soft-deleted page (clear deleted_at) and re-create its markdown file on disk (the counterpart to delete_page removing it; the result write_through field reports the outcome). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.",
+        "description": "Restore a soft-deleted page (clear deleted_at) and re-create its markdown file on disk (the counterpart to delete_page removing it; the result write_through field reports the outcome). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag. A restore that writes no file refuses (source_changed, detail canonical_file_absent) when the page's recorded file is gone from the checkout, because the next full sync would delete it again; the user chooses between putting the file back and detach: true.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
         "name": "restore_page",
         "parameters": {
+          "detach": "boolean?",
           "expected_revision": "string?",
           "force": "boolean?",
           "request_id": "string?",
@@ -780,6 +781,10 @@
         "required_scopes": [],
         "schema": {
           "properties": {
+            "detach": {
+              "description": "Restore a page whose recorded canonical file is gone from the checkout as a database-only page: it forgets the file, so sync never deletes it again. Only accepted when a plain restore refuses with canonical_file_absent; ask the user first.",
+              "type": "boolean"
+            },
             "expected_revision": {
               "description": "Revision read; omit to create.",
               "type": "string"

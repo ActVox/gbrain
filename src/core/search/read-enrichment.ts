@@ -346,13 +346,16 @@ export async function readAliases(query: ReadQuery, aliases: string[], scope?: P
   const params: unknown[] = [aliases];
   const aliasScope = pageReadFilter('m', scope && { sourceId: scope.sourceId, sourceIds: scope.sourceIds }, params);
   const filter = pageReadFilter('p', scope, params, true);
+  const titleFilter = pageReadFilter('t', scope, params, true);
   // Alias matches first, then one unique-key page lookup each (OFFSET 0 keeps the
   // read filter out of that lookup): without planner statistics (PGLite has no
   // autovacuum) the page_aliases -> sources foreign key otherwise makes the planner
   // walk every readable page and probe aliases per page.
   // Precedence: within a source, only the claims at the best origin answer
   // (frontmatter > declared > subject), and a derived (declared or subject)
-  // alias never answers for a name that is another live page's exact title,
+  // alias never answers for a name that is another live page's exact title
+  // the caller can read (a private title a remote caller can't see must not
+  // hide a readable alias),
   // so "Acme Example" stays the company page beside "CRM record: Acme Example".
   const rows = await query<PageRef & { alias_norm: string; rank: number }>(`
     WITH a AS MATERIALIZED (
@@ -364,7 +367,7 @@ export async function readAliases(query: ReadQuery, aliases: string[], scope?: P
     SELECT a.alias_norm, a.slug, a.source_id, a.rank FROM a
     CROSS JOIN LATERAL (SELECT * FROM pages WHERE source_id = a.source_id AND slug = a.slug OFFSET 0) p
     WHERE ${filter}
-      AND (a.rank = 0 OR NOT EXISTS (SELECT 1 FROM pages t WHERE t.source_id = a.source_id AND t.deleted_at IS NULL
+      AND (a.rank = 0 OR NOT EXISTS (SELECT 1 FROM pages t WHERE t.source_id = a.source_id AND ${titleFilter}
                                      AND lower(t.title) = a.alias_norm AND t.slug <> a.slug))
     ORDER BY a.alias_norm, a.source_id, a.rank, a.slug`, params);
   const best = new Map<string, number>();

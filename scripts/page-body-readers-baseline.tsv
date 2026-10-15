@@ -236,6 +236,7 @@ src/core/facts/relink-publish.ts	prepareRelinkMutation	call:serializePageToMarkd
 src/core/facts/relink-publish.ts	prepareRelinkMutation	field	SEGW	
 src/core/facts/subject-infer-write.ts	linkAllowed	field	STREAM	
 src/core/facts/unfenced-facts.ts	auditUnadoptableFacts	call:serializePageToMarkdown	SEGW	
+src/core/facts/unfenced-facts.ts	fenceDatabaseOnlyPage	call:serializePageToMarkdown	SEGW	
 src/core/facts/unfenced-facts.ts	fenceFilePage	call:contentHash	META	
 src/core/facts/unfenced-facts.ts	fenceFilePage	call:refreshPageBody	SEGW	
 src/core/facts/unfenced-facts.ts	fenceFilePage	field	SEGW	

@@ -392,6 +392,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
     toolResult = await dispatchToolCall(engine, name, params as Record<string, unknown> | undefined, {
       remote: true,
       admissionOrigin: 'interactive',
+      config: ctx.config,
       // WP1/D7: network transport — the dispatch-layer localOnly
       // backstop keys off this marker.
       transport: 'http',

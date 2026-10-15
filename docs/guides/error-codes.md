@@ -1086,7 +1086,7 @@ More: [docs/guides/write-refusals.md#facts_absorb_write_refused](../../docs/guid
 |---|---|---|---|---|---|---|
 | A page write queued no automatic fact extraction; the receipt's `facts_backstop.skipped` reason says why (a `kind:<type>` reason names a page type that is not extracted). | A capability this request needs is not configured or not reachable on this brain. | Nothing failed. `opted_out` means the page frontmatter sets `facts_backstop: false`; remove that line and save the page to extract it. Run: gbrain get --source '{source_id}' -- '{slug}' | agent | `gbrain doctor --json` | 1 | no |
 
-Reasons: `opted_out`, `quarantined`, `body_unchanged`, `extraction_disabled`, `dream_generated`, `subagent_namespace`, `too_short`, `no_parsed_page`, `slug_bound_client`, `operation_bound_client`, `not_imported`, `backstop_error`.
+Reasons: `opted_out`, `quarantined`, `body_unchanged`, `extraction_disabled`, `dream_generated`, `subagent_namespace`, `too_short`, `no_parsed_page`, `slug_bound_client`, `operation_bound_client`, `not_imported`, `conversation_pipeline`, `backstop_error`.
 
 More: [docs/guides/concurrent-writes.md#facts-backstop](../../docs/guides/concurrent-writes.md#facts-backstop)
 
@@ -1311,6 +1311,14 @@ More: [docs/guides/shared-checkout-git.md#stuck-rebase](../../docs/guides/shared
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The canonical commit is durable locally; its push will retry. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
+
+### git_target_pending
+
+<a id="git_target_pending"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Git still lists a removed canonical file in the index; the removal was not committed yet. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
 ### git_target_unsafe
 

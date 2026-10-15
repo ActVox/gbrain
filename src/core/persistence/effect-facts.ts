@@ -149,7 +149,8 @@ export async function dispatchFactsBackstopEffect(engine: BrainEngine, effect: P
     // #6231: the page-write filter in force when the effect dispatches; the job keeps it across retries.
     const notabilityFilter = await resolvePageWriteNotabilityFilter(tx);
     const job = await new MinionQueue(tx).add('facts-absorb', {
-      slug: effect.data.slug, sourceId: effect.source_id, source: 'mcp:put_page', notabilityFilter,
+      // #6333: a stable per-page session (mirrors sync's `sync:<slug>`) so a re-extraction feeds the same-page shadow counter.
+      slug: effect.data.slug, sourceId: effect.source_id, source: 'mcp:put_page', sessionId: `put_page:${effect.data.slug}`, notabilityFilter,
       visibility: effect.data.visibility === 'world' ? 'world' : 'private',
       persistence_request_id: effect.request_id, page_id: effect.data.page_id, revision: effect.revision,
     }, { queue: 'default', idempotency_key: `facts-absorb:write:${effect.request_id}`, max_attempts: 5, backoff_delay: 60_000 });

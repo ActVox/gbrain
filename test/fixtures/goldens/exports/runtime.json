@@ -691,6 +691,7 @@
         "expectEvent"
       ],
       "./link-extraction": [
+        "EXACT_SLUG_SHAPE_RE",
         "FRONTMATTER_LINK_MAP",
         "LINK_EXTRACTOR_VERSION_TS",
         "TIMELINE_HEADING_RE",
@@ -698,6 +699,7 @@
         "attendanceEvidenceRanges",
         "buildBasenameIndex",
         "deriveTimelineAnchor",
+        "exactSlugCandidates",
         "explainLinkType",
         "extractCodeRefs",
         "extractEntityRefs",

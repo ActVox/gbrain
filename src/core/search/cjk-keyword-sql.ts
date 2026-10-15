@@ -22,7 +22,7 @@
  */
 import type { SearchOpts } from '../types.ts';
 import { buildBestPerPagePoolCte } from './sql-ranking.ts';
-import { escapeLikePattern, splitCJKQueryTerms } from '../cjk.ts';
+import { escapeLikePattern, cjkMatchTerms } from '../cjk.ts';
 
 /** Query-shape context shared by both engines' CJK fallback call sites. */
 export interface CjkKeywordCtx {
@@ -63,7 +63,7 @@ export function buildCJKKeywordSql(query: string, ctx: CjkKeywordCtx, variant: C
   const { limit, offset, innerLimit, sourceFactorCase, hardExcludeClause, visibilityClause, detailFilter, opts, dedup } = ctx;
   const qRaw = query;
   if (qRaw.length === 0) return null;
-  const terms = splitCJKQueryTerms(qRaw);
+  const terms = cjkMatchTerms(qRaw);
   if (terms.length === 0) return null;
   const any = variant.match === 'any' && terms.length > 1;
 
@@ -153,7 +153,7 @@ export function buildCJKCandidateSql(
   ctx: CjkKeywordCtx,
   stage: { match: 'all' | 'any'; cap: number; excludeIds?: number[] },
 ): CjkKeywordSql | null {
-  const terms = splitCJKQueryTerms(query);
+  const terms = cjkMatchTerms(query);
   if (query.length === 0 || terms.length === 0) return null;
   const params: unknown[] = [];
   const likeParamIndices = terms.map(term => { params.push(`%${escapeLikePattern(term)}%`); return params.length; });
