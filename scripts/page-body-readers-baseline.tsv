@@ -194,7 +194,7 @@ src/core/engine-sql/salience.ts	listEnrichCandidates	sql	META
 src/core/engine-sql/timeline.ts	getTimeline	sql	NONE	not the page body: SELECT * FROM pages inside a LATERAL used for the page id only
 src/core/enrichment-service.ts	enrichEntity	call:putPage	INLINE	
 src/core/enrichment-service.ts	enrichEntity	call:serializeMarkdown	INLINE	
-src/core/export-snapshot.ts	readExportPage	field	STREAM	export refuses a segmented page: segmented page: getter throws page_body_segmented (streaming export in PR 2)
+src/core/export-snapshot.ts	readExportPage	field	STREAM	inline pages only: a segmented page skips the overlay here and streams through segmentedExportMarkdown (readBodyRange, trusted stored)
 src/core/export-snapshot.ts	readExportPage	sql	STREAM	
 src/core/extract-ner.ts	extractNerLinks	field	STREAM	
 src/core/extract-takes-from-pages.ts	extractTakesFromPages	call:serializePageToMarkdown	SEGW	
