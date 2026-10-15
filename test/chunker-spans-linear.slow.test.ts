@@ -8,7 +8,10 @@
  * bound is generous (linear is 2x, quadratic 4x) and each size takes its best
  * of three runs, so a busy machine does not fail it. Each run is timed in
  * process CPU time, which measures the work rather than how long the
- * scheduler made it wait.
+ * scheduler made it wait. The 2 MB and 4 MB runs alternate: CPU time still
+ * grows when a co-tenant slows the core (a 2-vCPU CI runner read 3.8x with
+ * the three 4 MB runs after the three 2 MB runs), so a slow spell has to cover
+ * both sizes to move the ratio.
  */
 import { describe, test, expect } from 'bun:test';
 import { chunkText } from '../src/core/chunkers/recursive.ts';
@@ -38,14 +41,22 @@ function chatLog(chars: number): string {
   return parts.join('');
 }
 
-function bestMs(text: string): number {
-  let best = Infinity;
+function runMs(text: string): number {
+  let chunks: ReturnType<typeof chunkText> = [];
+  const ms = cpuMs(() => { chunks = chunkText(text, { spans: true }); });
+  expect(chunks.every(c => c.byte_start !== undefined)).toBe(true);
+  return ms;
+}
+
+/** Best of three runs per size, the sizes alternating. */
+function bestPair(small: string, large: string): [number, number] {
+  let s = Infinity;
+  let l = Infinity;
   for (let k = 0; k < 3; k++) {
-    let chunks: ReturnType<typeof chunkText> = [];
-    best = Math.min(best, cpuMs(() => { chunks = chunkText(text, { spans: true }); }));
-    expect(chunks.every(c => c.byte_start !== undefined)).toBe(true);
+    s = Math.min(s, runMs(small));
+    l = Math.min(l, runMs(large));
   }
-  return best;
+  return [s, l];
 }
 
 const MB = 1024 * 1024;
@@ -56,8 +67,7 @@ describe('chunkText(spans: true) scales linearly', () => {
     ['one-word paragraphs', (chars: number) => 'x\n\n'.repeat(Math.floor(chars / 3))],
   ] as const) {
     test(`${name}: 4 MB takes under 3x the time of 2 MB`, () => {
-      const small = bestMs(make(2 * MB));
-      const large = bestMs(make(4 * MB));
+      const [small, large] = bestPair(make(2 * MB), make(4 * MB));
       expect(large / small).toBeLessThan(3);
     }, 120_000);
   }
