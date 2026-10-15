@@ -65,8 +65,10 @@ export async function runPagesUnsearchable(engine: BrainEngine, args: string[]):
   const embeddingsEnabled = !(await embeddingsDisabled(engine));
   const found = await engine.listEmbeddingStateRows({ sourceIds: [sourceId], states, limit: parsed.limit + 1, purgeWindowHours: DELETED_PAGE_PURGE_WINDOW_HOURS });
   const render = cliRenderContext();
+  const summary = await readEmbeddingState(engine, { mode: 'full', sourceIds: [sourceId] });
+  const blockBytes = (summary.keyword_only as { threshold_bytes?: number } | undefined)?.threshold_bytes;
   const rows = found.slice(0, parsed.limit).map(row => {
-    const fix = embeddingStateFix(row.state, { sourceId, slug: row.slug, markerBytes: row.marker_bytes, embeddingsEnabled });
+    const fix = embeddingStateFix(row.state, { sourceId, slug: row.slug, markerBytes: row.marker_bytes, blockBytes, embeddingsEnabled });
     return {
       slug: row.slug, source_id: row.source_id, state: row.state, reason: reasonFor(row, embeddingsEnabled), chunks: row.chunks, bytes: row.bytes,
       ...(row.marker_bytes !== null ? { marker_bytes: row.marker_bytes } : {}),
@@ -74,7 +76,6 @@ export async function runPagesUnsearchable(engine: BrainEngine, args: string[]):
       fix: fix ? renderAction(fix, render) : null,
     };
   });
-  const summary = await readEmbeddingState(engine, { mode: 'full', sourceIds: [sourceId] });
   const complete = found.length <= parsed.limit;
   if (parsed.json) {
     console.log(JSON.stringify({ source_id: sourceId, state: parsed.state, limit: parsed.limit, complete, active_column: summary.active_column,
