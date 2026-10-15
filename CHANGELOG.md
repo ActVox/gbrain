@@ -12,68 +12,47 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.253.0] - 2026-10-15
 
-**One drainer per managed source, one cursor per source, and a resume never refuses over processing flags (#6712 PR 1).** Two processes could drain one source at once (a cron `gbrain sync` beside a serve, a `--no-delegate` run beside a job), racing each other's checkpoints, and every writer, authority and option set got its own cursor, so a resume by a different process started over or refused with `cursor_processing_options_conflict`. Now every managed pass runs under the source's drain lease, a second run follows the holder instead of competing, the cursor key is the source itself, and the cursor's opt-outs are inherited.
+**A note an agent writes can no longer quietly erase a take or timeline entry you confirmed. And when something an agent derived from is downgraded, everything derived from it is downgraded too.** Until now, an agent rewriting a page could drop or reword a take you had confirmed, or a dated timeline line, and the stored row went with it. The same happened when the takes cleanup or the timeline cleanup decided a row was gone. Now the row stays exactly as it was, and you get a proposal to approve or dismiss. Separately, when a page or fact loses trust (an agent edited it, or you lowered it), the facts, takes and pages computed from it now drop to match. Raising trust never lifts them back up on its own.
+
+### How to use it
+
+```bash
+gbrain trust review              # lists each held change: "A lower-trust write would remove t12"
+gbrain trust confirm tp<id>      # apply it: the row now matches the page (you type the token to confirm)
+gbrain trust drop tp<id>         # keep the row as it is
+```
+
+Agents get the proposal back: `put_page` lists it under `contested`, and a refused `takes_remove` returns `forget_requires_owner` with the exact `gbrain trust confirm` command to hand you. Agents cannot decide proposals themselves, over MCP or otherwise.
 
 ### What you'd see
 
 | Situation | Before | Now |
 |---|---|---|
-| `gbrain sync` while a serve or job drains the source | a second drain on the same cursor, or `SyncLockBusyError` | follows the holder (prints kind, pid, host, version and the pages it commits), takes over when it finishes; out of budget exits 0 `resumable`, code `sync_drain_lease_held`, `retry_after_ms` 60 s |
-| the holder is wedged (no commit for 5 min) | a follower would wait or exit 0 on every tick | `blocked`, `drain_stalled`, cause `no_progress`, `stall.lease_holder`, fix naming `--break-lock` |
-| the holder crashed | its sync lock lingered until its TTL | the lease lapses within 2 minutes; the next run takes over |
-| resume with `--no-embed` omitted (or added) against a cursor that stored the opposite | `invalid_params`, `cursor_processing_options_conflict` | the cursor's opt-outs are kept; `inherited_options` names the flag |
-| a different writer, the serve or a job resumes a CLI's cursor | a new cursor under its own key | the same cursor; the resumer admits the rest under its own grant, admitted requests keep their principal |
-| an unfinished cursor an older gbrain left | ignored by a run with different options | finished in place under its key (`cursorAdopted`); other old-key cursors retired once idle (`cursorFanIn`) |
+| An agent rewrites a page and drops or rewords a take you confirmed | the take was deleted or replaced | the take stays; a proposal waits for you |
+| An agent rewrites a page and drops a confirmed timeline line | the timeline row was deleted | the row stays; a proposal waits for you |
+| An agent calls `takes_remove` on a confirmed take | the take was removed | refused with `forget_requires_owner` and a proposal |
+| `gbrain extract takes` or the timeline cleanup finds a confirmed row missing from the page | the row was pruned | the row stays |
+| A page an agent edits loses trust, and a fact was derived from it | the fact kept its old trust | the fact drops to the page's trust |
+| You raise that page's trust again | | the fact stays where it is until it is derived again |
+
+### Things to watch
+
+- **Dismissing a proposal keeps the row in the database, not in the page text.** `gbrain trust drop` leaves the row where it was, but the page still reads the way the agent wrote it. Add the line back to the page if you want the text to match. A later republish does not ask again or delete the row.
+- An ordinary page republished by maintenance now keeps an agent-written timeline row the new text dropped, with a pending proposal, where it used to delete it.
+- On a managed brain, a derived row in a source the current write does not hold is marked for re-derivation instead of being lowered in place.
 
 ### Itemized changes
 
-- **Drain lease.** New `src/core/persistence/sync-lease.ts`: `withDrainLease` (2-minute TTL, 20 s renewal, reentrant for its holder), holder record and `readDrainHolder` (kind, id, host, pid, heartbeat, version, progress), `assertDrainLease` fencing admission, the settled/held CAS, cursor fan-in and the cursor CAS, followers bounded by `followStopAt`, `leaseHeldResult` and `leaseStalledResult`. Wired into `performManagedSync` (CLI, `--no-delegate`, worktree refresh), the serve's delegated runs (`followDrainLease`, holder `serve`), `sync` jobs (holder `job`), the dream cycle and the MCP `sync_brain` operation (holder `mcp`). A non-job holder writes a `gbrain-drain-lease` beacon row so the `liveSyncJob` check of older binaries backs off; `liveSyncJob` reads the lease holder first.
-- **Codes and docs.** `sync_drain_lease_held` registered (`src/core/error-registry.ts`, `SYNC_FAULT_TABLE`, runbook row, `docs/guides/write-refusals.md#sync_drain_lease_held`); `drain_stalled` gains the lease-holder case (`#drain-lease-stalled`). `gbrain sync --help` documents following, Ctrl-C, `--break-lock` and `--force-break-lock`, and that `--no-delegate` never skips the lease.
-- **One cursor key.** `src/core/persistence/sync-cursor-key.ts`: `managedCursorKey(incarnation, company?)`, `legacyManagedCursorKey` (read-only) and `resolveManagedCursor`, which adopts the newest older-key unfinished cursor in place, supersedes the rest through `retireManagedSyncOrphan` (new reason `superseded_by_adoption`, fault point `sync:cursor_adopted`), retains any cursor with a running, recovering or publishing request or a recovery row, and makes the pass wait (`writer_pending`) for such a request. `selectManagedCursor` and `managedSyncCursorKey` are removed.
-- **Authority handoff.** `src/core/persistence/sync-run.ts`: `adoptCursor` stamps the resumer's validated authority in one CAS and drops only unadmitted frozen entries on a writer change; admitted requests are read under their own intent principal (`admittedBy`, `readAdmitted`); a remote job never adopts a local cursor (`local_resume_required`, fix `gbrain sync --no-pull --source <id>`).
-- **Processing options.** Opt-outs are inherited OR-wise and reported (`inherited_options`, `cursorAdopted`); `assertCursorProcessingOptions`, `explicitProcessing` (CLI, IPC, admin wire, serve runner), `explicitSyncProcessing`, `typedSyncProcessing` and `src/core/persistence/managed-retry-actions.ts` are removed. The wire still accepts an older client's `explicitProcessing` by shape and ignores it until 2026-11-14 (new `src/core/wire-skew.ts`, floor 0.60.249.0). `--retry-failed` counts every managed failure of the source.
-- **Downgrade.** Quiescent only (stop serve, autopilot and crons first); see the `BEHAVIOR_CHANGES` row.
-- Tests: `test/persistence-sync-lease.test.ts` (TTL takeover, reentrancy, follower takeover, out-of-budget `sync_drain_lease_held`, Ctrl-C, stalled holder, fencing after takeover, `followStopAt` against the watchdog, the doctor cron recipe with `--no-delegate`), `test/persistence-sync-cursor-adoption.test.ts` (cross-principal adoption with running members, new admissions and a stop during checkpoint completion; remote→local, local→remote, revoked writer, fan-in with a running request, company approvals), and rewritten `persistence-sync-cursor-strategy-6696`, `persistence-sync-cursor-options`, `sync-owner-lane-processing-6696` and the delegation wire tests.
-
-**One page that fails no longer drags the rest of a managed sync down with it (#6712, #6565, #6600).** Until now a page that did not commit cancelled every other page in its bulk group and every group admitted after it, and the next sync had to re-freeze them all, sometimes until `knock_on_exhausted` stopped the source. Now each page gets its own fate: a page with a problem is held or retried on its own, the pages around it still publish, and the run is counted from each page's own receipt. A file you edit while a sync is running is retried after the rest of the manifest and then held `worktree_dirty`, instead of stalling the run. An unknown database refusal stops the run with a named cause, and the next plain sync picks up again once the cause is gone, with no `--retry-failed` needed.
-
-### What you'd see
-
-| Situation | Before | Now |
-|---|---|---|
-| One page in a bulk group refuses (bad frontmatter, identity conflict) | that group and later groups cancelled; the next syncs re-freeze them | only that page is held or fails; every other page commits |
-| You edit a file while a sync is running | the run could stall at a lane group and never finish; one in-place retry | the page is retried after the last manifest entry (up to 3 times), then held `worktree_dirty`; the rest of the run finishes |
-| A database trigger raises an unrecognized P0001 or a 55000 on page writes | `storage_error`; every page the refusal failed needed `--retry-failed` | the run stops naming the SQLSTATE; the next plain sync re-freezes the stopped pages (at most 3 times in a row) and converges once the refusal is lifted |
-| A held deletion whose page an authorized delete already removed | stays held | settles as done and the hold clears (#6600) |
-| Two changes to one page in one sync, and the first is held | the second published against a page whose earlier change never landed | the second is held too, naming the first (`blocked_on`), and is re-screened when the first clears |
-| `preparation_stalled` holds | waited for `gbrain sources retry-held` | every sync retries them until the third hold |
-| `gbrain config set sync.knock_on_refreeze_limit` / `sync.knock_on_run_limit` | tuned knock-on recovery | refused: the keys are retired, since nothing produces knock-ons any more |
-| an older receipt with `knock_on_exhausted` | the error code's fix | read as superseded, with `gbrain sync --source <id> --no-pull` as the fix |
-
-The write owner (the host that runs `gbrain serve` or the sync) must run this release for the new behavior.
-
-### Itemized changes
-
-- `src/core/persistence/group-publish.ts`, `src/core/persistence/sync-window.ts`, `src/core/persistence/sync-lanes.ts`, `src/core/persistence/consumer.ts`: the producers of cascade cancels are gone (bulk-group cancel, window cancels, lane `predecessor_failed`, the claimed-head cancel). A member whose preparation failed settles before its group publishes; a sync member refused inside a lane group's transaction settles alone and the rest of the group is requeued, instead of falling back to the single path, whose exclusive lock waits behind the lanes. Sync groups keep their claim size (63 followers) and preparation width (4).
-- `src/core/persistence/sync-run.ts` (`settleFailedRequest`, `freezeNext`, `refreezeInPlace`) and `src/core/persistence/sync-stop-class.ts` (new: `receiptClass`, `resumableStop`, `stopRecorded`): a non-committed receipt is routed by its `SYNC_FAULT_TABLE` class: a page fault is held or deferred, a transport fault is re-frozen in place, a systemic stop is recorded and re-frozen by the next plain sync when the fault table retries it (bounded by `STOPS_PER_ENTRY` = 3). `source_changed` is deferred past the manifest end (`DEFER_PER_ENTRY` = 3) before `worktree_dirty`. Under `sync.holds=fail` the pages that committed after the failed page are recorded as settled.
-- `src/core/persistence/sync-cursor-moves.ts` (new): the pure cursor transitions, split out of `sync-run.ts`.
-- `src/core/persistence/sync-group.ts`, `src/core/persistence/sync-page-fault.ts`, `src/core/persistence/sync-holds.ts`, `src/core/persistence/sync-discovery.ts`: dependency edges (one slug or page id twice in a sync), `blocked_on` holds, `idempotentDeletionProof` (#6600), and re-screen of `preparation_stalled` (until `HOLD_ATTEMPTS_NEEDS_HUMAN`), `blocked_on` and `concurrent_write` holds whose basis moved.
-- Retired: `sync.knock_on_refreeze_limit`, `sync.knock_on_run_limit`, knock-on recovery and the checkpoint's knock-on exemption (`checkpoint-validation.ts`). `knock_on_exhausted` stays registered with `retired_in` so older receipts still render.
-- `--retry-failed` now rediscovers a run whose checkpoint a receipt still blocks.
-- Docs: `docs/guides/sync-unblock-runbook.md`, `docs/guides/error-codes.md`, key-files entries.
-
-### For contributors
-
-- Fault points `sync:held_settled` and `sync:retry_deferred` join the convergence kill list; convergence modes e (mid-run edit), knock-on and systemic run on every convergence job.
-- Tests: `test/error-registry-retired.test.ts` (no printed fix names a retired key or flag), forced probes in `test/managed-sync-bulk.test.ts` (window followers that commit after the failure and a drainer kill, under both hold policies; a database refusal re-freezing every page it failed), `test/managed-sync-lanes.test.ts` (a page edited after its freeze inside a lane group), `test/sync-group-member-order.test.ts` (sync-group claim size and width).
-
-**A resume skips what it already imported, and a sync never imports a file over a database edit it never saw (#6712 PR 1).** Discovery checks each page against the provenance PR 0 started recording, so a no-change resume of 2,000 pages takes under a second instead of about ten. A page whose database version moved while its file did not is held `file_drift` instead of being overwritten.
-
-### Itemized changes
-
-- **content-addressed resume.** Discovery prescreens each existing page against its import provenance (bytes on disk, the revision the import wrote, the parser fingerprint) with one `ls-tree`; a match is passed by the guarded no-op kernel's bounded checks in one transaction, with no freeze or preparation. A no-change tree walk of a 2,000-page fixture dropped from 10.5 s to 0.9 s (PGLite) and 9.1 s to 0.8 s (local Postgres). Receipts carry `prescreened`. Code, image, file-repair and published no-op publishes now write full provenance.
-- **`file_drift`.** A managed sync no longer imports a file over a database version of its page that sync never saw (the page moved since the file's last recorded import, or, in a tree walk, has no usable record on an upgraded brain); the file is held `file_drift` unless the import is a proven no-op or a sync request wrote the current revision. `gbrain repair file-drift` is the exit; `storage.keep_db` prefixes go to the keep_db worker instead of a hold.
-- **a lost manifest re-discovers the whole tree at HEAD** on the next sync instead of stopping with `storage_error`, so a file the lost run imported and HEAD later reverted is restored.
+- `src/core/trust/fence-guard.ts`: `heldRows`, `guardFenceTakes`, `guardTakeRows`, `contestHeldRows` (one `forget` proposal per held row, an open one reused) and `factsAboveWriter`.
+- `src/core/persistence/canonical-projections.ts`: timeline deletions and detail refreshes, and take deletes, replaces and deactivations, skip rows more trusted than the writer; the publish response carries `contested`. Resolution handling applies to the rows that are not held.
+- `src/core/persistence/takes-prepare.ts`: `takes_remove` of a more trusted take throws `forget_requires_owner` with the proposal ref.
+- `src/core/cycle/extract-takes.ts`, `src/core/timeline-extract.ts`: the takes reconcile and the timeline orphan prune keep held rows.
+- `src/core/trust/held-removals.ts` (new): the owner accept applies the change as the page now says; a refused `takes_remove` reruns as an owner `takes_remove`. `supersede-handlers.ts` routes take and timeline `forget` proposals to it.
+- `src/core/trust/propagation.ts` (new): `propagateTierLowering` walks recorded derivation inputs and lowers each derived row to the least trusted of its current inputs, recording `write_origin.input_lowered`; a row it cannot write is marked `needs_rederive` (reason `input_lowered`). Hooked into owner tier changes, agent page lowering, derived republishes, `gbrain trust claim-sources` relowering, the supersede undo and fence fact-field rewrites.
+- Accepting a held change on a segmented page (only with segmented page storage switched on) refuses with `page_body_segmented`, and the proposal stays pending.
+- `gbrain trust review` and the confirm prompt name what a held change would do ("remove t12", "remove timeline row 4").
+- No schema change.
+- Tests: `test/trust-held-removals.test.ts` runs on PGLite and Postgres and fails without the fix.
 
 ## [0.60.252.0] - 2026-10-15
 

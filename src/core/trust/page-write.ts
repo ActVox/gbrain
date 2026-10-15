@@ -24,6 +24,7 @@ import type { WriteRequest } from '../persistence/model.ts';
 import { frontmatterTrustCaps, requestChannelTrust, stampTrustMarker } from './channel.ts';
 import { declaredWriteTrust, readDerivationDeclaration } from './taint.ts';
 import { insertTrustProposal, updatePendingTrustProposalAfter } from './proposals.ts';
+import { propagateTierLowering } from './propagation.ts';
 import { OWNER_TIER_FLOOR, compareTrust, effectiveWriteTrust, minTrust, storedTrustTier, type TrustTier, type WriteTrust } from './tier.ts';
 
 /** Page writes that only edit a gbrain-managed fence (or strike a row) and keep the page's tier. */
@@ -95,6 +96,8 @@ export async function recordAgentPageLowering(tx: BrainEngine, row: Pick<WriteRe
     await updatePendingTrustProposalAfter(tx, Number(pending.id), after);
     return { proposal_ref: `tp${pending.id}` };
   }
+  // W1 #6783 §12 (b): rows derived from the page follow it down.
+  await propagateTierLowering(tx, [{ table: 'pages', id: pageId }]);
   const [version] = await tx.executeRaw<{ id: number }>(
     'SELECT id FROM page_versions WHERE page_id = $1 AND trust_tier = $2 ORDER BY id DESC LIMIT 1', [pageId, prior.tier]);
   const proposal = await insertTrustProposal(tx, {

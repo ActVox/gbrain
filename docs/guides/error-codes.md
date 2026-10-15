@@ -1216,7 +1216,7 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A remote caller asked to forget a fact more trusted than its own writes, so nothing was forgotten and the owner was asked instead. | Lower-trust writers cannot overwrite, supersede or forget what the owner confirmed or curated (#5575 guarded supersession). The request became a trust proposal the owner can accept on the brain host; forget's frozen expired meaning is unchanged because nothing expired. | Do not retry. Tell the user the fact needs their decision and give them the command in fix (gbrain trust confirm <proposal_ref> on the brain host). | user | `repeat the read that failed` | 3 | no |
+| A caller asked to forget a fact (remote forget) or remove a take (takes_remove) more trusted than its own writes, so nothing was removed and the owner was asked instead. | Lower-trust writers cannot overwrite, supersede or forget what the owner confirmed or curated (#5575 guarded supersession). The request became a trust proposal the owner can accept on the brain host; forget's frozen expired meaning is unchanged because nothing expired. | Do not retry. Tell the user the fact or take needs their decision and give them the command in fix (gbrain trust confirm <proposal_ref> on the brain host). | user | `repeat the read that failed` | 3 | no |
 
 ### frontmatter_slug_conflict
 
