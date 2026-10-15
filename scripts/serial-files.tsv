@@ -416,3 +416,4 @@ test/write-path-no-egress.serial.test.ts	global-state	global-state: binds a loca
 test/write-path-zero-llm.serial.test.ts	R1	R1: mutates process.env (ANTHROPIC_API_KEY, OPENAI_API_KEY) so gated chat and embedding paths are live
 test/writeback-nudge.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/writeback-review-fixes.serial.test.ts	global-state	global-state: process-wide test seams __resetCheckpointHarvestForTests; patches process stdout/stderr/console
+test/resolve-ipc-rebind.serial.test.ts	global-state	global-state: binds real Unix sockets and spawns a child serve that is SIGKILLed; withEnv scopes GBRAIN_HOME

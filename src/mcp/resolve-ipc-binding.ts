@@ -42,10 +42,10 @@ import { persistenceSocketPathForConfig, startPersistenceIpcServer, type Persist
 import { residentPersistenceConfig } from '../core/persistence/local-client.ts';
 
 export interface ResolveIpcBinding {
-  /** The bound listener, or null when binding was skipped/failed (best-effort). */
-  server: Server | null;
-  /** The socket path the listener bound (null when not bound). */
-  socketPath: string | null;
+  /** The bound listener for this serve's own resolve socket, or null while it is not bound (best-effort). */
+  readonly server: Server | null;
+  /** The socket path the listener bound (null while not bound). */
+  readonly socketPath: string | null;
   /** Dedicated persistence listener; its larger frames never enter hook handlers. */
   persistence?: PersistenceIpcBinding;
   /** Idempotent teardown: close the listener + reap the socket file. */
@@ -53,6 +53,14 @@ export interface ResolveIpcBinding {
 }
 
 const NULL_BINDING: ResolveIpcBinding = { server: null, socketPath: null, close: () => {} };
+
+/** #6647: a serve that could not bind a resolve socket retries it this often (plus jitter). */
+export const RESOLVE_IPC_REBIND_INTERVAL_MS = 30_000;
+const RESOLVE_IPC_REBIND_JITTER_MS = 5_000;
+
+function defaultRebindDelayMs(): number {
+  return RESOLVE_IPC_REBIND_INTERVAL_MS + Math.floor(Math.random() * RESOLVE_IPC_REBIND_JITTER_MS);
+}
 
 /**
  * The turn_context assembly the serve answers with (minus the pressure gate).
@@ -130,7 +138,11 @@ export async function bindResolveIpcForServe(
   engine: BrainEngine,
   defaultSource: string,
   persistenceProvider?: PersistenceIpcProvider,
-  opts: { rememberCallable?: boolean | (() => boolean) } = {},
+  opts: {
+    rememberCallable?: boolean | (() => boolean);
+    /** Delay before each re-bind attempt of a socket this serve does not hold; tests inject a short one. */
+    rebindDelayMs?: () => number;
+  } = {},
 ): Promise<ResolveIpcBinding> {
   let persistence: PersistenceIpcBinding | null = null;
   try {
@@ -285,28 +297,49 @@ export async function bindResolveIpcForServe(
       boundSourceId: defaultSource,
       secret: ipcSecret,
     };
-    const server = await startResolveIpcServer(resolveSocket, handlers, serverOpts);
-    const legacyServer = legacySocket === resolveSocket ? null : await startResolveIpcServer(legacySocket, handlers, serverOpts);
-
-    // startResolveIpcServer returns null when the socket is already owned
-    // by a live listener (another serve) — that serve is the IPC provider.
-    if (!server && !persistence) {
-      try { legacyServer?.close(); } catch { /* noop */ }
-      return NULL_BINDING;
-    }
-
+    // #6647: every socket this serve could not bind (its source socket, the
+    // legacy socket) is retried on its own unref'd timer through the same
+    // startResolveIpcServer, which still defers to a live or unknown owner
+    // (#4896), so a surviving serve takes over only once the owner probes
+    // dead. Bind attempts and close() run one at a time per serve; a bind
+    // that completes after close() is closed at once. Persistence is never
+    // re-set-up here.
+    const slots = [resolveSocket, ...(legacySocket === resolveSocket ? [] : [legacySocket])]
+      .map(path => ({ path, server: null as Server | null, timer: undefined as ReturnType<typeof setTimeout> | undefined }));
+    const rebindDelayMs = opts.rebindDelayMs ?? defaultRebindDelayMs;
     let closed = false;
+    let lifecycle: Promise<void> = Promise.resolve();
+    const serialized = (step: () => Promise<void>): Promise<void> => (lifecycle = lifecycle.then(step, step));
+    const bind = async (slot: (typeof slots)[number], retry: boolean): Promise<void> => {
+      if (closed || slot.server) return;
+      const server = await startResolveIpcServer(slot.path, handlers, serverOpts).catch(() => null);
+      if (closed) { try { server?.close(); } catch { /* noop */ } return; }
+      if (!server) { schedule(slot); return; }
+      slot.server = server;
+      if (retry) process.stderr.write(`[resolve-ipc] took over ${slot.path} after its previous owner exited\n`);
+    };
+    const schedule = (slot: (typeof slots)[number]): void => {
+      if (closed) return;
+      slot.timer = setTimeout(() => {
+        slot.timer = undefined;
+        void serialized(() => bind(slot, true));
+      }, rebindDelayMs());
+      slot.timer.unref?.();
+    };
+    await serialized(async () => { for (const slot of slots) await bind(slot, false); });
+
+    const own = slots[0]!;
     return {
-      server,
-      socketPath: server ? resolveSocket : null,
+      get server() { return own.server; },
+      get socketPath() { return own.server ? resolveSocket : null; },
       ...(persistence ? { persistence } : {}),
       close: () => {
         if (closed) return;
         closed = true;
+        for (const slot of slots) clearTimeout(slot.timer);
         // server.close() unlinks the pathname THIS listener bound; never
         // blind-unlink the path — it may belong to a newer live serve (#4896).
-        try { server?.close(); } catch { /* noop */ }
-        try { legacyServer?.close(); } catch { /* noop */ }
+        for (const slot of slots) { try { slot.server?.close(); } catch { /* noop */ } }
         persistence?.close();
       },
     };
