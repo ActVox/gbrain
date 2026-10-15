@@ -73,7 +73,8 @@ export interface MarkerRepairPreview {
   /** Pages an agent edit already lowered to unknown through the marker: revert the item first, then preview again. */
   lowered: Array<{ page: string; ref: string; prior_tier: TrustTier; revert: string[] }>;
   preview_hash: string;
-  apply_command: string[];
+  /** Null when no page is a candidate. */
+  apply_command: string[] | null;
 }
 
 export interface MarkerRepairApplied {
@@ -144,7 +145,7 @@ export async function previewMarkerRepair(engine: BrainEngine, opts: { sourceId?
     .map(r => ({ page: pageRef(r.source_id, r.slug), ref: trustProposalRef(Number(r.id)), prior_tier: storedTrustTier(r.prior_tier), revert: ['gbrain', 'trust', 'revert', trustProposalRef(Number(r.id))] }));
   const preview_hash = `mr_${createHash('sha256').update(JSON.stringify(candidates.map(c => [c.source_id, c.slug, c.revision, c.stored_tier]))).digest('hex').slice(0, 16)}`;
   const named = candidates.filter(c => c.assessment === 'consistent_with_6550');
-  const apply_command = [...TRUST_MARKER_REPAIR_COMMAND, ...(opts.sourceId ? ['--source', opts.sourceId] : []),
+  const apply_command = candidates.length === 0 ? null : [...TRUST_MARKER_REPAIR_COMMAND, ...(opts.sourceId ? ['--source', opts.sourceId] : []),
     ...(named.length ? named.flatMap(c => ['--slug', c.slug]) : ['--slug', '<SLUG>']), '--expect', preview_hash];
   return { mode: 'preview', fixed_release: run, candidates, lowered, preview_hash, apply_command };
 }
@@ -189,11 +190,11 @@ export function renderMarkerRepairPreview(preview: MarkerRepairPreview): string 
         `      ${c.reasons.join('; ')}`);
     }
   }
-  if (!preview.candidates.length) lines.push('', 'No page has an "unknown" marker below its stored tier.');
+  if (!preview.candidates.length) lines.push('', 'No page has an "unknown" marker below its stored tier, so there is nothing to repair.');
   if (preview.lowered.length) {
     lines.push('', 'Already lowered to "unknown" through the marker (revert the item, then run this preview again):');
     for (const l of preview.lowered) lines.push(`  ${l.page}  was ${l.prior_tier}: ${shellQuote(l.revert)}`);
   }
-  lines.push('', `Preview hash: ${preview.preview_hash}`, `Apply with: ${shellQuote(preview.apply_command)}`);
+  if (preview.apply_command) lines.push('', `Preview hash: ${preview.preview_hash}`, `Apply with: ${shellQuote(preview.apply_command)}`);
   return lines.join('\n');
 }

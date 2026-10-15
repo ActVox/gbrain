@@ -162,7 +162,7 @@ ambiguous. A page imported with the marker was probably marked on purpose.
 Pages an agent edit already lowered are listed with their `gbrain trust
 revert` command. Revert them first, then run the preview again.
 
-The preview ends with the exact command:
+When any page is listed, the preview ends with the exact command:
 
 ```bash
 gbrain trust backfill --repair-unknown-markers --slug notes/a-example --expect mr_0123456789abcdef

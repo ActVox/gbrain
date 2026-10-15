@@ -13,6 +13,9 @@ Branch `capy/w18b-lane3`. These are the edits to files other lanes may also touc
 - `src/commands/doctor/registry.ts`: `embeddingIdentityEntry` registered right after `embeddingEnvOverrideEntry`.
 - `src/core/doctor-categories.ts`: category for `embedding_identity_unqualified`.
 - Doctor goldens: `test/fixtures/goldens/doctor/json-pglite-degraded.json`, `json-pglite-fresh.json`, `registry-build-checks.json`, `content-pglite-human.json`, `content-pglite-json.json`, `hot-checks-pglite-json.json`, and the Postgres E2E goldens `hot-checks-postgres-json.json`, `json-postgres-fresh.json` gain the new check (`GBRAIN_TEST_UPDATE_GOLDENS=1` on `test/doctor-registry-golden.test.ts`, `test/doctor-json-golden.test.ts`, `test/doctor-content-golden.test.ts`, `test/doctor-hot-checks-golden.test.ts`, `test/e2e/doctor-json-golden.test.ts`, `test/e2e/doctor-hot-checks-golden.test.ts`).
+- `src/core/cli-flag-registry.generated.ts` (`bun run regen:all`): `trust` gains `--expect`, `--repair-unknown-markers`, `--slug`.
+- `test/fixtures/goldens/exports/types.json` (export-surface golden): the error-code union gains the three new codes.
+- `llms.txt` / `llms-full.txt`: NOT regenerated (integrator-owned); `regen:all` adds the troubleshooting `#embedding-identity-unqualified` section to `llms-full.txt`, so `verify`'s `check:regen-all` fails on this branch until the integrator regenerates.
 - `test/fixtures/goldens/trust/help.txt`: the `--repair-unknown-markers` usage block.
 - `scripts/serial-files.tsv`: three R2 rows (mock.module): `test/cycle-patterns-timeline-appends.serial.test.ts`, `test/cycle-patterns-cadence.serial.test.ts`, `test/cycle-patterns-read-budget.serial.test.ts`.
 - `src/core/config.ts`: known config keys gain `dream.patterns.min_interval_hours` and `dream.patterns.child_read_budget_kb` (one line).
