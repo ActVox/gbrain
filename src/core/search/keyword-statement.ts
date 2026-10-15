@@ -20,7 +20,7 @@
  * round-trips through JSON exactly.
  */
 import type { SearchOpts } from '../types.ts';
-import { escapeLikePattern, hasCJK, splitCJKQueryTerms } from '../cjk.ts';
+import { escapeLikePattern, hasCJK, cjkMatchTerms } from '../cjk.ts';
 import { getFtsLanguage } from '../fts-language.ts';
 import { resolveBoostMap, resolveHardExcludes } from './source-boost.ts';
 import { buildHardExcludeClause, buildSourceFactorCase, buildVisibilityClause } from './sql-ranking.ts';
@@ -43,7 +43,7 @@ export function buildKeywordMatch(query: string, opts: SearchOpts | undefined): 
   let predicate: string;
   let rank: string;
   if (hasCJK(query)) {
-    const terms = splitCJKQueryTerms(query);
+    const terms = cjkMatchTerms(query);
     if (terms.length === 0) return null;
     const likes = terms.map(term => {
       params.push(`%${escapeLikePattern(term)}%`);
