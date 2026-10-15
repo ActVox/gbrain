@@ -29,7 +29,7 @@ export function contentRepairCommit(path: string, receipt: Pick<ContentRepairRec
   return { subject: contentRepairCommitSubject(path), line: `${safe(path)} (frontmatter_slug_conflict)`, trailer: contentRepairTrailer(receipt) };
 }
 export interface ParkedTarget { slug?: string; error_code: string }
-export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' }
+export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' | 'page_body_segmented' }
 /** A Git or withdrawal target parks after this many consecutive execution failures. */
 export const PARK_AFTER_FAILURES = 5;
 export interface EffectRecovery {

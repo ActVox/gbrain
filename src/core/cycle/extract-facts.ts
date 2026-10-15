@@ -65,6 +65,7 @@ import { digest } from '../persistence/digest.ts';
 import { getWriteRequest } from '../persistence/journal.ts';
 import { maintenanceCallerPreflight, maintenancePreflight, submitDatabaseMaintenanceIntent, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
 import { resolveManagedFactsEmbedding } from '../persistence/facts-maintenance.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { REVISION_BACKFILL_PENDING } from '../page-state/types.ts';
 import { opError, OperationError } from '../ops/contract.ts';
 import {
@@ -993,6 +994,10 @@ export async function runExtractFacts(
     revision = page.knowledge_revision ?? null;
     // #6259: a quarantined page projects no fence facts; its existing index is left as it is.
     if (isQuarantined(page.frontmatter as Record<string, unknown> | null)) return 'skipped';
+    if (isSegmentedPage(page)) {
+      result.warnings.push(`${slug}: FACTS_RECONCILE_SEGMENTED: the page body is stored in segments, which fence reconcile cannot read yet; its existing facts index is preserved`);
+      return 'skipped';
+    }
 
     const plan = await planFenceReconcile(engine, page, slug, sourceId, result.warnings);
     if (!plan) return 'invalid';

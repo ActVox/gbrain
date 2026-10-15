@@ -26,6 +26,7 @@ import { opError, OperationError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { contentHash, rowToPage } from '../utils.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { discoverWithdrawalTargets, withdrawalDiscoveryFailure } from './withdrawal-discovery.ts';
 import { dropPurgedFenceRows } from './purge-overlay.ts';
 import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from './derivation-inputs.ts';
@@ -156,6 +157,7 @@ async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: Purge
   const rewritten: string[] = [];
   for (const row of rows) {
     const page = rowToPage(row);
+    assertInlineBody(page, 'purge page rewrite');
     const compiled = await dropPurgedFenceRows(tx, sourceId, page.compiled_truth, page.slug);
     const timeline = await dropPurgedFenceRows(tx, sourceId, page.timeline ?? '', page.slug);
     if (compiled === page.compiled_truth && timeline === (page.timeline ?? '')) continue;

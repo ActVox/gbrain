@@ -6,6 +6,8 @@ import type { StaleTakeRow } from './takes-row-types.ts';
 // truth for the hash-ephemeral frontmatter keys shared with the importer.
 import { QUARANTINE_KEY, CONTENT_FLAG_KEY } from './quarantine.ts';
 import { EMBED_SKIP_KEY } from './embed-skip.ts';
+import { guardSegmentedBody } from './page-body/page-shape.ts';
+import type { BodyStorage } from './page-body/types.ts';
 
 /**
  * SHA-256 hash a token/secret for storage. Never store plaintext tokens.
@@ -230,15 +232,18 @@ export function rowToPage(row: Record<string, unknown>): Page {
   const contextualRetrievalMode = row.contextual_retrieval_mode === undefined
     ? undefined
     : (row.contextual_retrieval_mode as Page['contextual_retrieval_mode']);
-  return {
+  const segmented = row.body_storage === 'segmented';
+  const page: Page = {
     id: row.id as number,
     slug: row.slug as string,
     type: row.type as string,
     title: row.title as string,
-    compiled_truth: row.compiled_truth as string,
-    timeline: row.timeline as string,
+    compiled_truth: segmented ? '' : row.compiled_truth as string,
+    timeline: segmented ? '' : row.timeline as string,
     frontmatter: (typeof row.frontmatter === 'string' ? JSON.parse(row.frontmatter) : row.frontmatter) as Record<string, unknown>,
     content_hash: row.content_hash as string | undefined,
+    ...(row.body_storage !== undefined && { body_storage: row.body_storage as BodyStorage }),
+    ...(row.body_bytes !== undefined && { body_bytes: row.body_bytes == null ? null : Number(row.body_bytes) }),
     ...(row.source_path !== undefined && { source_path: row.source_path as string | null }),
     ...(row.knowledge_revision != null && { knowledge_revision: String(row.knowledge_revision) }),
     ...(row.text_projection_revision !== undefined && { text_projection_revision: row.text_projection_revision as string | null }),
@@ -273,6 +278,7 @@ export function rowToPage(row: Record<string, unknown>): Page {
     // silently mis-attribute).
     source_id: (row.source_id as string | undefined) ?? 'default',
   };
+  return segmented ? guardSegmentedBody(page, 'rowToPage') : page;
 }
 
 /**
