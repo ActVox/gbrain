@@ -1716,7 +1716,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // #5984: managed Postgres sync publishes pages in bulk groups (on by default; each page keeps its own request).
   'sync.bulk',
   'sync.bulk_size',
-  'sync.bulk_max_txn_ms',
+  'sync.bulk_max_txn_ms', 'sync.job_drain', // the last: #6706, `false` keeps a managed `sync` job single-pass
   'sync.lanes', 'sync.waive_batch', 'persistence.single_write_group', 'persistence.preadmit_cache', // the last three: write-path kill switches (persistence/switches.ts)
   // Persisted indexing scope (comma/newline-separated glob list; trailing '/'
   // normalizes to a '/**' subtree glob). Read best-effort at the top of
