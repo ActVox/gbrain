@@ -45,7 +45,7 @@ import { GBRAIN_CLIENT_HEADER, isGbrainThinClient, resolveResultRowsMode, result
 import { parseStrictParamsMode } from './validate-params.ts';
 import { filterOpsForSurface, clampSurface, advertisedOps, resolveAdvertisedSurface, type McpSurface } from './surface.ts';
 import { disabledOpsForPublishGates } from './publish-gates.ts';
-import { loadConfig } from '../core/config.ts';
+import { loadConfig, loadConfigWithEngine, type GBrainConfig } from '../core/config.ts';
 import { buildDefaultLimiters, type RateLimiter } from './rate-limit.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { degradedLastError, isEngineDegraded } from '../core/degraded-marker.ts';
@@ -220,6 +220,9 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
   // serve-http path re-reads dual-plane per request). Dispatch-side
   // enforcement still resolves per call. mcp.advertised_surface (file plane) narrows the tool list only.
   const fileConfig = loadConfig();
+  // #6589: operations see the CLI's effective config (file + env over the DB plane), read once at startup:
+  // a DB-plane change (`gbrain config set`) applies after a serve restart. A degraded engine keeps the file plane.
+  const operationConfig = isEngineDegraded(engine) ? fileConfig : await loadConfigWithEngine(engine, fileConfig ?? { engine: engine.kind } as GBrainConfig);
   const strictParams = parseStrictParamsMode(fileConfig?.mcp?.strict_params) === 'reject';
   const tools = buildToolDefs(advertisedOps(surfacedOps, surface, await resolveAdvertisedSurface(null, fileConfig)), { strictParams });
 
@@ -465,7 +468,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
 
       if (method === 'resources/list' || method === 'resources/read') {
         const resources = createSkillResources(engine, async () => ({ remote: true, transport: 'http',
-          auth: auth.auth!, sourceId: auth.sourceId ?? 'default', allowedOps: surfaceAllowedOps, surface, config: fileConfig ?? undefined }));
+          auth: auth.auth!, sourceId: auth.sourceId ?? 'default', allowedOps: surfaceAllowedOps, surface, config: operationConfig ?? undefined }));
         try {
           const result = method === 'resources/list'
             ? { resources: [{ uri: CAPABILITIES_URI, name: 'GBrain capabilities', mimeType: 'application/json' }, ...await resources.list()] }
@@ -537,6 +540,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
         const result = await dispatchToolCall(engine, toolName, args, {
           remote: true,
           admissionOrigin: 'interactive',
+          config: operationConfig ?? undefined,
           // WP1/D7: network transport — the dispatch-layer localOnly
           // backstop keys off this marker.
           transport: 'http',
