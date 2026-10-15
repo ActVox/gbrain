@@ -28,7 +28,7 @@ import { SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES } from '../../src/core/page-body/l
 import { regionFlags, Segmenter, segmentStream, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
 import {
-  bigPage, FACTS_BLOCK, joinedProjection, KEY_BODY, MARKER_BULLET, PEM_BLOCK, pick, segmentOptions, segmentPieces, segmentShapeErrors, soup,
+  bigPage, FACTS_BLOCK, joinedProjection, KEY_BODY, MARKER_BULLET, PEM_BEGIN_RSA, PEM_BLOCK, PEM_END_RSA, pick, segmentOptions, segmentPieces, segmentShapeErrors, soup,
 } from '../helpers/segment-bodies.ts';
 
 const MAX = SEGMENT_MAX_BYTES;
@@ -295,8 +295,8 @@ describe('forced cuts with open state', () => {
 
   test('released early, a segment never shows what whole-body sanitization hides (key lines around giant regions)', () => {
     const r = mulberry32(91);
-    const keyish = [`${KEY_BODY}\n`, `  ${KEY_BODY.slice(0, 40)}\n`, 'prose line here\n', '\n', '-----BEGIN RSA PRIVATE KEY-----\n',
-      '-----END RSA PRIVATE KEY-----\n', `"k": "${KEY_BODY}\\n${KEY_BODY}\\n`, 'é😀\n', '## heading\n'];
+    const keyish = [`${KEY_BODY}\n`, `  ${KEY_BODY.slice(0, 40)}\n`, 'prose line here\n', '\n', `${PEM_BEGIN_RSA}\n`,
+      `${PEM_END_RSA}\n`, `"k": "${KEY_BODY}\\n${KEY_BODY}\\n`, 'é😀\n', '## heading\n'];
     const regions = [['<!--- gbrain:takes:begin -->\n', '<!--- gbrain:takes:end -->\n'], ['<!--- gbrain:takes:begin -->\n', ''],
       ['<!--- gbrain:facts:begin -->\n', '<!--- gbrain:facts:end -->\n']];
     let guarded = 0;

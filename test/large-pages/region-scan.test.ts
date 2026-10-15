@@ -19,11 +19,11 @@ import { PROTECTED_PAIRS } from '../../src/core/remote-body.ts';
 import { privateKeySpans } from '../../src/core/secret-scan.ts';
 import { feedPemScan, initialPemScan, initialRegionScan, protectedRegionScan, walkTrusted, type ScannedRegion } from '../../src/core/page-body/region-scan.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
-import { KEY_BODY, pick } from '../helpers/segment-bodies.ts';
+import { KEY_BODY, PEM_BEGIN_PKCS8, PEM_BEGIN_RSA, PEM_END_RSA, pick } from '../helpers/segment-bodies.ts';
 
 const ATOMS = ['<!--- gbrain:facts:begin -->', '<!--- gbrain:facts:end -->', '<!--- gbrain:takes:begin -->', '<!--- gbrain:takes:end -->',
   '```', '~~~', '````', '```js', '`', '\n', '\r\n', '\r', ' ', 'text', 'é', '😀', '  ```', '    ```', '\\`', '\u2028'];
-const PEM_ATOMS = ['-----BEGIN RSA PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----', KEY_BODY, 'AAAA',
+const PEM_ATOMS = [PEM_BEGIN_RSA, PEM_END_RSA, PEM_BEGIN_PKCS8, KEY_BODY, 'AAAA',
   '\n', '\r\n', ' ', 'prose words', '\\n', 'Proc-Type: 4,ENCRYPTED', '-----', 'BEGIN', ' PRIVATE KEY-----', 'x'.repeat(3000)];
 
 const byteAt = (s: string, i: number) => Buffer.byteLength(s.slice(0, i));
