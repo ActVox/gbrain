@@ -22,7 +22,8 @@
  * already published inside it are restored from their recovery records by
  * the ordinary recovery path (`recoverPublication`, which also requeues their
  * claims), and the caller then publishes the members one at a time, so a
- * failure is attributed to its own page and no later member overtakes it.
+ * failure is attributed to its own page. #6712: every group is independent
+ * (one page, one fate): a member that does not commit never cancels another.
  * A member with a skill bundle or a source-exclusive checkpoint, or whose
  * file changed since preparation, takes the single path.
  *
@@ -38,10 +39,9 @@ import { localHostId } from './identity.ts';
 import { acquireWorktree, acquireWorktreeShared, getWorktreeBinding, guardOwnership, joinWorktreeLease, MANAGED_MODE_SQL } from './ownership.ts';
 import { isLockOpenFailure, type NativeLockHandle } from './native-lock.ts';
 import { awaitLaneBegin, awaitLaneTurn, LaneAbort, laneApplyBegin, laneClaimed, laneFinished, lanePolicy, stepDownLanes, type LaneState } from './sync-lanes.ts';
-import { cancelRows, laneFaultBlockedReason, laneFaultCancelMessage, windowPredecessor } from './sync-window.ts';
-import { BULK_GROUP_CANCEL_MESSAGE, knockOnDetail } from './sync-knock-on.ts';
-import { clearResolvedRecoveries, completeWrite, ENSURE_COUNTERS_SQL, getWriteRequestById, LOCK_COUNTERS_SQL, markDispatched, markRecovering, prepareRecoveries,
-  foregroundPriority, independentGroup, publicationGroupKey, reclaimReleasedWrite, releaseUnpublishedClaim, renewGroupClaims } from './journal.ts';
+import { laneFaultBlockedReason, windowPredecessor } from './sync-window.ts';
+import { clearResolvedRecoveries, ENSURE_COUNTERS_SQL, getWriteRequestById, LOCK_COUNTERS_SQL, markDispatched, markRecovering, prepareRecoveries,
+  foregroundPriority, independentGroup, publicationGroupKey, reclaimReleasedWrite, releaseUnpublishedClaim, renewGroupClaims, syncGroup } from './journal.ts';
 import { principalKey, requestPrincipal, type FileRecoveryRecord, type WriteRequest } from './model.ts';
 import { CLAIM_LOST, DEFAULT_CLAIM_LEASE_TIMING, endLostLease, holdClaimForPublication, startClaimLease, type ClaimLeaseTiming } from './claim-lease.ts';
 import { claimPhaseStamp, enterClaimPhase, startClaimPhase, type ClaimPhaseClock } from './claim-phase.ts';
@@ -431,7 +431,7 @@ export async function publishSingleWrite(engine: BrainEngine, row: WriteRequest,
 }
 
 /** Why a group transaction did not commit, for the lane fallback and step-down. */
-export type GroupFailure = 'busy' | 'predecessor_failed' | 'predecessor_requeued' | 'wounded' | 'order_timeout' | 'lock_timeout' | 'statement_timeout' | 'failed';
+export type GroupFailure = 'busy' | 'predecessor_requeued' | 'wounded' | 'order_timeout' | 'lock_timeout' | 'statement_timeout' | 'failed';
 function groupFailure(error: unknown): GroupFailure {
   if (error instanceof LaneAbort) return error.reason;
   const code = (error as { code?: unknown } | null)?.code;
@@ -439,15 +439,14 @@ function groupFailure(error: unknown): GroupFailure {
 }
 
 /**
- * #5984 lanes: a lane group that did not commit. A group whose predecessor ended without committing is
- * cancelled; one whose predecessor committed takes the single path like any FIFO head (null); one whose
- * predecessor still publishes, waits in the queue or is not admitted yet releases its claims so it runs first. Lock and statement timeouts
- * cost one lane for the rest of the drain.
+ * #5984 lanes: a lane group that did not commit. One whose predecessor ended (committed or not, #6712) takes the single
+ * path like any FIFO head (null); one whose predecessor still publishes, waits in the queue or is not admitted yet, or
+ * that found the worktree busy, releases its claims so it runs first. Lock and statement timeouts cost one lane for the
+ * rest of the drain.
  */
-async function laneFallback(engine: BrainEngine, rows: WriteRequest[], reason: GroupFailure | undefined, run: GroupExecution): Promise<boolean | null> {
+async function laneFallback(engine: BrainEngine, rows: WriteRequest[], reason: GroupFailure | undefined, run: GroupExecution): Promise<false | null> {
   if (run.lane) run.lane.fallbacks++;
-  // #6402 residual (P4.3): a server fault on the lane group is kept on the rows it releases or cancels (`blocked_reason`
-  // `lane_<fault>`, the cancel message), so the ledger and `claimedHeadOrder` name it instead of a generic wait.
+  // #6402 residual (P4.3): a server fault on the lane group is kept on the rows it releases (`blocked_reason` `lane_<fault>`).
   const laneFault = reason === 'lock_timeout' || reason === 'statement_timeout' ? reason : null;
   if (laneFault) stepDownLanes(rows[0]!.worktree_id!, `${reason} on a lane group`);
   const after = windowPredecessor(rows[0]!);
@@ -455,12 +454,7 @@ async function laneFallback(engine: BrainEngine, rows: WriteRequest[], reason: G
     [rows[0]!.principal_kind, rows[0]!.principal_id, after]).then(found => found[0]?.state ?? null) : 'committed';
   // A group that found the worktree busy (another holder or no publication capacity) releases its claims and is
   // claimed again as a lane head; publishing its members one at a time would hold the lanes back.
-  if (prior === 'committed' && reason !== 'busy') return null;
-  if (prior !== null && ['failed', 'conflict', 'cancelled'].includes(prior)) {
-    for (const done of await cancelRows(engine, rows, laneFault ? laneFaultCancelMessage(laneFault) : undefined,
-      knockOnDetail(laneFault ? 'lane_fault' : 'window_predecessor', after))) run.settled(done);
-    return true;
-  }
+  if (prior !== null && ['committed', 'failed', 'conflict', 'cancelled'].includes(prior) && reason !== 'busy') return null;
   for (const row of rows) await releaseUnpublishedClaim(engine, row, laneFault ? laneFaultBlockedReason(laneFault) : 'group_member_waiting');
   return false;
 }
@@ -554,11 +548,13 @@ export interface GroupExecution {
 type MemberOutcome = { ok: PreparedMutation } | { error: unknown } | { released: 'preparation_deadline' | 'group_member_waiting' | 'claim_lost' };
 
 /**
- * Prepares a claimed group (four members at a time), publishes it in one
- * transaction when every member qualifies, and otherwise publishes the
- * members one at a time in order. After a member ends in failure the later
- * members are cancelled, and after one is released back to the queue the
- * later ones are released too, so nothing overtakes it. Claims are renewed
+ * Prepares a claimed group (a sync group four members at a time, a page
+ * batch all at once), publishes it in one transaction when every member
+ * qualifies, and otherwise publishes the members one at a time in order.
+ * #6712: a member that ends in failure is its page's fate alone; the later
+ * members still publish. In a sync group, after a member is released back
+ * to the queue the later ones are released too, so nothing overtakes it
+ * (order, not fate: a released member is claimed again). Claims are renewed
  * for the whole group while it runs (claim-lease.ts). If the group stops
  * holding every member's claim while it is still preparing, it lets go: each
  * member is released unpublished with `claim_lost` (token-fenced, so a member
@@ -573,7 +569,7 @@ type MemberOutcome = { ok: PreparedMutation } | { error: unknown } | { released:
  * aborted, k is released `preparation_deadline` (charged; finished
  * `preparation_stalled` when that reaches the limit) and the later members
  * `group_member_waiting` (not charged), and the contiguous prepared prefix
- * 0..k-1 publishes. An independent `batch:` group releases only k. An
+ * 0..k-1 publishes. A `batch:` or `import:` group releases only k. An
  * abandoned member's preparation goes to `leftRunning` with its clock.
  */
 export async function executeClaimedGroup(engine: BrainEngine, rows: WriteRequest[], run: GroupExecution): Promise<boolean> {
@@ -591,8 +587,9 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
     return (await renewGroupClaims(engine, live.map(([row]) => row), 30_000, signal, live.map(([, i]) => stampOf(i)))).size === live.length;
   }, run.lease ?? DEFAULT_CLAIM_LEASE_TIMING, () => { for (const prep of inFlight.values()) prep.abort({ code: 'claim_lost' }); });
   if (run.lane) laneClaimed(run.lane, rows);
-  // A put_pages batch or a managed import batch is independent page writes: one page's failure never cancels its siblings.
-  const independent = independentGroup(publicationGroupKey(rows[0]!));
+  // #6712: every group's members are independent page writes: one page's failure never cancels its siblings. A sync group
+  // keeps its order on release and deadline (a released member goes first when it is claimed again); a batch does not.
+  const ordered = syncGroup(publicationGroupKey(rows[0]!));
   const prepared: MemberOutcome[] = new Array(rows.length);
   // The first member whose deadline passed in an ordered group: nothing after it is dispatched or published this pass.
   let cut: number | null = null;
@@ -601,10 +598,10 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
     // GBRA-75 wave 10: an import group's members read their pages and duplicate candidates through one batch each (import-reads.ts).
     const reads = preparationReads(engine, publicationGroupKey(rows[0]!)?.startsWith('import:') ? importGroupReads(engine, rows) : undefined);
     // A put_pages or import group prepares all of its (at most PAGE_BATCH_GROUP_MAX) pages at once.
-    const width = independent ? PAGE_BATCH_GROUP_MAX : 4;
+    const width = ordered ? 4 : PAGE_BATCH_GROUP_MAX;
     // GBRA-75 wave 10: the members' preparations share one memo of root-level path facts; publication re-checks every path.
     const preparing = withScreeningPaths(async () => {
-      for (let start = 0; start < rows.length && (independent || cut === null); start += width) {
+      for (let start = 0; start < rows.length && (!ordered || cut === null); start += width) {
         const wave = rows.slice(start, start + width);
         const now = Date.now();
         const cancels = wave.map(() => new AbortController());
@@ -620,7 +617,7 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
             await faultPoint('consumer:preparing', { requestId: row.request_id, sourceId: row.source_id, operation: row.operation, signal });
             return run.prepare(row, reads, undefined, clocks[i]);
           }, budget, { onDeadline: () => {
-            if (independent) return;
+            if (!ordered) return;
             if (cut === null || i < cut) cut = i;
             for (const [j, other] of inFlight) if (j > i) other.abort({ code: 'group_member_waiting' });
           } });
@@ -654,7 +651,7 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i]!, outcome = prepared[i];
       const expired = outcome !== undefined && 'released' in outcome && outcome.released === 'preparation_deadline';
-      const after = !independent && cut !== null && i > cut;
+      const after = ordered && cut !== null && i > cut;
       if (!expired && !after) continue;
       held.delete(row.id); released.add(row.id);
       // A dispatched member the deadline or the suffix abort took off this pass may still run: it blocks the root until it settles or the ceiling passes.
@@ -687,40 +684,30 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
       if (run.lane && liveRows.length < rows.length) run.lane.begun.delete(liveRows.at(-1)!.request_id);
       if (result.done) { for (const row of result.done) run.settled(row); return true; }
       requeued = new Set(result.requeued);
-      if (run.lane) { const settled = await laneFallback(engine, liveRows, result.reason, run); if (settled !== null) return settled || progressed; }
-    } else if (run.lane) {
-      const settled = await laneFallback(engine, liveRows, 'failed', run);
-      if (settled !== null) return settled || progressed;
-    }
-    let stop: 'cancel' | 'release' | null = null;
-    /** #6643: the member whose non-commit cancels the rest of the group (the cancel's knock-on root). */
-    let stopRoot: string | null = null;
+      if (run.lane && await laneFallback(engine, liveRows, result.reason, run) !== null) return progressed;
+    } else if (run.lane && await laneFallback(engine, liveRows, 'failed', run) !== null) return progressed;
+    let release = false;
     for (const { row: member, i } of live) {
       let row = member;
       let current = await getWriteRequestById(engine, row.id);
       // A claim the group's file restoration released is taken back, in order, while this pass still owns the worktree.
-      if (current?.state === 'queued' && requeued.has(row.id) && stop === null) {
+      if (current?.state === 'queued' && requeued.has(row.id) && !release) {
         const reclaimed = await reclaimReleasedWrite(engine, row.id);
         if (reclaimed) { row = reclaimed; current = reclaimed; }
       }
       if (!current || current.execution_token !== row.execution_token || current.state !== 'running') {
-        if (current && ['committed', 'conflict', 'failed', 'cancelled'].includes(current.state)) { run.settled(current); progressed = true; if (current.state !== 'committed' && !independent && stop === null) { stop = 'cancel'; stopRoot = current.request_id; } }
-        else if (independent) stop ??= 'release';
+        if (current && ['committed', 'conflict', 'failed', 'cancelled'].includes(current.state)) { run.settled(current); progressed = true; }
+        else if (!ordered) release = true;
         continue;
       }
-      if (stop === 'release') { await releaseUnpublishedClaim(engine, row, 'group_member_waiting'); continue; }
-      if (stop === 'cancel') {
-        const cancelled = await engine.transaction(tx => completeWrite(tx, current, 'cancelled', {}, { code: 'cancelled',
-          message: BULK_GROUP_CANCEL_MESSAGE, detail: knockOnDetail('bulk_group', stopRoot) }));
-        run.settled(cancelled); progressed = true; continue;
-      }
+      if (release) { await releaseUnpublishedClaim(engine, row, 'group_member_waiting'); continue; }
       const p = prepared[i]!;
       // #6278: a member aborted by our own cancellation (never a deadline here) is released, not failed.
-      if ('released' in p) { await releaseUnpublishedClaim(engine, row, p.released === 'claim_lost' ? 'claim_lost' : 'group_member_waiting'); stop ??= independent ? null : 'release'; continue; }
+      if ('released' in p) { await releaseUnpublishedClaim(engine, row, p.released === 'claim_lost' ? 'claim_lost' : 'group_member_waiting'); if (ordered) release = true; continue; }
       const done = 'ok' in p ? await bounded(() => publishMutation(engine, row, p.ok, run.hostId)) : await finishUnpublishedFailure(engine, current, p.error, 'preparation');
       run.settled(done);
-      if (done.state === 'committed') { progressed = true; continue; }
-      if (['conflict', 'failed', 'cancelled'].includes(done.state)) { progressed = true; if (!independent) { stop = 'cancel'; stopRoot ??= done.request_id; } } else stop = 'release';
+      if (['committed', 'conflict', 'failed', 'cancelled'].includes(done.state)) progressed = true;
+      else release = true;
     }
     return progressed;
   } finally {

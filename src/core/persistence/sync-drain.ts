@@ -808,9 +808,6 @@ export async function drainManagedSync(engine: BrainEngine, opts: SyncOpts, anno
       const left = opts.deadlineAtMs === undefined ? null : Math.max(0, opts.deadlineAtMs - Date.now());
       const stats = left === null ? await closeLaneRun(laneRun)
         : await Promise.race([closeLaneRun(laneRun), new Promise<undefined>(resolve => { const t: ReturnType<typeof setTimeout> = setTimeout(() => resolve(undefined), left); t.unref?.(); })]);
-      const { cancelOrphanedLaneRows } = await import('./sync-window.ts');
-      const settleMs = opts.deadlineAtMs === undefined ? 10_000 : Math.max(0, Math.min(10_000, opts.deadlineAtMs - Date.now()));
-      await cancelOrphanedLaneRows(engine, laneRun, result?.drain?.outcome === 'blocked' ? settleMs : 0).catch(() => undefined);
       const lanes = result?.drain?.bulk?.lanes;
       if (lanes && stats) Object.assign(lanes, { busy: stats.busy, apply_ms_per_page: stats.applyMsPerPage, turn_wait_share: stats.turnWaitShare });
     }
