@@ -30,7 +30,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const INTERVAL_MS = 300;
-const cfg = { engine: 'postgres' as const, database_url: 'postgresql://user:secret@db.example.com:5432/rebind-brain' };
+const cfg = { engine: 'postgres' as const, database_url: 'postgresql://user@db.example.invalid:5432/rebind-brain' };
 const BINDING_MODULE = new URL('../src/mcp/resolve-ipc-binding.ts', import.meta.url).pathname;
 
 let engine: PGLiteEngine;
