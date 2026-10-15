@@ -10,10 +10,25 @@
  * The thin client asks for the whole page. A host that cannot send it in one
  * response refuses with page_too_large_for_inline; the client then pages the
  * round-trip markdown (view: 'markdown') to its end, checks the total size and
- * sha256 the host reported, and prints it, or fails without printing.
+ * sha256 the host reported, and prints it window by window, or fails without
+ * printing.
+ *
+ * A segmented page (Wave B) is never returned whole by get_page. Locally the
+ * refusal is page_body_segmented and `gbrain get` streams the page instead:
+ * the frontmatter head, the truth segments, TIMELINE_SEPARATOR and the
+ * timeline segments, one segment at a time. `--json` puts the page in one
+ * string, so above PAGE_MAX_BYTES it refuses, locally and over the thin
+ * client, with a fix that drops `--json`.
  */
 import { createHash } from 'node:crypto';
+import type { BrainEngine } from '../core/engine.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
+import { opError } from '../core/ops/contract.ts';
+import { readFix } from '../core/ops/op-fix.ts';
+import { PAGE_MAX_BYTES } from '../core/page-size-policy.ts';
+import { isSegmentedPage } from '../core/page-body/page-shape.ts';
+import { openSegmentedBody } from '../core/page-body/read-range.ts';
+import { markdownHead, segmentedMarkdownDocument } from '../core/page-window/segmented.ts';
 
 /** Window size the thin client asks for while paging a whole page. */
 export const REMOTE_PAGE_WINDOW_BYTES = 512 * 1024;
@@ -73,15 +88,18 @@ export function wantsWholePage(params: Record<string, unknown>): boolean {
 /**
  * Page a whole page's round-trip markdown through windows. Restarts from the
  * top when the page changes mid-read; throws rather than return a short or
- * unverified body.
+ * unverified body. The windows are kept as they arrived (`parts`); `markdown`
+ * joins them on demand.
  */
 export async function readWholePageMarkdown(
   call: (params: Record<string, unknown>) => Promise<GetPageResult>,
   params: Record<string, unknown>,
-): Promise<{ markdown: string; revision: string; windows: number }> {
+): Promise<{ parts: Buffer[]; markdown: string; revision: string; windows: number }> {
   const base = { slug: params.slug, ...(params.source_id !== undefined ? { source_id: params.source_id } : {}), body: 'window', view: 'markdown' };
   for (let attempt = 0; attempt <= MAX_RESTARTS; attempt++) {
     const parts: Buffer[] = [];
+    const hash = createHash('sha256');
+    let bytes = 0;
     let r = await call({ ...base, max_bytes: REMOTE_PAGE_WINDOW_BYTES });
     const { revision, size } = r;
     let windows = 1;
@@ -90,7 +108,10 @@ export async function readWholePageMarkdown(
       if (!r.window || typeof r.window.byte_start !== 'number' || !size || typeof size.sha256 !== 'string') {
         throw new Error(`get_page did not return a markdown window for ${String(params.slug)}; the page was not printed.`);
       }
-      parts.push(Buffer.from(r.window.text, 'utf8'));
+      const part = Buffer.from(r.window.text, 'utf8');
+      parts.push(part);
+      hash.update(part);
+      bytes += part.length;
       if (!r.next_cursor) break;
       try {
         r = await call({ ...base, cursor: r.next_cursor });
@@ -103,11 +124,57 @@ export async function readWholePageMarkdown(
       windows++;
     }
     if (changed) continue;
-    const whole = Buffer.concat(parts);
-    if (whole.length !== size.total_bytes || createHash('sha256').update(whole).digest('hex') !== size.sha256) {
+    if (bytes !== size.total_bytes || hash.digest('hex') !== size.sha256) {
       throw new Error(`The paged copy of ${String(params.slug)} does not match the size and sha256 the host reported; the page was not printed.`);
     }
-    return { markdown: whole.toString('utf8'), revision, windows };
+    return { parts, get markdown() { return Buffer.concat(parts).toString('utf8'); }, revision, windows };
   }
   throw new Error(`${String(params.slug)} kept changing while it was being read (${MAX_RESTARTS + 1} attempts); the page was not printed. Try again.`);
+}
+
+/** `--json` holds the whole page in one string: refused above PAGE_MAX_BYTES, with a fix that streams it instead. */
+function jsonTooLargeError(slug: string, sourceId: string | undefined, bytes: number) {
+  return opError('page_too_large_for_inline', `Page ${slug} is ${bytes} bytes, over the ${PAGE_MAX_BYTES}-byte limit of one --json document.`,
+    'Run gbrain get without --json: it prints the page whole, window by window or segment by segment.',
+    { fix: readFix('Prints the page whole without holding it as one string.', { argv: ['gbrain', 'get', ...(sourceId ? ['--source', sourceId] : []), '--', slug] }) });
+}
+
+/** The thin client's whole-page read after a page_too_large_for_inline refusal: page, verify, then print each window (or one --json document). */
+export async function printPagedPage(call: (params: Record<string, unknown>) => Promise<GetPageResult>, params: Record<string, unknown>,
+  write: (text: string) => Promise<void>): Promise<void> {
+  const json = params.json === true;
+  const paged = await readWholePageMarkdown(async p => {
+    const r = await call(p);
+    if (json && r.size?.total_bytes > PAGE_MAX_BYTES) throw jsonTooLargeError(String(params.slug), params.source_id as string | undefined, r.size.total_bytes);
+    return r;
+  }, params);
+  if (json) await write(JSON.stringify({ slug: params.slug, revision: paged.revision, content: paged.markdown, windows: paged.windows }) + '\n');
+  else for (const part of paged.parts) await write(part.toString('utf8'));
+}
+
+/** What the local get_page call returns when `streamSegmentedGet` printed the page itself. */
+export const SEGMENTED_STREAMED = Symbol('segmented page streamed');
+
+/**
+ * Local `gbrain get` of a segmented page, after get_page refused it whole (page_body_segmented, whose fix names the
+ * resolved slug and source): stream the trusted markdown view to `write`, one segment at a time, as the inline
+ * page would print. False when `error` is not that refusal of a whole-page read.
+ */
+export async function streamSegmentedGet(engine: BrainEngine, params: Record<string, unknown>, error: unknown, write: (text: string) => Promise<void>): Promise<boolean> {
+  const ref = (error as { fix?: { mcp?: { arguments?: Record<string, unknown> } } } | null)?.fix?.mcp?.arguments;
+  if (remoteErrorCode(error) !== 'page_body_segmented' || !wantsWholePage(params) || typeof ref?.slug !== 'string' || typeof ref.source_id !== 'string') return false;
+  const snapshot = await engine.readPageSnapshot(ref.slug, { sourceId: ref.source_id, includeDeleted: params.include_deleted === true });
+  if (!snapshot || !isSegmentedPage(snapshot.page)) return false;
+  const { page, tags } = snapshot;
+  const json = params.json === true;
+  if (json && Number(page.body_bytes) > PAGE_MAX_BYTES) throw jsonTooLargeError(page.slug, page.source_id, Number(page.body_bytes));
+  const body = await openSegmentedBody(engine, { pageId: page.id, ledger: { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) } });
+  const doc = await segmentedMarkdownDocument(engine, body, markdownHead(page, tags), 'trusted');
+  const parts: string[] = [];
+  for await (const bytes of doc.stream()) {
+    if (json) parts.push(bytes.toString('utf8'));
+    else await write(bytes.toString('utf8'));
+  }
+  if (json) await write(JSON.stringify({ slug: page.slug, source_id: page.source_id, revision: snapshot.revision, content: parts.join('') }) + '\n');
+  return true;
 }

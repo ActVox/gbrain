@@ -56,6 +56,7 @@ export interface BodyRow {
   byteStart: number;
   byteLen: number;
   lineStart: number;
+  lineCount: number;
   staticProjBytes: number;
   staticProjLines: number;
   outlineCount: number;
@@ -70,6 +71,7 @@ export interface SegmentedBody {
   slug: string;
   generation: number;
   bodyBytes: number;
+  bodyLines: number;
   truthBytes: number;
   flags: JsonObject;
   rows: BodyRow[];
@@ -125,28 +127,31 @@ export interface BodyRangePiece {
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 const HEAVY_BATCH = 64;
 const toJson = (v: unknown) => typeof v === 'string' ? JSON.parse(v) as unknown : v;
-const bytesOf = (v: unknown): Uint8Array => { const b = v as Uint8Array; return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); };
 const newlines = (s: string) => { let n = 0; for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) n++; return n; };
 
 export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: number; generation?: number; ledger?: BodyLedger }): Promise<SegmentedBody> {
-  const [page] = await engine.executeRaw<Record<string, unknown>>(`SELECT id, source_id, slug, body_storage, body_generation, body_bytes, truth_bytes,
+  const [page] = await engine.executeRaw<Record<string, unknown>>(`SELECT id, source_id, slug, body_storage, body_generation, body_bytes, body_lines, truth_bytes,
       body_flags, segmenter_version FROM pages WHERE id=$1`, [opts.pageId]);
   if (!page || page.body_storage !== 'segmented') throw new Error(`Page ${opts.pageId} is not a segmented page.`);
   const generation = opts.generation ?? Number(page.body_generation);
-  const rows = await engine.executeRaw<Record<string, unknown>>(`SELECT m.seq, m.occurrence_id, m.region, m.sha256, m.byte_start, m.byte_len,
-      m.line_start, m.static_proj_bytes, m.static_proj_lines, jsonb_array_length(m.outline) AS outline_count,
-      jsonb_array_length(m.facts_slots) > 0 AS has_facts, m.date_min IS NOT NULL AS has_date
+  // One JSON row instead of one result row per segment: PGLite spends about 10 us per result row, and these sums are
+  // all a body: 'none' read of a large page costs beyond a constant.
+  const [listed] = await engine.executeRaw<{ rows: unknown }>(`SELECT coalesce(json_agg(json_build_object('seq', m.seq, 'occurrence_id', m.occurrence_id,
+      'region', m.region, 'sha256', encode(m.sha256, 'hex'), 'byte_start', m.byte_start, 'byte_len', m.byte_len, 'line_start', m.line_start,
+      'line_count', m.line_count, 'static_proj_bytes', m.static_proj_bytes, 'static_proj_lines', m.static_proj_lines, 'outline_count', jsonb_array_length(m.outline),
+      'has_facts', jsonb_array_length(m.facts_slots) > 0, 'has_date', m.date_min IS NOT NULL) ORDER BY m.seq), '[]') AS rows
     FROM page_body_manifest m
-    WHERE m.page_id=$1 AND m.staging_id IS NULL AND m.gen_from<=$2 AND (m.gen_to IS NULL OR m.gen_to>$2) ORDER BY m.seq`, [opts.pageId, generation]);
+    WHERE m.page_id=$1 AND m.staging_id IS NULL AND m.gen_from<=$2 AND (m.gen_to IS NULL OR m.gen_to>$2)`, [opts.pageId, generation]);
+  const rows = toJson(listed?.rows ?? '[]') as Array<Record<string, unknown>>;
   const slug = String(page.slug);
   const sourceId = String(page.source_id);
   const ledger = opts.ledger ?? await readBodyLedger(engine, sourceId, slug);
   return {
-    pageId: opts.pageId, sourceId, slug, generation, bodyBytes: Number(page.body_bytes ?? 0), truthBytes: Number(page.truth_bytes ?? 0),
+    pageId: opts.pageId, sourceId, slug, generation, bodyBytes: Number(page.body_bytes ?? 0), bodyLines: Number(page.body_lines ?? 0), truthBytes: Number(page.truth_bytes ?? 0),
     flags: (toJson(page.body_flags) ?? {}) as JsonObject, ledger, stale: Number(page.segmenter_version) !== SEGMENTER_VERSION,
     rows: rows.map(r => ({
-      seq: Number(r.seq), occurrenceId: Number(r.occurrence_id), region: r.region as BodyRegion, sha256: bytesOf(r.sha256),
-      byteStart: Number(r.byte_start), byteLen: Number(r.byte_len), lineStart: Number(r.line_start), staticProjBytes: Number(r.static_proj_bytes),
+      seq: Number(r.seq), occurrenceId: Number(r.occurrence_id), region: r.region as BodyRegion, sha256: new Uint8Array(Buffer.from(String(r.sha256), 'hex')),
+      byteStart: Number(r.byte_start), byteLen: Number(r.byte_len), lineStart: Number(r.line_start), lineCount: Number(r.line_count), staticProjBytes: Number(r.static_proj_bytes),
       staticProjLines: Number(r.static_proj_lines), outlineCount: Number(r.outline_count), hasFacts: r.has_facts === true, hasDate: r.has_date === true,
     })),
   };
@@ -293,10 +298,11 @@ export async function projectedTotals(engine: BrainEngine, body: SegmentedBody):
   return { total_bytes: layout.totalBytes, total_lines: lines, timeline_byte_start: layout.timelineByte };
 }
 
-type Unit = { kind: 'row'; index: number; start: number } | { kind: 'text'; text: string; start: number; storedStart: number; region: BodyRegion | null };
+export type ProjectedUnit = { kind: 'row'; index: number; start: number } | { kind: 'text'; text: string; start: number; storedStart: number; region: BodyRegion | null };
+type Unit = ProjectedUnit;
 
 /** The read projection's parts in document order: truth rows, the low-tier block, the separator, timeline rows. */
-function units(body: SegmentedBody, layout: ProjectedLayout): Unit[] {
+export function projectedUnits(body: SegmentedBody, layout: ProjectedLayout): Unit[] {
   const out: Unit[] = [];
   body.rows.forEach((row, i) => { if (row.region === 'truth') out.push({ kind: 'row', index: i, start: layout.rowStart[i]! }); });
   if (layout.lowTier) out.push({ kind: 'text', text: layout.lowTier, start: layout.lowTierStart, storedStart: body.truthBytes, region: 'truth' });
@@ -352,7 +358,7 @@ function cutStored(piece: ProjectedPiece, base: number, start: number, end: numb
 
 async function* projectedRange(engine: BrainEngine, body: SegmentedBody, req: BodyRangeRequest): AsyncIterable<BodyRangePiece> {
   const layout = await projectedLayout(engine, body);
-  const wanted = units(body, layout).filter(u => {
+  const wanted = projectedUnits(body, layout).filter(u => {
     const region = u.kind === 'row' ? body.rows[u.index]!.region : u.region;
     return (!req.region || region === req.region) && u.start < req.end && u.start + unitBytes(u, layout) > req.start;
   });
@@ -387,7 +393,7 @@ export async function projectedLineStart(engine: BrainEngine, body: SegmentedBod
   const layout = await projectedLayout(engine, body);
   let want = line - 1;
   if (want <= 0) return 0;
-  for (const u of units(body, layout)) {
+  for (const u of projectedUnits(body, layout)) {
     const count = u.kind === 'row' ? layout.rowNewlines[u.index]! : newlines(u.text);
     if (want > count) { want -= count; continue; }
     let text = '';

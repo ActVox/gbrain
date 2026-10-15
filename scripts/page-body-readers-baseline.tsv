@@ -351,6 +351,7 @@ src/core/page-window/bounded-lead.ts	overlaidBoundedRows	field	LEAD	rows carry b
 src/core/page-window/document.ts	projectPageText	field	STREAM	
 src/core/page-window/document.ts	readPageDocument	call:pageDocument	STREAM	
 src/core/page-window/document.ts	readPageDocument	field	STREAM	
+src/core/page-window/segmented.ts	markdownHead	call:serializePageToMarkdown	NONE	serializes the frontmatter head only: compiled_truth and timeline are passed as empty strings
 src/core/persistence/atom-maintenance.ts	prepareManagedAtomMutation	field	META	
 src/core/persistence/atom-maintenance.ts	readAtomOrigin	field	META	
 src/core/persistence/atom-retry.ts	retryManagedAtomBatch	field	STREAM	
