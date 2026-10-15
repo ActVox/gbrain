@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -218,6 +218,42 @@ test('reconcile of a marked page with a recorded origin clears the unbound_sourc
           'SELECT source_path,database_only_reason FROM pages WHERE source_id=$1 AND slug=$2', [f.id, f.slug]);
         expect(page).toEqual({ source_path: 'notes/example.md', database_only_reason: null });
       });
+    }
+  });
+}, 180_000);
+
+// #6670: the canonical file differs from the slug only by case (HEARTBEAT.md is page heartbeat on import).
+test('a marked page adopts a file whose name differs from its slug only by case, and records the on-disk spelling', async () => {
+  await withEnv({ GBRAIN_HOME: home, OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
+    for (const engine of engines) {
+      const f = await collision(engine);
+      const cased = join(f.file, '..', 'Example.md');
+      renameSync(f.file, cased);
+      await withVerifiedLocalRegistration(engine, f.registration, async () => {
+        const preview = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
+        expect(preview.relative_path).toBe('notes/Example.md');
+        const resolved = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug, from: preview.preview,
+          decisions: (preview.conflict_paths as string[]).map(path => ({ path, action: 'take_database' })) });
+        const receipt = await runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview: resolved.preview, request_id: randomUUID() });
+        expect(receipt.state).toBe('committed');
+        const [page] = await engine.executeRaw<{ source_path: string | null }>('SELECT source_path FROM pages WHERE source_id=$1 AND slug=$2', [f.id, f.slug]);
+        expect(page!.source_path).toBe('notes/Example.md');
+        expect(readFileSync(cased, 'utf8')).toContain('no canonical owner');
+      });
+    }
+  });
+}, 180_000);
+
+test('two case variants and no exact spelling refuse slug_path_ambiguous and change nothing', async () => {
+  await withEnv({ GBRAIN_HOME: home, OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
+    for (const engine of engines) {
+      const f = await collision(engine);
+      renameSync(f.file, join(f.file, '..', 'Example.md'));
+      writeFileSync(join(f.file, '..', 'EXAMPLE.md'), fileSide);
+      await withVerifiedLocalRegistration(engine, f.registration, async () => {
+        await expect(runReconcilePreview(engine, { source_id: f.id, slug: f.slug })).rejects.toMatchObject({ code: 'source_changed', detail: 'slug_path_ambiguous' });
+      });
+      expect(readFileSync(join(f.file, '..', 'EXAMPLE.md'), 'utf8')).toBe(fileSide);
     }
   });
 }, 180_000);
