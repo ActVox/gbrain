@@ -32,7 +32,7 @@ import { assertPhysicalRoot } from './physical-root.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { LockStolenError, syncLockId, withRefreshingLock, type DbLockHandle } from '../db-lock.ts';
 import { ownedGoogleReceipts, prepareGoogleReceiptPatch, type GoogleReceipts } from './connector-google-receipts.ts';
-import { connectorCheckpointKey, connectorIdentity, type ConnectorIdentity, type ConnectorKind } from './connector-identity.ts';
+import { connectorCheckpointKeys, connectorIdentity, connectorIdentityMatches, type ConnectorIdentity, type ConnectorKind } from './connector-identity.ts';
 import { readManagedConnectorState, recordConnectorSyncAttempt, sameConnectorAccount, writeManagedConnectorState, type ConnectorAccount, type ConnectorPendingEntry, type ConnectorRunCounts, type ConnectorState } from './connector-state.ts';
 import { connectorAccountChanged, connectorFenceHint, docsAnchor, receiptDeliveredHint, CONNECTOR_INTENT_OUTDATED_OLD_HOST, CONNECTOR_INTENT_OUTDATED_PRE_UPGRADE } from './connector-errors.ts';
 import { inspectUnchanged, screeningRequest } from './noop-kernel.ts';
@@ -331,13 +331,16 @@ export class ManagedConnectorSync {
   readonly counts: Omit<ConnectorRunCounts, 'finished_at' | 'pending' | 'stopped_on_wait_budget'> & { created: number; updated: number; deleted: number } = {
     page_admissions: 0, skipped_unchanged: 0, checkpoint_admissions: 0, dropped_upstream: 0, created: 0, updated: 0, deleted: 0 };
   readonly checkpointKey: string;
+  /** The stable key plus its #6561 alias keys: retry approvals recorded under an alias still apply. */
+  private readonly checkpointKeys: string[];
   private readonly connector: ConnectorKind;
   constructor(private engine: BrainEngine, readonly sourceId: string, private identity: ConnectorIdentity,
     private source: ConnectorSource, private authority: SyncAuthority, private binding: WorktreeBinding | null,
     private canonicalRoot: string | null, private noEmbed: boolean, private noSchemaPack: boolean, private retryFailed = false,
     private lease?: ConnectorLease, private resetRequested = false, private targeted = false, private fullSweep = false) {
     this.connector = identity.kind;
-    this.checkpointKey = connectorCheckpointKey(sourceId, source.incarnation, identity);
+    this.checkpointKeys = connectorCheckpointKeys(sourceId, source.incarnation, identity);
+    this.checkpointKey = this.checkpointKeys[0]!;
   }
   async assertLease(engine: BrainEngine): Promise<void> {
     if (!this.lease) return;
@@ -370,9 +373,9 @@ export class ManagedConnectorSync {
     const [row] = await this.engine.executeRaw<{ completed_keys: unknown[] }>("SELECT completed_keys FROM op_checkpoints WHERE op='managed-connector' AND fingerprint=$1", [this.checkpointKey]);
     this.checkpoint = row?.completed_keys ?? [];
     const pointers = await this.engine.executeRaw<{ completed_keys: ConnectorRetry[] }>(`SELECT completed_keys FROM op_checkpoints
-      WHERE op='managed-connector-retry' AND completed_keys->0->>'checkpointKey'=$1
+      WHERE op='managed-connector-retry' AND completed_keys->0->>'checkpointKey'=ANY($1::text[])
       AND completed_keys->0->>'principalId'=$2 AND completed_keys->0->>'principalKind'=$3`,
-    [this.checkpointKey, this.authority.writer.principal.id, this.authority.writer.principal.kind]);
+    [this.checkpointKeys, this.authority.writer.principal.id, this.authority.writer.principal.kind]);
     this.retryApprovals = new Map(pointers.map(row => [row.completed_keys[0].baseRequestId, row.completed_keys[0].requestId]));
   }
   /**
@@ -948,7 +951,7 @@ export async function prepareConnectorMutation(engine: BrainEngine, row: WriteRe
     await validateSyncAuthority(tx, p.syncAuthority, row.slug);
     const [source] = await tx.executeRaw<ConnectorSource>('SELECT incarnation,archived,local_path,config FROM sources WHERE id=$1', [row.source_id]);
     if (!source || source.archived || source.incarnation !== row.source_incarnation || source.config.kind !== p.connector ||
-        connectorIdentity(p.connector, source.config, source.local_path).digest !== p.configHash || source.local_path !== p.sourceRoot) {
+        !connectorIdentityMatches(connectorIdentity(p.connector, source.config, source.local_path), p.configHash) || source.local_path !== p.sourceRoot) {
       throw connectorPublicationRefusal('source_changed', 'The connector configuration changed after admission.', row,
         `The connector configuration, path or incarnation of ${row.source_id} changed after this write was admitted.`);
     }
