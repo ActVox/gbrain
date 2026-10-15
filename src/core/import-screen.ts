@@ -11,7 +11,7 @@
 import type { BrainEngine } from './engine.ts';
 import { loadConfig, loadConfigWithEngine } from './config.ts';
 import { loadConfigSnapshot } from './config-snapshot.ts';
-import { assessContentSanity, ContentSanityBlockError, type ContentSanityResult } from './content-sanity.ts';
+import { assessContentSanity, ContentSanityBlockError, DEFAULT_BYTES_BLOCK, type ContentSanityResult } from './content-sanity.ts';
 import { carryStoredQuarantineOverride, dropClassifierMarkers, hasCurrentQuarantineOverride, QUARANTINE_OVERRIDE_KEY, withQuarantineOverride } from './quarantine-override.ts';
 import { logContentSanityAssessment } from './audit/content-sanity-audit.ts';
 import { buildEmbedSkipMarker, EMBED_SKIP_KEY } from './embed-skip.ts';
@@ -90,6 +90,18 @@ export async function loadImportSanityConfig(engine: BrainEngine): Promise<Impor
     junkDisposition: cs.junk_disposition === 'reject' ? 'reject' : 'quarantine',
     writeGate: parseWriteGateConfig({ external_mode: externalMode, agent_mode: agentMode }),
   };
+}
+
+/**
+ * The bytes_block every size check applies: the write gate's resolution (DB
+ * config plane over file and env, #6526), capped at the page ceiling, and the
+ * ceiling itself when content sanity is disabled. Doctor's oversized_pages and
+ * the oversized-page backfill read it, so they agree with the gate.
+ */
+export async function effectiveBytesBlock(engine: BrainEngine): Promise<number> {
+  const sanity = await loadImportSanityConfig(engine);
+  const block = sanity.disabled ? PAGE_MAX_BYTES : (sanity.cs.bytes_block ?? DEFAULT_BYTES_BLOCK);
+  return Math.min(block, PAGE_MAX_BYTES);
 }
 
 export interface ContentDispositionContext {

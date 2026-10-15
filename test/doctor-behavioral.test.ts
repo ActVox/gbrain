@@ -301,6 +301,34 @@ describe('buildChecks — orchestrator against PGLite', () => {
     expect(oversized!.message).toContain('oversized-embed-skip-absent-probe');
   });
 
+  test('#6526: oversized_pages honors a DB-plane content_sanity.bytes_block override', async () => {
+    // The check read bytes_block from the file and env planes only (loadConfig), so a
+    // `gbrain config set content_sanity.bytes_block N` that the write gate honors never
+    // reached it. It now uses the gate's resolution (import-screen.ts effectiveBytesBlock).
+    // The page sits between the operator's 500_000 and the 24 MiB default, with no
+    // embed_skip marker, so the DB-plane value alone decides the warn.
+    const lowered = 500_000;
+    await engine.setConfig('content_sanity.bytes_block', String(lowered));
+    try {
+      const big = 'oversized page body prose for the db-plane override probe. '.repeat(11_000); // ~650KB
+      await engine.putPage('wiki/oversized-db-plane-probe', {
+        type: 'note',
+        title: 'Oversized DB-Plane Probe',
+        compiled_truth: big,
+        timeline: '',
+      });
+
+      const checks = await buildChecks(engine, []);
+      const oversized = checks.find(c => c.name === 'oversized_pages');
+      expect(oversized).toBeDefined();
+      expect(oversized!.status).toBe('warn');
+      expect(oversized!.message).toContain('oversized-db-plane-probe');
+      expect(oversized!.message).toContain(`${lowered}`);
+    } finally {
+      await engine.unsetConfig('content_sanity.bytes_block');
+    }
+  });
+
   test('mixed-outcome render path: synthesized checks aggregate as expected', () => {
     // The orchestrator's render path (outputResults in the wrapper) reads
     // the same DoctorReport.status enum we compute here. Pin the

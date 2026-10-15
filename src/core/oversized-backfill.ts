@@ -35,8 +35,7 @@ import type { OperationContext } from './ops/contract.ts';
 import { managedPersistenceEnabled } from './persistence/ownership.ts';
 import { submitPageMutation } from './persistence/page-mutations.ts';
 import { resolveCliWriteWaitMs } from './persistence/write-wait.ts';
-import { loadImportSanityConfig } from './import-screen.ts';
-import { DEFAULT_BYTES_BLOCK } from './content-sanity.ts';
+import { effectiveBytesBlock } from './import-screen.ts';
 import { PAGE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
 import { estimatePageEmbedUsd, holdPageEmbedding } from './page-embedding-budget.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
@@ -68,12 +67,6 @@ export interface OversizedBackfillReceipt {
   embedding_enabled: boolean;
   /** Exact commands: finish the backfill; approve held embedding. */
   commands: { finish: string[]; approve: string[]; preview: string[] };
-}
-
-async function effectiveBlockBytes(engine: BrainEngine): Promise<number> {
-  const sanity = await loadImportSanityConfig(engine);
-  const block = sanity.disabled ? PAGE_MAX_BYTES : (sanity.cs.bytes_block ?? DEFAULT_BYTES_BLOCK);
-  return Math.min(block, PAGE_MAX_BYTES);
 }
 
 interface Candidate { id: number; slug: string; source_id: string; bytes: number }
@@ -124,7 +117,7 @@ export async function runOversizedBackfill(engine: BrainEngine, opts: {
 } = {}): Promise<OversizedBackfillReceipt> {
   const now = opts.now ?? Date.now;
   const started = now();
-  const block = await effectiveBlockBytes(engine);
+  const block = await effectiveBytesBlock(engine);
   const before = await countMarked(engine, block, opts.sourceId);
   const embeddingEnabled = loadConfig()?.embedding_disabled !== true;
   const scope = opts.sourceId ? ['--source', opts.sourceId] : [];
@@ -198,7 +191,7 @@ export function formatOversizedBackfillReceipt(r: OversizedBackfillReceipt): str
  */
 export async function printOversizedBackfillUpgradeNotice(engine: BrainEngine): Promise<void> {
   try {
-    const block = await effectiveBlockBytes(engine);
+    const block = await effectiveBytesBlock(engine);
     if ((await countMarked(engine, block, undefined)).under === 0) return;
     const receipt = await runOversizedBackfill(engine, { deadlineMs: 120_000 });
     const lines = ['', ...formatOversizedBackfillReceipt(receipt)];
