@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.235.0] - 2026-10-14
+
+**Writes stop failing at the cumulative quota wall (#6696).** A brain running autopilot hit `queue_capacity` on every write once its receipt bytes reached the 1.5 GiB principal cap, because every receipt held a 16 KiB reservation it never gave back and nothing warned before the wall. Receipts are now charged for what they keep, the defaults cover a year at 5,000 writes a day, background work pauses before the wall so your own writes keep working, and doctor, notices and `/metrics` say how many days are left.
+
+### Itemized changes
+
+- **Receipt true-up**: an admission reserves its request body plus 12 KiB (at least 16 KiB), so a 100 KB page reserves its 100 KB; once the last effect settles, `trueUpRequests` gives back what the receipt does not keep (in its own transaction after every settle path: the effect runner, embedding settle, the `embed --stale` bulk settle, effect retry and restore). Receipts compacted earlier give their excess back in one bounded pass.
+- **Defaults and forecast**: principal caps 2,000,000 request ids and 16 GiB receipt bytes (brain 8,000,000 and 64 GiB), from the growth model in `docs/guides/concurrent-writes.md#growth-model`. `persistence_capacity` forecasts days to exhaustion from the full 7-day aggregate on the principal index; warn at 80% or 30 days, fail at 95% or 7 days (`persistence.capacity.warn_days`, `fail_days`).
+- **Clear refusals**: a cumulative cap refuses `write_quota_exhausted` (reason `lifetime_ids` or `terminal_bytes`) with the host's `gbrain config set` raise; `queue_capacity` is only the outstanding-request cap. Background producers pause at `persistence.capacity.background_pause_pct` (80) with `write_capacity_backpressure`.
+- **Warnings**: `[gbrain notice write_capacity_low]` on write and sync receipts (hourly per scope, muteable), sync status and cycle output; `write_capacity_backpressure` notice when the pause starts; admin `/metrics` gauges `gbrain_write_capacity_{used,limit,days_to_exhaustion}` with a documented alert rule.
+- **Sync**: a capacity preflight refuses `write_quota_insufficient` before the first admission; a later cap refusal ends the drain `resumable` / `capacity_paused`.
+- **Compaction**: `gbrain repair receipt-compaction` (explicit-only, preview-bound) compacts on demand, floored at the configured retention unless `--force`; compaction skips open sync runs and the newest sync receipt per worktree; the consumer records each pass (`persistence.maintenance.last_compaction`); doctor adds `persistence_compaction` and `persistence_counter_drift`.
+- **Known-failing writes**: maintenance refuses a page whose canonical file is gone before admission (`canonical_file_missing`) and holds back a write refused three times in a day (`persistence.maintenance.refusal_breaker_threshold`); doctor `maintenance_write_drift` lists them.
+
 ## [0.60.233.0] - 2026-10-14
 
 **An autopilot `sync` job on a managed brain now drains its source until it is caught up or its deadline arrives, instead of landing about one page per job (#6706).** On a managed brain each `sync` Minions job ran a single pass: it admitted one page write, waited 5 s for it and returned `partial`. Where a write takes 10-20 s to commit, each freshness job landed about one page and still reported `completed`, so a 10-entry delta took 3 hours while `gbrain sync` drained the same backlog in under 2 minutes. Now the job drains on one lane until the source is synced or its deadline (less a reserve for cleanup) arrives, queues one follow-up job when work is left, and reports its result in the same shape as the CLI. To go back: `gbrain config set sync.job_drain false`. Inline `gbrain jobs work` and supervisor workers need a restart to pick it up.
