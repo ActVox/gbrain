@@ -154,7 +154,8 @@ async function phaseBFenceFacts(
       return {
         name: 'fence_facts', status: 'skipped',
         detail: `dry-run: would fence ${fenceableRowCount(plan)} rows; ${outcome.skipped_no_entity} unfenceable (NULL entity_slug); ` +
-          `skipped_no_page=${outcome.skipped_no_page} skipped_no_local_path=${outcome.skipped_no_local_path}`,
+          `skipped_no_page=${outcome.skipped_no_page} skipped_no_local_path=${outcome.skipped_no_local_path}` +
+          (outcome.unbound_refused.length > 0 ? ` skipped_unbound_source=${outcome.unbound_refused.reduce((n, page) => n + page.rows, 0)}` : ''),
       };
     }
 
@@ -191,6 +192,7 @@ function fenceFactsResult(outcome: UnfencedFactsOutcome): OrchestratorPhaseResul
     `pages=${outcome.pages_touched} skipped_no_entity=${outcome.skipped_no_entity} ` +
     `skipped_no_local_path=${outcome.skipped_no_local_path} skipped_no_page=${outcome.skipped_no_page}` +
     (outcome.skipped_archived > 0 ? ` skipped_archived=${outcome.skipped_archived}` : '') +
+    (outcome.unbound_refused.length > 0 ? ` skipped_unbound_source=${outcome.unbound_refused.reduce((n, page) => n + page.rows, 0)}` : '') +
     (outcome.failed_pages.length > 0 ? ` failed=${outcome.failed_pages.length}` : '');
   if (outcome.failed_pages.length > 0) {
     // The same `FACTS_FENCE_FAILED: <slug> (<reason>)` token the extract_facts
