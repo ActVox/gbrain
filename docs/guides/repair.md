@@ -9,7 +9,7 @@ fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
 The explicit-only kinds, among them `google-file-modes`, `stale-atoms`, `extractor-facts`,
-`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans` and `stuck-recovery`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `stuck-recovery` and `aliases`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash>` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -1013,7 +1013,8 @@ retained refused writes that may be replayable, per source, and names this
 preview; the preview decides which ones it replays. Doctor leaves out (and
 lists under `details.not_replayable`) the two classes it can decide from the
 receipt alone: an unpinned `remember` (`unpinned_target`) and a `put_page`
-whose page changed after the revision the caller read (`superseded`). The
+whose page changed after the revision the caller read (`revision_superseded`, which
+the preview classes `superseded`). The
 preview changes no page content, but it records an approval checkpoint for its
 replay set, which `--apply --expect <hash>` reads.
 
