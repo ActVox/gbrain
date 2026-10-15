@@ -93,6 +93,24 @@ export function defineSegmentGcCases(opts: { getEngine: () => BrainEngine; concu
       expect(await textExists(engine, sourceId, orphan)).toBe(true);
       expect((await engine.readManifest(pageId, { stagingId: staging.id })).length).toBe(1);
     }, 30_000);
+
+    test('chunk staging on another connection waits for the page guard instead of deadlocking with it', async () => {
+      const engine = opts.getEngine();
+      const sourceId = await freshSource(engine);
+      const slug = `notes/gc-lock-order-${sourceId}`;
+      const page = await publishSegmentedPage(engine, slug, [segmentText('# Lock order\nguarded projection\n')], { sourceId });
+      const occurrence = page.occurrences[0]!;
+      let writer: Promise<unknown> | null = null;
+      await engine.transaction(async guard => {
+        await guard.lockPageKeys([{ sourceId, slug }]);
+        writer = engine.stageSegmentChunks(page.pageId, 2, [chunk(occurrence, 0, 'staged by a preparation')]);
+        await sleep(300);
+        await guard.stageSegmentChunks(page.pageId, 1, [chunk(occurrence, 0, 'staged by the projection')]);
+      });
+      await writer;
+      const rows = await engine.executeRaw<{ chunk_text: string }>('SELECT chunk_text FROM content_chunks WHERE page_id = $1 ORDER BY chunk_index', [page.pageId]);
+      expect(rows.map(row => row.chunk_text)).toEqual(['staged by the projection', 'staged by a preparation']);
+    }, 30_000);
   }
 
   test('deleting a referenced text is refused by the manifest foreign key', async () => {

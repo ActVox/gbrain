@@ -129,7 +129,7 @@ describe('managed import over the single-string ceiling', () => {
       const staged = async () => Number((await engine.executeRaw<{ n: string }>(
         'SELECT count(*)::text AS n FROM page_body_manifest WHERE page_id=$1 AND staging_id IS NOT NULL', [page.id]))[0]!.n);
       expect(await staged()).toBeGreaterThan(0);
-      await engine.executeRaw(`UPDATE page_body_stagings SET state='aborted' WHERE page_id=$1 AND state='open'`, [page.id]);
+      await engine.executeRaw(`UPDATE page_body_stagings SET state='aborted' WHERE page_id=$1 AND state IN ('open','prepared')`, [page.id]);
       await sweepSegmentStorage(engine);
       expect(await staged()).toBe(0);
     }

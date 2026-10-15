@@ -73,7 +73,7 @@ export function chunkVisibleFilter(page: string, chunk: string): string {
 export function chunkManifestJoin(page: string, chunk: string, manifest: string): string {
   return `LEFT JOIN page_body_manifest ${manifest} ON ${chunk}.occurrence_id IS NOT NULL
        AND ${manifest}.page_id = ${chunk}.page_id AND ${manifest}.occurrence_id = ${chunk}.occurrence_id
-       AND ${manifest}.gen_from <= ${page}.body_generation
+       AND ${manifest}.staging_id IS NULL AND ${manifest}.gen_from <= ${page}.body_generation
        AND (${manifest}.gen_to IS NULL OR ${manifest}.gen_to > ${page}.body_generation)`;
 }
 

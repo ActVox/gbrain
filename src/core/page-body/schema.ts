@@ -51,9 +51,10 @@ $func$ LANGUAGE plpgsql;`;
  * manifest, body stagings and their raw upload parts, and the occurrence id
  * sequence. The manifest's text FK is NO ACTION: a referenced text can't be
  * deleted, and a source delete cascades through pages and texts in one
- * statement before the check runs. Published manifest rows are unique per
- * (page, occurrence, gen_from) and staged rows per (staging, occurrence), so
- * the rows of a staging that never flipped can't collide with the next write's.
+ * statement before the check runs. The manifest key carries the staging
+ * (`staging_key`: the staging id, or the nil uuid once published), so published
+ * rows are unique per (page, occurrence, gen_from) and the rows of a staging
+ * that never flipped can't collide with the next write's.
  */
 export const PAGE_BODY_SCHEMA_SQL = `CREATE SEQUENCE IF NOT EXISTS page_body_occurrence_id_seq;
 CREATE TABLE IF NOT EXISTS page_segment_texts (
@@ -89,13 +90,14 @@ CREATE TABLE IF NOT EXISTS page_body_manifest (
   date_max          DATE,
   hash_state        BYTEA   NOT NULL,
   staging_id        UUID,
+  staging_key       UUID GENERATED ALWAYS AS (COALESCE(staging_id, '00000000-0000-0000-0000-000000000000'::uuid)) STORED,
+  PRIMARY KEY (page_id, occurrence_id, gen_from, staging_key),
   FOREIGN KEY (source_id, sha256) REFERENCES page_segment_texts(source_id, sha256)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS page_body_manifest_published ON page_body_manifest (page_id, occurrence_id, gen_from) WHERE staging_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS page_body_manifest_live_seq ON page_body_manifest (page_id, seq) WHERE gen_to IS NULL AND staging_id IS NULL;
 CREATE INDEX IF NOT EXISTS page_body_manifest_live_bytes ON page_body_manifest (page_id, byte_start) WHERE gen_to IS NULL;
 CREATE INDEX IF NOT EXISTS page_body_manifest_text ON page_body_manifest (source_id, sha256);
-CREATE UNIQUE INDEX IF NOT EXISTS page_body_manifest_staging ON page_body_manifest (staging_id, occurrence_id) WHERE staging_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS page_body_manifest_staging ON page_body_manifest (staging_id) WHERE staging_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS page_body_stagings (
   id                 UUID PRIMARY KEY,
   kind               TEXT NOT NULL CHECK (kind IN ('upload','import','sync','put','append','edit','resegment')),

@@ -5,7 +5,8 @@
  *    `body_staging_expired` and leaves the published body as it was; a replace
  *    of a page whose post-create projection never ran chunks every live
  *    occurrence before it seals; a preparation that died before its flip does
- *    not block the next write of the page; a projection that prepared at a
+ *    not block the next write of the page or duplicate its chunk reads; a
+ *    finished preparation restarts its staging's idle deadline; a projection that prepared at a
  *    generation a flip has since moved past stages no chunk rows.
  * 2. Fails when: the flip publishes without its staged manifest rows, the flip
  *    deletes chunk rows its own preparation staged, staged manifest rows of an
@@ -102,6 +103,20 @@ describe('segmented writes: crash, expiry, concurrency', () => {
     const after = await reconstructedPage(engine, slug);
     expect(after.page.body_generation).toBe(2);
     expect(after.body.compiled_truth).toBe(parseMarkdown(next, `${slug}.md`).compiled_truth);
+    const chunks = await engine.getChunks(slug, { sourceId: 'default' });
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(new Set(chunks.map(chunk => chunk.id)).size).toBe(chunks.length);
+  }, 120_000);
+
+  test('a finished preparation marks its staging prepared and restarts its idle deadline', async () => {
+    const slug = 'notes/prepared-staging';
+    await importFromContent(engine, slug, page(sections('a')), { sourceId: 'default', noEmbed: true });
+    const { staged } = await stageReplace(slug, page('## Intro\n\nA new first paragraph.\n\n' + sections('a')));
+    await engine.executeRaw(`UPDATE page_body_stagings SET idle_expires_at = now() - interval '1 minute' WHERE id=$1`, [staged.prepared.stagingId]);
+    await engine.setBodyStagingState(staged.prepared.stagingId, 'prepared');
+    const [row] = await engine.executeRaw<{ state: string; fresh: boolean }>(`SELECT state, idle_expires_at > now() + interval '50 minutes' AS fresh
+      FROM page_body_stagings WHERE id=$1`, [staged.prepared.stagingId]);
+    expect(row).toEqual({ state: 'prepared', fresh: true });
   }, 120_000);
 
   test('a projection that prepared at a generation a flip moved past stages no rows', async () => {

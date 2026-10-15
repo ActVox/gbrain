@@ -188,7 +188,9 @@ export async function openSegmentedStaging(engine: BrainEngine, input: Pick<Segm
 export async function prepareSegmentedBody(engine: BrainEngine, input: SegmentedBodyInput): Promise<PreparedSegmentedBody> {
   const stagingId = await openSegmentedStaging(engine, input);
   try {
-    return await stageBody(engine, input, stagingId);
+    const prepared = await stageBody(engine, input, stagingId);
+    await engine.setBodyStagingState(stagingId, 'prepared');
+    return prepared;
   } catch (error) {
     await engine.setBodyStagingState(stagingId, 'aborted').catch(() => undefined);
     throw error;
@@ -379,7 +381,7 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     let moved = false;
     if (chunks.length && input.guarded) rows -= chunks.length - await engine.transaction(async tx => {
       await tx.lockPageKeys([{ sourceId: input.sourceId, slug: input.slug }]);
-      const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1 FOR UPDATE', [input.pageId]);
+      const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1', [input.pageId]);
       if (Number(page?.body_generation) !== input.generation) { moved = true; return 0; }
       const open = new Set((await occurrencesWithoutChunks(tx, input.pageId, input.generation, batch)).map(row => row.occurrenceId));
       const still = chunks.filter(chunk => open.has(chunk.occurrence_id));

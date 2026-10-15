@@ -36,7 +36,7 @@ export const GUARDED_TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> 
     'upstream_commit'],
   page_segment_texts: ['body', 'byte_len', 'created_at', 'line_count', 'sha256', 'source_id'],
   page_body_manifest: ['byte_len', 'byte_start', 'cut_kind', 'date_max', 'date_min', 'entry_state', 'facts_slots', 'gen_from', 'gen_to', 'hash_state',
-    'line_count', 'line_start', 'occurrence_id', 'outline', 'page_id', 'protected_regions', 'region', 'seq', 'sha256', 'source_id', 'staging_id',
+    'line_count', 'line_start', 'occurrence_id', 'outline', 'page_id', 'protected_regions', 'region', 'seq', 'sha256', 'source_id', 'staging_id', 'staging_key',
     'static_proj_bytes', 'static_proj_lines'],
 };
 

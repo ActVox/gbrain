@@ -20,7 +20,7 @@
 import type { ManifestRow, ManifestRowInput, BodyFlipInput, BodyFlipResult, BodyRegion, BodyStagingInput, BodyStagingState,
   SegmentChunkInput, SegmentedPageMeta, SegmentSweepOptions, SegmentSweepResult, SegmentTextInput } from '../page-body/types.ts';
 import type { ResolvedColumn } from '../types.ts';
-import { BODY_STAGING_HARD_MS, SEGMENT_TEXT_GC_GRACE_MS, STAGE_BATCH_BYTES } from '../page-body/limits.ts';
+import { BODY_STAGING_HARD_MS, BODY_STAGING_IDLE_MS, SEGMENT_TEXT_GC_GRACE_MS, STAGE_BATCH_BYTES } from '../page-body/limits.ts';
 import { jsonRowBatches, sanitizeText } from '../batch-rows.ts';
 import { normalizeEngineColumn, quoteIdentifier, resolveWriteColumnFromConfigRows, vectorCastSuffix } from '../search/embedding-column.ts';
 import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
@@ -172,6 +172,8 @@ export async function stageSegmentChunks(exec: SqlExecutor, pageId: number, gene
   const cast = vectorCastSuffix(column);
   return exec.transaction(async tx => {
     if (tx.capabilities.transactionAdvisoryLocks) {
+      // The page row first, as the projection's page guard takes it: the chunk insert's FK check would take it after the advisory lock.
+      await tx.run(sqlFragment`SELECT 1 FROM pages WHERE id = ${pageId} FOR KEY SHARE`);
       // Lock-census: COMPLIANT — key is the page id, unique brain-wide.
       await tx.run(sqlFragment`SELECT pg_advisory_xact_lock(hashtextextended('gbrain:page-body-chunks:' || ${pageId}::text, 0))`);
     }
@@ -318,8 +320,11 @@ export async function openBodyStaging(exec: SqlExecutor, input: BodyStagingInput
       ${input.idleExpiresAt}, ${input.hardExpiresAt})`);
 }
 
+/** Moving a staging to a live state restarts its idle deadline (never past its hard one). */
 export async function setBodyStagingState(exec: SqlExecutor, id: string, state: BodyStagingState, opts: { commitRequestId?: string | null } = {}): Promise<void> {
   await exec.run(sqlFragment`UPDATE page_body_stagings SET state = ${state}, updated_at = now(),
+      idle_expires_at = CASE WHEN ${state} = ANY(${LIVE_STAGING_STATES}::text[])
+        THEN LEAST(hard_expires_at, now() + (${BODY_STAGING_IDLE_MS}::bigint * interval '1 millisecond')) ELSE idle_expires_at END,
       commit_request_id = COALESCE(${opts.commitRequestId ?? null}::uuid, commit_request_id)
     WHERE id = ${id}::uuid`);
 }
