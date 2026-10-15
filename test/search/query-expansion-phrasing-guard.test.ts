@@ -17,6 +17,9 @@ const ROOT_DOCS = ['INSTALL_FOR_AGENTS.md', 'CLAUDE.md', 'AGENTS.md', 'README.md
 const CLAIM = /\b(?:expands?|expansion|expanding)\b[^.;\n]{0,40}\bin every mode\b|\bin every mode\b[^.;\n]{0,20}\bexpan(?:ds?|sion)\b|\balways (?:expands?|requests expansion)\b/i;
 
 /** A claim that `tokenmax` turns expansion on by default. */
+/** Troubleshooting advice that sends agents to bare `query` for expansion. */
+const BARE_QUERY_EXPANSION_ADVICE = /`query` \(multi-query expansion\)|`gbrain query "[^"]*"` wastes an LLM expansion call|search runs without query expansion, so/i;
+
 const TOKENMAX_CLAIM = /\bexpan\w*\b[^.\n]{0,80}\bon (?:in|for|only in) `?tokenmax`?|`?tokenmax`?[^.\n]{0,30}\bexpansion ?[=:]? ?on\b|`?tokenmax`?[^.\n]{0,80}\bexpands by default\b/i;
 
 function files(dir: string): string[] {
@@ -47,6 +50,12 @@ describe('query expansion phrasing guard', () => {
       'tokenmax (expansion=on, limit=50) has a different hash',
       '3) tokenmax — no budget, 50 chunks, reranked, `gbrain query` expands by default.',
     ]) expect(old).toMatch(TOKENMAX_CLAIM);
+    for (const old of [
+      '| `target_not_retrieved` | No arm returned it for this query. | `query` (multi-query expansion) or rephrase. |',
+      '`gbrain query "Alice Example"` wastes an LLM expansion call.',
+      'Search runs without query expansion, so synonym- and outcome-phrased matches can be missed',
+    ]) expect(old).toMatch(BARE_QUERY_EXPANSION_ADVICE);
+    expect('`query --expand` (`expand: true`) or rephrase').not.toMatch(BARE_QUERY_EXPANSION_ADVICE);
     for (const fine of ['`gbrain query` does not expand by default in any mode', 'tokenmax (limit=50, no token budget)', 'reranker on for balanced and tokenmax']) {
       expect(fine).not.toMatch(TOKENMAX_CLAIM);
     }
@@ -58,7 +67,7 @@ describe('query expansion phrasing guard', () => {
     for (const path of paths) {
       if (relative(ROOT, path) === 'src/core/behavior-change-notice.ts') continue;
       readFileSync(path, 'utf8').split('\n').forEach((line, i) => {
-        if (TOKENMAX_CLAIM.test(line)) offenders.push(`${relative(ROOT, path)}:${i + 1}: ${line.trim().slice(0, 160)}`);
+        if (TOKENMAX_CLAIM.test(line) || BARE_QUERY_EXPANSION_ADVICE.test(line)) offenders.push(`${relative(ROOT, path)}:${i + 1}: ${line.trim().slice(0, 160)}`);
       });
     }
     expect(offenders).toEqual([]);

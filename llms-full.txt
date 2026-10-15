@@ -2858,8 +2858,8 @@ Estimated downstream input cost of the retrieved payload @ 10K queries/mo:
 >
 >   2) balanced — 12K budget, 25 chunks, reranked.
 >
->   3) tokenmax (recommended with a chat key) — no budget, 50 chunks, reranked,
->      per-chunk synopsis context. The widest retrieval.
+>   3) tokenmax (recommended with a chat key) — no budget, 50 chunks, reranked.
+>      The widest retrieval.
 >
 > `gbrain query` does not expand by default in any mode; `--expand`
 > (`expand: true` over MCP) forces it and `--no-expand` (`expand: false`) skips
