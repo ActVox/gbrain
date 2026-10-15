@@ -23,7 +23,7 @@ import type { CompanyBrainPlan } from '../company-brain/types.ts';
 import { assertDistinctSyncOrigins, legacySyncOrigin, sameSyncOrigin, selectOriginClaimant, sharedOriginExit, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
 import { assertManagedSyncActive } from './sync-authority.ts';
 import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
-import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances } from './sync-holds.ts';
+import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances } from './sync-holds.ts';
 import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
@@ -384,16 +384,11 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       return hold && !hold.meta.blob_oid && !hold.meta.working && blob ? [blob] : [];
     });
     const contents = readBlobContents(gitRoot, unversioned);
-    // #6712: a deterministic `concurrent_write` hold re-screens when its page's revision moves (a reconcile, an authorized delete).
-    const watched = checked.flatMap(path => { const hold = holdByPath.get(path); return hold?.code === 'concurrent_write' && hold.page_id != null && hold.meta.page_revision ? [Number(hold.page_id)] : []; });
-    const revisions = new Map(watched.length ? (await engine.executeRaw<{ id: number; revision: string }>('SELECT id, knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND id=ANY($2::int[])',
-      [sourceId, watched])).map(row => [Number(row.id), row.revision]) : []);
+    const moved = await holdBasisMoved(engine, sourceId, holdByPath, checked);
     for (const path of checked) {
       const hold = holdByPath.get(path), gitPath = toGitPath(path), blob = blobs.get(gitPath);
       const workingHold = working && (hold?.meta.working === true || !blob);
-      // #6712 dependency edge: a hold that waits on an earlier entry's hold re-screens once that hold is gone.
-      let changed = !hold || holdRescreenDue(hold, retry.has(path)) || (!!hold.meta.blocked_on && !holdByPath.has(hold.meta.blocked_on))
-        || (hold.code === 'concurrent_write' && hold.page_id != null && !!hold.meta.page_revision && revisions.get(Number(hold.page_id)) !== hold.meta.page_revision);
+      let changed = !hold || holdRescreenDue(hold, retry.has(path)) || moved.has(path);
       let present = !!blob;
       if (workingHold) {
         let bytes: Buffer | null = null;

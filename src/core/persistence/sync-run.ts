@@ -24,7 +24,7 @@ import { prepareManagedSyncMutation, type SyncCursorOptions, type SyncIntent } f
 import { startClaimPhase } from './claim-phase.ts';
 import { screeningRequest } from './noop-kernel.ts';
 import { FINISH_BUDGET_MS, stampDrainStep } from './drain-step.ts';
-import { noopWaiversEnabled, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waiverBatchEnabled, type NoopWaiver, type WaiverRunEntry } from './sync-waivers.ts';
+import { noopWaiversEnabled, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waiverBatchEnabled, type WaiverRunEntry } from './sync-waivers.ts';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { currentCompanyBrainSync, getCompanyBrainProfile, readCompanyBrainPlan } from '../company-brain/profile.ts';
@@ -34,7 +34,7 @@ import { importAnalyzeEveryPages, maybeRefreshPlannerStats } from '../planner-st
 import { recordManagedSyncFailure, clearManagedSyncFailureAfterSuccess, formatManagedSyncFailure, managedSyncRetryCommand, type ManagedSyncFailure, type ManagedSyncRootCause } from './sync-failures.ts';
 import { writeFailureDiagnostic } from './verb-errors.ts';
 import { extractManagedStaleLinks } from './links-maintenance.ts';
-import { addSettledRange, CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
+import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import { principalKey, type WriteRequest } from './model.ts';
 import { readJournalLimits } from './limits.ts';
@@ -63,6 +63,7 @@ import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
+import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -79,16 +80,16 @@ export interface ManagedSyncWriteDiagnostic {
   docs?: string;
 }
 
-interface Pending { requestId: string; slug: string; pageId: number | null; intent: SyncIntent; rebound?: true;
+export interface Pending { requestId: string; slug: string; pageId: number | null; intent: SyncIntent; rebound?: true;
   /** #5988: re-frozen in place from a failed content refusal; a second refusal of the same bytes stays blocked. */
   converted?: true;
   /** #6712: re-frozen in place after the run stopped on this entry (a transport or systemic fault, a legacy knock-on); the re-freezes in a row here. */
   stops?: number; }
 /** #5988: the frozen entry is held instead of admitted. #6340 `overtaken`: another cursor of the source imported the entry's page meanwhile (#5522), so the checkpoint accepts a source already at this target. */
-interface Held { hold: HeldEntry; overtaken?: true }
+export interface Held { hold: HeldEntry; overtaken?: true }
 /** #6600: the frozen deletion was already carried out by a committed, authorized delete of its exact page (`idempotentDeletionProof`); it settles with no admission and clears its hold. */
-interface Settled { settled: { path: string; request_id: string } }
-interface Cursor extends SyncDiscovery { runId: string; index: number; authority: SyncAuthority; pending?: Pending; done?: boolean; companyReceiptId?: string;
+export interface Settled { settled: { path: string; request_id: string } }
+export interface Cursor extends SyncDiscovery { runId: string; index: number; authority: SyncAuthority; pending?: Pending; done?: boolean; companyReceiptId?: string;
   processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions; overtaken?: true;
   counts: { added: number; modified: number; deleted: number; chunks: number; renamed?: number;
     /** #5751: unchanged working-tree files skipped only because a no-op publication could never resolve their admit reason. */
@@ -266,20 +267,6 @@ async function currentCursor(engine: BrainEngine, key: string, cached: Cursor): 
   if (!current) throw syncRunRefusal('storage_error', 'The durable sync cursor disappeared.', cached,
     `The durable sync cursor of source ${cached.sourceId} vanished (another run of the source finished or replaced it), so this run stopped.`);
   return current;
-}
-/** The cursor after a waived entry: counted under `waived`, plus the #5751 kernel breakdown kept for `legacySkips`. */
-function waivedCursor(cursor: Cursor, waived: NoopWaiver, index = cursor.index): Cursor {
-  const prior = cursor.counts.waived ?? { imports: 0, deletes: 0 };
-  const passed: Cursor = { ...cursor }; delete passed.pending; delete passed.group;
-  const next: Cursor = { ...settledPast(passed, index), counts: { ...cursor.counts,
-    waived: { imports: prior.imports + (waived.kind === 'import' ? 1 : 0), deletes: prior.deletes + (waived.kind === 'delete' ? 1 : 0) } } };
-  if (waived.kernel.includes('contextual_mode')) next.counts.skippedContextualMode = (next.counts.skippedContextualMode ?? 0) + 1;
-  if (waived.kernel.includes('canonical_file_differs')) next.counts.skippedCanonicalBytes = (next.counts.skippedCanonicalBytes ?? 0) + 1;
-  return next;
-}
-/** #6643: the cursor's settled indexes with its current entry added (it passes that entry without a commit). */
-function settleIndex(cursor: Cursor): SyncSettledIndexes {
-  return addSettledRange(cursor.settled ?? { from: cursor.index, ranges: [] }, cursor.index, cursor.index);
 }
 /** The rollback signal of an admission whose cursor no longer holds the frozen entry (ENG-A7). */
 class CursorMoved extends Error {}
@@ -467,6 +454,27 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
 }
 
 /** A resume adopts the cursor's stored processing options unless the caller set a conflicting one explicitly. */
+/**
+ * #6712: the cursor's next freeze. Past the manifest's last entry it is the first entry deferred because its file
+ * changed after admission. A settled deletion (#6600) and a hold, the entry's own or a dependency edge's (an entry that
+ * shares a slug or page id with one this run held waits on that hold), are saved in one cursor step (`saved`); anything
+ * else is the frozen entry to admit.
+ */
+async function freezeNext(engine: BrainEngine, cursor: Cursor, key: string, assertActive: () => void, run: Parameters<typeof freezeEntry>[4],
+  observedAt: string): Promise<{ saved: Cursor; held: boolean } | { frozen: Pending; deferredAt?: number }> {
+  const deferredAt: number | undefined = cursor.index >= cursor.entries.length ? cursor.deferred?.[0]?.index : undefined;
+  const index = deferredAt ?? cursor.index;
+  let frozen = await freezeEntry(engine, { ...cursor, index }, key, assertActive, run);
+  if ('settled' in frozen) return { held: false, saved: await saveCursor(engine, key, cursor, deletionSettled(cursor, index), false, assertActive, holdClear(cursor, frozen.settled.path, observedAt)) };
+  const blockedOn = 'requestId' in frozen ? dependencyKeys(frozen).map(page => cursor.heldKeys?.[page]).find(Boolean) : undefined;
+  if (blockedOn && 'requestId' in frozen && cursor.entries[index]) frozen = { hold: dependentHold(cursor.entries[index]!, frozen.slug, frozen.pageId, frozen.intent, blockedOn) };
+  if ('hold' in frozen) {
+    return { held: true, saved: await saveCursor(engine, key, cursor, { ...withHeldKeys(advanceHeld(cursor, undefined, index), frozen.hold), ...(frozen.overtaken ? { overtaken: true as const } : {}) },
+      false, assertActive, heldWrite(cursor, frozen.hold, observedAt)) };
+  }
+  return { frozen, ...(deferredAt !== undefined ? { deferredAt } : {}) };
+}
+
 function assertCursorProcessingOptions(cursor: Cursor, processingOptions: SyncProcessingOptions, explicitProcessing: SyncOpts['explicitProcessing']): void {
   const stored = cursor.processingOptions;
   if (stored ? digest(stored) !== digest(processingOptions) : !cursor.pending) {
@@ -499,60 +507,6 @@ const holdClear = (cursor: Cursor, path: string | null | undefined, observedAt: 
 /** #5988: the hold write that commits with the cursor step passing a held entry. */
 const heldWrite = (held: Cursor, hold: HeldEntry, observedAt: string) => (tx: BrainEngine) => writeGitHold(tx, { source_id: held.sourceId, incarnation: held.incarnation, ...hold,
   observed_at: observedAt, run_id: held.runId, mode: 'managed' });
-
-/** #5988: the cursor past a held entry (no request admitted for it, or none committed); #6712: `index` may name a deferred entry. */
-function advanceHeld(held: Cursor, converted?: string[], index = held.index): Cursor {
-  const next: Cursor = { ...held, counts: { ...held.counts, held: (held.counts.held ?? 0) + 1 }, ...(converted ? { convertedFromFailed: converted } : {}) };
-  delete next.pending; delete next.group;
-  return settledPast(next, index);
-}
-/**
- * #6712: the cursor with entry `index` settled without a commit: the cursor's own entry advances the cursor, a deferred
- * entry leaves the deferred list. Either way the index joins the settled ranges the checkpoint skips.
- */
-function settledPast(cursor: Cursor, index: number): Cursor {
-  if (index === cursor.index) return promoteWindow({ ...cursor, index: cursor.index + 1, settled: settleIndex(cursor) });
-  const next: Cursor = { ...cursor, deferred: (cursor.deferred ?? []).filter(entry => entry.index !== index),
-    settled: addSettledRange(cursor.settled ?? { from: cursor.index, ranges: [] }, index, index) };
-  if (!next.deferred!.length) delete next.deferred;
-  return next;
-}
-/**
- * #6712: a cursor with no pending entry whose window starts at its index takes the window's first group as its group:
- * those requests were admitted after an entry the cursor has now passed, and are read, never frozen again.
- */
-function promoteWindow(cursor: Cursor): Cursor {
-  const [first, ...rest] = cursor.window ?? [];
-  if (cursor.pending || !first?.length || first[0]!.intent.index !== cursor.index) return cursor;
-  const next: Cursor = { ...cursor, pending: first[0], group: first };
-  if (rest.length) next.window = rest; else delete next.window;
-  return next;
-}
-/** #6712: the cursor past its committed pending entry: its own entry advances it, a deferred one leaves the deferred list (its receipt is its record). */
-function committedPast(cursor: Cursor, pending: Pending): Cursor {
-  const index = indexOf(cursor, pending);
-  const next: Cursor = { ...cursor }; delete next.pending; delete next.group;
-  if (index === cursor.index) return promoteWindow({ ...next, index: cursor.index + 1 });
-  next.deferred = (cursor.deferred ?? []).filter(entry => entry.index !== index);
-  if (!next.deferred.length) delete next.deferred;
-  return next;
-}
-/** #6712: the entry a pending request was frozen for: the cursor's own, or a deferred one past the manifest end. */
-const indexOf = (cursor: Cursor, pending: Pending) => typeof pending.intent.index === 'number' ? pending.intent.index : cursor.index;
-const entryOf = (cursor: Cursor, pending: Pending) => cursor.entries[indexOf(cursor, pending)];
-/** #6712: the cursor without `pending` and the group it heads; the window (later admitted requests) stays. */
-function withoutPending(cursor: Cursor): Cursor {
-  const base: Cursor = { ...cursor }; delete base.pending; delete base.group;
-  return base;
-}
-/** #6600: the cursor past an idempotent deletion: counted as a waived delete, its index settled. */
-const deletionSettled = (cursor: Cursor, index: number) => waivedCursor(withoutPending(cursor), { kind: 'delete', kernel: [] }, index);
-/** #6712: the cursor with `hold`'s page keys recorded, so a later entry of the run that shares one is held behind it. */
-function withHeldKeys(cursor: Cursor, hold: HeldEntry): Cursor {
-  if (!hold.slug) return cursor;
-  const keys = dependencyKeys({ slug: hold.slug, pageId: hold.page_id ?? null });
-  return { ...cursor, heldKeys: { ...cursor.heldKeys, ...Object.fromEntries(keys.map(key => [key, { path: hold.path, code: hold.code }])) } };
-}
 
 /** #6278: the terminal code an owner stamps on a request whose preparation never settled within its attempts (Lane A, consumer.ts). */
 export const PREPARATION_STALLED = 'preparation_stalled';
@@ -1581,24 +1535,14 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         }
         foregroundWaitStart = 0;
         phase = 'freeze'; stampDrainStep('freeze', signal);
-        // #6712: past the manifest's last entry, entries deferred because their file changed after admission are retried before the checkpoint.
-        const deferredAt: number | undefined = cursor.index >= cursor.entries.length ? cursor.deferred?.[0]?.index : undefined;
-        let frozen = await freezeEntry(engine, deferredAt === undefined ? cursor : { ...cursor, index: deferredAt }, key, assertActive, frozenRun);
-        if ('settled' in frozen) {
-          cursor = await saveCursor(engine, key, cursor, deletionSettled(cursor, deferredAt ?? cursor.index), false, assertActive, holdClear(cursor, frozen.settled.path, observedAt));
-          opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length, waived: true }); assertActive();
+        const next = await freezeNext(engine, cursor, key, assertActive, frozenRun, observedAt);
+        if ('saved' in next) {
+          cursor = next.saved;
+          opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, ...(next.held ? {} : { total: cursor.entries.length, waived: true }) }); assertActive();
+          if (next.held && slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
           continue;
         }
-        // #6712 dependency edge: an entry sharing a slug or page id with one this run held waits on that hold.
-        const blockedOn = 'requestId' in frozen ? dependencyKeys(frozen).map(page => cursor!.heldKeys?.[page]).find(Boolean) : undefined;
-        const entryAt: SyncDiscovery['entries'][number] | undefined = cursor.entries[deferredAt ?? cursor.index];
-        if (blockedOn && entryAt && 'requestId' in frozen) frozen = { hold: dependentHold(entryAt, frozen.slug, frozen.pageId, frozen.intent, blockedOn) };
-        if ('hold' in frozen) {
-          cursor = await saveCursor(engine, key, cursor, { ...withHeldKeys(advanceHeld(cursor, undefined, deferredAt ?? cursor.index), frozen.hold), ...(frozen.overtaken ? { overtaken: true as const } : {}) }, false, assertActive, heldWrite(cursor, frozen.hold, observedAt));
-          opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index }); assertActive();
-          if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
-          continue;
-        }
+        const { frozen, deferredAt } = next;
         const waived: Cursor | null = waiveBatch && !frozen.rebound && deferredAt === undefined ? await waiveRun(engine, cursor, frozen, key, config, assertActive, frozenRun, drainStartedAt,
           slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : WAIVER_RUN_MAX, opts.onProgress) : null;
         if (waived && slice && (waived.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(waived, 'partial', 'writer_yield');

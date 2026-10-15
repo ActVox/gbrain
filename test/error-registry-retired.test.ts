@@ -19,7 +19,7 @@ import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
 const RETIRED_KEYS = ['sync.knock_on_refreeze_limit', 'sync.knock_on_run_limit'];
 
 const entries = (registry: Record<string, unknown>) => Object.entries(registry) as Array<[string, CodeEntry]>;
-const fixText = (entry: CodeEntry) => [entry.suggestion, entry.why, ...(entry.fix ? [entry.fix.argv.join(' '), entry.fix.why] : [])].filter(Boolean).join('\n');
+const fixText = (entry: CodeEntry) => [entry.suggestion, entry.why, ...(entry.fix ? [(entry.fix.argv ?? []).join(' '), entry.fix.why] : [])].filter(Boolean).join('\n');
 
 test('no registered fix, suggestion or reason names a retired config key', () => {
   const texts: Array<[string, string]> = [
@@ -59,7 +59,7 @@ test('a retired code renders superseded: its fix is read-only, needs no consent,
   for (const [, entry] of retired) {
     expect(entry.summary).toMatch(/^Retired:/);
     expect(entry.fix).toMatchObject({ consent: [], requires_exclusive: false });
-    expect(entry.fix!.argv.join(' ')).not.toMatch(/config set|--retry-failed|--reset-checkpoint/);
+    expect((entry.fix?.argv ?? []).join(' ')).not.toMatch(/config set|--retry-failed|--reset-checkpoint/);
   }
   expect(CODES.knock_on_exhausted.suggestion).toContain('gbrain sync --source <id> --no-pull');
 });

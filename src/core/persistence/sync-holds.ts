@@ -388,6 +388,24 @@ export async function readGitHoldListing(engine: Exec, sourceIds: string[], limi
 }
 
 /**
+ * #6712: the held paths whose verdict rests on something that has since moved: a dependency-edge hold (`blocked_on`)
+ * whose predecessor's hold is gone, and a deterministic `concurrent_write` hold whose page's revision moved (a
+ * reconcile, an authorized delete). Discovery re-screens them like a changed file.
+ */
+export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, holds: ReadonlyMap<string, Pick<GitHoldRecord, 'code' | 'page_id' | 'meta'>>,
+  paths: readonly string[]): Promise<Set<string>> {
+  const watched = paths.flatMap(path => { const hold = holds.get(path); return hold?.code === 'concurrent_write' && hold.page_id != null && hold.meta.page_revision ? [Number(hold.page_id)] : []; });
+  const revisions = new Map(watched.length ? (await engine.executeRaw<{ id: number; revision: string }>('SELECT id, knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND id=ANY($2::int[])',
+    [sourceId, watched])).map(row => [Number(row.id), row.revision]) : []);
+  return new Set(paths.filter(path => {
+    const hold = holds.get(path);
+    if (!hold) return false;
+    if (hold.meta.blocked_on && !holds.has(hold.meta.blocked_on)) return true;
+    return hold.code === 'concurrent_write' && hold.page_id != null && !!hold.meta.page_revision && revisions.get(Number(hold.page_id)) !== hold.meta.page_revision;
+  }));
+}
+
+/**
  * #6188 (E23): the one re-screen predicate managed discovery and legacy sync
  * share, apart from the byte comparison each makes its own way. A hold is
  * re-screened when `sources retry-held` asked, when its verdict depends on
