@@ -13,6 +13,8 @@ import { authorizeStoredRequest, authorizeWrite } from './authority.ts';
 import { completeEffect } from './effect-journal.ts';
 import { guardEffectSource } from './effect-recovery.ts';
 import { derivedExtractionSkip } from './derived-extraction-gate.ts';
+import { bodyStorageOf, stringWriteStorage } from './segmented-apply.ts';
+import { isSegmentedPage, pageBodyBytes } from '../page-body/page-shape.ts';
 import type { PersistenceEffect } from './effect-model.ts';
 import type { WriteRequest } from './model.ts';
 
@@ -94,6 +96,7 @@ export async function prepareFactsBackstop(engine: BrainEngine, row: WriteReques
   if (!(await isFactsExtractionEnabled(engine))) return { skipped: 'extraction_disabled' };
   const eligible = isFactsBackstopEligible(row.slug, page);
   if (!eligible.ok) return { skipped: eligible.reason };
+  if ((await stringWriteStorage(engine, pageBodyBytes(page), bodyStorageOf(before?.page))).storage === 'segmented') return { skipped: 'page_body_segmented' };
   if (await bodyAlreadyOffered(engine, row.slug, page, before)) return { skipped: 'body_unchanged' };
   return { queued: true };
 }
@@ -117,6 +120,7 @@ export async function readFactsBackstopJobPage(engine: BrainEngine, data: Record
       throw error;
     }
   }
+  if (isSegmentedPage(snapshot.page)) return { skipped: 'page_body_segmented' } as const;
   return { page: snapshot.page };
 }
 
