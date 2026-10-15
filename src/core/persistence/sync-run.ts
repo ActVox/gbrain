@@ -1472,14 +1472,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     assertActive();
     try { cursor = await readCursor(engine, key); }
     catch (error) {
-      if (!(error instanceof MissingSyncManifest) || !opts.retryFailed || opts.dryRun || company) throw error;
-      missingManifestCursor = error.cursor;
-      assertActive();
-      phase = 'discovery';
-      discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
-      const discovery = await discoverManagedSync(engine, opts, context);
-      assertActive();
-      const replaced = await replaceCursor(engine, key, error.cursor, { ...discovery, authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
+      if (!(error instanceof MissingSyncManifest) || opts.dryRun || company) throw error;
+      missingManifestCursor = error.cursor; phase = 'discovery'; discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
+      // #6712 PR 1 (L1): a lost manifest re-discovers against HEAD; the prescreen passes what the lost run imported, so the old cursor is a skip-ahead.
+      const replaced = await replaceCursor(engine, key, error.cursor, { ...await discoverManagedSync(engine, opts, context), authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
       if ('wait' in replaced) return { ...result(error.cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: replaced.wait }) };
       cursor = replaced;
     }
