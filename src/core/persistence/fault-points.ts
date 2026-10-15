@@ -18,8 +18,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'consumer:preparing' | 'lane:applied'
   // #6712 PR 0: after `freezeEntry` froze an import entry (its bytes are read) and before the request is admitted or published.
   | 'sync:after_freeze'
-  // #6712 PR 1: after a pass took the source's drain lease (before it reads the cursor), and after the cursor fan-in adopted
-  // an old-key cursor under the source's one key (before the old rows are retired).
+  // #6712 PR 1: after a pass took the source's drain lease (before it reads the cursor); after each cursor the fan-in
+  // superseded is retired (before the next one), and after a pass stamped its authority on a cursor another writer started.
   | 'sync:lease_acquired' | 'sync:cursor_adopted'
   // #6511: the page purge's in-transaction journal lookups (page-purge.ts `journalLookup`); a hook that throws a 57014 models a statement timeout there.
   | 'purge:slug_lookup' | 'purge:tail_recheck' | 'purge:pending_recheck' | 'purge:redaction_read'

@@ -17,6 +17,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { __setManagedCursorKeyForTests } from '../src/core/persistence/sync-cursor-key.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { classifySyncFault } from '../src/core/persistence/sync-fault-class.ts';
 import { readManagedSyncFailures } from '../src/core/persistence/sync-failures.ts';
@@ -265,8 +266,17 @@ test('with two cursors, sync status shows the one its recorded failure belongs t
     const f = await stoppedRun();
     const blockedRun = (await readSyncStatus(engine, f.id)).run_id!;
     await clearConfig();
-    // A newer cursor of the same source, selected by different options, runs to the end.
-    const other = await performManagedSync(engine, { ...f.opts, exclude: ['nothing-matches/**'] });
+    // A newer cursor of the same source, selected by different options, runs to the end. #6712 PR 1: one key per source,
+    // so a second cursor is one an older gbrain left under its own key; it ran while the blocked cursor did not exist for it.
+    const blockedKey = (await engine.executeRaw<{ fingerprint: string }>("SELECT fingerprint FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [f.id]))[0]!.fingerprint;
+    await engine.executeRaw("UPDATE op_checkpoints SET op='managed-sync-parked' WHERE op='managed-sync' AND fingerprint=$1", [blockedKey]);
+    __setManagedCursorKeyForTests(() => `${f.id}-older-key`);
+    let other: Awaited<ReturnType<typeof performManagedSync>>;
+    try { other = await performManagedSync(engine, { ...f.opts, exclude: ['nothing-matches/**'] }); }
+    finally {
+      __setManagedCursorKeyForTests(null);
+      await engine.executeRaw("UPDATE op_checkpoints SET op='managed-sync' WHERE op='managed-sync-parked' AND fingerprint=$1", [blockedKey]);
+    }
     expect(other.status).not.toBe('blocked_by_failures');
     const status = await readSyncStatus(engine, f.id);
     expect(status.run_id).toBe(blockedRun);
