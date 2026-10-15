@@ -117,7 +117,7 @@ async function readColumns(engine: BrainEngine): Promise<Columns> {
 }
 
 /** Builds the rank expressions for one schema shape. Every term yields a rank or NULL (no signal). */
-function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilings: LegacyCeilings = null) {
+function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilings: LegacyCeilings = null, relower = false) {
   const signals = new Set<string>();
   /** The source aliased `s` is claimed (or projected as claimed): its rows with no lowering signal are operator_curated. */
   const claimed = (s: string) => {
@@ -185,10 +185,16 @@ function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilin
     return `CASE WHEN ${c} AND ${legacyRowSql('pages', p, ceilings)} THEN ${least([String(rank('operator_curated')), ...caps, ...terms])} ELSE ${least(terms)} END`;
   };
   const hasTrust = cols.has('pages', 'trust_tier');
-  /** The tier a row's page contributes: its stored tier when classified, else the page's own signals. */
+  /**
+   * The tier a row's page contributes: its stored tier when classified, else the page's own signals. In the
+   * relower pass a page the claim lifted contributes the tier it is about to be lowered to, so the read-only
+   * preview and the apply (which lowers pages first) report the same child rows (#6533).
+   */
   const pageTaint = (p: string, s: string, r: string) => {
     const rule = pageRule(p, s, r);
-    return hasTrust ? `CASE WHEN ${p}.id IS NULL THEN NULL WHEN ${p}.trust_tier <> 'unknown' THEN ${trustRankSql(`${p}.trust_tier`)} ELSE ${rule} END` : rule;
+    const stored = trustRankSql(`${p}.trust_tier`);
+    const classified = relower ? `CASE WHEN ${p}.write_origin->>'channel' = 'trust_claim' THEN LEAST(${stored}, COALESCE(${rule}, ${stored})) ELSE ${stored} END` : stored;
+    return hasTrust ? `CASE WHEN ${p}.id IS NULL THEN NULL WHEN ${p}.trust_tier <> 'unknown' THEN ${classified} ELSE ${rule} END` : rule;
   };
   const pageJoins = (p: string, s: string, r: string, on: string) =>
     `LEFT JOIN pages ${p} ON ${on} ${cols.has('sources', 'config') ? `LEFT JOIN sources ${s} ON ${s}.id = ${p}.source_id` : ''} ${requestJoin('pages', 'revision_write_request_id', r, p)}`;
@@ -350,6 +356,68 @@ export async function runTrustBackfill(engine: BrainEngine, opts: TrustBackfillO
     if (c) { t.rows = c.rows; t.projected = c.counts; t.current = c.counts; }
   }
   return summarize('apply', 'trust_columns', tables, signals, 'complete');
+}
+
+export const TRUST_RELOWER_COMMAND = ['gbrain', 'trust', 'claim-sources', '--relower'] as const;
+
+export interface TrustRelowerReport {
+  mode: 'dry_run' | 'apply';
+  /** Rows the claim lifted that their own signals now place lower, per table and target tier. */
+  tables: Array<{ table: TrustTable; rows: number; to: TierCounts }>;
+  rows: number;
+  /** Up to 20 affected pages, for the preview. */
+  sample: Array<{ source_id: string; slug: string; from: TrustTier; to: TrustTier }>;
+}
+
+/**
+ * #6533 repair, lower only: rows a claim lifted (`write_origin.channel` `trust_claim`) whose own page rule
+ * now ranks below their stored tier (legacy extract_atoms atoms the claim made "your notes" before
+ * `extracted_by` was a signal) are lowered to that rule, pages first so facts, takes and timeline rows on a
+ * lowered page follow it. Each lowered row's `write_origin.channel` becomes `trust_relower`, so a rerun finds
+ * nothing. Nothing is ever raised, and rows a person or a later write classified are not touched. The dry
+ * run is read-only and reports the same rows the apply lowers.
+ */
+export async function relowerClaimedRows(engine: BrainEngine, opts: { dryRun?: boolean; sources?: readonly string[] } = {}): Promise<TrustRelowerReport> {
+  const cols = await readColumns(engine);
+  const mode: TrustRelowerReport['mode'] = opts.dryRun ? 'dry_run' : 'apply';
+  if (!cols.has('pages', 'trust_tier') || !cols.has('pages', 'write_origin') || !cols.has('sources', 'config')) return { mode, tables: [], rows: 0, sample: [] };
+  const { forTable } = classifier(cols, [], await readLegacyCeilings(engine).catch(() => null), true);
+  const claimed = (await engine.executeRaw<{ id: string }>(`SELECT s.id FROM sources s WHERE ${claimedSourceSql('s')} ORDER BY s.id`))
+    .map(r => r.id).filter(id => !opts.sources || opts.sources.includes(id));
+  const report: TrustRelowerReport = { mode, tables: [], rows: 0, sample: [] };
+  if (claimed.length === 0) return report;
+  const managedBrain = opts.dryRun ? false : await readManagedMode(engine);
+  const attribution = opts.dryRun ? null : await maintenanceAttribution(engine);
+  const origin = JSON.stringify({ channel: 'trust_relower' });
+  for (const table of BACKFILL_ORDER) {
+    if (!cols.table(table) || !cols.has(table, 'write_origin')) continue;
+    const { from, rule, src } = forTable(table);
+    const candidates = `SELECT x.id, ${src} AS source_id, ${table === 'pages' ? 'x.slug' : 'NULL::text'} AS slug, x.trust_tier AS from_tier,
+        ${trustTierFromRankSql(rule)} AS to_tier
+      FROM ${from}
+     WHERE x.write_origin->>'channel' = 'trust_claim' AND ${src} = ANY($1::text[])
+       AND (${rule}) IS NOT NULL AND (${rule}) < ${trustRankSql('x.trust_tier')}`;
+    const rows = await engine.executeRaw<{ id: number | string; source_id: string; slug: string | null; from_tier: string; to_tier: string }>(
+      `${candidates} ORDER BY x.id`, [claimed]);
+    const to = zero();
+    for (const row of rows) {
+      const target = isTrustTier(row.to_tier) ? row.to_tier : 'unknown';
+      to[target]++;
+      if (row.slug !== null && report.sample.length < 20 && isTrustTier(row.from_tier)) {
+        report.sample.push({ source_id: row.source_id, slug: row.slug, from: row.from_tier, to: target });
+      }
+    }
+    report.tables.push({ table, rows: rows.length, to });
+    report.rows += rows.length;
+    if (opts.dryRun || rows.length === 0) continue;
+    const ids = rows.map(r => Number(r.id));
+    const sources = [...new Set(rows.map(r => r.source_id))];
+    const apply = (tx: BrainEngine) => withTrustBackfill(tx, () => tx.executeRaw(
+      `WITH b AS (${candidates} AND x.id = ANY($2::bigint[]))
+       UPDATE ${table} t SET trust_tier = b.to_tier, write_origin = $3::text::jsonb FROM b WHERE t.id = b.id`, [claimed, ids, origin]));
+    await engine.transaction(tx => managedBrain ? withCoordinatedWrite(tx, sources, () => apply(tx), attribution!) : apply(tx));
+  }
+  return report;
 }
 
 /** Doctor: the stored backfill state (an interrupted run's cursor, and when a complete run finished). */
