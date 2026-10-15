@@ -24,7 +24,7 @@ import { prepareManagedSyncMutation, type SyncCursorOptions, type SyncIntent } f
 import { startClaimPhase } from './claim-phase.ts';
 import { screeningRequest } from './noop-kernel.ts';
 import { FINISH_BUDGET_MS, stampDrainStep } from './drain-step.ts';
-import { noopWaiversEnabled, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waiverBatchEnabled, type NoopWaiver, type WaiverRunEntry } from './sync-waivers.ts';
+import { noopWaiversEnabled, prescreenedHead, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waivePrescreenedRun, waiverBatchEnabled, type NoopWaiver, type WaiverRunEntry } from './sync-waivers.ts';
 import { resolve } from 'node:path';
 import { currentCompanyBrainSync, getCompanyBrainProfile, readCompanyBrainPlan } from '../company-brain/profile.ts';
 import { readCommittedBlob } from '../company-brain/revision.ts';
@@ -53,7 +53,7 @@ import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
 import { managedSyncWriteDiagnostic, writeWaitOf } from './sync-write-diagnostic.ts';
 import { checkpointSuperseded } from './sync-checkpoint-replaced.ts';
 import { publicFailureDetail } from './publication-failure.ts';
-import { fileChangedAfterAdmission, headCommittedBytes, originFaultHold, pageChangeProof, pageChangedHold, pinnedWorktreeConflict, receiptPageFaultHold, worktreeDirtyHold } from './sync-page-fault.ts';
+import { fileChangedAfterAdmission, fileDriftHold, headCommittedBytes, originFaultHold, pageChangeProof, pageChangedHold, pinnedWorktreeConflict, receiptPageFaultHold, worktreeDirtyHold } from './sync-page-fault.ts';
 import { faultPoint } from './fault-points.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { withCoordinatedWrite } from './context.ts';
@@ -96,6 +96,8 @@ interface Cursor extends SyncDiscovery { runId: string; index: number; authority
     skippedContextualMode?: number; skippedCanonicalBytes?: number;
     /** DX-A7: entries advanced without an admission because their publication would change nothing. */
     waived?: { imports: number; deletes: number };
+    /** #6712 PR 1: of the waived imports, those the guarded kernel passed straight from the discovery prescreen (no preparation). */
+    prescreened?: number;
     /** #5988: imports held, and files imported only after quoting frontmatter. */
     held?: number; recovered?: { count: number; sample_paths: string[]; comment_values?: number };
     /** #6188: files whose fences Tier 1 rewrote (and the Git effect committed). */
@@ -313,7 +315,7 @@ function result(cursor: Cursor | CursorHeader, status: SyncResult['status'], rea
     ...(cursor.slugCollisions?.length ? { slugCollisions: cursor.slugCollisions } : {}),
     ...(cursor.fileRefusals?.length ? { fileRefusals: cursor.fileRefusals } : {}), ...(cursor.workingTreeKept?.length ? { working_tree_kept: cursor.workingTreeKept.length } : {}),
     ...(cursor.stagedHead && !cursor.authority.writer.remote ? { staged: { target: cursor.target, head: cursor.stagedHead, ...(cursor.slice && !cursor.slice.done ? { slice: { phase: cursor.slice.phase, after: cursor.slice.after } } : {}) } } : {}),
-    waived: { imports: cursor.counts.waived?.imports ?? 0, deletes: cursor.counts.waived?.deletes ?? 0 },
+    waived: { imports: cursor.counts.waived?.imports ?? 0, deletes: cursor.counts.waived?.deletes ?? 0 }, prescreened: cursor.counts.prescreened ?? 0,
     filesImported: cursor.index, bankedFiles: cursor.index,
     managedCursor: { index: cursor.index, total: 'total' in cursor ? cursor.total : cursor.entries.length, ...(cursor.progress ? { progress: cursor.progress } : {}) },
     ...(cursor.uncommitted ? { uncommitted: cursor.uncommitted } : {}), ...(reason ? { reason } : {}),
@@ -437,6 +439,13 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
         throw syncRunRefusal('revision_conflict', 'A renamed page changed after this sync cursor was enumerated.', retry,
           `Page ${moved.slug}, which ${entry.path} was renamed from, changed or was deleted after this sync enumerated it, so the run stopped before admitting the rename.`);
       }
+    }
+    // #6712 PR 1: an import whose page moved since its file was last imported runs only as a proven no-op (sync-prescreen.ts).
+    if (entry.drift && holdsOn && !occupantRebound && content !== null && snapshot && !(image ? sameImageBytes(imageBytes, snapshot.page)
+      : await sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly, run.signal))) {
+      const proof = await pageChangeProof(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, pageId, expectedRevision: null });
+      assertActive();
+      return { hold: fileDriftHold(entry, slug, pageId, frozenIntent, { sides: entry.drift, revision: snapshot.revision, proof }) };
     }
     if (screening && !image) {
       const hold = await screenFrozenImport(engine, { cursor, entry, slug, pageId, snapshot, content, rawHash, lineEndingOnly, blob, oversize,
@@ -992,6 +1001,29 @@ async function waiveRun(engine: BrainEngine, cursor: Cursor, head: Pending, key:
     ? saveCursor(engine, key, done.cursor, { ...done.cursor, pending: done.next as Pending }, false, assertActive) : done.cursor;
 }
 
+/**
+ * #6712 PR 1 (L1): the consecutive prescreened entries at the head (sync-prescreen.ts), passed by the guarded kernel's
+ * bounded checks in one transaction (`waivePrescreenedRun`) without freezing or preparing them. Null when the head is
+ * not a prescreened entry or the kernel passed none; `missed` then remembers the head, so the ordinary path freezes,
+ * screens and imports it (the prescreen fails toward importing).
+ */
+async function prescreenRun(engine: BrainEngine, cursor: Cursor, key: string, run: { missed: Set<number>; limit: number; embeddingRequested: boolean;
+  drainStartedAt: number; assertActive: () => void; signal?: AbortSignal; onProgress: SyncOpts['onProgress'] }): Promise<Cursor | null> {
+  const entries = prescreenedHead(cursor.entries, cursor.index, run.missed, run.limit);
+  if (!entries.length || cursor.pending) return null;
+  stampDrainStep('waiver_run', run.signal);
+  const done = await waivePrescreenedRun(engine, cursor, entries, key, { embeddingRequested: run.embeddingRequested }, (tx, count) => {
+    let next: Cursor = cursor;
+    for (let i = 0; i < count; i++) next = waivedCursor(next, { kind: 'import', kernel: [] });
+    return writeCursor(tx, key, cursor, { ...next, counts: { ...next.counts, prescreened: (cursor.counts.prescreened ?? 0) + count },
+      progress: stampProgress(cursor.progress, cursor.index, cursor.index + count, run.drainStartedAt) });
+  }, tx => currentCursor(tx, key, cursor));
+  if (!done) { run.missed.add(cursor.index); return null; }
+  for (let index = cursor.index + 1; index <= cursor.index + done.waived; index++) run.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: index, total: cursor.entries.length, waived: true });
+  run.assertActive();
+  return done.cursor;
+}
+
 /** waiveRun's screens: the head, then its followers four at a time while each one screens as a waiver. */
 async function screenWaiverRun(engine: BrainEngine, cursor: Cursor, head: Pending, key: string, config: GBrainConfig, assertActive: () => void,
   frozenRun: Parameters<typeof freezeEntry>[4], limit: number): Promise<WaiverRunEntry[] | null> {
@@ -1528,7 +1560,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     let creditedPages = 0, creditStarted = 0, foregroundQueued = false;
     const sliceStarted = performance.now(), sliceFirstIndex = cursor.index, drainStartedAt = opts.drainStartedAt ?? Date.now();
     const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
-    const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig);
+    const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig), prescreen = { missed: new Set<number>(), limit: Infinity, drainStartedAt, assertActive, signal, onProgress: opts.onProgress,
+      embeddingRequested: !(cursor.processingOptions ?? processingOptions).noEmbed && !opts.embedDeferred && !config.embedding_disabled && !!config.embedding_model?.trim() };
     if (opts.capacityPreflight && !cursor.done) await preflightSyncCapacity(engine, { root: cursor.root, writer: cursor.authority.writer, entries: cursor.entries.slice(cursor.index) });
     opts.onProgress?.({ phase: 'managed_sync.start', bankedFiles: cursor.index, total: cursor.entries.length });
     while (!cursor.done) {
@@ -1554,6 +1587,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           creditedPages = 25; creditStarted = performance.now();
         }
         foregroundWaitStart = 0;
+        const prescreened = await prescreenRun(engine, cursor, key, { ...prescreen, limit: slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : Infinity });
+        if (prescreened && slice && (prescreened.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(prescreened, 'partial', 'writer_yield');
+        if (prescreened) { cursor = prescreened; continue; }
         phase = 'freeze'; stampDrainStep('freeze', signal);
         const frozen = await freezeEntry(engine, cursor, key, assertActive, frozenRun);
         if ('hold' in frozen) {

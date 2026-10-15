@@ -26,6 +26,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances } from './sync-holds.ts';
 import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { movedDriftHolds, prescreenSyncEntries, type SyncDriftSide } from './sync-prescreen.ts';
 import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
 
 /** The page an import takes over from its previous origin: a Git rename, or a file that replaced a vanished origin at the same slug. */
@@ -35,7 +36,11 @@ export interface SyncEntry { path: string; sourcePath: string; action: 'import' 
   /** #5565: a deleted file no page records as its origin; its slug's page keeps another origin, so the deletion is a fenced no-op. */
   unownedDeletion?: boolean;
   /** #5988: a held rename destination whose source page changed since the rename was recorded; the freeze screen holds it as `rename_held`. */
-  renameHeld?: SyncRename; }
+  renameHeld?: SyncRename;
+  /** #6712 PR 1: the import provenance matches the pinned blob, the frozen revision and this parser; the no-op kernel decides (sync-prescreen.ts). */
+  prescreened?: true;
+  /** #6712 PR 1: the page moved since its last recorded import (or has no record); imported only when the freeze proves it a no-op, else held `file_drift`. */
+  drift?: SyncDriftSide; }
 /** Files that map to a slug another origin keeps; they are left out of the manifest until one is renamed. */
 export interface SyncSlugCollision { slug: string; kept: string; skipped: string[]; }
 /** #5032: a file sync skipped on this host with a named refusal, without failing the run. */
@@ -383,11 +388,11 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       const hold = holdByPath.get(path), blob = blobs.get(toGitPath(path));
       return hold && !hold.meta.blob_oid && !hold.meta.working && blob ? [blob] : [];
     });
-    const contents = readBlobContents(gitRoot, unversioned);
+    const contents = readBlobContents(gitRoot, unversioned), movedDrift = await movedDriftHolds(engine, sourceId, holds);
     for (const path of checked) {
       const hold = holdByPath.get(path), gitPath = toGitPath(path), blob = blobs.get(gitPath);
       const workingHold = working && (hold?.meta.working === true || !blob);
-      let changed = !hold || holdRescreenDue(hold, retry.has(path));
+      let changed = !hold || holdRescreenDue(hold, retry.has(path)) || movedDrift.has(path);
       let present = !!blob;
       if (workingHold) {
         let bytes: Buffer | null = null;
@@ -546,6 +551,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   if (collisions.length) discovered.slugCollisions = collisions;
   // Identities and origin collisions were resolved over the whole target above; only the frozen manifest is cut.
   if (slicing) cutDiscoveryToSlice(discovered, slicing, head);
+  await prescreenSyncEntries(engine, discovered, { full: !!opts.full, treeWalk: delta?.status !== 'ok', noSchemaPack: !!opts.noSchemaPack, dryRun: !!opts.dryRun, held: holdByPath });
   if (!working) {
     const uncommitted = { added: new Set([...dirty.added,...dirty.renamed.map(r=>r.to)].filter(eligible)).size,
       modified: new Set(dirty.modified.filter(eligible)).size,

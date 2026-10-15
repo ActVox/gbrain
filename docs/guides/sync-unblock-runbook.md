@@ -89,6 +89,7 @@ Every hold and error has three fields, from one table
 |---|---|---|---|---|
 | `worktree_dirty` | page | retry_when_clean | no | held 3 times: the file keeps changing without being committed |
 | `concurrent_write` | page | reconcile | yes | always: the file and the database page diverge |
+| `file_drift` | page | reconcile | yes | always: the page changed in the database since its file was last imported |
 | `preparation_stalled` | page | retry, upgrade | no | held 3 times, or writer status names a step that never finishes |
 | `invalid_fence` | page | repair | no | the fence repair preview offers no plan (a manual reason) |
 | `invalid_frontmatter` | page | repair | no | the repair preview needs an interpretation (--include-ambiguous) |

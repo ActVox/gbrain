@@ -48,6 +48,8 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
     escalate: `held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times: the file keeps changing without being committed`, human_reason: 'Someone (or an agent) keeps editing the file without committing it; find out who and commit or restore it.' },
   { code: 'concurrent_write', class: 'page', safe_actions: ['reconcile'], needs_human: true, escalate: 'always: the file and the database page diverge',
     human_reason: 'The Git file and the database page both changed; a person chooses which version wins (gbrain sources reconcile <source> <slug> --preview shows both and writes nothing).' },
+  { code: 'file_drift', class: 'page', safe_actions: ['reconcile'], needs_human: true, escalate: 'always: the page changed in the database since its file was last imported',
+    human_reason: 'The database page moved since sync last imported its file, and importing would replace it; a person chooses which version wins (gbrain repair file-drift --source <source> --slug <slug> --prefer database|file previews it and writes nothing until applied).' },
   { code: 'preparation_stalled', class: 'page', safe_actions: ['retry', 'upgrade'], needs_human: false,
     escalate: `held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times, or writer status names a step that never finishes`, human_reason: 'The write owner cannot finish preparing this file; writer status names the step, fix or report it.' },
   { code: 'invalid_fence', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the fence repair preview offers no plan (a manual reason)', human_reason: 'Edit the facts or takes table the hold names and commit.' },
