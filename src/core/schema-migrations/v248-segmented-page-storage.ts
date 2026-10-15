@@ -107,5 +107,10 @@ export const v248: Migration = {
     await engine.runMigration(248, 'ALTER TABLE pages VALIDATE CONSTRAINT pages_body_storage_chk;');
     await engine.runMigration(248, 'ALTER TABLE page_versions VALIDATE CONSTRAINT page_versions_body_chk;');
     await buildIndexOnline(engine, 248, CONTENT_CHUNKS_OCCURRENCE_INDEX, { notice: migrationNotice });
+    // Search's visibility predicate reads the generation columns; without their statistics Postgres prices it at 0.5%
+    // and vector search sorts every candidate instead of walking its HNSW index (projection-statistics.ts).
+    if (engine.kind === 'postgres') {
+      await engine.runMigration(248, 'ANALYZE pages(body_generation); ANALYZE content_chunks(body_generation, retired_generation);');
+    }
   },
 };

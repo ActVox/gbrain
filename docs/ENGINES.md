@@ -173,14 +173,14 @@ describes bounded candidate recovery and incomplete-result metadata.
 
 On Postgres the same refresh also analyzes the page columns every search
 filter reads (`deleted_at`, `source_id`, `type`, `slug`) and
-`content_chunks(model, modality, page_id)`, and an embed drain that embedded
+`content_chunks(model, modality, page_id, body_generation, retired_generation)`, and an embed drain that embedded
 anything analyzes those chunk columns once at its end (each ANALYZE bounded by
 a 30 s statement and 2 s lock timeout). Without those statistics the vector
 candidate statement sorts every eligible chunk instead of walking the HNSW
 index, and at 1M chunks and above that sort runs past the 8 s vector budget,
 so hybrid search falls back to keyword-only results until autovacuum
 analyzes the tables. If a refresh is skipped (a lock, or a role that does not
-own the tables), run `ANALYZE content_chunks(model, modality, page_id)` and
+own the tables), run `ANALYZE content_chunks(model, modality, page_id, body_generation, retired_generation)` and
 `ANALYZE pages` as the table owner.
 
 ### Vector index sizing
