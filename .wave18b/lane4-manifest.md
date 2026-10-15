@@ -23,6 +23,7 @@ one-line change; regenerate the generated files once after merging all lanes.
 | `test/scripts/windows-hide-guard.test.ts` | ratchet fixture repointed from `src/core/tailscale.ts` (migrated) to `src/core/persistence/topology-filesystem.ts` | 4.3 |
 | `.github/workflows/persistence-validation.yml` | `test/e2e/transaction-cancel-held-lock.test.ts` added to the direct + pooled step (`Require canonical reconciliation through direct and pooled PostgreSQL`) so its PgBouncer arm runs in CI | 4.6 |
 | `.github/workflows/test.yml` | Windows-only step `Long Windows PGLite IPC paths use the per-user run dir (#6573)` running `test/windows-ipc-long-path-6573.serial.test.ts`, after the #4992 hidden-console step | 4.2 |
+| `test/fixtures/goldens/exports/types.json` | the registry code union gains the four codes (`regen:all --goldens`; justify in the PR body as new registered codes) | 4.2, 4.4, 4.5 |
 
 ## Generated docs (committed regenerated; regenerate once after merge)
 
