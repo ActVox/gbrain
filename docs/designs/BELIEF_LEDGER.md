@@ -126,16 +126,21 @@ Two lifetimes scope every key:
 | Subject | Logical key (always under `source_incarnation`) | Notes |
 |---|---|---|
 | page | `page_lifetime` | Slug is payload, resolved through the lifetime table. |
-| fact (claim) | `(subject_slug, fp_version, fingerprint, visibility)` | `subject_slug` is `source_markdown_slug` for fence rows and `entity_slug` for database-only rows. Withdrawals already match on `(source_id, visibility, entity_slug, fingerprint)` (`src/core/facts/withdrawal.ts:77-82`). `fingerprint` is `gbrain_fact_fingerprint(fact)`, re-versioned once (`withdrawal-schema.ts:24-36`), hence `fp_version`. Two identical claims on one page are one belief whose value carries `count`, so reordering them emits nothing. |
+| fact (claim) | `(subject, fp_version, fingerprint, visibility)` | `subject` is the page named by `source_markdown_slug` for fence rows and by `entity_slug` for database-only rows, serialized as its lifetime or, with no page, as the slug (rule below). Withdrawals already match on `(source_id, visibility, entity_slug, fingerprint)` (`src/core/facts/withdrawal.ts:77-82`). `fingerprint` is `gbrain_fact_fingerprint(fact)`, re-versioned once (`withdrawal-schema.ts:24-36`), hence `fp_version`. Two identical claims on one page are one belief whose value carries `count`, so reordering them emits nothing. |
 | fact (ontology observation) | `(entity_slug, dimension, value_hash, source_markdown_slug, valid_from)` | The stint identity the schema already enforces (`v188-facts-ontology-stint-dedup.ts:15-17`). Stints with identical claim text are distinct beliefs. |
 | take | `(page_lifetime, claim_hash, ordinal)` | `claim_hash` is over claim, kind and holder. `take_purges` hashes the claim alone, so events also carry the claim-only fingerprint for purge (section 6.5). `ordinal` separates identical claims on one page, ordered by `since_date` then row number at first sight, and stays fixed for the take's life. Row number is **not** identity: the collision check covers only new row numbers (`canonical-projections.ts:388`), and the upsert can replace a claim in place (`engine-sql/takes.ts:82-84`). A pure renumber emits nothing. An in-place claim edit at the same row is `take.retracted(old)` plus `take.asserted(new)` linked by `replaces`. |
-| link assertion | `(from_source_id, from_slug, to_source_id, to_slug, link_type, link_source, origin_source_id, origin_slug)` | Every endpoint qualified by source, as the derived-links diff already does (`derived-links.ts:282-284`) and storage resolves (`engine-sql/links.ts:117-119`). Endpoint lifetimes are recorded in the payload. The event belongs to the **origin** page's stream (lock and order), else to the from page. |
+| link assertion | `(from_source_id, from_slug, to_source_id, to_slug, link_type, link_source, origin_source_id, origin_slug)` | Every endpoint qualified by source, as the derived-links diff already does (`derived-links.ts:282-284`) and storage resolves (`engine-sql/links.ts:117-119`). Each endpoint and the origin are serialized as page lifetimes where a page exists (rule below); the slugs are payload labels. The event belongs to the **origin** page's stream (lock and order), else to the from page. |
 | link transition | link key + `(kind, occurred_on, producer)` | Evidence rows from `link_transitions`. |
 
 Identity changes are explicit events:
 
 - **Rename** (`page.renamed`, carrying `old_slug` and `new_slug`): same
-  lifetime, new slug. Readers resolve slugs through the lifetime table.
+  lifetime, new slug. Because page-backed key components are lifetimes (rule
+  below), a rename changes no key in any stream, including link keys in other
+  pages' streams whose endpoint was renamed. The rename code rewrites fact
+  slugs and link reads take endpoint slugs from the renamed page
+  (`page-state/rename-alias.ts:54-57`, `engine-sql/links.ts:260-267`), and
+  neither moves a key.
 - **Merge** (phantom redirect). Not a rename: the managed merge is two
   requests (`cycle/phantom-redirect-managed.ts:4-12`), and both pages exist
   between them. The first transaction appends `page.published` for the
@@ -147,6 +152,18 @@ Identity changes are explicit events:
   transfer names one of them.
 - There is no code path that changes `pages.source_id` today (census P11), so
   `page.source_moved` is reserved but has no producer in V1.
+
+**Slugs are labels; lifetimes are identity.** Every slug component in the
+table above (a fact's `subject_slug`, each link endpoint and origin) is
+serialized in `subject_key` as the page lifetime of the page that holds that
+slug at the event, with the slug kept only as a label in the payload. A
+component whose slug names no page (a database-only fact, a link to a page
+that does not exist yet) is serialized as `(source_incarnation, slug)`. When
+a page is later created at that slug, its first publication appends one
+`*.adopted` event per page-less subject at the slug, moving it from the slug
+form to the lifetime form in the same transaction, so a reused slug never
+joins an older page's history. Append, replay, subject lookup and
+`state_hash` all use this one serialization.
 
 **Keys are derived, never stored as foreign keys.** That is what makes the
 ledger survive the legacy engine copier (fresh page ids, takes not copied:
@@ -197,6 +214,12 @@ Link: `link.asserted`, `link.retracted`, `link.transition_added`,
 
 Trust and gating (section 6): `trust.contested`, `trust.held`,
 `trust.retiered`.
+
+Purge (section 6.5): `fact.purged` and `page.purged` (above), and
+`derived.hidden` for a key whose row a purge hid through the derivation walk.
+
+Identity (section 3): `fact.adopted` and `link.adopted`, when a page is
+created at a slug that page-less subjects already named.
 
 Coverage (section 7): `coverage.started`, `coverage.stopped`,
 `coverage.restored`, `baseline` (one per subject at activation), plus history
@@ -342,7 +365,13 @@ writers that retry their own transactions.
   `belief_commit_marks (publication_id, observed_at)`. A maintenance writer
   outside the effects queue writes its mark in a follow-up statement after
   commit. Any later reader that finds a committed event with no mark (a
-  crash before the mark) writes one with its own `now()`. At a time `T`, an
+  crash before the mark) writes one. Every mark takes `clock_timestamp()` in
+  the same statement that reads the committed event
+  (`INSERT … SELECT publication_id, clock_timestamp() FROM belief_events …`),
+  never `now()`: `now()` is the observing transaction's start, and a
+  long-running READ COMMITTED transaction can start before the publication
+  commits and read its event afterwards. The writer refuses a mark whose
+  `observed_at` is below the publication's newest `recorded_at`. At a time `T`, an
   event is **visible** if `observed_at <= T`, **not visible** if
   `recorded_at > T`, and otherwise **unproven**, unless a later event on the
   same page (higher `id`) has `recorded_at <= T`, which proves the earlier
@@ -428,10 +457,23 @@ but never tier (`canonical-projections.ts:432`, `:449-455`), and the tier
 trigger handles INSERT and UPDATE, not DELETE (`trust/schema.ts:222-224`). So
 omitting a higher-tier take from a page rewrite bypasses the explicit
 `takes_supersede` guard (`takes-prepare.ts:150-156`). The fix is an inherited
-product guard and a W1 prerequisite, not a ledger feature: the deletes in the
-projection skip a row whose tier is above the writer's, keep it (a take keeps
-its row; a timeline row stays), and file a proposal for the owner, as
-`guardFenceRows` does for facts. The ledger appends `trust.contested` for a
+product guard and a W1 prerequisite, not a ledger feature. It covers **every
+destructive path**, not only an omitted fence row:
+
+- the projection's deletes (`dropTakes`, the timeline deletes);
+- the delete `takes_remove` runs after the projection
+  (`takes-prepare.ts:215`);
+- the takes upsert, whose `ON CONFLICT (page_id, row_num) DO UPDATE`
+  replaces `claim` and sets `active` in place (`engine-sql/takes.ts:77-90`),
+  so a same-row claim replacement or a deactivation;
+- the timeline detail refresh, which updates without comparing tiers
+  (`canonical-projections.ts:454-455`).
+
+Each one, when the row's tier is above the writer's, keeps the row as it is
+and files a proposal for the owner, as `guardFenceRows` does for facts. The
+contest is decided **before** the old assertion changes, so #6789's rule that
+an in-place claim edit drops the old grade runs only after the guard lets the
+edit through. The ledger appends `trust.contested` for a
 take (timeline rows are not ledger subjects, section 1), never a completed
 `take.retracted`, until the owner accepts; the acceptance then appends the
 retraction.
@@ -544,20 +586,40 @@ The contract W1 adds for the ledger:
      historical keys reached through the rename chain, gets `value` and
      `value_hash` set to NULL and `purged = true`.
    - **Carrying fields:** every event in the source whose `value` contains a
-     purge needle (the claim, its fence-escaped and JSON-escaped forms, as
-     `purge-verify.ts` already builds them) has each carrying field replaced
-     by a redaction marker naming the purge request; its `value_hash` is
-     recomputed over the redacted value and the event is marked
-     `redacted_fields`. The scan runs in keyset batches until none is left,
-     like the version redaction #6789 fixed. A statement timeout refuses
-     the whole purge with the typed `purge_lookup_timeout` (as #6511 does
-     for the journal), never a partial one.
-   - **Derived keys:** events of rows found through the derivation walk are
-     hidden by the same `needs_rederive` rule the read surfaces use, because
-     a paraphrase cannot be matched by a needle. A walk that hits its bound
-     (1,000 rows or eight hops, `derivation-inputs.ts:51-71`) is reported
-     `truncated`, and certification of that source's coverage is withheld
-     until a complete walk runs.
+     purge needle has each carrying field replaced by a redaction marker
+     naming the purge request. The needles are each purged claim with its
+     fence-escaped and JSON-escaped forms, as `purge-verify.ts` already
+     builds them. For a page purge the claim inventory is **exhaustive**:
+     every fact and take claim on the page and every claim in the page
+     lifetime's historical ledger events, enumerated in keyset batches.
+     `readPurgeClaims` is not that inventory: it reads at most 1,000 facts
+     and takes, drops claims under 8 characters and keeps 32 needles
+     (`page-purge.ts:64-66`), which suits its report and not a sweep. If
+     enumeration cannot finish in the purge's budget, the purge refuses
+     with a typed code, as a statement timeout does. The event's `value_hash` is
+     recomputed over the redacted value, and the replaced fields are listed
+     in `redacted_fields`. The next event's `prior_hash` then no longer
+     matches, so chain checks treat an event with `redacted_fields` or
+     `purged` as a disclosed break, not as drift. The scan runs in keyset
+     batches until none is left, like the version redaction #6789 fixed, and
+     it is an unindexed substring scan over the source's events, as the
+     version and journal scans already are. A statement timeout refuses the
+     whole purge with the typed `purge_lookup_timeout` (as #6511 does for the
+     journal), never a partial one.
+   - **Derived keys:** a paraphrase cannot be matched by a needle, so the
+     derivation walk decides. Purge maps each row the walk hides to its
+     logical key and appends one `derived.hidden` event per key, naming the
+     purge request. **That suppression is permanent for the events it
+     covers:** every event of the key with an `id` up to the
+     `derived.hidden` event stays hidden from history reads, because a
+     paraphrase of the purged text is still in them. A later re-derivation
+     from surviving inputs appends new events, and only those become
+     readable. Unlike the live `needs_rederive` marker, which re-derivation
+     clears (`eligibility/sql.ts:68-69`), nothing un-hides the earlier
+     range. A walk that hits its bound (1,000 rows or eight hops,
+     `derivation-inputs.ts:51-71`) is reported `truncated`, and
+     certification of that source's coverage is withheld until a complete
+     walk runs.
 
    Then the purge appends one `page.purged` or `fact.purged` event carrying
    the purge request id. The event skeleton (key, type, time, tier) stays, so
@@ -578,12 +640,18 @@ The contract W1 adds for the ledger:
    key lock purge also takes:
    - a fingerprint check of the subject against `fact_purges`, `take_purges`
      and `page_purges`, following the rename chain;
-   - a **stale-preparation check**: every payload records the source's purge
-     watermark (the highest `fact_purges`, `take_purges` and `page_purges`
-     ids it saw) at preparation. If a purge committed in the source since
-     then, the append is refused and the payload is prepared again from
-     current, redacted state. A text check cannot do this after the purge,
-     because the purged text is no longer stored anywhere to match against.
+   - a **stale-preparation check**: a new `sources.purge_epoch` counter is
+     incremented by every fact and page purge in its own transaction (both
+     already hold the source row `FOR UPDATE`, `facts/purge.ts:274` and
+     `persistence/page-purge.ts:246`, so increments are serialized). Every payload records the epoch it read at
+     preparation, and the append reads it again under the source `FOR SHARE`
+     lock that `lockPageKeys` takes (`page-state/guards.ts:24-41`). If the
+     epoch moved, the append is refused and the payload is prepared again
+     from current, redacted state. The tombstone tables cannot serve here:
+     they have no sequence, and their `purged_at` is the purge transaction's
+     start time, which can precede a preparation that commits before the
+     purge does. A text check cannot do it either, because the purged text
+     is no longer stored anywhere to match against.
    Tests: an exact claim that survives only in another subject's context or
    take evidence is redacted; a refresh proposal prepared before a purge and
    appended after it is refused.
@@ -735,17 +803,31 @@ replay (`:255-273`). W1 adds one, using the ledger's purge events as the
 source: they are text-free (fingerprints, scope, source incarnation, request
 id, recorded time), so reading them leaks nothing.
 
-1. Restore reads the `page.purged` and `fact.purged` events recorded after
-   the archive's creation time from the original brain
-   (`metadata.original_root`, which restore records) when it is still
-   readable, or from a source the operator names.
+1. Restore needs the `page.purged` and `fact.purged` events recorded after
+   the archive's creation time. A running PGLite cluster cannot be opened by
+   a second process, so each purge's post-commit effect also appends its
+   purge event, text-free, to a mirror file in the brain's home
+   (`purge-events.jsonl`, 0600), outside the database. Restore reads that
+   mirror under `metadata.original_root`, which restore records, or a copy
+   the operator names. On Postgres, the replay reads the events from the
+   pre-restore database itself.
 2. Inside restore's existing transaction, before the root is published, it
    replays them in recorded order for the matching source incarnation: it
    writes the tombstone rows, finds the restored fact, take or page rows by
    fingerprint or content hash (the restored rows still hold the text, so
    the standard purge redaction, including the ledger's carrying-field pass,
    runs on them), and appends one `fact.purged` or `page.purged` per replayed
-   purge with `cause: 'restore_replay'` and the original request id.
+   purge with `cause: 'restore_replay'` and the original request id. Each
+   replayed purge records an outcome. `complete` means the purged text was
+   recovered from a restored row and the carrying-field pass ran. `partial`
+   means no restored row matches the fingerprint: the tombstones are written
+   and key-level redaction by fingerprint runs, but a quote of the claim in
+   another subject's text cannot be found without the text (for example, an
+   archive older than the claim's own fact, holding only another subject's
+   quote of it). A partial outcome raises the same restore warning and doctor
+   finding as an unreadable mirror, naming the purge request ids. No other
+   process can reach the restored database before the root is published, so
+   the replay needs no page key locks; it bumps `purge_epoch` like any purge.
 3. When no newer purge events can be read, restore still succeeds but
    records `purge_replay: 'unavailable'` on `coverage.restored`, the restore
    receipt says so, and a doctor finding (`ask_user`) tells the user that
@@ -764,7 +846,7 @@ W5 should be re-scoped with that in mind (section 12, question 8).
 
 **Schema.** One additive migration (`bun run new:migration`; v214 is the
 template). `CREATE TABLE IF NOT EXISTS belief_events`, three indexes plus the
-unique `event_key` and the partial `claim_fp` index, and the guarded `DO $rls$` block (`v214-wanted-links.ts:38-42`).
+unique `event_key` and the partial `claim_fp` index, `sources.purge_epoch BIGINT NOT NULL DEFAULT 0` (section 6.5), and the guarded `DO $rls$` block (`v214-wanted-links.ts:38-42`).
 The DDL goes in `schema.sql` and the bootstrap blob (no column of it is
 referenced by an older blob index, so no bootstrap probe is needed). Then
 `build:schema` and `build:pglite-snapshot`, and regenerate the migrations and
@@ -1008,7 +1090,26 @@ reconstructed state, not counts**, on PGLite and Postgres:
     naming every changed subject;
 27. purge-verify reports link context, timeline detail and raw data that
     carry the claim, naming the rows;
-28. N1 unchanged (388/388, 0 stale).
+28. the contest guard on each destructive path: an explicit `takes_remove`,
+    a same-row claim replacement, `active = false`, a timeline detail
+    replacement and an omitted fence row → the higher-tier row unchanged
+    and a proposal filed;
+29. a renamed endpoint whose links live in another page's stream, then
+    reuse of the old slug → no key changes, and the new page does not join
+    the old page's history; a database-only fact whose page is created later
+    → one `fact.adopted`;
+30. a page purge with more than 32 claims, a short claim and a claim that
+    exists only in historical take events, each quoted in another subject's
+    context → all redacted;
+31. purge, then re-derivation of the same page lifetime → history reads
+    return none of the pre-purge derived events;
+32. a restore from an archive that holds only another subject's quote of
+    a claim asserted and purged after the backup → that purge's replay is
+    `partial` and the warning is raised;
+33. an observer transaction that starts before a publication commits and
+    reads its event afterwards → `observed_at` is not below the event's
+    `recorded_at`;
+34. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
