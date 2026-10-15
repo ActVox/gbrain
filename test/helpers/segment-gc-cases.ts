@@ -151,7 +151,7 @@ export function defineSegmentGcCases(opts: { getEngine: () => BrainEngine; concu
     expect(left).toEqual([{ id: held.stagingId, state: 'expired' }]);
   });
 
-  test('a closed manifest row a retained version references survives; unreferenced closed rows and retired chunks go', async () => {
+  test('a closed manifest row a retained version references survives; unreferenced closed rows go, and the flips already deleted the retired chunks', async () => {
     const engine = opts.getEngine();
     const sourceId = await freshSource(engine);
     const v1 = [segmentText('# One\nfirst\n'), segmentText('# Two\nsecond\n')];
@@ -167,10 +167,13 @@ export function defineSegmentGcCases(opts: { getEngine: () => BrainEngine; concu
     await engine.executeRaw('UPDATE page_body_manifest SET seq = 1 WHERE staging_id = $1::uuid', [s3.stagingId]);
     await engine.flipBodyGeneration(flipInput(page.pageId, 2, s3.stagingId, v3, { closeOccurrences: s2.occurrences, retireChunkOccurrences: s2.occurrences }));
     await ageTexts(engine, sourceId);
+    const chunkOccurrences = async () => (await engine.executeRaw<{ occurrence_id: number }>(
+      'SELECT DISTINCT occurrence_id::int AS occurrence_id FROM content_chunks WHERE page_id = $1 ORDER BY 1', [page.pageId])).map(r => r.occurrence_id);
+    expect(await chunkOccurrences()).toEqual([page.occurrences[0]!, s3.occurrences[0]!]);
 
     const first = await engine.sweepSegments({ pageId: page.pageId, graceMs: 0 });
     expect(first.manifestRowsDeleted).toBe(1);
-    expect(first.retiredChunksDeleted).toBe(2);
+    expect(first.retiredChunksDeleted).toBe(0);
     expect(first.textsDeleted).toBe(1);
     expect(await textExists(engine, sourceId, v2[0]!)).toBe(false);
     expect((await engine.readManifest(page.pageId, { generation: 1 })).map(r => r.occurrenceId)).toEqual(page.occurrences);

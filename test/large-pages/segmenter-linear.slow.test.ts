@@ -8,11 +8,16 @@
  * 2. Fails when: doubling the input more than 2.5x the CPU time (linear is
  *    2x, quadratic 4x), for prose, short lines, one newline-free line, a
  *    giant fence, an unterminated protected region and key-dense text.
- * 3. Forced probe: the same ratio check run on an append path that
- *    resegments the whole prefix on each append (the quadratic variant)
- *    exceeds the bound, so the check can tell the two apart.
- * 4. After one warm-up run, each size takes its best of five interleaved runs
- *    in thread CPU time, each on a freshly collected heap (cpuScalingRatio).
+ * 3. Forced probes: the same ratio check run on a cut search that rescans
+ *    everything pushed so far, and on an append path that resegments the whole
+ *    prefix on each append (the quadratic variants), exceeds the bound, so the
+ *    check can tell the two apart.
+ * 4. After one warm-up run of each size, the ratio is the median of three
+ *    rounds, each the best of three runs per size in thread CPU time
+ *    (cpuScalingRatio).
+ * 5. Measured (8 runs, 4 in parallel on a 4-core machine): every shape and the
+ *    resuming append 1.84-2.18x; the probes, a cut search that rescans the
+ *    pushed input 2.85-3.04x and whole-page resegmenting per append 3.52-3.77x.
  */
 import { describe, expect, test } from 'bun:test';
 import { initialEntryState } from '../../src/core/page-body/entry-state.ts';
@@ -43,6 +48,22 @@ function segmentStreaming(body: string): number {
   return n + seg.finish().length;
 }
 
+/**
+ * The quadratic cut search: before each 4 KiB push it searches everything pushed so far for the last heading cut
+ * candidate, as a cut decision that rescans the open input instead of carrying its scan state would.
+ */
+function segmentRescanningCuts(body: string): number {
+  const seg = new Segmenter(entry(), segmentOptions('trusted'));
+  let n = 0;
+  let candidates = 0;
+  for (let i = 0; i < body.length; i += 4 * 1024) {
+    const pushed = body.slice(0, i);
+    for (const cut = /\n## /g; cut.exec(pushed);) candidates++;
+    n += seg.push(body.slice(i, i + 4 * 1024)).length;
+  }
+  return n + seg.finish().length + (candidates & 0);
+}
+
 describe('the segmenter scales linearly', () => {
   const shapes: Array<[string, (bytes: number) => string, number]> = [
     ['mixed page', prefix, 2 * MB],
@@ -59,6 +80,13 @@ describe('the segmenter scales linearly', () => {
       expect(r).toBeLessThan(BOUND);
     }, 120_000);
   }
+
+  test('forced probe: a cut search that rescans the pushed input exceeds the bound', () => {
+    const giantFence = shapes.find(([name]) => name === 'giant fence')!;
+    const r = ratio(giantFence[1], giantFence[2], segmentRescanningCuts);
+    console.log(`[segmenter-linear] giant fence, rescanning cut search (quadratic probe): ${r.toFixed(2)}x`);
+    expect(r).toBeGreaterThan(BOUND);
+  }, 120_000);
 });
 
 const STEP = 64 * 1024;

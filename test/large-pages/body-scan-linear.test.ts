@@ -2,7 +2,7 @@
  * Wave B (spec 3.1): pass 1 stays linear in the file size.
  *
  * Protects: the streamed body scan does O(bytes) work: CPU time at 2n bytes is
- * under 2.5x the time at n bytes (n = 4 MiB, best of five interleaved runs) on a page dense with every state the scan
+ * under 2.5x the time at n bytes (n = 4 MiB, median of three best-of-three ratios) on a page dense with every state the scan
  * carries (quoted sentinels inside fences, `---` lines awaiting a Timeline
  * H2, bare-section headings that fail their lookahead, CRLF, astral text).
  * Fails when: a step re-reads buffered input per line or per chunk (a
@@ -11,6 +11,8 @@
  * Why existing coverage misses it: split-body-linear covers the whole-string
  * splitBody, not the streaming scanner.
  * Seams: none; the quadratic variant wraps the public push API.
+ * Measured (12 runs, 4 in parallel on a 4-core machine, cpuScalingRatio): the
+ * scan 1.94-2.04x, the prefix-re-reading probe 3.30-3.65x.
  */
 import { describe, expect, test } from 'bun:test';
 import { BodyScanner } from '../../src/core/page-body/body-scan.ts';
@@ -48,15 +50,19 @@ function quadraticScan(bytes: Uint8Array): void {
 function ratio(run: (bytes: Uint8Array) => void, n: number, runs: number): number {
   const small = page(n);
   const large = page(2 * n);
-  return cpuScalingRatio(() => run(small), () => run(large), runs);
+  return cpuScalingRatio(() => run(small), () => run(large), { runs });
 }
 
 describe('body scan cost', () => {
   test(`CPU time at 2n stays under ${RATIO_LIMIT}x the time at n`, () => {
-    expect(ratio(scan, 4 * MB, 5)).toBeLessThan(RATIO_LIMIT);
+    const r = ratio(scan, 4 * MB, 3);
+    console.log(`[body-scan-linear] scan: ${r.toFixed(2)}x`);
+    expect(r).toBeLessThan(RATIO_LIMIT);
   }, 60_000);
 
   test('forced probe: the same ratio fails a scan that re-reads its buffered prefix', () => {
-    expect(ratio(quadraticScan, MB, 3)).toBeGreaterThan(RATIO_LIMIT);
+    const r = ratio(quadraticScan, MB, 3);
+    console.log(`[body-scan-linear] prefix-re-reading scan (quadratic probe): ${r.toFixed(2)}x`);
+    expect(r).toBeGreaterThan(RATIO_LIMIT);
   }, 120_000);
 });

@@ -24,6 +24,8 @@ import { readPageBodyPolicy, SEGMENTED_DEMOTE_AT_OR_BELOW_BYTES, SEGMENTED_PROMO
 import { abortSegmentedStaging, stageSegmentedImport } from '../../src/core/persistence/segmented-apply.ts';
 import { conversationBody, conversationPage } from '../helpers/conversation-page.ts';
 import { fakeEmbedPage, reconstructedPage, segmentedPageRow, visibleChunks } from '../helpers/segmented-page-checks.ts';
+import { embeddingInputHash } from '../../src/core/embedding-input-hash.ts';
+import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page-state/projections.ts';
 
 let engine: PGLiteEngine;
 let dir: string;
@@ -96,6 +98,64 @@ describe('string path: create, no-op, append', () => {
     const keptSet = new Set(kept);
     expect(chunks.filter(chunk => keptSet.has(Number(chunk.occurrence_id))).every(chunk => chunk.embedded)).toBe(true);
     expect(chunks.filter(chunk => !chunk.embedded).length).toBeLessThanOrEqual(result.chunks);
+  }, 180_000);
+
+  /**
+   * The flip deletes the rows it retires, so vector reuse must read them before it: during preparation, when they are
+   * still live. Every chunk gets its own vector and the recorded input hash reuse admits; after the append, each new tail
+   * chunk whose text was in a retired occurrence carries that chunk's vector, and no row of a retired occurrence is left.
+   */
+  async function embedDistinct(pageId: number): Promise<void> {
+    const [page] = await engine.executeRaw<{ title: string; contextual_retrieval_mode: string | null; corpus_generation: string | null }>(
+      'SELECT title, contextual_retrieval_mode, corpus_generation FROM pages WHERE id=$1', [pageId]);
+    const provenance = embeddingInputContext(await embeddingWriteTarget(engine), page!.title, page!.corpus_generation, []);
+    const tier = page!.contextual_retrieval_mode === 'title' ? 'title' : 'none';
+    const rows = await engine.executeRaw<{ id: number; chunk_text: string; chunk_source: string }>(
+      'SELECT id, chunk_text, chunk_source FROM content_chunks WHERE page_id=$1', [pageId]);
+    for (const row of rows) {
+      await engine.executeRaw(`UPDATE content_chunks SET embedding = (array_fill(0::float4, ARRAY[$3::int - 1]) || ARRAY[$2::float4])::vector,
+          embedding_input_hash = $4, embedded_at = now() WHERE id = $1`,
+        [row.id, 1 + row.id / 1e6, (await embeddingWriteTarget(engine)).column.dimensions,
+          embeddingInputHash(provenance, tier, { chunk_text: row.chunk_text, chunk_source: row.chunk_source })]);
+    }
+  }
+  const vectorsByText = async (pageId: number, occurrences: number[]) => new Map((await engine.executeRaw<{ key: string; embedding: string | null }>(
+    `SELECT chunk_source || '|' || chunk_text AS key, embedding::text AS embedding FROM content_chunks WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[])`,
+    [pageId, occurrences])).map(row => [row.key, row.embedding]));
+
+  async function appendAfterDistinctEmbed(dropTailVectors: boolean) {
+    await importFromContent(engine, 'notes/big', content, { sourceId: 'default', noEmbed: true });
+    const before = await segmentedPageRow(engine, 'notes/big');
+    await embedDistinct(before.id);
+    const liveBefore = (await engine.readManifest(before.id)).map(row => Number(row.occurrenceId));
+    const tail = liveBefore.slice(-2);
+    if (dropTailVectors) await engine.executeRaw('UPDATE content_chunks SET embedding = NULL WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[])', [before.id, tail]);
+    const oldByOccurrence = new Map(await Promise.all(tail.map(async id => [id, await vectorsByText(before.id, [id])] as const)));
+    const appended = `${content.trimEnd()}\n\n${conversationBody(10 * 1024, { seed: 99 })}\n`;
+    expect((await importFromContent(engine, 'notes/big', appended, { sourceId: 'default', noEmbed: true })).status).toBe('imported');
+    const live = (await engine.readManifest(before.id)).map(row => Number(row.occurrenceId));
+    const retired = liveBefore.filter(id => !live.includes(id));
+    const old = new Map(retired.flatMap(id => [...(oldByOccurrence.get(id) ?? new Map())]));
+    const fresh = await vectorsByText(before.id, live.filter(id => !liveBefore.includes(id)));
+    const shared = [...fresh.keys()].filter(key => old.has(key));
+    const left = await engine.executeRaw('SELECT 1 FROM content_chunks WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[])', [before.id, retired]);
+    expect(retired.length).toBeGreaterThan(0);
+    expect(retired.every(id => tail.includes(id))).toBe(true);
+    return { old, fresh, shared, left: left.length };
+  }
+
+  test('a rewritten tail keeps the vectors of its unchanged chunks, read before the flip deletes the rows it retires', async () => {
+    const { old, fresh, shared, left } = await appendAfterDistinctEmbed(false);
+    expect(left).toBe(0);
+    expect(shared.length).toBeGreaterThan(0);
+    for (const key of shared) expect(fresh.get(key)).toBe(old.get(key)!);
+  }, 180_000);
+
+  test('forced probe: with the retired rows\' vectors gone before preparation, no tail chunk gets one', async () => {
+    const { fresh, shared, left } = await appendAfterDistinctEmbed(true);
+    expect(left).toBe(0);
+    expect(shared.length).toBeGreaterThan(0);
+    for (const key of shared) expect(fresh.get(key)).toBeNull();
   }, 180_000);
 
   test('staged rows stay out of the live manifest and the page until the flip', async () => {

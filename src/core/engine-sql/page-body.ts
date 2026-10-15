@@ -276,8 +276,9 @@ export async function flipBodyGeneration(exec: SqlExecutor, input: BodyFlipInput
     const retireDeferred = toRetire > input.retireMaxRows;
     await tx.run(sqlFragment`UPDATE page_body_manifest SET gen_to = ${input.newGeneration}::bigint
       WHERE page_id = ${input.pageId} AND gen_to IS NULL AND staging_id IS NULL AND occurrence_id = ANY(${[...input.closeOccurrences]}::bigint[])`);
-    const retired = retireDeferred || toRetire === 0 ? 0 : (await tx.run(sqlFragment`UPDATE content_chunks c
-      SET retired_generation = ${input.newGeneration}::bigint, body_generation = COALESCE(c.body_generation, 0) WHERE ${retire}`)).affectedRows;
+    // Retired rows are deleted, not marked: GC would delete a marked row at once (retired_generation <= the live generation),
+    // nothing reads one (vector reuse runs during preparation, against live rows), and marking rewrote each row's HNSW entry.
+    const retired = retireDeferred || toRetire === 0 ? 0 : (await tx.run(sqlFragment`DELETE FROM content_chunks c WHERE ${retire}`)).affectedRows;
     await tx.run(sqlFragment`UPDATE page_body_manifest SET staging_id = NULL WHERE page_id = ${input.pageId} AND staging_id = ${input.stagingId}::uuid`);
     const m = metaParams(input.meta);
     const b = input.body;

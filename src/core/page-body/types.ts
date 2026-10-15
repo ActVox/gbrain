@@ -112,17 +112,18 @@ export interface BodyFlipInput {
   stagingId: string;
   /** Live manifest rows closed at newGeneration (retired and shifted occurrences). */
   closeOccurrences: readonly number[];
-  /** Occurrences whose chunk rows retire at newGeneration (retired, not shifted). */
+  /** Occurrences whose chunk rows the flip deletes (retired, not shifted). */
   retireChunkOccurrences: readonly number[];
-  /** Promotion from inline: the page's inline chunk rows (body_generation NULL) retire too. */
+  /** Promotion from inline: the page's inline chunk rows (body_generation NULL) are deleted too. */
   retireInlineChunks?: boolean;
-  /** Retire at most this many chunk rows in the transaction; above it the flip retires none and reports `retireDeferred`. */
+  /** Delete at most this many retired chunk rows in the transaction; above it the flip deletes none and reports `retireDeferred`. */
   retireMaxRows: number;
   body: SegmentedBodyColumns;
   meta: SegmentedPageMeta;
 }
 
 export interface BodyFlipResult {
+  /** Retired chunk rows the flip deleted. */
   retiredChunks: number;
   /** True when retirement exceeded `retireMaxRows`: the caller leaves the projection unsealed and queues the retirement. */
   retireDeferred: boolean;

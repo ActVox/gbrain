@@ -13,21 +13,24 @@ export function cpuMs(fn: () => unknown): number {
 }
 
 /**
- * CPU-time scaling ratio `large / small` for a linearity bound: after one warm-up run of each, `runs` interleaved pairs,
- * each call on a freshly collected heap, and the best of each side. Collecting first keeps the previous call's garbage
- * out of the measured call (thread CPU time counts collection work done on the calling thread), and interleaving keeps
- * a slow stretch of a loaded VM from landing on one side only.
+ * CPU-time scaling ratio `large / small` for a linearity bound: after one warm-up run of each, `rounds` independent
+ * ratios, each the best of `runs` calls at the large size over the best of `runs` at the small size, and their median.
+ * A collection landing in one call skews one round's best at most, and the median drops that round; collecting before
+ * each call made it worse, because every measured call then regrew the heap (allocation-heavy shapes went from a 2.30x
+ * to a 2.98x worst case in 36 runs).
  */
-export function cpuScalingRatio(small: () => unknown, large: () => unknown, runs = 5): number {
+export function cpuScalingRatio(small: () => unknown, large: () => unknown, opts: { rounds?: number; runs?: number } = {}): number {
+  const rounds = opts.rounds ?? 3;
+  const runs = opts.runs ?? 3;
   small();
   large();
-  let bestSmall = Infinity;
-  let bestLarge = Infinity;
-  for (let k = 0; k < runs; k++) {
-    Bun.gc(true);
-    bestSmall = Math.min(bestSmall, cpuMs(small));
-    Bun.gc(true);
-    bestLarge = Math.min(bestLarge, cpuMs(large));
-  }
-  return bestLarge / bestSmall;
+  const best = (fn: () => unknown) => {
+    let ms = Infinity;
+    for (let k = 0; k < runs; k++) ms = Math.min(ms, cpuMs(fn));
+    return ms;
+  };
+  const ratios: number[] = [];
+  for (let round = 0; round < rounds; round++) ratios.push(best(large) / best(small));
+  ratios.sort((a, b) => a - b);
+  return ratios[Math.floor(rounds / 2)]!;
 }

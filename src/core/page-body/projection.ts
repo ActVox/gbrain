@@ -8,11 +8,11 @@
  * projection job for a page left unsealed (crash, deferred retirement), and by
  * rebuilds.
  *
- * Retirement runs in bounded statements: rows of occurrences outside the live
- * generation, inline rows a promotion deferred, and older duplicates of a live
- * occurrence (a projection that raced a flip) get `retired_generation` = the
- * live generation, so they leave every reader's visibility filter at once and
- * GC deletes them later. Nothing is deleted here.
+ * Retirement runs in bounded statements and deletes, as the flip does: rows of
+ * occurrences outside the live generation, inline rows a promotion deferred,
+ * and older duplicates of a live occurrence (a projection that raced a flip).
+ * GC would delete a marked row at once, and a delete leaves the HNSW index
+ * alone where marking rewrote each row's entry.
  */
 import type { BrainEngine } from '../engine.ts';
 import { isQuarantined } from '../quarantine.ts';
@@ -37,12 +37,11 @@ async function readProjectionPage(engine: Pick<BrainEngine, 'executeRaw'>, ref: 
   return page ?? null;
 }
 
-/** Retire, in bounded batches, chunk rows the live generation does not hold: other occurrences, inline rows, older duplicates. */
+/** Delete, in bounded batches, chunk rows the live generation does not hold: other occurrences, inline rows, older duplicates. */
 async function retireStaleChunks(engine: Pick<BrainEngine, 'executeRaw' | 'kind'>, pageId: number, generation: number, live: readonly number[]): Promise<number> {
   let retired = 0;
   for (;;) {
-    const rows = await engine.executeRaw<{ id: number }>(`UPDATE content_chunks c SET retired_generation=$2,
-        body_generation=COALESCE(c.body_generation, 0)
+    const rows = await engine.executeRaw<{ id: number }>(`DELETE FROM content_chunks c
       WHERE c.id IN (SELECT s.id FROM content_chunks s -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
         WHERE s.page_id=$1 AND s.retired_generation IS NULL
         AND (s.body_generation IS NULL

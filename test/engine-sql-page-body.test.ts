@@ -137,7 +137,7 @@ describe('manifest and flip', () => {
     expect(() => engine.flipBodyGeneration(flipInput(page.pageId, 1, staged.stagingId, t, { newGeneration: 3 }))).toThrow(TypeError);
   });
 
-  test('retirement above retireMaxRows retires none and reports retireDeferred; within the bound it retires them', async () => {
+  test('retirement above retireMaxRows deletes none and reports retireDeferred; within the bound it deletes them', async () => {
     const t = [segmentText('# A\na\n'), segmentText('# B\nb\n'), segmentText('# C\nc\n')];
     const page = await publishSegmentedPage(engine, 'notes/flip-retire-bound', t, { chunkTexts: true });
     const replacement = [segmentText('# A2\na\n'), segmentText('# B2\nb\n'), segmentText('# C2\nc\n')];
@@ -155,11 +155,10 @@ describe('manifest and flip', () => {
       { closeOccurrences: staged.occurrences, retireChunkOccurrences: [...page.occurrences, ...staged.occurrences], retireMaxRows: 6 }));
     expect(retired).toEqual({ retiredChunks: 6, retireDeferred: false });
     const after = await chunkRows(page.pageId);
-    expect(after.filter(r => r.retired_generation === 3).length).toBe(6);
-    expect(after.filter(r => r.retired_generation === null).map(r => r.occurrence_id)).toEqual(staged3.occurrences);
+    expect(after.map(r => [r.occurrence_id, r.retired_generation])).toEqual(staged3.occurrences.map(occurrence => [occurrence, null]));
   });
 
-  test('two preparers at one generation: the loser\'s staged chunk rows retire with the winner\'s flip', async () => {
+  test('two preparers at one generation: the loser\'s staged chunk rows are deleted with the winner\'s flip', async () => {
     const t = [segmentText('# Race\nbase\n')];
     const page = await publishSegmentedPage(engine, 'notes/flip-two-stagings', t, { chunkTexts: true });
     const winner = await stageGeneration(engine, { pageId: page.pageId, slug: 'notes/flip-two-stagings', genFrom: 2, texts: [segmentText('# Race\nwinner\n')], chunkTexts: true });
@@ -168,14 +167,11 @@ describe('manifest and flip', () => {
       { closeOccurrences: page.occurrences, retireChunkOccurrences: page.occurrences }));
     expect(result).toEqual({ retiredChunks: 2, retireDeferred: false });
     const rows = await chunkRows(page.pageId);
-    const byOccurrence = new Map(rows.map(r => [r.occurrence_id, r]));
-    expect(byOccurrence.get(winner.occurrences[0]!)?.retired_generation).toBeNull();
-    expect(byOccurrence.get(loser.occurrences[0]!)?.retired_generation).toBe(2);
-    expect(byOccurrence.get(page.occurrences[0]!)?.retired_generation).toBe(2);
+    expect(rows.map(r => [r.occurrence_id, r.retired_generation])).toEqual([[winner.occurrences[0]!, null]]);
     expect((await engine.readManifest(page.pageId)).map(r => r.occurrenceId)).toEqual(winner.occurrences);
   });
 
-  test('promotion from inline retires the inline chunk rows (body_generation 0) and NULLs the body columns', async () => {
+  test('promotion from inline deletes the inline chunk rows and NULLs the body columns', async () => {
     await engine.putPage('notes/promote-inline', { type: 'note', title: 'Promote', compiled_truth: 'inline body', timeline: '' });
     const [{ id: pageId }] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE slug = 'notes/promote-inline' AND source_id = 'default'");
     await engine.upsertChunks('notes/promote-inline', [{ chunk_index: 0, chunk_text: 'inline body', chunk_source: 'compiled_truth' }]);
@@ -184,7 +180,7 @@ describe('manifest and flip', () => {
     const result = await engine.flipBodyGeneration(flipInput(pageId, 0, staged.stagingId, t, { retireInlineChunks: true }));
     expect(result).toEqual({ retiredChunks: 1, retireDeferred: false });
     const rows = await chunkRows(pageId);
-    expect(rows.map(r => [r.chunk_index, r.body_generation, r.retired_generation])).toEqual([[0, 0, 1], [1, 1, null]]);
+    expect(rows.map(r => [r.chunk_index, r.body_generation, r.retired_generation])).toEqual([[1, 1, null]]);
     const page = await pageRow(pageId);
     expect([page.body_storage, page.compiled_truth, page.timeline, page.body_generation]).toEqual(['segmented', null, null, 1]);
   });

@@ -124,7 +124,10 @@ async function flipRetire(engine: BrainEngine, rows: number, embedded: boolean) 
   const texts = Array.from({ length: Math.ceil(rows / FLIP_CHUNKS_PER_OCCURRENCE) }, (_, i) => segmentText(`## Part ${i}\n\nSegment ${i} of ${slug}.\n`));
   const page = await publishSegmentedPage(engine, slug, texts);
   const samples = Array.from({ length: 64 }, (_, i) => conversationBody(FLIP_CHUNK_BYTES, { seed: 100 + i }));
-  const embedding = embedded ? "('[' || array_to_string(ARRAY(SELECT round(random()::numeric, 4) FROM generate_series(1, 1024) WHERE g >= 0), ',') || ']')::vector" : 'NULL';
+  const [column] = await engine.executeRaw<{ type: string }>(`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute
+    WHERE attrelid = 'content_chunks'::regclass AND attname = 'embedding'`);
+  const dims = Number(/\((\d+)\)/.exec(column?.type ?? '')?.[1] ?? 1024);
+  const embedding = embedded ? `('[' || array_to_string(ARRAY(SELECT round(random()::numeric, 4) FROM generate_series(1, ${dims}) WHERE g >= 0), ',') || ']')::vector` : 'NULL';
   for (let from = 0; from < rows; from += 5000) {
     await engine.executeRaw(`INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, occurrence_id, local_ordinal, raw_byte_start, raw_byte_end, body_generation, embedding, embedded_at)
       SELECT $1, g, ($2::text[])[1 + g % 64], 'compiled_truth', ($3::bigint[])[1 + g / ${FLIP_CHUNKS_PER_OCCURRENCE}], g % ${FLIP_CHUNKS_PER_OCCURRENCE}, 0, ${FLIP_CHUNK_BYTES}, 1,
