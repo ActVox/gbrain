@@ -12,10 +12,7 @@ import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { embeddingsDisabled } from '../../../core/embedding-disabled.ts';
 import { calibrationKey } from '../../../core/facts/supersession-threshold.ts';
-import { FACTS_ARM_COSINE_MIN, RESERVE_COSINE_MIN } from '../../../core/search/fact-relevance.ts';
-
-/** Embedding models whose admission floors an eval measured, keyed `provider:model@dims`. Add a row only with an eval behind it. */
-export const FACT_ADMISSION_FLOOR_EVIDENCE: Readonly<Record<string, string>> = {};
+import { FACT_ADMISSION_FLOOR_EVIDENCE, FACTS_ARM_COSINE_MIN, RESERVE_COSINE_MIN } from '../../../core/search/fact-relevance.ts';
 
 async function runFactAdmissionFloors(ctx: DoctorContext): Promise<Check[]> {
   const engine = connectedEngine(ctx);
