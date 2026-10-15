@@ -1,6 +1,8 @@
 import type { BrainEngine } from '../engine.ts';
 import { opError, OperationError } from '../ops/contract.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
+import { managedPersistenceEnabled } from './ownership.ts';
+import { isConnectorSourceKind } from './connector-identity.ts';
 
 /**
  * #5254: a Postgres page write to a filesystem source with no canonical owner
@@ -96,6 +98,28 @@ export function unboundSourceError(sourceId: string, path: string | null, scope:
     requires_exclusive: false,
   };
   return error;
+}
+
+export type UnboundWriteDecision = { kind: 'claim' } | { kind: 'database_only'; reason: 'connector_database' | 'unbound_source' };
+
+/**
+ * The one rule for a write-through write to a source with a checkout root but
+ * no worktree binding, shared by page writers and fact writers (#6608):
+ * a connector source is database-only by design and never claimed; PGLite
+ * claims the source automatically unless activation listed it database-only
+ * (#6449); otherwise a target with a recorded canonical file, or any
+ * `persistence.unbound_write` other than `database_only`, refuses with
+ * `unboundSourceError`, and the rest is written database-only (`unbound_source`).
+ * `path` names the checkout in the refusal; pass it only for trusted local callers.
+ */
+export async function decideUnboundWrite(engine: BrainEngine,
+  input: { sourceId: string; sourceKind: string | null; fileBacked: boolean; path: string | null }): Promise<UnboundWriteDecision> {
+  if (isConnectorSourceKind(input.sourceKind)) return { kind: 'database_only', reason: 'connector_database' };
+  if (engine.kind === 'pglite' && !(await readDatabaseOnlyActivatedSources(engine)).includes(input.sourceId)) return { kind: 'claim' };
+  if (input.fileBacked || await readUnboundWritePolicy(engine) !== 'database_only') {
+    throw unboundSourceError(input.sourceId, input.path, input.fileBacked ? 'file_backed' : 'database_only_eligible', !await managedPersistenceEnabled(engine));
+  }
+  return { kind: 'database_only', reason: 'unbound_source' };
 }
 
 export function unboundPublicationHint(sourceId: string): string {
