@@ -41,6 +41,7 @@ import { readRowReferences, referencesUnavailableNotice, type RecordGroupView, t
 import type { Notice } from '../agent-output.ts';
 import { readCardIdentity, type CardIdentity } from './entity-card-identity.ts';
 import { factEntitySlugs } from '../mentions/siblings.ts';
+import { boundedPrefixSql, overlaidBoundedRows } from '../page-window/bounded-lead.ts';
 
 const EDGE_CAP = 10;
 const OPEN_THREADS_CAP = 3;
@@ -238,7 +239,7 @@ export async function entityLookupScope(engine: BrainEngine, sourceId: string, r
 
 /**
  * Candidate selection for one name: `hit` with the best page row (its
- * `compiled_truth` included) and up to SUGGESTION_CAP runners-up; `miss` with
+ * bounded, withdrawal-overlaid `compiled_truth` prefix included) and up to SUGGESTION_CAP runners-up; `miss` with
  * keyword near-miss suggestions; `withheld` when every match is a quarantined
  * page `omitQuarantined` leaves out (no suggestion names it).
  */
@@ -291,7 +292,7 @@ export async function selectEntityCandidates(
   let rows: CardPageRow[] = [];
   try {
     rows = await engine.executeRaw<CardPageRow>(
-      `SELECT slug, source_id, title, type, frontmatter, compiled_truth, updated_at,
+      `SELECT slug, source_id, title, type, frontmatter, ${boundedPrefixSql('compiled_truth')} AS compiled_truth, updated_at,
               GREATEST(last_retrieved_at, (SELECT r.last_retrieved_at FROM page_retrievals r WHERE r.page_id = pages.id)) AS last_retrieved_at
          FROM pages
         WHERE deleted_at IS NULL
@@ -316,7 +317,7 @@ export async function selectEntityCandidates(
   if (missing.length) {
     try {
       const extra = await engine.executeRaw<CardPageRow>(
-        `SELECT slug, source_id, title, type, frontmatter, compiled_truth, updated_at,
+        `SELECT slug, source_id, title, type, frontmatter, ${boundedPrefixSql('compiled_truth')} AS compiled_truth, updated_at,
               GREATEST(last_retrieved_at, (SELECT r.last_retrieved_at FROM page_retrievals r WHERE r.page_id = pages.id)) AS last_retrieved_at
            FROM pages
           WHERE deleted_at IS NULL AND source_id = $1 AND slug = ANY($2::text[])${privatePredicate}`,
@@ -351,9 +352,11 @@ export async function selectEntityCandidates(
   }
   if (candidates.length === 0) return { kind: 'miss', suggestions: await nearMissSuggestions(engine, sourceId, trimmed, scope.excludePrivate) };
 
+  // Large pages: the hit carries a bounded, withdrawal-overlaid body prefix (its summary and lead read only that).
+  const [row] = await overlaidBoundedRows(engine, [candidates[0].row]);
   return {
     kind: 'hit',
-    row: candidates[0].row,
+    row,
     runnersUp: candidates.slice(1, 1 + SUGGESTION_CAP).map(c => ({
       slug: c.slug,
       title: c.row.title ?? c.slug,
