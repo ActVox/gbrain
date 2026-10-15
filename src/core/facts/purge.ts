@@ -44,7 +44,7 @@ import { cancelRequestsHoldingStagings, findRequestsCarrying, findRequestsHoldin
 import { withPageTierKept } from '../trust/fence-append.ts';
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
-import { purgeCompletion, verifyFactPurge, type PurgeReceipt, type StoreCount } from './purge-verify.ts';
+import { carriesClaimSql, claimNeedles, purgeCompletion, verifyFactPurge, type PurgeReceipt, type StoreCount } from './purge-verify.ts';
 
 export const PURGE_OPERATION = 'purge_fact';
 const PURGE_TERMINAL_RESERVATION = 64 * 1024;
@@ -114,8 +114,8 @@ export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, al
     'SELECT slug,id AS page_id,knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND id=ANY($2::int[])', [target.source_id, extra]) : [];
   const pages = [...discovered, ...takePages.map(p => ({ ...p, page_id: Number(p.page_id) }))].sort((a, b) => a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
   const [versions] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_versions v JOIN pages p ON p.id=v.page_id
-    WHERE p.source_id=$1 AND (strpos(lower(v.compiled_truth),$2)>0 OR strpos(lower(COALESCE(v.timeline,'')),$2)>0
-      OR (v.body_storage='segmented' AND ${SEGMENTED_VERSION_CARRIES}))`, [target.source_id, target.fact.toLowerCase()]);
+    WHERE p.source_id=$1 AND (${carriesClaimSql('v', 2)}
+      OR (v.body_storage='segmented' AND ${SEGMENTED_VERSION_CARRIES}))`, [target.source_id, ...claimNeedles(target.fact)]);
   const stagings = (await engine.executeRaw<{ id: string }>(`SELECT s.id::text AS id FROM page_body_stagings s
     WHERE s.source_id=$1 AND s.state IN ('open','sealed','prepared') AND (EXISTS (SELECT 1 FROM page_body_manifest m
         JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256 WHERE m.staging_id=s.id AND strpos(lower(convert_from(t.body,'UTF8')),$2)>0)
@@ -199,24 +199,32 @@ async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: Purge
   return out;
 }
 
+const VERSION_REDACTION_BATCH = 5000;
+
 /** Redact the row from every retained snapshot that carries the claim; returns redacted and still-carrying (prose) counts. */
 async function redactPageVersions(tx: BrainEngine, sourceId: string, claim: string, pageIds: number[]):
   Promise<{ redacted: number; prose: Array<{ slug: string; version_id: number }>; segmentedPages: number[]; replaced: Uint8Array[] }> {
-  const needle = claim.toLowerCase();
-  const rows = await tx.executeRaw<{ id: number; slug: string; compiled_truth: string; timeline: string | null }>(`SELECT v.id,p.slug,v.compiled_truth,v.timeline
-    FROM page_versions v JOIN pages p ON p.id=v.page_id
-    WHERE p.source_id=$1 AND v.body_storage='inline' AND (v.page_id=ANY($3::int[]) OR strpos(lower(v.compiled_truth),$2)>0 OR strpos(lower(COALESCE(v.timeline,'')),$2)>0)
-    ORDER BY v.id LIMIT 5000`, [sourceId, needle, pageIds]);
+  const [needle, escaped] = claimNeedles(claim);
   let redacted = 0;
   const prose: Array<{ slug: string; version_id: number }> = [];
-  for (const v of rows) {
-    const compiled = await dropPurgedFenceRows(tx, sourceId, v.compiled_truth, v.slug);
-    const timeline = await dropPurgedFenceRows(tx, sourceId, v.timeline ?? '', v.slug);
-    if (compiled !== v.compiled_truth || timeline !== (v.timeline ?? '')) {
-      await tx.executeRaw('UPDATE page_versions SET compiled_truth=$2,timeline=$3 WHERE id=$1', [v.id, compiled, timeline]);
-      redacted++;
+  for (let after = 0; ;) {
+    const rows = await tx.executeRaw<{ id: number; slug: string; compiled_truth: string; timeline: string | null; metadata: boolean }>(`SELECT v.id,p.slug,v.compiled_truth,v.timeline,
+        (strpos(lower(COALESCE(v.title,'')),$4)>0 OR strpos(lower(COALESCE(v.frontmatter::text,'')),$5)>0) AS metadata
+      FROM page_versions v JOIN pages p ON p.id=v.page_id
+      WHERE p.source_id=$1 AND v.body_storage='inline' AND v.id>$3 AND (v.page_id=ANY($2::int[]) OR ${carriesClaimSql('v', 4)})
+      ORDER BY v.id LIMIT ${VERSION_REDACTION_BATCH}`, [sourceId, pageIds, after, needle, escaped]);
+    if (!rows.length) break;
+    after = Number(rows[rows.length - 1].id);
+    for (const v of rows) {
+      const compiled = await dropPurgedFenceRows(tx, sourceId, v.compiled_truth, v.slug);
+      const timeline = await dropPurgedFenceRows(tx, sourceId, v.timeline ?? '', v.slug);
+      if (compiled !== v.compiled_truth || timeline !== (v.timeline ?? '')) {
+        await tx.executeRaw('UPDATE page_versions SET compiled_truth=$2,timeline=$3 WHERE id=$1', [v.id, compiled, timeline]);
+        redacted++;
+      }
+      if (v.metadata || compiled.toLowerCase().includes(needle) || timeline.toLowerCase().includes(needle)) prose.push({ slug: v.slug, version_id: Number(v.id) });
     }
-    if (compiled.toLowerCase().includes(needle) || timeline.toLowerCase().includes(needle)) prose.push({ slug: v.slug, version_id: Number(v.id) });
+    if (rows.length < VERSION_REDACTION_BATCH) break;
   }
   // Wave B (spec 11): a segmented version references a generation; that generation is rebuilt with the rows dropped.
   const segmented = await tx.executeRaw<{ id: number; page_id: number; generation: number; slug: string; title: string; type: string;

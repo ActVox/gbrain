@@ -357,6 +357,43 @@ process.stdout.write('{"event":"continued"}\\n');
     expect({ lines, alive, stderr }).toEqual({ lines: [{ event: 'fault', point: 'effect:git:mid', nth: 2, detail: { effectId: '42', requestId: 'r1' } }], alive: true, stderr: '' });
   }, 90_000);
 
+  test('a re-run preparation of the same request does not advance nth: count and run agree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-crash-robot-prep-'));
+    const path = join(dir, 'prep.ts');
+    writeFileSync(path, `import { faultPoint, installFaultHook } from ${JSON.stringify(join(import.meta.dir, '../src/core/persistence/fault-points.ts'))};
+import { robotFaultHook, seamCounter } from ${JSON.stringify(join(import.meta.dir, '../scripts/persistence/crash-robot.ts'))};
+const counted = seamCounter(); const counts: Record<string, number> = {};
+installFaultHook((point, detail) => { if (counted(point, detail)) counts[point] = (counts[point] ?? 0) + 1; });
+for (const requestId of ['a', 'a', 'b', 'b', 'b']) await faultPoint('consumer:preparing', { requestId });
+for (const requestId of ['a', 'a']) await faultPoint('publication:after_commit', { requestId });
+process.stdout.write(JSON.stringify({ event: 'counts', counts }) + '\\n');
+installFaultHook(robotFaultHook({ point: 'consumer:preparing', nth: 2 }));
+await faultPoint('consumer:preparing', { requestId: 'a' });
+await faultPoint('consumer:preparing', { requestId: 'a' });
+await faultPoint('consumer:preparing', { requestId: 'b' });
+process.stdout.write('{"event":"continued"}\\n');
+`);
+    const child = Bun.spawn([process.execPath, '--no-env-file', path], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    try {
+      const lines: Record<string, unknown>[] = [];
+      const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let pending = '';
+      const deadline = Date.now() + 60_000;
+      while (lines.length < 2 && Date.now() < deadline) {
+        const chunk = await Promise.race([reader.read(), Bun.sleep(deadline - Date.now()).then(() => null)]);
+        if (!chunk || chunk.done) break;
+        pending += decoder.decode(chunk.value, { stream: true });
+        for (let newline = pending.indexOf('\n'); newline >= 0; newline = pending.indexOf('\n')) {
+          lines.push(JSON.parse(pending.slice(0, newline))); pending = pending.slice(newline + 1);
+        }
+      }
+      reader.releaseLock();
+      expect(lines).toEqual([
+        { event: 'counts', counts: { 'consumer:preparing': 2, 'publication:after_commit': 2 } },
+        { event: 'fault', point: 'consumer:preparing', nth: 2, detail: { requestId: 'b' } },
+      ]);
+    } finally { child.kill('SIGKILL'); await child.exited; rmSync(dir, { recursive: true, force: true }); }
+  }, 90_000);
+
   test('a hook that cannot report its fault emits fault_hook_error and still freezes', async () => {
     const { lines, alive } = await hookChild(`const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
 await faultPoint('effect:git:mid', { requestId: 'r1', signal: cyclic as never });`);
