@@ -446,6 +446,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
   }
   await validateSyncAuthority(engine, cursor.authority, slug);
   assertActive();
+  if (entry?.action === 'import') await faultPoint('sync:after_freeze', { sourceId: cursor.sourceId, slug, path: entry.path });
   return remember(frozenSnapshot, { requestId: randomUUID(), slug, pageId, ...(occupantRebound ? { rebound: true as const } : {}), intent: { kind: !entry ? 'managed_sync_checkpoint' : entry.action === 'import' ? 'managed_sync_import' : 'managed_sync_delete',
     expected_revision: revision, sourcePath: entry?.sourcePath ?? null, path: entry?.path ?? null, rawHash, content, lineEndingOnly,
     ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}),
