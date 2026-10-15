@@ -15,6 +15,7 @@ integrator. All are appends or regenerations; no existing assertion was weakened
 | `scripts/module-size-limits.tsv` | ceilings: `postgres-engine.ts` 3060 -> 3063, `types.ts` 2315 -> 2319, `config.ts` 1979 -> 1980 (notes appended) | façade growth for 2.2 |
 | `test/postgres-unit-arms.txt` | +1 row `test/keyword-timeout-negative-cache-6495.test.ts` | its DATABASE_URL-gated arm runs in a Postgres lane (`check:postgres-lanes`) |
 | `llms-full.txt` | regenerated (`bun run build:llms`; it inlines `docs/guides/troubleshooting.md`) | so `check:regen-all` passes; integrator regenerates once after merging |
+| `.gstack/pregate.json` | +1 `dependencies` row `".wave18b/**": []` | the wave's hand-off notes have no test lane; pregate run with `--policy-from head` (the integrator drops the row with `.wave18b/`) |
 | `test/fixtures/goldens/exports/types.json` | regenerated | `DEGRADED_REASONS`/`DegradedReason`, `SearchOpts.keywordTimeoutCache`, `PostgresEngine` private `keywordTimeouts` |
 | `test/fixtures/goldens/doctor/json-postgres-fresh.json`, `test/fixtures/goldens/doctor/hot-checks-postgres-json.json` | regenerated on Postgres | `keyword_plan.details.negative_cache` (only diff) |
 
