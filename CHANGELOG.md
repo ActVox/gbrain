@@ -26,8 +26,6 @@ identifiers and attribution are available in the pre-removal Git revision
 - **`get_chunks`.** When the list is cut, its last chunk carries `truncated: true` and `next_from_index`. The result is still an array.
 - **Schema.** Migrations add `page_embedding_budget` and `page_extraction_state`.
 
-Supersedes #6585
-
 ## [0.60.241.0] - 2026-10-15
 
 **Timing tests that guard CPU-bound work no longer fail on a busy CI machine (tests only, no behavior change).** Tests that bound how long a parser, scanner or redactor may take used to measure wall-clock time, so a loaded runner could fail them without any regression. On a loaded runner `chunker-spans-linear` read 3.50 against its bound of 3. Under 6 busy loops at nice 10, `relational-plan`'s 50 ms bound failed 4 runs of 5. These tests now measure CPU time on the test's own thread, which counts the work rather than how long the scheduler made it wait. The bounds and correctness asserts are unchanged.
