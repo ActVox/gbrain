@@ -62,6 +62,9 @@ import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
+import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
+import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
+import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -238,6 +241,7 @@ async function saveCursor(engine: BrainEngine, key: string, before: Cursor | nul
 }
 /** Compare-and-swap inside the caller's transaction; a lost swap returns the cursor that won. */
 async function writeCursor(tx: BrainEngine, key: string, before: Cursor | null, next: Cursor, inTx?: (tx: BrainEngine) => Promise<unknown>, synchronous = false): Promise<Cursor> {
+  await assertDrainLease(tx, next.sourceId);
   // #6643: a cursor records the indexes it settles without a commit from its first save by this build on; a cursor saved
   // before (a run that began on an older build) starts recording at the index it had then.
   if (!next.settled) next.settled = before && before.runId === next.runId ? { from: before.settled?.from ?? before.index, ranges: before.settled?.ranges ?? [] } : { from: 0, ranges: [] };
@@ -294,6 +298,7 @@ async function replaceCursor(engine: BrainEngine, key: string, before: CursorHea
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR UPDATE', [next.binding.worktree_id]);
     // #6643: only the old cursor's own open requests and recovery-bearing ones veto the swap, and the caller is told which.
+    await assertDrainLease(tx, next.sourceId);
     const blocker = await oldRunBlocker(tx, next, key);
     if (blocker) { assertActive(); return { wait: blocker }; }
     await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2,$3::text::jsonb)`, [`${OP}-manifest`, next.runId, JSON.stringify(next.entries)]);
@@ -1302,6 +1307,7 @@ async function finishCheckpoint(engine: BrainEngine, key: string, cursor: Cursor
 async function retireCompletedCursor(engine: BrainEngine, key: string, completed: Cursor, assertActive: () => void): Promise<Cursor | null> {
   await engine.transaction(async tx => {
     assertActive();
+    await assertDrainLease(tx, completed.sourceId);
     await tx.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 AND completed_keys=$3::text::jsonb', [OP, key, JSON.stringify([header(completed)])]);
     assertActive();
   });
@@ -1372,7 +1378,22 @@ async function oldRunBlocker(engine: Pick<BrainEngine, 'executeRaw'>, cursor: Pi
   return row ? { ...row, recovery: row.recovery === true, retry_after_ms: 5000 } : null;
 }
 
+/**
+ * One managed pass under the source's drain lease (#6712 PR 1): reentrant inside a drain, a staged catch-up or a CLI
+ * run that holds it; a direct caller (an owner RPC slice, a refresh) takes it for this pass, and a busy or lost lease
+ * returns `sync_drain_lease_held` (resumable). A dry run takes no lease.
+ */
 export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, slice?: { maxPages: number; maxMs: number }): Promise<SyncResult> {
+  if (opts.dryRun || currentDrainLease(opts.sourceId ?? 'default')) return performManagedPass(engine, opts, slice);
+  const sourceId = opts.sourceId ?? 'default';
+  return withDrainLease(engine, sourceId, { holder: opts.drainHolder ?? { kind: slice ? 'owner_slice' : 'cli', id: null } },
+    signal => performManagedPass(engine, signal ? { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, signal]) : signal } : opts, slice))
+    .catch(async error => {
+      if (!(error instanceof LockUnavailableError) || error.lockId !== syncLockId(sourceId)) throw error;
+      return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null), { remote: currentSubmissionAuthority()?.kind === 'remote_generic' });
+    });
+}
+async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: { maxPages: number; maxMs: number }): Promise<SyncResult> {
   const state: HoldRunState = {};
   const synced = await runManagedSync(engine, opts, slice, state);
   if (!state.sourceId || !state.incarnation || synced.status === 'dry_run') return synced;
@@ -1610,6 +1631,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         const [held] = await tx.executeRaw<{ request_id: string | null; same: boolean | null }>(`SELECT completed_keys->0->'pending'->>'requestId' AS request_id,
           completed_keys->0->'pending'->'intent' = $3::text::jsonb AS same FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, JSON.stringify(pending.intent)]);
         if (held?.request_id !== pending.requestId || held.same !== true) throw new CursorMoved();
+        await assertDrainLease(tx, admitting.sourceId);
         assertActive();
         return accepted;
       }), undefined, error => engine.reconnect({ error })).catch(error => cursorMovedAdmission(engine, key, admitting, pending, error));
@@ -1673,7 +1695,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       // A refresh fence, or an admission refused while other requests hold the writer's outstanding cap (#6278: the drain
       // waits for them), is transient admission back-pressure, not a sync failure to record. #6340: neither is a lost
       // database connection or a statement timeout: the cursor and its frozen manifest stay, and the next pass resumes them.
-      if (!['permission_denied', 'worktree_refreshing', 'refresh_recovery_required'].includes(code) && !isWriteCapacityWait(error)
+      if (!['permission_denied', 'worktree_refreshing', 'refresh_recovery_required'].includes(code) && !isWriteCapacityWait(error) && !(error instanceof LockStolenError)
         && !isRetryableConnError(error) && !isStatementTimeoutError(error) && !(code === 'invalid_params' && phase === 'resume' && (await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'code' IS DISTINCT FROM 'invalid_params'", [key])).length > 0)) {
         const [stored] = cursor ? [] : await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]);
         const failedCursor = cursor ?? stored?.completed_keys?.[0];

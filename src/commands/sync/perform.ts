@@ -10,7 +10,7 @@ import {
   currentSourceFilesystemSignal,
   assertSourceFilesystemActive,
 } from '../../core/minions/source-filesystem.ts';
-import { currentJobSignal } from '../../core/minions/submission-authority.ts';
+import { currentJobSignal, currentSubmissionAuthority } from '../../core/minions/submission-authority.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../../core/company-brain/profile.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import type { OperationContext } from '../../core/ops/contract.ts';
@@ -58,35 +58,7 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     if (connector) return connector;
   }
   if (opts.signal?.aborted) return finish(await interruptedBeforeWork());
-  if (managed) {
-    let result = opts.drain
-      ? await (await import('../../core/persistence/sync-drain.ts')).drainManagedSync(engine, opts, true)
-      : await (await import('../../core/persistence/sync-run.ts')).performManagedSync(engine, opts);
-    // #6349: a delta past the cursor bound syncs in stages; a drain takes the next stage from where the last one landed
-    // until it reaches HEAD (each stage freezes its own bounded manifest, and a stop resumes at the stored cursor).
-    const { deadlinePassed } = await import('../../core/persistence/sync-drain.ts');
-    while (opts.drain && result.staged && result.drain?.outcome === 'synced' && !opts.dryRun && !opts.signal?.aborted) {
-      // #6706: a caller deadline ends the catch-up between stages; the stage that landed is kept and the next run takes the next one.
-      if (deadlinePassed(opts.deadlineAtMs)) { result = { ...result, drain: { ...result.drain, outcome: 'resumable', stop_reason: 'deadline' } }; break; }
-      serr(result.staged.slice
-        ? `[sync] sliced catch-up: committed the ${result.staged.slice.phase} slice of ${result.staged.target.slice(0, 12)} through ${result.staged.slice.after ?? '(start)'} (the target exceeds the cursor bound); taking the next slice.`
-        : `[sync] staged catch-up: synced to ${result.staged.target.slice(0, 12)}, short of HEAD ${result.staged.head.slice(0, 12)} (the delta exceeds the cursor bound); taking the next stage.`);
-      const next = await (await import('../../core/persistence/sync-drain.ts')).drainManagedSync(engine, opts, true);
-      const stages = (result.staged.stages ?? 1) + 1, d = result.drain, n = next.drain;
-      result = { ...next, fromCommit: result.fromCommit, added: result.added + next.added, modified: result.modified + next.modified, deleted: result.deleted + next.deleted,
-        renamed: result.renamed + next.renamed, chunksCreated: result.chunksCreated + next.chunksCreated,
-        ...(next.staged ? { staged: { ...next.staged, stages } } : {}),
-        ...(n ? { drain: { ...n, passes: d.passes + n.passes, processed: d.processed + n.processed, written: d.written + n.written, waived: d.waived + n.waived } } : {}) };
-      if (!next.staged) serr(`[sync] staged catch-up reached HEAD after ${stages} stages.`);
-    }
-    if (!opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
-    if (!opts.dryRun && ['synced', 'first_sync', 'up_to_date'].includes(result.status)) await clearSettledFailures(engine, opts.sourceId ?? 'default');
-    if (!opts.dryRun) {
-      const replayed = await replayImportedRemembers(engine, opts.sourceId ?? 'default');
-      if (replayed) result = { ...result, replayedRemembers: replayed };
-    }
-    return result;
-  }
+  if (managed) return performManagedBranch(engine, opts);
   const filesystemRoot = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
   if (filesystemRoot && !hasSourceFilesystemLock(filesystemRoot)) {
     let entered = false;
@@ -125,6 +97,60 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     if (err instanceof LockUnavailableError) {
       throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
     }
+    throw err;
+  }
+}
+
+/**
+ * The managed branch: the drain (or one pass), its staged stages and the post-sync settles, all under the source's drain
+ * lease (#6712 PR 1, persistence/sync-lease.ts). A plain CLI sync follows a live holder within its budget; every other
+ * caller gets `SyncLockBusyError` on a busy lease, as the classic per-source lock does.
+ */
+async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promise<SyncResult> {
+  const sourceId = outer.sourceId ?? 'default';
+  const { withDrainLease } = await import('../../core/persistence/sync-lease.ts');
+  const lockKey = syncLockId(sourceId);
+  const work = async (leaseSignal: AbortSignal | undefined): Promise<SyncResult> => {
+    const opts: SyncOpts = leaseSignal ? { ...outer, signal: outer.signal ? AbortSignal.any([outer.signal, leaseSignal]) : leaseSignal } : outer;
+    let result = opts.drain
+      ? await (await import('../../core/persistence/sync-drain.ts')).drainManagedSync(engine, opts, true)
+      : await (await import('../../core/persistence/sync-run.ts')).performManagedSync(engine, opts);
+    // #6349: a delta past the cursor bound syncs in stages; a drain takes the next stage from where the last one landed
+    // until it reaches HEAD (each stage freezes its own bounded manifest, and a stop resumes at the stored cursor).
+    const { deadlinePassed } = await import('../../core/persistence/sync-drain.ts');
+    while (opts.drain && result.staged && result.drain?.outcome === 'synced' && !opts.dryRun && !opts.signal?.aborted) {
+      // #6706: a caller deadline ends the catch-up between stages; the stage that landed is kept and the next run takes the next one.
+      if (deadlinePassed(opts.deadlineAtMs)) { result = { ...result, drain: { ...result.drain, outcome: 'resumable', stop_reason: 'deadline' } }; break; }
+      serr(result.staged.slice
+        ? `[sync] sliced catch-up: committed the ${result.staged.slice.phase} slice of ${result.staged.target.slice(0, 12)} through ${result.staged.slice.after ?? '(start)'} (the target exceeds the cursor bound); taking the next slice.`
+        : `[sync] staged catch-up: synced to ${result.staged.target.slice(0, 12)}, short of HEAD ${result.staged.head.slice(0, 12)} (the delta exceeds the cursor bound); taking the next stage.`);
+      const next = await (await import('../../core/persistence/sync-drain.ts')).drainManagedSync(engine, opts, true);
+      const stages = (result.staged.stages ?? 1) + 1, d = result.drain, n = next.drain;
+      result = { ...next, fromCommit: result.fromCommit, added: result.added + next.added, modified: result.modified + next.modified, deleted: result.deleted + next.deleted,
+        renamed: result.renamed + next.renamed, chunksCreated: result.chunksCreated + next.chunksCreated,
+        ...(next.staged ? { staged: { ...next.staged, stages } } : {}),
+        ...(n ? { drain: { ...n, passes: d.passes + n.passes, processed: d.processed + n.processed, written: d.written + n.written, waived: d.waived + n.waived } } : {}) };
+      if (!next.staged) serr(`[sync] staged catch-up reached HEAD after ${stages} stages.`);
+    }
+    if (!opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
+    if (!opts.dryRun && ['synced', 'first_sync', 'up_to_date'].includes(result.status)) await clearSettledFailures(engine, opts.sourceId ?? 'default');
+    if (!opts.dryRun) {
+      const replayed = await replayImportedRemembers(engine, opts.sourceId ?? 'default');
+      if (replayed) result = { ...result, replayedRemembers: replayed };
+    }
+    return result;
+  };
+  // A dry run reads and previews only; it never waits for, or keeps out, a drainer.
+  if (outer.dryRun) return work(undefined);
+  try {
+    return await withDrainLease(engine, sourceId, {
+      holder: outer.drainHolder ?? { kind: 'cli', id: null }, remote: currentSubmissionAuthority()?.kind === 'remote_generic',
+      ...(outer.followDrainLease ? { follow: { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs } } : {}),
+      announce: holder => serr(`[sync] source ${sourceId} is being drained by ${holder ? `a ${holder.kind} drainer (pid ${holder.pid ?? '?'} on ${holder.host ?? '?'})` : 'another drainer'}; `
+        + 'following it until it finishes or this run\'s budget ends (one drainer per source; it resumes the same cursor).'),
+    }, work);
+  } catch (err) {
+    if (err instanceof LockUnavailableError && err.lockId === lockKey) throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
     throw err;
   }
 }

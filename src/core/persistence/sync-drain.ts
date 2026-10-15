@@ -41,7 +41,9 @@ export type DrainStopReason = 'deadline' | 'drain_stalled' | 'database_contentio
   /** #6340: the database connection dropped `CONNECTION_STRIKES` times in a row with no page committed between the drops; the cursor stands, the same command resumes it. */
   | 'connection_lost'
   /** #6696 (A7): a cumulative write cap (or the background pause line) refused the next admission after the preflight passed; resumable once capacity returns. */
-  | 'capacity_paused';
+  | 'capacity_paused'
+  /** #6712 PR 1: another drainer holds the source's drain lease (or took it from this run); resumable, the next run follows it. */
+  | 'drain_lease_held';
 /** #6696 (A7): the refusal that paused the drain (`capacity_paused`); `fix` is the host's config raise. */
 export interface DrainCapacityPause { code: string; reason: string | null; detail: string | null; message: string; fix?: Action }
 /** A capacity refusal raised by an admission after the run's preflight (the preflight's own refusal stops the command up front). */
@@ -576,6 +578,7 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
       }
       if (!continues(result)) {
         if (TERMINAL_STATUSES.has(result.status)) return finish(result, 'synced');
+        if (result.leaseHeld) return finish(result, 'resumable', 'drain_lease_held', { retry_after_ms: result.leaseHeld.retry_after_ms });
         // #6278: the breaker's systemic stop is one diagnostic, not a failed page.
         if (result.breaker) return finish(result, 'blocked', 'preparation_systemic');
         if (result.status === 'blocked_by_failures') return finish(result, 'blocked', 'blocked_by_failures');
@@ -901,7 +904,7 @@ const STOP_DOCS: Record<DrainStopReason, CatalogueName> = {
   recovery_required: 'sync_drain_writer_blocked', owner_unavailable: 'sync_drain_writer_blocked', unexpected_file_bytes: 'sync_drain_writer_blocked',
   unexpected_staging_bytes: 'sync_drain_writer_blocked', blocked_by_failures: 'sync_drain_blocked_by_failures',
   preparation_abandoned: 'sync_drain_preparation_abandoned', preparation_systemic: 'sync_drain_preparation_systemic', write_capacity: 'sync_drain_write_capacity',
-  connection_lost: 'sync_drain_connection_lost', capacity_paused: 'sync_drain_capacity_paused',
+  connection_lost: 'sync_drain_connection_lost', capacity_paused: 'sync_drain_capacity_paused', drain_lease_held: 'sync_drain_lease_held',
 };
 
 /** What the agent runs next, or null when the sync is done (DX-A2). */
@@ -918,6 +921,12 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
       why: `The sync paused: ${pause?.message ?? 'a cumulative write cap refused its next admission'} Nothing failed; the cursor and every accepted write are intact. `
         + `${pause?.reason === 'lifetime_ids' ? 'Request ids never free, so ' : ''}${raise ? `the brain host runs ${raise} (reversible)` : 'the brain host raises the cap gbrain doctor --only persistence_capacity --json names'}`
         + `${pause?.reason === 'terminal_bytes' ? ', or receipts compact over time' : ''}; then rerun: ${resumeCommand}`, ...(docs ? { docs } : {}) };
+  }
+  if (outcome === 'resumable' && (d?.stop_reason === 'drain_lease_held' || result.leaseHeld)) {
+    const held = result.leaseHeld;
+    return { command: resumeCommand, safe_to_loop: true, retry_after_ms: held?.retry_after_ms ?? d?.retry_after_ms ?? 0, ...estimate, code: 'sync_drain_lease_held',
+      why: held?.fix.why ?? 'Another drainer holds this source\'s drain lease and resumes the same cursor; rerun after retry_after_ms.',
+      ...(held ? { fix: renderAction({ ...held.fix, argv: resumeCommand.split(' ') }, cliRenderContext()) } : {}), docs: ERROR_CATALOGUE.sync_drain_lease_held.docs };
   }
   if (outcome === 'resumable') {
     const abandoned = d?.stop_reason === 'preparation_abandoned';
