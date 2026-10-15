@@ -119,21 +119,34 @@ export const HASH_EPHEMERAL_FRONTMATTER_KEYS: readonly string[] = [
  * callers usually leave them inside — both now hash identically).
  */
 export function contentHash(page: PageInput): string {
-  const fm: Record<string, unknown> = { ...(page.frontmatter || {}) };
-  for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) delete fm[k];
-  const rawTags = page.tags ?? fm.tags;
-  delete fm.tags;
-  const tags = Array.isArray(rawTags) ? rawTags.map(t => String(t)).sort() : [];
+  const { frontmatter, tags } = contentHashFrontmatterAndTags(page);
   return createHash('sha256')
     .update(JSON.stringify({
       title: page.title,
       type: page.type,
       compiled_truth: page.compiled_truth,
       timeline: page.timeline || '',
-      frontmatter: fm,
+      frontmatter,
       tags,
     }))
     .digest('hex');
+}
+
+/**
+ * The `frontmatter*` and `tags*` members of the content hash envelope: a copy
+ * of the frontmatter without HASH_EPHEMERAL_FRONTMATTER_KEYS and `tags`, and
+ * `page.tags ?? frontmatter.tags` as sorted strings. Shared with the streamed
+ * form (page-body/content-hash-stream.ts) so both hash identical bytes.
+ */
+export function contentHashFrontmatterAndTags(page: Pick<PageInput, 'frontmatter' | 'tags'>): {
+  frontmatter: Record<string, unknown>;
+  tags: string[];
+} {
+  const fm: Record<string, unknown> = { ...(page.frontmatter || {}) };
+  for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) delete fm[k];
+  const rawTags = page.tags ?? fm.tags;
+  delete fm.tags;
+  return { frontmatter: fm, tags: Array.isArray(rawTags) ? rawTags.map(t => String(t)).sort() : [] };
 }
 
 /**
