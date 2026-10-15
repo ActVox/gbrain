@@ -38,6 +38,48 @@ identifiers and attribution are available in the pre-removal Git revision
 - **#6694: recovery by plain sync.** `reviveCheckpoint` (`src/core/persistence/sync-run.ts`) also revives a checkpoint refused as `slug_root_mode_mismatch`, or as an older release's moved-checkpoint `revision_conflict`, when `last_commit` still equals the run's start and the source now admits the run's mode (unpinned, equal, or the repository root). The fresh checkpoint request validates everything again; `--retry-failed` keeps its rediscovery.
 - **Write-only import provenance (#6712 PR 0).** `sync-import-provenance` records gain `disk_sha256` and `disk_blob_oid` (the canonical writeback when sync rewrote the file, else the file's bytes; the blob id is what `git hash-object` returns), `revision` (the page revision of that publish) and `parser` (`parser_version` from `SYNC_IMPORT_PARSER_VERSION`: the import counter, frontmatter recovery and fence screen versions; `markdown_chunker`; `schema_pack`; never the release string, so the fingerprint holds across releases that change no parsing), written in the publish transaction. A no-op waiver (`src/core/persistence/sync-waivers.ts`, batched and per-entry) writes the same record in its waiver transaction, with the page's current revision, so an unchanged page carries one too; the per-entry waiver now also re-reads the file there and admits the entry when its raw hash moved, as the batched waiver already did. Nothing reads the fields yet; older records lack them and are replaced on the page's next import or waiver. Code and image pages still write no import provenance. `gitBlobOid` moved to `src/core/persistence/digest.ts`; the checkpoint publication moved to `applyManagedSyncCheckpoint` in `sync-prepare.ts`.
 - Tests: `test/sync-slug-root-mode-6694.test.ts` (root source in both pins, unpinned, subdirectory in both modes, the mismatch refusal and both of its exits, recovery of an already-failed checkpoint) and `test/sync-import-provenance-disk.test.ts` (plain import and update, canonical writeback, line-ending-only disk bytes, batched and per-entry waivers, a legacy record), each on PGLite and, with `DATABASE_URL`, Postgres (`test/postgres-unit-arms.txt`).
+## [0.60.246.0] - 2026-10-15
+
+**Windows hosts can delete pages again, Chinese, Japanese and Korean searches show their match counts again, and Google sources stop re-reading old mail after an upgrade.**
+
+Four bugs that each broke something people use every day. On Windows, every page delete (and every reconcile) failed with a database error before it did anything, because one query sent the database a value it never used. Every search in Chinese, Japanese or Korean said its keyword match count was unavailable, for a similar reason. A Google connector upgraded past v0.60.176.0 lost track of where it had stopped, so Gmail and contacts were read again from the start, captures could time out, and the old position could even be cleaned up as junk. And `gbrain sources writer movement --wait 5m` refused its own documented flag.
+
+## How to use it
+
+Nothing to turn on. Upgrade, then:
+
+```bash
+gbrain search "혈당"                       # the count line shows a number again
+gbrain sync --source <google-source-id>    # resumes where it left off
+gbrain sources writer movement --source <id> --wait 5m
+```
+
+## What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| Delete a page on Windows | Fails with Postgres error 42P18 | Works |
+| Search in Chinese, Japanese or Korean | "Keyword match count unavailable" | The count |
+| First Google sync after upgrading past v0.60.176.0 | Re-reads mail and contacts from the start | Continues from the saved position |
+| `writer movement --wait 5m` | Fails as an internal error | Judges movement over a 5-minute window |
+| `remember ... --wait 5m` | Internal error, exit 1 | Usage error naming seconds, exit 2 |
+
+## Things to watch
+
+Nothing is rewritten when you upgrade. A Google source keeps both of its saved positions, the pre-v0.60.176.0 one and the one written since, and its next sync picks the right one: the older one, unless the newer one finished its Gmail backfill and reached newer mail. That sync saves the position once under the original key. If an older cleanup already deleted the original position, that source reads its history once more. A malformed write `--wait` now exits 2 instead of 1.
+
+Contributed by @49ps5vwv5g-del (the Windows page-delete fix).
+
+### Itemized changes
+
+- **Windows page deletes (#6659).** The file-claim census behind `delete_page`, the shared-origin check and reconcile now builds its query and parameters per platform (`fileClaimCandidatesQuery` in `src/core/persistence/file-claims.ts`), so every parameter it sends is one the query uses. A new test runs every exported query builder over its platforms and options and checks that each `$n` is referenced (`test/sql-bind-placeholders.test.ts`).
+- **CJK keyword counts.** `buildKeywordMatch` (`src/core/search/keyword-statement.ts`) puts the match and filter parameters first and the ranking parameters last; the count sends only the first group. `keyword_total` on hybrid search and `total` with `match: "keyword"` work for CJK queries on PGLite and Postgres, with type and source filters. A count failure that is not a timeout logs its SQLSTATE once per process.
+- **Google checkpoint key (#6561).** A connector config field added with a default that keeps the old behavior (Google `contactsDir: people`) no longer changes the checkpoint key (`elideWhen` in `src/core/persistence/connector-identity.ts`). The key written by v0.60.176.0 through v0.60.245.0 is kept as an alias: orphan cleanup, `gbrain repair connector-checkpoints` and the doctor check never delete a row under it (the repair preview counts them as `alias_protected`), the sync loader reads retry approvals under it, and writes admitted under it still publish. The loader resumes from the alias row when the original key has none, or when the alias row was written later and holds the newer completed Gmail backfill; every write goes to the original key.
+- **`--wait` on `sources writer movement` (#6625).** The global write-wait parser hands `--wait` back to `sources writer movement` (`WAIT_OWNING_ROUTES` in `src/core/cli-options.ts`), which reads durations like `5m`. A malformed write `--wait` is an `invalid_params` usage error (exit 2) whose message says seconds, no units.
+
+### For contributors
+
+- New tests: `test/file-claims-win32-6659.serial.test.ts`, `test/sql-bind-placeholders.test.ts`; #6561 cases in `test/connector-identity.test.ts` and `test/connector-checkpoint-identity.test.ts` (Postgres arm through `test/e2e/connector-wave3.test.ts`); CJK count cases in `test/search-keyword-paging.test.ts` and `test/e2e/search-keyword-paging-parity.test.ts`; `--wait` cases in `test/cli-options.test.ts`.
 
 ## [0.60.245.0] - 2026-10-15
 
