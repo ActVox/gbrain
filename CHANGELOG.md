@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.244.0] - 2026-10-15
+
+**More timing tests now measure the work instead of how busy the CI machine is, and the write-gate check at the 24 MiB page limit is back to a fair bound (tests only, no behavior change).** On #6738's CI, `write-gate-perf`'s 5 MB adversarial p95 read 1585 ms against its 1500 ms bound. The cause wasn't load. #6733 raised the page import limit (`MAX_FILE_SIZE`) to 24 MiB, and the check sized its test text by that constant, so it had been timing about 5x the bytes against bounds calibrated for 5 MB, with no change to the write-gate code (adversarial p95: 151 ms at ee922300, 777 ms at 44eb0493). The 5 MB check now uses 5 MB of text again, and a new linearity check covers the real 24 MiB limit. Ten awaited-PGLite timing asserts now measure the test thread's CPU time. Two size-ratio checks now alternate their sizes so a slow spell on a shared machine can't skew them. All bounds and correctness asserts are unchanged.
+
+### Itemized changes
+
+- **Ten asserts in six files now measure thread CPU time.** A new `cpuMsAsync(fn)` in `test/helpers/cpu-time.ts` measures thread CPU across an awaited span; PGLite's WASM engine runs on the calling thread. Converted:
+  - `write-gate-perf.slow`: repo docs <50 ms, 5 MB adversarial <1500 ms, 5 MB typical <500 ms
+  - `relational-chain-hub.slow`: <2000 ms
+  - `traverse-walk-cap`: paths <5000 ms, graph <1500 ms
+  - `traverse-paths-row-cap`: <60000 ms
+  - `sync-delete-batch.slow`: hard <5000 ms, soft <5000 ms
+  - `eval-longmemeval.slow`: p50
+
+  On an idle machine, thread CPU matched wall time within a few ms for every one. A busy loop injected inside each PGLite code path (the receipt insert, `runRelationalChain`, `traverseGraph`, `traversePathsDetailed`, `deletePages`, `softDeletePages`, `importFromContent`) failed all ten on master and after the change, for example write-gate adversarial 2379 / 1744 and sync-delete hard 13199 / 12924. Under 6 busy loops at nice 10 (5 runs per side), write-gate and sync-delete failed every run on master and pass every run now. `test/chunkers/code-lua.test.ts` stays on wall clock: it guards tree-sitter's wall-clock timeout (`GBRAIN_CHUNKER_TIMEOUT_MS`), which under load fires after less CPU than the bound, so CPU time would hide that regression.
+- **write-gate's 5 MB check uses 5 MB of text again.** The corpora are pinned at 5,000,000 bytes, and the p95 is back to about 156 ms locally and 253–266 ms on Ubicloud.
+- **New check at the 24 MiB page limit:** `page import limit (MAX_FILE_SIZE) scales linearly from 5 MB`. It alternates 24 MiB and 5 MB samples in one process, on thread CPU, and asserts the p50 ratio stays under 15x (linear is about 5x, quadratic about 25x). It reads 5.0–5.2x locally, 5.1x on Ubicloud and 4.7–5.2x under load (5/5 pass). An injected quadratic term fails (15.3x, 17.7x). An injected linear term passes (5.0x).
+- **`sync-delete-batch.slow` seeds its fixtures once, and the 30 s per-test timeout is unchanged.** Both 10K-page fixtures are inserted in `beforeAll` with one `generate_series` INSERT each, and `ANALYZE` runs after the first 100 rows. On an empty table, `bump_page_generation_fn`'s cached `MAX(generation)` plan is a seq scan, so a single-statement 10K-row seed went quadratic: about 6 s of CPU instead of 0.8 s. Under load each test takes 9–12 s and passes 5/5; before, seeding alone took up to 121 s of wall time.
+- **`chunker-spans-linear.slow` alternates its 2 MB and 4 MB runs.** The PR stress gate read the 4 MB run at 3.8x the 2 MB time on a 2-vCPU runner, because the three 4 MB runs came after the three 2 MB runs and a slow spell covered only the second half. CPU time still goes up when another tenant slows the core. The bound of 3 is unchanged. A simulated slowdown that doubles every run after the third fails on master (4.02) and passes now. A quadratic term still fails on both.
+
 ## [0.60.243.0] - 2026-10-15
 
 **Entity rows now point at the records behind an account.** Every found `entity names` row (and each identity sibling) carries `referenced_by_count` and a `next` to its full card, so an agent that resolved a batch of names knows which ones have pages to read and how to open them. With `entity.record_types` set (off by default), the rows, the full card and `context_pack` also list the referring contracts, amendments or other record types you enroll: newest page date first, each with its page date labeled as a page date, its `status`, the record it amends (with the terms-start date when the link records one) and what it replaces, bounded per page and per call, with continuations that return exactly the rest. The order never claims which record governs. A late or failed read is marked `references_unavailable` with a degraded notice, never shown as an empty list.
