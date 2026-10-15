@@ -132,6 +132,7 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
         ...(n ? { drain: { ...n, passes: d.passes + n.passes, processed: d.processed + n.processed, written: d.written + n.written, waived: d.waived + n.waived } } : {}) };
       if (!next.staged) serr(`[sync] staged catch-up reached HEAD after ${stages} stages.`);
     }
+    await printCursorAdoption(result, sourceId);
     if (!opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
     if (!opts.dryRun && ['synced', 'first_sync', 'up_to_date'].includes(result.status)) await clearSettledFailures(engine, opts.sourceId ?? 'default');
     if (!opts.dryRun) {
@@ -146,13 +147,37 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
     return await withDrainLease(engine, sourceId, {
       holder: outer.drainHolder ?? { kind: 'cli', id: null }, remote: currentSubmissionAuthority()?.kind === 'remote_generic',
       ...(outer.followDrainLease ? { follow: { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs } } : {}),
-      announce: holder => serr(`[sync] source ${sourceId} is being drained by ${holder ? `a ${holder.kind} drainer (pid ${holder.pid ?? '?'} on ${holder.host ?? '?'})` : 'another drainer'}; `
-        + 'following it until it finishes or this run\'s budget ends (one drainer per source; it resumes the same cursor).'),
+      tty: process.stderr.isTTY === true,
+      announce: (holder, phase) => {
+        const who = holder ? `a ${holder.kind} drainer (pid ${holder.pid ?? '?'} on ${holder.host ?? '?'}${holder.version ? `, gbrain ${holder.version}` : ''})` : 'another drainer';
+        const done = holder?.progress ? `${holder.progress.committed} page(s) committed since it started${holder.progress.last_committed_at ? `, last at ${holder.progress.last_committed_at}` : ''}` : 'progress unknown';
+        serr(phase === 'start'
+          ? `[sync] source ${sourceId} is being drained by ${who}; following it until it finishes or this run's budget ends (one drainer per source; it resumes the same cursor). Ctrl-C stops following and leaves it running.`
+          : `[sync] following ${who}: ${done}.`);
+      },
     }, work);
   } catch (err) {
     if (err instanceof LockUnavailableError && err.lockId === lockKey) throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
     throw err;
   }
+}
+
+/**
+ * #6712 PR 1: the one-line notices of a resumed cursor. A run that finished another writer's (or another option set's)
+ * unfinished run names that run's own options, and a kept opt-out names the command that settles what it skipped.
+ */
+async function printCursorAdoption(result: SyncResult, sourceId: string): Promise<void> {
+  const adopted = result.cursorAdopted;
+  if (adopted?.sync_options !== undefined) {
+    const { managedSyncResumeArgs } = await import('../../core/sync-reconcile.ts');
+    serr(`[sync] resumed the unfinished sync run of source ${sourceId}${adopted.writer_changed ? ' that another writer started' : ''}; it finishes under its own frozen options `
+      + `(gbrain sync ${managedSyncResumeArgs({ sourceId, processingOptions: adopted.processing_options, syncOptions: adopted.sync_options }).join(' ')}), and the next run uses this run's.`);
+  }
+  const kept = result.inherited_options ?? [];
+  if (!kept.length) return;
+  const flags = { noEmbed: '--no-embed', noExtract: '--no-extract', noSchemaPack: '--no-schema-pack' } as const;
+  const settle = [...(kept.includes('noEmbed') ? ['gbrain embed --stale'] : []), ...(kept.includes('noExtract') ? ['gbrain extract --stale'] : [])];
+  serr(`[sync] kept the unfinished run's ${kept.map(key => flags[key]).join(' ')} for the pages it imports${settle.length ? `; ${settle.join(' and ')} settle${settle.length === 1 ? 's' : ''} them afterwards` : ''}.`);
 }
 
 /**

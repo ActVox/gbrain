@@ -104,7 +104,8 @@ interface HoldRow { count: number | string | null; stalled: number | string | nu
 export async function liveSyncJob(engine: BrainEngine, sourceId: string): Promise<number | null> {
   const holder = await (await import('./sync-lease.ts')).readDrainHolder(engine, sourceId).catch(() => null);
   if (holder?.kind === 'job' && holder.id && /^\d+$/.test(holder.id)) return Number(holder.id);
-  const [row] = await engine.executeRaw<{ id: number | string }>(`SELECT id FROM minion_jobs WHERE name='sync' AND status='active' AND lock_until > now()
+  // The lease's beacon row (sync-lease.ts) is for older binaries; this build reads the lease holder above.
+  const [row] = await engine.executeRaw<{ id: number | string }>(`SELECT id FROM minion_jobs WHERE name='sync' AND status='active' AND lock_until > now() AND queue <> 'gbrain-drain-lease'
     AND (COALESCE(data->>'sourceId', data->>'source_id')=$1 OR (COALESCE(data->>'sourceId', data->>'source_id') IS NULL
       AND (data->>'repoPath' IS NULL AND $1='default' OR data->>'repoPath'=(SELECT local_path FROM sources WHERE id=$1)))) ORDER BY started_at LIMIT 1`, [sourceId]).catch(() => []);
   return row ? Number(row.id) : null;

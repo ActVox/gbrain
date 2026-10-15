@@ -84,6 +84,22 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
     const { planJobDrain, jobDrainProgress, settleJobDrain } = await import('./sync-job-drain.ts');
     const plan = await planJobDrain(engine, job);
     const progress = jobDrainProgress(job, (await import('../../persistence/sync-drain.ts')).drainEstimate);
+    // #6706: one drainer per source. A tick, retry or delayed continuation that starts while another sync job for the same
+    // source is live completes as a skip (the dispatcher's maxPending does not see delayed rows), like the lock-busy skip below.
+    // A continuation ignores its own parent, which stays active until the worker records the parent's completion.
+    // #6712 PR 1: the drain lease is the guard between processes of this build; this one still catches a job an older
+    // worker runs during a rolling upgrade (it holds no lease). The lease's holder records are not jobs.
+    if (plan.opts.drain && await (await import('../../persistence/managed-mode.ts')).readManagedMode(engine).catch(() => false)) {
+      const [live] = await engine.executeRaw<{ id: number | string }>(`SELECT id FROM minion_jobs WHERE name='sync' AND status='active' AND lock_until > now() AND id <> $1 AND id <> $3
+        AND queue <> 'gbrain-drain-lease' AND (started_at, id) < (SELECT started_at, id FROM minion_jobs WHERE id = $1)
+        AND (COALESCE(data->>'sourceId', data->>'source_id')=$2 OR (COALESCE(data->>'sourceId', data->>'source_id') IS NULL AND ($4::text IS NULL AND $2='default' OR data->>'repoPath'=$4))) LIMIT 1`,
+        [job.id, sourceId ?? 'default', typeof job.data.continuation_of === 'number' ? job.data.continuation_of : -1, repoPath ?? null]).catch(() => []);
+      if (live) {
+        console.error(`[sync] skipped: sync job #${live.id} is already draining ${sourceId ?? 'default'}.`);
+        return { skipped: true, reason: 'sync_in_progress', source_id: sourceId ?? 'default', running_job_id: Number(live.id),
+          next: { command: `gbrain jobs get ${live.id} --json`, safe_to_loop: true, retry_after_ms: 30_000, why: `Sync job #${live.id} is draining source ${sourceId ?? 'default'}; it resumes the cursor, so nothing else needs to run.` } };
+      }
+    }
     let result;
     try {
       result = await performSync(engine, {
@@ -106,7 +122,8 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
       if (err instanceof SyncLockBusyError) {
         // #6712 PR 1 (folds #6706's live-job guard): one drainer per source is the drain lease; a job that finds it held completes as a skip.
         const id = sourceId ?? 'default';
-        const holder = await (await import('../../persistence/sync-lease.ts')).readDrainHolder(engine, id).catch(() => null);
+        const read = await (await import('../../persistence/sync-lease.ts')).readDrainHolder(engine, id).catch(() => null);
+        const holder = read && read.kind !== 'unknown' ? read : null;
         const runningJob = holder?.kind === 'job' && holder.id && /^\d+$/.test(holder.id) ? Number(holder.id) : null;
         console.error(`[sync] skipped: sync already in progress for ${id} (lock ${err.lockKey} held${holder ? ` by a ${holder.kind} drainer` : ''}).`);
         return { skipped: true, reason: 'sync_in_progress', source_id: id, ...(holder ? { holder } : {}),

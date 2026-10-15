@@ -3134,6 +3134,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | Another sync run of the source replaced the managed-sync cursor before this checkpoint published, so the checkpoint had nothing left to publish. | The replacing run (a --retry-failed rediscovery or a newer sync of the source) covers the source from its own discovery; the superseded checkpoint's receipt is a conflict, no managed-sync failure is recorded for it, and the run that awaited it goes on with the winning cursor. A same-run index lag still reports revision_conflict. | Nothing to repair: let the current sync finish. gbrain sync status --source <id> --json shows the cursor that now covers the source. | agent | `repeat the read that failed` | 1 | no |
 
+### sync_drain_lease_held
+
+<a id="sync_drain_lease_held"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Another process holds the source's drain lease and is still committing pages; this run followed it until its own budget ended, or lost the lease mid-pass, and stopped `resumable`. | One managed drainer per source: two drainers on one cursor raced each other's checkpoints. A follower counts the holder's commits as its own progress, takes the lease when the holder releases it, and stops `drain_stalled` (cause `no_progress`) instead when the holder commits nothing for 5 minutes, so a wedged holder never reads as a clean exit. | Rerun next.command after next.retry_after_ms (safe_to_loop), or let the holder finish; Ctrl-C while following leaves the holder running. | provider | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/write-refusals.md#sync_drain_lease_held](../../docs/guides/write-refusals.md#sync_drain_lease_held)
+
 ### sync_in_progress
 
 <a id="sync_in_progress"></a>
