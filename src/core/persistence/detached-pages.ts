@@ -14,7 +14,7 @@
  * that way on a brain without managed persistence (`ghost_pages` covers
  * managed sources on their owner host).
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../spawn.ts';
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
