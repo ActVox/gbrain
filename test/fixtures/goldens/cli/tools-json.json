@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 237891,
-    "stdoutSha256": "1fb381cb00791ea77bfbfa6909afa789d1c7e38aa3c90f4d67b8539d79d64bdd",
+    "stdoutBytes": 237965,
+    "stdoutSha256": "b60d0f2305e16e2337858abac409a0a4d971dac5b014e0afb7ae4726083d774a",
     "toolNames": [
       "remember",
       "entity",
@@ -3522,7 +3522,7 @@
         "scope": "read"
       },
       {
-        "description": "Return a page's indexed content chunks (the units search ranks), in chunk_index order, 50 at a time by default. Use when debugging why search did or did not match a page. A large page has more chunks than one call returns: _meta.pagination carries total_chunks and next_from_index, and a listing_truncated notice names the next call (from_index). Needs read scope. On page_not_found: resolve the slug with resolve_slugs.",
+        "description": "Return a page's indexed content chunks (the units search ranks), in chunk_index order, 50 at a time by default. Use when debugging why search did or did not match a page. A large page has more chunks than one call returns: the last chunk of a cut list carries truncated: true and next_from_index, _meta.pagination carries total_chunks and next_from_index, and a listing_truncated notice names the next call (from_index). Needs read scope. On page_not_found: resolve the slug with resolve_slugs.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,

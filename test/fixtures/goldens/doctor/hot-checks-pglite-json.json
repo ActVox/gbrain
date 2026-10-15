@@ -748,7 +748,7 @@
                 "marker_bytes": 0,
                 "pages": 0,
                 "reason": "embed_skip",
-                "threshold_bytes": 500000
+                "threshold_bytes": 25165824
               },
               "mode": "full",
               "omitted_states": [],
@@ -931,7 +931,7 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1115 column(s) verified against live schema",
+            "message": "1132 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
@@ -1815,8 +1815,15 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No pages exceed 500000 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
+            "message": "No pages exceed 25165824 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
             "name": "oversized_pages",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "No large page is held or capped by embed.max_usd_per_page.",
+            "name": "partial_embedding",
             "status": "ok"
           },
           {
@@ -2777,6 +2784,16 @@
             "elapsed_ms": "<volatile>",
             "message": "No managed atom page or transcript is held after repeated extraction failures.",
             "name": "extract_atoms_held_failed",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "groups": []
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "Every page extraction read all of its input (no head-only, tail-window or size-skip receipts).",
+            "name": "extraction_input_truncated",
             "status": "ok"
           },
           {
@@ -4411,7 +4428,7 @@
                 "marker_bytes": 0,
                 "pages": 0,
                 "reason": "embed_skip",
-                "threshold_bytes": 500000
+                "threshold_bytes": 25165824
               },
               "mode": "full",
               "omitted_states": [],
@@ -4594,7 +4611,7 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1115 column(s) verified against live schema",
+            "message": "1132 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
@@ -5478,8 +5495,15 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No pages exceed 500000 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
+            "message": "No pages exceed 25165824 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
             "name": "oversized_pages",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "No large page is held or capped by embed.max_usd_per_page.",
+            "name": "partial_embedding",
             "status": "ok"
           },
           {
@@ -6440,6 +6464,16 @@
             "elapsed_ms": "<volatile>",
             "message": "No managed atom page or transcript is held after repeated extraction failures.",
             "name": "extract_atoms_held_failed",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "groups": []
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "Every page extraction read all of its input (no head-only, tail-window or size-skip receipts).",
+            "name": "extraction_input_truncated",
             "status": "ok"
           },
           {
