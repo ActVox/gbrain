@@ -178,6 +178,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database](../../docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database)
 
+### backup_too_large
+
+<a id="backup_too_large"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain backup create` refused before writing anything: the PGLite brain's estimated archive size is over the 8 GiB backup-archive cap. | The archive format holds at most 8 GiB of payload and the dump is materialized in memory; refusing up front avoids a long dump that cannot be published. | Take a quiesced physical copy of the data directory instead (stop writers, copy, open the copy in an isolated GBRAIN_HOME, verify with gbrain doctor --json). Run: gbrain doctor --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy](../../docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy)
+
 ### benchmark_duplicate_task_id
 
 <a id="benchmark_duplicate_task_id"></a>
@@ -1794,6 +1804,16 @@ More: [docs/guides/company-brain-ingestion.md#resume-and-verify](../../docs/guid
 |---|---|---|---|---|---|---|
 | Invalid write wait. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### ipc_path_too_long
+
+<a id="ipc_path_too_long"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain's local IPC socket path is longer than the operating system allows, even after the per-user run-dir fallback, so hooks and local commands cannot reach gbrain serve. | A Unix-domain socket path must fit sockaddr_un (107 bytes on Windows afunix, 103 on macOS); on Windows a long PGLite data-dir path already moves to %USERPROFILE%\.gbrain\run, and only a profile path too long for that is reported. | Stop gbrain serve, move the brain to a shorter path (`gbrain config set database_path <shorter path>` after moving the data directory), then restart serve. Run: gbrain doctor --only ipc_socket_path --json | agent | `gbrain doctor --only ipc_socket_path --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#ipc-path-too-long](../../docs/guides/troubleshooting.md#ipc-path-too-long)
+
 ### keyword_candidates_incomplete
 
 <a id="keyword_candidates_incomplete"></a>
@@ -2259,6 +2279,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The payload exceeds the configured size cap. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### pending_verify
+
+<a id="pending_verify"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain bootstrap harness --token` wired the harness on a PGLite brain while no `gbrain serve` answered, so the wiring is not verified yet; nothing failed. | On PGLite the serve holds the single-writer lock, so a stopped serve is the normal state for wiring; the smoke test needs the serve, so it waits for the re-run. | Start `gbrain serve --http` for this brain, then re-run the same `gbrain bootstrap harness` command with the same --token; `gbrain bootstrap harness --status` stays partial until that run passes its smoke test. | host_admin | `gbrain doctor --json` | 13 | no |
+
+More: [docs/guides/bootstrap.md#pending-verify](../../docs/guides/bootstrap.md#pending-verify)
 
 ### pending_writes
 
@@ -3385,6 +3415,16 @@ More: [docs/guides/write-refusals.md#unclosed_ambiguous_tail](../../docs/guides/
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The caller's transport could not be identified. | A capability this request needs is not configured or not reachable on this brain. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. | agent | `gbrain doctor --json` | 1 | no |
+
+### unmanaged_database_path
+
+<a id="unmanaged_database_path"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain backup create` refused before writing anything: the PGLite data directory is not the managed `<root>/.gbrain/brain.pglite` (a flat config home, or a path reached through a symlink). | The archive records the managed root it can restore into and refuses to follow a symlink out of it, so a flat or aliased layout cannot be archived without risking a restore into the wrong place. | Take a quiesced physical copy into a new managed root (`<new-home>/.gbrain/brain.pglite`); the copy is then a normal layout that `gbrain backup create` accepts while it is under the 8 GiB cap. Run: gbrain doctor --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy](../../docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy)
 
 ### unmanaged_path
 

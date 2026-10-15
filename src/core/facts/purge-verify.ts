@@ -15,7 +15,7 @@
  * stored receipt, the effects and a fingerprint probe.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn } from '../spawn.ts';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
