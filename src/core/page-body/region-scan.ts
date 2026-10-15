@@ -27,8 +27,19 @@ import { PROTECTED_PAIRS } from '../remote-body.ts';
 import { PEM_BEGIN_RE, PEM_BODY_MAX_CHARS, PEM_END_RE, pemBackwardStart, pemForwardEnd } from '../secret-scan.ts';
 import { SEGMENT_MAX_BYTES } from './limits.ts';
 
+/**
+ * @internal Work the scans do, for the linearity tests: UTF-16 units the line
+ * split, token search, fence probe, byte counting and inline-code scan read
+ * (`chars`); projection units the PEM scan appends, searches, walks back over,
+ * claims and copies when it trims its buffer (`pem`); and PEM bookkeeping
+ * entries visited (`entries`: pending cuts, claims, fences, read-aheads).
+ * Counts, not time, so a busy machine cannot move them.
+ */
+export const regionScanWork = { chars: 0, pem: 0, entries: 0 };
+
 /** UTF-8 byte length of `s.slice(from, to)` without slicing. */
 export function utf8Len(s: string, from = 0, to = s.length): number {
+  regionScanWork.chars += to - from;
   if (from === 0 && to === s.length && to > 64) return Buffer.byteLength(s, 'utf8');
   let n = 0;
   for (let i = from; i < to; i++) {
@@ -75,6 +86,7 @@ export function newLineSplit(pos: number, at: LinePosition): LineSplit {
 
 /** Split `chunk` into lines and long-line pieces, in order; `final` flushes the last line. */
 export function splitLines(split: LineSplit, chunk: string, final: boolean, emit: (e: SplitEvent) => void): void {
+  regionScanWork.chars += chunk.length;
   let i = 0;
   if (split.cr) {
     if (chunk.length === 0 && !final) return;
@@ -126,6 +138,7 @@ function endLine(split: LineSplit, content: string, term: string, emit: (e: Spli
     emit({ kind: 'piece', text: content, byteStart: split.pos, first: false, term, at: split.at });
     split.pos += utf8Len(content) + termBytes;
   } else {
+    regionScanWork.chars += split.pending.length;
     const text = split.pending + content;
     const bytes = split.pendingBytes + utf8Len(content);
     if (bytes + termBytes > SEGMENT_MAX_BYTES) emit({ kind: 'piece', text, byteStart: split.pos, first: true, term, at: split.at });
@@ -152,6 +165,7 @@ function endLine(split: LineSplit, content: string, term: string, emit: (e: Spli
 export function findTokens(carry: string, text: string, tokens: readonly string[],
   onToken: (token: number, at: number) => boolean | void): string {
   const s = carry + text;
+  regionScanWork.chars += s.length * tokens.length;
   let from = 0;
   const next = tokens.map(t => s.indexOf(t));
   for (;;) {
@@ -202,7 +216,8 @@ function newFenceProbe(): FenceProbe {
 }
 
 function feedFenceProbe(p: FenceProbe, s: string): void {
-  for (let i = 0; i < s.length && p.phase !== 'none'; i++) {
+  let i = 0;
+  for (; i < s.length && p.phase !== 'none'; i++) {
     const c = s.charCodeAt(i);
     if (p.phase === 'indent') {
       if (c === 32 && p.indent < 3) { p.indent++; continue; }
@@ -219,6 +234,7 @@ function feedFenceProbe(p: FenceProbe, s: string): void {
     if (c !== 32 && c !== 9) p.ws = false;
     if (!p.ws && p.sep && (p.tick || p.ch === '~')) p.phase = 'none';
   }
+  regionScanWork.chars += i;
 }
 
 function probeOpens(p: FenceProbe): boolean {
@@ -294,6 +310,7 @@ export function scanRegionLine(track: RegionTrack, trusted: boolean, text: strin
   feedFenceProbe(probe, text);
   const inBlock = trusted && (track.walk.fence !== null || probeOpens(probe));
   let coverFrom = track.open || track.truncatedAt !== null ? 0 : -1;
+  if (track.truncatedAt === null) regionScanWork.chars += text.length;
   if (track.truncatedAt === null && text.includes(MARKER_LEAD)) {
     let spans: Array<[number, number]> | null = null;
     let charAt = 0;
@@ -301,6 +318,7 @@ export function scanRegionLine(track: RegionTrack, trusted: boolean, text: strin
     findTokens('', text, MARKER_TEXTS, (i, at) => {
       byteAt += utf8Len(text, charAt, at);
       charAt = at;
+      if (!spans) regionScanWork.chars += text.length;
       const read = !inBlock && !insideSpan(spans ??= inlineCodeSpans(text), at);
       const step = regionToken(track, i, byteAt, read, out);
       if (step === 'open') coverFrom = at;
@@ -462,11 +480,13 @@ export function initialPemScan(start: PemStart): PemScanState {
  */
 export function feedPemScan(st: PemScanState, text: string, final: boolean, onSpan: (start: number, end: number) => void): void {
   st.buf += text;
+  regionScanWork.pem += text.length;
   st.final = final;
   discoverPem(st, 'begin');
   discoverPem(st, 'end');
   processPem(st, onSpan);
   const resolved = pemResolvedTo(st);
+  regionScanWork.entries += st.cuts.length;
   for (const cut of st.cuts) if (!cut.done && cut.at <= resolved) cut.done = pemCutCheck(st, cut.at);
   trimPem(st);
 }
@@ -487,6 +507,7 @@ export function markPemCut(st: PemScanState, at: number): void {
 
 /** The answer for a marked cut (removing it), or null while unresolved. */
 export function takePemCut(st: PemScanState, at: number): { clean: boolean; start: PemStart } | null {
+  regionScanWork.entries += st.cuts.length;
   const i = st.cuts.findIndex(c => c.at === at && c.done);
   if (i === -1) return null;
   return st.cuts.splice(i, 1)[0]!.done!;
@@ -494,6 +515,7 @@ export function takePemCut(st: PemScanState, at: number): { clean: boolean; star
 
 /** The answer for a marked cut taken before it resolved: never clean; where a resumed scan restarts. */
 export function forcePemCut(st: PemScanState, at: number): { clean: boolean; start: PemStart } {
+  regionScanWork.entries += st.cuts.length;
   const i = st.cuts.findIndex(c => c.at === at);
   const done = i === -1 ? undefined : st.cuts.splice(i, 1)[0]!.done;
   if (done) return done;
@@ -521,6 +543,7 @@ export function pemExposedFrom(st: PemScanState): number {
   for (let i = buf.length, open = true; i > lo; open = false) {
     let j = i;
     while (j > lo && buf.charCodeAt(j - 1) !== 10 && !(buf.charCodeAt(j - 1) === 110 && buf.charCodeAt(j - 2) === 92)) j--;
+    regionScanWork.pem += i - j + 1;
     if (!(open ? PEM_LINE_OPEN : PEM_LINE_DONE).test(buf.slice(j, i))) break;
     start = j;
     i = buf.charCodeAt(j - 1) === 10 ? j - 1 : j - 2;
@@ -537,6 +560,7 @@ function discoverPem(st: PemScanState, kind: 'begin' | 'end'): void {
   const end = st.base + st.buf.length;
   const held = st.final ? end : heldFrom(st.buf, prefix, find.from - st.base) + st.base;
   re.lastIndex = find.from - st.base;
+  regionScanWork.pem += st.buf.length - re.lastIndex;
   for (let m = re.exec(st.buf); m && m.index + st.base < held; m = re.exec(st.buf)) {
     const fence = { begin: kind === 'begin', start: m.index + st.base, end: m.index + st.base + m[0].length };
     queue.push(fence);
@@ -553,7 +577,9 @@ function heldFrom(buf: string, prefix: string, from: number): number {
   let i = len;
   const lim = Math.max(from, len - PEM_FENCE_HOLD_MAX);
   while (i > lim && isFenceClass(buf.charCodeAt(i - 1))) i--;
+  regionScanWork.pem += 2 * (len - i);
   for (let q = buf.indexOf(prefix, i); q !== -1; q = buf.indexOf(prefix, q + 1)) {
+    regionScanWork.pem += len - q;
     FENCE_REST.lastIndex = q + prefix.length;
     if (FENCE_REST.test(buf)) return q;
   }
@@ -605,6 +631,7 @@ function processPem(st: PemScanState, onSpan: (start: number, end: number) => vo
 }
 
 function claimPem(st: PemScanState, start: number, end: number, onSpan: (start: number, end: number) => void): void {
+  regionScanWork.pem += end - start;
   st.claims.push({ start, end });
   onSpan(start, end);
 }
@@ -620,6 +647,7 @@ function pemCutCheck(st: PemScanState, at: number): { clean: boolean; start: Pem
   const lineStart = st.buf.charCodeAt(rel - 1) === 10;
   const start: PemStart = lineStart ? 'line_start' : 'mid_line';
   const spans = (r: { start: number; end: number }) => r.start < at && at < r.end;
+  regionScanWork.entries += st.claims.length + st.fences.length + st.readAhead.length;
   if (st.claims.some(spans) || st.fences.some(spans) || st.readAhead.some(r => r.start < at && r.until > at)) return { clean: false, start };
   if (!lineStart) return { clean: !isPemLineChar(st.buf.charCodeAt(rel - 1)), start };
   return { clean: !(bodyLikeBefore(st.buf, rel - 1) && bodyLikeFrom(st.buf, rel)), start };
@@ -637,6 +665,7 @@ export function pemBodyLike(line: string): boolean {
 function bodyLikeFrom(s: string, from: number): boolean {
   let any = false;
   for (let i = from; i < s.length; i++) {
+    regionScanWork.pem++;
     const c = s.charCodeAt(i);
     if (c === 10 || c === 13) return any;
     if (i - from >= PEM_LINE_PROBE) return true;
@@ -651,6 +680,7 @@ function bodyLikeBefore(s: string, nl: number): boolean {
   if (s.charCodeAt(i - 1) === 13) i--;
   let any = false;
   for (let k = i - 1; k >= 0; k--) {
+    regionScanWork.pem++;
     const c = s.charCodeAt(k);
     if (c === 10) return any;
     if (i - k > PEM_LINE_PROBE) return true;
@@ -665,8 +695,11 @@ function trimPem(st: PemScanState): void {
   const f = headFence(st);
   if (f) keep = Math.min(keep, f.start);
   keep -= 2 * PEM_CONTEXT_CHARS;
+  regionScanWork.entries += st.cuts.length;
   for (const cut of st.cuts) if (!cut.done) keep = Math.min(keep, cut.at - PEM_LINE_PROBE - 2);
   if (st.final || keep - st.base < 4 * PEM_CONTEXT_CHARS) return;
+  regionScanWork.pem += st.buf.length - (keep - st.base);
+  regionScanWork.entries += st.fences.length + st.claims.length + st.readAhead.length;
   st.buf = st.buf.slice(keep - st.base);
   st.base = keep;
   st.fences = st.fences.filter(x => x.end > keep);

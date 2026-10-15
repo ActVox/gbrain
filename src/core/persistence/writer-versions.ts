@@ -10,9 +10,11 @@ export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
  * Writers older than this do not understand segmented page bodies (Wave B): a pre-Wave-B binary reads a segmented
  * page's NULL body columns, and the release that added segmented storage behind the switch purges, forgets and exports
  * without its segment texts. A recent one keeps `pages.segmented_storage` effectively off (`page-body/limits.ts`).
- * Provisional until merge: stamped with the release that turns the switch on, the `since` of its BEHAVIOR_CHANGES row.
+ * A placeholder equal to the branch's VERSION until the merge-slot stamp, which sets it to the release that turns the
+ * switch on (the `since` of its BEHAVIOR_CHANGES row, pinned by test/large-pages/segmented-switch.test.ts). That
+ * release must be above v0.60.252.0, the release that added segmented storage with the switch off.
  */
-export const SEGMENTED_WRITER_FLOOR = '0.60.250.0';
+export const SEGMENTED_WRITER_FLOOR = '0.60.252.0';
 
 /** Numeric comparison on all four components; null when either side is not a version. */
 export function compareWriterVersions(a: string, b: string): number | null {

@@ -81,7 +81,22 @@ const GEAR: Uint32Array = (() => {
   return table;
 })();
 
+/**
+ * @internal Work the segmenter does, for the linearity tests: line and piece
+ * events handled (`lines`); UTF-16 units the per-line passes read (`chars`:
+ * cut-candidate classifiers and gear hash, cut blockers, line state, the
+ * projection, a long piece's fit and remainder); bookkeeping entries visited
+ * (`entries`: held segments, removals re-sorted, projection pieces copied,
+ * PEM spans and region ends scanned at each emit, kept ranges); and units of
+ * each emitted segment's raw and projected text read by its join, byte copy,
+ * hash, projection parts, outline, dates and line count (`emitted`). The line
+ * split, token search and PEM scan count in `regionScanWork`. Counts, not
+ * time, so a busy machine cannot move them.
+ */
+export const segmenterWork = { lines: 0, chars: 0, entries: 0, emitted: 0 };
+
 function gearHit(line: string): boolean {
+  segmenterWork.chars += line.length;
   let h = 0;
   for (let i = 0; i < line.length; i++) {
     const c = line.charCodeAt(i);
@@ -246,8 +261,10 @@ export class Segmenter {
     markPemCut(this.pem, this.proj);
     this.feedPem(false);
     this.release();
+    segmenterWork.entries += this.closed.length;
     let held = this.closed.reduce((n, seg) => n + seg.bytes, 0);
     while (held > HOLD_MAX_BYTES) {
+      segmenterWork.entries += this.closed.length;
       const seg = this.closed.shift()!;
       held -= seg.bytes;
       seg.exit.pem = forcePemCut(this.pem, seg.projEnd);
@@ -258,6 +275,7 @@ export class Segmenter {
   }
 
   private onEvent(e: SplitEvent): void {
+    segmenterWork.lines++;
     if (e.kind === 'line') {
       const bytes = utf8Len(e.text) + e.term.length;
       const kind = this.candidate(e.text, e.at);
@@ -278,6 +296,7 @@ export class Segmenter {
       if (fit.chars > 0) this.piece(text.slice(0, fit.chars), byteStart, e.first && byteStart === e.byteStart, null);
       byteStart += fit.bytes;
       text = text.slice(fit.chars);
+      segmenterWork.chars += text.length;
       this.st.at = 'mid';
       this.close('forced');
     }
@@ -287,6 +306,7 @@ export class Segmenter {
   private candidate(text: string, at: SplitEvent['at']): SegmentCutKind | null {
     const size = this.cur.bytes;
     if (at !== 'lf' || size < SEGMENT_MIN_BYTES) return null;
+    segmenterWork.chars += text.length;
     const st = this.st;
     let kind: SegmentCutKind | null = null;
     let rank = 4;
@@ -301,6 +321,7 @@ export class Segmenter {
   }
 
   private blocked(text: string): boolean {
+    segmenterWork.chars += text.length;
     const st = this.st;
     if (st.trusted.walk.fence || st.trusted.open || st.untrusted.open || st.withdrawal.open) return true;
     if (st.pemMargin.trusted !== null || st.pemMargin.untrusted !== null) return true;
@@ -317,6 +338,7 @@ export class Segmenter {
     scanRegionLine(st.trusted, true, text, byteStart, term, outT);
     scanRegionLine(st.untrusted, false, text, byteStart, term, outU);
     const whole = text + term;
+    segmenterWork.chars += whole.length;
     const markers = whole.includes('gbrain:materialized') ? materializedMarkerSpans(whole) : [];
     this.project(whole, text.length, byteStart, outT, outU, markers);
     const b = text.lastIndexOf(FACTS_FENCE_BEGIN);
@@ -345,6 +367,7 @@ export class Segmenter {
     scanRegionPiece(st.trusted, true, text, byteStart, first, term, outT);
     scanRegionPiece(st.untrusted, false, text, byteStart, first, term, outU);
     const whole = text + (term ?? '');
+    segmenterWork.chars += whole.length;
     this.project(whole, text.length, byteStart, outT, outU, []);
     let last = -1;
     st.withdrawal.carry = findTokens(st.withdrawal.carry, text, [FACTS_FENCE_BEGIN, FACTS_FENCE_END], t => { last = t; });
@@ -377,6 +400,8 @@ export class Segmenter {
       const plain = out.covers.length === 0 && markers.length === 0;
       const keep = plain ? (whole.length ? [[0, whole.length] as [number, number]] : []) : keptRanges(whole, textLen, out, markers);
       const projected = plain ? whole : keep.map(([a, b]) => whole.slice(a, b)).join('');
+      segmenterWork.chars += projected.length;
+      segmenterWork.entries += keep.length;
       const carryKey = isTrusted ? 'carryTrusted' : 'carryUntrusted';
       const marginKey = isTrusted ? 'trusted' : 'untrusted';
       let found = -1;
@@ -411,8 +436,10 @@ export class Segmenter {
       else this.cur.removals.push(r);
     };
     const covers: Cover[] = out.covers.map(c => ({ ...c, to: c.to === textLen && out.coverTerm ? whole.length : c.to }));
+    segmenterWork.entries += covers.length + markers.length * (covers.length + 1);
     for (const [a, b] of markers) if (!covers.some(c => a < c.to && c.from < b)) add({ start: at(a), end: at(b), kind: 'marker', regionStart: at(a) });
     for (const c of covers) add({ start: at(c.from), end: at(c.to), kind: c.pair === 0 ? 'facts' : c.pair === 1 ? 'takes' : 'tail', regionStart: c.start });
+    segmenterWork.entries += this.cur.removals.length;
     this.cur.removals.sort((x, y) => x.start - y.start);
   }
 
@@ -429,7 +456,10 @@ export class Segmenter {
       const mid = (lo + hi) >> 1;
       if (pieces[mid]!.proj + pieces[mid]!.text.length < resolved) lo = mid + 1; else hi = mid;
     }
-    if (lo > 0) this.projPieces = pieces.slice(lo);
+    if (lo > 0) {
+      segmenterWork.entries += pieces.length - lo;
+      this.projPieces = pieces.slice(lo);
+    }
   }
 
   /** Stored byte of projection offset `pos` (`end`: the offset just past a char). */
@@ -467,6 +497,8 @@ export class Segmenter {
   private emit(seg: ClosedSegment, guardFrom: number | null): SegmentOut {
     const raw = seg.parts.join('');
     const bytes = Buffer.from(raw, 'utf8');
+    segmenterWork.emitted += raw.length + 2 * bytes.length;
+    segmenterWork.entries += seg.removals.length + 2 * this.pemSpans.length + this.regionEnds.size;
     const segEnd = seg.byteStart + seg.bytes;
     const tailFrom = seg.tailFrom;
     const regions: StoredRegion[] = [];
@@ -494,6 +526,7 @@ export class Segmenter {
     this.pemSpans = this.pemSpans.filter(s => s.end > segEnd);
     for (const [start, end] of this.regionEnds) if (end <= segEnd) this.regionEnds.delete(start);
     regions.sort((a, b) => a.start - b.start || b.end - a.end);
+    segmenterWork.entries += regions.length;
     const parts = segmentProjectionParts(raw, regions, seg.byteStart);
     let projected = '';
     let projBytes = 0;
@@ -504,6 +537,7 @@ export class Segmenter {
         ...(p.region!.open_end !== undefined ? { open_end: p.region!.open_end } : {}) });
       if (p.kind === 'text' || p.kind === 'pem') { projected += p.text; projBytes += utf8Len(p.text); }
     }
+    segmenterWork.emitted += 2 * projected.length;
     const { outline, dateMin, dateMax } = this.outlineOf(projected);
     seg.exit.outline = { ...this.outline };
     let projLines = 0;
@@ -548,6 +582,7 @@ export class Segmenter {
       }
       skip = false;
       const next = nl === -1 ? text.length : nl + 1;
+      segmenterWork.emitted += next - at;
       byte += utf8Len(text, at, next);
       at = next;
     }
@@ -579,10 +614,14 @@ function fitChars(text: string, room: number): { chars: number; bytes: number } 
     const d = c >= 0xd800 && c <= 0xdbff ? text.charCodeAt(i + 1) : 0;
     const pair = d >= 0xdc00 && d <= 0xdfff;
     const n = c < 0x80 ? 1 : c < 0x800 ? 2 : pair ? 4 : 3;
-    if (bytes + n > room) return { chars: i, bytes };
+    if (bytes + n > room) {
+      segmenterWork.chars += i;
+      return { chars: i, bytes };
+    }
     bytes += n;
     if (pair) i++;
   }
+  segmenterWork.chars += text.length;
   return { chars: text.length, bytes };
 }
 
@@ -639,11 +678,16 @@ export interface ProjectionPart {
  */
 export function segmentProjectionParts(raw: string, regions: readonly StoredRegion[], byteStart: number): ProjectionPart[] {
   const sorted = [...regions].sort((a, b) => a.start - b.start || b.end - a.end);
+  segmenterWork.entries += sorted.length;
   const charAt = byteToChar(raw, sorted.flatMap(r => [r.start, r.end]));
   const parts: ProjectionPart[] = [];
   let cursor = 0;
   const text = (to: number) => {
-    if (to > cursor) parts.push({ kind: 'text', start: cursor, end: to, text: raw.slice(charAt.get(cursor)!, charAt.get(to)!) });
+    if (to > cursor) {
+      const part = raw.slice(charAt.get(cursor)!, charAt.get(to)!);
+      segmenterWork.emitted += part.length;
+      parts.push({ kind: 'text', start: cursor, end: to, text: part });
+    }
   };
   charAt.set(0, 0);
   for (let i = 0; i < sorted.length; i++) {
@@ -662,6 +706,7 @@ export function segmentProjectionParts(raw: string, regions: readonly StoredRegi
       let newlines = 0;
       let k = from;
       for (let j = i + 1; j < sorted.length && sorted[j]!.start < r.end; j++) {
+        segmenterWork.entries++;
         const inner = sorted[j]!;
         newlines += countNewlines(raw, k, charAt.get(inner.start)!);
         k = Math.max(k, charAt.get(inner.end)!);
@@ -681,6 +726,7 @@ export function segmentProjectionParts(raw: string, regions: readonly StoredRegi
 }
 
 function countNewlines(s: string, from: number, to: number): number {
+  segmenterWork.emitted += Math.max(0, to - from);
   let n = 0;
   for (let i = s.indexOf('\n', from); i !== -1 && i < to; i = s.indexOf('\n', i + 1)) n++;
   return n;
@@ -703,6 +749,7 @@ function byteToChar(s: string, offsets: readonly number[]): Map<number, number> 
     }
     out.set(target, i);
   }
+  segmenterWork.emitted += i;
   return out;
 }
 

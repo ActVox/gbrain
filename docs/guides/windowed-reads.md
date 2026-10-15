@@ -68,6 +68,14 @@ window around the hits, with `delivered.fallback_reason: "page_over_inline_bytes
 A truncated search snippet past the first chunk points at
 `get_page <slug> around_chunk_id=<id>`.
 
+On a page stored in segments, an evidence block is read around its hits only:
+each hit's window (its neighbor chunks, or its segment for `section`) comes
+from the same per-segment read projection as a `get_page` window, so it costs
+the windows, not the page. Hits far apart come back as one block of separate
+windows joined by `[…]`. Search keeps up to two hits per region of such a page
+(hits more than 1 MiB apart are separate regions) and at most six per page; an
+inline page keeps two.
+
 ## Privacy
 
 Windows, outlines and snippets for remote callers are slices of the read

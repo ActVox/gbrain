@@ -121,8 +121,21 @@ type Token = FenceToken | null;
 /** stepFenceWalk's state with the opener as its run, so a run longer than the line buffer needs no string. */
 interface RunWalk { open: FenceToken | null; mispaired: boolean }
 
+/**
+ * @internal Work pass 1 does, for the linearity test: bytes the line split
+ * searches and the head readers read (`bytes`); bytes copied to join or keep
+ * a line's carry, a long line's code-point tail or the head (`carry`); lines
+ * read (`lines`); UTF-16 units the per-line passes read (`chars`: decode, NUL
+ * and content endpoints, the line-head classifiers, fence tokens, the region
+ * walks' held text, the long-line readers, the title readers); and region-walk
+ * steps and copies (`walks`). Counts, not time, so a busy machine cannot move
+ * them.
+ */
+export const bodyScanWork = { bytes: 0, carry: 0, lines: 0, chars: 0, walks: 0 };
+
 /** The token stepFenceWalk reads in `s` (a trailing CR is its line ending). */
 function fenceToken(s: string): Token {
+  bodyScanWork.chars += s.length;
   const c0 = s.charCodeAt(0);
   if (c0 !== 32 && c0 !== 96 && c0 !== 126) return null;
   const end = s.charCodeAt(s.length - 1) === 13 ? s.length - 1 : s.length;
@@ -171,6 +184,7 @@ class RegionFenceWalk {
   private subFirst = false;
 
   push(line: Line): void {
+    bodyScanWork.walks++;
     if (!line.contentStart) return;
     const text = this.started ? line.text : line.text.trimStart();
     this.stepHeld(this.walk, false);
@@ -180,6 +194,7 @@ class RegionFenceWalk {
   }
 
   pushSub(sub: SubLine): void {
+    bodyScanWork.walks++;
     this.stepHeld(this.walk, false);
     this.subFirst = !this.started;
     this.sub = sub;
@@ -188,6 +203,7 @@ class RegionFenceWalk {
   }
 
   clone(): RegionFenceWalk {
+    bodyScanWork.walks++;
     const copy = new RegionFenceWalk();
     copy.walk = { ...this.walk };
     copy.started = this.started;
@@ -206,6 +222,7 @@ class RegionFenceWalk {
   /** scanMarkdownCode ends lines at CR too; `last` applies the region's trailing trim. */
   private stepHeld(walk: RunWalk, last: boolean): void {
     if (this.text !== null) {
+      bodyScanWork.chars += this.text.length;
       for (const sub of (last ? this.text.trimEnd() : this.text).split('\r')) stepToken(walk, fenceToken(sub));
     } else if (this.sub) {
       const sub = this.sub;
@@ -290,17 +307,20 @@ class LongLine {
     if (!this.truncated) this.compress(text);
     let last = text.length - 1;
     while (last >= 0 && isWs(text.charCodeAt(last))) last--;
+    bodyScanWork.chars += 2 * (text.length - last);
     if (last >= 0) {
       const line = this.line;
       if (!line.contentStart) {
         let first = 0;
         while (isWs(text.charCodeAt(first))) first++;
+        bodyScanWork.chars += 2 * first;
         line.contentStart = { byte: line.start + before + utf8(text.slice(0, first)), line: line.index };
       }
       this.contentEnd = this.bytes - utf8(text.slice(last + 1));
     }
     if (this.quote && this.quote.phase !== QUOTE_NO) this.stepQuote(text);
     if (this.lastUnit === 13) this.innerCr = true;
+    bodyScanWork.chars += 2 * text.length;
     const cr = text.indexOf('\r');
     if (cr !== -1 && cr < text.length - 1) this.innerCr = true;
     this.lastUnit = text.charCodeAt(text.length - 1);
@@ -337,7 +357,8 @@ class LongLine {
   }
 
   private compress(text: string): void {
-    for (let i = 0; i < text.length && !this.truncated; i++) {
+    let i = 0;
+    for (; i < text.length && !this.truncated; i++) {
       const c = text.charCodeAt(i);
       const kind = isWs(c) ? 1 : c === 42 ? 2 : 0;
       if (kind !== this.runKind) this.endRun();
@@ -359,6 +380,7 @@ class LongLine {
         this.wsLastB = c;
       }
     }
+    bodyScanWork.chars += i;
   }
 
   private endRun(): void {
@@ -382,6 +404,7 @@ class LongLine {
     const s = this.sub;
     for (let i = from; i < to; i++) {
       if (s.phase === SUB_NONE || (s.restBad && s.endBad)) return;
+      bodyScanWork.chars++;
       const c = text.charCodeAt(i);
       if (s.phase === SUB_LEAD) {
         if (isWs(c)) {
@@ -438,6 +461,7 @@ class LongLine {
   private stepQuote(text: string): void {
     const q = this.quote!;
     for (let i = 0; i < text.length; i++) {
+      bodyScanWork.chars++;
       const c = text.charCodeAt(i);
       const word = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95;
       if (q.phase === QUOTE_KEY0) {
@@ -461,6 +485,7 @@ class LongLine {
   }
 
   private quoteValue(value: string): void {
+    bodyScanWork.chars += 2 * value.length;
     const q = this.quote!;
     if (/[\r\u2028\u2029]/.test(value)) {
       q.phase = QUOTE_NO;
@@ -500,6 +525,7 @@ class LongLine {
   }
 
   private scanValue(text: string, from: number): void {
+    bodyScanWork.chars += text.length - from;
     for (let i = from; i < text.length && this.valueKind !== null; i++) {
       const c = text.charCodeAt(i);
       if (this.valueKind === 'h1') {
@@ -522,6 +548,7 @@ const utf8 = (text: string) => Buffer.byteLength(text, 'utf8');
 
 function concatBytes(parts: Uint8Array[], total: number): Uint8Array {
   if (parts.length === 1) return parts[0]!;
+  bodyScanWork.carry += total;
   const out = new Uint8Array(total);
   let at = 0;
   for (const part of parts) { out.set(part, at); at += part.length; }
@@ -656,6 +683,7 @@ export class BodyScanner {
     const all = concatBytes(this.headParts, this.totalBytes);
     this.headParts = [];
     const headBytes = complete ? all : all.subarray(0, FRONTMATTER_HEAD_MAX_BYTES);
+    bodyScanWork.bytes += headBytes.length;
     let text: string;
     try {
       text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(headBytes, { stream: !complete });
@@ -667,6 +695,7 @@ export class BodyScanner {
     const bounded = !complete && (firstContent === -1 || text[firstContent] === '-');
     const prefix = bounded ? text.slice(0, text.lastIndexOf('\n') + 1) : text;
     if (bounded && !/\S/.test(prefix)) return this.unbounded('first_line');
+    bodyScanWork.bytes += 3 * prefix.length;
     const head = parseMarkdownHead(prefix, this.opts);
     this.head = head;
     this.headEnd = utf8(prefix);
@@ -690,11 +719,13 @@ export class BodyScanner {
       this.bodyFileStart = this.headEnd - utf8(head.body);
     } else {
       const literal = Buffer.from(head.body, 'utf8');
+      bodyScanWork.carry += literal.length;
       this.literalBytes = literal.length;
       for (let k = 0; k < literal.length; k++) if (literal[k] === 10) this.literalNewlines++;
       this.bodyFileStart = this.headEnd;
       this.feed(literal);
     }
+    bodyScanWork.bytes += this.bodyFileStart;
     for (let k = 0; k < this.bodyFileStart; k++) if (all[k] === 10) this.fileNewlinesBeforeBody++;
     this.feed(all.subarray(this.bodyFileStart));
   }
@@ -711,12 +742,14 @@ export class BodyScanner {
     while (!this.refusal) {
       const nl = bytes.indexOf(10, from);
       const end = nl === -1 ? bytes.length : nl;
+      bodyScanWork.bytes += end - from + 1;
       if (this.long || this.carryBytes + end - from > this.lineBufferBytes) {
         this.feedLong(bytes.subarray(from, end));
         if (nl === -1 || this.refusal) return;
         this.endLong(true);
       } else if (nl === -1) {
         if (from < end) {
+          bodyScanWork.carry += end - from;
           this.carry.push(bytes.slice(from));
           this.carryBytes += end - from;
         }
@@ -768,6 +801,7 @@ export class BodyScanner {
   private onLine(bytes: Uint8Array, hasNewline: boolean): void {
     const start = this.pos;
     const index = this.lineIndex++;
+    bodyScanWork.lines++;
     this.pos = start + bytes.length + (hasNewline ? 1 : 0);
     let text: string;
     try {
@@ -776,7 +810,9 @@ export class BodyScanner {
       this.refusal = { kind: 'invalid_utf8', offset: this.fileOffset(start) + firstInvalidUtf8(bytes) };
       return;
     }
+    bodyScanWork.chars += 2 * bytes.length + 2 * text.length;
     if (bytes.indexOf(0) !== -1) this.noteNul(start, index);
+    if (this.quoteWatched(start)) bodyScanWork.chars += text.length;
     if (this.quoteWatched(start) && !this.watchQuote(text, hasNewline, quoteAmbiguousFrontmatterLine(text) !== null, text.endsWith('\r'))) return;
     const lead = text.search(/\S/);
     let contentStart: Pos | null = null;
@@ -795,6 +831,7 @@ export class BodyScanner {
   private feedLong(bytes: Uint8Array): void {
     let long = this.long;
     if (!long) {
+      bodyScanWork.lines++;
       const index = this.lineIndex++;
       const line: Line = { index, start: this.pos, text: '', hasNewline: false, contentStart: null, contentEnd: null };
       const e = this.embedded;
@@ -817,6 +854,7 @@ export class BodyScanner {
       at += take;
       if (long.tail.length > 0) slice = concatBytes([long.tail, slice], long.tail.length + slice.length);
       const cut = codePointCut(slice);
+      bodyScanWork.carry += slice.length - cut;
       long.tail = slice.slice(cut);
       this.decodeLong(slice.subarray(0, cut));
     }
@@ -825,6 +863,7 @@ export class BodyScanner {
   private decodeLong(piece: Uint8Array): void {
     if (piece.length === 0) return;
     const long = this.long!;
+    bodyScanWork.chars += 2 * piece.length;
     let text: string;
     try {
       text = this.decoder.decode(piece);
@@ -848,6 +887,7 @@ export class BodyScanner {
 
   private drainLong(long: LongLine): void {
     if (!long.targets) return;
+    bodyScanWork.walks += long.targets.length;
     for (const sub of long.subs) for (const walk of long.targets) walk.pushSub(sub);
     long.subs.length = 0;
   }
@@ -896,6 +936,7 @@ export class BodyScanner {
    */
   private lineHead(line: Line): RegionFenceWalk[] {
     const { text, contentStart } = line;
+    bodyScanWork.chars += 4 * text.length;
     const trimmed = contentStart ? text.trim() : '';
     const targets: RegionFenceWalk[] = [];
 
@@ -912,6 +953,7 @@ export class BodyScanner {
       else if (kind === 'dash' && this.firstContent) this.pendingDash = { candidate: this.newCandidate(line), opener, mispaired };
     }
     for (const candidate of new Set([this.firstQuoted, this.firstOutside])) {
+      bodyScanWork.walks++;
       if (!candidate || candidate.line.index >= line.index) continue;
       if (!candidate.timelineFirst && contentStart) candidate.timelineFirst = contentStart;
       targets.push(candidate.timelineWalk);
@@ -929,7 +971,10 @@ export class BodyScanner {
   /** The rest of the line once it has ended: `fence` is its token for the sentinel walk, `value` its text for the title readers. */
   private lineEnd(line: Line, fence: Token, value: string | null): void {
     if (!this.decided) stepToken(this.sentinelWalk, fence);
-    if (this.titleLine && value !== null) this.bodyTitle = h1TitleLineValue(value);
+    if (this.titleLine && value !== null) {
+      bodyScanWork.chars += value.length;
+      this.bodyTitle = h1TitleLineValue(value);
+    }
     this.stepEmbeddedTitle(line, value);
     if (line.contentStart) {
       this.firstContent ??= line;
@@ -945,6 +990,7 @@ export class BodyScanner {
     }
     const pending = this.bareCandidate;
     if (pending) {
+      bodyScanWork.chars += line.text.length;
       const kind = bareTimelineSectionLine(line.text, pending.bullets);
       if (kind === 'end' || kind === 'other') {
         this.bareCandidate = null;
@@ -967,6 +1013,7 @@ export class BodyScanner {
   /** inferTitleFromEmbeddedFrontmatter, one line at a time. */
   private stepEmbeddedTitle(line: Line, value: string | null): void {
     const e = this.embedded;
+    if (e.state !== 'done') bodyScanWork.chars += line.text.length + (value?.length ?? 0);
     if (e.state === 'start') {
       if (!line.contentStart) return;
       e.state = line.hasNewline && /^---[ \t]*\r?$/.test(line.text.trimStart()) ? 'block' : 'done';

@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.250.0] - 2026-10-15
+## [0.60.252.0] - 2026-10-15
 
 **Groundwork for pages up to 256 MB: segmented page storage and streaming import, behind a switch that stays off (no behavior change).** This release adds the storage that Wave B of large pages builds on. It stores a page over 1 MiB as content-addressed segments with an ordered manifest per body generation. It streams a file into it in bounded memory and re-indexes only the segments that changed. The experimental `pages.segmented_storage` setting defaults to `off`, and nothing a user sees changes while it is off. Pages at or under 1 MiB are stored byte-for-byte as before. The release that turns it on will document it.
 
@@ -20,6 +20,54 @@ identifiers and attribution are available in the pre-removal Git revision
 - **Measured with the switch on** (`scripts/bench-large-pages.ts`): a 100 MiB page imports in 31 s on Postgres and 52 s on PGLite, excluding embedding. Peak memory over a 1 MiB import is +136 MB on Postgres and +227 MB on PGLite. A 10 KB append writes only the tail segments and re-embeds only the new chunks.
 - **PGLite bytea encoding** now uses Buffer's hex codec, which is faster on large values. Stored values are unchanged.
 - **New error codes** for the segment reader, `page_body_segmented` and `body_staging_expired`, are registered in `docs/guides/error-codes.md`.
+
+## [0.60.251.0] - 2026-10-15
+
+**Take grades you recorded only in the database stay put, and a purge no longer leaves its text readable through version history or rows derived from it.** Before this release, publishing a page again erased any take grade that lived only in the database, for example one `grade_takes` wrote on a source without managed persistence. A prose edit, a re-import, a sync or a revert to an older version each did it. Separately, a few read paths still returned text that `purge_fact` or a page purge had removed.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A graded take's page is edited, re-imported, synced or reverted, and its fence has no resolution cells | the grade was erased | the grade stays |
+| A take's claim is edited in place at the same row | the old claim's grade carried over | the old grade is dropped |
+| `get_versions` after `purge_fact` on a page with more than 5,000 versions | the newest versions still held the purged row | every version is redacted |
+| A fact derived from a purged page, filed on another page | still returned by `recall` | hidden, as `purge_fact` already does |
+| `get_page` with `include_deleted`, `fetch` or `get_versions` on a page a purge hid for re-derivation | returned the hidden page | reads as missing |
+| A page or version that states a purged claim only in its title or frontmatter | not in the purge receipt | reported as `out_of_scope: source_prose`, like prose |
+
+### Itemized changes
+
+- `src/core/persistence/canonical-projections.ts`: fence resolutions apply only to rows whose fence carries resolution cells; a claim changed in place at the same row clears the old resolution. The `applyPreservingTakeResolutions` workaround in `prepared-maintenance.ts` is gone, and `facts/relink-publish.ts` applies the page directly.
+- `src/core/facts/purge.ts`: version redaction runs in keyset batches until none is left. `purge.ts` and `purge-verify.ts` match the claim in a page's or version's body, timeline, title and frontmatter.
+- `src/core/persistence/page-purge.ts`: page purge hides rows derived from the page, its facts and its takes, and its receipt carries `purge.derived`.
+- `src/core/ops/get-page-projection.ts`, `src/core/engine-sql/pages.ts`: `get_page`, `fetch` and `get_versions` hide a page awaiting re-derivation.
+- Crash robot (`scripts/persistence/crash-robot.ts`): a preparation that runs again for the same request no longer advances the fault count, so the counting and crashing runs agree on which preparation to crash.
+- Chunker test (`src/core/chunkers/recursive.ts`, `test/chunker-spans-linear.slow.test.ts`): span work is bounded by deterministic counts instead of thread CPU time.
+- Tests: `test/take-resolution-survives-publish.test.ts` and `test/purge-read-surfaces.test.ts` run on PGLite and Postgres; each fails without its fix.
+
+## [0.60.250.0] - 2026-10-15
+
+**Hosted and remote agents can now pull contradiction findings.** Before this release, `find_contradictions` gave any remote agent, and any caller with a source filter or a token trust floor, an empty list with a "temporarily available" note. The reason was that a stored probe report copies both sides' text verbatim, including private takes, and doesn't record which source each side came from. Now those callers get the findings they are allowed to see. gbrain re-reads each side from the brain under the caller's own permissions and returns a finding only when the caller can read both sides now and both still say what the judge saw. Each side comes with its source and trust tier. The bare local `gbrain find-contradictions` works exactly as before.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote agent calls `find_contradictions` | `{contradictions: [], note}` | findings whose two sides it can read, each with `source_id`, `trust_tier` and `origin`, plus `total_visible` |
+| A connection with a token trust floor | refused (`permission_denied`) | findings at or above the floor |
+| `gbrain find-contradictions --source <id>` (or `GBRAIN_SOURCE`) | the availability note | findings whose two sides live in that source (or its federated set) |
+| A finding with a private page, a held take, another source's page, or text edited since the probe on either side | (not returned) | still not returned, and none of its text leaves |
+| A proposal to supersede a confirmed take with a lower-trust side | (not returned) | returned as a manual review, `supersede_withheld: "higher_trust_target"` |
+| Bare `gbrain find-contradictions` | the stored run | unchanged |
+
+### Itemized changes
+
+- `src/core/eval-contradictions/scoped-read.ts` (new): `resolveScopedFindings` re-reads each side by chunk or take id. The source scope, page visibility, live page and source, quarantine, current text projection, safe chunks for remote callers, the takes holder allow-list and the trust floor all apply in SQL. It drops a finding unless both sides are visible and unchanged, rebuilds `resolution_command` from the live rows, and withholds a supersede of a higher-trust take.
+- `src/core/ops/insights.ts`: `find_contradictions` takes `min_trust` and moves from `labeled` to `filtered` (`src/core/eligibility/registry.ts`). Only trusted, unscoped, unfloored local callers get the stored report as written. A remote context with no source scope gets an empty list and a note.
+- Tests: `test/find-contradictions-scoped.test.ts` covers 15 kinds of side, every pair, a seeded fuzz over callers and params, and the real probe path. Each filter has a forced probe that fails without it. The tests that pinned the old note now assert the new contract.
+- Measured in gbrain-evals ([PR 163](https://github.com/garrytan/gbrain-evals/pull/163)): the N6 visibility fuzz now seeds a stored report and finds 0 leaks over 11,104 probes. With the live re-read bypassed it finds 288 content and 192 existence leaks. N2's compatible-pair rule still holds at 4/51; the judge is unchanged.
+- Docs: `docs/contradictions.md` ("Trust posture"), `docs/operations/mcp-surface-runbook.md`, `docs/integrations/qm-harness.md`.
 
 ## [0.60.249.0] - 2026-10-15
 
