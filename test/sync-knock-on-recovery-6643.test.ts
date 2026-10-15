@@ -99,7 +99,7 @@ test('the pre-#6643 producer messages are the only untyped knock-ons; an operato
   expect(isSyncKnockOn({ ...base, intent: null, state: 'cancelled', error_code: 'cancelled', error_message: null, error_detail: knockOnDetail('bulk_group', null) } as never)).toBe(true);
   // #6712: the retired stop renders superseded: a retryable page fault a plain sync resumes, never a human page.
   expect(classifySyncFault({ code: 'knock_on_exhausted' })).toEqual({ class: 'page', safe_actions: ['retry'], needs_human: false });
-  expect(CODES.knock_on_exhausted).toMatchObject({ retired_in: '0.60.250.0' });
+  expect(CODES.knock_on_exhausted).toMatchObject({ retired_in: '0.60.251.0' });
 });
 
 test('the SQL predicate agrees with isSyncKnockOn row by row', async () => {
