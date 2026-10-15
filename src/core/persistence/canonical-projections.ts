@@ -453,19 +453,27 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
       WHERE f.source_id=$1 AND f.source_markdown_slug=$2 AND f.row_num=r.row_num`, [sourceId, slug, fieldRows]) : Promise.resolve([]);
     const checkTakes = () => refuseCollisions(tx, id);
     const dropTakes = () => tx.executeRaw('DELETE FROM takes WHERE page_id=$1 AND row_num=ANY($2::integer[])', [id, takeRowsGone.filter(n => !heldRowNums.has(n))]);
-    // Full canonical versions include resolution fields; a revert restores those
-    // fields from Markdown too, without the ordinary immutable-resolution API.
-    const resolutions = JSON.stringify(projectedTakes.map(take => ({ row_num: take.rowNum, resolved_at: take.resolvedAt ?? null,
+    // A fence row's resolution cells are written as Markdown says, so a revert to a version that carries them restores
+    // them. A row without resolution cells keeps the stored resolution (a database-only grade, e.g. unmanaged
+    // grade_takes) unless its claim changed in place, which drops the old claim's grade. A held take keeps its grade:
+    // the guard decided before any of these statements run (W1 #6783 §6.2).
+    const fenceResolved = projectedTakes.filter(take => take.resolvedAt !== undefined || take.resolvedQuality !== undefined);
+    const claims = JSON.stringify(projectedTakes.map(take => ({ row_num: take.rowNum, claim: take.claim })));
+    const clearChangedResolutions = () => projectedTakes.length ? tx.executeRaw(`UPDATE takes k SET resolved_at=NULL,resolved_quality=NULL,
+        resolved_outcome=NULL,resolved_source=NULL,resolved_value=NULL,resolved_unit=NULL,resolved_by=NULL
+      FROM jsonb_to_recordset($2::text::jsonb) AS n(row_num integer,claim text)
+      WHERE k.page_id=$1 AND k.row_num=n.row_num AND k.resolved_at IS NOT NULL AND k.claim IS DISTINCT FROM n.claim`, [id, claims]) : Promise.resolve([]);
+    const resolutions = JSON.stringify(fenceResolved.map(take => ({ row_num: take.rowNum, resolved_at: take.resolvedAt ?? null,
       resolved_quality: take.resolvedQuality ?? null,
       resolved_outcome: take.resolvedQuality === 'correct' ? true : take.resolvedQuality === 'incorrect' ? false : null,
       resolved_source: take.resolvedEvidence ?? null, resolved_value: take.resolvedValue ?? null, resolved_unit: take.resolvedUnit ?? null,
       resolved_by: take.resolvedBy ?? null })));
-    const resolveTakes = () => tx.executeRaw(`UPDATE takes k SET resolved_at=r.resolved_at::timestamptz,resolved_quality=r.resolved_quality,
+    const resolveTakes = () => fenceResolved.length ? tx.executeRaw(`UPDATE takes k SET resolved_at=r.resolved_at::timestamptz,resolved_quality=r.resolved_quality,
         resolved_outcome=r.resolved_outcome,resolved_source=r.resolved_source,resolved_value=r.resolved_value,resolved_unit=r.resolved_unit,
         resolved_by=r.resolved_by
       FROM jsonb_to_recordset($2::text::jsonb) AS r(row_num integer,resolved_at text,resolved_quality text,resolved_outcome boolean,
         resolved_source text,resolved_value real,resolved_unit text,resolved_by text)
-      WHERE k.page_id=$1 AND k.row_num=r.row_num`, [id, resolutions]);
+      WHERE k.page_id=$1 AND k.row_num=r.row_num`, [id, resolutions]) : Promise.resolve([]);
     // Event-page references have a different canonical origin and remain intact;
     // new rows carry their Markdown detail on insert, pinned rows refresh only from their preimage.
     const timelineRows = [
@@ -497,7 +505,7 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
       const contested = await step('fact_trust', () => guard.finish(tx));
       // W1 #6783 §12 (b): a fence row's field rewrite can lower a more trusted fact (the tier trigger); what was derived from it follows.
       const above = factRows.length ? await factsAboveWriter(tx, sourceId, slug) : [];
-      await step('fact_fields', () => pipelined(tx, [factFields, checkTakes, dropTakes]));
+      await step('fact_fields', () => pipelined(tx, [factFields, checkTakes, dropTakes, clearChangedResolutions]));
       if (above.length) await propagateFactLowering(tx, above);
       if (projectedTakes.length) {
         await step('takes', async () => {

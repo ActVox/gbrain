@@ -166,6 +166,26 @@ function freeze(event: Record<string, unknown>): never {
 }
 
 /**
+ * Seams one request can reach more than once by design: a preparation runs
+ * again after a revision conflict or a group cut, as often as timing
+ * dictates (7 to 10 preparations for the same 8-op schedule). Counting every
+ * pass made the count run and the run role disagree on nth, so a fault could
+ * go unreached. These seams count each request once (its first pass).
+ */
+const PER_REQUEST_SEAMS: ReadonlySet<FaultPoint> = new Set<FaultPoint>(['consumer:preparing']);
+/** True when this pass counts toward the seam's nth: always, except a repeat of the same request at a per-request seam. */
+export function seamCounter(): (point: FaultPoint, detail: FaultDetail) => boolean {
+  const seen = new Set<string>();
+  return (point, detail) => {
+    if (!PER_REQUEST_SEAMS.has(point) || !detail.requestId) return true;
+    const key = `${point}\u0000${detail.requestId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  };
+}
+
+/**
  * The `run` role's hook: freeze at the nth matching seam. A hook that throws
  * would unwind into the code under test, which then keeps running as if no
  * crash were requested (#6584), so the error is reported as a
@@ -174,8 +194,9 @@ function freeze(event: Record<string, unknown>): never {
  */
 export function robotFaultHook(fault: NonNullable<RobotConfig['fault']>): (point: FaultPoint, detail: FaultDetail) => void {
   let seen = 0;
+  const counts = seamCounter();
   return (point, detail) => {
-    if (point !== fault.point || (fault.operation && detail.operation !== fault.operation) || ++seen !== fault.nth) return;
+    if (point !== fault.point || (fault.operation && detail.operation !== fault.operation) || !counts(point, detail) || ++seen !== fault.nth) return;
     try { freeze({ event: 'fault', point, nth: seen, detail }); }
     catch (error) { freeze({ event: 'fault_hook_error', point, nth: seen, message: error instanceof Error ? error.message : String(error) }); }
   };
@@ -345,7 +366,8 @@ export async function robotWorker(role: 'count' | 'run' | 'recover', config: Rob
     world.descriptors = new Map(config.schedule.ops.map(d => [d.id, d]));
     installLockOrderTrace();
     const counts: Record<string, number> = {};
-    if (role === 'count') installFaultHook(point => { counts[point] = (counts[point] ?? 0) + 1; });
+    const counted = seamCounter();
+    if (role === 'count') installFaultHook((point, detail) => { if (counted(point, detail)) counts[point] = (counts[point] ?? 0) + 1; });
     if (role === 'run' && config.fault) installFaultHook(robotFaultHook(config.fault));
     if (role === 'run') {
       let next = 0; let inFlight: string[] = [];
