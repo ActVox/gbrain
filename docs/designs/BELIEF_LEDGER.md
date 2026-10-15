@@ -191,7 +191,8 @@ Page: `page.published` (create or replace; carries `revision_before` and
 carries the version's revision), `page.renamed`, `page.merged` (section 3),
 `page.visibility_changed`, `page.view_changed` (the effective page view
 changed without a publication: a withdrawal and its materialization, section
-10), `page.purged`.
+10), `page.purged`, `page.expired` (retention removal of an old soft-deleted
+page, section 6.5).
 
 Every event carries `state_hash`: a digest of its slug's whole belief set
 (page, facts, takes, links in its stream) after the transition. The coverage
@@ -217,6 +218,8 @@ Trust and gating (section 6): `trust.contested`, `trust.held`,
 
 Purge (section 6.5): `fact.purged` and `page.purged` (above), and
 `derived.hidden` for a key whose row a purge hid through the derivation walk.
+Retention removal of an old soft-deleted page is `page.expired`, never
+`page.purged`.
 
 Identity (section 3): `fact.adopted` and `link.adopted`, when a page is
 created at a slug that page-less subjects already named.
@@ -618,7 +621,12 @@ The contract W1 adds for the ledger:
      from surviving inputs appends new events, and only those become
      readable. Unlike the live `needs_rederive` marker, which re-derivation
      clears (`eligibility/sql.ts:68-69`), nothing un-hides the earlier
-     range. A walk that hits its bound (1,000 rows or eight hops,
+     range. The cutoff is not only an `id`: a **backfill** event (section
+     7.2) for a key with a `derived.hidden` is always appended hidden,
+     whatever its `id`, because old git or version content of a suppressed
+     derivation is the contaminated generation, not a re-derivation. Only a
+     live re-derivation from surviving inputs creates readable events for
+     that key. A walk that hits its bound (1,000 rows or eight hops,
      `derivation-inputs.ts:51-71`) is reported `truncated`, and
      certification of that source's coverage is withheld until a complete
      walk runs.
@@ -689,8 +697,10 @@ The contract W1 adds for the ledger:
 
 `gbrain pages purge-deleted` hard-deletes old tombstones with no purge
 tombstone (`engine-sql/pages.ts:286-318`). It removes body text but not
-claims. It appends `page.purged` with `cause: 'expired_tombstone'` and does
-not redact earlier events, because nothing was asked to be forgotten.
+claims. It appends **`page.expired`**, a separate event type, and does not
+redact earlier events, because nothing was asked to be forgotten. Retention
+removal is never `page.purged`, so it is never mirrored or replayed as a
+purge (section 8).
 
 ## 7. Watermark, backfill and coverage
 
@@ -805,14 +815,21 @@ replay (`:255-273`). W1 adds one, using the ledger's purge events as the
 source: they are text-free (fingerprints, scope, source incarnation, request
 id, recorded time), so reading them leaks nothing.
 
-1. Restore needs the `page.purged` and `fact.purged` events recorded after
-   the archive's creation time. A running PGLite cluster cannot be opened by
-   a second process, so each purge's post-commit effect also appends its
-   purge event, text-free, to a mirror file in the brain's home
-   (`purge-events.jsonl`, 0600), outside the database. Restore reads that
-   mirror under `metadata.original_root`, which restore records, or a copy
-   the operator names. On Postgres, the replay reads the events from the
-   pre-restore database itself.
+1. Restore needs the owner-requested `page.purged` and `fact.purged` events
+   recorded after the archive's creation time (never `page.expired`, which
+   is retention removal). A running PGLite cluster cannot be opened by a
+   second process, so purge keeps a text-free mirror in the brain's home
+   (`purge-events.jsonl`, 0600), outside the database, written **ahead** of
+   the commit: the purge transaction appends and fsyncs an `intent` line
+   (request id, source incarnation, scope, fingerprints, the `purge_epoch`
+   it will commit) before it commits, and a post-commit effect appends a
+   `committed` line. A post-commit write alone would leave a window in which
+   a committed purge is missing from a file that otherwise reads as valid.
+   So the mirror is a superset of committed purges: every committed purge has
+   at least its intent line. Restore reads that mirror under
+   `metadata.original_root`, which restore records, or a copy the operator
+   names. On Postgres, the replay reads the events from the pre-restore
+   database itself, which is complete by construction.
 2. Inside restore's existing transaction, before the root is published, it
    replays them in recorded order for the matching source incarnation: it
    writes the tombstone rows, finds the restored fact, take or page rows by
@@ -827,7 +844,11 @@ id, recorded time), so reading them leaks nothing.
    another subject's text cannot be found without the text (for example, an
    archive older than the claim's own fact, holding only another subject's
    quote of it). A partial outcome raises the same restore warning and doctor
-   finding as an unreadable mirror, naming the purge request ids. No other
+   finding as an unreadable mirror, naming the purge request ids. An intent
+   line with no `committed` line may belong to a purge that rolled back, so
+   it is not replayed automatically: restore reports it as `unverified`,
+   with the same warning, and the doctor finding asks the user whether to
+   run that purge again. No other
    process can reach the restored database before the root is published, so
    the replay needs no page key locks; it bumps `purge_epoch` like any purge.
 3. When no newer purge events can be read, restore still succeeds but
@@ -1111,7 +1132,14 @@ reconstructed state, not counts**, on PGLite and Postgres:
 33. an observer transaction that starts before a publication commits and
     reads its event afterwards → `observed_at` is not below the event's
     `recorded_at`;
-34. N1 unchanged (388/388, 0 stale).
+34. a crash after a purge commits and before its `committed` mirror line,
+    with earlier complete lines in the mirror → restore finds the intent
+    line, reports it `unverified` and raises the warning;
+35. purge, live re-derivation, then backfill of the pre-purge git version
+    of the derived page → the backfilled events stay hidden;
+36. backup, soft delete, retention cleanup (`page.expired`), then restore
+    → no content tombstone written and no history redacted;
+37. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
