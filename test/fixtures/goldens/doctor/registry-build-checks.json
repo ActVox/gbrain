@@ -234,6 +234,10 @@
         "name": "pglite_scratch_probe"
       },
       {
+        "category": "ops",
+        "name": "ipc_socket_path"
+      },
+      {
         "category": "brain",
         "name": "text_projection_readiness"
       },

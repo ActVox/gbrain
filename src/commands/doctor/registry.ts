@@ -40,6 +40,7 @@ import {
   connectionEntry,
   connectionGateEntry,
 } from './checks/db-connection.ts';
+import { ipcSocketPathEntry } from './checks/local-ipc.ts';
 import {
   pgvectorEntry,
   rlsEntry,
@@ -148,6 +149,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   harnessWiringDoctorEntry,
   agentContractEntry,
   pgliteDataDirEntry,
+  ipcSocketPathEntry,
   projectionResidentEntry,
   offlineConnectionEntry,
   dbChecksGateEntry,

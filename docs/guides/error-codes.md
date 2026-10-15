@@ -1786,6 +1786,16 @@ More: [docs/guides/company-brain-ingestion.md#resume-and-verify](../../docs/guid
 |---|---|---|---|---|---|---|
 | Invalid write wait. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### ipc_path_too_long
+
+<a id="ipc_path_too_long"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain's local IPC socket path is longer than the operating system allows, even after the per-user run-dir fallback, so hooks and local commands cannot reach gbrain serve. | A Unix-domain socket path must fit sockaddr_un (107 bytes on Windows afunix, 103 on macOS); on Windows a long PGLite data-dir path already moves to %USERPROFILE%\.gbrain\run, and only a profile path too long for that is reported. | Stop gbrain serve, move the brain to a shorter path (`gbrain config set database_path <shorter path>` after moving the data directory), then restart serve. Run: gbrain doctor --only ipc_socket_path --json | agent | `gbrain doctor --only ipc_socket_path --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#ipc-path-too-long](../../docs/guides/troubleshooting.md#ipc-path-too-long)
+
 ### keyword_candidates_incomplete
 
 <a id="keyword_candidates_incomplete"></a>

@@ -40,6 +40,7 @@ import { makeContextPackIpcHandler } from './context-pack-handler.ts';
 import { logBriefDeliveryFireAndForget, logTurnContextDeliveryFireAndForget } from '../core/context/volunteer-events.ts';
 import { persistenceSocketPathForConfig, startPersistenceIpcServer, type PersistenceIpcProvider, type PersistenceIpcBinding } from '../core/persistence/ipc.ts';
 import { residentPersistenceConfig } from '../core/persistence/local-client.ts';
+import { findIpcPathTooLong, ipcPathTooLongMessage } from '../core/context/ipc-path-too-long.ts';
 
 export interface ResolveIpcBinding {
   /** The bound listener for this serve's own resolve socket, or null while it is not bound (best-effort). */
@@ -153,11 +154,19 @@ export async function bindResolveIpcForServe(
     const legacySocket = resolveSocketPathForConfig(cfg);
     if (!resolveSocket || !legacySocket) return NULL_BINDING;
 
+    // #6573: a socket path the OS cannot bind (even after the per-user
+    // run-dir fallback) is reported once, typed, and never retried.
+    const tooLong = (path: string | null) => {
+      const problem = findIpcPathTooLong([path]);
+      if (problem) process.stderr.write(`[resolve-ipc] ${ipcPathTooLongMessage(problem)}\n`);
+      return problem !== null;
+    };
+
     // The owner socket follows the brain the engine opened, which may be a mount (#5237).
     const owner = residentPersistenceConfig(cfg);
     if (persistenceProvider && owner?.engine === 'pglite') {
       const persistenceSocket = persistenceSocketPathForConfig(owner);
-      if (persistenceSocket) {
+      if (persistenceSocket && !tooLong(persistenceSocket)) {
         try { persistence = await startPersistenceIpcServer(persistenceSocket, persistenceProvider); }
         catch {
           process.stderr.write('[persistence-ipc] listener unavailable; local callers will receive owner_unavailable.\n');
@@ -305,6 +314,7 @@ export async function bindResolveIpcForServe(
     // that completes after close() is closed at once. Persistence is never
     // re-set-up here.
     const slots = [resolveSocket, ...(legacySocket === resolveSocket ? [] : [legacySocket])]
+      .filter(path => !tooLong(path))
       .map(path => ({ path, server: null as Server | null, timer: undefined as ReturnType<typeof setTimeout> | undefined }));
     const rebindDelayMs = opts.rebindDelayMs ?? defaultRebindDelayMs;
     let closed = false;
@@ -328,10 +338,10 @@ export async function bindResolveIpcForServe(
     };
     await serialized(async () => { for (const slot of slots) await bind(slot, false); });
 
-    const own = slots[0]!;
+    const own = slots.find(slot => slot.path === resolveSocket);
     return {
-      get server() { return own.server; },
-      get socketPath() { return own.server ? resolveSocket : null; },
+      get server() { return own?.server ?? null; },
+      get socketPath() { return own?.server ? resolveSocket : null; },
       ...(persistence ? { persistence } : {}),
       close: () => {
         if (closed) return;
