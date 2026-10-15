@@ -644,10 +644,10 @@ export async function importFromContent(
   // it reuses inside its publication transaction, under the page guard, from
   // the chunks it is about to replace; only the chunks left without a vector
   // reach the provider.
-  // A large page commits with NULL vectors; the stale sweep embeds it under the
-  // per-page cap and the sampled junk check, so no provider call holds the write.
+  // A large or segmented page (the hysteresis band too) commits with NULL vectors; the stale
+  // sweep embeds it under the per-page cap and the sampled junk check, so no provider call holds the write.
   const noEmbed = opts.noEmbed || isEmbedSkipped(parsed.frontmatter);
-  const largePage = isLargePageBytes(bodyBytes);
+  const largePage = isLargePageBytes(bodyBytes) || segmented !== null;
   const postCommitEmbedding = largePage ? undefined : opts.onPostCommitEmbedding;
   const reusable = !!existing && !existing.deleted_at && !opts.forceRechunk && !postCommitEmbedding && chunks.length > 0 && bodyStorageOf(existing) !== 'segmented'
     && !(opts.prepare && modeRequiresSynopsis(effectiveCRMode)) && !hasProtectedBody(`${existing.compiled_truth}\n${existing.timeline ?? ''}`) && !hasProtectedBody(`${parsed.compiled_truth}\n${parsed.timeline ?? ''}`);

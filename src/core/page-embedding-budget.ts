@@ -40,6 +40,8 @@ import { PAGE_INLINE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
 import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
 import { chunkGenerationFilter } from './search/safe-chunks.ts';
+import { quoteIdentifier } from './search/embedding-column.ts';
+import { embeddingWriteTarget } from './page-state/projections.ts';
 
 export const PAGE_EMBED_CAP_KEY = 'embed.max_usd_per_page';
 export const DEFAULT_PAGE_EMBED_CAP_USD = 2;
@@ -195,9 +197,10 @@ export async function listBudgetLimitedPages(engine: Pick<BrainEngine, 'executeR
   const filters = [`b.state <> 'open'`, 'p.deleted_at IS NULL'];
   if (opts.state) filters.push(`b.state = $${params.push(opts.state)}`);
   if (opts.sourceId) filters.push(`p.source_id = $${params.push(opts.sourceId)}`);
+  const pending = `(cc.embedded_at IS NULL OR cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)} IS NULL)`;
   const rows = await engine.executeRaw<PageBudgetReport>(`SELECT p.slug, p.source_id, b.state, b.reason, b.spent_usd, b.cap_usd,
-      (SELECT count(*)::int FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedded_at IS NULL AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chunks,
-      (SELECT COALESCE(sum(length(cc.chunk_text)), 0)::bigint FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedded_at IS NULL AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chars
+      (SELECT count(*)::int FROM content_chunks cc WHERE cc.page_id = p.id AND ${pending} AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chunks,
+      (SELECT COALESCE(sum(length(cc.chunk_text)), 0)::bigint FROM content_chunks cc WHERE cc.page_id = p.id AND ${pending} AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chars
     FROM page_embedding_budget b JOIN pages p ON p.id = b.page_id
     WHERE ${filters.join(' AND ')} ORDER BY b.updated_at DESC, p.id LIMIT $1`, params);
   return rows.map(row => ({ ...row, spent_usd: Number(row.spent_usd), cap_usd: row.cap_usd === null ? null : Number(row.cap_usd), pending_chunks: Number(row.pending_chunks), pending_chars: Number(row.pending_chars) }));
@@ -267,8 +270,8 @@ export async function heldEmbedArgv(engine: BrainEngine, args: readonly string[]
 /**
  * #6722: what a write left a page's embedding in, for write, sync and
  * remember receipts. Null for an ordinary page (embedded with the write, or by
- * the post-write job). `deferred`: over the inline threshold, embedded after
- * the commit under the per-page cap. `partial`: the cap stopped it with chunks
+ * the post-write job). `deferred`: over the inline threshold or stored
+ * segmented, embedded after the commit under the per-page cap. `partial`: the cap stopped it with chunks
  * left keyword-only. `held`: it waits for the user's approval. `skipped`: an
  * embed_skip marker (`oversized` when the gate set it because the page is over
  * the operator's bytes_block). Every such page is chunked and keyword-searchable.
@@ -276,13 +279,13 @@ export async function heldEmbedArgv(engine: BrainEngine, args: readonly string[]
 export interface PageSizeState { embedding: 'deferred' | 'partial' | 'held' | 'skipped'; reason: string; bytes: number }
 
 export function pageSizeState(bytes: number, frontmatter: Record<string, unknown> | null | undefined,
-  budget?: { state: PageBudgetState; reason: string | null } | null): PageSizeState | null {
+  budget?: { state: PageBudgetState; reason: string | null } | null, segmented = false): PageSizeState | null {
   if (isEmbedSkipped(frontmatter)) {
     return { embedding: 'skipped', reason: (frontmatter!.embed_skip as { reason?: unknown } | null)?.reason === 'oversized' ? 'oversized' : 'operator_marker', bytes };
   }
   if (budget?.state === 'held') return { embedding: 'held', reason: budget.reason ?? 'awaiting_approval', bytes };
   if (budget?.state === 'capped') return { embedding: 'partial', reason: 'spend_cap', bytes };
-  return isLargePageBytes(bytes) ? { embedding: 'deferred', reason: 'large_page', bytes } : null;
+  return isLargePageBytes(bytes) || segmented ? { embedding: 'deferred', reason: 'large_page', bytes } : null;
 }
 
 /**
@@ -292,14 +295,14 @@ export function pageSizeState(bytes: number, frontmatter: Record<string, unknown
 export async function readPageSizeStates(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slugs: readonly string[] | null): Promise<Array<{ slug: string } & PageSizeState>> {
   if (slugs?.length === 0) return [];
   const bytes = `(CASE WHEN p.body_storage = 'segmented' THEN p.body_bytes ELSE octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')) END)`;
-  const rows = await engine.executeRaw<{ slug: string; bytes: number; frontmatter: Record<string, unknown> | null; state: PageBudgetState | null; reason: string | null }>(
-    `SELECT p.slug, ${bytes}::bigint AS bytes, p.frontmatter, b.state, b.reason
+  const rows = await engine.executeRaw<{ slug: string; bytes: number; segmented: boolean; frontmatter: Record<string, unknown> | null; state: PageBudgetState | null; reason: string | null }>(
+    `SELECT p.slug, ${bytes}::bigint AS bytes, p.body_storage = 'segmented' AS segmented, p.frontmatter, b.state, b.reason
        FROM pages p LEFT JOIN page_embedding_budget b ON b.page_id = p.id
       WHERE p.source_id = $1 AND p.deleted_at IS NULL${slugs ? ' AND p.slug = ANY($3::text[])' : ''}
-        AND (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip' OR ${bytes} > $2 OR b.page_id IS NOT NULL) ORDER BY p.slug`,
+        AND (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip' OR ${bytes} > $2 OR p.body_storage = 'segmented' OR b.page_id IS NOT NULL) ORDER BY p.slug`,
     slugs ? [sourceId, PAGE_INLINE_MAX_BYTES, [...slugs]] : [sourceId, PAGE_INLINE_MAX_BYTES]);
   return rows.flatMap(row => {
-    const state = pageSizeState(Number(row.bytes), row.frontmatter, row.state ? { state: row.state, reason: row.reason } : null);
+    const state = pageSizeState(Number(row.bytes), row.frontmatter, row.state ? { state: row.state, reason: row.reason } : null, row.segmented === true);
     return state ? [{ slug: row.slug, ...state }] : [];
   });
 }
@@ -309,7 +312,7 @@ export async function sizeStateField(engine: Pick<BrainEngine, 'executeRaw'>, so
   page: { body_storage?: BodyStorage | null; body_bytes?: number | null; compiled_truth?: string | null; timeline?: string | null; frontmatter?: Record<string, unknown> | null } | null | undefined): Promise<{ size_state?: PageSizeState }> {
   if (!page) return {};
   const bytes = pageBodyBytes(page);
-  if (!isLargePageBytes(bytes) && !isEmbedSkipped(page.frontmatter)) return {};
+  if (!isLargePageBytes(bytes) && !isSegmentedPage(page) && !isEmbedSkipped(page.frontmatter)) return {};
   const [state] = await readPageSizeStates(engine, sourceId, [slug]);
   return state ? { size_state: { embedding: state.embedding, reason: state.reason, bytes: state.bytes } } : {};
 }

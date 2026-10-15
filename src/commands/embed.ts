@@ -51,7 +51,7 @@ export { resolveEmbedConcurrency, _resetEmbedConcurrencyClampWarningForTest } fr
 import { isEmbeddingZeroNormError } from '../core/ai/embedding-guard.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
 import { heldEmbedArgv, meterPageBatch, spendGrant } from '../core/page-embedding-budget.ts';
-import { countSegmentedEmbedRows, embedSegmentedPage, readSegmentedEmbedPage, type SegmentedEmbedPage } from '../core/page-body/segmented-embedding.ts';
+import { countSegmentedEmbedRows, embedSegmentedPage, readSealedSegmentedEmbedPage, readSegmentedEmbedPage, type SegmentedEmbedPage } from '../core/page-body/segmented-embedding.ts';
 import {
   restampIfDemotedToTitleTier,
   embedBatchWithBackoff,
@@ -1066,22 +1066,22 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
 }
 
 /**
- * Wave B: embed a segmented page's vector-less live rows by keyset
- * (`embedSegmentedPage`), never through its body or a whole-page chunk read.
- * A dry run only counts those rows.
+ * Wave B: embed a segmented page's vector-less live rows (all of them with `all`)
+ * by keyset (`embedSegmentedPage`), never through its body or a whole-page
+ * chunk read. A dry run only counts those rows.
  */
 async function embedSegmented(engine: BrainEngine, page: SegmentedEmbedPage, result: EmbedResult,
-  opts: { dryRun: boolean; signal?: AbortSignal; signature?: string; approvedCapUsd?: number }): Promise<void> {
+  opts: { dryRun: boolean; signal?: AbortSignal; signature?: string; approvedCapUsd?: number; all?: boolean }): Promise<void> {
   if (opts.dryRun) {
     const counts = await countSegmentedEmbedRows(engine, page.id);
     result.total_chunks += counts.total;
-    result.would_embed += counts.stale;
+    result.would_embed += opts.all ? counts.total : counts.stale;
     result.pages_processed++;
     return;
   }
   try {
     const done = await embedSegmentedPage(engine, page, { embedFn: (texts, o) => embedBatchWithBackoff(texts, o),
-      signal: opts.signal, signature: opts.signature, approvedCapUsd: opts.approvedCapUsd });
+      signal: opts.signal, signature: opts.signature, approvedCapUsd: opts.approvedCapUsd, all: opts.all });
     result.embedded += done.embedded;
     const stamp = done.complete ? await resolveProvenanceStamp(engine, opts.signature) : undefined;
     if (stamp) await stampIfPageProvenanceComplete(engine, page.slug, page.source_id, stamp);
@@ -1108,7 +1108,7 @@ async function embedPage(
   if (!initial) {
     throw new Error(`Page not found: ${slug}`);
   }
-  const segmented = await readSegmentedEmbedPage(engine, { sourceId: initial.page.source_id, slug });
+  const segmented = await readSealedSegmentedEmbedPage(engine, initial.page, !dryRun);
   if (segmented) {
     if (isEmbedSkipped(initial.page.frontmatter)) { if (!quiet) serr(`  ${slug}: skipped (frontmatter.embed_skip set); its chunks stay keyword-searchable`); return; }
     await embedSegmented(engine, segmented, result, { dryRun, signal, signature: currentEmbeddingSignature() ?? undefined, approvedCapUsd: approvedPageCapUsd });
@@ -1371,8 +1371,8 @@ async function embedAll(
     // target the correct (source_id, slug) row, not the 'default' source.
     const pageSourceId = page.source_id;
     const pageOpts = pageSourceId ? { sourceId: pageSourceId } : undefined;
-    const segmented = await observed(pacer, () => readSegmentedEmbedPage(engine, { id: page.id }));
-    if (segmented) { await embedSegmented(engine, segmented, result, { dryRun, signal, signature }); return; }
+    const segmented = await observed(pacer, () => readSealedSegmentedEmbedPage(engine, page, !dryRun));
+    if (segmented) { await embedSegmented(engine, segmented, result, { dryRun, signal, signature, all: true }); return; }
     const prepared = await observed(pacer, () => readProjectionSnapshot(engine, page.slug, pageSourceId, { requireLiveSource: !dryRun }));
     if (!prepared) {
       if (!dryRun) recordFailure(result, 1, page.slug, EMBED_UNAVAILABLE_MESSAGE);

@@ -67,6 +67,7 @@ test/large-pages/chunk-visibility.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/segment-vector-reuse.test.ts
 test/large-pages/segmented-body-unreachable.test.ts
+test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-versions.test.ts
 test/link-cross-source.test.ts
