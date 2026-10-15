@@ -94,7 +94,18 @@ describe('gbrain pages unsearchable', () => {
       expect(row.fix!.verify?.argv).toEqual(['gbrain', 'pages', 'unsearchable', '--source', 'default', '--state', row.state, '--json']);
     }
     expect(out.rows.find(r => r.state === 'pending')!.fix).toMatchObject({ argv: ['gbrain', 'embed', '--stale', '--catch-up', '--source', 'default', '--yes'], consent: ['paid'] });
-    expect(out.rows.find(r => r.state === 'keyword_only')!.fix).toMatchObject({ next: 'ask_user', argv: ['gbrain', 'config', 'set', 'content_sanity.bytes_block', '600001'] });
+    // A marker under the current bytes_block (the 24 MiB default) predates it: the free backfill clears it, never a lowered limit.
+    expect(out.rows.find(r => r.state === 'keyword_only')!.fix).toMatchObject({ next: 'run', argv: ['gbrain', 'reindex', '--oversized', '--source', 'default'], consent: [] });
+  });
+
+  test('a page over the operator\'s bytes_block is asked about raising the limit to just above its marker', async () => {
+    await engine.setConfig('content_sanity.bytes_block', '500000');
+    try {
+      const out = JSON.parse(await run(['--source', 'default', '--state', 'keyword_only', '--json'])) as Listing;
+      expect(out.rows[0]!.fix).toMatchObject({ next: 'ask_user', argv: ['gbrain', 'config', 'set', 'content_sanity.bytes_block', '600001'] });
+    } finally {
+      await engine.unsetConfig('content_sanity.bytes_block');
+    }
   });
 
   test('--state filters, embedded is reachable only through --state, and the source scope holds', async () => {

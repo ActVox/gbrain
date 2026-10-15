@@ -23,6 +23,7 @@ test/claude-cli-output-cap.test.ts
 test/colon-slug-windows-5032.test.ts
 test/company-brain-policy.test.ts
 test/company-brain-runtime.test.ts
+test/conversation-facts-oversized-sidecar.test.ts
 test/cycle/synthesize-concepts-merge.test.ts
 test/decide/conflict-proposals-managed.test.ts
 test/declared-lineage-visibility.test.ts
@@ -39,6 +40,7 @@ test/extract-atoms-input-truncated-6503.test.ts
 test/extract-endpoint-revision.serial.test.ts
 test/extract-entities-managed.test.ts
 test/extract-timeline-from-meetings-managed.test.ts
+test/extraction-watermark-atoms.test.ts
 test/fact-fence-adoption-exits.test.ts
 test/fact-purge-lookup-timeout-6511.test.ts
 test/fence-repair-receipts.test.ts
@@ -91,6 +93,8 @@ test/managed-sync-stale-group-head.test.ts
 test/migration-persistence-request-slug-index.test.ts
 test/owner-refusal.test.ts
 test/pack-relation-direction-engine.test.ts
+test/page-embedding-budget.test.ts
+test/page-embedding-content-validity.test.ts
 test/page-embedding-install-batch.test.ts
 test/page-prepare-shared-origin-6517.test.ts
 test/page-purge-journal-timeout-6511.test.ts

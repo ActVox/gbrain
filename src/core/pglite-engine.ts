@@ -83,7 +83,7 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defa
 import { readStoredEmbeddingIdentity } from './stored-embedding-identity.ts';
 import { DELETE_BATCH_SIZE, TRAVERSE_PATH_ROW_CAP, TRAVERSE_WALK_ROW_CAP } from './engine-constants.ts';
 import { PageMissingError } from './engine-errors.ts';
-import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
+import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
 import { acquireLock, pgliteLockDirFor, releaseLock, type LockHandle } from './pglite-lock.ts';
 import { assertPgliteGraduationOpenable } from './persistence/graduation-custody.ts';
 // Engine-live path (#3596): static import, never a lazy `import()` in the

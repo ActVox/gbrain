@@ -112,6 +112,7 @@ import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
+import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
 import {
   persistenceCapacityEntry,
   terminalFailuresEntry,
@@ -215,6 +216,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   coreMemoryEntry,
   persistenceConsumersEntry,
   atomHeldFailedEntry,
+  extractionInputTruncatedEntry,
   ghostPagesEntry,
   fenceIntegrityEntry,
   searchModeEntry,

@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { sizeStateField } from '../page-embedding-budget.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { boundedReads } from './bounded-reads.ts';
 import { basename, dirname, join } from 'node:path';
@@ -220,7 +221,7 @@ function syncContentRefusal(refusal: ContentRefusal, row: WriteRequest, p: SyncI
   const where = refusal.line !== undefined ? `line ${refusal.line}${refusal.key ? ` (key "${refusal.key}")` : ''} of ${p.sourcePath}` : p.sourcePath;
   const cause = refusal.code === 'invalid_fence' ? `Edit ${fenceWhere(refusal.fence)} in ${p.sourcePath} as the message says and commit the change${p.companyApproval ? ' to the repository (a company-brain source never rewrites repository files and never holds a file)' : ''}.`
     : refusal.code === 'frontmatter_slug_conflict' ? 'Correct the frontmatter `slug:` in the file and commit the change.'
-    : refusal.code === 'file_too_large' ? `${p.sourcePath} is over the import size limit; split it into smaller files or add it to sync.exclude, then commit.`
+    : refusal.code === 'file_too_large' ? `${p.sourcePath} is over the page size limit; add it to sync.exclude, or split it into files under the limit and commit.`
     : refusal.code === 'content_rejected' ? `The content-sanity gate rejects ${p.sourcePath} under junk_disposition=reject; remove the matched junk and commit.`
     : refusal.code === 'purged_content' ? `${p.sourcePath} still carries purged content; delete or edit the file and commit, or the owner clears the tombstone with gbrain pages unpurge.`
     : refusal.code === 'write_gate_rejected' ? `The write gate refuses ${p.sourcePath}: external instruction-like content under write_gate.external_mode=reject. Tell the user; changing that setting or the file is their decision.`
@@ -701,8 +702,10 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
           raw_sha256: sha256(p.content!), ...(p.blobOid ? { blob_oid: p.blobOid } : {}), working: p.working === true, gbrain_version: VERSION, ...(recovery?.length ? { recovery } : {}) }); },
       ]);
       preparedImport.postimage = final;
+      // #6722: a large or embed_skip page says what this write left its embedding in.
+      const sizeState = applied.noop ? {} : await sizeStateField(tx, row.source_id, row.slug, live?.page);
       return { status: moved ? 'renamed' : applied.noop ? 'skipped' : snapshot ? 'updated' : 'created', slug: row.slug, source_id: row.source_id,
-        chunks: applied.result.chunks, noop: applied.noop && !moved, imported_file: true, ...(moved ? { renamed_from: moved.slug } : {}),
+        chunks: applied.result.chunks, noop: applied.noop && !moved, imported_file: true, ...(moved ? { renamed_from: moved.slug } : {}), ...sizeState,
         ...(recovery?.length ? { recovered_frontmatter: true } : {}), ...(commentValue ? { comment_value: true } : {}),
         ...(fenceFixes.length ? { fences_normalized: fenceFixesWire(fenceFixes) } : {}) };
     } };

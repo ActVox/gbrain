@@ -22,7 +22,7 @@ export interface SyncResult {
   /** #6643: the request a `--retry-failed` rediscovery waits for (its producer and slug), instead of a silent no-op. */
   retryWait?: import('../core/persistence/sync-run.ts').RetryWait;
   /** #6643: knock-on pages this run re-froze automatically, and the limits that bound it. */
-  knockOns?: { refrozen: number };
+  knockOns?: { refrozen: number }; /** #6722: pages this run left large or embed_skip (chunked, keyword-searchable) and their embedding state. */ size_states?: import('../core/page-embedding-budget.ts').SyncSizeStates;
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run' | 'blocked_by_failures' | 'partial';
   fromCommit: string | null;
   toCommit: string;

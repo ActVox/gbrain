@@ -717,6 +717,8 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
         await (await import('../core/feedback/upgrade-notice.ts')).printRetrievalFeedbackUpgradeNotice(engine);
         // Entity mention index: [AGENT] catch-up line while pages are due (best-effort).
         await (await import('../core/mentions/upgrade-notice.ts')).printMentionIndexUpgradeNotice(engine);
+        // Large pages: re-index pages an older gbrain stored chunkless for size (keyless-safe, time-boxed, resumable).
+        await (await import('../core/oversized-backfill.ts')).printOversizedBackfillUpgradeNotice(engine);
 
         // Temporal typed edges: one-shot [AGENT] notice (live-by-default graph reads + relationship check), best-effort.
         await (await import('../core/temporal-edges-upgrade-notice.ts')).printTemporalEdgesUpgradeNotice(engine);

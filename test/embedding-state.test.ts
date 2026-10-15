@@ -11,6 +11,7 @@
  * embed job's predicate, or scans in ops mode. No existing owner: the classifier
  * is new. PGLite in-memory; the SQL is shared by both engines.
  */
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -86,7 +87,8 @@ describe('embedding state classifier (full mode)', () => {
     expect(s.unsearchable).toBe(2 + 3 + 1 + 1);
     expect(s.unsearchable_complete).toBe(true);
     expect(s.deleted_page_chunks).toEqual({ within_window: 1, past_window: 2, window_hours: 72 });
-    expect(s.keyword_only).toMatchObject({ reason: 'embed_skip', pages: 2, marker_bytes: 1_300_000, threshold_bytes: 500_000 });
+    // The default bytes_block is the 24 MiB page ceiling (large pages Wave A); these markers predate it.
+    expect(s.keyword_only).toMatchObject({ reason: 'embed_skip', pages: 2, marker_bytes: 1_300_000, threshold_bytes: PAGE_MAX_BYTES });
     const unstamped = s.unstamped_pending as { count: number; created_at_lower_bound: string | null; writer_version: string };
     expect(unstamped.count).toBe(1);
     expect(unstamped.created_at_lower_bound).not.toBeNull();

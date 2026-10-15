@@ -154,12 +154,10 @@ function ratio(embedded: number | undefined, pending: number): number | null {
   return total === 0 ? null : Math.round(((embedded ?? 0) / total) * 10_000) / 10_000;
 }
 
-/** The effective `content_sanity.bytes_block` the import gate applies (env > file > DB > default). */
+/** The effective `content_sanity.bytes_block` the import gate applies (env > file > DB > default, capped at the page ceiling). */
 async function effectiveBlockThreshold(engine: BrainEngine): Promise<number> {
   try {
-    const { loadImportSanityConfig } = await import('./import-screen.ts');
-    const configured = (await loadImportSanityConfig(engine)).cs.bytes_block;
-    return typeof configured === 'number' && configured > 0 ? configured : DEFAULT_BYTES_BLOCK;
+    return await (await import('./import-screen.ts')).effectiveBytesBlock(engine);
   } catch {
     return DEFAULT_BYTES_BLOCK;
   }
@@ -176,7 +174,7 @@ export function embeddingStateVerify(sourceId: string, state: EmbeddingState): {
  * docs). Null for `embedded`, which needs none. Without `sourceId` the
  * commands run brain-wide; pass `verify` then (doctor verifies with itself).
  */
-export function embeddingStateFix(state: EmbeddingState, ctx: { sourceId?: string; slug?: string; markerBytes?: number | null; embeddingsEnabled: boolean; verify?: { argv: string[] } }): Action | null {
+export function embeddingStateFix(state: EmbeddingState, ctx: { sourceId?: string; slug?: string; markerBytes?: number | null; blockBytes?: number; embeddingsEnabled: boolean; verify?: { argv: string[] } }): Action | null {
   const verify = ctx.verify ?? embeddingStateVerify(ctx.sourceId ?? 'default', state);
   const base = { verify, docs: EMBEDDING_STATE_DOCS, requires_exclusive: false };
   const source = ctx.sourceId ? ['--source', ctx.sourceId] : [];
@@ -194,6 +192,12 @@ export function embeddingStateFix(state: EmbeddingState, ctx: { sourceId?: strin
         user_message: 'Some notes are not indexed for search yet. Indexing them sends their text to your embedding provider and costs a little money. OK to run it?' };
     }
     case 'keyword_only': {
+      // A marker written under an older, lower limit: the free backfill clears it; raising the limit to the marker would lower it.
+      if (ctx.markerBytes && ctx.blockBytes && ctx.markerBytes <= ctx.blockBytes) {
+        const reindex = ['gbrain', 'reindex', '--oversized', ...source];
+        return { ...base, argv: reindex, preview_argv: [...reindex, '--dry-run'], consent: [], actor: 'agent',
+          why: `This page was marked embed_skip under an older, lower size limit; at ${ctx.markerBytes} bytes it is under the current content_sanity.bytes_block (${ctx.blockBytes}). The backfill removes the stale marker and re-chunks it on the CPU at no cost; a page over 1 MiB then waits for the user's approval before paid embedding.` };
+      }
       const threshold = ctx.markerBytes && ctx.markerBytes > 0 ? String(ctx.markerBytes + 1) : null;
       const why = 'The import gate marked this page embed_skip because its body exceeds content_sanity.bytes_block; keyword search still reads its chunks. Removing the marker alone is undone on the next import. Two exits: split the page into smaller pages, or raise the threshold (a brain-wide setting the operator approves) and re-import, which embeds it.';
       const reimport: Action = { ...base, argv: ['gbrain', 'sync', ...source, '--full'], consent: ['paid'], actor: 'agent',
