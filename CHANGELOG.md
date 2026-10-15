@@ -10,6 +10,60 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.239.0] - 2026-10-15
+
+**Before a meeting or a reply, your agent can now get a short "Before you start" note with up to three dated things the brain knows about the person (off until you turn it on).** When you tell Claude Code to draft a reply to someone or prepare for a call, it usually starts cold: it doesn't know you promised that person a term sheet last week, or that they changed jobs on Friday. With the brief on, the brain notices that you named a person or company it knows and that the task is a reply or a meeting. It can also see that a meeting with them starts within 12 hours. It then adds at most three dated items, each with the page it came from, ahead of the rest of the context. A prompt that just mentions someone ("what is Alice's title?") gets nothing extra. Nothing changes for anyone who leaves it off.
+
+### How to turn it on
+
+```bash
+gbrain config set context.proactive_brief true    # Claude Code hooks: SessionStart + every prompt
+gbrain config set context.proactive_brief false   # back off on the next turn, no restart
+```
+
+Harnesses without hooks can pull the same note: `context_pack` with `counterparty` (a name or a page slug) and optional `intent` (`meeting` or `reply`).
+
+### What you'd see
+
+| You type | The brain adds |
+|---|---|
+| "Draft a reply to Alice Example about the deck" | `## Before you start` with, for example, `[L12] due 2026-10-16 · open loop: “Send the revised term sheet”` and `[F3401] 2026-10-09 · change: “Moved to Acme Example as CFO”`, each with its source page |
+| A new session, with a 2 pm call with Alice on the calendar | the same note at session start |
+| "What is Alice Example's title?" | nothing extra |
+| "Will you reply to the thread?" | nothing: "Will" is a common word, never a name |
+
+### What to watch for
+
+- **Only shareable items.** Private pages, facts sourced from private pages, and commitments extracted from your email are never pushed. An email commitment shows up only once its fact is made shareable. Remote callers of the pull form get dated facts only, never open loops.
+- **Only fresh items.** Promises with no activity for 90 days are skipped, and so are inboxes and calendars that haven't synced in 24 hours. A sync whose calendar step alone failed still counts as fresh.
+- **Once per session.** An item is not repeated in the same session. A compaction or `/clear` starts over, and a serve restart forgets what was already shown.
+- **Claude Code only, for now.** Codex, OpenCode and thin-client installs don't get the pushed note; use the pull form there.
+
+### Itemized changes
+
+- **Brief assembler** (`src/core/context/proactive-brief.ts`):
+  - **Trigger:** the counterparty must resolve on the alias or title arm at 0.8 or higher, to a person or company page, never through a one-word common name.
+  - **Calendar arm:** a world-visible meeting page, in a google source that synced within 24 h, starts within 12 h and lists one of the counterparty's emails as an attendee.
+  - **Lexicon arm:** the prompt matches a fixed reply/meeting phrase list.
+  - **Items:** at most 3, each up to 600 characters, up to 1,800 characters (and 2,048 bytes) for the block. Stored text is secret-redacted before it is cut and carries its existing trust label.
+- **Hooks** (`src/mcp/resolve-ipc-binding.ts`, `src/mcp/context-pack-handler.ts`): the turn and SessionStart blocks lead with the brief. The usual block is built first, and the brief stops at 300 ms (turn) and 650 ms (session start) after the request arrives.
+- **Repeat suppression:** a per-session ledger, recorded when the block is written (`onContextPackDelivered` is new in `src/core/context/resolve-ipc.ts`), plus a scan of earlier injections in the session.
+- **`context_pack`** (`src/core/ops/facts.ts`, `docs/protocol/MEMORY_VERBS_v1.md`) gains `counterparty` and `intent`. These are additive, advertised on the full tool surface only, and return a structured `brief` field. Without `counterparty` the response is unchanged.
+- **Telemetry:** delivered items log to `context_volunteer_events` under the new channel `brief`, with `match_arm` set to `brief-calendar`, `brief-lexicon` or `brief-session`. No schema change.
+- **Config:** `context.proactive_brief` (DB-plane, default off) is registered in `KNOWN_CONFIG_KEYS`.
+
+### For contributors
+
+- `test/proactive-brief.test.ts` covers:
+  - gate precision (common words, the 0.72 surname arm, a negative prompt);
+  - limits and staleness;
+  - a private-canary fuzz across all four surfaces;
+  - repeat suppression and the pull parameters;
+  - telemetry rows;
+  - default off: `turn_context` is byte-identical to the legacy assembly with the key unset.
+- `isStopword` (`entity-salience.ts`) and `isCommonAliasWord` (`mentions/aliases.ts`) are now exported.
+- The design is in `docs/plans/2026-10-14-001-feat-proactive-brief-d5-plan.md`.
+
 ## [0.60.237.0] - 2026-10-15
 
 **Sync, reconcile and repair loops that used to go round forever now end, or tell you exactly what ends them (#6696).** A sync handed to a running `gbrain serve` refused to resume an unfinished run unless you retyped its options, and flags a managed source can't honor failed late with an unrelated error. A run that had finished could still report itself blocked. A wedged migration printed "WEDGED" and then "All migrations up to date". Writes to a page whose file is gone were told to retry a sync that can never import that file. Hundreds of derived pages that disagreed with their files could only be reconciled one at a time. Each of these now finishes, or names the one command that finishes it. And `gbrain doctor --tier ops` now shows what is wrong in seconds on a brain of any size, with anything it could not finish reported as unknown instead of clear.
