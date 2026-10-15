@@ -29,7 +29,7 @@ export async function googleCalendarReadableCheck(engine: BrainEngine, sourceIds
     }
     const details = { code: unreadable.length ? 'calendar_unreadable' : undefined, count: unreadable.length, sources: unreadable,
       docs: 'docs/guides/google-connect.md#unreadable-calendar' };
-    if (!unreadable.length) return { name: 'google_calendar_readable', status: 'ok', message: 'Every Google source calendar was readable at its last sync.', details };
+    if (!unreadable.length) return { name: 'google_calendar_readable', status: 'ok', message: 'No Google source recorded an unreadable calendar at its last sync.', details };
     const first = unreadable[0]!;
     return {
       name: 'google_calendar_readable', status: 'warn', details,

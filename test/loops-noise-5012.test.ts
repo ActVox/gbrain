@@ -16,7 +16,7 @@
  * Synthetic data only.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -257,6 +257,17 @@ describe('mute closes, unmute re-checks', () => {
     await engine.executeRaw(`UPDATE sources SET last_sync_at = now() - interval '3 days' WHERE id = 'g1'`);
     const res = await handleToolCall(engine, 'loops_unmute', { kind: 'sender', value: 'alerts@bank-example.test', source_id: 'g1' }) as Record<string, unknown>;
     expect(res).toMatchObject({ stale_source: true, recheck_command: 'gbrain sync --source g1' });
+  });
+});
+
+describe('the google-loops skill runbook matches the CLI', () => {
+  test('skills/google-loops/SKILL.md names drop sender with its dry run, unmute, and withheld_noise', async () => {
+    const skill = readFileSync(join(import.meta.dir, '..', 'skills', 'google-loops', 'SKILL.md'), 'utf8');
+    for (const line of ['gbrain loops drop sender <email> --dry-run', 'gbrain loops unmute sender <email>', 'withheld_noise', 'cannot be undone']) {
+      expect(skill).toContain(line);
+    }
+    const help = await captured(() => runLoops(engine, ['--help']));
+    expect(help.out + help.err).toContain('drop  sender <email> [--source <id>] [--note <text>] [--dry-run]');
   });
 });
 
