@@ -64,7 +64,7 @@ function parseWaitSeconds(val: string | undefined): number {
   const seconds = val !== undefined && /^\d+(?:\.\d+)?$/.test(val) ? Number(val) : NaN;
   if (!Number.isFinite(seconds) || seconds > 600) {
     throw opError('invalid_params',
-      `--wait takes a number of seconds from 0 to 600, no units (got ${val === undefined ? 'nothing' : JSON.stringify(val)}).`,
+      `--wait requires a number of seconds from 0 to 600, no units (got ${val === undefined ? 'nothing' : JSON.stringify(val)}).`,
       'Give --wait seconds with no unit, for example --wait 45 or --wait 300 for five minutes.');
   }
   return Math.round(seconds * 1000);

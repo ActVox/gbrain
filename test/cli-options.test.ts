@@ -429,7 +429,7 @@ describe('--wait flag (#5232 write wait; #6625 movement owns its own)', () => {
     const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
     const write = spawnSync('bun', [CLI, 'remember', 'x', '--wait', '5m'], { encoding: 'utf-8', env: { ...process.env, NO_COLOR: '1' } });
     expect(write.status).toBe(2);
-    expect(write.stderr).toContain('Error [invalid_params]: --wait takes a number of seconds from 0 to 600, no units (got "5m").');
+    expect(write.stderr).toContain('Error [invalid_params]: --wait requires a number of seconds from 0 to 600, no units (got "5m").');
     const movement = spawnSync('bun', [CLI, 'sources', 'writer', 'movement', '--wait', '10x'], { encoding: 'utf-8', env: { ...process.env, NO_COLOR: '1' } });
     expect(movement.stderr).toContain('--wait must be a positive integer with optional s/m/h suffix');
     expect(movement.stderr).not.toContain('seconds from 0 to 600');
