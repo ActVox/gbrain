@@ -611,6 +611,24 @@ The contract W1 adds for the ledger:
      version and journal scans already are. A statement timeout refuses the
      whole purge with the typed `purge_lookup_timeout` (as #6511 does for the
      journal), never a partial one.
+
+     **The redaction stays in force for later appends.** Purge leaves a live
+     carrier as it is when it lies outside the purged row: a surviving fence
+     row's context that quotes the claim survives `dropPurgedFenceRows`
+     (`purge-overlay.ts:41`) and is re-projected unchanged
+     (`canonical-projections.ts:424-426`). A later publication that changes
+     only that fact's confidence would otherwise copy the context, and the
+     purged text in it, back into a fresh event, and neither the tombstone
+     check nor the purge epoch would stop it. So each field the pass redacts
+     is recorded in `belief_redactions (source_id, subject_key, field,
+     purge_request, field_hash)`, where `field_hash` is the hash of the
+     field's value at the purge. Every later append for that key (a
+     revision, a baseline, a reconcile, a backfill) writes the redaction
+     marker in that field while the field's canonical value still hashes to
+     `field_hash`. Once the owner changes the field, the new value is a new
+     write and is recorded as written. Purge-verify reports the live carrier
+     itself (the surviving row's context) as `out_of_scope: source_prose`,
+     naming the key, so the user can edit it.
    - **Derived keys:** a paraphrase cannot be matched by a needle, so the
      derivation walk decides. Purge maps each row the walk hides to its
      logical key and appends one `derived.hidden` event per key, naming the
@@ -874,7 +892,7 @@ The DDL goes in `schema.sql` and the bootstrap blob (no column of it is
 referenced by an older blob index, so no bootstrap probe is needed). Then
 `build:schema` and `build:pglite-snapshot`, and regenerate the migrations and
 schema-catalog goldens. It also gets inventory rows in deletion (`swept`) and
-graduation (`carry`) for every ledger table (events, page lifetimes, commit marks and the retiering manifest), and, because its appends ride
+graduation (`carry`) for every ledger table (events, page lifetimes, commit marks, the retiering manifest and the redaction register), and, because its appends ride
 canonical writes, a line in `docs/architecture/canonical-writers.tsv` naming
 the finalization contract.
 
@@ -913,7 +931,7 @@ CREATE INDEX IF NOT EXISTS belief_events_page ON belief_events (source_id, slug,
 CREATE INDEX IF NOT EXISTS belief_events_subject ON belief_events (source_id, subject_kind, subject_key, id);
 CREATE INDEX IF NOT EXISTS belief_events_recorded ON belief_events (recorded_at);
 CREATE INDEX IF NOT EXISTS belief_events_claim_fp ON belief_events (source_id, claim_fp) WHERE claim_fp IS NOT NULL;
--- plus belief_page_lifetimes (section 3), belief_commit_marks (section 5.3) and belief_retier_manifest (section 6.4)
+-- plus belief_page_lifetimes (section 3), belief_commit_marks (section 5.3), belief_retier_manifest (section 6.4) and belief_redactions (section 6.5)
 ```
 
 The bench's 905-925 bytes per event used a TEXT hex `event_key`; BYTEA saves
@@ -1139,7 +1157,12 @@ reconstructed state, not counts**, on PGLite and Postgres:
     of the derived page → the backfilled events stay hidden;
 36. backup, soft delete, retention cleanup (`page.expired`), then restore
     → no content tombstone written and no history redacted;
-37. N1 unchanged (388/388, 0 stale).
+37. purge X while fact Y's fence context quotes X, then a fresh
+    publication that changes only Y's confidence → Y's new event carries
+    the redaction marker in `context`, and the receipt names Y's context;
+    after the owner edits that context, the next event records the new
+    value;
+38. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
