@@ -6,7 +6,8 @@
  * 1. Protects: an approval (`--max-usd N`) raises a segmented page's cap once
  *    per run, and a binding cap spends on the newest rows; `embed --all`
  *    re-embeds a segmented page's live rows as it does an inline page's; the
- *    dry-run count and the held report read the write column; a segmented
+ *    dry-run count and a segmented page's held report read the write column
+ *    (a large inline page's still counts rows without embedded_at); a segmented
  *    write under the inline threshold reports deferred embedding; an
  *    unsealed segmented create with no chunk rows is rebuilt by projection
  *    recovery, `embed <slug>` and `embed --all`, and counts as chunkless.
@@ -25,12 +26,13 @@ import { importFromContent } from '../../src/core/import-file.ts';
 import { prepareEmbeddingProjections } from '../../src/core/embedding-readiness.ts';
 import { countSegmentedEmbedRows, embedSegmentedPage, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
 import { estimatePageEmbedUsd, holdPageEmbedding, listBudgetLimitedPages, PAGE_EMBED_CAP_KEY, readPageSizeStates } from '../../src/core/page-embedding-budget.ts';
-import { SEGMENTED_DEMOTE_AT_OR_BELOW_BYTES, SEGMENTED_PROMOTE_ABOVE_BYTES } from '../../src/core/page-body/limits.ts';
+import { PAGE_INLINE_MAX_BYTES, SEGMENTED_DEMOTE_AT_OR_BELOW_BYTES, SEGMENTED_PROMOTE_ABOVE_BYTES } from '../../src/core/page-body/limits.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../../src/core/search/embedding-column.ts';
 import { conversationPage } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { segmentPage, unitVector } from '../helpers/segmented-chunks-fixture.ts';
+import { installFixtureChunks } from '../helpers/page-projection.ts';
 import { segmentedPageRow, visibleChunks } from '../helpers/segmented-page-checks.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 
@@ -131,6 +133,18 @@ for (const kind of testBackends()) {
       await engine.executeRaw('UPDATE content_chunks SET embedding = NULL WHERE page_id = $1', [pageId]);
       await holdPageEmbedding(engine, pageId, 'awaiting_approval');
       expect(await listBudgetLimitedPages(engine)).toEqual([expect.objectContaining({ slug: SLUG, state: 'held', pending_chunks: 3 })]);
+    });
+
+    test('the held report of a large inline page still counts rows without embedded_at, as before segmented storage', async () => {
+      await engine.putPage('notes/inline-held', { type: 'note', title: 'Inline held', compiled_truth: ROW_TEXT(9).repeat(3200), timeline: '', frontmatter: {} });
+      const vector = Float32Array.from(await unitVector(engine, 1));
+      await installFixtureChunks(engine, 'notes/inline-held', [0, 1, 2].map(i => ({ chunk_index: i, chunk_text: ROW_TEXT(i), chunk_source: 'compiled_truth' as const, embedding: vector })));
+      const [page] = await engine.executeRaw<{ id: number; bytes: number }>(
+        `SELECT id, octet_length(compiled_truth) AS bytes FROM pages WHERE slug = 'notes/inline-held'`);
+      expect(Number(page!.bytes)).toBeGreaterThan(PAGE_INLINE_MAX_BYTES);
+      await engine.executeRaw('UPDATE content_chunks SET embedding = NULL WHERE page_id = $1', [page!.id]);
+      await holdPageEmbedding(engine, Number(page!.id), 'awaiting_approval');
+      expect(await listBudgetLimitedPages(engine)).toEqual([expect.objectContaining({ slug: 'notes/inline-held', state: 'held', pending_chunks: 0 })]);
     });
 
     test('a segmented write in the hysteresis band defers its embedding like a large page', async () => {

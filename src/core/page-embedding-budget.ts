@@ -197,7 +197,7 @@ export async function listBudgetLimitedPages(engine: Pick<BrainEngine, 'executeR
   const filters = [`b.state <> 'open'`, 'p.deleted_at IS NULL'];
   if (opts.state) filters.push(`b.state = $${params.push(opts.state)}`);
   if (opts.sourceId) filters.push(`p.source_id = $${params.push(opts.sourceId)}`);
-  const pending = `(cc.embedded_at IS NULL OR cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)} IS NULL)`;
+  const pending = `(CASE WHEN p.body_storage = 'segmented' THEN cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)} IS NULL ELSE cc.embedded_at IS NULL END)`;
   const rows = await engine.executeRaw<PageBudgetReport>(`SELECT p.slug, p.source_id, b.state, b.reason, b.spent_usd, b.cap_usd,
       (SELECT count(*)::int FROM content_chunks cc WHERE cc.page_id = p.id AND ${pending} AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chunks,
       (SELECT COALESCE(sum(length(cc.chunk_text)), 0)::bigint FROM content_chunks cc WHERE cc.page_id = p.id AND ${pending} AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chars
