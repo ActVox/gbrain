@@ -107,7 +107,7 @@ export function buildSearchTitlesStatement(query: string, opts: SearchOpts | und
   const sql = `
     WITH top_pages AS (
       SELECT p.slug, p.id AS page_id, p.title, p.type, p.source_id,
-        p.effective_date, p.effective_date_source, p.updated_at, p.body_generation,
+        p.effective_date, p.effective_date_source, p.updated_at, p.body_storage, p.body_generation,
         (lower(btrim(p.title, ' "''' || chr(160))) = $2) AS exact_title,
         ${rankSql} * ${sourceFactorCase} AS score
       FROM pages p

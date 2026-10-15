@@ -110,7 +110,7 @@ export const v248: Migration = {
     // Search's visibility predicate reads the generation columns; without their statistics Postgres prices it at 0.5%
     // and vector search sorts every candidate instead of walking its HNSW index (projection-statistics.ts).
     if (engine.kind === 'postgres') {
-      await engine.runMigration(248, 'ANALYZE pages(body_generation); ANALYZE content_chunks(body_generation, retired_generation);');
+      await engine.runMigration(248, 'ANALYZE pages(body_generation); ANALYZE content_chunks(body_generation);');
     }
   },
 };

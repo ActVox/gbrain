@@ -164,8 +164,18 @@ interface Run { text: string; segs: Seg[] }
 interface Slice { text: string; at: number }
 interface Placed { text: string; start: number | null; end: number | null }
 
+/**
+ * @internal Work the span bookkeeping does, for the linearity test: seg entries
+ * visited or copied (`segs`) and steps the UTF-8 offset walk takes
+ * (`units`). Counts, not time, so a busy machine cannot move them.
+ */
+export const spanWork = { segs: 0, units: 0 };
+
 function runOffset(run: Run, t: number): number | null {
-  for (const seg of run.segs) if (t >= seg.t && t < seg.t + seg.n) return seg.s + (t - seg.t);
+  for (const seg of run.segs) {
+    spanWork.segs++;
+    if (t >= seg.t && t < seg.t + seg.n) return seg.s + (t - seg.t);
+  }
   return null;
 }
 
@@ -183,6 +193,7 @@ function trimmedRun(run: Run): Run {
 }
 
 function sliceRun(run: Run, from: number, to: number): Run {
+  spanWork.segs += run.segs.length;
   const segs: Seg[] = [];
   for (const seg of run.segs) {
     const a = Math.max(from, seg.t);
@@ -193,6 +204,7 @@ function sliceRun(run: Run, from: number, to: number): Run {
 }
 
 function joinRuns(a: Run, b: Run): Run {
+  spanWork.segs += a.segs.length + b.segs.length;
   return { text: a.text + b.text, segs: [...a.segs, ...b.segs.map(seg => ({ ...seg, t: seg.t + a.text.length }))] };
 }
 
@@ -217,8 +229,10 @@ export function utf16ToUtf8Offsets(text: string, offsets: readonly number[]): Ma
   const out = new Map<number, number>();
   let bytes = 0;
   let i = 0;
+  let walked = 0;
   for (const target of sorted) {
     while (i < target && i < text.length) {
+      walked++;
       const c = text.charCodeAt(i);
       if (c < 0x80) bytes += 1;
       else if (c < 0x800) bytes += 2;
@@ -231,6 +245,7 @@ export function utf16ToUtf8Offsets(text: string, offsets: readonly number[]): Ma
     }
     if (!out.has(target)) out.set(target, bytes);
   }
+  spanWork.units += walked;
   return out;
 }
 

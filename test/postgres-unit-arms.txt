@@ -64,9 +64,16 @@ test/import-revision-concurrency.test.ts
 test/keyword-statement-timeout-knob-6495.test.ts
 test/lane-apply-pipelining.test.ts
 test/large-pages/chunk-visibility.test.ts
+test/large-pages/contextual-reembed-segmented.test.ts
+test/large-pages/credential-reseal-segments.test.ts
+test/large-pages/forget-scope.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
+test/large-pages/managed-sync-streamed.test.ts
+test/large-pages/oversized-backfill-segmented.test.ts
+test/large-pages/page-purge-segments.test.ts
 test/large-pages/projection-parity.test.ts
+test/large-pages/purge-segments.test.ts
 test/large-pages/remote-window-privacy.test.ts
 test/large-pages/sealed-segmented-search.test.ts
 test/large-pages/segment-vector-reuse.test.ts
@@ -74,7 +81,12 @@ test/large-pages/segmented-body-unreachable.test.ts
 test/large-pages/segmented-derived-work.test.ts
 test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
+test/large-pages/segmented-evidence-read-cost.test.ts
+test/large-pages/segmented-evidence.test.ts
+test/large-pages/segmented-leads.test.ts
+test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
+test/large-pages/segmented-storage-visibility.test.ts
 test/large-pages/segmented-versions.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
@@ -149,6 +161,7 @@ test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts
 test/purge-fact.test.ts
 test/purge-global-marker.test.ts
+test/purge-read-surfaces.test.ts
 test/recall-page-fill.test.ts
 test/remediation-manual-only.test.ts
 test/repair-apply-pending-6543.test.ts
@@ -191,6 +204,7 @@ test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
 test/sync-waiver-budget.test.ts
 test/sync-waiver-run-imports.test.ts
+test/take-resolution-survives-publish.test.ts
 test/takes-vector-lifecycle-5885.serial.test.ts
 test/terminal-failures-6650.test.ts
 test/trust-channel-writes.test.ts
