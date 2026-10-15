@@ -44,6 +44,8 @@ import { withdrawalFailureDetail } from '../facts/withdrawal.ts';
 import { faultPoint, withFaultPoints } from './fault-points.ts';
 import { recordPublicationFenceTrend } from '../fence-repair/census-store.ts';
 import { segmentWriteScope } from '../page-body/ingest.ts';
+import { publicationBeliefOptions, withBeliefBatch } from '../belief/ledger.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -281,6 +283,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let afterCommitDue = false;
   const skill = prepared.target === 'skill_bundle';
   const files = skill ? prepared.files ?? [] : prepared.file ? [prepared.file] : [];
+  const beliefReport = { appended: 0 };
   try {
     assertMutationProtocol(row);
     if ((row.target_kind ?? 'page') !== (prepared.target ?? 'page') || (skill ? !!prepared.file || !files.length : prepared.files !== undefined)) {
@@ -421,7 +424,10 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await hooks.boundary?.('after_publication', row);
       }
       prepared.postimage = undefined;
-      const outcome = await withCoordinatedWrite(tx, [row.source_id], () => prepared.apply(tx, snapshot), publicationAttribution(row, prepared.trust));
+      // W1 finalization contract (docs/designs/BELIEF_LEDGER.md 5.1): the ledger append is the last canonical write before the receipt.
+      const apply = () => prepared.apply(tx, snapshot);
+      const outcome = await withCoordinatedWrite(tx, [row.source_id], skill ? apply
+        : () => withBeliefBatch(tx, publicationBeliefOptions(row, prepared.additionalPageKeys, beliefReport), apply), publicationAttribution(row, prepared.trust));
       if (!skill) await classifyUnboundPage(tx, row);
       if (prepared.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
       const final = skill ? null : await publicationPostimage(tx, row, prepared);
@@ -434,6 +440,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       return committed;
     });
     await hooks.boundary?.('after_commit', done);
+    if (beliefReport.appended && done.state === 'committed') await markBeliefCommits(engine, [row.id]).catch(() => undefined);
     if (recovery) await clearResolvedRecovery(engine, row.id, done);
     afterCommitDue = done.state === 'committed';
     return done;

@@ -72,6 +72,8 @@ import { assertMutationProtocol } from './protocol.ts';
 import { writeSwitchOn } from './switches.ts';
 import { importGroupReads, type ImportGroupReads } from './import-reads.ts';
 import { withScreeningPaths } from './screening-paths.ts';
+import { publicationBeliefOptions, withBeliefBatch } from '../belief/ledger.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 
 /** A `put_pages` or managed import group publishes at most this many pages per transaction, so one commit stays a few seconds long. */
 export const PAGE_BATCH_GROUP_MAX = 8;
@@ -211,6 +213,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
   hooks: GroupHooks = {}, lane: LaneState | null = null, transaction: TransactionRunner = fn => publicationTransaction(engine, fn)): Promise<{ done: WriteRequest[] | null; requeued: string[]; reason?: GroupFailure }> {
   const head = rows[0];
   const none: { done: null; requeued: string[]; reason?: GroupFailure } = { done: null, requeued: [] };
+  const beliefReport = { appended: 0 };
   if (!head?.worktree_id || rows.some((row, i) => row.worktree_id !== head.worktree_id || row.source_id !== head.source_id || !groupable(row, prepared[i]!)
     || rows.length > 1 && singleWrite(row))) return none;
   const binding = await getWorktreeBinding(engine, head.source_id, hostId);
@@ -342,7 +345,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
             if (attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust));
           }
           member.postimage = undefined;
-          const outcome = await member.apply(tx, snapshot);
+          const outcome = await withBeliefBatch(tx, publicationBeliefOptions(row, member.additionalPageKeys, beliefReport), () => member.apply(tx, snapshot));
           await classifyUnboundPage(tx, row);
           if (member.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
           const final = await publicationPostimage(tx, row, member);
@@ -366,6 +369,8 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
       return done;
     });
     committed = true;
+    // One post-commit observation for every member (docs/designs/BELIEF_LEDGER.md 5.3).
+    if (beliefReport.appended) await markBeliefCommits(engine, done.map(row => row.id)).catch(() => undefined);
     for (const row of done) await seam('after_commit', row);
     hooks.committed?.(done);
     if (recorded.size) {
