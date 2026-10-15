@@ -89,6 +89,8 @@ export async function liveFileDrift(engine: BrainEngine, sourceId: string, slug:
   } catch (error) {
     if (!(error instanceof OperationError)) return { still_present: null, reason: 'error' };
     if (error.detail !== 'file_database_drift') {
+      // #6696 (A12): a recorded canonical file that is gone is its own reason; a producer refuses before admission on it.
+      if (error.detail === 'canonical_file_missing') return { still_present: null, reason: 'canonical_file_missing', db_revision: page.revision };
       return { still_present: null, reason: error.code === 'source_changed' ? 'file_missing' : error.code };
     }
     const path = await canonicalFilePath(engine, sourceId, root, page, slug);
@@ -147,6 +149,8 @@ export interface ConflictRow extends Record<string, unknown> {
   last_committed: { request_id?: string; completed_at: string } | null;
   source_path?: string | null;
   git?: { tracked: boolean | null; committed: boolean | null };
+  /** Source-relative path of the canonical file the live check compared (trusted callers on the owner host). */
+  path?: string;
   file_hash?: string;
   db_revision?: string;
   still_present: { value: boolean | null; reason: string };
@@ -272,7 +276,7 @@ export async function auditDriftConflicts(engine: BrainEngine, sourceId: string,
         result.still_present = { value: live.still_present, reason: live.reason };
         if (live.file_hash) result.file_hash = live.file_hash;
         if (live.db_revision) result.db_revision = live.db_revision;
-        if (live.path) result.git = gitState(root, live.path);
+        if (live.path) { result.path = live.path; result.git = gitState(root, live.path); }
         if (live.still_present) {
           report.totals.still_present++;
           result.class = await driftClass(engine, sourceId, row.slug, !page?.source_path && !page?.source_uri);

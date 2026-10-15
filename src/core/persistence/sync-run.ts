@@ -9,18 +9,19 @@ import { currentSourceFilesystemSignal } from '../minions/source-filesystem.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { digest, sha256 } from './digest.ts';
 import { getWriteRequest, admitWriteInTransaction, foregroundPriority, intentDigest, receiptFor } from './journal.ts';
+import { preflightSyncCapacity } from './sync-capacity-preflight.ts';
 import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
-import { syncCursorOptions } from './sync-slices.ts';
+import { selectManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
 import { assertManagedSyncActive, assertSyncDispatchActive, managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, syncProcessingOptions, SYNC_PROCESSING_KEYS, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { prepareManagedSyncMutation, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { startClaimPhase } from './claim-phase.ts';
 import { screeningRequest } from './noop-kernel.ts';
-import { stampDrainStep } from './drain-step.ts';
+import { FINISH_BUDGET_MS, stampDrainStep } from './drain-step.ts';
 import { noopWaiversEnabled, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waiverBatchEnabled, type NoopWaiver, type WaiverRunEntry } from './sync-waivers.ts';
 import { resolve } from 'node:path';
 import { currentCompanyBrainSync, getCompanyBrainProfile, readCompanyBrainPlan } from '../company-brain/profile.ts';
@@ -329,7 +330,7 @@ function remember(snapshot: PageSnapshot | null | undefined, pending: Pending): 
   return pending;
 }
 async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, assertActive: () => void,
-  run: { syncOptions: SyncCursorOptions; repoPath?: string; screen?: SyncScreenRun | null; observedAt?: string; signal?: AbortSignal }): Promise<Pending | Held> {
+  run: { syncOptions: SyncCursorOptions; repoPath?: string; screen?: SyncScreenRun | null; observedAt?: string; signal?: AbortSignal; embedDeferred?: boolean }): Promise<Pending | Held> {
   assertActive();
   const entry = cursor.entries[cursor.index];
   const retry = { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? run.syncOptions, repoPath: run.repoPath };
@@ -447,7 +448,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     expected_revision: revision, sourcePath: entry?.sourcePath ?? null, path: entry?.path ?? null, rawHash, content, lineEndingOnly,
     ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}),
     ...(entry?.renameFrom ? { renameFrom: entry.renameFrom } : {}),
-    ...(run.observedAt ? { holdObservedAt: run.observedAt } : {}), ...(blob ? { blobOid: blob.oid } : {}),
+    ...(run.observedAt ? { holdObservedAt: run.observedAt } : {}), ...(blob ? { blobOid: blob.oid } : {}), ...(entry && run.embedDeferred ? { embedDeferred: true } : {}),
     ...(!entry && cursor.releasedHolds?.length ? { releasedHolds: cursor.releasedHolds } : {}),
     ...(!entry && cursor.convertedFromFailed?.length ? { supersededRequests: cursor.convertedFromFailed } : {}),
     ...(!entry && cursor.settled ? { settled: cursor.settled } : {}),
@@ -1309,17 +1310,11 @@ interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boole
  * #5988: every result (resumed, no-change and blocked runs included) carries this run's holds and the source's outstanding total.
  */
 
-/** The cursor-selecting options of a managed run; part of its durable cursor key. */
-const cursorSyncOptions = syncCursorOptions;
-function managedCursorKey(incarnation: string, authority: SyncAuthority, company: ReturnType<typeof currentCompanyBrainSync>, syncOptions: SyncCursorOptions): string {
-  return digest({ source: incarnation, principal: authority.writer.principal, authority, ...(company ? { company: { receiptId: company.receiptId, planDigest: company.plan.plan_digest } } : {}),
-    options: syncOptions });
-}
 /** The durable cursor key performManagedSync would use for these options, so --retry-failed can count only the failures it retries. */
 export async function managedSyncCursorKey(engine: BrainEngine, opts: SyncOpts): Promise<string> {
   const context = await resolveManagedSyncContext(engine, opts);
   const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root);
-  return managedCursorKey(context.incarnation, authority, currentCompanyBrainSync(context.sourceId), cursorSyncOptions(opts));
+  return (await selectManagedCursor(engine, { opts, context, authority, company: currentCompanyBrainSync(context.sourceId) })).key;
 }
 /**
  * `--retry-failed` on an unfinished cursor whose pending request failed (or whose run has a ledger row). #6340: a pending
@@ -1399,11 +1394,14 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   if (!opts.dryRun) await assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId);
   const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root);
   const company = currentCompanyBrainSync(context.sourceId);
+  // #6696: the one boundary that normalizes the strategy (fresh cursors only); discovery below reads the selected opts.
+  const selected = await selectManagedCursor(engine, { opts, context, authority, company });
+  opts = selected.opts;
   const processingOptions = syncProcessingOptions(opts);
-  const syncOptions = cursorSyncOptions(opts);
-  const frozenRun: { syncOptions: SyncCursorOptions; repoPath?: string; screen?: SyncScreenRun | null; observedAt?: string; signal?: AbortSignal } = { syncOptions, ...(opts.repoPath ? { repoPath: resolve(opts.repoPath) } : {}) };
+  const syncOptions = selected.syncOptions;
+  const frozenRun: Parameters<typeof freezeEntry>[4] = { syncOptions, ...(opts.repoPath ? { repoPath: resolve(opts.repoPath) } : {}), ...(opts.embedDeferred ? { embedDeferred: true } : {}) };
   const runStartedAt = new Date().toISOString();
-  const key = managedCursorKey(context.incarnation, authority, company, syncOptions);
+  const key = selected.key;
   let cursor: Cursor | null = null;
   let missingManifestCursor: CursorHeader | null = null;
   if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => cursor });
@@ -1422,9 +1420,12 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   // process, so forward references inside one run resolve and PGLite-delegated
   // syncs match Postgres. Content is already committed: a failure here leaves
   // the pages stale for `gbrain extract --stale` instead of failing the sync.
+  // #6696 C4: the checkpoint committed, so the tail admits nothing; step `finish` and its progress event keep the drain's
+  // governor from reading it as `no_admission`, and link extraction stops at the tail's own budget.
+  const finishing = (done: Cursor) => { stampDrainStep('finish', signal); opts.onProgress?.({ phase: 'managed_sync.finish', bankedFiles: done.index, total: done.entries.length }); };
   const withLinks = async (done: Cursor, synced: SyncResult): Promise<SyncResult> => {
     if (company || (done.processingOptions ?? processingOptions).noExtract) return synced;
-    try { return { ...synced, links: await extractManagedStaleLinks(engine, { sourceId: done.sourceId, maxPages: 1000, signal, mentions: false,
+    try { return { ...synced, links: await extractManagedStaleLinks(engine, { sourceId: done.sourceId, maxPages: 1000, timeBudgetMs: FINISH_BUDGET_MS, signal, mentions: false,
       slugs: done.entries.flatMap(entry => entry.action === 'import' && entry.slug ? [entry.slug] : []) }) }; }
     catch { return synced; }
   };
@@ -1521,6 +1522,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     const sliceStarted = performance.now(), sliceFirstIndex = cursor.index, drainStartedAt = opts.drainStartedAt ?? Date.now();
     const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
     const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig);
+    if (opts.capacityPreflight && !cursor.done) await preflightSyncCapacity(engine, { root: cursor.root, writer: cursor.authority.writer, entries: cursor.entries.slice(cursor.index) });
     opts.onProgress?.({ phase: 'managed_sync.start', bankedFiles: cursor.index, total: cursor.entries.length });
     while (!cursor.done) {
       assertActive();
@@ -1630,7 +1632,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         if (!cursor?.done) throw syncRunRefusal('storage_error', 'Committed sync checkpoint lost its cursor.',
           { sourceId: context.sourceId, processingOptions: pending.intent.processingOptions, syncOptions: pending.intent.syncOptions ?? syncOptions, repoPath: pending.intent.repoPath ?? frozenRun.repoPath },
           `The final checkpoint request ${pending.requestId} of this sync committed, but its cursor could not be read back to finish the run.`);
-        return withLinks(cursor, await finishCheckpoint(engine, key, cursor, !!company, assertActive));
+        finishing(cursor); return withLinks(cursor, await finishCheckpoint(engine, key, cursor, !!company, assertActive));
       }
       // The frozen manifest is shared; only the cursor header changes per page.
       const next: Cursor = { ...cursor, ...committedBreaker(cursor), index: cursor.index + 1, counts: { ...cursor.counts }, progress: stampProgress(cursor.progress, cursor.index, cursor.index + 1, drainStartedAt) }; delete next.pending; delete next.group;
@@ -1649,7 +1651,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         batchPages = 0; batchStart = performance.now();
       }
     }
-    return withLinks(cursor, result(cursor, cursor.from === null ? 'first_sync' : 'synced'));
+    finishing(cursor); return withLinks(cursor, result(cursor, cursor.from === null ? 'first_sync' : 'synced'));
   } catch (error) {
     assertSyncDispatchActive();
     if (signal?.aborted && error instanceof Error && error.name === 'AbortError') {
