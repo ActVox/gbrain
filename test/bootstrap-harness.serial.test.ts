@@ -149,6 +149,7 @@ function makeFake(opts: {
       });
     }) as unknown as typeof fetch,
     probeIdentity: async (_url: string, probeToken: string): Promise<ConnectProbeResult> => {
+      if (!health.ok) return { ok: false, reason: 'unreachable', message: 'fetch failed: ECONNREFUSED' };
       // Token-aware like a REAL serve: only tokens this fixture knows about
       // authenticate — the apply-time canary (a random same-format token)
       // must fail with reason 'auth' or every apply trips the impostor guard.

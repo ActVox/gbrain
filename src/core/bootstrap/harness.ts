@@ -43,7 +43,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { askHarnessConsent } from './harness-consent.ts';
 import { CONFIRMATION_REQUIRED_EXIT_CODE, HARNESS_PENDING_VERIFY_EXIT_CODE } from '../exit-codes.ts';
-import { cliRenderContext, renderAction, type Action } from '../agent-output.ts';
+import { finishPendingVerify, harnessOutcomeFields, harnessVerifyPending, pendingVerifyStatusLine } from './harness-pending-verify.ts';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -947,22 +947,8 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     d.log('registrar mode (non-loopback url): hooks are NOT wired — they would talk to the LOCAL brain, not the registered remote serve. MCP registration only.');
   }
   const health = await probeServeHealth(url, d.fetchFn);
-  // #6661: on PGLite a stopped serve is the normal state for wiring with --token (the serve holds the
-  // single-writer lock), so nothing answering is pending verification, not a failure. A serve that holds
-  // the brain but does not answer at this url (a wrong --url/--port), or anything else answering, still fails.
-  const verifyPending = !health.ok && health.unreachable === true && flags.token !== undefined && !registrarMode &&
-    d.loadFileConfig()?.engine === 'pglite' && !d.pgliteLiveServe();
-  if (!health.ok && !verifyPending) {
-    d.logError(
-      `no healthy gbrain serve at ${url} (${health.detail ?? 'unreachable'}) — ` +
-        'start `gbrain serve --http` on this box first (or pass --url/--port).',
-    );
-    return 1;
-  }
-  if (verifyPending) {
-    d.logError(`no gbrain serve answers at ${url} and none holds this PGLite brain: wiring with the supplied --token now; ` +
-      'verification waits for the serve (pending_verify).');
-  }
+  const verifyPending = harnessVerifyPending(health, flags, registrarMode, url, d); // #6661: logs the verdict
+  if (!health.ok && !verifyPending) return 1;
 
   // 2b. Ambient-writeback gate (WP3): resolved from the FILE plane only —
   // this lane is engine-free by design (the DB plane stays authoritative for
@@ -1663,11 +1649,9 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
   // format, both unknown to it), so it either rejects both (smoke fails,
   // nothing revoked, rollback fires) or accepts the canary and is caught
   // here. Either way the fresh mint is revoked below, never left live.
-  const canary = verifyPending ? null : await d.probeIdentity(url, generateToken('gbrain_'));
+  const canary = await d.probeIdentity(url, generateToken('gbrain_'));
   let smoke: ConnectProbeResult;
-  if (canary === null) {
-    smoke = { ok: false, reason: 'unreachable', message: `no gbrain serve answered at ${url} when this run started` };
-  } else if (canary.ok || canary.reason === 'tool_error') {
+  if (canary.ok || canary.reason === 'tool_error') {
     smoke = {
       ok: false,
       reason: 'auth',
@@ -1691,9 +1675,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
       'smoke test: token authenticated (initialize + tool dispatch reached); get_brain_identity ' +
         'unavailable — the serve likely runs a narrowed --surface (e.g. verbs). Counted as verified.',
     );
-  } else if (verifyPending) {
-    d.log('smoke test: pending — start `gbrain serve --http`, then re-run this command (the wiring stays in place).');
-  } else {
+  } else if (!verifyPending || !['unreachable', 'timeout'].includes(smoke.reason)) { // #6661: nothing answered, nothing to roll back
     d.logError(
       redactToken(
         `smoke test FAILED (${smoke.reason}): ${smoke.message}` +
@@ -2033,22 +2015,12 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     );
   }
 
-  // #6661: everything wired, only the serve-side check is outstanding.
-  const pendingVerify = verifyPending && allConfirmed;
-  const pendingFix = pendingVerify ? harnessPendingVerifyFix(flags, url, unpinnedHooks || flags.source ? null : hookSource ?? null) : null;
-  if (pendingVerify) {
-    receipt.verify_pending = { since: new Date().toISOString(), reason: 'serve_unreachable' };
-    save();
-    d.logError(`pending_verify: the harness is wired but not verified. ${pendingFix!.user_message}`);
-  }
-
+  const pendingFix = verifyPending && allConfirmed && !smokeOk ? finishPendingVerify(receipt, save, flags.raw, url, unpinnedHooks || flags.source ? null : hookSource, d) : null;
   if (flags.json) {
     emitJson(
       JSON.stringify(
         {
-          schema_version: 1,
-          status: pendingVerify ? 'pending_verify' : allConfirmed && smokeOk ? 'ok' : 'failed',
-          ...(pendingFix ? { code: 'pending_verify', fix: renderAction(pendingFix, cliRenderContext()) } : {}),
+          schema_version: 1, ...harnessOutcomeFields(pendingFix, allConfirmed && smokeOk),
           url,
           engine: health.engine ?? null,
           serve_version: health.version ?? null,
@@ -2066,38 +2038,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
       ),
     );
   }
-  if (pendingVerify) return HARNESS_PENDING_VERIFY_EXIT_CODE;
-  return allConfirmed && smokeOk ? 0 : 1;
-}
-
-/**
- * #6661: the completion step for `pending_verify` is this same --token run once the serve is up: it needs no
- * PGLite lock (nothing is minted, and source resolution falls back while a serve holds the brain), verifies
- * over HTTP, and enrolls shared skills. The token value is never repeated; the source this run resolved is
- * pinned so the re-run wires the hooks the same way.
- */
-function harnessPendingVerifyFix(flags: HarnessFlags, url: string, resolvedSource: string | null): Action {
-  const argv = ['gbrain', 'bootstrap', 'harness'];
-  for (let i = 0; i < flags.raw.length; i++) {
-    const a = flags.raw[i]!;
-    if (a === '--json') continue;
-    if (a === '--token') { i++; argv.push('--token', '<TOKEN>'); continue; }
-    argv.push(a);
-  }
-  if (resolvedSource) argv.push('--source', resolvedSource);
-  if (!argv.includes('--yes')) argv.push('--yes');
-  return {
-    argv,
-    inputs: [{ name: 'TOKEN', how: 'The same token this run was given with --token.' }],
-    consent: [],
-    actor: 'user',
-    why: 'The smoke test needs a running serve; the re-run verifies the wiring over HTTP while the serve holds the PGLite brain.',
-    user_message: `Start \`gbrain serve --http\` for this brain (it must answer at ${url}), then re-run this command with the same --token. ` +
-      '`gbrain bootstrap harness --status` reports partial until that run passes its smoke test.',
-    verify: { argv: ['gbrain', 'bootstrap', 'harness', '--status', '--json'] },
-    docs: 'docs/guides/bootstrap.md#pending-verify',
-    requires_exclusive: false,
-  };
+  return pendingFix ? HARNESS_PENDING_VERIFY_EXIT_CODE : allConfirmed && smokeOk ? 0 : 1;
 }
 
 // ── Remove [C9/F2/C8] ───────────────────────────────────────────────────────
@@ -2605,10 +2546,7 @@ export async function statusHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
     if (receipt.token.previous_ids?.length) {
       d.log(`  pending: ${receipt.token.previous_ids.length} previous token(s) await revocation (re-run to converge): ${receipt.token.previous_ids.join(', ')}`);
     }
-    if (receipt.verify_pending) {
-      d.log(`  partial: wired ${receipt.verify_pending.since} while no serve answered (pending_verify) — with \`gbrain serve --http\` running, ` +
-        're-run the same `gbrain bootstrap harness --token <TOKEN>` command to verify and finish.');
-    }
+    if (receipt.verify_pending) d.log(pendingVerifyStatusLine(receipt.verify_pending));
     if (degraded) {
       d.log('per-turn injection: needs a running gbrain serve on Postgres (MCP tools are the active seam).');
     }
