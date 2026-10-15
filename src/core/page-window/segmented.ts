@@ -47,6 +47,13 @@ const OUTLINE_READ_BYTES = 4 * 1024 * 1024;
 const TAIL_BYTES = 4096;
 const NL = 0x0a;
 
+/**
+ * @internal Deterministic work counters (test/large-pages/read-cost.test.ts): `units` counts document units and
+ * manifest rows a read visits, `bytes` the segment text it reads or scans. A read's bytes stay bounded by what it
+ * returns; its units grow with the segment count, never with the bytes.
+ */
+export const segmentedReadWork = { units: 0, bytes: 0 };
+
 export interface DocumentUnit {
   start: number;
   bytes: number;
@@ -59,6 +66,7 @@ export interface DocumentUnit {
 type Reader = (start: number, end: number) => Promise<Buffer>;
 
 function newlinesIn(b: Uint8Array): number {
+  segmentedReadWork.bytes += b.length;
   let n = 0;
   for (let i = b.indexOf(NL); i !== -1; i = b.indexOf(NL, i + 1)) n++;
   return n;
@@ -82,9 +90,12 @@ function unitAt(units: readonly DocumentUnit[], b: number): number {
 export class SegmentedDocument {
   readonly newlines: number;
   private readonly before: number[];
+  private readonly reader: Reader;
 
   constructor(readonly engine: BrainEngine, readonly body: SegmentedBody, readonly total: number, readonly units: readonly DocumentUnit[],
-    private readonly reader: Reader, readonly timelineByte = -1) {
+    reader: Reader, readonly timelineByte = -1) {
+    this.reader = async (start, end) => { const b = await reader(start, end); segmentedReadWork.bytes += b.length; return b; };
+    segmentedReadWork.units += units.length;
     let n = 0;
     this.before = units.map(u => { const at = n; n += u.newlines; return at; });
     this.newlines = n;
@@ -137,6 +148,7 @@ export class SegmentedDocument {
    */
   async aroundChunk(chunk: { occurrence_id: number; projected_byte_start: number | null; projected_byte_end: number | null; chunk_text: string },
     contextLines: number, maxBytes: number): Promise<{ window: WindowSlice; span: { start: number; end: number } } | null> {
+    segmentedReadWork.units += this.units.length;
     const unit = this.units.find(u => u.row >= 0 && this.body.rows[u.row]!.occurrenceId === chunk.occurrence_id);
     const s0 = chunk.projected_byte_start, e0 = chunk.projected_byte_end;
     if (!unit || s0 == null || e0 == null || !(e0 > s0) || s0 < 0 || e0 > unit.bytes) return null;
@@ -152,6 +164,7 @@ export class SegmentedDocument {
     const want = line - 1;
     if (want <= 0) return 0;
     for (let i = 0; i < this.units.length; i++) {
+      segmentedReadWork.units++;
       const u = this.units[i]!;
       if (this.before[i]! + u.newlines < want) continue;
       const buf = await this.readUnit(i);
@@ -163,12 +176,6 @@ export class SegmentedDocument {
       return u.start + at + 1;
     }
     return this.total;
-  }
-
-  /** 1-based line of byte `b`, from the newline sums and the text of the unit holding it. */
-  lineAt(b: number, text: Buffer): number {
-    const i = this.unitAt(b);
-    return i < 0 ? 1 : 1 + this.before[i]! + newlinesIn(text.subarray(0, b - this.units[i]!.start));
   }
 
   linesBefore(i: number): number { return this.before[i] ?? this.newlines; }
@@ -234,6 +241,7 @@ export async function segmentedMarkdownDocument(engine: BrainEngine, body: Segme
     };
   } else {
     const measured = new Map<number, { bytes: number; newlines: number }>();
+    segmentedReadWork.units += body.rows.length;
     if (ledgerApplies(body.ledger)) {
       for (const [i, row] of body.rows.entries()) {
         if (!row.hasFacts) continue;
@@ -320,6 +328,7 @@ export async function readViewLines(doc: SegmentedDocument, revision: string): P
  * caller gets it only when those rows hold no protected or facts region: a hash of hidden text is a guessing oracle.
  */
 export async function tailDigest(engine: BrainEngine, body: SegmentedBody, remote: boolean): Promise<{ tail_sha256: string; tail_region: string } | Record<string, never>> {
+  segmentedReadWork.units += body.rows.length;
   const region = body.rows.some(r => r.region === 'timeline' && r.byteLen > 0) ? 'timeline' : 'truth';
   const rows = body.rows.filter(r => r.region === region);
   const tail: typeof rows = [];
@@ -333,6 +342,7 @@ export async function tailDigest(engine: BrainEngine, body: SegmentedBody, remot
   }
   const texts = await engine.readSegmentTexts(body.sourceId, tail.map(r => r.sha256));
   const raw = Buffer.concat(tail.map(r => texts.get(Buffer.from(r.sha256).toString('hex')) ?? new Uint8Array()));
+  segmentedReadWork.bytes += raw.length;
   return { tail_sha256: createHash('sha256').update(raw.subarray(Math.max(0, raw.length - TAIL_BYTES))).digest('hex'), tail_region: region };
 }
 
@@ -392,6 +402,7 @@ export async function segmentedOutline(doc: SegmentedDocument, from: number, lim
   const interior: number[] = [];
   for (let k = 0; k < count; k++) {
     for (let i = doc.unitAt(bounds[k]!.start); i <= doc.unitAt(end(k) - 1); i++) {
+      segmentedReadWork.units++;
       const row = doc.units[i]!.row;
       if (row < 0 || reads.has(i)) continue;
       if (body.rows[row]!.hasFacts) reads.add(i); else interior.push(row);
@@ -401,21 +412,32 @@ export async function segmentedOutline(doc: SegmentedDocument, from: number, lim
   for (const i of reads) texts.set(i, await doc.readUnit(i));
   const dates = await storedDates(doc, interior);
   const textOf = async (i: number) => texts.get(i) ?? await doc.readUnit(i);
-  const lineAt = async (b: number) => doc.lineAt(b, await textOf(doc.unitAt(b)));
+  // Entries come in byte order: carry the count from the previous byte in the same unit instead of rescanning it.
+  let last = { unit: -1, at: 0, line: 0 };
+  const lineAt = async (b: number) => {
+    const i = doc.unitAt(b);
+    if (i < 0) return 1;
+    const text = await textOf(i);
+    const from = last.unit === i && b >= last.at ? last : { unit: i, at: doc.units[i]!.start, line: 1 + doc.linesBefore(i) };
+    last = { unit: i, at: b, line: from.line + newlinesIn(text.subarray(from.at - doc.units[i]!.start, b - doc.units[i]!.start)) };
+    return last.line;
+  };
   const entries: OutlineEntry[] = [];
   for (let k = 0; k < count; k++) {
     const { start, heading, level } = bounds[k]!;
     const stop = end(k);
     const range = new DateRange();
     for (let i = doc.unitAt(start); i <= doc.unitAt(stop - 1); i++) {
+      segmentedReadWork.units++;
       const u = doc.units[i]!;
       if (u.row >= 0 && !texts.has(i)) {
         const d = dates.get(u.row);
         if (d) range.add(d.min, d.max);
         continue;
       }
-      const text = await textOf(i);
-      range.scan(text.subarray(Math.max(start, u.start) - u.start, Math.min(stop, u.start + u.bytes) - u.start).toString('utf8'));
+      const slice = (await textOf(i)).subarray(Math.max(start, u.start) - u.start, Math.min(stop, u.start + u.bytes) - u.start);
+      segmentedReadWork.bytes += slice.length;
+      range.scan(slice.toString('utf8'));
     }
     const lineStart = await lineAt(start);
     entries.push({
@@ -431,6 +453,7 @@ async function blankBefore(doc: SegmentedDocument, b: number): Promise<boolean> 
   const last = doc.unitAt(b);
   let reads = 0;
   for (let i = 0; i <= last; i++) {
+    segmentedReadWork.units++;
     const u = doc.units[i]!;
     const upTo = Math.min(u.bytes, b - u.start);
     if (upTo <= 0) continue;
@@ -442,17 +465,21 @@ async function blankBefore(doc: SegmentedDocument, b: number): Promise<boolean> 
 
 async function blocksOutline(doc: SegmentedDocument, from: number, limit: number, totalLines: number): Promise<PageOutline> {
   const starts: number[] = [];
+  segmentedReadWork.units += doc.units.length;
   for (const u of doc.units) if (u.row >= 0 && u.bytes > 0) starts.push(starts.length ? u.start : 0);
   if (!starts.length && doc.total > 0) starts.push(0);
   const page = starts.slice(from, from + limit);
   const rows = new Set<number>();
   const end = (k: number) => starts[from + k + 1] ?? doc.total;
-  page.forEach((start, k) => { for (let i = doc.unitAt(start); i <= doc.unitAt(end(k) - 1); i++) if (doc.units[i]!.row >= 0) rows.add(doc.units[i]!.row); });
+  page.forEach((start, k) => {
+    for (let i = doc.unitAt(start); i <= doc.unitAt(end(k) - 1); i++) { segmentedReadWork.units++; if (doc.units[i]!.row >= 0) rows.add(doc.units[i]!.row); }
+  });
   const dates = await storedDates(doc, [...rows]);
   const entries: OutlineEntry[] = page.map((start, k) => {
     const stop = end(k);
     const range = new DateRange();
     for (let i = doc.unitAt(start); i <= doc.unitAt(stop - 1); i++) {
+      segmentedReadWork.units++;
       const u = doc.units[i]!;
       if (u.row < 0) range.scan(u.text!);
       else { const d = dates.get(u.row); if (d) range.add(d.min, d.max); }

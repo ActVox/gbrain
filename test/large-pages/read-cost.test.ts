@@ -3,14 +3,15 @@
  * costs the size of what it returns, not the size of the page.
  *
  * 1. Protects: body: 'none', the first outline page and a 40 KB window in the
- *    middle of a 10 MB and a 40 MB page take about the same CPU (median ratio
- *    of best-of-runs below 1.3; Wave A's whole-document path is about 4x), and
- *    a window reads at most the window plus two segments of segment text.
+ *    middle of a 10 MB and a 40 MB page load the same bounded segment text
+ *    (readSegmentTexts spy) and scan the same bounded bytes (segmentedReadWork,
+ *    deterministic counters), visit a few document units per segment and no
+ *    more, and a window reads at most the window plus two segments of text.
  * 2. Fails when: a read materializes or projects the whole body (Wave A's
  *    readPageDocument / pageOutline over the full text), the line count reads
  *    every segment, or a window loads segments it does not cut from.
- * 3. PGLite only: PGLite runs its SQL on the calling thread, so thread CPU
- *    counts the database work too.
+ * 3. PGLite only: one 10 MB and one 40 MB import; the counts do not depend on
+ *    the engine.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
@@ -21,11 +22,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { importFromFile } from '../../src/core/import-file.ts';
 import { readPageBodyPolicy } from '../../src/core/page-body/limits.ts';
-import { cpuMsAsync } from '../helpers/cpu-time.ts';
+import { segmentedReadWork } from '../../src/core/page-window/segmented.ts';
 
 const getPage = operations.find(o => o.name === 'get_page')!;
 const WINDOW = 40_000;
-const REPEAT = 20;
+/** segmented.ts's per-page cap on outline segment reads. */
+const OUTLINE_READ_BYTES = 4 * 1024 * 1024;
 let engine: PGLiteEngine;
 let dir: string;
 
@@ -51,22 +53,25 @@ const remote = (): OperationContext => ({ engine, config: {} as GBrainConfig, lo
     sourceId: 'default', allowedSources: ['default'] } } as unknown as OperationContext);
 const get = async (params: Record<string, unknown>) => await getPage.handler(remote(), params) as Record<string, any>;
 
-/** cpuScalingRatio for async spans: median over rounds of best-of-runs large / best-of-runs small, after a warm-up of each. */
-async function asyncScalingRatio(small: () => Promise<unknown>, large: () => Promise<unknown>, rounds = 5, runs = 3): Promise<number> {
-  await small();
-  await large();
-  const best = async (fn: () => Promise<unknown>) => {
-    let ms = Infinity;
-    for (let k = 0; k < runs; k++) ms = Math.min(ms, await cpuMsAsync(fn));
-    return ms;
+/** Segment text a call loads from storage (readSegmentTexts) and the counted work, after one warm-up call fills the view caches. */
+async function measure(call: () => Promise<unknown>): Promise<{ loaded: number; units: number; bytes: number }> {
+  await call();
+  const original = engine.readSegmentTexts.bind(engine);
+  let loaded = 0;
+  engine.readSegmentTexts = async (sourceId, hashes) => {
+    const texts = await original(sourceId, hashes);
+    for (const text of texts.values()) loaded += text.byteLength;
+    return texts;
   };
-  const ratios: number[] = [];
-  for (let r = 0; r < rounds; r++) ratios.push(await best(large) / await best(small));
-  return ratios.sort((a, b) => a - b)[Math.floor(rounds / 2)]!;
+  segmentedReadWork.units = 0;
+  segmentedReadWork.bytes = 0;
+  try { await call(); } finally { engine.readSegmentTexts = original; }
+  return { loaded, ...segmentedReadWork };
 }
 
 describe('segmented get_page read cost', () => {
-  const pages = { small: { slug: 'logs/read-cost-10mb', bytes: 10_000_000, size: 0 }, large: { slug: 'logs/read-cost-40mb', bytes: 40_000_000, size: 0 } };
+  const pages = { small: { slug: 'logs/read-cost-10mb', bytes: 10_000_000, size: 0, rows: 0 }, large: { slug: 'logs/read-cost-40mb', bytes: 40_000_000, size: 0, rows: 0 } };
+  let segment = 0;
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
@@ -82,7 +87,12 @@ describe('segmented get_page read cost', () => {
       const none = await get({ slug: page.slug, body: 'none' });
       expect(none.body_storage).toBe('segmented');
       page.size = none.size.total_bytes;
+      const [rows] = await engine.executeRaw<{ n: unknown; max: unknown }>(`SELECT count(*) AS n, max(m.byte_len) AS max FROM page_body_manifest m JOIN pages p ON p.id = m.page_id
+        WHERE p.slug = $1 AND m.gen_to IS NULL`, [page.slug]);
+      page.rows = Number(rows!.n);
+      segment = Math.max(segment, Number(rows!.max));
     }
+    expect(pages.large.rows).toBeGreaterThan(3 * pages.small.rows);
   }, 600_000);
 
   afterAll(async () => {
@@ -90,23 +100,25 @@ describe('segmented get_page read cost', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const reads: Array<[string, (slug: string, size: number) => Record<string, unknown>]> = [
-    ['body none', () => ({ body: 'none' })],
-    ['the first outline page', () => ({ body: 'outline' })],
-    ['a window in the middle', (_slug, size) => ({ body: 'window', bytes: { offset: Math.floor(size / 2), length: WINDOW } })],
+  const reads: Array<[string, (size: number) => Record<string, unknown>, (segment: number) => number]> = [
+    ['body none', () => ({ body: 'none' }), segment => 2 * segment],
+    ['the first outline page', () => ({ body: 'outline' }), segment => OUTLINE_READ_BYTES + 2 * segment],
+    ['a window in the middle', size => ({ body: 'window', bytes: { offset: Math.floor(size / 2), length: WINDOW } }), segment => WINDOW + 2 * segment],
   ];
-  for (const [name, params] of reads) {
-    test(`${name}: 40 MB costs about what 10 MB costs`, async () => {
-      // Thread CPU ticks at a few ms, so one sample is REPEAT reads.
-      const read = (page: typeof pages.small) => async () => { for (let i = 0; i < REPEAT; i++) await get({ slug: page.slug, ...params(page.slug, page.size) }); };
-      const ratio = await asyncScalingRatio(read(pages.small), read(pages.large));
-      expect(ratio).toBeLessThan(1.3);
+  for (const [name, params, bound] of reads) {
+    test(`${name}: 40 MB loads and scans what 10 MB does`, async () => {
+      const small = await measure(() => get({ slug: pages.small.slug, ...params(pages.small.size) }));
+      const large = await measure(() => get({ slug: pages.large.slug, ...params(pages.large.size) }));
+      for (const [page, m] of [[pages.small, small], [pages.large, large]] as const) {
+        expect({ name, size: page.bytes, loaded: m.loaded <= bound(segment), scanned: m.bytes <= 3 * bound(segment), units: m.units <= 8 * page.rows + 64 })
+          .toEqual({ name, size: page.bytes, loaded: true, scanned: true, units: true });
+      }
+      expect(large.loaded).toBeLessThanOrEqual(small.loaded + 2 * segment);
+      expect(large.bytes).toBeLessThanOrEqual(small.bytes + 6 * segment);
     }, 300_000);
   }
 
   test('a window reads at most the window plus two segments of segment text', async () => {
-    const [largest] = await engine.executeRaw<{ n: unknown }>(`SELECT max(m.byte_len) AS n FROM page_body_manifest m JOIN pages p ON p.id = m.page_id WHERE p.slug = $1`, [pages.large.slug]);
-    const segment = Number(largest!.n);
     const original = engine.readSegmentTexts.bind(engine);
     let bytes = 0;
     engine.readSegmentTexts = async (sourceId, hashes) => {
