@@ -24,6 +24,7 @@ const REVIEWED: Record<string, string> = {
   'src/core/repair/connector-fences.ts': 'moves fence blocks verbatim, reservations included',
   'src/core/repair/take-supersession.ts': 're-renders through replaceFence, which keeps the reservations of the body it replaces',
   'src/core/shared-skills/migration-projection.ts': 'compares stored takes with fence takes; neither holds a reservation',
+  'src/core/trust/held-removals.ts': 'looks up the live fence row at a held take\'s number; a reserved number has no take, so the accept deletes the held row',
   'src/core/takes-write.ts': 'replaceFence, upsertTakeRow and supersedeRow keep reservations; round-trip checks count takes only',
 };
 
