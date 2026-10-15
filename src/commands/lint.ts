@@ -41,6 +41,7 @@ import { pathToSlug } from '../core/sync.ts';
 import { isManagedBrain } from '../core/cycle/phase-table.ts';
 import { maintenancePreflight, publishMaintenancePage, type MaintenanceAuthority } from '../core/persistence/prepared-maintenance.ts';
 import { fileMatchesSnapshot, prepareFileTarget } from '../core/persistence/page-prepare.ts';
+import { scannerSlugRootMode, scannerSourcePath } from '../core/write-through.ts';
 import { heldFileDiagnostic, writeFailureDiagnostic } from '../core/persistence/verb-errors.ts';
 import { loadActivePackForEngine } from '../core/schema-pack/engine-resolution.ts';
 import { OperationError, opError } from '../core/ops/contract.ts';
@@ -729,7 +730,8 @@ async function publishLintFix(engine: BrainEngine, authority: MaintenanceAuthori
   const scanned = existsSync(page) ? readSourceFileSync(page, 'utf-8') : null;
   const fixed = scanned === null ? null : fixContent(scanned);
   if (scanned === null ? !authority.binding : fixed === scanned) return null;
-  if (authority.binding && (scanned === null || !await fileMatchesSnapshot(engine, slug, scanned, snapshot, activePack))) {
+  const importPath = async () => scannerSourcePath(root, page, await scannerSlugRootMode(engine, sourceId, root));
+  if (authority.binding && (scanned === null || !await fileMatchesSnapshot(engine, slug, scanned, snapshot, importPath, activePack))) {
     const current = await engine.readPageSnapshot(slug, { sourceId, includeDeleted: true });
     if (current?.revision !== snapshot.revision) return pendingIssue(relPath, slug, 'revision_changed', changedWhileLinting(sourceId, slug));
     try {

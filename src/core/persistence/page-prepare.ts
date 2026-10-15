@@ -13,6 +13,7 @@ import type { Page, PageVersion } from '../types.ts';
 import { importFromContent, verifyPageReadable, type ParsedPage } from '../import-file.ts';
 import { comparableFrontmatter, frontmatterHoldMessageWithoutKeys, parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, resolveSourceLocalFilePath, type ParseOpts } from '../markdown.ts';
 import { assertLargePageReplacement } from './large-page-guard.ts';
+import { applyInference } from '../frontmatter-inference.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { CANONICAL_FILE_MISSING } from './publication-failure.ts';
 import { readFix } from '../ops/op-fix.ts';
@@ -135,28 +136,52 @@ export function publishesDatabaseOnly(root: string, slug: string, snapshot: { pa
   return isSourceDbOnlySlug(root, slug, 'refuse') || isNeverFiledDerivedPage(slug, snapshot.page);
 }
 /**
+ * #6605: a canonical file read the way the importer reads it. A file with no frontmatter under a
+ * directory-inference rule is imported with the frontmatter and tags inferred from its path
+ * (`applyInference` after stripping a BOM: import-prepare.ts, import-file.ts), so comparing its raw bytes
+ * with the stored row reads every untouched file as drift. `sourcePath` is the path the importer infers
+ * from (`scannerSourcePath`). Inference is deterministic, so this reproduces what the import stored;
+ * `inferred` is false when no rule applies (the bytes are read as they are).
+ */
+export function readCanonicalAsImported(bytes: string, sourcePath: string): { content: string; inferred: boolean } {
+  const inference = applyInference(sourcePath, bytes.replace(/^\uFEFF/, ''));
+  return inference.inferred.skipped === true ? { content: bytes, inferred: false } : { content: inference.content, inferred: true };
+}
+
+/**
  * Whether file bytes hold the snapshot's page: the canonical (format-insensitive)
  * comparison prepareFileTarget applies before replacing a canonical file. Lint
  * uses it to bind a repair to the revision it read before reading the file.
+ * `sourcePath` (the importer's path for the file, or a resolver for it) lets a
+ * frontmatter-less file match the row an inferring import stored (#6605); the
+ * raw reading still matches a row imported without inference (`gbrain reindex`
+ * on an unmanaged brain passes `inferFrontmatter: false`).
  */
 export async function fileMatchesSnapshot(engine: BrainEngine, slug: string, bytes: string, snapshot: PageSnapshot,
-  activePack?: ParseOpts['activePack']): Promise<boolean> {
-  const parsed = parseMarkdown(bytes, slug, { activePack });
-  // #5521 parity for subtype (#5928): a pack rule is not part of the file's bytes, so a file
-  // without an explicit `subtype:` keeps the stored subtype (or none); the import still stamps it.
-  delete parsed.inferredSubtype;
-  resolveParsedSubtype(parsed, snapshot.page);
-  // #6429: the v0.13.1 grandfather stamped `validate: false` into the database; on an unmanaged brain that path
-  // never wrote the file, so the file lacks a key the database carries. The mechanical stamp authors nothing
-  // (grandfather.ts): a file without a `validate:` key keeps the stored stamp, and the next coordinated write publishes it.
-  if (!Object.hasOwn(parsed.frontmatter, 'validate') && snapshot.page.frontmatter?.validate === false) parsed.frontmatter.validate = false;
-  // #1035 parity (#5521): a file without an explicit `type:` keeps the stored type on import.
-  const type = parsed.typeExplicit ? parsed.type : snapshot.page.type;
-  // Withdrawal overlays intentionally precede physical mirroring. The ledger
-  // is applied by the import preparation and cannot be undone by this check.
-  const actual = canonical({ ...parsed, type, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
-    parsed.compiled_truth, parsed.timeline ?? '', snapshot.withdrawals, { sourceId: snapshot.page.source_id, marker: snapshot.globalPurges }) }, parsed.tags);
-  return digest(actual) === digest(canonical(snapshot.page, snapshot.tags));
+  sourcePath: string | (() => Promise<string>), activePack?: ParseOpts['activePack']): Promise<boolean> {
+  const expected = digest(canonical(snapshot.page, snapshot.tags));
+  const matches = async (content: string, inferred: boolean) => {
+    const parsed = parseMarkdown(content, slug, { activePack });
+    // #5521 parity for subtype (#5928): a pack rule is not part of the file's bytes, so a file
+    // without an explicit `subtype:` keeps the stored subtype (or none); the import still stamps it.
+    delete parsed.inferredSubtype;
+    resolveParsedSubtype(parsed, snapshot.page);
+    // #6429: the v0.13.1 grandfather stamped `validate: false` into the database; on an unmanaged brain that path
+    // never wrote the file, so the file lacks a key the database carries. The mechanical stamp authors nothing
+    // (grandfather.ts): a file without a `validate:` key keeps the stored stamp, and the next coordinated write publishes it.
+    if (!Object.hasOwn(parsed.frontmatter, 'validate') && snapshot.page.frontmatter?.validate === false) parsed.frontmatter.validate = false;
+    // #1035 parity (#5521): a file without an explicit `type:` keeps the stored type on import. An inferred
+    // type is not one the file declared (#6605): inference only applies to a file with no frontmatter.
+    const type = parsed.typeExplicit && !inferred ? parsed.type : snapshot.page.type;
+    // Withdrawal overlays intentionally precede physical mirroring. The ledger
+    // is applied by the import preparation and cannot be undone by this check.
+    const actual = canonical({ ...parsed, type, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
+      parsed.compiled_truth, parsed.timeline ?? '', snapshot.withdrawals, { sourceId: snapshot.page.source_id, marker: snapshot.globalPurges }) }, parsed.tags);
+    return digest(actual) === expected;
+  };
+  if (await matches(bytes, false)) return true;
+  const reading = readCanonicalAsImported(bytes, typeof sourcePath === 'string' ? sourcePath : await sourcePath());
+  return reading.inferred && await matches(reading.content, true);
 }
 export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'>, snapshot: PageSnapshot | null,
   content: string | null, hostId?: string, options: { allowMissing?: boolean; deleting?: boolean; capture?: { path: string; hash: string }; activePack?: ParseOpts['activePack']; remote?: boolean;
@@ -224,7 +249,8 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   // A normal edit may replace only the bytes represented by its read snapshot.
   // Unknown local edits require explicit import/recovery, even for force writes.
   if (before && snapshot) {
-    if (!await fileMatchesSnapshot(engine, row.slug, before.toString('utf8'), snapshot, options.activePack)) {
+    const importPath = async () => scannerSourcePath(root, path, mode ?? await scannerSlugRootMode(engine, row.source_id, root));
+    if (!await fileMatchesSnapshot(engine, row.slug, before.toString('utf8'), snapshot, importPath, options.activePack)) {
       const held = await heldFileRefusal(engine, row, root, path, 'drift', options.remote === true);
       if (held) throw held;
       // #6394: a page that never recorded its file reconciles against the file at its slug path only when adopted explicitly.
