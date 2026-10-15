@@ -20,6 +20,32 @@ anything.
 gbrain config set dream.patterns.subagent_timeout_ms 2400000
 ```
 
+## Timeline appends
+
+A patterns child often updates an existing pattern page by appending a dated
+entry (`add_timeline_entry`) instead of rewriting the page. The phase treats
+those pages as written:
+
+- It finds the entries the child newly published from their write receipts.
+  An entry that was already on the page, or a replayed call, is not a new
+  append.
+- With `dream.quote_verify` on (the default), only the new entries are
+  checked against the reflections this run read. An entry whose quote is not
+  in them moves to the page's `unverified_claims`, like a failing claim on a
+  rewritten page. Everything else on the page, including quotes an earlier
+  run verified against older reflections, stays as it is.
+- The page gets the dream provenance stamp and counts in `patterns_written`.
+  `timeline_appends` counts the new entries, and `quote_verify.timeline_appends`
+  reports how many were checked, quarantined and repaired.
+
+`appended_unverified` (the number of completed `add_timeline_entry` calls) is
+deprecated and will be removed two releases after this one; read
+`timeline_appends` and `patterns_written` instead.
+
+**Say to your agent:** *"Did the last dream patterns run check the quotes it added to my pattern pages?"*
+The agent reads the phase result (`gbrain dream --phase patterns --json` on a
+direct run) and reports `quote_verify.timeline_appends`.
+
 ## Budget sizing
 
 After every child, finished, timed out or failed, the phase records its cost
@@ -64,5 +90,8 @@ slowly than the reflection count and halving may take several cycles to fit.
 - Fix wave 13: a child stopped at its own timeout records `timeout`, so the
   next plan halves (#6296). Timeline entries a child appends with
   `add_timeline_entry` are counted in the phase result as
-  `appended_unverified`; unlike pages written with `put_page`, they are not
+  `appended_unverified`; unlike pages written with `put_page`, they were not
   quote-verified or provenance-stamped yet (#6302).
+- Fix wave 18b: appended timeline entries are quote-verified, their pages are
+  provenance-stamped and counted in `patterns_written`; `appended_unverified`
+  is deprecated (#6302).

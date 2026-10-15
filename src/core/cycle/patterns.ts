@@ -397,25 +397,29 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     // #4077: no post-abort derived-state writes (collection is a read, but
     // the reverse-write below dual-writes files).
     throwIfAborted(opts.signal, '[dream] patterns output');
-    const writtenRefs = await collectChildPutPageSlugs(engine, [job.id], cycleSourceId);
-    // #6302 Part A [R17]: timeline appends are counted and reported, never quote-verified or provenance-stamped.
+    const putPageRefs = await collectChildPutPageSlugs(engine, [job.id], cycleSourceId);
+    // #6302: pages the child changed only through add_timeline_entry get their new entries verified and count as written.
+    const appends = (await collectChildTimelineAppends(engine, [job.id], cycleSourceId))
+      .filter(a => a.slug.startsWith(`${config.outputSlugPrefix}/`) && !putPageRefs.some(ref => ref.slug === a.slug));
+    const writtenRefs = [...putPageRefs, ...[...new Set(appends.map(a => a.slug))].map(slug => ({ slug, source_id: cycleSourceId }))];
+    // Deprecated alias (#6302): completed add_timeline_entry calls, kept two releases for readers of the old field.
     const appendedUnverified = await countChildTimelineAppends(engine, [job.id]);
 
     // #6052: `finalized` leaves out outputs whose managed publication is held (pending or contended); `held` counts them.
-    const { quoteVerify, finalized, held } = await stampPatternOutputs(engine, maintenance, writtenRefs, submitted, derivation, config, cycleSourceId, cycleDate, opts.signal);
+    const { quoteVerify, finalized, held } = await stampPatternOutputs(engine, maintenance, putPageRefs, appends, submitted, derivation, config, cycleSourceId, cycleDate, opts.signal);
     const reverseWriteCount = maintenance ? await verifyMaintenanceOutputs(engine, maintenance, finalized)
       : await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal);
     const details = { reflections_considered: submitted.length, reflections_selected: selected, plan_basis: plan.basis, patterns_written: finalized.length,
       ...(quoteVerify ? { quote_verify: quoteVerify } : {}), reverse_write_count: reverseWriteCount, publish_deferred: held,
-      appended_unverified: appendedUnverified, child_outcome: outcome, job_id: job.id };
-    const appendedNote = appendedUnverified > 0 ? `; ${appendedUnverified} timeline entr${appendedUnverified === 1 ? 'y' : 'ies'} appended (unverified)` : '';
+      timeline_appends: appends.length, appended_unverified: appendedUnverified, child_outcome: outcome, job_id: job.id };
+    const appendedNote = appends.length > 0 ? `; ${appends.length} timeline entr${appends.length === 1 ? 'y' : 'ies'} appended${quoteVerify ? ' (quote-verified)' : ''}` : '';
 
     // #2782: the phase status must reflect the child outcome. Pre-fix this
     // returned status:ok even when the subagent timed out (e.g. no
     // subagent-capable worker slot free for the whole wait window) and zero
     // pattern pages were written — a silent no-op for days.
     if (outcome !== 'completed') {
-      if (finalized.length === 0 && appendedUnverified === 0) {
+      if (finalized.length === 0 && appends.length === 0 && appendedUnverified === 0) {
         return {
           phase: 'patterns',
           status: 'fail',
@@ -682,14 +686,16 @@ When done, briefly list the pattern slugs you wrote/updated in your final messag
  * publications all landed, and the number of pages whose publication is held for a later cycle.
  */
 async function stampPatternOutputs(engine: BrainEngine, maintenance: MaintenanceAuthority | null, written: Array<{ slug: string; source_id: string }>,
-  reflections: ReflectionRef[], derivation: Derivation & { declaration: DerivationDeclaration }, config: { outputSlugPrefix: string; sourceSlugPrefix: string },
-  sourceId: string, cycleDate: string, signal?: AbortSignal) {
+  appends: TimelineAppend[], reflections: ReflectionRef[], derivation: Derivation & { declaration: DerivationDeclaration },
+  config: { outputSlugPrefix: string; sourceSlugPrefix: string }, sourceId: string, cycleDate: string, signal?: AbortSignal) {
   const heldSlugs = new Set<string>();
-  const quoteVerify = await groundPatternPages(engine, maintenance, written, reflections, config.outputSlugPrefix, sourceId, cycleDate, signal, heldSlugs, derivation);
-  await stampProvenance(engine, maintenance, written.filter(ref => ref.slug.startsWith(`${config.outputSlugPrefix}/`)), cycleDate, config.sourceSlugPrefix, sharedSeat(reflections), signal, heldSlugs, derivation);
+  const pages = await groundPatternPages(engine, maintenance, written, reflections, config.outputSlugPrefix, sourceId, cycleDate, signal, heldSlugs, derivation);
+  const appended = await groundTimelineAppends(engine, maintenance, appends, reflections, sourceId, cycleDate, signal, heldSlugs, derivation);
+  const outputs = [...written, ...[...new Set(appends.map(a => a.slug))].map(slug => ({ slug, source_id: sourceId }))];
+  await stampProvenance(engine, maintenance, outputs.filter(ref => ref.slug.startsWith(`${config.outputSlugPrefix}/`)), cycleDate, config.sourceSlugPrefix, sharedSeat(reflections), signal, heldSlugs, derivation);
   // Holds are recorded for this cycle's source only, so a ref in any other source is never excused from verification.
-  const finalized = written.filter(ref => ref.source_id !== sourceId || !heldSlugs.has(ref.slug));
-  return { quoteVerify, finalized, held: heldSlugs.size };
+  const finalized = outputs.filter(ref => ref.source_id !== sourceId || !heldSlugs.has(ref.slug));
+  return { quoteVerify: pages ? { ...pages, ...(appended ? { timeline_appends: appended } : {}) } : null, finalized, held: heldSlugs.size };
 }
 
 async function stampProvenance(engine: BrainEngine, maintenance: MaintenanceAuthority | null,
@@ -730,10 +736,7 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
        AND frontmatter->>'dream_generated' = 'true' AND frontmatter->>'quote_verified_at' IS NULL`, [sourceId, `${outputSlugPrefix}/%`]);
   const slugs = [...new Set([...refs.map(r => r.slug).filter(slug => slug.startsWith(`${outputSlugPrefix}/`)), ...leftover.map(r => r.slug)])];
   if (slugs.length === 0) return { pages: 0, quarantined: 0, repaired: 0 };
-  const sourcePages = await engine.executeRaw<{ slug: string; compiled_truth: string; timeline: string }>(
-    'SELECT slug, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL',
-    [sourceId, reflections.map(r => r.slug)]);
-  const sources = sourcePages.map(p => groundSource(p.slug, `${p.compiled_truth}\n\n${p.timeline ?? ''}`, { tolerant: true }));
+  const sources = await loadGroundingSources(engine, sourceId, reflections, groundSource);
   const stats = { pages: 0, quarantined: 0, repaired: 0 };
   const { serializePageToMarkdown } = await import('../markdown.ts');
   for (const slug of slugs) {
@@ -753,21 +756,103 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
     const page = { ...snapshot.page,
       compiled_truth: ct.body.trim() ? ct.body : (await import('./synthesize-verify.ts')).ALL_CLAIMS_QUARANTINED_BODY,
       timeline: tl.body, frontmatter };
-    const content = serializePageToMarkdown(page, snapshot.tags);
-    if (maintenance) {
-      const { publishMaintenancePage } = await import('../persistence/prepared-maintenance.ts');
-      const publish = () => publishMaintenancePage(engine, maintenance, slug, content, { expectedRevision: snapshot.revision,
-        ...(derived ? { derivation: derived.declaration } : {}) });
-      if (!heldSlugs) await publish();
-      else if (await publishOrHold(publish)) heldSlugs.add(slug);
-    } else {
-      const [{ importFromContent }, { isAvailable }] = await Promise.all([import('../import-file.ts'), import('../ai/gateway.ts')]);
-      const write = (tx: BrainEngine) => importFromContent(tx, slug, content, { noEmbed: !isAvailable('embedding'), sourceId, preserveGateMarkers: true });
-      if (!derived) await write(engine);
-      else await derivedMaintenanceTransaction(engine, derived, async tx => ({ result: await write(tx), rows: [{ table: 'pages' as const, id: snapshot.page.id, sourceId }] }));
-    }
+    await writeGroundedPage(engine, maintenance, snapshot, serializePageToMarkdown(page, snapshot.tags), sourceId, heldSlugs, derived);
   }
   return stats;
+}
+
+/** The full reflection pages a run read, grounded for quote verification. */
+async function loadGroundingSources<T>(engine: BrainEngine, sourceId: string, reflections: ReflectionRef[],
+  groundSource: (path: string, content: string, opts: { tolerant: boolean }) => T): Promise<T[]> {
+  const sourcePages = await engine.executeRaw<{ slug: string; compiled_truth: string; timeline: string }>(
+    'SELECT slug, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL',
+    [sourceId, reflections.map(r => r.slug)]);
+  return sourcePages.map(p => groundSource(p.slug, `${p.compiled_truth}\n\n${p.timeline ?? ''}`, { tolerant: true }));
+}
+
+/** Write a grounded page back at its read revision: a managed maintenance publish (held when pending or contended), else an import. */
+async function writeGroundedPage(engine: BrainEngine, maintenance: MaintenanceAuthority | null, snapshot: { page: Page; revision: string },
+  content: string, sourceId: string, heldSlugs?: Set<string>, derived?: Derivation & { declaration: DerivationDeclaration },
+  removedEntries: TimelineAppend['entry'][] = []): Promise<void> {
+  const slug = snapshot.page.slug;
+  if (maintenance) {
+    const { publishMaintenancePage } = await import('../persistence/prepared-maintenance.ts');
+    const publish = () => publishMaintenancePage(engine, maintenance, slug, content, { expectedRevision: snapshot.revision,
+      ...(derived ? { derivation: derived.declaration } : {}) });
+    if (!heldSlugs) await publish();
+    else if (await publishOrHold(publish)) heldSlugs.add(slug);
+    return;
+  }
+  const [{ importFromContent }, { isAvailable }] = await Promise.all([import('../import-file.ts'), import('../ai/gateway.ts')]);
+  // A managed publish projects timeline rows from the Markdown; an import does not, so a removed entry's row goes here.
+  const write = async (tx: BrainEngine) => {
+    const result = await importFromContent(tx, slug, content, { noEmbed: !isAvailable('embedding'), sourceId, preserveGateMarkers: true });
+    for (const e of removedEntries) {
+      await tx.executeRaw('DELETE FROM timeline_entries WHERE page_id = $1 AND event_page_id IS NULL AND date = $2::date AND source = $3 AND summary = $4',
+        [snapshot.page.id, e.date, e.source, e.summary]);
+    }
+    return result;
+  };
+  if (!derived) await (removedEntries.length ? engine.transaction(write) : write(engine));
+  else await derivedMaintenanceTransaction(engine, derived, async tx => ({ result: await write(tx), rows: [{ table: 'pages' as const, id: snapshot.page.id, sourceId }] }));
+}
+
+/**
+ * #6302: quote-verify only the entries a patterns child appended with add_timeline_entry (on pages it did not
+ * put_page) against this run's reflections. A failing entry leaves the timeline for frontmatter `unverified_claims`
+ * (a materialized marker line in front of it goes with it); a near or normalized quote is repaired in place. Every
+ * other byte of the page, earlier verified content and its stored claim sources included, is kept, and an entry no
+ * longer on the page is skipped. Returns null when dream.quote_verify is off. Holds and derivation as groundPatternPages.
+ */
+export async function groundTimelineAppends(engine: BrainEngine, maintenance: MaintenanceAuthority | null, appends: TimelineAppend[],
+  reflections: ReflectionRef[], sourceId: string, cycleDate: string, signal?: AbortSignal, heldSlugs?: Set<string>,
+  derivation?: Derivation & { declaration: DerivationDeclaration }): Promise<{ entries: number; quarantined: number; repaired: number } | null> {
+  const { dreamQuoteVerifyEnabled, groundSource, verifyBody } = await import('./synthesize-verify.ts');
+  if (!await dreamQuoteVerifyEnabled(engine)) return null;
+  const stats = { entries: 0, quarantined: 0, repaired: 0 };
+  if (appends.length === 0) return stats;
+  const sources = await loadGroundingSources(engine, sourceId, reflections, groundSource);
+  const { serializePageToMarkdown } = await import('../markdown.ts');
+  for (const slug of [...new Set(appends.map(a => a.slug))]) {
+    throwIfAborted(signal, '[dream] patterns timeline quote verify');
+    const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+    if (!snapshot) continue;
+    let timeline = snapshot.page.timeline ?? '';
+    const quarantined: Array<Record<string, unknown>> = [];
+    const removed: TimelineAppend['entry'][] = [];
+    for (const append of appends.filter(a => a.slug === slug)) {
+      const at = timeline.indexOf(append.block);
+      if (at < 0) continue;
+      stats.entries++;
+      const verified = verifyBody(append.block, sources, { checks: 'quotes' });
+      if (verified.quarantined.length > 0) {
+        stats.quarantined += verified.quarantined.length;
+        quarantined.push(...verified.quarantined.map(c => ({ ...c, detected_at: cycleDate })));
+        timeline = removeTimelineBlock(timeline, at, append.block.length, append.marker);
+        removed.push(append.entry);
+      } else if (verified.changed) {
+        stats.repaired += verified.normalized + verified.near;
+        timeline = timeline.slice(0, at) + verified.body + timeline.slice(at + append.block.length);
+      }
+    }
+    if (timeline === (snapshot.page.timeline ?? '')) continue;
+    const frontmatter = quarantined.length
+      ? withClaimSources(snapshot.page.frontmatter as Record<string, unknown>, quarantined, sources.map(x => x.path)).frontmatter
+      : snapshot.page.frontmatter;
+    await writeGroundedPage(engine, maintenance, snapshot, serializePageToMarkdown({ ...snapshot.page, timeline, frontmatter }, snapshot.tags),
+      sourceId, heldSlugs, derivation, removed);
+  }
+  return stats;
+}
+
+/** Cut one entry block (and the materialized marker line in front of it, when present) out of a timeline. */
+function removeTimelineBlock(timeline: string, at: number, length: number, marker: string): string {
+  let before = timeline.slice(0, at);
+  let after = timeline.slice(at + length);
+  if (before.endsWith(`${marker}\n`)) before = before.slice(0, -(marker.length + 1));
+  if (after.startsWith('\n')) after = after.slice(1);
+  else if (before.endsWith('\n')) before = before.slice(0, -1);
+  return before + after;
 }
 
 // ── Provenance via put_page tool execution rows ─────────────────────
@@ -799,7 +884,43 @@ async function collectChildPutPageSlugs(
     .map(slug => ({ slug, source_id: sourceId }));
 }
 
-/** Completed `brain_add_timeline_entry` calls of the given children (#6302 Part A). */
+/** #6302: one entry a patterns child newly published with add_timeline_entry. */
+export interface TimelineAppend { slug: string; requestId: string; block: string; marker: string; entry: { date: string; source: string; summary: string } }
+
+/**
+ * #6302: the timeline entries the given children newly published, selected by their write receipts, not by tool
+ * completion: the request committed with outcome status `ok` (an entry already on the page commits as `skipped`).
+ * A replayed call returns its original receipt, so each request id counts once, and two requests for one entry
+ * identity (slug, date, source, summary) count once. The entry block is rendered from the call's input.
+ */
+async function collectChildTimelineAppends(engine: BrainEngine, childIds: number[], sourceId = 'default'): Promise<TimelineAppend[]> {
+  if (childIds.length === 0) return [];
+  const rows = await engine.executeRaw<{ request_id: string; slug: string; input: unknown }>(
+    `SELECT r.request_id::text AS request_id, r.slug, e.input
+       FROM subagent_tool_executions e
+       JOIN persistence_requests r ON r.request_id::text = COALESCE(e.input->>'request_id', (e.input #>> '{}')::jsonb->>'request_id')
+      WHERE e.job_id = ANY($1::int[]) AND e.tool_name = 'brain_add_timeline_entry'
+        AND r.operation = 'add_timeline_entry' AND r.source_id = $2 AND r.state = 'committed' AND r.outcome->>'status' = 'ok'
+      ORDER BY e.id`,
+    [childIds, sourceId],
+  );
+  const out: TimelineAppend[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const input = (typeof row.input === 'string' ? JSON.parse(row.input) : row.input) as Record<string, unknown>;
+    if (input.slug !== row.slug) continue;
+    const rendered = renderTimelineEntry({ date: String(input.date), summary: String(input.summary ?? ''),
+      source: String(input.source ?? ''), detail: String(input.detail ?? '') }, row.slug);
+    if (!rendered) continue;
+    const identity = [row.slug, rendered.canonical.date, rendered.canonical.source, rendered.canonical.summary].join('\0');
+    if (seen.has(row.request_id) || seen.has(identity)) continue;
+    seen.add(row.request_id).add(identity);
+    out.push({ slug: row.slug, requestId: row.request_id, block: rendered.block, marker: materializedMarker(rendered.canonical), entry: rendered.canonical });
+  }
+  return out;
+}
+
+/** Completed `brain_add_timeline_entry` calls of the given children: the deprecated `appended_unverified` alias (#6302). */
 async function countChildTimelineAppends(engine: BrainEngine, childIds: number[]): Promise<number> {
   if (childIds.length === 0) return 0;
   const [row] = await engine.executeRaw<{ n: number }>(
@@ -813,6 +934,8 @@ async function countChildTimelineAppends(engine: BrainEngine, childIds: number[]
 // ── Reverse-write ────────────────────────────────────────────────────
 
 import { validateSourceId } from '../utils.ts';
+import { renderTimelineEntry } from '../timeline-write-through.ts';
+import { materializedMarker } from '../timeline-marker.ts';
 
 async function reverseWriteRefs(
   engine: BrainEngine,
@@ -937,6 +1060,7 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // source-scoping contract (#1586) without driving a whole dream cycle.
 // Mirrors synthesize.ts's `__testing` block.
 export const __testing = {
+  collectChildTimelineAppends,
   countChildTimelineAppends,
   gatherReflections,
   collectChildPutPageSlugs,
