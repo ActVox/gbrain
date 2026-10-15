@@ -193,6 +193,11 @@ export async function runBackupCli(
         writeCliError(error, 'backup', { json, legacy: { ok: false, reason: 'invalid_params', message: error.message } });
         return { exitCode: 2 };
       }
+      if (error instanceof OperationError && (error.code === 'backup_too_large' || error.code === 'unmanaged_database_path')) {
+        const { writeCliError } = await import('../cli/cli-error.ts');
+        writeCliError(error, 'backup', { json, legacy: { ok: false, reason: error.code, message: error.message } });
+        return { exitCode: 1 };
+      }
       const detail = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown; retryable?: unknown };
       const reason = typeof detail.code === 'string' && SAFE_ERROR_FIELD.test(detail.code) ? detail.code : 'backup_failed';
       const message = backupFailureMessage(error);
