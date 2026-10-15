@@ -9,7 +9,7 @@ fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
 The explicit-only kinds, among them `google-file-modes`, `stale-atoms`, `extractor-facts`,
-`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans` and `stuck-recovery`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `stuck-recovery` and `aliases`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash>` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -145,6 +145,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one; `--only`/`--skip` narrow by canonical file path glob. Opt-in `storage.keep_db` lets the owner host's resident consumer resolve drift under declared prefixes with the database copy. See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
 | `ghost-pages` | `ghost_pages` | Explicit-only, preview-bound, destructive consent. Soft-deletes live pages whose canonical file is missing on the owner host (ghost pages: every write refuses `canonical_file_missing` and no sync can import a file that is not there), through `delete_page` bound to the previewed owner, path and revision. `--apply --expect <hash> --yes`. See [ghost pages](#ghost-pages). | Declared db_only and never-filed derived pages (never listed); a page whose file came back before the apply (`file_restored`); pages changed after the preview (`changed_since_preview`). |
 | `receipt-compaction` | `persistence_capacity` (terminal bytes) | Explicit-only, preview-bound, destructive consent. Compacts terminal write receipts now instead of on the idle maintenance tick (#6696): the intent and error message are dropped, the outcome, error code and detail stay, and the unused reservation returns to the receipt-bytes counters. `--older-than <72h\|30d>` is floored at the configured retention unless `--force`; committed receipts only unless `--include-failures`. No admission, so it runs at a full cap. See [receipt compaction](#receipt-compaction). | `failures_kept`: failed, conflict and cancelled receipts left without `--include-failures`. Receipts of a run whose sync cursor is still open, and the newest sync receipt of each worktree, are never listed. |
+| `aliases` | `dangling_aliases` (orphaned rows) | Explicit-only. Deletes free-text page aliases and slug redirects whose target page has no row at all (a page purged before purge removed its aliases, #6619, or a hard-deleted page), each target rechecked under its page lock; a coordinated maintenance write on a managed brain. A redirect from an old name of a page that still exists is never touched. See [aliases](#aliases). | `soft_deleted_target`: aliases of a soft-deleted page, kept for `gbrain restore` and removed when the page is purged. |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -586,6 +587,32 @@ A page whose keys a write cleared between preview and apply is counted
 `already_clean`. Nested user keys with the same names (`metadata.title`) are
 never touched; only the four top-level keys are.
 
+### Aliases
+
+<a id="aliases"></a>
+Doctor `dangling_aliases` counts alias rows whose target page is gone. Two
+kinds are reported apart:
+
+- **Orphaned:** the target slug has no page row at all, usually a page purged
+  before purge removed its aliases (#6619). A free-text alias can still resolve
+  a name to that missing page. Preview per source, then apply:
+
+  ```bash
+  gbrain repair aliases --source <id>
+  gbrain repair aliases --source <id> --apply
+  ```
+
+  The apply deletes `page_aliases` rows whose `slug` is the missing page and
+  `slug_aliases` rows whose `canonical_slug` is the missing page. A redirect
+  whose old name happens to be the missing slug but points at a live page (a
+  rename) is kept.
+- **Soft-deleted target:** the page is in its restore window. Its aliases are
+  kept so `gbrain restore` brings them back; purging the page removes them.
+  Nothing needs running.
+
+Both alias tables carry the managed writer guard, so deleting rows with raw SQL
+fails on a managed brain; use the repair.
+
 ### Orphan children
 
 **Say to your agent:** *"gbrain fails with `unexpected chunk number` or
@@ -981,8 +1008,15 @@ write keeps a receipt with its full intent until receipt compaction
 (`persistence.receipt_retention_days`, 30 days by default). `gbrain repair
 failed-writes` submits those writes again. It is explicit-only and
 preview-bound, and needs v0.60.38.0 or later (`gbrain doctor --json` reports
-schema version 197 or later). Doctor's `lost_caller_writes` counts the writes
-it would replay, per source, and names this preview.
+schema version 197 or later). Doctor's `lost_caller_writes` counts the
+retained refused writes that may be replayable, per source, and names this
+preview; the preview decides which ones it replays. Doctor leaves out (and
+lists under `details.not_replayable`) the two classes it can decide from the
+receipt alone: an unpinned `remember` (`unpinned_target`) and a `put_page`
+whose page changed after the revision the caller read (`revision_superseded`, which
+the preview classes `superseded`). The
+preview changes no page content, but it records an approval checkpoint for its
+replay set, which `--apply --expect <hash>` reads.
 
 **Say to your agent:** *"Preview which refused writes gbrain can replay, show
 me the list, then apply after I agree."* The agent runs `gbrain repair

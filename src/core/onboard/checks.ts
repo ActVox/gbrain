@@ -26,6 +26,8 @@ import { embeddingEnablement, type ReadinessState } from '../readiness.ts';
 import { embeddingsDisabled } from '../embedding-disabled.ts';
 import { loadConfig } from '../config.ts';
 import { MIN_ENTITY_PAGES_FOR_COVERAGE } from '../types.ts';
+import { ORPHANED_ALIAS_COUNTS_SQL, SOFT_DELETED_ALIAS_COUNT_SQL } from '../repair/aliases.ts';
+import { repairPreviewCommand } from '../repair/registry.ts';
 
 /** Shared shape returned by all four checks. */
 export interface OnboardCheckResult {
@@ -695,59 +697,57 @@ export async function checkTypeProliferation(
 
 /**
  * dangling_aliases (F12): surfaces both slug_aliases redirects and
- * page_aliases free-text names whose target page no longer exists.
- * Source-scoped JOINs prevent cross-source false-positive deletion.
+ * page_aliases free-text names whose target page is gone or soft-deleted.
+ * Source-scoped JOINs prevent cross-source false positives.
  *
- * v0.42 ships surface-only (no auto-GC RemediationStep). v0.43+ may add
- * `cleanup-dangling-aliases` as an auto_apply handler once detection is
- * confirmed clean in production.
+ * #6619: the two cases are reported apart. Aliases whose target has no page
+ * row (purged or hard-deleted) are cleared by `gbrain repair aliases`, named
+ * per source; aliases of a soft-deleted page are kept for `gbrain restore`
+ * and removed when that page is purged, so nothing is offered for them. The
+ * alias tables carry the managed writer guard, so raw SQL is never offered.
  *
- * Defensive: pre-v105 brains don't have slug_aliases yet — returns ok
- * via the `isUndefinedTableError` fallthrough inherent in safeCount's
- * catch-all (returns 0 on any SQL error).
+ * Defensive: pre-v105 brains don't have slug_aliases yet; a failed read
+ * counts nothing (ok).
  */
 export async function checkDanglingAliases(
   engine: BrainEngine,
 ): Promise<OnboardCheckResult> {
-  const slugAliases = await safeCount(
-    engine,
-    `SELECT COUNT(*) AS count FROM slug_aliases sa
-     LEFT JOIN pages p
-       ON p.slug = sa.canonical_slug
-      AND p.source_id = sa.source_id
-      AND p.deleted_at IS NULL
-     WHERE p.id IS NULL`,
-  );
-  const pageAliases = await safeCount(
-    engine,
-    `SELECT COUNT(*) AS count FROM page_aliases pa
-     LEFT JOIN pages p
-       ON p.slug = pa.slug
-      AND p.source_id = pa.source_id
-      AND p.deleted_at IS NULL
-     WHERE p.id IS NULL`,
-  );
+  let orphaned: Array<{ source_id: string; slug_redirects: number; page_aliases: number }> = [];
+  let soft = { slug_redirects: 0, page_aliases: 0 };
+  try {
+    orphaned = await engine.executeRaw(ORPHANED_ALIAS_COUNTS_SQL);
+    const [row] = await engine.executeRaw<typeof soft>(SOFT_DELETED_ALIAS_COUNT_SQL);
+    if (row) soft = row;
+  } catch { /* pre-v105 brain or unreadable alias tables: nothing to report */ }
+  const slugAliases = orphaned.reduce((sum, row) => sum + Number(row.slug_redirects), 0) + Number(soft.slug_redirects);
+  const pageAliases = orphaned.reduce((sum, row) => sum + Number(row.page_aliases), 0) + Number(soft.page_aliases);
   const n = slugAliases + pageAliases;
-  if (n > 0) {
+  if (n === 0) {
     return {
-      check: {
-        name: 'dangling_aliases',
-        status: 'warn',
-        message:
-          `${n} alias rows point at missing/deleted pages ` +
-          `(${slugAliases} slug redirects; ${pageAliases} free-text page aliases). ` +
-          `Safe GC (source-scoped): ` +
-          `\`DELETE FROM slug_aliases sa WHERE NOT EXISTS (SELECT 1 FROM pages p ` +
-          `WHERE p.slug = sa.canonical_slug AND p.source_id = sa.source_id ` +
-          `AND p.deleted_at IS NULL); DELETE FROM page_aliases pa WHERE NOT EXISTS ` +
-          `(SELECT 1 FROM pages p WHERE p.slug = pa.slug ` +
-          `AND p.source_id = pa.source_id AND p.deleted_at IS NULL);\``,
-      },
-      remediations: [],  // v0.42: surface-only; auto-GC v0.43+
+      check: { name: 'dangling_aliases', status: 'ok', message: 'No dangling aliases' },
+      remediations: [],
     };
   }
+  const commands = orphaned.map(row => repairPreviewCommand('aliases', { source: row.source_id }));
+  const softTotal = Number(soft.slug_redirects) + Number(soft.page_aliases);
+  const orphanedText = orphaned.length
+    ? `${n - softTotal} point at pages that no longer exist (${orphaned.map(row => `${row.source_id}: ${Number(row.slug_redirects) + Number(row.page_aliases)}`).join(', ')}); `
+      + `preview their cleanup with ${commands.join('; ')}, then run the --apply command it prints. `
+    : '';
+  const softText = softTotal
+    ? `${softTotal} belong to soft-deleted pages and are kept for gbrain restore; purging the page removes them, so nothing needs running for those.`
+    : '';
   return {
-    check: { name: 'dangling_aliases', status: 'ok', message: 'No dangling aliases' },
+    check: {
+      name: 'dangling_aliases',
+      status: 'warn',
+      message:
+        `${n} alias rows point at missing/deleted pages ` +
+        `(${slugAliases} slug redirects; ${pageAliases} free-text page aliases). ${orphanedText}${softText}`.trimEnd(),
+      details: { orphaned, soft_deleted: soft },
+      ...(orphaned.length ? { fix: { argv: commands[0]!.split(' '), consent: [], actor: 'agent' as const, requires_exclusive: false,
+        why: 'Lists the orphaned alias rows of that source without changing anything; its output prints the apply command.' } } : {}),
+    },
     remediations: [],
   };
 }
