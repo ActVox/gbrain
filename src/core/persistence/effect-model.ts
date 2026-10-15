@@ -57,6 +57,8 @@ export interface PersistenceEffect {
   source_incarnation: string;
   worktree_id: string | null;
   data: { version?: 2; targets?: WithdrawalTarget[]; slug?: string; page_id?: number; relative_path?: string; expected_hash?: string | null; after_slug?: string; source_id?: string; source_scan?: boolean; visibility?: 'private' | 'world'; embedding_attempt_base?: number; embedding_retry_base?: number;
+    /** Wave B: the occurrences a segmented write added; its embedding effect embeds only their chunk rows. */
+    occurrence_ids?: number[];
     /** A single-file Git target's GitCommitNote, when its preparer gave one. */
     commit_subject?: string;
     commit_line?: string;

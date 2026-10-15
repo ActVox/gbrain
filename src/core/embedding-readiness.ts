@@ -3,6 +3,7 @@ import { readProjectionSnapshot, queuePageProjection, preparePageProjection, ins
 import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from './search/embedding-column.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from './quarantine.ts';
 import { isMultimodalEnabled } from './sync.ts';
+import { buildSegmentedProjection } from './page-body/projection.ts';
 
 export async function countArchivedEmbeddingWork(engine: BrainEngine, opts: { sourceId?: string; signature?: string; includeNullSignature?: boolean; includeUnsealed?: boolean } = {}, activeColumn?: string | null): Promise<number> {
   const column = activeColumn === undefined ? (await resolveActiveEmbeddingColumnFromEngine(engine)).name : activeColumn;
@@ -102,6 +103,11 @@ export async function prepareEmbeddingProjections(engine: BrainEngine, opts: { s
       await opts.assertOwned?.();
       try {
         if (await readProjectionSnapshot(engine, row.slug, row.source_id)) continue;
+        const [segmented] = await engine.executeRaw(`SELECT 1 FROM pages WHERE id=$1 AND body_storage='segmented'`, [row.id]);
+        if (segmented) {
+          if ((await buildSegmentedProjection(engine, { sourceId: row.source_id, slug: row.slug })).sealed) rebuilt++;
+          continue;
+        }
         const queued = await engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
           await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug }]);

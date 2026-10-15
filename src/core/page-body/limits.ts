@@ -54,6 +54,14 @@ export const STAGE_BATCH_BYTES: Readonly<Record<'postgres' | 'pglite', number>> 
 /** Chunk rows the generation flip retires inside the publication transaction; above it the page publishes unsealed and a projection job retires the rest. */
 export const DEFAULT_FLIP_RETIRE_MAX_ROWS = 20_000;
 
+/**
+ * Snapshots of an inline page over the inline cap kept per page (Wave A). Each
+ * one is a full copy of the body, so an append-heavy 24 MiB page would otherwise
+ * grow history by 24 MiB per write. Snapshots at or under the inline cap, and
+ * every snapshot of a small page, are never pruned.
+ */
+export const LARGE_PAGE_VERSIONS_KEPT = 5;
+
 /** Segmented version retention: newest N kept, then oldest-first pruning while pinned bytes exceed max(floor, body_bytes). */
 export const DEFAULT_SEGMENTED_VERSIONS_MAX_PER_PAGE = 50;
 export const DEFAULT_SEGMENTED_VERSIONS_MAX_PINNED_BYTES = 64 * 1024 ** 2;

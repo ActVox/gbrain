@@ -16,6 +16,7 @@ import { getEmbeddingModel } from '../ai/gateway.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
 import { belowSafeChunkFence, movableChunkSql } from '../search/safe-chunks.ts';
+import { buildSegmentedProjection } from '../page-body/projection.ts';
 import { acceptedEmbeddingInputHashes, embeddingInputHash, plainEmbeddingTier, synopsisBodyHash,
   type EmbeddingInputContext, type EmbeddingTier } from '../embedding-input-hash.ts';
 
@@ -140,7 +141,16 @@ async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot, maxC
     corpusGeneration: projection?.corpus_generation ?? null };
 }
 
-/** A short guarded read binds the exact chunk set and title/body revision. */
+/** Wave B: a segmented page's snapshot carries no body strings (lane 1c's `isSegmentedPage` shape). */
+function segmentedSnapshot(snapshot: PageSnapshot): boolean {
+  return (snapshot.page as { body_storage?: unknown }).body_storage === 'segmented';
+}
+
+/**
+ * A short guarded read binds the exact chunk set and title/body revision.
+ * Null for a segmented page: its projection is `buildSegmentedProjection` and
+ * its embedding `page-body/segmented-embedding.ts`, never this body read.
+ */
 export async function readProjectionSnapshot(engine: BrainEngine, slug: string, sourceId: string,
   opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean } = {}): Promise<ProjectionSnapshot | null> {
   return engine.transaction(async tx => {
@@ -153,7 +163,7 @@ export async function readProjectionSnapshot(engine: BrainEngine, slug: string, 
 async function readGuardedProjectionSnapshot(tx: BrainEngine, slug: string, sourceId: string,
   opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean }): Promise<ProjectionSnapshot | null> {
   const snapshot = await tx.readPageSnapshot(slug, { sourceId, ...(opts.requireLiveSource && { requireLiveSource: true }) });
-  if (!snapshot || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
+  if (!snapshot || segmentedSnapshot(snapshot) || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
   const context = await indexingContext(tx, snapshot, opts.maxChunkTokens);
   const fenceOverlay = context.pageKind === 'markdown' ? await loadFenceChunkOverlay(tx, { sourceId, slug, compiled_truth: snapshot.page.compiled_truth, timeline: snapshot.page.timeline }) : undefined;
   return { snapshot, chunks: await tx.getChunks(slug, { sourceId, includeUnsealed: true }), indexingContext: context.key,
@@ -282,7 +292,7 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
     await tx.lockPageKeys([{ sourceId, slug }]);
     const current = await tx.readPageSnapshot(slug, { sourceId });
     if (!current || current.page.deleted_at || current.sourceIncarnation !== snapshot.sourceIncarnation || current.page.id !== snapshot.page.id
-      || current.page.text_projection_revision !== current.revision) return refused;
+      || current.page.text_projection_revision !== current.revision || segmentedSnapshot(current)) return refused;
     const [source] = await tx.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]);
     if (!source || source.archived) return refused;
     const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);
@@ -497,7 +507,11 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
           WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid`, observed);
         if (!pending.length) return null;
         const read = await readGuardedProjectionSnapshot(tx, job.slug, job.source_id, { allowUnsealed: true });
-        if (!read) return null;
+        if (!read) {
+          const [segmented] = await tx.executeRaw(`SELECT 1 FROM pages WHERE source_id=$1 AND slug=$2 AND body_storage='segmented' AND deleted_at IS NULL`,
+            [job.source_id, job.slug]);
+          return segmented ? 'segmented' : null;
+        }
         const { snapshot } = read;
         if (snapshot.sourceIncarnation === job.source_incarnation && snapshot.revision === job.revision) return read;
         if (snapshot.sourceIncarnation !== job.source_incarnation || snapshot.page.text_projection_revision === snapshot.revision) {
@@ -510,6 +524,15 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
       });
       if (!prepared) { superseded++; continue; }
       if (prepared === 'removed') { superseded++; opts.onHeal?.({ kind: 'removed', source_id: job.source_id, slug: job.slug }); continue; }
+      if (prepared === 'segmented') {
+        const built = await buildSegmentedProjection(engine, { sourceId: job.source_id, slug: job.slug });
+        await engine.executeRaw(built.sealed
+          ? 'DELETE FROM page_projection_jobs WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid'
+          : 'UPDATE page_projection_jobs SET updated_at=now() WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid', observed);
+        if (built.sealed) rebuilt++;
+        else superseded++;
+        continue;
+      }
       const projection = await preparePageProjection(prepared);
       await installPageProjection(engine, prepared, projection.chunks, { seal: true, preserveEmbeddings: true, code: projection.code });
       rebuilt++;

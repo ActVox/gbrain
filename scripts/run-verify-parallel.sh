@@ -177,6 +177,9 @@ CHECKS=(
   # Goal (a) (refactor wave 1): engine SQL only shrinks; baseline
   # scripts/engine-sql-baseline.tsv.
   "check:engine-sql-ratchet"
+  # Wave B large pages: every content_chunks reader applies the chunk-visibility
+  # predicate or carries a reason; baseline scripts/chunk-visibility-baseline.tsv only shrinks.
+  "check:chunk-visibility"
   # CQ3 / EO17 (refactor wave 1): engine-sql splices only constant text, no
   # composed $n, no expanded IN lists.
   "check:engine-sql-dynamic"

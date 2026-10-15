@@ -32,7 +32,7 @@ import type { PreparedMutation } from './coordinator.ts';
 import { persistenceFileHash } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
-import { belowSafeChunkFence } from '../search/safe-chunks.ts';
+import { belowSafeChunkFence, chunkGenerationFilter } from '../search/safe-chunks.ts';
 import { sha256 } from './digest.ts';
 
 export interface NoopKernelResult {
@@ -73,8 +73,8 @@ export async function inspectUnchanged(engine: Pick<BrainEngine, 'executeRaw'>, 
   if (observedRevision !== snapshot.revision) return result('revision_moved');
   const [page] = await engine.executeRaw<{ chunker_version: number | null; text_projection_revision: string | null; knowledge_revision: string;
     mode_pending: boolean; unembedded: boolean; source_path: string | null }>(`SELECT p.chunker_version,p.text_projection_revision::text,p.knowledge_revision::text,p.source_path,
-      (p.contextual_retrieval_mode IS NULL AND EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NOT NULL)) AS mode_pending,
-      EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL) AS unembedded
+      (p.contextual_retrieval_mode IS NULL AND EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NOT NULL AND ${chunkGenerationFilter('p', 'c')})) AS mode_pending,
+      EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL AND ${chunkGenerationFilter('p', 'c')}) AS unembedded
     FROM pages p WHERE p.id=$1 AND p.deleted_at IS NULL`, [snapshot.page.id]);
   if (!page) return result('page_missing');
   // The page's current revision, read after the preparer ran: a write that landed since the snapshot was read is admitted.

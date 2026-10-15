@@ -43,6 +43,7 @@ import {
 } from '../page-window/window.ts';
 import { renderTrustedText, type TrustFields } from '../eligibility/labels.ts';
 import type { QuarantinedView } from './get-page-projection.ts';
+import { chunkGenerationProbe } from '../search/safe-chunks.ts';
 
 export const BODY_MODES = ['auto', 'full', 'none', 'outline', 'window'] as const;
 export type BodyMode = typeof BODY_MODES[number];
@@ -235,7 +236,7 @@ async function aroundChunk(ctx: OperationContext, page: Page, doc: PageDocument,
   Promise<{ window: WindowSlice | null; chunkText: string; anchor: 'stored_span' | 'located' | 'chunk_only'; span?: { byte_start: number; byte_end: number } }> {
   const rows = await ctx.engine.executeRaw<{ chunk_text: string; chunk_source: string; projected_byte_start: unknown; projected_byte_end: unknown }>(
     `SELECT chunk_text, chunk_source, projected_byte_start, projected_byte_end FROM content_chunks
-      WHERE id = $1 AND page_id = $2 AND COALESCE(modality, 'text') = 'text'`, [chunkId, page.id]);
+      WHERE id = $1 AND page_id = $2 AND COALESCE(modality, 'text') = 'text' AND ${chunkGenerationProbe('content_chunks')}`, [chunkId, page.id]);
   const row = rows[0];
   if (!row) {
     throw opError('revision_changed', `Chunk ${chunkId} is not part of page ${page.slug} at its current revision.`,
@@ -296,7 +297,8 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
 
   if (mode === 'none') {
     const [counts] = await ctx.engine.executeRaw<{ total: unknown; embedded: unknown }>(
-      `SELECT count(*) AS total, count(*) FILTER (WHERE embedded_at IS NOT NULL) AS embedded FROM content_chunks WHERE page_id = $1`, [page.id]);
+      `SELECT count(*) AS total, count(*) FILTER (WHERE embedded_at IS NOT NULL) AS embedded FROM content_chunks
+        WHERE page_id = $1 AND ${chunkGenerationProbe('content_chunks')}`, [page.id]);
     const fm = (page.frontmatter ?? {}) as Record<string, unknown>;
     return { ...out, chunks: { total: Number(counts?.total ?? 0), embedded: Number(counts?.embedded ?? 0) },
       ...(fm.embed_skip ? { embed_skip: true } : {}), truncated: doc.bytes.length > 0 };
