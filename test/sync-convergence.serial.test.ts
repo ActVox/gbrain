@@ -128,12 +128,14 @@ const ENTITY = 'people/alice-example';
  * file-publication pair (`before_publication`/`after_publication`) never fires for it. Per-page seams are counted
  * per submit_job request (nth inside the first 60% of a round); `lane:applied` and `sync:before_group_admission`
  * fire once per bulk group, and a small round may form one group, so they kill at the first; `sync:mid_checkpoint`
- * fires on every cursor save (the first or second).
+ * fires on every cursor save (the first or second); #6712's `sync:held_settled` and `sync:retry_deferred` fire on the
+ * cursor step that holds a failed entry or defers a changed one (the first or second), and only in a round that has one.
  */
 const KILL_POINTS = [
   { point: 'publication:before_commit', per: 'page' }, { point: 'publication:after_commit', per: 'page' },
   { point: 'consumer:preparing', per: 'page' }, { point: 'lane:applied', per: 'group' },
   { point: 'sync:before_group_admission', per: 'group' }, { point: 'sync:mid_checkpoint', per: 'save' },
+  { point: 'sync:held_settled', per: 'save' }, { point: 'sync:retry_deferred', per: 'save' },
 ] as const satisfies ReadonlyArray<{ point: FaultPoint; per: 'page' | 'group' | 'save' }>;
 const MAX_RECOVERY_RUNS = 2;
 /** Oracle tests are named by the persistence gate's violation class (scripts/persistence/model.ts) they would report. */
@@ -825,7 +827,7 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
     // The fault plan, drawn from the seed before anything runs: one kill per round.
     const kinds = [runs('a') && 'client', runs('b') && 'serve', runs('a') && runs('b') && 'serve+client'].filter(Boolean) as Array<'client' | 'serve' | 'serve+client'>;
     const perRound = Math.min(100, Math.max(10, Math.round(NOTES * 0.1)));
-    // Victims and fault points cycle from seeded offsets, so six kills reach every point and each victim kind twice.
+    // Victims and fault points cycle from seeded offsets, so six kills reach each victim kind twice and KILL_POINTS.length kills reach every point.
     const offset = b.between(0, 2), pointOffset = b.between(0, KILL_POINTS.length - 1);
     const plan = Array.from({ length: kinds.length ? KILLS : 0 }, (_, k) => {
       const kind = kinds[(k + offset) % kinds.length];
