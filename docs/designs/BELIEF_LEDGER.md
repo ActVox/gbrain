@@ -646,7 +646,8 @@ The contract W1 adds for the ledger:
      for the same field, keeping its purge request, and the same owner
      release is needed there. Separately, any append in the source whose
      field value hashes to an active suppression's `field_hash` (a verbatim
-     copy of the whole field into an unlinked subject) gets the marker too.
+     copy of the whole field into an unlinked subject) gets the marker too
+     (the register is indexed on `(source_id, field_hash)`).
      What remains is a stated limit, the same one the live resurrection
      guards have (they match fingerprints, not text): a writer that copies
      part of a suppressed field into a new, unlinked subject is not
