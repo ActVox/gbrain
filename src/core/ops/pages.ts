@@ -392,7 +392,6 @@ async function runAutoLink(
   const snapshot = await engine.readPageSnapshot(slug, { sourceId });
   if (!snapshot) return;
   const { prepareAutomaticLinks } = await import('../persistence/links-preparation.ts');
-  // A segmented page keeps its body unread: link preparation streams it.
   snapshot.page.frontmatter ??= {};
   const prepared = await prepareAutomaticLinks(engine, slug, snapshot.page, sourceId);
   return engine.transaction(async tx => {

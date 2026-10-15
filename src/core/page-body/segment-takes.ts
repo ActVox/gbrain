@@ -11,7 +11,7 @@
  */
 import { indexOfOutsideCode } from '../fence-scan.ts';
 import { parseTakesFence, TAKES_FENCE_BEGIN, TAKES_FENCE_END, type ParseResult } from '../takes-fence.ts';
-import { BLOCK_MAX_BYTES, blockTooLargeError, type BodyBlock } from './segment-blocks.ts';
+import { BLOCK_MAX_BYTES, blockTooLargeError, segmentedPassWork, type BodyBlock } from './segment-blocks.ts';
 
 export interface StreamedTakes {
   parsed: ParseResult;
@@ -49,6 +49,7 @@ export async function parseTakesFenceBlocks(blocks: AsyncIterable<BodyBlock>, pa
     const end = indexOfOutsideCode(text, TAKES_FENCE_END, search);
     const piece = text.slice(from, end === -1 ? text.length : end + TAKES_FENCE_END.length);
     fenceChars += piece.length;
+    segmentedPassWork.carry += piece.length;
     if (fenceChars > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, page.source_id, fenceChars);
     fence.push(piece);
     if (end !== -1) return { parsed: parseTakesFence(fence.join('')), hasBegin, hasMarker };

@@ -26,7 +26,7 @@ import { rangedRelationLines } from '../link-effective.ts';
 import type { TemporalBody } from '../link-temporal-apply.ts';
 import { PageRegexBudget } from '../schema-pack/redos-guard.ts';
 import type { PageType } from '../types.ts';
-import { bodyBlocks, detachedValue, type BodyBlock, type BodyBlockOptions } from './segment-blocks.ts';
+import { bodyBlocks, detachedValue, segmentedPassWork, type BodyBlock, type BodyBlockOptions } from './segment-blocks.ts';
 
 /** Context a window carries after its block (an excerpt reaches 120 chars past a link) and, at least, before it. */
 const CONTEXT_CHARS = 4096;
@@ -66,7 +66,12 @@ export async function* bodyWindows(engine: BrainEngine, page: { id: number; slug
   const windowOf = (own: BodyBlock): BodyWindow => {
     const lead = before[0]?.at ?? own.at;
     const head = (lead === 0 ? '' : `\n${headings.filter(Boolean).map(h => `${h}\n`).join('')}`) + before.map(b => b.text).join('');
-    const after = ahead.map(b => b.text).join('').slice(0, CONTEXT_CHARS);
+    let after = '';
+    for (const b of ahead) {
+      if (after.length >= CONTEXT_CHARS) break;
+      after += b.text.slice(0, CONTEXT_CHARS - after.length);
+    }
+    segmentedPassWork.windows += head.length + own.text.length + after.length;
     return { text: head + own.text + after, start: head.length, end: head.length + own.text.length, offset: own.at - head.length, block: own };
   };
   const done = (own: BodyBlock) => {

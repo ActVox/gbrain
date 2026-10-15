@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 import { truncateUtf8 } from './text-safe.ts';
 import { openSegmentedBody, readBodyRange } from './page-body/read-range.ts';
-import { readGarbageCollector } from './page-body/segment-blocks.ts';
+import { readGarbageCollector, segmentedPassWork } from './page-body/segment-blocks.ts';
 
 export type ExtractionPipeline = 'facts_backstop' | 'extract_atoms' | 'conversation_facts';
 
@@ -120,6 +120,7 @@ export async function planSegmentedExtraction(engine: BrainEngine, pageId: numbe
   for await (const piece of readBodyRange(engine, { pageId, space: 'stored', start: 0, end: Infinity, audience: 'trusted', region: 'truth', body })) {
     const buf = piece.bytes;
     collect(buf.length);
+    segmentedPassWork.bytes += buf.length;
     whole.update(buf);
     const text = decoder.decode(buf, { stream: true });
     chars += text.length;
@@ -131,6 +132,7 @@ export async function planSegmentedExtraction(engine: BrainEngine, pageId: numbe
       const after = tailDecoder.decode(buf.subarray(split), { stream: true });
       tailChars += after.length;
       tailText ||= after.trim().length > 0;
+      segmentedPassWork.carry += tail.length + after.length;
       tail = (tail + after).slice(-2 * cap);
     }
     bytes += buf.length;

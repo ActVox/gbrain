@@ -38,6 +38,14 @@ export function readGarbageCollector(): (bytes: number) => void {
   };
 }
 
+/**
+ * @internal Work the derived passes do over a segmented body, for the linearity test: bytes read (`bytes`), UTF-16
+ * units of the blocks yielded (`blocks`) and of the link-extraction windows built around them (`windows`), and units a
+ * pass copies past its block (`carry`: a takes fence joined across blocks, the watermark planner's tail window).
+ * Counts, not time, so a busy machine cannot move them.
+ */
+export const segmentedPassWork = { bytes: 0, blocks: 0, windows: 0, carry: 0 };
+
 /** The longest run of segments joined across forced cuts that a pass holds as one string. */
 export const BLOCK_MAX_BYTES = 8 * SEGMENT_MAX_BYTES;
 
@@ -87,6 +95,8 @@ export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug:
       for await (const piece of readBodyRange(engine, { pageId: body.pageId, space: 'stored', start, end, audience: 'trusted', region, body })) parts.push(piece.bytes);
       const text = Buffer.concat(parts).toString('utf8');
       collect(end - start);
+      segmentedPassWork.bytes += end - start;
+      segmentedPassWork.blocks += text.length;
       yield { region, text, at };
       at += text.length;
       i = j + 1;
