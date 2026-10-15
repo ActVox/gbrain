@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 243,
+    "count": 244,
     "gaps": [
       17,
       18,
@@ -11,6 +11,7 @@
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
       "BOUNDED_TIMELINE_CHECKPOINT": "385c4da3e28732343148795d6e9a86670813a7a7cfa1e52f8a5bb494680a3c0d",
       "CHECKPOINT": "3c6ff909363c4ba1c9d730e748654ab90aa07549ddf4bf36b8f93c5f4ea3680b",
+      "CONTENT_CHUNKS_GENERATION_INDEX": "c434b3a4acdad499cf3b9f170d9f9967b8e3e8218c829db99f3ecba3b53c8b5d",
       "CONTENT_CHUNKS_OCCURRENCE_INDEX": "7b692ba777b30399ab5a3b100eb40b3b9d1b3fb2322dc4dc808ba8a4d667912c",
       "FACT_PURGES_ALL_SUBJECTS_INDEX": "99e2eb6c24134b539cb4cfd6e5ff66a724463525d09e9ba1fdde3c13f5787b6c",
       "FACT_PURGES_SUBJECT_INDEX": "f4fba07082f2e26da3fa51b0b689f3fe78a3d09afd20c1924dbc2fbe6b1560f1",
@@ -57,7 +58,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 248,
+    "latest": 249,
     "records": [
       {
         "handler": {
@@ -3776,7 +3777,7 @@
             "migrationNotice",
             "quietMigrationNotices"
           ],
-          "sha256": "f534fe8c1c2a21a072644ff97155d6298e87245cf293fbf25b94c0713f6f4a66"
+          "sha256": "2fb35d2d13c92c07dfd2f002db579956d1fea8869a908210f6668911fa6ddd89"
         },
         "idempotent": true,
         "name": "segmented_page_storage",
@@ -3797,6 +3798,29 @@
         "transaction": false,
         "verify": "absent",
         "version": 248
+      },
+      {
+        "handler": {
+          "form": "arrow",
+          "helpers": [
+            "CONTENT_CHUNKS_GENERATION_INDEX",
+            "buildIndexOnline",
+            "dropInvalidConcurrentIndex",
+            "migrationNotice",
+            "quietMigrationNotices"
+          ],
+          "sha256": "04311e56cedf0fa4c64828548231ceda89ed68f6e2038d7ece7a907d3e3c413f"
+        },
+        "idempotent": true,
+        "name": "segmented_chunk_gc_index",
+        "sql": {
+          "length": 68,
+          "sha256": "004ba9dd1ed2cdc010622bc58689e5bf912d937212ec3b8b83307d9f6824e1c9"
+        },
+        "sqlFor": "absent",
+        "transaction": false,
+        "verify": "absent",
+        "version": 249
       }
     ],
     "versions": [
@@ -4042,7 +4066,8 @@
       245,
       246,
       247,
-      248
+      248,
+      249
     ]
   },
   "normalizer": "migrations-record-v1"
