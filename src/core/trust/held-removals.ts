@@ -11,7 +11,9 @@
  *   number (or the timeline entry with its date, source and summary) replaces
  *   it at the writer's tier, and when the page no longer carries one the row
  *   is deleted.
- * Dismissing keeps the row (the default reject).
+ * Dismissing keeps the row (the default reject). A segmented page has no body
+ * string to rule the row, so its accept refuses (`page_body_segmented`) and the
+ * proposal stays pending.
  */
 import type { BrainEngine } from '../engine.ts';
 import { parseTakesFence } from '../takes-fence.ts';
@@ -23,12 +25,13 @@ import { queuePageProjection } from '../page-state/projections.ts';
 import { reprojectTimelineRow } from '../persistence/canonical-projections.ts';
 import { decisionResult, getTrustProposal, transitionTrustProposal, type TrustDecisionContext, type TrustDecisionResult, type TrustProposalRow } from './proposals.ts';
 import { storedTrustTier } from './tier.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 
-interface HeldPageRow { id: number; page_id: number; source_id: string; slug: string; compiled_truth: string; timeline: string | null }
+interface HeldPageRow { id: number; page_id: number; source_id: string; slug: string; body_storage: 'inline' | 'segmented' | null; compiled_truth: string; timeline: string | null }
 
 async function heldRow(engine: BrainEngine, table: string, id: number): Promise<(HeldPageRow & Record<string, unknown>) | undefined> {
   const columns = table === 'takes' ? 'x.row_num, x.claim' : 'x.date::text AS date, x.source, x.summary';
-  const [row] = await engine.executeRaw<HeldPageRow & Record<string, unknown>>(`SELECT x.id, x.page_id, ${columns}, p.source_id, p.slug, p.compiled_truth, p.timeline
+  const [row] = await engine.executeRaw<HeldPageRow & Record<string, unknown>>(`SELECT x.id, x.page_id, ${columns}, p.source_id, p.slug, p.body_storage, p.compiled_truth, p.timeline
     FROM ${table === 'takes' ? 'takes' : 'timeline_entries'} x JOIN pages p ON p.id = x.page_id WHERE x.id = $1`, [id]);
   return row;
 }
@@ -50,6 +53,7 @@ export async function acceptHeldRemoval(engine: BrainEngine, proposal: TrustProp
     await transitionTrustProposal(engine, proposal.id, 'pending', 'superseded', { decidedBy: ctx.decidedBy });
     return decisionResult(proposal, 'accept', 'superseded', { reason: 'row_missing' });
   }
+  assertInlineBody(row, 'trust confirm (held removal)');
   const body = { compiled_truth: row.compiled_truth, timeline: row.timeline ?? '' };
   const fenceRow = table === 'takes' ? parseTakesFence(`${row.compiled_truth}\n${row.timeline ?? ''}`).takes.find(t => t.rowNum === Number(row.row_num)) : undefined;
   if (fenceRow && fenceRow.claim === row.claim) {
