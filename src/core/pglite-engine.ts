@@ -11,7 +11,7 @@ import { readPageSnapshotsBatch } from './page-snapshot-batch.ts';
 import { createPageVersion } from './page-state/versions.ts';
 import { moveSlugBindings, recordRenameAlias } from './page-state/rename-alias.ts';
 import { composablePgliteTransaction, transactionMemo } from './page-state/transactions.ts';
-import { dropRowTypeArrayParsers, PgliteStatementCache } from './pglite-statements.ts';
+import { configurePgliteCodecs, PgliteStatementCache } from './pglite-statements.ts';
 import { snapshotSchemaInputs } from './snapshot-schema-inputs.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
@@ -793,7 +793,7 @@ export class PGLiteEngine implements BrainEngine {
     this.vectorIterativeScan = undefined;
     const opening = this._connectInternal(config).then(async () => {
       try {
-        await dropRowTypeArrayParsers(this.db);
+        await configurePgliteCodecs(this.db);
         if (registerRoots) await registerManagedFilesystemEngine(this, config.database_path);
       }
       catch (error) {

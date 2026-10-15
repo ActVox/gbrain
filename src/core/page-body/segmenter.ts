@@ -543,7 +543,7 @@ export class Segmenter {
         if (FENCE.test(line)) this.outline.fence = !this.outline.fence;
         else if (!this.outline.fence && outline.length < OUTLINE_MAX_HEADINGS) {
           const h = HEADING.exec(line);
-          if (h) outline.push({ proj_byte: byte, level: h[1]!.length, text: clip(h[2]!, HEADING_MAX_CHARS) });
+          if (h) outline.push({ proj_byte: byte, level: h[1]!.length, text: detached(clip(h[2]!, HEADING_MAX_CHARS)) });
         }
       }
       skip = false;
@@ -558,8 +558,17 @@ export class Segmenter {
       if (dateMin === null || m[0] < dateMin) dateMin = m[0];
       if (dateMax === null || m[0] > dateMax) dateMax = m[0];
     }
-    return { outline, dateMin, dateMax };
+    return { outline, dateMin: dateMin && detached(dateMin), dateMax: dateMax && detached(dateMax) };
   }
+}
+
+/**
+ * A copy of `slice` that does not share the string it was cut from. A substring (slice, regex match) keeps its whole
+ * parent alive, and segment metadata outlives the segment: a write holds every manifest row until it publishes, so an
+ * outline heading cut from a segment's projection would pin that projection, the whole body across all rows.
+ */
+function detached(slice: string): string {
+  return Buffer.from(slice, 'utf8').toString('utf8');
 }
 
 /** The longest prefix of `text` whose UTF-8 bytes fit in `room` (chars and bytes), never splitting a surrogate pair. */

@@ -181,6 +181,16 @@ export async function openSegmentedStaging(engine: BrainEngine, input: Pick<Segm
 }
 
 /**
+ * A full collection after each staging batch. A batch leaves garbage several times its payload (driver parameter
+ * text, protocol buffers, decoded segment texts, chunk strings), and JSC sizes its collection threshold to the heap,
+ * which PGLite's WASM memory makes large, so batches piled up uncollected: a 100 MiB import peaked ~1.1 GB on PGLite
+ * without this and ~0.75 GB with it (scripts/bench-large-pages.ts). One collection of a small live heap per 4 MiB.
+ */
+function collectBatchGarbage(): void {
+  Bun.gc(true);
+}
+
+/**
  * Pass 2 for one write: segment both regions, hash, stage texts, diff against
  * the live manifest, stage the changed manifest rows and (replace) the chunks
  * of every occurrence the new generation lacks. A failure aborts the staging.
@@ -219,6 +229,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
     if (!pending.length) return;
     const batch = pending.splice(0);
     await writes(exec => exec.stageSegmentTexts(input.sourceId, batch));
+    collectBatchGarbage();
     pendingBytes = 0;
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
   };
@@ -385,6 +396,7 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     });
     rows += chunks.length;
     done += batch.length;
+    collectBatchGarbage();
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
   }
   return { rows, occurrences: done, indexes };
