@@ -38,6 +38,31 @@ After upgrading, transcripts an earlier verify marked this way are extracted aga
 - `gbrain sweep --retry-failed [--apply] [--json]` (`src/commands/sweep.ts`); doctor `memory_writeback` warns about stopped windows and names `gbrain sweep --retry-failed --apply` (paid) as its fix. `corpus_chat_unavailable`, `corpus_window_backoff` and `corpus_window_dead_lettered` are registered, so `gbrain errors <code>` explains them.
 - Tests: `test/sweep-corpus-chat-unavailable-6786.test.ts` (unservable model in the sweep and the compact harvest; legacy sidecars with and without `.progress`, asserting the facts exist; GC then sweep and sweep then GC with an aged file) and `test/sweep-corpus-failure-cap-6785.test.ts` (a claim landing mid-call, the harvest preflight, the drain log, the retry schedule, the re-arm, doctor's fix and the operator retry). A new `bootstrap-verify.serial.test.ts` case runs the real verify with a keyed report and no gateway. The new behavior cases fail on the previous tree.
 
+## [0.60.251.0] - 2026-10-15
+
+**Take grades you recorded only in the database stay put, and a purge no longer leaves its text readable through version history or rows derived from it.** Before this release, publishing a page again erased any take grade that lived only in the database, for example one `grade_takes` wrote on a source without managed persistence. A prose edit, a re-import, a sync or a revert to an older version each did it. Separately, a few read paths still returned text that `purge_fact` or a page purge had removed.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A graded take's page is edited, re-imported, synced or reverted, and its fence has no resolution cells | the grade was erased | the grade stays |
+| A take's claim is edited in place at the same row | the old claim's grade carried over | the old grade is dropped |
+| `get_versions` after `purge_fact` on a page with more than 5,000 versions | the newest versions still held the purged row | every version is redacted |
+| A fact derived from a purged page, filed on another page | still returned by `recall` | hidden, as `purge_fact` already does |
+| `get_page` with `include_deleted`, `fetch` or `get_versions` on a page a purge hid for re-derivation | returned the hidden page | reads as missing |
+| A page or version that states a purged claim only in its title or frontmatter | not in the purge receipt | reported as `out_of_scope: source_prose`, like prose |
+
+### Itemized changes
+
+- `src/core/persistence/canonical-projections.ts`: fence resolutions apply only to rows whose fence carries resolution cells; a claim changed in place at the same row clears the old resolution. The `applyPreservingTakeResolutions` workaround in `prepared-maintenance.ts` is gone, and `facts/relink-publish.ts` applies the page directly.
+- `src/core/facts/purge.ts`: version redaction runs in keyset batches until none is left. `purge.ts` and `purge-verify.ts` match the claim in a page's or version's body, timeline, title and frontmatter.
+- `src/core/persistence/page-purge.ts`: page purge hides rows derived from the page, its facts and its takes, and its receipt carries `purge.derived`.
+- `src/core/ops/get-page-projection.ts`, `src/core/engine-sql/pages.ts`: `get_page`, `fetch` and `get_versions` hide a page awaiting re-derivation.
+- Crash robot (`scripts/persistence/crash-robot.ts`): a preparation that runs again for the same request no longer advances the fault count, so the counting and crashing runs agree on which preparation to crash.
+- Chunker test (`src/core/chunkers/recursive.ts`, `test/chunker-spans-linear.slow.test.ts`): span work is bounded by deterministic counts instead of thread CPU time.
+- Tests: `test/take-resolution-survives-publish.test.ts` and `test/purge-read-surfaces.test.ts` run on PGLite and Postgres; each fails without its fix.
+
 ## [0.60.250.0] - 2026-10-15
 
 **Hosted and remote agents can now pull contradiction findings.** Before this release, `find_contradictions` gave any remote agent, and any caller with a source filter or a token trust floor, an empty list with a "temporarily available" note. The reason was that a stored probe report copies both sides' text verbatim, including private takes, and doesn't record which source each side came from. Now those callers get the findings they are allowed to see. gbrain re-reads each side from the brain under the caller's own permissions and returns a finding only when the caller can read both sides now and both still say what the judge saw. Each side comes with its source and trust tier. The bare local `gbrain find-contradictions` works exactly as before.
