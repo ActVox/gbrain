@@ -91,7 +91,7 @@ async function ownerRevokedError(tx: BrainEngine, sourceId: string, request: Wri
       '--admin-intent', 'writer_retry_effects', '--expected-state', await writerAdminState(tx)], consent: [], actor: 'agent', requires_exclusive: false,
     why: 'Retries the parked Git effect once under this brain owner\'s authority on the owner host; the effect records retried_under: owner_host.',
     user_message: `${why} Approve one more Git attempt for ${request.slug} under this brain owner's authority? It mirrors content the database already committed.`,
-    verify: { argv: ['gbrain', 'sources', 'writer', 'retry-effects', '--source', sourceId, '--request-id', request.request_id, '--dry-run', '--json'] } }
+    verify: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] } }
     : { ask_user: true, consent: [], actor: 'user', requires_exclusive: false, why: 'A withdrawal effect runs only under its original writer\'s authority.',
       user_message: `${why} A withdrawal is never retried under another authority, so this parked withdrawal has no supported retry; decide with the brain owner how to withdraw ${request.slug}.`,
       verify: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] } };
