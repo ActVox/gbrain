@@ -138,7 +138,7 @@ case "$DATABASE_URL" in postgresql://postgres:postgres@postgres-*:5432/gbrain_te
 [ "$GBRAIN_PGBOUNCER_DIRECT_URL" = postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test ] || exit 44
 [ "$GBRAIN_CI_REQUIRE_PGBOUNCER" = 1 ] || exit 45
 [ "$GBRAIN_TEST_DB" = 1 ] || exit 46
-printf 'target:%s\\n' "$DATABASE_URL" "$GBRAIN_PGBOUNCER_URL" "$GBRAIN_PGBOUNCER_DIRECT_URL" >> "$TRACE"
+printf 'target:%s\\n' "db=$DATABASE_URL" "pgbouncer=$GBRAIN_PGBOUNCER_URL" "direct=$GBRAIN_PGBOUNCER_DIRECT_URL" >> "$TRACE"
 printf 'e2e:%s:%s\\n' "\${SHARD-all}" "$*" >> "$TRACE"
 [ "$FAIL_STAGE" != e2e ] || exit 7
 `);
@@ -180,7 +180,7 @@ describe('ci-local execution coverage', () => {
         expect(e2e).toHaveLength(noShard ? 1 : 4);
         const targets = result.trace.filter(line => line.startsWith('target:'));
         expect(targets).toHaveLength(noShard ? 3 : 12);
-        for (const target of targets) expect(() => assertSafeE2eDatabaseUrl(target.slice(7), {})).not.toThrow();
+        for (const target of targets) expect(() => assertSafeE2eDatabaseUrl(target.slice(target.indexOf('=') + 1), {})).not.toThrow();
         // --diff no longer narrows: every shard runs run-e2e.sh's full discovery.
         expect(e2e.every(line => line.endsWith(':'))).toBe(true);
         if (!noShard) {
@@ -198,9 +198,11 @@ describe('ci-local execution coverage', () => {
     test(`the PgBouncer admin database is created first and is no shard's database (#6674, no-shard=${noShard})`, () => {
       const result = runPhases(noShard, false);
       expect(result.status, result.stdout + result.stderr).toBe(0);
-      const targets = result.trace.filter(line => line.startsWith('target:')).map(line => new URL(line.slice(7)));
-      const shards = targets.filter((_, i) => i % 3 === 0);
-      const admins = new Set(targets.filter((_, i) => i % 3 === 2).map(url => `${url.host}${url.pathname}`));
+      // Shards run concurrently, so their target lines interleave: each line names its role.
+      const role = (name: string) => result.trace.filter(line => line.startsWith(`target:${name}=`)).map(line => new URL(line.slice(line.indexOf('=') + 1)));
+      const shards = role('db');
+      expect(shards).toHaveLength(noShard ? 1 : 4);
+      const admins = new Set(role('direct').map(url => `${url.host}${url.pathname}`));
       expect([...admins]).toEqual(['postgres-1:5432/gbrain_ci_admin_test']);
       for (const shard of shards) expect(shard.pathname).not.toBe('/gbrain_ci_admin_test');
       const created = result.trace.indexOf('admin_db:postgresql://postgres:postgres@postgres-1:5432/gbrain_test:gbrain_ci_admin_test');
