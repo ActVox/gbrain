@@ -5,7 +5,7 @@ import { opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { pageIdentityError } from './page-identity.ts';
 import { assertPageRevision } from '../page-state/types.ts';
-import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence, upsertFactRow, formatFenceDate } from '../facts-fence.ts';
+import { factsFenceSection, parseFactsFence, strikeFactRowInPage, upsertFactRow, formatFenceDate } from '../facts-fence.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { assertInlineBody } from '../page-body/page-shape.ts';
 import { assertFactNotWithdrawn, decideReplacement, decideSingleFact, prepareFactEmbedding, type SingleFactIntent } from '../facts/single-prepare.ts';
@@ -152,20 +152,19 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
       writer: row.principal_kind, path: snapshot.page.source_path ?? null, remote: row.authority.remote }) };
     // #6696 C9: a facts row the fence does not hold (extraction, a hand edit) still owns its row_num, so the new row numbers past both.
     const [indexed] = await engine.executeRaw<{ n: number }>('SELECT COALESCE(MAX(row_num),0)::int AS n FROM facts WHERE source_id=$1 AND source_markdown_slug=$2', [row.source_id, row.slug]);
+    // #6686: the fence is edited in the section it lives in (a lone timeline fence stays below the sentinel); the other section is kept byte for byte.
+    const section = factsFenceSection(target.page);
+    const fenced = { compiled_truth: target.page.compiled_truth, timeline: target.page.timeline ?? '' };
     // #6385 R12: an entity fence that does not parse cleanly refuses typed instead of losing the rows it skipped.
-    const appended = refuseUnparsedRewrite(target.page, row.slug, row.source_id, () => upsertFactRow(target.page.compiled_truth, {
+    const appended = refuseUnparsedRewrite(target.page, row.slug, row.source_id, () => upsertFactRow(fenced[section], {
       claim: input.fact, kind: input.kind, visibility: input.visibility, confidence: 1, notability: 'medium', validFrom: formatFenceDate(validFrom),
       validUntil: validUntil ? formatFenceDate(validUntil) : undefined, source: fact.source, context,
-      rowNum: Math.max(indexed?.n ?? 0, ...parseFactsFence(target.page.compiled_truth).facts.map(f => f.rowNum)) + 1 }));
+      rowNum: Math.max(indexed?.n ?? 0, ...[fenced.compiled_truth, fenced.timeline].flatMap(text => parseFactsFence(text).facts.map(f => f.rowNum))) + 1 }));
     rowNum = appended.rowNum;
-    let body = appended.body;
+    let next = { ...fenced, [section]: appended.body };
     const old = decision.candidate;
-    if (status === 'superseded' && old?.source_markdown_slug === row.slug && old.row_num != null) {
-      const rows = parseFactsFence(body).facts.map(f => f.rowNum === old.row_num
-        ? { ...f, active: false, supersededBy: rowNum, context: `superseded by #${rowNum}` } : f);
-      body = replaceOrInsertFactsFence(body, renderFactsTable(rows));
-    }
-    const content = serializePageToMarkdown({ ...snapshot.page, compiled_truth: body, timeline: target.page.timeline }, snapshot.tags);
+    if (status === 'superseded' && old?.source_markdown_slug === row.slug && old.row_num != null) next = strikeFactRowInPage(next, Number(old.row_num), rowNum);
+    const content = serializePageToMarkdown({ ...snapshot.page, ...next }, snapshot.tags);
     // Reuse the canonical parser/chunker and durable filesystem publication.
     // The original caller revision was checked above; this CAS binds this render.
     // #5575 ENG-1: the new row has no facts row yet; its chunks are cut at the append's tier.

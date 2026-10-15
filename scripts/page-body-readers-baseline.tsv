@@ -88,6 +88,8 @@ src/core/content-repair/judgment.ts	judgmentParticipant	field	STREAM
 src/core/content-sanity.ts	assessContentSanity	field	STREAM	
 src/core/context/compile-view.ts	compileView	field	LEAD	
 src/core/context/compile-view.ts	renderEntry	field	LEAD	
+src/core/context/proactive-brief.ts	editItem	field	INLINE	reads the body only at or under 64 KiB, below the segmented threshold; a segmented page's NULL body skips the edit arm
+src/core/context/proactive-brief.ts	editItem	sql	INLINE	reads the body only at or under 64 KiB, below the segmented threshold; a segmented page's NULL body skips the edit arm
 src/core/context/retrieval-reflex.ts	resolveEntitiesToPointers	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
 src/core/context/retrieval-reflex.ts	safeSynopsis	field	LEAD	bounded prefix rows
 src/core/context/retrieval-reflex.ts	weakTitleHits	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
@@ -201,6 +203,8 @@ src/core/extract-takes-from-pages.ts	extractTakesFromPages	sql	STREAM	length(COA
 src/core/extract-timeline-from-meetings.ts	extractTimelineFromMeetings	field	STREAM	
 src/core/extract-timeline-from-meetings.ts	extractTimelineFromMeetings	sql	STREAM	
 src/core/extract/receipt-writer.ts	writeReceipt	call:putPage	INLINE	
+src/core/facts-fence.ts	factsFenceSection	field	SEGW	
+src/core/facts-fence.ts	factsFenceSections	field	SEGW	
 src/core/facts/backstop.ts	runFactsBackstop	field	STREAM	
 src/core/facts/backstop.ts	runPipeline	field	STREAM	
 src/core/facts/drain.ts	estimateBacklogUsd	sql	META	
@@ -446,6 +450,10 @@ src/core/repair/frontmatter.ts	pagesByOrigin	sql	LEAD
 src/core/repair/orphan-children.ts	PROBE_SQL	sql	META	
 src/core/repair/safe-chunks.ts	safeChunksRepair	sql	META	
 src/core/repair/slug-conflicts.ts	pageContent	call:serializePageToMarkdown	SEGW	
+src/core/repair/split-facts.ts	mergeOne	call:serializePageToMarkdown	SEGW	
+src/core/repair/split-facts.ts	mergeSplitFacts	call:serializePageToMarkdown	SEGW	
+src/core/repair/split-facts.ts	mergeSplitFacts	field	SEGW	
+src/core/repair/split-facts.ts	splitFactsRepair	sql	SEGW	SQL exclusion: a segmented page's NULL body never matches the fence LIKE
 src/core/repair/stale-atoms.ts	staleAtoms	sql	META	
 src/core/repair/take-supersession.ts	readPage	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	call:serializePageToMarkdown	SEGW	
@@ -478,6 +486,7 @@ src/core/search/alias-hop.ts	aliasInjectedRow	field	LEAD	projectedLead over getP
 src/core/search/chunk-windows.ts	mapChunkWindowRows	field	STREAM	
 src/core/search/entity-anchor.ts	entityAnchoredPages	sql	STREAM	
 src/core/search/evidence-delivery.ts	deliverEvidence	field	STREAM	
+src/core/search/evidence-delivery.ts	selectLongPages	sql	META	sizes a segmented page from its NULL body (0), so it is never selected as a long page; moves to body_bytes
 src/core/search/exact-lookup.ts	structuralExactLookup	field	LEAD	projectedLead over getPage: segmented page: getter throws page_body_segmented (lead source in PR 2)
 src/core/search/provenance-demotion.ts	applyGeneratedDemotion	field	LEAD	
 src/core/search/provenance-demotion.ts	applyGeneratedDemotion	sql	LEAD	

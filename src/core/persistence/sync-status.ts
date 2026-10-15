@@ -85,8 +85,12 @@ export interface SyncStatus {
   human_reason?: string;
   /** The resume arguments after `gbrain sync` for this source's cursor (its stored options when one exists). */
   resume_argv: string[];
-  /** #6643: for a cursor whose checkpoint has not committed, every receipt that would block it now (empty: the next sync commits it). */
-  checkpoint_blockers?: Array<{ request_id: string; slug: string; state: string; code: string | null; index: number | null; recovery: boolean; knock_on: boolean }>;
+  /**
+   * #6643: for a cursor whose checkpoint has not committed, every receipt that would block it now (empty: the next sync
+   * commits it). #6712 PR 0: always present; empty when no checkpoint is pending (no cursor, a finished one, or one
+   * still before its checkpoint step).
+   */
+  checkpoint_blockers: Array<{ request_id: string; slug: string; state: string; code: string | null; index: number | null; recovery: boolean; knock_on: boolean }>;
   /** #6643: every managed-sync cursor of the source under its current incarnation, newest first (at most 20). */
   cursors: SyncStatusCursor[];
   /** #6650: the source's terminal write receipts that did not commit, summarized (`terminal-failures.ts`); `unknown` when the bounded read timed out. */
@@ -247,16 +251,16 @@ export async function readCheckpointBlockers(engine: BrainEngine, sourceId: stri
   if (!source) return [];
   const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
-  return (await checkpointBlockers(engine, selected?.header ?? null)).checkpoint_blockers ?? [];
+  return (await checkpointBlockers(engine, selected?.header ?? null)).checkpoint_blockers;
 }
 
 /**
  * #6643: a cursor at its end whose checkpoint has not committed lists every receipt that would block that checkpoint now
  * (the checkpoint's own refusal names only the first), each marked when it is a knock-on; empty means the next sync commits it.
  */
-async function checkpointBlockers(engine: BrainEngine, header: CursorHeader | null): Promise<{ checkpoint_blockers?: Array<Awaited<ReturnType<typeof listIncompleteSyncReceipts>>[number] & { knock_on: boolean }> }> {
+async function checkpointBlockers(engine: BrainEngine, header: CursorHeader | null): Promise<{ checkpoint_blockers: Array<Awaited<ReturnType<typeof listIncompleteSyncReceipts>>[number] & { knock_on: boolean }> }> {
   const intent = header?.pending?.intent;
-  if (!header || header.done || intent?.kind !== 'managed_sync_checkpoint' || !header.binding?.worktree_id) return {};
+  if (!header || header.done || intent?.kind !== 'managed_sync_checkpoint' || !header.binding?.worktree_id) return { checkpoint_blockers: [] };
   const rows = await listIncompleteSyncReceipts(engine, header.binding.worktree_id, header.runId, intent.supersededRequests ?? [], intent.settled ?? null, Number(header.total));
   const knockOns = new Set(rows.length ? (await engine.executeRaw<{ request_id: string }>(`SELECT request_id::text AS request_id FROM persistence_requests r
     WHERE r.request_id::text = ANY($1::text[]) AND ${syncKnockOnSql('r')}`, [rows.map(row => row.request_id)])).map(row => row.request_id) : []);
