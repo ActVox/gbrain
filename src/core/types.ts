@@ -92,6 +92,10 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
+  /** Wave B: on a `segmented` page `compiled_truth`/`timeline` throw `page_body_segmented` (page-body/page-shape.ts); absent = inline. */
+  body_storage?: import('./page-body/types.ts').BodyStorage;
+  /** Wave B: UTF-8 bytes of truth + timeline; always set on a segmented page (`pageBodyBytes`). */
+  body_bytes?: number | null;
   /** Source-relative canonical file identity; snapshot reads expose it for guarded import comparisons. */
   source_path?: string | null;
   /** Opaque canonical state; independent of indexing and telemetry updates. */

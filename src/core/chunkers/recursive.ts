@@ -102,6 +102,24 @@ export interface TextChunk {
 // rows go.
 
 export function chunkText(text: string, opts?: ChunkOptions): TextChunk[] {
+  if (!text || text.trim().length === 0) return [];
+
+  // v0.28: strip fenced takes blocks BEFORE chunking. Takes are retrieval-
+  // accessible only via the takes table; their content must not appear in
+  // content_chunks where the per-token allow-list cannot reach.
+  //
+  // v0.32.2: also strip private facts (Codex R2-#1). World facts stay so
+  // search retains its public-knowledge surface; private rows are filtered
+  // out at the fence-row level via stripFactsFence({keepVisibility:['world']}).
+  return chunkProjectedText(credentialSafeProjection(sanitizeRemoteBody(text)), opts);
+}
+
+/**
+ * chunkText on text that is already the retrieval projection (sanitized and
+ * credential-safe): segmented pages build it per segment from stored regions
+ * (page-body/segment-chunks.ts). Spans index `stripped`.
+ */
+export function chunkProjectedText(stripped: string, opts?: ChunkOptions): TextChunk[] {
   const chunkSize = opts?.chunkSize || 300;
   const chunkOverlap = opts?.chunkOverlap || 50;
   const maxChars = opts?.maxChars || 6000;
@@ -112,16 +130,6 @@ export function chunkText(text: string, opts?: ChunkOptions): TextChunk[] {
     ? Math.min(opts.maxTokens, DEFAULT_MAX_CHUNK_TOKENS)
     : DEFAULT_MAX_CHUNK_TOKENS;
 
-  if (!text || text.trim().length === 0) return [];
-
-  // v0.28: strip fenced takes blocks BEFORE chunking. Takes are retrieval-
-  // accessible only via the takes table; their content must not appear in
-  // content_chunks where the per-token allow-list cannot reach.
-  //
-  // v0.32.2: also strip private facts (Codex R2-#1). World facts stay so
-  // search retains its public-knowledge surface; private rows are filtered
-  // out at the fence-row level via stripFactsFence({keepVisibility:['world']}).
-  const stripped = credentialSafeProjection(sanitizeRemoteBody(text));
   if (!stripped || stripped.trim().length === 0) return [];
 
   const wordCount = countWords(stripped);

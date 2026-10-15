@@ -110,6 +110,7 @@ export function buildCJKKeywordSql(query: string, ctx: CjkKeywordCtx, variant: C
   let fromClause = 'content_chunks cc';
   if (variant.candidateIds) {
     params.push(variant.candidateIds);
+    // chunk-visibility-ok: ctx.visibilityClause is buildVisibilityClause(..., { chunkAlias: 'cc' }) (engine searchKeywordCJK)
     fromClause = `unnest($${params.length}::bigint[]) AS cand(id) JOIN content_chunks cc ON cc.id = cand.id`;
   }
   const { whereLikeClause, matchedExpr } = likeClauses(terms, likeParamIndices, any);
@@ -165,6 +166,7 @@ export function buildCJKCandidateSql(
   const capIndex = params.length;
   const { whereLikeClause } = likeClauses(terms, likeParamIndices, stage.match === 'any' && terms.length > 1);
   return {
+    // chunk-visibility-ok: ctx.visibilityClause is buildVisibilityClause(..., { chunkAlias: 'cc' }) (engine searchKeywordCJK)
     sql: `SELECT cc.id AS chunk_id
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id

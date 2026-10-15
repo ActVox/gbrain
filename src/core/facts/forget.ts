@@ -20,6 +20,7 @@ import { parseFactsFence, renderFactsTable, type ParsedFact } from '../facts-fen
 import { parseMarkdown } from '../markdown.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { contentHash } from '../utils.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { recordFactWithdrawal } from './withdrawal.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { withdrawnFact } from './withdrawal-overlay.ts';
@@ -181,6 +182,7 @@ export async function forgetFactInFence(
     const slug = row.source_markdown_slug;
     const page = await engine.getPage(slug, { sourceId: row.source_id });
     if (!page) return;
+    assertInlineBody(page, 'forget fence strike');
     const struck = strikeFenceRow(page.compiled_truth ?? '', row.row_num, strike);
     if (struck === null) return;
     // The FILE was not rewritten on this tier, so the row must NOT keep the
@@ -290,6 +292,7 @@ export async function forgetFactInFence(
         const reparsed = parseMarkdown(tmpBody, `${slug}.md`);
         const page = await engine.getPage(slug, { sourceId: row.source_id });
         if (page) {
+          assertInlineBody(page, 'forget fence mirror');
           await maintenanceTransaction(engine, tx => tx.refreshPageBody(slug, row.source_id,
             sanitizeText(reparsed.compiled_truth), sanitizeText(reparsed.timeline),
             page.content_hash || contentHash(page)));
