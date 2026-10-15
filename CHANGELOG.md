@@ -12,14 +12,26 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.250.0] - 2026-10-15
 
-**Groundwork for pages up to 256 MB: segmented page storage and streaming import, behind a switch that stays off (no behavior change).** This release adds the storage that Wave B of large pages builds on. It stores a page over 1 MiB as content-addressed segments with an ordered manifest per body generation. It streams a file into it in bounded memory and re-indexes only the segments that changed. The experimental `pages.segmented_storage` setting defaults to `off`, and nothing a user sees changes while it is off. Pages at or under 1 MiB are stored byte-for-byte as before. The release that turns it on will document it.
+**Hosted and remote agents can now pull contradiction findings.** Before this release, `find_contradictions` gave any remote agent, and any caller with a source filter or a token trust floor, an empty list with a "temporarily available" note. The reason was that a stored probe report copies both sides' text verbatim, including private takes, and doesn't record which source each side came from. Now those callers get the findings they are allowed to see. gbrain re-reads each side from the brain under the caller's own permissions and returns a finding only when the caller can read both sides now and both still say what the judge saw. Each side comes with its source and trust tier. The bare local `gbrain find-contradictions` works exactly as before.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote agent calls `find_contradictions` | `{contradictions: [], note}` | findings whose two sides it can read, each with `source_id`, `trust_tier` and `origin`, plus `total_visible` |
+| A connection with a token trust floor | refused (`permission_denied`) | findings at or above the floor |
+| `gbrain find-contradictions --source <id>` (or `GBRAIN_SOURCE`) | the availability note | findings whose two sides live in that source (or its federated set) |
+| A finding with a private page, a held take, another source's page, or text edited since the probe on either side | (not returned) | still not returned, and none of its text leaves |
+| A proposal to supersede a confirmed take with a lower-trust side | (not returned) | returned as a manual review, `supersede_withheld: "higher_trust_target"` |
+| Bare `gbrain find-contradictions` | the stored run | unchanged |
 
 ### Itemized changes
 
-- **Schema.** A migration adds the `page_body_segments`, `page_body_manifest` and `page_body_stagings` tables, plus the body-generation and storage columns on `pages` and the occurrence columns on `content_chunks`. Existing rows aren't rewritten.
-- **Measured with the switch on** (`scripts/bench-large-pages.ts`): a 100 MiB page imports in 31 s on Postgres and 52 s on PGLite, excluding embedding. Peak memory over a 1 MiB import is +136 MB on Postgres and +227 MB on PGLite. A 10 KB append writes only the tail segments and re-embeds only the new chunks.
-- **PGLite bytea encoding** now uses Buffer's hex codec, which is faster on large values. Stored values are unchanged.
-- **New error codes** for the segment reader, `page_body_segmented` and `body_staging_expired`, are registered in `docs/guides/error-codes.md`.
+- `src/core/eval-contradictions/scoped-read.ts` (new): `resolveScopedFindings` re-reads each side by chunk or take id. The source scope, page visibility, live page and source, quarantine, current text projection, safe chunks for remote callers, the takes holder allow-list and the trust floor all apply in SQL. It drops a finding unless both sides are visible and unchanged, rebuilds `resolution_command` from the live rows, and withholds a supersede of a higher-trust take.
+- `src/core/ops/insights.ts`: `find_contradictions` takes `min_trust` and moves from `labeled` to `filtered` (`src/core/eligibility/registry.ts`). Only trusted, unscoped, unfloored local callers get the stored report as written. A remote context with no source scope gets an empty list and a note.
+- Tests: `test/find-contradictions-scoped.test.ts` covers 15 kinds of side, every pair, a seeded fuzz over callers and params, and the real probe path. Each filter has a forced probe that fails without it. The tests that pinned the old note now assert the new contract.
+- Measured in gbrain-evals ([PR 163](https://github.com/garrytan/gbrain-evals/pull/163)): the N6 visibility fuzz now seeds a stored report and finds 0 leaks over 11,104 probes. With the live re-read bypassed it finds 288 content and 192 existence leaks. N2's compatible-pair rule still holds at 4/51; the judge is unchanged.
+- Docs: `docs/contradictions.md` ("Trust posture"), `docs/operations/mcp-surface-runbook.md`, `docs/integrations/qm-harness.md`.
 
 ## [0.60.249.0] - 2026-10-15
 
