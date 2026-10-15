@@ -601,7 +601,7 @@ export interface CycleOpts {
    * Never reads or writes config — the phase still evaluates its config
    * gate every call; this only overrides the boolean OUTCOME for that one
    * call. Applies to: patterns, synthesize, conversation_facts_backfill,
-   * enrich_thin, skillopt, lint (the phases that gate on a `.enabled` config
+   * enrich_thin, skillopt, lint, consolidate (the phases that gate on a `.enabled` config
    * key read inside the phase's own module). Does NOT apply to
    * extract_atoms / synthesize_concepts — those are pack-gated via
    * `packDeclaresPhase`, a different mechanism with its own existing
@@ -2665,7 +2665,7 @@ async function runCycleUnscoped(
         progress.start('cycle.consolidate');
         const { runPhaseConsolidate } = await import('./cycle/phases/consolidate.ts');
         const { result, duration_ms } = await racedTimePhase(() => runPhaseConsolidate(engine, {
-          dryRun,
+          dryRun, once: opts.onceForPhase === 'consolidate',
           remote: opts.remote,
           sourceId: cycleSourceId,
           // W0 (Tier-1 #1): wrap the caller hook so this phase ALSO refreshes
