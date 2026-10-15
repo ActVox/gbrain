@@ -19,6 +19,12 @@ export function isDatabaseOnlyPage(page: { source_path?: string | null; source_u
   return page.database_only_reason === 'unbound_source' && !page.source_path?.trim() && !page.source_uri?.trim();
 }
 
+/** `isDatabaseOnlyPage` as a SQL predicate over the `pages` row aliased `alias` (#6536: doctor counts with it). */
+export function databaseOnlyPageSql(alias: string): string {
+  const blank = (column: string) => `COALESCE(btrim(${alias}.${column}, E' \\t\\n\\r\\f\\v'), '')=''`;
+  return `${alias}.database_only_reason IS NOT DISTINCT FROM 'unbound_source' AND ${blank('source_path')} AND ${blank('source_uri')}`;
+}
+
 /**
  * The canonical file an import would give this slug (`<slug>.md` under the Git
  * root or the source root, per the source's slug-root mode) and the

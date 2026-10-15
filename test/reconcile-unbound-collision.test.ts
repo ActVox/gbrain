@@ -199,3 +199,25 @@ test('--adopt-slug-path refuses a page that is database-only by design (a never-
     }
   });
 }, 180_000);
+
+// #6536: a marked page whose origin was already recorded (sync recorded source_path) reconciles with origin 'recorded';
+// apply must still drop the #5254 marker, or doctor and reconcile-state keep reporting a page that has a canonical file.
+test('reconcile of a marked page with a recorded origin clears the unbound_source marker', async () => {
+  await withEnv({ GBRAIN_HOME: home, OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
+    for (const engine of engines) {
+      const f = await collision(engine);
+      await engine.executeRaw("UPDATE pages SET source_path='notes/example.md' WHERE source_id=$1 AND slug=$2", [f.id, f.slug]);
+      await withVerifiedLocalRegistration(engine, f.registration, async () => {
+        const preview = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
+        const resolved = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug, from: preview.preview,
+          decisions: (preview.conflict_paths as string[]).map(path => ({ path, action: 'take_file' })) });
+        expect(resolved.status).toBe('ready');
+        const receipt = await runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview: resolved.preview, request_id: randomUUID() });
+        expect(receipt.state).toBe('committed');
+        const [page] = await engine.executeRaw<{ source_path: string | null; database_only_reason: string | null }>(
+          'SELECT source_path,database_only_reason FROM pages WHERE source_id=$1 AND slug=$2', [f.id, f.slug]);
+        expect(page).toEqual({ source_path: 'notes/example.md', database_only_reason: null });
+      });
+    }
+  });
+}, 180_000);
