@@ -1008,8 +1008,14 @@ write keeps a receipt with its full intent until receipt compaction
 (`persistence.receipt_retention_days`, 30 days by default). `gbrain repair
 failed-writes` submits those writes again. It is explicit-only and
 preview-bound, and needs v0.60.38.0 or later (`gbrain doctor --json` reports
-schema version 197 or later). Doctor's `lost_caller_writes` counts the writes
-it would replay, per source, and names this preview.
+schema version 197 or later). Doctor's `lost_caller_writes` counts the
+retained refused writes that may be replayable, per source, and names this
+preview; the preview decides which ones it replays. Doctor leaves out (and
+lists under `details.not_replayable`) the two classes it can decide from the
+receipt alone: an unpinned `remember` (`unpinned_target`) and a `put_page`
+whose page changed after the revision the caller read (`superseded`). The
+preview changes no page content, but it records an approval checkpoint for its
+replay set, which `--apply --expect <hash>` reads.
 
 **Say to your agent:** *"Preview which refused writes gbrain can replay, show
 me the list, then apply after I agree."* The agent runs `gbrain repair
