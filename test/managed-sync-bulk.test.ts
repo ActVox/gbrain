@@ -193,6 +193,28 @@ test('#6712: a failed page leaves the groups admitted ahead of it in the cursor 
   } finally { await engine.unsetConfig('sync.holds'); }
 }), 300_000);
 
+test('#6712 (#6565): a database refusal stops the run, and the next plain sync re-freezes every page the same refusal failed, so one run converges once it is lifted', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+  if (!engine) return;
+  const f = await fixture(engine, notes(24));
+  const opts = { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true, drain: true };
+  expect((await performSync(engine, opts)).drain).toMatchObject({ outcome: 'synced' });
+  for (let i = 0; i < 24; i++) writeFileSync(join(f.root, `notes/n${i}.md`), `---\ntitle: Note ${i}\n---\nA revised observation number ${i}.\n`);
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qam', 'revise']);
+  const since = (await engine.executeRaw<{ at: string }>('SELECT now()::text AS at'))[0]!.at;
+  await engine.executeRaw(`CREATE FUNCTION bulk_systemic_refusal() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'test: systemic refusal'; END $$`);
+  await engine.executeRaw('CREATE TRIGGER bulk_systemic_refusal BEFORE INSERT OR UPDATE ON pages FOR EACH ROW EXECUTE FUNCTION bulk_systemic_refusal()');
+  try {
+    expect((await performSync(engine, opts)).drain).toMatchObject({ outcome: 'blocked' });
+    await settledAll(engine, f.id);
+  } finally { await engine.executeRaw('DROP TRIGGER bulk_systemic_refusal ON pages; DROP FUNCTION bulk_systemic_refusal()'); }
+  const [refused] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1
+    AND intent->>'kind'='managed_sync_import' AND state='failed' AND created_at > $2::timestamptz`, [f.id, since]);
+  expect(refused!.n).toBeGreaterThan(1);
+  expect((await performSync(engine, opts)).drain).toMatchObject({ outcome: 'synced' });
+  for (let i = 0; i < 24; i++) expect((await engine.getPage(`notes/n${i}`, { sourceId: f.id }))?.compiled_truth).toContain(`revised observation number ${i}`);
+}), 300_000);
+
 /**
  * #6712 Eng finding ("followers that commit after the failure CAS"): the group admitted ahead of a failed page is
  * held back in preparation until the drain has saved the failure and is gone (under `sync.holds=fail` it stops blocked;

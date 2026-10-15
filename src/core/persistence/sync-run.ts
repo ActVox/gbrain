@@ -814,9 +814,13 @@ function resumableStop(row: WriteRequest): boolean {
   const verdict = classifySyncFault({ code: row.error_code ?? 'storage_error', message: row.error_message ?? null });
   return verdict.class !== 'page' && verdict.safe_actions.includes('retry');
 }
-/** #6712: whether an earlier invocation already stopped this run on `requestId` (its failure is recorded under the cursor key). */
-async function stopRecorded(engine: BrainEngine, key: string, requestId: string): Promise<boolean> {
-  return (await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'observation_id'=$2", [key, requestId])).length > 0;
+/**
+ * #6712: whether an earlier invocation already stopped this run (its failure is recorded under the cursor key with the
+ * run's id). An invocation records at most one stop and returns, so a recorded stop of the run is always an earlier one's,
+ * and the pages its window admitted after the stop and the same refusal failed are re-frozen like the stop itself.
+ */
+async function stopRecorded(engine: BrainEngine, key: string, runId: string): Promise<boolean> {
+  return (await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'run_id'=$2", [key, runId])).length > 0;
 }
 
 /**
@@ -840,7 +844,7 @@ async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor;
   const revived = await reviveCheckpoint(engine, input);
   if (revived) { input.assertActive(); return { cursor: revived }; }
   const fault = receiptClass(done);
-  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, key, pending.requestId))) {
+  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, key, cursor.runId))) {
     const refrozen = await refreezeInPlace(engine, input);
     if (refrozen) { input.assertActive(); return { cursor: refrozen }; }
   }

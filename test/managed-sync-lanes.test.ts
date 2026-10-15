@@ -14,7 +14,6 @@ import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { performSync } from '../src/commands/sync/perform.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { resolveBulkSettings } from '../src/core/persistence/sync-group.ts';
-import { WINDOW_CANCEL_MESSAGE } from '../src/core/persistence/sync-window.ts';
 import { acquireShared, DEFER_WAIT_MS, deferToLease, exclusiveAcquired, joinLease, leaseDraining, leaseWounded, yieldLease } from '../src/core/persistence/worktree-lease.ts';
 import type { NativeLockHandle } from '../src/core/persistence/native-lock.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -296,7 +295,7 @@ test('admit-ahead fits the writer\'s outstanding-request limit instead of stoppi
   }
 }), 300_000);
 
-test('a failed page under lanes stops the run: earlier pages commit, nothing after it publishes', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home, GBRAIN_SYNC_BULK_SIZE: '4' }, async () => {
+test('a failed page under lanes stops the run and cancels nothing: every other admitted page commits as its own fate (#6712)', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home, GBRAIN_SYNC_BULK_SIZE: '4' }, async () => {
   if (!engine) return;
   const f = await fixture(engine, notes(60, i => i === 30 ? '---\ntitle: Conflict\nslug: notes/other\n---\nA conflicting identity must not be imported.\n' : null));
   await engine.setConfig('sync.holds', 'fail');
@@ -307,11 +306,9 @@ test('a failed page under lanes stops the run: earlier pages commit, nothing aft
   const rows = await imports(engine, f.id);
   const failedAt = rows.findIndex(row => row.slug === 'notes/n030');
   expect(rows[failedAt]!.state).toBe('failed');
-  expect(rows.slice(0, failedAt).every(row => row.state === 'committed')).toBe(true);
-  expect(rows.slice(failedAt + 1).filter(row => row.state !== 'cancelled').map(row => `${row.slug} ${row.state} group=${row.grp} lane=${row.lane}`)).toEqual([]);
-  for (const row of rows.slice(failedAt + 1)) expect(await engine.getPage(row.slug, { sourceId: f.id })).toBeNull();
-  const laterGroups = rows.slice(failedAt + 1).filter(row => row.grp !== rows[failedAt]!.grp);
-  for (const row of laterGroups) expect(row.error_message).toBe(WINDOW_CANCEL_MESSAGE);
+  expect(rows.filter((_, i) => i !== failedAt && rows[i]!.state !== 'committed').map(row => `${row.slug} ${row.state} group=${row.grp} lane=${row.lane}`)).toEqual([]);
+  expect(rows.slice(failedAt + 1).length).toBeGreaterThan(0);
+  for (const row of rows.slice(failedAt + 1)) expect(await engine.getPage(row.slug, { sourceId: f.id })).not.toBeNull();
 }), 300_000);
 
 test('a crash right after a group is admitted and saved skips nothing and admits nothing twice; the first group is small', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_BULK_SIZE: '4' }, async () => {

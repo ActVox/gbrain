@@ -552,7 +552,8 @@ type MemberOutcome = { ok: PreparedMutation } | { error: unknown } | { released:
  * batch all at once), publishes it in one transaction when every member
  * qualifies, and otherwise publishes the members one at a time in order.
  * #6712: a member that ends in failure is its page's fate alone; the later
- * members still publish. In a sync group, after a member is released back
+ * members still publish (a failed preparation is settled first, and the rest
+ * publish as one group). In a sync group, after a member is released back
  * to the queue the later ones are released too, so nothing overtakes it
  * (order, not fate: a released member is claimed again). Claims are renewed
  * for the whole group while it runs (claim-lease.ts). If the group stops
@@ -664,6 +665,20 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
       }
       await releaseUnpublishedClaim(engine, row, 'preparation_deadline', { charge: true });
     }
+    // #6712: a member whose preparation failed takes its own fate before publication, so the others still publish as one
+    // group: on a lane root the single path's exclusive lock waits behind the lanes that wait on this group's order. A
+    // member its failure sends back to the queue is a release: in a sync group the members after it are released too.
+    let requeuedAt: number | null = null;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!, outcome = prepared[i];
+      if (released.has(row.id) || (requeuedAt === null || !ordered) && !(outcome && 'error' in outcome)) continue;
+      held.delete(row.id); released.add(row.id);
+      if (requeuedAt !== null && ordered) { await releaseUnpublishedClaim(engine, row, 'group_member_waiting'); continue; }
+      const done = await finishUnpublishedFailure(engine, row, (outcome as { error: unknown }).error, 'preparation');
+      run.settled(done);
+      if (['conflict', 'failed', 'cancelled'].includes(done.state)) progressed = true;
+      else requeuedAt ??= i;
+    }
     for (const clock of clocks) if (clock) enterClaimPhase(clock, 'publishing');
     enterClaimPhase(groupClock, 'publishing');
     const bounded = <T>(publish: () => Promise<T>): Promise<T> => run.publication ? boundPublication(publish, { ...run.publication, onOverdue: () => {
@@ -704,7 +719,7 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
       const p = prepared[i]!;
       // #6278: a member aborted by our own cancellation (never a deadline here) is released, not failed.
       if ('released' in p) { await releaseUnpublishedClaim(engine, row, p.released === 'claim_lost' ? 'claim_lost' : 'group_member_waiting'); if (ordered) release = true; continue; }
-      const done = 'ok' in p ? await bounded(() => publishMutation(engine, row, p.ok, run.hostId)) : await finishUnpublishedFailure(engine, current, p.error, 'preparation');
+      const done = await bounded(() => publishMutation(engine, row, (p as { ok: PreparedMutation }).ok, run.hostId));
       run.settled(done);
       if (['committed', 'conflict', 'failed', 'cancelled'].includes(done.state)) progressed = true;
       else release = true;
