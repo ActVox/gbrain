@@ -144,9 +144,9 @@ src/core/cycle/phantom-redirect.ts	phantomHasResidue	field	SEGW	phantom stubs ar
 src/core/cycle/phantom-redirect.ts	tryRedirectPhantom	call:contentHash	META	hash of the reparsed inline file
 src/core/cycle/phantom-redirect.ts	tryRedirectPhantom	call:refreshPageBody	SEGW	assertInlineBody on the canonical first
 src/core/cycle/phantom-redirect.ts	tryRedirectPhantom	field	SEGW	canonical target asserted inline before the disk fence append; per-phantom throw is logged and the walk continues
-src/core/cycle/propose-takes.ts	listCandidatePages	sql	STREAM	
 src/core/cycle/propose-takes.ts	ProposeTakesPhase.process	call:contentHash	META	
 src/core/cycle/propose-takes.ts	ProposeTakesPhase.process	field	STREAM	
+src/core/cycle/propose-takes.ts	listCandidatePages	sql	STREAM	
 src/core/cycle/synthesize-concepts.ts	runPhaseSynthesizeConcepts	field	INLINE	
 src/core/cycle/synthesize-concepts.ts	runPhaseSynthesizeConcepts	sql	INLINE	
 src/core/cycle/synthesize-postprocess.ts	postprocessManagedSynthesis	call:serializePageToMarkdown	INLINE	
@@ -165,8 +165,8 @@ src/core/cycle/synthesize.ts	writeSummaryPage	field	INLINE
 src/core/cycle/transcript-discovery.ts	discoverConversationPages	field	STREAM	
 src/core/cycle/transcript-discovery.ts	discoverConversationPages	sql	STREAM	
 src/core/eligibility/fence-overlay.ts	loadFenceChunkOverlay	field	STREAM	
-src/core/eligibility/scan.ts	assess	field	STREAM	
 src/core/eligibility/scan.ts	SELECT	sql	STREAM	
+src/core/eligibility/scan.ts	assess	field	STREAM	
 src/core/embed-consent.ts	estimateEmbedBackfillUsd	sql	META	
 src/core/embed-stale-images.ts	embedStaleImages	sql	INLINE	
 src/core/embedding-migration-worst-case.ts	REPROJECTED_PAGE	sql	META	
@@ -178,10 +178,10 @@ src/core/engine-sql/chunks.ts	listChunklessPagesWithContent	sql	STREAM	lane 1e f
 src/core/engine-sql/chunks.ts	listEmbeddingStateRows	sql	META	lane 1e file: octet_length metadata
 src/core/engine-sql/page-body.ts	createSegmentedPageShell	sql	NONE	not a reader: the segmented storage writer sets the body columns NULL on the shell row
 src/core/engine-sql/page-body.ts	flipBodyGeneration	sql	NONE	not a reader: the generation flip sets the body columns NULL and the segmented body columns
+src/core/engine-sql/pages.ts	PAGE_VERSION_COLUMNS	sql	SEGW	lane 1e: versions of segmented pages carry no body
 src/core/engine-sql/pages.ts	listCorpusSample	sql	LEAD	segmented pages excluded from the sample in SQL (skip)
 src/core/engine-sql/pages.ts	listPrefixSampledPages	sql	LEAD	segmented pages excluded from the sample in SQL (skip)
 src/core/engine-sql/pages.ts	listStalePagesForExtraction	sql	STREAM	segmented pages skipped in SQL, still counted by countStalePagesForExtraction (visible as stale)
-src/core/engine-sql/pages.ts	PAGE_VERSION_COLUMNS	sql	SEGW	lane 1e: versions of segmented pages carry no body
 src/core/engine-sql/pages.ts	putPage	call:contentHash	META	hash of the incoming inline body
 src/core/engine-sql/pages.ts	putPage	field	SEGW	incoming PageInput body (a string); see putPage sql
 src/core/engine-sql/pages.ts	putPage	sql	SEGW	blank-guard reads body_bytes for a segmented page (an empty put over it refuses); a non-empty put over a segmented row is refused by the body-storage CHECK
@@ -299,21 +299,27 @@ src/core/ops/pages.ts	stripPrivacyFencesForRemoteReader	field	STREAM	segmented p
 src/core/output/post-write.ts	runPostWriteLint	field	INLINE	
 src/core/output/validators/link.ts	linkValidator	field	INLINE	
 src/core/output/validators/triple-hr.ts	tripleHrValidator	field	INLINE	
-src/core/output/writer.ts	runValidators	field	INLINE	
 src/core/output/writer.ts	WriteTxImpl.createEntity	call:putPage	INLINE	
 src/core/output/writer.ts	WriteTxImpl.createEntity	field	INLINE	
 src/core/output/writer.ts	WriteTxImpl.setCompiledTruth	call:putPage	INLINE	
 src/core/output/writer.ts	WriteTxImpl.setCompiledTruth	field	INLINE	
 src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	call:putPage	INLINE	
 src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	field	INLINE	
+src/core/output/writer.ts	runValidators	field	INLINE	
 src/core/oversized-backfill.ts	PAGE_BYTES_SQL	sql	SEGW	
 src/core/oversized-backfill.ts	reindexPage	call:serializeMarkdown	SEGW	
 src/core/oversized-backfill.ts	reindexPage	field	SEGW	
 src/core/page-body/body-scan.ts	scanMarkdownString	field	NONE	not a stored body: scans an incoming markdown string for the segmenter
 src/core/page-body/content-hash-stream.ts	ContentHashStream.fromState	field	NONE	not a stored body: resumes the streaming content hash over incoming text
 src/core/page-body/content-hash-stream.ts	streamingContentHash	field	NONE	not a stored body: hashes an incoming page streamed region by region
+src/core/page-body/ingest.ts	materializeSegmentedBody	field	STREAM	the segment reader's string form, for single-string write paths; callers materialize only bodies within PAGE_MAX_BYTES
+src/core/page-body/ingest.ts	stageBody	field	NONE	not a stored body: the write's region byte streams and the per-region leads it computes
 src/core/page-body/page-shape.ts	pageBodyBytes	field	INLINE	inline branch of pageBodyBytes; a segmented page answers body_bytes
 src/core/page-body/schema.ts	PAGE_GENERATION_BUMP_FN_SQL	sql	STREAM	trigger DDL: compares the body columns of inline rows; segmented rows compare body_generation (lane 1a)
+src/core/page-body/segmenter.ts	Segmenter.blocked	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
+src/core/page-body/segmenter.ts	Segmenter.line	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
+src/core/page-body/segmenter.ts	Segmenter.piece	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
+src/core/page-body/streamed-import.ts	importScanned	field	LEAD	bounded heads of the streamed file's regions for the sanity and type checks; the body itself streams to the segmenter
 src/core/page-embedding-budget.ts	pageBytes	field	META	lane 1e file: body_bytes for segmented pages
 src/core/page-embedding-budget.ts	planPageEmbedding	field	META	lane 1e file: body_bytes for segmented pages
 src/core/page-embedding-budget.ts	readPageSizeStates	sql	META	lane 1e file: body_bytes for segmented pages
@@ -403,6 +409,8 @@ src/core/persistence/reconcile-prepare.ts	prepareReconcileResult	call:serializeP
 src/core/persistence/reconcile-prepare.ts	prepareReconcileResult	field	INLINE	
 src/core/persistence/reconcile-state.ts	readReconcileState	sql	INLINE	
 src/core/persistence/reconcile.ts	runReconcilePreview	call:serializePageToMarkdown	SEGW	
+src/core/persistence/segmented-apply.ts	demoteSegmentedPage	sql	INLINE	demotion: the row turns inline with an empty body that the inline write in the same transaction fills
+src/core/persistence/segmented-apply.ts	stageSegmentedImport	field	INLINE	input.page is the parsed incoming write (strings within PAGE_MAX_BYTES), never a stored segmented row
 src/core/persistence/semantic-pages.ts	prepareSemanticPageMutation	call:serializePageToMarkdown	SEGW	assertInlineBody first
 src/core/persistence/semantic-pages.ts	prepareSemanticPageMutation	field	SEGW	assertInlineBody after the identity check (tag and timeline writes refuse)
 src/core/persistence/sync-prepare.ts	prepareManagedSyncCode	field	INLINE	code pages are never segmented
@@ -526,6 +534,3 @@ src/eval/brainbench/metrics/trust-reads.ts	canaryPersisted	sql	STREAM
 src/eval/chronicle/harness.ts	seedChronicleEvalCorpus	call:putPage	SEGW	
 src/eval/longmemeval/call-plan.ts	planPages	call:prepareMarkdownChunks	INLINE	
 src/eval/longmemeval/call-plan.ts	planPages	field	INLINE	
-src/core/page-body/segmenter.ts	Segmenter.blocked	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
-src/core/page-body/segmenter.ts	Segmenter.line	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
-src/core/page-body/segmenter.ts	Segmenter.piece	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state

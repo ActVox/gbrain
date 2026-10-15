@@ -69,8 +69,8 @@ export async function buildSegmentedProjection(engine: BrainEngine, ref: { sourc
   const frontmatter = page.frontmatter ?? {};
   const quarantined = isQuarantined(frontmatter);
   const unchunked = await occurrencesWithoutChunks(engine, pageId, generation, liveRows);
-  const staged = await stageOccurrenceChunks(engine, { pageId, sourceId: ref.sourceId, generation, occurrences: unchunked, title: page.title,
-    frontmatter, flags: page.body_flags ?? {}, chunking: { quarantined, corpusGeneration: null, tier: 'none' }, retiredOccurrences: [], guard: { slug: ref.slug } });
+  const staged = await stageOccurrenceChunks(engine, { pageId, sourceId: ref.sourceId, slug: ref.slug, generation, occurrences: unchunked, title: page.title,
+    frontmatter, flags: page.body_flags ?? {}, chunking: { quarantined, corpusGeneration: null, tier: 'none' }, retiredOccurrences: [], guarded: true });
   await faultPoint('segmented:projection_staged', { sourceId: ref.sourceId });
   const sealed = await engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: ref.sourceId, slug: ref.slug }]);

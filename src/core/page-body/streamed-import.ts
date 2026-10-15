@@ -271,7 +271,7 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   const prepared = await prepareSegmentedBody(engine, { sourceId, slug, live, title: parsed.title, type: parsed.type, frontmatter: parsed.frontmatter as JsonObject,
     tags: parsed.tags, truth: regionStream(scan.truth, read, inspect),
     timeline: (async function* () { codeRefs.end(); carry = ''; yield* regionStream(scan.timeline, read, inspect); })(),
-    flags: { fence_trust: scan.bodyFlags.fence_trust, timeline_fence_trust: scan.bodyFlags.timeline_fence_trust, timeline_split: scan.bodyFlags.timeline_split },
+    hasTimeline: scan.timelineBytes > 0, flags: { fence_trust: scan.bodyFlags.fence_trust, timeline_fence_trust: scan.bodyFlags.timeline_fence_trust, timeline_split: scan.bodyFlags.timeline_split },
     declaredBytes: scan.truthBytes + scan.timelineBytes,
     owner: { kind: 'import', principalKind: principal.kind, principalId: principal.id, baseRevision: existing?.knowledge_revision ?? null },
     chunking: { quarantined: disposition.quarantined, corpusGeneration, tier: mode === 'title' ? 'title' : 'none' } });

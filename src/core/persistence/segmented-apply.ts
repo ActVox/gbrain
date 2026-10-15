@@ -20,7 +20,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
-import type { SegmentedPageMeta } from '../page-body/types.ts';
+import type { JsonObject, SegmentedPageMeta } from '../page-body/types.ts';
 import type { PreparedSegmentedBody, SegmentChunkingContext, SegmentedLivePage, SegmentedStagingOwner } from '../page-body/ingest.ts';
 import { materializeSegmentedBody, prepareSegmentedBody, stringBodyFlags, stringRegion } from '../page-body/ingest.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
@@ -48,10 +48,11 @@ export function bodyStorageOf(page: object | null | undefined): 'inline' | 'segm
 
 /** The live page a segmented write diffs against, read by id (metadata only). */
 export async function segmentedLivePage(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<SegmentedLivePage> {
-  const [row] = await engine.executeRaw<{ id: number; body_generation: number | string; body_storage: string; title: string; type: string }>(
-    'SELECT id, body_generation, body_storage, title, type FROM pages WHERE id=$1', [pageId]);
+  const [row] = await engine.executeRaw<{ id: number; body_generation: number | string; body_storage: string; title: string; type: string; body_flags: JsonObject | null }>(
+    'SELECT id, body_generation, body_storage, title, type, body_flags FROM pages WHERE id=$1', [pageId]);
   if (!row) throw new Error(`Page ${pageId} not found.`);
-  return { id: Number(row.id), generation: Number(row.body_generation), storage: row.body_storage === 'segmented' ? 'segmented' : 'inline', title: row.title, type: row.type };
+  return { id: Number(row.id), generation: Number(row.body_generation), storage: row.body_storage === 'segmented' ? 'segmented' : 'inline', title: row.title, type: row.type,
+    flags: row.body_flags };
 }
 
 /**
@@ -183,7 +184,7 @@ export async function stageSegmentedImport(engine: BrainEngine, input: { slug: s
   }
   const prepared = await prepareSegmentedBody(engine, { sourceId: input.sourceId, slug: input.slug, live, title: input.page.title, type: input.page.type,
     frontmatter: input.page.frontmatter, tags: input.page.tags, truth: stringRegion(input.page.compiled_truth), timeline: stringRegion(input.page.timeline),
-    flags: stringBodyFlags(input.page.compiled_truth, input.page.timeline),
+    hasTimeline: input.page.timeline.length > 0, flags: stringBodyFlags(input.page.compiled_truth, input.page.timeline),
     declaredBytes: Buffer.byteLength(input.page.compiled_truth, 'utf-8') + Buffer.byteLength(input.page.timeline, 'utf-8'), owner, chunking: input.chunking });
   const staged: SegmentedImport = { prepared, applied: null,
     apply: async (tx, meta, contextual) => {

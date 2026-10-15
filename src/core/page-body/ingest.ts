@@ -21,16 +21,18 @@ import { stepFenceWalk, type FenceWalk } from '../fence-scan.ts';
 import { BODY_LEAD_BYTES, BODY_STAGING_HARD_MS, BODY_STAGING_IDLE_MS, STAGE_BATCH_BYTES } from './limits.ts';
 import type { BodyRegion, BodyStagingKind, BodyStorage, JsonObject, ManifestRow, ManifestRowInput, SegmentChunkInput,
   SegmentedBodyColumns, SegmentTextInput } from './types.ts';
-import { segmentStream, SEGMENTER_VERSION, type SegmentOut } from './segmenter.ts';
-import { initialEntryState } from './entry-state.ts';
+import { segmentProjectionParts, segmentStream, SEGMENTER_VERSION, type StoredRegion } from './segmenter.ts';
+import { initialEntryState, readEntryState, timelineEntryState, type EntryState } from './entry-state.ts';
 import { ContentHashStream } from './content-hash-stream.ts';
 import { prepareSegmentChunks } from './segment-chunks.ts';
 import { reuseSegmentChunkVectors } from '../import-chunk-reuse.ts';
+import { newFenceChunkBudget } from '../markdown-chunks.ts';
+import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 /** The live page a segmented write replaces (null: create). */
-export interface SegmentedLivePage { id: number; generation: number; storage: BodyStorage; title: string; type: string }
+export interface SegmentedLivePage { id: number; generation: number; storage: BodyStorage; title: string; type: string; flags: JsonObject | null }
 
 /** Who stages, for the `page_body_stagings` row (a GC root while open). */
 export interface SegmentedStagingOwner { kind: BodyStagingKind; principalKind: string; principalId: string; baseRevision: string | null }
@@ -46,6 +48,8 @@ export interface SegmentedBodyInput {
   /** The stored stream of each region (sanitized, valid UTF-8). */
   truth: AsyncIterable<Uint8Array>;
   timeline: AsyncIterable<Uint8Array>;
+  /** The timeline region is not empty (the truth then ends at `region_end`, not `eof`). */
+  hasTimeline: boolean;
   /** Page-global facts known at EOF (pass 1): `fence_trust`, `timeline_split`, ... */
   flags: JsonObject;
   /** Body bytes as declared by the source (exact for strings, the file size for streams). */
@@ -119,7 +123,13 @@ export function stringBodyFlags(truth: string, timeline: string): JsonObject {
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const sameBytes = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b));
-const occurrenceKey = (sha256: Uint8Array, entryState: unknown) => `${hex(sha256)}|${stableJson(entryState)}`;
+/** The whole-region fence trust a region's stored regions are computed under (body_flags). */
+export function regionTrust(flags: JsonObject | null | undefined, region: BodyRegion): 'trusted' | 'void' {
+  return (region === 'truth' ? flags?.fence_trust : flags?.timeline_fence_trust) === 'void' ? 'void' : 'trusted';
+}
+
+/** An occurrence is its bytes, entry state and the trust its stored regions were computed under: a trust flip rechunks the region. */
+const occurrenceKey = (sha256: Uint8Array, entryState: unknown, trust: 'trusted' | 'void') => `${hex(sha256)}|${stableJson(entryState)}|${trust}`;
 
 /** Every coordinate of a live row equals the row the new segment would get, so the row stays. */
 function rowUnchanged(live: ManifestRow, next: ManifestRowInput): boolean {
@@ -171,8 +181,9 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   const liveRows = live ? await engine.readManifest(live.id) : [];
   const byKey = new Map<string, ManifestRow[]>();
   for (const row of liveRows) {
-    const key = occurrenceKey(row.sha256, row.entryState);
-    byKey.set(key, [...(byKey.get(key) ?? []), row]);
+    const key = occurrenceKey(row.sha256, row.entryState, regionTrust(live!.flags, row.region));
+    const same = byKey.get(key);
+    if (same) same.push(row); else byKey.set(key, [row]);
   }
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   const expectedGeneration = input.live?.generation ?? 0;
@@ -196,17 +207,21 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   let texts = 0, byteStart = 0, lineStart = 0, truthBytes = 0, lines = 0;
   const leads: Record<BodyRegion, string> = { truth: '', timeline: '' };
   let hasProtected = false;
+  let truthExit: EntryState = initialEntryState({ region: 'truth' });
   for (const region of ['truth', 'timeline'] as const) {
     const stream = region === 'truth' ? input.truth : input.timeline;
+    const entry = region === 'truth' ? truthExit : timelineEntryState(truthExit);
+    const end = region === 'truth' && input.hasTimeline ? 'region_end' : 'eof';
     let first = true;
-    for await (const segment of segmentStream(stream, initialEntryState({ region }), { region }) as AsyncIterable<SegmentOut>) {
+    for await (const segment of segmentStream(stream, entry, { byteStart, lineStart, fenceTrust: regionTrust(input.flags, region), end })) {
       const seq = rows.length;
       if (first) { leads[region] = utf8Prefix(segment.bytes, BODY_LEAD_BYTES); first = false; }
+      if (region === 'truth') truthExit = segment.exitState;
       const text = utf8.decode(segment.bytes);
-      const key = occurrenceKey(segment.sha256, segment.entryState);
+      const key = occurrenceKey(segment.sha256, segment.entryState, segment.fenceTrust);
       const prior = liveRows[seq];
       const prefixRow = prefixIntact && prior && prior.region === region && Number(prior.byteStart) === byteStart
-        && occurrenceKey(prior.sha256, prior.entryState) === key ? prior : null;
+        && occurrenceKey(prior.sha256, prior.entryState, regionTrust(live!.flags, prior.region)) === key ? prior : null;
       let hashState: Uint8Array;
       if (prefixRow) hashState = prefixRow.hashState;
       else {
@@ -218,7 +233,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
       const row: ManifestRowInput = {
         pageId, occurrenceId: 0, genFrom: newGeneration, seq, region, sourceId: input.sourceId, sha256: segment.sha256,
         byteStart, byteLen: segment.bytes.length, lineStart, lineCount: segment.lineCount, cutKind: segment.cutKind,
-        entryState: segment.entryState as JsonObject, protectedRegions: segment.regions, factsSlots: segment.factsSlots,
+        entryState: segment.entryState as unknown as JsonObject, protectedRegions: segment.protectedRegions, factsSlots: segment.factsSlots,
         staticProjBytes: segment.staticProjBytes, staticProjLines: segment.staticProjLines, outline: segment.outline,
         dateMin: segment.dateMin, dateMax: segment.dateMax, hashState, stagingId,
       };
@@ -232,7 +247,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
         texts++;
         if (pendingBytes >= batchBytes) await flushTexts();
       }
-      if (segment.regions.length) hasProtected = true;
+      if (segment.protectedRegions.length) hasProtected = true;
       rows.push(row);
       byteStart += segment.bytes.length;
       lineStart += segment.lineCount;
@@ -271,7 +286,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   if (changed.length) await engine.stageManifestRows(changed);
   await faultPoint('segmented:manifest_staged', { sourceId: input.sourceId });
   const chunkable = await occurrencesWithoutChunks(engine, input.live.id, expectedGeneration, rows);
-  const chunks = await stageOccurrenceChunks(engine, { pageId: input.live.id, sourceId: input.sourceId, generation: newGeneration,
+  const chunks = await stageOccurrenceChunks(engine, { pageId: input.live.id, sourceId: input.sourceId, slug: input.slug, generation: newGeneration,
     occurrences: chunkable, title: input.title, frontmatter: input.frontmatter, flags: body.body_flags, chunking: input.chunking,
     retiredOccurrences: retireChunkOccurrences });
   await faultPoint('segmented:chunks_staged', { sourceId: input.sourceId });
@@ -302,13 +317,14 @@ export async function occurrencesWithoutChunks(engine: Pick<BrainEngine, 'execut
  * stage the chunk rows under `generation`. Shared by a replace's preparation
  * and the post-publication projection.
  */
-export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId: number; sourceId: string; generation: number;
+export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId: number; sourceId: string; slug: string; generation: number;
   occurrences: readonly ManifestRowInput[]; title: string; frontmatter: JsonObject; flags: JsonObject; chunking: SegmentChunkingContext;
   retiredOccurrences: readonly number[];
   /** Projection: each batch inserts under the page guard, after re-reading which occurrences still lack rows, so two projections never both chunk one. */
-  guard?: { slug: string } }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
+  guarded?: boolean }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
   if (input.chunking.quarantined || !input.occurrences.length) return { rows: 0, occurrences: 0, indexes: [] };
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
+  const fenceBudget = newFenceChunkBudget();
   let rows = 0, done = 0;
   const indexes: number[] = [];
   for (let start = 0; start < input.occurrences.length;) {
@@ -317,20 +333,29 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     const batch = input.occurrences.slice(start, end);
     start = end;
     const texts = await engine.readSegmentTexts(input.sourceId, batch.map(row => row.sha256));
+    const segments = batch.map(row => {
+      const bytes = texts.get(hex(row.sha256));
+      if (bytes === undefined) throw new Error(`Segment text ${hex(row.sha256)} of page ${input.pageId} is missing.`);
+      const entryState = readEntryState(row.entryState);
+      if (!entryState) throw new Error(`Manifest row ${row.occurrenceId} of page ${input.pageId} has an entry state of another version; resegment the page.`);
+      const fenceTrust = regionTrust(input.flags, row.region);
+      return { row, fenceTrust, segment: { region: row.region, bytes, byteStart: row.byteStart, entryState, fenceTrust, protectedRegions: row.protectedRegions as StoredRegion[] } };
+    });
+    const factsTexts = segments.flatMap(({ segment }) => segment.protectedRegions.some(region => region.kind === 'facts')
+      ? segmentProjectionParts(utf8.decode(segment.bytes), segment.protectedRegions, segment.byteStart)
+        .filter(part => part.kind === 'facts' && part.region?.open_start === undefined).map(part => part.text) : []);
+    const overlay = factsTexts.length ? await loadFenceChunkOverlay(engine, { sourceId: input.sourceId, slug: input.slug, compiled_truth: factsTexts.join('\n') }) : undefined;
     const chunks: SegmentChunkInput[] = [];
-    for (const row of batch) {
-      const text = texts.get(hex(row.sha256));
-      if (text === undefined) throw new Error(`Segment text ${hex(row.sha256)} of page ${input.pageId} is missing.`);
-      for (const chunk of prepareSegmentChunks({ ...row, text: utf8.decode(text) }, { flags: input.flags, frontmatter: input.frontmatter })) {
+    for (const { row, fenceTrust, segment } of segments) {
+      for (const chunk of await prepareSegmentChunks(segment, { fenceTrust, frontmatter: input.frontmatter, overlay, fenceBudget })) {
         chunks.push({ ...chunk, occurrence_id: row.occurrenceId });
       }
     }
     if (chunks.length && input.retiredOccurrences.length) await reuseSegmentChunkVectors(engine, { pageId: input.pageId,
       retiredOccurrences: input.retiredOccurrences, chunks, title: input.title, corpusGeneration: input.chunking.corpusGeneration, tier: input.chunking.tier });
-    const guard = input.guard;
-    if (chunks.length && !guard) indexes.push(...await engine.stageSegmentChunks(input.pageId, input.generation, chunks));
-    if (chunks.length && guard) rows -= chunks.length - await engine.transaction(async tx => {
-      await tx.lockPageKeys([{ sourceId: input.sourceId, slug: guard.slug }]);
+    if (chunks.length && !input.guarded) indexes.push(...await engine.stageSegmentChunks(input.pageId, input.generation, chunks));
+    if (chunks.length && input.guarded) rows -= chunks.length - await engine.transaction(async tx => {
+      await tx.lockPageKeys([{ sourceId: input.sourceId, slug: input.slug }]);
       const open = new Set((await occurrencesWithoutChunks(tx, input.pageId, input.generation, batch)).map(row => row.occurrenceId));
       const still = chunks.filter(chunk => open.has(chunk.occurrence_id));
       if (still.length) await tx.stageSegmentChunks(input.pageId, input.generation, still);

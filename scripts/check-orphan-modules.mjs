@@ -53,10 +53,6 @@ const ALLOWLIST = new Map([
 // string in a reviewer-visible edit. Modules reached from `scripts/**` carry
 // reason 'script-reachable', which the guard verifies.
 const PERMITTED_TEST_ONLY = [
-  { path: 'src/core/page-body/entry-state.ts', reason: 'held: Wave B PR 1 segmenter state; the segmented ingest path (spec 13 PR 1 integration) imports it' },
-  { path: 'src/core/page-body/region-scan.ts', reason: 'held: Wave B PR 1 streaming region scan; the segmented ingest path (spec 13 PR 1 integration) imports it' },
-  { path: 'src/core/page-body/segmenter.ts', reason: 'held: Wave B PR 1 segmenter; the segmented ingest path (spec 13 PR 1 integration) imports it' },
-  { path: 'src/core/page-body/segment-chunks.ts', reason: 'held: Wave B PR 1 per-segment chunker; the segmented projection (spec 13 PR 1 integration) imports it' },
   { path: 'src/core/bootstrap/template-repo.ts', reason: 'script-reachable' },
   { path: 'src/eval/longmemeval/diagnostics.ts', reason: 'script-reachable' },
   { path: 'src/eval/longmemeval/evidence-brief.ts', reason: 'held: eval-only wave 1 brief builder (10x memory advantage plan A3), loaded by path from gbrain-evals eval/runner/pilot; product wiring is plan item A8, conditional on the A5 pilot' },
