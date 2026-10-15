@@ -14,7 +14,7 @@ import type { WriteRequest } from './model.ts';
 
 export type PublicationBoundary = Parameters<NonNullable<PublicationHooks['boundary']>>[0];
 export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${EffectKind}:mid` | 'effect:embedding:settle'
-  | 'effect_recovery:before_clear' | 'publication_recovery:before_clear' | 'sync:mid_checkpoint' | 'sync:before_group_admission' | 'sync:mid_waiver_run' | 'consumer:prepared'
+  | 'effect_recovery:before_clear' | 'publication_recovery:before_clear' | 'sync:mid_checkpoint' | 'sync:before_group_admission' | 'sync:mid_waiver_run' | 'sync:prescreened' | 'consumer:prepared'
   | 'consumer:preparing' | 'lane:applied'
   // #6712 PR 0: after `freezeEntry` froze an import entry (its bytes are read) and before the request is admitted or published.
   | 'sync:after_freeze'

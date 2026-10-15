@@ -58,7 +58,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -141,6 +141,8 @@ const KILL_POINTS = [
   { point: 'consumer:preparing', per: 'page' }, { point: 'lane:applied', per: 'group' },
   { point: 'sync:before_group_admission', per: 'group' }, { point: 'sync:mid_checkpoint', per: 'save' },
   { point: 'sync:held_settled', per: 'held' }, { point: 'sync:retry_deferred', per: 'deferred' },
+  // #6712 PR 1: inside the guarded kernel run of prescreened entries (its round also commits mode-only changes, so it has some).
+  { point: 'sync:prescreened', per: 'group' },
 ] as const satisfies ReadonlyArray<{ point: FaultPoint; per: 'page' | 'group' | 'save' | 'held' | 'deferred' }>;
 const MAX_RECOVERY_RUNS = 2;
 /** Oracle tests are named by the persistence gate's violation class (scripts/persistence/model.ts) they would report. */
@@ -394,6 +396,12 @@ class Brain {
     this.git('add', '--', ...paths); this.git('commit', '-qm', message, '--', ...paths);
     const ack = performance.now();
     for (const f of files) this.ledger.record({ kind: 'commit', slug: f.slug, marker: f.marker, touches: ['db', 'file'], start, ack });
+  }
+  /** #6712 PR 1: a mode-only commit of these notes (same blobs), which the discovery prescreen passes without an import. */
+  chmodNotes(indexes: number[], message: string): void {
+    const paths = indexes.map(i => `${noteSlug(i)}.md`);
+    for (const path of paths) chmodSync(join(this.repo, path), 0o755);
+    this.git('add', '--', ...paths); this.git('commit', '-qm', message, '--', ...paths);
   }
   writeNotes(indexes: number[], version: string, message: string, extra: Array<{ slug: string; content: string; marker: string }> = []): void {
     this.commit(message, [...indexes.map(i => ({ slug: noteSlug(i), content: noteText(i, version), marker: noteMarker(i, version) })), ...extra]);
@@ -852,6 +860,7 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
       const tag = `round-${p.round}`;
       const first = (p.round * perRound) % NOTES;
       const indexes = Array.from({ length: perRound }, (_, i) => (first + i) % NOTES);
+      if (p.point === 'sync:prescreened') b.chmodNotes(Array.from({ length: 3 }, (_, i) => (first + perRound + 1 + 2 * i) % NOTES), `round ${p.round} modes`);
       const edited = p.primed ? indexes[Math.floor(perRound / 2)]! : null;
       const fault: Fault = { point: p.point, nth: p.nth, marker: b.marker(tag), operation: p.operation,
         ...(edited !== null ? { prime: { point: 'sync:after_freeze', nth: 1, path: `${noteSlug(edited)}.md`,

@@ -21,17 +21,22 @@ function git(gitRoot: string, args: string[], input?: string, maxBuffer = 32 * 1
     { env: gitChildEnv(), timeout: 60_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
 }
 
-/** Blob id and size of Git paths at a commit, in chunked `ls-tree` calls (never one process per file). */
+/** At this many paths `readTreeBlobs` lists the whole tree once instead of path chunks (#6712: the prescreen of a tree walk). */
+const WHOLE_TREE_AT = 1000;
+/** Blob id and size of Git paths at a commit, in chunked `ls-tree` calls (never one process per file), or one recursive listing for a large set. */
 export function readTreeBlobs(gitRoot: string, target: string, gitPaths: string[]): Map<string, TreeBlob> {
   const out = new Map<string, TreeBlob>();
+  const whole = gitPaths.length >= WHOLE_TREE_AT, wanted = whole ? new Set(gitPaths) : null;
   for (let i = 0; i < gitPaths.length; i += 500) {
-    const rows = git(gitRoot, ['ls-tree', '-l', '-z', target, '--', ...gitPaths.slice(i, i + 500)]).toString('utf8').split('\0');
+    const rows = (whole ? git(gitRoot, ['ls-tree', '-r', '-l', '-z', target], undefined, 512 * 1024 ** 2)
+      : git(gitRoot, ['ls-tree', '-l', '-z', target, '--', ...gitPaths.slice(i, i + 500)])).toString('utf8').split('\0');
     for (const row of rows) {
       const tab = row.indexOf('\t');
-      if (tab < 0) continue;
+      if (tab < 0 || wanted && !wanted.has(row.slice(tab + 1))) continue;
       const [, kind, oid, size] = row.slice(0, tab).split(/\s+/);
       if (kind === 'blob') out.set(row.slice(tab + 1), { oid: oid!, size: Number(size) });
     }
+    if (whole) break;
   }
   return out;
 }
