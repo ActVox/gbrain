@@ -3,6 +3,7 @@ import { opError, OperationError } from '../ops/contract.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { managedPersistenceEnabled } from './ownership.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
+import { detachRestoredPage } from './detached-pages.ts';
 
 /**
  * #5254: a Postgres page write to a filesystem source with no canonical owner
@@ -149,7 +150,13 @@ export async function assertUnboundPublication(tx: SqlEngine, row: Pick<WriteReq
   throw error;
 }
 
-export async function classifyUnboundPage(tx: SqlEngine, row: Pick<WriteRequest, 'authority' | 'source_id' | 'slug'>): Promise<void> {
+/**
+ * The publication's database-only stamp of the page it wrote: `unbound_source`
+ * for a write admitted that way, and `detached` (forgetting the recorded file)
+ * for a `restore_page` with `detach` (#6609, `detached-pages.ts`).
+ */
+export async function classifyUnboundPage(tx: SqlEngine, row: Pick<WriteRequest, 'authority' | 'source_id' | 'slug' | 'operation' | 'intent'>): Promise<void> {
+  await detachRestoredPage(tx, row);
   if (row.authority.databaseOnlyReason !== 'unbound_source') return;
   await tx.executeRaw("UPDATE pages SET database_only_reason='unbound_source' WHERE source_id=$1 AND slug=$2 AND database_only_reason IS NULL",
     [row.source_id, row.slug]);

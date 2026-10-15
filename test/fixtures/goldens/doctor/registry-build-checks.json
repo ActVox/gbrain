@@ -811,6 +811,10 @@
       },
       {
         "category": "brain",
+        "name": "missing_recorded_files"
+      },
+      {
+        "category": "brain",
         "name": "fence_integrity"
       },
       {

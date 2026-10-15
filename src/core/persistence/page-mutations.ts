@@ -34,6 +34,7 @@ import type { Principal, WriteRequest } from './model.ts';
 import { normalizeSubagentPageInput, undeclaredPageTypeWarning, type PageTypeWarning } from './page-input.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { decideUnboundWrite, isUnboundSourcePage } from './unbound-source.ts';
+import { assertRestoreOrigin } from './detached-pages.ts';
 import { colonSlugWindowsRefusal, isWindowsColonTarget } from './native-file-target.ts';
 import { publishesDatabaseOnly } from './page-prepare.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
@@ -379,6 +380,9 @@ export async function preparePageAdmission(ctx: OperationContext,
     if (decision.kind === 'claim') binding = await claimWorktree(ctx.engine, sourceId, root, undefined, undefined, { automatic: true });
     else authority.databaseOnlyReason = decision.reason;
   }
+  // #6609 (D5): a restore that writes no file refuses a page whose recorded file is gone, unless detach.
+  if (input.operation === 'restore_page') await assertRestoreOrigin(ctx.engine, { sourceId, slug, snapshot,
+    publishesFile: writeThrough && binding !== null, detach: p.detach === true, remote: ctx.remote !== false });
   // #5032: this host publishes the canonical file, and on Windows a ':' in its
   // name cannot be stored; refuse before admission. Database-only writes pass,
   // including read-only mirror sources and pages created while one (#5409).
