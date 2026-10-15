@@ -30,7 +30,7 @@ api_version: gbrain-schema-pack-v1
 name: amends-example
 version: 1.0.0
 description: Contracts and other dated records that amend earlier records
-gbrain_min_version: 0.60.181.0
+gbrain_min_version: 0.60.243.0
 extends: gbrain-base
 
 page_types:
