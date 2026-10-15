@@ -14,11 +14,18 @@
  * - `concurrent_small_put`: latency of small page writes (the put_page import
  *   core, `importFromContent`) issued one per event-loop turn, as separate
  *   requests arrive, while the large ingest runs.
+ * - `flip_retire`: wall time of `flipBodyGeneration` retiring N live chunk rows
+ *   (`--flip-rows`, default 5000,10000,20000,40000) in one transaction under the
+ *   publication timeouts (`lock_timeout` 1 s, `statement_timeout` 5 s), with
+ *   chunks of the bench page's average size, without and with embeddings (an
+ *   embedded row's retire UPDATE also writes HNSW entries). Each N gets its own
+ *   segmented page; `timed_out` reports a 57014 statement timeout.
  *
  * Run it under a memory cap so a regression fails instead of swapping:
  *   sudo systemd-run --scope -p MemoryMax=3G bun scripts/bench-large-pages.ts --size 100MB
  *   sudo systemd-run --scope -p MemoryMax=3G env DATABASE_URL=postgresql://... bun scripts/bench-large-pages.ts --size 100MB --engine postgres
- * Flags: --size <N>[KB|MB|GB] (default 100MB; above PAGE_MAX_BYTES, where the streamed path starts), --engine pglite|postgres (default pglite; postgres reads DATABASE_URL), --json.
+ * Flags: --size <N>[KB|MB|GB] (default 100MB; above PAGE_MAX_BYTES, where the streamed path starts), --engine pglite|postgres (default pglite; postgres reads DATABASE_URL), --json,
+ * --flip-rows <N,...>, --flip-only (only the `flip_retire` section).
  */
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -30,6 +37,7 @@ import { readPageBodyPolicy } from '../src/core/page-body/limits.ts';
 import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 import { importStreamedMarkdownFile } from '../src/core/page-body/streamed-import.ts';
 import { conversationBody, conversationPage } from '../test/helpers/conversation-page.ts';
+import { flipInput, publishSegmentedPage, segmentText, stageGeneration } from '../test/helpers/page-body-fixtures.ts';
 
 const SLUG = 'bench/large-page';
 
@@ -102,6 +110,53 @@ function peakRssBytes(): number {
   return (hwm ? Number(hwm[1]) : process.resourceUsage().maxRSS) * 1024;
 }
 
+/** Chunks per manifest occurrence and bytes per chunk text of the 100 MB bench page (29,041 chunks over 374 occurrences). */
+const FLIP_CHUNKS_PER_OCCURRENCE = 78;
+const FLIP_CHUNK_BYTES = 3400;
+
+/**
+ * One `flip_retire` cell: a segmented page at generation 1 whose occurrences hold `rows` live chunk rows, then the flip to
+ * generation 2 that retires all of them, timed inside a transaction with the publication's lock and statement timeouts.
+ */
+async function flipRetire(engine: BrainEngine, rows: number, embedded: boolean) {
+  const slug = `bench/flip-${rows}-${embedded ? 'embedded' : 'plain'}`;
+  await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [slug]);
+  const texts = Array.from({ length: Math.ceil(rows / FLIP_CHUNKS_PER_OCCURRENCE) }, (_, i) => segmentText(`## Part ${i}\n\nSegment ${i} of ${slug}.\n`));
+  const page = await publishSegmentedPage(engine, slug, texts);
+  const samples = Array.from({ length: 64 }, (_, i) => conversationBody(FLIP_CHUNK_BYTES, { seed: 100 + i }));
+  const embedding = embedded ? "('[' || array_to_string(ARRAY(SELECT round(random()::numeric, 4) FROM generate_series(1, 1024) WHERE g >= 0), ',') || ']')::vector" : 'NULL';
+  for (let from = 0; from < rows; from += 5000) {
+    await engine.executeRaw(`INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, occurrence_id, local_ordinal, raw_byte_start, raw_byte_end, body_generation, embedding, embedded_at)
+      SELECT $1, g, ($2::text[])[1 + g % 64], 'compiled_truth', ($3::bigint[])[1 + g / ${FLIP_CHUNKS_PER_OCCURRENCE}], g % ${FLIP_CHUNKS_PER_OCCURRENCE}, 0, ${FLIP_CHUNK_BYTES}, 1,
+        ${embedding}, ${embedded ? 'now()' : 'NULL'}
+      FROM generate_series($4::int, $5::int) AS g`, [page.pageId, samples, page.occurrences, from, Math.min(rows, from + 5000) - 1]);
+  }
+  const next = [segmentText(`## Part 0\n\nReplacement of ${slug}.\n`)];
+  const staged = await stageGeneration(engine, { pageId: page.pageId, slug, genFrom: 2, texts: next });
+  const t0 = performance.now();
+  try {
+    const flip = await engine.transaction(async tx => {
+      await tx.executeRaw("SELECT set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+      return tx.flipBodyGeneration(flipInput(page.pageId, 1, staged.stagingId, next,
+        { closeOccurrences: page.occurrences, retireChunkOccurrences: page.occurrences, retireMaxRows: rows }));
+    });
+    return { rows, embedded, ms: round(performance.now() - t0), retired: flip.retiredChunks, timed_out: false };
+  } catch (error) {
+    if ((error as { code?: unknown })?.code !== '57014' && !/statement timeout/i.test(String(error))) throw error;
+    return { rows, embedded, ms: round(performance.now() - t0), retired: 0, timed_out: true };
+  } finally {
+    await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [slug]);
+  }
+}
+
+async function flipRetireCells(engine: BrainEngine) {
+  const cells = [];
+  for (const embedded of [false, true]) {
+    for (const rows of arg('--flip-rows', '5000,10000,20000,40000').split(',').map(Number)) cells.push(await flipRetire(engine, rows, embedded));
+  }
+  return cells;
+}
+
 /** Child mode: ingest `--file` in a fresh process (the parent generated it) and report its peak RSS. */
 async function child(file: string, kind: string): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-bench-large-'));
@@ -127,6 +182,17 @@ async function main(): Promise<void> {
   const size = parseSize(arg('--size', '100MB'));
   const kind = arg('--engine', 'pglite');
   if (process.argv.includes('--child')) return child(arg('--child', ''), kind);
+  if (process.argv.includes('--flip-only')) {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-bench-large-'));
+    const engine = await openEngine(kind, dir);
+    try {
+      process.stdout.write(JSON.stringify({ engine: kind, flip_retire: await flipRetireCells(engine) }) + '\n');
+    } finally {
+      await engine.disconnect();
+      rmSync(dir, { recursive: true, force: true });
+    }
+    return;
+  }
   if (size <= PAGE_MAX_BYTES) throw new Error(`--size ${size} is not above PAGE_MAX_BYTES (${PAGE_MAX_BYTES}); smaller files take the single-string import.`);
 
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-bench-large-'));
@@ -173,6 +239,7 @@ async function main(): Promise<void> {
       rows: { texts: rows.texts, manifest: rows.manifest, chunks: rows.chunks },
       append_10kb: { ms: round(appendMs), manifest: appended.manifestAtGeneration, chunks: appended.chunksAtGeneration },
       concurrent_small_put: { writes: latencies.length, p50_ms: pct(0.5), p95_ms: pct(0.95), max_ms: pct(1) },
+      flip_retire: await flipRetireCells(engine),
     };
     if (process.argv.includes('--json')) process.stdout.write(JSON.stringify(report) + '\n');
     else process.stdout.write(JSON.stringify(report, null, 2) + '\n');

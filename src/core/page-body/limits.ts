@@ -53,8 +53,13 @@ export const STAGE_BATCH_BYTES: Readonly<Record<'postgres' | 'pglite', number>> 
   pglite: 4 * 1024 ** 2,
 };
 
-/** Chunk rows the generation flip retires inside the publication transaction; above it the page publishes unsealed and a projection job retires the rest. */
-export const DEFAULT_FLIP_RETIRE_MAX_ROWS = 20_000;
+/**
+ * Chunk rows the generation flip retires inside the publication transaction; above it the page publishes unsealed and a
+ * projection job retires the rest, this many rows per statement. Retiring an embedded row cannot be a HOT update, so it
+ * writes a new `idx_chunks_embedding` (HNSW) entry: `scripts/bench-large-pages.ts` measured 1,000 embedded rows at 1.4 s
+ * on PGLite and 0.6 s on Postgres, 20,000 at 129 s on PGLite and over the 5 s statement timeout on Postgres.
+ */
+export const DEFAULT_FLIP_RETIRE_MAX_ROWS = 1_000;
 
 /**
  * Snapshots of an inline page over the inline cap kept per page (Wave A). Each

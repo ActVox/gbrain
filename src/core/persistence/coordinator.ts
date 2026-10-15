@@ -42,6 +42,7 @@ import { fenceFailureDetail } from '../fence-repair/refusal.ts';
 import { withdrawalFailureDetail } from '../facts/withdrawal.ts';
 import { faultPoint, withFaultPoints } from './fault-points.ts';
 import { recordPublicationFenceTrend } from '../fence-repair/census-store.ts';
+import { segmentWriteScope } from '../page-body/ingest.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -556,7 +557,8 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       await faultPoint('publication_recovery:before_clear', { requestId: row.request_id, sourceId: row.source_id, operation: row.operation });
       await clearResolvedRecovery(engine, id);
       row = (await getWriteRequestById(engine, id))!;
-      if (row.page_id !== null && row.state === 'committed') await engine.sweepSegments({ pageId: Number(row.page_id) }).catch(() => undefined);
+      const pageId = row.page_id === null || row.state !== 'committed' ? null : Number(row.page_id);
+      if (pageId !== null) await segmentWriteScope(engine, row.source_id).then(writes => writes(exec => exec.sweepSegments({ pageId }))).catch(() => undefined);
     }
     return row;
   } finally { releaseCapacity?.(); await lock?.release(); }

@@ -22,7 +22,7 @@ import type { Page } from '../types.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import type { JsonObject, SegmentedPageMeta } from '../page-body/types.ts';
 import type { PreparedSegmentedBody, SegmentChunkingContext, SegmentedLivePage, SegmentedStagingOwner } from '../page-body/ingest.ts';
-import { materializeSegmentedBody, prepareSegmentedBody, stringBodyFlags, stringRegion } from '../page-body/ingest.ts';
+import { materializeSegmentedBody, prepareSegmentedBody, segmentWriteScope, stringBodyFlags, stringRegion } from '../page-body/ingest.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
 import { maintenanceAttribution } from './attribution.ts';
 import { readPageBodyPolicy, chooseBodyStorage, SEGMENTED_DEMOTE_AT_OR_BELOW_BYTES, type PageBodyPolicy } from '../page-body/limits.ts';
@@ -196,7 +196,8 @@ export async function stageSegmentedImport(engine: BrainEngine, input: { slug: s
     afterCommit: async target => {
       if (!staged.applied) return;
       if (!staged.applied.complete) await buildSegmentedProjection(target, { sourceId: input.sourceId, slug: input.slug }).catch(() => undefined);
-      await target.sweepSegments({ pageId: staged.applied.pageId }).catch(() => undefined);
+      const pageId = staged.applied.pageId;
+      await segmentWriteScope(target, input.sourceId).then(writes => writes(exec => exec.sweepSegments({ pageId }))).catch(() => undefined);
     } };
   return staged;
 }

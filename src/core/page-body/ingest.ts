@@ -17,6 +17,10 @@ import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { stableJson } from '../persistence/digest.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
+import { withCoordinatedWrite } from '../persistence/context.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
+import { maintenanceAttribution, principalAttribution } from '../persistence/attribution.ts';
+import type { Principal } from '../persistence/model.ts';
 import { stepFenceWalk, type FenceWalk } from '../fence-scan.ts';
 import { BODY_LEAD_BYTES, BODY_STAGING_HARD_MS, BODY_STAGING_IDLE_MS, STAGE_BATCH_BYTES } from './limits.ts';
 import type { BodyRegion, BodyStagingKind, BodyStorage, JsonObject, ManifestRow, ManifestRowInput, SegmentChunkInput,
@@ -83,6 +87,21 @@ export interface PreparedSegmentedBody {
   rows: { texts: number; manifest: number; chunks: number };
   /** `chunk_index` of every chunk row this preparation staged; the flip drops any other row staged under `newGeneration` (a dead preparation's). */
   stagedChunkIndexes: number[];
+}
+
+/**
+ * Runs writes to the guarded segment tables (texts, manifest rows, sweeps) of
+ * `sourceId` outside a publication transaction. On a managed brain they run in
+ * a coordinated write for that source, as the writer guard requires
+ * (writer-guard-schema.ts); the caller is the source's owner preparing or
+ * collecting its own write (`principal`, else the local maintenance writer).
+ * On any other brain they run directly.
+ */
+export async function segmentWriteScope(engine: BrainEngine, sourceId: string, principal?: Principal):
+  Promise<<T>(fn: (exec: BrainEngine) => Promise<T>) => Promise<T>> {
+  if (!await readManagedMode(engine)) return fn => fn(engine);
+  const attribution = principal ? principalAttribution(principal) : await maintenanceAttribution(engine);
+  return fn => engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => fn(tx), attribution));
 }
 
 /** A region of a string as a byte stream, sliced on code-point boundaries. */
@@ -185,6 +204,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
     const same = byKey.get(key);
     if (same) same.push(row); else byKey.set(key, [row]);
   }
+  const writes = await segmentWriteScope(engine, input.sourceId, { kind: input.owner.principalKind as Principal['kind'], id: input.owner.principalId });
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   const expectedGeneration = input.live?.generation ?? 0;
   const newGeneration = expectedGeneration + 1;
@@ -197,7 +217,8 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   let pendingBytes = 0;
   const flushTexts = async () => {
     if (!pending.length) return;
-    await engine.stageSegmentTexts(input.sourceId, pending.splice(0));
+    const batch = pending.splice(0);
+    await writes(exec => exec.stageSegmentTexts(input.sourceId, batch));
     pendingBytes = 0;
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
   };
@@ -283,7 +304,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
     return { stagingId, expectedGeneration, newGeneration, createRows: rows, closeOccurrences: [], retireChunkOccurrences: [],
       unchunked: rows.length, body, bodyUnchanged: false, rows: { texts, manifest: rows.length, chunks: 0 }, stagedChunkIndexes: [] };
   }
-  if (changed.length) await engine.stageManifestRows(changed);
+  if (changed.length) await writes(exec => exec.stageManifestRows(changed));
   await faultPoint('segmented:manifest_staged', { sourceId: input.sourceId });
   const chunkable = await occurrencesWithoutChunks(engine, input.live.id, expectedGeneration, rows);
   const chunks = await stageOccurrenceChunks(engine, { pageId: input.live.id, sourceId: input.sourceId, slug: input.slug, generation: newGeneration,
