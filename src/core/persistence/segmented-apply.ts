@@ -30,6 +30,7 @@ import { SEGMENTED_CHUNKER_VERSION } from '../page-body/segment-chunks.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { pageSearchVectorSql } from '../fts-language.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
+import { overlayCanonicalBodies, readPageSnapshot } from '../page-state/snapshot.ts';
 import { faultPoint } from './fault-points.ts';
 import { stableJson } from './digest.ts';
 
@@ -117,11 +118,19 @@ export interface SegmentedApplyInput {
 /** `complete`: every occurrence has chunks and the flip retired the old rows, so the caller seals as its last step (`sealSegmentedPage`). */
 export interface SegmentedApplied { pageId: number; complete: boolean; retireDeferred: boolean }
 
-/** Seal a segmented page's text projection at its current revision (chunks visible, title + timeline lead searchable). */
+/**
+ * Seal a segmented page's text projection at its current revision (chunks visible, title + timeline lead searchable).
+ * The lead is indexed as the inline seal indexes a snapshot's timeline: after the page's withdrawal overlay, sanitized.
+ */
 export async function sealSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, pageId: number, timelineLead?: string): Promise<void> {
-  const lead = timelineLead ?? (await tx.executeRaw<{ timeline_lead: string | null }>('SELECT timeline_lead FROM pages WHERE id=$1', [pageId]))[0]?.timeline_lead ?? '';
+  const [page] = await tx.executeRaw<{ slug: string; source_id: string; timeline_lead: string | null }>('SELECT slug, source_id, timeline_lead FROM pages WHERE id=$1', [pageId]);
+  if (!page) return;
+  const query = <T>(sql: string, params?: unknown[]) => tx.executeRaw<T>(sql, params);
+  const ledger = await readPageSnapshot(query, page.slug, { sourceId: page.source_id, includeDeleted: true });
+  const { timeline } = await overlayCanonicalBodies(query, '', timelineLead ?? page.timeline_lead ?? '', ledger?.withdrawals ?? [],
+    { sourceId: page.source_id, marker: ledger?.globalPurges });
   await tx.executeRaw(`UPDATE pages SET text_projection_revision=knowledge_revision, chunker_version=$3,
-    search_vector=${pageSearchVectorSql('title', '$2')} WHERE id=$1`, [pageId, sanitizeRemoteBody(lead), SEGMENTED_CHUNKER_VERSION]);
+    search_vector=${pageSearchVectorSql('title', '$2')} WHERE id=$1`, [pageId, sanitizeRemoteBody(timeline), SEGMENTED_CHUNKER_VERSION]);
 }
 
 /** The segmented branch of a page write's apply, inside the publication transaction. */

@@ -72,7 +72,7 @@ const PERMITTED_TEST_ONLY = [
   { path: 'src/core/ingestion/sources/file-watcher.ts', reason: 'held: ingestion cluster awaits a wire-up vs delete product decision' },
   { path: 'src/core/ingestion/sources/gstack-learnings.ts', reason: 'held: ingestion cluster awaits a wire-up vs delete product decision' },
   { path: 'src/core/ingestion/sources/inbox-folder.ts', reason: 'held: ingestion cluster awaits a wire-up vs delete product decision (docs/guides/data-ingestion.md promises the inbox folder)' },
-  { path: 'src/core/ingestion/sources/markdown-greenfield.ts', reason: 'held: ingestion cluster awaits a wire-up vs delete product decision (docs/migrations/v0.41.2-markdown-greenfield.md)' },
+  { path: 'src/core/ingestion/sources/markdown-greenfield.ts', reason: 'held: ingestion cluster awaits a wire-up vs delete product decision (docs/migrations/v0.41.2-markdown-greenfield.md)' },  { path: 'src/core/page-body/read-range.ts', reason: 'held: Wave B PR 2 segment reader (lane F); the get_page, page-window and evidence lanes of the same PR wire it into their reads' },
 ];
 
 const RULES = {

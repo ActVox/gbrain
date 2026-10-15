@@ -105,6 +105,18 @@ derived-link passes (a trusted page write's links, the managed stale-links
 pass, post-batch auto-link) read a segmented page up to 24 MiB as one string;
 the extraction and link passes skip a larger one with this code.
 
+## page_projection_stale
+
+A read of a segmented page reached a segment whose stored projection metadata
+(its protected regions, written when the segment was stored) cannot be used:
+it was written by another segmenter version or the text does not match its
+hash, and the parser state carried with the segment is missing or of another
+version. A trusted body read also refuses when a facts fence block crosses a
+forced segment cut while the source has withdrawals. gbrain returns nothing for
+that segment rather than text it cannot sanitize. Rewrite the page body (import
+or sync its file again), which segments it with this gbrain version, then read
+it again; other windows and the outline still work.
+
 ## page_shrink_refused
 
 A remote `put_page` would replace a page over the inline size with content under
