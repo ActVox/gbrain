@@ -20,12 +20,11 @@ import { faultPoint } from '../persistence/fault-points.ts';
 import { sealSegmentedPage } from '../persistence/segmented-apply.ts';
 import { PROJECTION_RETRY_READY_SQL } from '../page-state/projections.ts';
 import { occurrencesWithoutChunks, stageOccurrenceChunks } from './ingest.ts';
+import { DEFAULT_FLIP_RETIRE_MAX_ROWS } from './limits.ts';
 import type { JsonObject } from './types.ts';
 
 export interface SegmentedProjectionResult { chunks: number; retired: number; sealed: boolean }
 
-/** Chunk rows one retirement statement marks. */
-const RETIRE_BATCH_ROWS = 5_000;
 
 interface ProjectionPage {
   id: number; body_generation: number | string; knowledge_revision: string; text_projection_revision: string | null;
@@ -52,9 +51,9 @@ async function retireStaleChunks(engine: Pick<BrainEngine, 'executeRaw' | 'kind'
           OR (s.body_generation<=$2 AND EXISTS (SELECT 1 FROM content_chunks n WHERE n.page_id=s.page_id AND n.occurrence_id=s.occurrence_id
             AND n.retired_generation IS NULL AND n.body_generation>s.body_generation AND n.body_generation<=$2)))
         LIMIT $4)
-      RETURNING c.id`, [pageId, generation, live, RETIRE_BATCH_ROWS]);
+      RETURNING c.id`, [pageId, generation, live, DEFAULT_FLIP_RETIRE_MAX_ROWS]);
     retired += rows.length;
-    if (rows.length < RETIRE_BATCH_ROWS) return retired;
+    if (rows.length < DEFAULT_FLIP_RETIRE_MAX_ROWS) return retired;
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
   }
 }
