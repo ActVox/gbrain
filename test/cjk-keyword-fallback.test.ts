@@ -122,7 +122,9 @@ describe('Korean particles in the CJK keyword match (#6666)', () => {
     await page('notes/glucose', '혈당 수치가 아침에 높았다.');
     await page('notes/other', '오늘은 운동을 했다.');
     expect(slugs(await engine.searchKeyword('혈당에서'))).toEqual(['notes/glucose']);
-    expect(slugs(await engine.searchKeywordPages('혈당에서', undefined, { limit: 10 }))).toEqual(['notes/glucose']);
+    const rows = await engine.searchKeywordPages('혈당에서', undefined, { limit: 10 });
+    expect(slugs(rows)).toEqual(['notes/glucose']);
+    expect(await engine.countKeywordPages('혈당에서')).toBe(rows.length);
   });
 
   test('the strict AND keeps every term: a second stemmed term that matches nothing still finds nothing', async () => {
