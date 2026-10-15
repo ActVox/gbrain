@@ -2262,6 +2262,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | The payload exceeds the configured size cap. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### pending_verify
+
+<a id="pending_verify"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain bootstrap harness --token` wired the harness on a PGLite brain while no `gbrain serve` answered, so the wiring is not verified yet; nothing failed. | On PGLite the serve holds the single-writer lock, so a stopped serve is the normal state for wiring; the smoke test needs the serve, so it waits for the re-run. | Start `gbrain serve --http` for this brain, then re-run the same `gbrain bootstrap harness` command with the same --token; `gbrain bootstrap harness --status` stays partial until that run passes its smoke test. | host_admin | `gbrain doctor --json` | 13 | no |
+
+More: [docs/guides/bootstrap.md#pending-verify](../../docs/guides/bootstrap.md#pending-verify)
+
 ### pending_writes
 
 <a id="pending_writes"></a>

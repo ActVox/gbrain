@@ -359,4 +359,37 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
     const text = await res.text();
     expect(text).toMatch(/insufficient_scope|requires .*admin|not permitted|scope/i);
   }, 30_000);
+
+  // #6661 option B, run for real: with the serve stopped a --token run wires and ends pending_verify (exit 13);
+  // --status stays partial until the fix's re-run, which runs while the live serve holds the PGLite brain.
+  test('--token with the serve stopped ends pending_verify; the printed re-run completes it under the live serve', async () => {
+    const env: Record<string, string | undefined> = { ...process.env, GBRAIN_HOME: parent };
+    delete env.DATABASE_URL;
+    delete env.GBRAIN_DATABASE_URL;
+    await stopServe();
+    const { runner } = makeClaudeRunner();
+    const run = (argv: string[]) => withEnv(envFor(), () => capture(() => runBootstrap(argv, { runner, harnessDetect: HARNESS_DETECT })));
+    const pending = await run(['harness', '--yes', '--port', String(PORT), '--harness', 'codex', '--skills', 'memory-only', '--token', token, '--json']);
+    expect(pending.result).toBe(13);
+    const doc = JSON.parse(pending.out) as { status: string; fix: { argv: string[] } };
+    expect(doc.status).toBe('pending_verify');
+    expect(pending.out).not.toContain(token);
+    expect(readFileSync(codexConfig(), 'utf8')).toContain(`http_headers = { Authorization = "Bearer ${token}" }`);
+    expect((await run(['harness', '--status', '--json'])).result).toBe(1);
+
+    await startServe(env);
+    const partial = await run(['harness', '--status', '--json']);
+    expect(partial.result).toBe(1);
+    expect(JSON.parse(partial.out)).toMatchObject({ status: 'partial', serve_ok: true, engine: 'pglite' });
+
+    const completed = await run(doc.fix.argv.slice(2).map(a => (a === '<TOKEN>' ? token : a)));
+    expect(completed.result).toBe(0);
+    // The re-run could not open the brain (the live serve holds it) and verified over HTTP instead.
+    expect(completed.err).toMatch(/could not verify --source 'default' against the brain/);
+    expect(completed.out).toMatch(/smoke test:/);
+    const done = await run(['harness', '--status', '--json']);
+    expect(done.result).toBe(0);
+    expect(JSON.parse(done.out).verify_pending).toBeUndefined();
+    expect((await run(['harness', '--remove', '--yes'])).result).toBe(0);
+  }, 120_000);
 });

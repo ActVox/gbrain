@@ -1844,3 +1844,73 @@ describe('harness hooks without their marker (#6092, #6171)', () => {
     expect(f.out.join('\n')).toContain(`hook entries in ${f.userSettings}: 5 gbrain (5 without the _gbrain marker)`);
   });
 });
+
+// #6661 option B: on PGLite a stopped serve is the normal state for a --token run, so nothing answering is
+// pending verification (exit 13, JSON status pending_verify) instead of a hard stop; everything else still fails.
+describe('--token on PGLite with no serve answering: pending_verify (#6661)', () => {
+  const pglite = () => ({ engine: 'pglite' } as GBrainConfig);
+
+  test('wires, skips the smoke without rolling back, records verify_pending and names the re-run as the fix', async () => {
+    const f = makeFake({ health: { ok: false } });
+    f.deps.loadFileConfig = pglite;
+    const code = await applyHarness(flags(['--harness', 'codex', '--token', TOKEN_A, '--json']), f.deps);
+    expect(code).toBe(13);
+    const doc = JSON.parse(f.out.at(-1)!) as { status: string; code: string; smoke_ok: boolean; targets: HarnessTarget[]; fix: { argv: string[]; next: string; inputs: Array<{ name: string }>; verify: { argv: string[] } } };
+    expect(doc.status).toBe('pending_verify');
+    expect(doc.code).toBe('pending_verify');
+    expect(doc.smoke_ok).toBe(false);
+    expect(doc.targets.every(t => t.state === 'confirmed')).toBe(true);
+    expect(doc.fix.next).toBe('tell_user_to_run');
+    expect(doc.fix.argv).toEqual(['gbrain', 'bootstrap', 'harness', '--yes', '--harness', 'codex', '--token', '<TOKEN>', '--source', 'default']);
+    expect(JSON.stringify(doc)).not.toContain(TOKEN_A);
+    expect(doc.fix.inputs.map(i => i.name)).toEqual(['TOKEN']);
+    expect(doc.fix.verify.argv).toEqual(['gbrain', 'bootstrap', 'harness', '--status', '--json']);
+    expect(readFileSync(f.codexConfig, 'utf8')).toContain(`Authorization = "Bearer ${TOKEN_A}"`);
+    const state = readHarnessReceiptState(f.home);
+    expect(state.state === 'ok' && state.receipt.verify_pending?.reason).toBe('serve_unreachable');
+
+    // --status stays partial (exit 1) while pending, even once the serve answers and the token verifies.
+    f.out.length = 0;
+    expect(await statusHarness(parseHarnessArgs(['--status', '--json']), f.deps)).toBe(1);
+    expect(JSON.parse(f.out.join('\n'))).toMatchObject({ status: 'partial', serve_ok: false, verify_pending: { reason: 'serve_unreachable' } });
+    const up = makeFake();
+    up.deps.gbrainHome = f.home;
+    up.deps.codexConfig = f.codexConfig;
+    up.deps.loadFileConfig = pglite;
+    expect(await statusHarness(parseHarnessArgs(['--status', '--json']), up.deps)).toBe(1);
+    expect(JSON.parse(up.out.join('\n'))).toMatchObject({ status: 'partial', serve_ok: true, token_verified: true });
+
+    // The fix's re-run with the serve up passes its smoke, writes a fresh receipt without the marker, and status is green.
+    const rerun = doc.fix.argv.slice(3).map(a => (a === '<TOKEN>' ? TOKEN_A : a));
+    expect(await applyHarness(parseHarnessArgs(rerun), up.deps)).toBe(0);
+    const after = readHarnessReceiptState(f.home);
+    expect(after.state === 'ok' && after.receipt.verify_pending).toBeUndefined();
+    up.out.length = 0;
+    expect(await statusHarness(parseHarnessArgs(['--status', '--json']), up.deps)).toBe(0);
+  });
+
+  test('a serve that holds the brain but does not answer at this url (wrong --url/--port) still fails with no writes', async () => {
+    const f = makeFake({ health: { ok: false }, pgliteLive: true });
+    f.deps.loadFileConfig = pglite;
+    expect(await applyHarness(flags(['--harness', 'codex', '--port', '9999', '--token', TOKEN_A]), f.deps)).toBe(1);
+    expect(f.err.join('\n')).toMatch(/no healthy gbrain serve/);
+    expect(readHarnessReceiptState(f.home)).toEqual({ state: 'absent' });
+  });
+
+  test('without --token, on Postgres, or when something non-gbrain answers, the health failure is still a hard stop', async () => {
+    const noToken = makeFake({ health: { ok: false } });
+    noToken.deps.loadFileConfig = pglite;
+    expect(await applyHarness(flags(['--harness', 'codex']), noToken.deps)).toBe(1);
+    const postgres = makeFake({ health: { ok: false } });
+    postgres.deps.loadFileConfig = () => ({ engine: 'postgres' } as GBrainConfig);
+    expect(await applyHarness(flags(['--harness', 'codex', '--token', TOKEN_A]), postgres.deps)).toBe(1);
+    const answered = makeFake();
+    answered.deps.loadFileConfig = pglite;
+    answered.deps.fetchFn = (async () => new Response('nope', { status: 404 })) as unknown as typeof fetch;
+    expect(await applyHarness(flags(['--harness', 'codex', '--token', TOKEN_A]), answered.deps)).toBe(1);
+    for (const f of [noToken, postgres, answered]) {
+      expect(f.err.join('\n')).toMatch(/no healthy gbrain serve/);
+      expect(readHarnessReceiptState(f.home)).toEqual({ state: 'absent' });
+    }
+  });
+});
