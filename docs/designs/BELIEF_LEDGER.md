@@ -621,12 +621,21 @@ The contract W1 adds for the ledger:
      purged text in it, back into a fresh event, and neither the tombstone
      check nor the purge epoch would stop it. So each field the pass redacts
      is recorded in `belief_redactions (source_id, subject_key, field,
-     purge_request, field_hash)`, where `field_hash` is the hash of the
+     purge_request, field_hash, released_by, released_hash)`, where `field_hash` is the hash of the
      field's value at the purge. Every later append for that key (a
      revision, a baseline, a reconcile, a backfill) writes the redaction
-     marker in that field while the field's canonical value still hashes to
-     `field_hash`. Once the owner changes the field, the new value is a new
-     write and is recorded as written. Purge-verify reports the live carrier
+     marker in that field **until an owner releases it**, whether or not the
+     bytes changed: an agent can append a sentence to the context and keep
+     the quote, and the fact guard lets a same-row, same-claim rewrite
+     through (`trust/fence-guard.ts:50-51`). A release is an owner decision
+     bound to one value: a trusted local write (`remote = false`) at or above
+     `OWNER_TIER_FLOOR` (`trust/tier.ts:40`) that sets the field, or the
+     owner confirm action on that key (`trust/confirm.ts`), records
+     `released_by` (its request id) and `released_hash` (the hash of the new
+     value) in `belief_redactions`. Only an append whose field value hashes to
+     `released_hash` records it as written; any later change goes back to the
+     marker until the next release. Agent writes, sync, reconcile and
+     backfill never release, whatever their tier. Purge-verify reports the live carrier
      itself (the surviving row's context) as `out_of_scope: source_prose`,
      naming the key, so the user can edit it.
    - **Derived keys:** a paraphrase cannot be matched by a needle, so the
@@ -1160,8 +1169,9 @@ reconstructed state, not counts**, on PGLite and Postgres:
 37. purge X while fact Y's fence context quotes X, then a fresh
     publication that changes only Y's confidence → Y's new event carries
     the redaction marker in `context`, and the receipt names Y's context;
-    after the owner edits that context, the next event records the new
-    value;
+    an agent edit that changes Y's context but keeps the quote → still the
+    marker; a trusted local owner replacement → the next event records the
+    new value, and a later agent change to it → the marker again;
 38. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
