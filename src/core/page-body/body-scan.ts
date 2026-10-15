@@ -13,7 +13,7 @@
  * is `frontmatter_head_unbounded` and the caller holds the file as
  * `invalid_frontmatter`. The readers that must close inside `P`: the data
  * fence (`scanDataFrontmatter`), the pre-quote pass's fence (unless no later
- * line closes it, or closing it would rewrite nothing), and with `validate`
+ * line closes it, or closing it would change no line), and with `validate`
  * the validator's `---` line. A NUL beyond `P` is added to the findings as
  * parseMarkdown's whole-file NULL_BYTES check would report it.
  *
@@ -157,7 +157,7 @@ interface BareSection extends BareCandidate {
   timelineEnd: Pos;
 }
 
-interface QuoteWatch { anyBefore: boolean; prev: boolean; prevStripped: boolean }
+interface QuoteWatch { anyBefore: boolean; prev: boolean; prevChanged: boolean }
 
 const utf8 = (text: string) => Buffer.byteLength(text, 'utf8');
 
@@ -275,7 +275,7 @@ export class BodyScanner {
         if (fence.opens && fence.closeLine === -1) return this.unbounded('validator_fence');
       }
       if (frontmatterQuoteFence(head.lifted) === 'open') {
-        const watch = { anyBefore: false, prev: false, prevStripped: false };
+        const watch = { anyBefore: false, prev: false, prevChanged: false };
         const lines = head.lifted.split('\n');
         for (let k = 1; k < lines.length - 1; k++) watchQuoteLine(watch, lines[k]!);
         this.quoteWatch = watch;
@@ -349,7 +349,7 @@ export class BodyScanner {
     }
     if (this.quoteWatch && inFile && this.fileOffset(start) >= this.headEnd) {
       if (text === '---' || (text === '---\r' && hasNewline)) {
-        if (this.quoteWatch.anyBefore || this.quoteWatch.prevStripped) return this.unbounded('quote_fence');
+        if (this.quoteWatch.anyBefore || this.quoteWatch.prevChanged) return this.unbounded('quote_fence');
         this.quoteWatch = null;
       } else {
         watchQuoteLine(this.quoteWatch, text);
@@ -535,13 +535,14 @@ export class BodyScanner {
 
 /**
  * The pre-quote pass's view of fence lines when its fence did not close in the
- * head: whether any line so far would be rewritten. Every line keeps its CR
- * except the one just before the closing `---`, whose CR the regex absorbs.
+ * head: whether closing it on the next line would change any line so far.
+ * Every line keeps its CR except the one just before the closing `---`, which
+ * the pass rebuilds without its CR (and then may rewrite).
  */
 function watchQuoteLine(watch: QuoteWatch, text: string): void {
   watch.anyBefore ||= watch.prev;
   watch.prev = quoteAmbiguousFrontmatterLine(text) !== null;
-  watch.prevStripped = quoteAmbiguousFrontmatterLine(text.endsWith('\r') ? text.slice(0, -1) : text) !== null;
+  watch.prevChanged = text.endsWith('\r') || quoteAmbiguousFrontmatterLine(text) !== null;
 }
 
 /** Pass 1 over a streamed file. */

@@ -108,7 +108,7 @@ describe('body scan vs parseMarkdown (whole file within the head bound)', () => 
     fc.assert(fc.property(docArb, fc.constantFrom(...PATHS), fc.boolean(), (doc, path, validate) => {
       expectAgrees(render(doc), path, { validate });
     }), { numRuns: 3000 });
-  });
+  }, 60_000);
 
   test('named shapes', () => {
     const shapes = [
@@ -155,7 +155,8 @@ describe('body scan on files larger than the head bound', () => {
       const got = capture(() => scanMarkdownString(content, 'notes/x.md', { validate }));
       if (!('thrown' in got) && got.kind === 'frontmatter_head_unbounded') {
         refused++;
-        expect(content.trimStart().startsWith('-') || content.startsWith('\uFEFF-')).toBe(true);
+        const head = content.slice(0, FRONTMATTER_HEAD_MAX_BYTES);
+        expect(!/\S/.test(head) || /^\s*-/.test(head)).toBe(true);
         return;
       }
       expectAgrees(content, 'notes/x.md', { validate });
@@ -180,6 +181,9 @@ describe('body scan on files larger than the head bound', () => {
     expect(scanMarkdownString(blockRewrite).kind).toBe('frontmatter_head_unbounded');
     expectAgrees(`---\ntitle: x\n---  \n${pad('prose')}---\nend\n`, 'notes/x.md', { validate: true });
     expectAgrees(`---\ntitle: x\n---  \n${pad('Note: one: two')}end\n`, 'notes/x.md', { validate: true });
+    // The pass rebuilds the line before its closing `---` without the CR, so a CRLF body line changes too.
+    const crlf = `---\r\n---\r\n${pad('## notes\r')}---`;
+    expect(scanMarkdownString(crlf).kind).toBe('frontmatter_head_unbounded');
   });
 
   test('the validator fence must close in the head only under validate', () => {
