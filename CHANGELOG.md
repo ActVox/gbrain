@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.239.0] - 2026-10-15
 
 **The v0.60.218.0 notes now say where a private fact could become world.** Before v0.60.218.0, fencing a legacy fact into a leftover fence row with a different visibility was refused on a managed brain. An unmanaged brain had no such check, so a private fact could be published as world, in the page file and in the database. The `BEHAVIOR_CHANGES` row and `docs/guides/write-refusals.md#fence_unrenderable` claimed the refusal held everywhere; both now describe the two paths. Code is unchanged: v0.60.218.0 already closed the unmanaged path.
 
