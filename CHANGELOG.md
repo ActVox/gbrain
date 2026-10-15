@@ -18,6 +18,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - **Docs**: the v0.60.218.0 fact-fence row in `src/core/behavior-change-notice.ts` (wording only) and the `fence_unrenderable` entry in `docs/guides/write-refusals.md` name the unmanaged path.
 - **Regression test**: `test/fact-fence-adoption-exits.test.ts` covers an unmanaged brain (PGLite and Postgres): a leftover world cell plus a private legacy fact with the same claim and source keeps the fact private in the file and the database after `extract_facts`. It fails on the build before v0.60.218.0 and passes now.
+- **Flake fix**: the #6007 put_page statement-budget e2e test could count 26 or 27 statements against the preparation budget of 25 on a measured write. The consumer's idle no-op embedding settle pass runs two statements on its own connection (the embedding config read and its effect probe). They normally land before the claim commit; when one lands after it, the classifier counted it as preparation. Both now count as a consumer scan, and only when the probe follows the read on that connection, because write paths share the config read. Budgets are unchanged. A synthetic-trace test fails before the change and passes after.
 
 ## [0.60.234.0] - 2026-10-15
 
