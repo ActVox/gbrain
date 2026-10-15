@@ -251,6 +251,34 @@
       },
       {
         "category": "ops",
+        "name": "persistence_capacity"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_terminal_failures"
+      },
+      {
+        "category": "ops",
+        "name": "managed_sync_not_moving"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_compaction"
+      },
+      {
+        "category": "ops",
+        "name": "serve_build_drift"
+      },
+      {
+        "category": "meta",
+        "name": "schema_pack_consistency"
+      },
+      {
+        "category": "brain",
+        "name": "embedding_state"
+      },
+      {
+        "category": "ops",
         "name": "pgvector"
       },
       {
@@ -260,14 +288,6 @@
       {
         "category": "meta",
         "name": "pages_upsert_arbiter"
-      },
-      {
-        "category": "ops",
-        "name": "persistence_capacity"
-      },
-      {
-        "category": "ops",
-        "name": "persistence_compaction"
       },
       {
         "category": "ops",
@@ -412,10 +432,6 @@
       {
         "category": "ops",
         "name": "lost_caller_writes"
-      },
-      {
-        "category": "ops",
-        "name": "persistence_terminal_failures"
       },
       {
         "category": "ops",
@@ -767,10 +783,6 @@
       },
       {
         "category": "ops",
-        "name": "managed_sync_not_moving"
-      },
-      {
-        "category": "ops",
         "name": "two_consumers_on_host"
       },
       {
@@ -784,6 +796,10 @@
       {
         "category": "brain",
         "name": "extract_atoms_held_failed"
+      },
+      {
+        "category": "brain",
+        "name": "ghost_pages"
       },
       {
         "category": "brain",

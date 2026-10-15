@@ -110,6 +110,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'embedding_provider',
   // #5691: query-instruction advisory for instruction-style embedding models.
   'embedding_query_prefix',
+  'embedding_state',
   'embedding_width_consistency',
   'embeddings',
   'entity_link_coverage',
@@ -184,6 +185,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5254 — pages written database-only to a source with no canonical owner.
   'unbound_source',
   'undeclared_db_only_pages',
+  // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
+  'ghost_pages',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
@@ -276,6 +279,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'two_consumers_on_host',
   'consumers_without_heartbeat',
   'host_identity_mismatch',
+  // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
+  'serve_build_drift',
   'stale_embedding_effects',
   'vector_plan',
   'keyword_plan',
