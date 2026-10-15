@@ -3786,12 +3786,12 @@
         },
         "sqlFor": {
           "pglite": {
-            "length": 8386,
-            "sha256": "3ae3ac5bb5ea2699157ca82f87fd83bad42f941304979a8f06c48b5c9f0c3c38"
+            "length": 8521,
+            "sha256": "41b3978089d002a00953c00d951b41a35cb25a998513e98507b75edfb42976a5"
           },
           "postgres": {
-            "length": 8595,
-            "sha256": "312f51807d49e623fe35dfae180c3f6e5a4dbefb6abf9fd83213938b8bb61bca"
+            "length": 8730,
+            "sha256": "4d2cf34486e3fb35c8922bf128190d5c544eff3d92a332201ad229866bbe6fe9"
           }
         },
         "transaction": false,
