@@ -936,6 +936,16 @@ More: [docs/guides/write-refusals.md#embedding_auth_failed](../../docs/guides/wr
 |---|---|---|---|---|---|---|
 | Computing embeddings for the content failed. | The server failed; this is not a caller mistake. | Server-side failure, not a caller mistake. Run `gbrain doctor --json` on the brain host; if it repeats, report it to the user. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### embedding_identity_unqualified
+
+<a id="embedding_identity_unqualified"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain's embedding_model config row names a model with no provider prefix, so managed fact extraction cannot verify its embedding identity. | Rows from older installs stored the bare model name. The managed facts resolver reads only the DB row and `config set` refuses to change it, so the supported rewrite is `gbrain migrate embeddings --to <provider:model>`, which re-embeds active facts (paid). | Preview the rewrite with `gbrain migrate embeddings --to <provider:model> --dry-run`, show the user its cost, and apply it only with their paid authorization. Run: gbrain doctor --only embedding_identity_unqualified --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#embedding-identity-unqualified](../../docs/guides/troubleshooting.md#embedding-identity-unqualified)
+
 ### embedding_model_mismatch
 
 <a id="embedding_model_mismatch"></a>

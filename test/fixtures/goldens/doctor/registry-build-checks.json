@@ -363,6 +363,10 @@
       },
       {
         "category": "brain",
+        "name": "embedding_identity_unqualified"
+      },
+      {
+        "category": "brain",
         "name": "supersession_calibration"
       },
       {

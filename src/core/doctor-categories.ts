@@ -104,6 +104,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
+  // #6113: a bare legacy embedding_model DB row; the fix previews migrate embeddings.
+  'embedding_identity_unqualified',
   // #5137: an env provider key shadowing a different config key.
   'embedding_key_source',
   'embedding_migration_state',

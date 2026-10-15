@@ -892,6 +892,13 @@
         },
         {
           "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "The brain records its embedding model with its provider (voyage:voyage-4).",
+          "name": "embedding_identity_unqualified",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
           "details": {
             "config_key": "facts.supersession_thresholds",
             "dims": 3072,
