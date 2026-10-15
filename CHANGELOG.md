@@ -38,6 +38,50 @@ identifiers and attribution are available in the pre-removal Git revision
 - **#6694: recovery by plain sync.** `reviveCheckpoint` (`src/core/persistence/sync-run.ts`) also revives a checkpoint refused as `slug_root_mode_mismatch`, or as an older release's moved-checkpoint `revision_conflict`, when `last_commit` still equals the run's start and the source now admits the run's mode (unpinned, equal, or the repository root). The fresh checkpoint request validates everything again; `--retry-failed` keeps its rediscovery.
 - **Write-only import provenance (#6712 PR 0).** `sync-import-provenance` records gain `disk_sha256` and `disk_blob_oid` (the canonical writeback when sync rewrote the file, else the file's bytes; the blob id is what `git hash-object` returns), `revision` (the page revision of that publish) and `parser` (`parser_version` from `SYNC_IMPORT_PARSER_VERSION`: the import counter, frontmatter recovery and fence screen versions; `markdown_chunker`; `schema_pack`; never the release string, so the fingerprint holds across releases that change no parsing), written in the publish transaction. A no-op waiver (`src/core/persistence/sync-waivers.ts`, batched and per-entry) writes the same record in its waiver transaction, with the page's current revision, so an unchanged page carries one too; the per-entry waiver now also re-reads the file there and admits the entry when its raw hash moved, as the batched waiver already did. Nothing reads the fields yet; older records lack them and are replaced on the page's next import or waiver. Code and image pages still write no import provenance. `gitBlobOid` moved to `src/core/persistence/digest.ts`; the checkpoint publication moved to `applyManagedSyncCheckpoint` in `sync-prepare.ts`.
 - Tests: `test/sync-slug-root-mode-6694.test.ts` (root source in both pins, unpinned, subdirectory in both modes, the mismatch refusal and both of its exits, recovery of an already-failed checkpoint) and `test/sync-import-provenance-disk.test.ts` (plain import and update, canonical writeback, line-ending-only disk bytes, batched and per-entry waivers, a legacy record), each on PGLite and, with `DATABASE_URL`, Postgres (`test/postgres-unit-arms.txt`).
+
+## [0.60.247.0] - 2026-10-15
+
+**The "Before you start" brief now also picks up changes you or your agent recorded by editing a person's page, not only saved facts (still off until you turn it on).** Some agents record a moved meeting or a corrected number by editing the contact's page instead of saving a fact. Until now the brief only read saved facts, so those agents got no brief at all. With the brief on, it now also looks at the newest dated change on the person's or company's page: the lines the latest edit added, or the newest timeline entry. That change becomes one of the brief's up-to-three items, with its date and the page it came from. If the same thing is already saved as a fact, you see it once, as the fact. Nothing changes for anyone who leaves the brief off.
+
+### How to turn it on
+
+Same switch as before:
+
+```bash
+gbrain config set context.proactive_brief true
+```
+
+### What you'd see
+
+| What happened earlier | The brain adds before the next reply or meeting |
+|---|---|
+| Your agent edited `people/alice-example`: "Next meeting: Tuesday, October 20 (moved from Friday, October 16)" | `[Ev88] 2026-10-14 · edit: “- Next meeting: Tuesday, October 20 (moved from Friday, October 16).”` → `people/alice-example` |
+| A timeline entry was added to the page: "Pricing review moved to Tuesday" | `[Et17] 2026-10-14 · timeline: “Pricing review moved to Tuesday”` |
+| The same change was also saved as a fact | only the fact (`[F…] … change: …`) |
+| The edit is older than 30 days | nothing from that edit |
+
+### What to watch for
+
+- **Only shareable pages.** Edits on private pages, on pages derived from private notes, and timeline entries that come from private events are never shown. Rows in a page's facts table never count as an edit, so a private fact written into a shared page stays private.
+- **Remote callers get shareable edits too.** Remote callers of the pull form (`context_pack` with `counterparty`) get edit items from shareable pages only, the same text `get_versions` and `get_timeline` already return to them. Open loops stay withheld.
+- **Only recent changes.** An edit or timeline entry recorded more than 30 days ago is skipped, and so is a timeline entry dated more than 30 days ago.
+- **The person's own page only.** Edits to meeting or deal pages that link to the person are not used yet.
+
+### Itemized changes
+
+- **Edit items** (`src/core/context/proactive-brief.ts`): a new `edit` item comes after the newest open loop and the newest fact. It is the page's newest revision (the narrative lines it added that the page still has, id `Ev<version id>`) or its newest timeline entry (`Et<entry id>`), whichever was recorded last.
+  - Facts and takes tables and headings are left out of the comparison.
+  - It reads at most four revisions of a page up to 64 KiB.
+  - It uses the same privacy, eligibility, redaction, 600/1,800-character and once-per-session rules as the other items.
+  - An edit whose words are at least 80% contained in a fact or open loop of the same brief is dropped.
+- **Telemetry:** delivered edit items log to `context_volunteer_events` with rationale `edit:<id>`. No schema change.
+- **Docs:** `docs/guides/push-context.md` and `docs/protocol/MEMORY_VERBS_v1.md` describe the edit item.
+
+### For contributors
+
+- `test/e2e/persistence-statement-budget.test.ts` no longer counts the consumer's dead-owner claim scan as preparation. Its warm-up also re-reads the write-switch snapshot and publication ceiling before each measured write, using `resetWriteSwitches` and the new test-only `_resetPublicationCeilingForTest`, so neither cache expires mid-write on a slow host. Budgets are unchanged.
+- `test/persistence-consumer-scheduling.test.ts`: the healthy-renewal case now prepares until the claim lease has renewed three times, instead of for a fixed 120 ms.
+
 ## [0.60.246.0] - 2026-10-15
 
 **Windows hosts can delete pages again, Chinese, Japanese and Korean searches show their match counts again, and Google sources stop re-reading old mail after an upgrade.**

@@ -946,9 +946,14 @@ A name resolves only on the alias or title arm at ≥ 0.8, to a person or compan
 page, never through a common word. An unresolved name returns
 `reason: "counterparty_unresolved"` and no items; an invalid `intent` is
 `invalid_params`. Items are open loops (`L<id>`, trusted-local callers only;
-remote callers get `withheld_arms: ["loops"]`) and the newest dated fact
-(`F<id>`). Visibility follows the `include_private` rule above, with
-private-provenance facts excluded unless widened. The same assembler serves
+remote callers get `withheld_arms: ["loops"]`), the newest dated fact
+(`F<id>`), and the counterparty page's newest dated edit (`kind: "edit"`: the
+lines a revision added, `Ev<page version id>`, or a timeline entry,
+`Et<timeline entry id>`), dropped when it repeats a fact or loop of the same
+brief. Visibility follows the `include_private` rule above, with
+private-provenance facts excluded unless widened; an edit's page (and a
+timeline entry's event page) follows the same page rule, and facts and takes
+fence rows never count as an edit. The same assembler serves
 the off-by-default hook push ([push context](../guides/push-context.md)).
 
 ### delta(since?, since_slug?, cursor?, entities?, budget_tokens?, session_id?, include_private?) — read, zero LLM
