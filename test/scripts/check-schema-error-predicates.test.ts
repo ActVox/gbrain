@@ -45,7 +45,7 @@ describe('check-schema-error-predicates.ts', () => {
     expect(r.out).toContain('FAIL [schema_error_predicate_broad]: src/core/doctor-thing/example.ts:');
     expect(r.out).toContain('use isMissingSchemaObject(e, "column", [names])');
     expect(r.out).toContain('to ALLOWLIST in scripts/check-schema-error-predicates.ts');
-    expect(r.out).toContain('See:  docs/TESTING.md#schema-error-predicate-guard');
+    expect(r.out).toContain('See:  scripts/check-schema-error-predicates.ts (header)');
   });
 
   test('the strict predicate, comments, other SQLSTATEs and utils.ts itself pass', () => {

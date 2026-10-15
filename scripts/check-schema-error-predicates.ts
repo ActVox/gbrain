@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Schema-error predicate guard (wave 18b, docs/TESTING.md#schema-error-predicate-guard).
+ * Schema-error predicate guard (wave 18b lane 1; registered in scripts/guards-manifest.tsv).
  *
  * `isUndefinedColumnError(e, col)` returns true for ANY SQLSTATE 42703 (the
  * column argument only matters when the driver drops the code), and
@@ -26,7 +26,7 @@ import { join, relative } from 'node:path';
 import ts from 'typescript';
 
 const ROOT = process.env.GBRAIN_GUARD_ROOT ?? join(import.meta.dir, '..');
-const ANCHOR = 'docs/TESTING.md#schema-error-predicate-guard';
+const ANCHOR = 'scripts/check-schema-error-predicates.ts (header)';
 const HELPER = 'src/core/utils.ts';
 const BROAD = new Set(['isUndefinedColumnError', 'isUndefinedTableError']);
 
