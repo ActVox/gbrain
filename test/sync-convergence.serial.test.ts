@@ -102,7 +102,6 @@ const PGBOUNCER_CONTAINER = process.env.GBRAIN_TEST_CONVERGENCE_PGBOUNCER_CONTAI
 const LOG_DIR = process.env.GBRAIN_TEST_CONVERGENCE_LOG_DIR;
 
 /** The chaos modes. `skip` names the PR that turns a mode master fails on; the mode stays written and runs when named in GBRAIN_TEST_CONVERGENCE_MODES. */
-const PR1 = 'PR 1 of #6712 (L1 content-addressed resume + L2 one page, one fate + the drain lease)';
 const MODES = {
   a: { title: 'client kills', skip: null },
   b: { title: 'serve kills mid-publish', skip: null },
@@ -110,9 +109,7 @@ const MODES = {
   'c-db': { title: 'a DB-only competitor', skip: null },
   d: { title: 'out-of-band git mv/git rm of committed files and deletion of uncommitted files', skip: null },
   e: { title: 'a deterministic mid-run edit after freezeEntry', skip: null },
-  // #6712 lane C: the page that loses its pooled connection mid-publication keeps its live owner's publication claim until
-  // that lease lapses (~366 s, "claim lapsed: owner missing"); one page's fate converges, the stall is the owner's (the drain lease).
-  f: { title: 'a pooler drop mid-bulk', skip: PR1 },
+  f: { title: 'a pooler drop mid-bulk', skip: null },
   g: { title: 'two concurrent drainers: a --all run beside a serve', skip: null },
   lease: { title: 'the drain-lease holder killed with two followers queued behind it', skip: null },
   'knock-on': { title: 'one page failure inside a bulk group', skip: null },
@@ -820,9 +817,8 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
       expect(b.git('ls-files', '--others', '--exclude-standard')).toBe('stray.md');
     } finally { rmSync(b.repo, { recursive: true, force: true }); }
   });
-  test('modes master fails stay written and name the PR that turns them on', () => {
-    expect(MODES.f.skip).toContain('PR 1 of #6712');
-    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'g', 'lease', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
+  test('every mode runs: #6712 PR 2 turned on the last skipped one (f, a pooler drop mid-bulk)', () => {
+    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'f', 'g', 'lease', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
   });
 });
 
