@@ -63,6 +63,7 @@ import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
+import { classifySyncFault } from './sync-fault-class.ts';
 import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
 
 export interface ManagedSyncWriteDiagnostic {
@@ -804,6 +805,15 @@ function receiptClass(row: WriteRequest): 'transport' | 'page' | 'systemic' {
   if (verdict?.category === 'transport' && verdict.code !== 'graduation_in_progress') return 'transport';
   return verdict?.class === 'page' ? 'page' : 'systemic';
 }
+/**
+ * #6712 (#6565): a stop the next plain sync re-freezes in place: a database refusal the fault table retries (an
+ * unrecognised P0001 or a 55000 raised under a page write surfaces as `storage_error`). A content, consent or option
+ * refusal is never one: its receipt stays the diagnosis until --retry-failed.
+ */
+function resumableStop(row: WriteRequest): boolean {
+  const verdict = classifySyncFault({ code: row.error_code ?? 'storage_error', message: row.error_message ?? null });
+  return verdict.class !== 'page' && verdict.safe_actions.includes('retry');
+}
 /** #6712: whether an earlier invocation already stopped this run on `requestId` (its failure is recorded under the cursor key). */
 async function stopRecorded(engine: BrainEngine, key: string, requestId: string): Promise<boolean> {
   return (await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'observation_id'=$2", [key, requestId])).length > 0;
@@ -814,8 +824,8 @@ async function stopRecorded(engine: BrainEngine, key: string, requestId: string)
  * positively classified page fault is held with its index settled in one cursor step (`holdFailedFenceRequest`), or
  * deferred when its file changed after admission; a transport fault, or a legacy knock-on, is re-frozen in place without
  * advancing (`refreezeInPlace`); any other fault is recorded in the failure ledger and blocks the run with its
- * diagnostic and the classifier's action, and for a systemic fault the next invocation re-freezes the entry in place
- * (`stopRecorded`), so a plain sync converges once the cause is gone. Nothing after the entry is cancelled: requests
+ * diagnostic and the classifier's action, and for a database refusal the fault table retries (`resumableStop`) the next
+ * invocation re-freezes the entry in place (`stopRecorded`), so a plain sync converges once the cause is gone. Nothing after the entry is cancelled: requests
  * admitted after it stay in the cursor's window and are settled by their own receipts.
  */
 async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor; key: string; pending: Pending; done: WriteRequest; assertActive: () => void;
@@ -830,7 +840,7 @@ async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor;
   const revived = await reviveCheckpoint(engine, input);
   if (revived) { input.assertActive(); return { cursor: revived }; }
   const fault = receiptClass(done);
-  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, key, pending.requestId))) {
+  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, key, pending.requestId))) {
     const refrozen = await refreezeInPlace(engine, input);
     if (refrozen) { input.assertActive(); return { cursor: refrozen }; }
   }
@@ -1307,7 +1317,7 @@ async function retryFailedStart(engine: BrainEngine, cursor: Cursor, key: string
   const failed = cursor.pending ? await getWriteRequest(engine, cursor.authority.writer.principal, cursor.pending.requestId) : null;
   assertActive();
   // #6712: --retry-failed resets the in-place re-freeze bound of an entry the run stopped on for a fault not its page's; the drain re-freezes it again.
-  if (failed && cursor.pending && (cursor.pending.stops ?? 0) >= STOPS_PER_ENTRY && ['failed', 'conflict', 'cancelled'].includes(failed.state) && (isSyncKnockOn(failed) || receiptClass(failed) !== 'page')) {
+  if (failed && cursor.pending && (cursor.pending.stops ?? 0) >= STOPS_PER_ENTRY && ['failed', 'conflict', 'cancelled'].includes(failed.state) && (isSyncKnockOn(failed) || receiptClass(failed) === 'transport' || resumableStop(failed))) {
     const { stops: _stops, ...pending } = cursor.pending;
     return { cursor: await saveCursor(engine, key, cursor, { ...cursor, pending }, false, assertActive) };
   }

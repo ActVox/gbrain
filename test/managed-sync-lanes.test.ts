@@ -193,7 +193,7 @@ test('a lane that joins while the last holder is still releasing the native lock
   expect(held).toBe(false);
 });
 
-test('a lane waits for its predecessor to commit, yields to a requeued or unadmitted one and stops after a failed one', async () => {
+test('a lane waits for its predecessor to end, yields to a requeued or unadmitted one and takes its turn after a failed one (#6712)', async () => {
   openLanes('wt-turn', 'run-turn', 4, null);
   const state = laneOf({ worktree_id: 'wt-turn', intent: { lane: 'run-turn' } } as never)!;
   const rows = [{ request_id: 'b', principal_kind: 'local_cli', principal_id: 'p', intent: { after: 'a', lane: 'run-turn' } }] as never;
@@ -201,7 +201,9 @@ test('a lane waits for its predecessor to commit, yields to a requeued or unadmi
   await awaitLaneTurn(tx(['running', 'running', 'committed']), state, rows);
   await expect(awaitLaneTurn(tx(['running', 'queued']), state, rows)).rejects.toMatchObject({ reason: 'predecessor_requeued' });
   await expect(awaitLaneTurn(tx([null]), state, rows)).rejects.toMatchObject({ reason: 'predecessor_requeued' });
-  await expect(awaitLaneTurn(tx(['running', 'failed']), state, rows)).rejects.toMatchObject({ reason: 'predecessor_failed' });
+  // #6712 (one page, one fate): a predecessor that ended without committing does not stop this group; it commits in its turn.
+  await awaitLaneTurn(tx(['running', 'failed']), state, rows);
+  await awaitLaneTurn(tx(['cancelled']), state, rows);
   await expect(awaitLaneTurn(tx(['running', 'running', 'running']), state, rows, 60)).rejects.toMatchObject({ reason: 'order_timeout' });
   await closeLaneRun('run-turn');
   expect(laneOf({ worktree_id: 'wt-turn', intent: { lane: 'run-turn' } } as never)).toBeNull();
