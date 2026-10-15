@@ -262,6 +262,7 @@ const FACT_FLOORS_VERIFY = { argv: ['gbrain', 'doctor', '--only', 'fact_admissio
  * every call.
  */
 export function factsCalibrationNotice(calibration: FactsCalibration, brainId?: string): Notice {
+  const dedupe_key = [brainId ?? 'host', calibration.model_key].join('|');
   return {
     code: 'facts_calibration_unmeasured',
     kind: 'info',
@@ -269,7 +270,7 @@ export function factsCalibrationNotice(calibration: FactsCalibration, brainId?: 
       + 'If this model scores unrelated text high, a fact can pass for a question nothing answers, so a short facts list is weaker evidence than on a measured model; check the facts against the question before relying on them. Results and facts_degraded are unchanged.',
     fix: { argv: FACT_FLOORS_VERIFY.argv, consent: [], actor: 'agent', requires_exclusive: false, verify: FACT_FLOORS_VERIFY,
       why: "Read-only: doctor's fact_admission_floors names the model key, the cosine floors in use and whether an eval measured them." },
-    dedupe_key: `${brainId ?? 'host'}|${calibration.model_key}`,
+    dedupe_key,
   };
 }
 

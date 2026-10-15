@@ -27,7 +27,7 @@ let dims = 1536;
 function bagOfWords(text: string): number[] {
   const v = new Array<number>(dims).fill(0);
   for (const token of text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3)) {
-    let h = 2166136261;
+    let h = 0x811c9dc5;
     for (const ch of token) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
     v[h % dims]! += 1;
   }
