@@ -103,6 +103,8 @@ export interface GitHoldMeta {
   page_revision?: string;
   /** #6712 PR 1 `file_drift`: which side moved since the page's last recorded import (`unknown`: no usable record); `page_revision` is the page's revision when held. */
   sides?: 'database' | 'both' | 'unknown';
+  /** #6517 `file_drift`: the page survived a shared-origin delete that kept its file; the fix leads with importing the file. */
+  shared_origin?: true;
   /** #6340 `concurrent_write`: the revision the entry was frozen against (the page's live revision is `page_revision`). */
   expected_revision?: string;
   /** #6340 `worktree_dirty`: sha256 of the uncommitted working-tree bytes the hold protected (`blob_oid` is the pinned blob). */
@@ -517,10 +519,15 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
         : `page ${slug} changed in the database${record.meta.page_revision ? ` (revision ${record.meta.page_revision})` : ''}`;
       const preview = (prefer: 'database' | 'file') => ['gbrain', 'repair', 'file-drift', '--source', source, '--slug', slug, '--prefer', prefer];
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
-      return { argv: preview('database'), consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#file_drift',
-        why: `${by} since ${record.path} was last imported, so sync held the file instead of overwriting the database version (${record.meta.sides === 'database' ? 'the file did not change in Git'
-          : record.meta.sides === 'both' ? 'the file changed too' : 'no import record says which side changed'}). This preview (writes nothing) keeps the database copy and rewrites the file; `
-          + `${preview('file').join(' ')} previews importing the file instead. Decide with the user which version wins, run the apply command the preview prints, then sync again. The rest of the source is not blocked.`,
+      const held = `${by} since ${record.path} was last imported, so sync held the file instead of overwriting the database version (${record.meta.sides === 'database' ? 'the file did not change in Git'
+        : record.meta.sides === 'both' ? 'the file changed too' : 'no import record says which side changed'}). `;
+      const decide = 'Decide with the user which version wins, run the apply command the preview prints, then sync again. The rest of the source is not blocked.';
+      // #6517: a shared-origin delete kept the file for this surviving page, and its receipt names importing the file.
+      const shared = record.meta.shared_origin === true;
+      return { argv: preview(shared ? 'file' : 'database'), consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#file_drift',
+        why: shared ? `${held}Page ${slug} survived a shared-origin delete that kept ${record.path} for it. This preview (writes nothing) imports the file into the page, as the delete's receipt says; `
+          + `${preview('database').join(' ')} previews keeping the database copy and rewriting the file instead. ${decide}`
+          : `${held}This preview (writes nothing) keeps the database copy and rewrites the file; ${preview('file').join(' ')} previews importing the file instead. ${decide}`,
         then: { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
           why: `Re-screens ${record.path} after the repair (a changed file or page revision re-screens it by itself).` },
         verify };

@@ -106,14 +106,27 @@ function base(entry: HoldEntry, slug: string, pageId: number | null, code: 'conc
  * page revision changes.
  */
 export function fileDriftHold(entry: HoldEntry, slug: string, pageId: number | null, intent: Pick<SyncIntent, 'content' | 'blobOid'>,
-  observed: { sides: 'database' | 'both' | 'unknown'; revision: string | null; proof: PageChangeProof | null }): HeldEntry {
+  observed: { sides: 'database' | 'both' | 'unknown'; revision: string | null; proof: PageChangeProof | null; sharedOrigin: boolean }): HeldEntry {
   const by = observed.proof ? `${observed.proof.operation} request ${observed.proof.request_id} wrote page ${slug} straight to the database` : `page ${slug} changed in the database`;
   const file = observed.sides === 'database' ? 'its file did not change in Git' : observed.sides === 'both' ? 'its file changed too'
     : 'there is no import record to tell which side changed';
   return base(entry, slug, pageId, 'file_drift',
     `${entry.path}: ${by} since the file was last imported and ${file}, so sync held the import instead of overwriting the database version; the rest of the source synced.`,
     intent.content ?? null, intent.blobOid, { sides: observed.sides, ...(observed.revision ? { page_revision: observed.revision } : {}),
-      ...(observed.proof ? { competing_request_id: observed.proof.request_id, competing_operation: observed.proof.operation } : {}) });
+      ...(observed.proof ? { competing_request_id: observed.proof.request_id, competing_operation: observed.proof.operation } : {}),
+      ...(observed.sharedOrigin ? { shared_origin: true as const } : {}) });
+}
+
+/**
+ * #6517: whether `sourcePath`'s page survived a shared-origin delete (another page recording the same file was soft-deleted
+ * with `write_through.skipped: shared_origin`, keeping the file). Its `file_drift` hold leads with importing the file, as
+ * the delete's receipt does.
+ */
+export async function sharedOriginSurvivor(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, sourcePath: string): Promise<boolean> {
+  const rows = await engine.executeRaw(`SELECT 1 FROM pages d JOIN persistence_requests r ON r.source_id=d.source_id AND r.slug=d.slug
+    WHERE d.source_id=$1 AND d.deleted_at IS NOT NULL AND d.source_path=$2 AND r.operation='delete_page' AND r.state='committed'
+      AND r.outcome->'write_through'->>'skipped'='shared_origin' LIMIT 1`, [sourceId, sourcePath]);
+  return rows.length > 0;
 }
 
 /**

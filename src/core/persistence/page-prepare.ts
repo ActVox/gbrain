@@ -310,8 +310,9 @@ async function prepareDeleteFileTarget(engine: BrainEngine, row: WriteRequest, s
 
 /** #6517: the recorded-origin census of a delete's file (file-claims.ts) and the other live pages that record it. */
 export interface SharedOrigin { target: FileClaimTarget; claimants: FileClaimant[] }
-export const sharedOriginReceipt = (sourceId: string) => 'The selected database page is hidden; the file and the surviving page remain. This does not erase that file\'s contents. '
-  + `The file's current content will be imported into the surviving page by the next sync that imports it (gbrain sync --source ${sourceId} --no-pull --full imports every file now); edit the file first if it holds the deleted page's text.`;
+export const sharedOriginReceipt = (sourceId: string, survivor: string | null) => 'The selected database page is hidden; the file and the surviving page remain. This does not erase that file\'s contents. '
+  + `Sync does not overwrite the surviving page with the file (#6712: a file whose page differs from it is held file_drift); import the file's current content into it with gbrain repair file-drift --source ${sourceId} --slug ${survivor ?? '<surviving-slug>'} --prefer file `
+  + '(it previews and writes nothing; run the apply command it prints), then gbrain sync --source ' + sourceId + ' --no-pull. Edit the file first if it holds the deleted page\'s text.';
 /**
  * #6517 [R8]: the survivor is revalidated under publication: the kept file must still resolve to the same real file and the
  * same live pages must still record it; otherwise the delete refuses and the file is never removed as a fallback.
@@ -326,7 +327,7 @@ async function validateSharedOrigin(tx: BrainEngine, row: WriteRequest, shared: 
   const named: string[] = [];
   for (const page of claimants) if (await slugDisclosable(tx, row.authority, page.slug)) named.push(page.slug);
   const who = named.length ? `Another page of this source records the same file: ${named.join(', ')}.` : 'Another page of this source records the same file.';
-  return `${who} ${sharedOriginReceipt(row.source_id)}`;
+  return `${who} ${sharedOriginReceipt(row.source_id, named.length === 1 ? named[0]! : null)}`;
 }
 function sharedOriginChanged(row: WriteRequest, what: string): OperationError {
   const error = pageRefusal('source_changed', `The shared canonical file changed while the delete was prepared: ${what} before it published, so nothing was written and the file was not removed. Submit the delete again with a new request_id; it re-reads the file's claimants.`, row,
