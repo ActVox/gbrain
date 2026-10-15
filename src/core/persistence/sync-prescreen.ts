@@ -22,11 +22,9 @@
  *   recorded as a drift candidate the keep_db worker reconciles from the database (`liveFileDrift` confirms the file
  *   and the database still differ; an entry where they agree stays, and its import is a no-op).
  */
-import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
-import { gitChildEnv } from '../git-env.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
 import { readSyncImportProvenances, syncImportParserFor, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
@@ -38,25 +36,8 @@ import type { SyncDiscovery, SyncEntry } from './sync-discovery.ts';
 /** Which side moved since the page's last recorded import (`unknown`: no usable record). */
 export type SyncDriftSide = 'database' | 'both' | 'unknown';
 
-/** Above this many candidates the pinned tree is listed once instead of path by path. */
-const WHOLE_TREE_AT = 1000;
 /** Provenance rows read per statement. */
 const PROVENANCE_CHUNK = 5000;
-
-/** The blob of each Git path at `target`: one recursive listing for a large set, else `readTreeBlobs`. */
-function pinnedBlobs(gitRoot: string, target: string, gitPaths: string[]): Map<string, TreeBlob> {
-  if (gitPaths.length < WHOLE_TREE_AT) return readTreeBlobs(gitRoot, target, gitPaths);
-  const wanted = new Set(gitPaths), out = new Map<string, TreeBlob>();
-  const listing = execFileSync('git', ['-c', 'core.quotepath=false', '-C', gitRoot, 'ls-tree', '-r', '-z', target],
-    { env: gitChildEnv(), encoding: 'utf8', timeout: 60_000, maxBuffer: 256 * 1024 ** 2, stdio: ['ignore', 'pipe', 'pipe'] });
-  for (const row of listing.split('\0')) {
-    const tab = row.indexOf('\t');
-    if (tab < 0 || !wanted.has(row.slice(tab + 1))) continue;
-    const [, kind, oid] = row.slice(0, tab).split(' ');
-    if (kind === 'blob') out.set(row.slice(tab + 1), { oid: oid!, size: -1 });
-  }
-  return out;
-}
 
 const sameParser = (a: SyncImportParser | null | undefined, b: SyncImportParser) => !!a && a.parser_version === b.parser_version
   && a.markdown_chunker === b.markdown_chunker && (a.schema_pack ?? null) === b.schema_pack;
@@ -86,7 +67,7 @@ export async function prescreenSyncEntries(engine: BrainEngine, discovered: Sync
   if (!candidates.length) return;
   const nativeRoot = realpathSync.native(discovered.root), nativeGitRoot = realpathSync.native(discovered.gitRoot);
   const gitPathOf = (entry: SyncEntry) => relative(nativeGitRoot, join(nativeRoot, entry.path)).split(sep).join('/');
-  const blobs = pinnedBlobs(discovered.gitRoot, discovered.target, candidates.map(gitPathOf));
+  const blobs = readTreeBlobs(discovered.gitRoot, discovered.target, candidates.map(gitPathOf));
   const records = new Map<number, SyncImportProvenance>();
   for (let i = 0; i < candidates.length; i += PROVENANCE_CHUNK) {
     const read = await readSyncImportProvenances(engine, discovered.sourceId, discovered.incarnation, candidates.slice(i, i + PROVENANCE_CHUNK).map(entry => Number(entry.pageId)));

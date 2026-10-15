@@ -100,6 +100,7 @@
   "test/sync-frontmatter-slug-conflict.test.ts": 4750,
   "test/sync-group-member-order.test.ts": 8852,
   "test/sync-legacy-holds.test.ts": 8989,
+  "test/sync-prescreen-drift-6712.test.ts": 30000,
   "test/sync-waiver-budget.test.ts": 5274,
   "test/takes-vector-lifecycle-5885.serial.test.ts": 8340,
   "test/withdrawal-overlay-concurrency.test.ts": 4486,
