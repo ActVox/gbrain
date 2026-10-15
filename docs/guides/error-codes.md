@@ -1278,6 +1278,16 @@ More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-page
 |---|---|---|---|---|---|---|
 | The canonical checkout is on a detached HEAD, so a push would target the wrong ref. | Only the operator of the brain host can change what blocks this. | Check out the branch the remote should track (git switch <branch>) on the brain host, then rerun. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### git_durability_not_enabled
+
+<a id="git_durability_not_enabled"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A filesystem source's owner will not commit or push its page writes (Git durability is off, or not recorded and no harden post-commit hook is installed), so its Git effects complete as skipped; writer activate still proceeds and lists it under warnings. | Activation applies the effect runner's own policy: the binding's recorded setting decides, and only when nothing is recorded does the legacy hook decide (a failed probe counts as not durable). sources harden is refused once the brain is managed, so the recorded setting is the way to turn durability on. | Preview gbrain sources writer git-durability <source> --enable --dry-run on the owner host, then apply it with --admin-intent writer_git_durability; enabling re-queues the Git effects that were skipped while it was off. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs/guides/concurrent-writes.md#git-durability-at-activation)
+
 ### git_index_locked
 
 <a id="git_index_locked"></a>
