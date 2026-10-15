@@ -29,6 +29,28 @@ export function isSegmentedPage(page: BodyShape): boolean {
   return page.body_storage === 'segmented';
 }
 
+/**
+ * True when the page's body fields are still the throwing getters: a segmented
+ * page that was not read back as strings (`materializedPage` leaves a body over
+ * the single-string ceiling unread). Such a body was written by the streamed
+ * import, which holds files with facts or takes fences.
+ */
+export function bodyUnread(page: object): boolean {
+  return Object.getOwnPropertyDescriptor(page, 'compiled_truth')?.get !== undefined;
+}
+
+/** The page's fields without its body, for a copy whose body comes from elsewhere (a page with an unread body cannot be spread). */
+export function withoutBody<T extends object>(page: T): Omit<T, SegmentedBodyField> {
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(page)) if (key !== 'compiled_truth' && key !== 'timeline' && key !== 'content') copy[key] = (page as Record<string, unknown>)[key];
+  return copy as Omit<T, SegmentedBodyField>;
+}
+
+/** The stored body a fence merge reads: an unread body holds no facts or takes fences, so it reads as empty. */
+export function fenceBody(page: { compiled_truth: string; timeline?: string | null }): { compiled_truth: string; timeline: string } {
+  return bodyUnread(page) ? { compiled_truth: '', timeline: '' } : { compiled_truth: page.compiled_truth, timeline: page.timeline ?? '' };
+}
+
 /** The refusal every whole-body path gives a segmented page; `site` names the path in the message. */
 export function pageBodySegmentedError(page: { slug?: string; source_id?: string }, site: string) {
   const slug = page.slug ?? '<unknown>';

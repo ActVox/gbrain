@@ -318,6 +318,7 @@ src/core/page-body/content-hash-stream.ts	ContentHashStream.fromState	field	NONE
 src/core/page-body/content-hash-stream.ts	streamingContentHash	field	NONE	not a stored body: hashes an incoming page streamed region by region
 src/core/page-body/ingest.ts	materializeSegmentedBody	field	STREAM	the segment reader's string form, for single-string write paths; callers materialize only bodies within PAGE_MAX_BYTES
 src/core/page-body/ingest.ts	stageBody	field	NONE	not a stored body: the write's region byte streams and the per-region leads it computes
+src/core/page-body/page-shape.ts	fenceBody	field	INLINE	reads a body that is a string (inline or materialized); an unread segmented body holds no fences and reads as empty
 src/core/page-body/page-shape.ts	pageBodyBytes	field	INLINE	inline branch of pageBodyBytes; a segmented page answers body_bytes
 src/core/page-body/schema.ts	PAGE_GENERATION_BUMP_FN_SQL	sql	STREAM	trigger DDL: compares the body columns of inline rows; segmented rows compare body_generation (lane 1a)
 src/core/page-body/streamed-import.ts	importScanned	field	LEAD	bounded heads of the streamed file's regions for the sanity and type checks; the body itself streams to the segmenter
@@ -414,7 +415,7 @@ src/core/persistence/semantic-pages.ts	prepareSemanticPageMutation	call:serializ
 src/core/persistence/semantic-pages.ts	prepareSemanticPageMutation	field	SEGW	assertInlineBody after the identity check (tag and timeline writes refuse)
 src/core/persistence/sync-prepare.ts	prepareManagedSyncCode	field	INLINE	code pages are never segmented
 src/core/persistence/sync-prepare.ts	prepareManagedSyncMutation	call:serializePageToMarkdown	SEGW	lane 1d file
-src/core/persistence/sync-prepare.ts	prepareManagedSyncMutation	field	SEGW	lane 1d file: preserveProtectedTakes; segmented page: getter throws page_body_segmented
+src/core/persistence/sync-prepare.ts	prepareManagedSyncMutation	field	SEGW	lane 1d file: preserveProtectedTakes over fenceBody (an unread body is fence-free)
 src/core/persistence/takes-prepare.ts	prepare	call:serializePageToMarkdown	SEGW	
 src/core/persistence/writer-guard-schema.ts	MANAGED_WRITER_GUARD_FUNCTION_SQL	sql	STREAM	managed-writer guard tuple (lane 1a adds body_generation)
 src/core/pglite-engine.ts	PGLiteEngine.putPage	call:putPage	SEGW	delegation to engine-sql putPage
