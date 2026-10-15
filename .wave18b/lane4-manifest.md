@@ -16,16 +16,21 @@ one-line change; regenerate the generated files once after merging all lanes.
 | `src/commands/doctor/registry.ts` | `ipcSocketPathEntry` after `pgliteDataDirEntry` | 4.2 |
 | `src/core/doctor-categories.ts` | `ipc_socket_path` → `ops` | 4.2 |
 | `test/fixtures/goldens/doctor/registry-build-checks.json` | 4 lines for the `ipc_socket_path` entry | 4.2 |
-| `scripts/serial-files.tsv` | row for `test/resolve-ipc-rebind.serial.test.ts` | 4.1 |
+| `scripts/serial-files.tsv` | rows for `test/resolve-ipc-rebind.serial.test.ts` (4.1), `test/windows-ipc-long-path-6573.serial.test.ts` (4.2, R1) and `test/backup-preflight-6649.serial.test.ts` (4.5, R3) | 4.1, 4.2, 4.5 |
 | `scripts/check-agent-contract.ts` | `READ_ONLY_SUBCOMMANDS` gains `bootstrap harness --status` (it takes no lock and writes nothing) | 4.4 |
-| `scripts/check-windows-hide.ts` | `NOT_YET_MIGRATED` trimmed from 84 to 13 entries, each naming its owner | 4.3 |
+| `scripts/check-windows-hide.ts` | `NOT_YET_MIGRATED` trimmed from 84 to 13 entries (`import.ts` and `facts/purge-verify.ts` migrated after #6787 merged), each naming its owner | 4.3 |
+| `test/fixtures/guards/check-windows-hide.ts/{good,bad-stale-migration}` | fixture file moved from `src/core/tailscale.ts` to `src/core/persistence/topology-filesystem.ts` (still listed) | 4.3 |
 | `test/scripts/windows-hide-guard.test.ts` | ratchet fixture repointed from `src/core/tailscale.ts` (migrated) to `src/core/persistence/topology-filesystem.ts` | 4.3 |
 | `.github/workflows/persistence-validation.yml` | `test/e2e/transaction-cancel-held-lock.test.ts` added to the direct + pooled step (`Require canonical reconciliation through direct and pooled PostgreSQL`) so its PgBouncer arm runs in CI | 4.6 |
-| `.github/workflows/test.yml` | Windows-only step `Long Windows PGLite IPC paths use the per-user run dir (#6573)`, after the #4992 hidden-console step | 4.2 |
+| `.github/workflows/test.yml` | Windows-only step `Long Windows PGLite IPC paths use the per-user run dir (#6573)` running `test/windows-ipc-long-path-6573.serial.test.ts`, after the #4992 hidden-console step | 4.2 |
 
 ## Generated docs (committed regenerated; regenerate once after merge)
 
 - `docs/guides/error-codes.md` (`bun run build:error-codes`): the four codes above.
+- `bun run build:agent-protocol` + `regen:all` copies of the exit-13 row: `skills/conventions/agent-operator-protocol.md`,
+  `plugin/skills/conventions/agent-operator-protocol.md`, `plugin-variants/gbrain-{coding,daily}/skills/conventions/agent-operator-protocol.md`,
+  `skills/skills.lock.json`.
+- Not regenerated (integrator): `llms.txt` / `llms-full.txt` (`regen:all --check` reports them stale on this branch).
 
 ## Shared docs (hand-edited)
 
