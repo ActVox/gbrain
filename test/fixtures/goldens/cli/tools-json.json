@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 238686,
-    "stdoutSha256": "a403a58d9fa9c89c4e37c2d3b370c7e924f48aa066d0c8216100680c40eace9f",
+    "stdoutBytes": 238925,
+    "stdoutSha256": "48e1395287f6d7cc7418aa35788642033780fadcdfc344e549c04be6740a6e47",
     "toolNames": [
       "remember",
       "entity",
@@ -648,7 +648,7 @@
         "scope": "write"
       },
       {
-        "description": "Soft-delete a page and remove its markdown file from the source working tree (the source local_path, or sync.repo_path when the source has none). File removal is skipped when sync.write_through is off; the committed receipt reports the persistence mode and write_through outcome. Read the page revision first and pass expected_revision; retain request_id for replay. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h, which re-creates the file. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed. A page whose file another live page of the source records is hidden without touching that file (receipt write_through.skipped: shared_origin): the file and the surviving page remain, nothing is erased, and the warning names gbrain repair file-drift --prefer file, which imports the file's current content into the surviving page (sync holds that page file_drift rather than overwrite it). purge: true is trusted-local CLI only and removes the row, chunks, links and raw data immediately after its recorded markdown artifact is removed. Purge uses the same revision, request_id and recovery protocol, including for existing tombstones. A removal failure preserves the prior row and never reports purge success; repair the artifact and submit a new request_id. A purge of a page whose file is shared refuses and names the soft delete. A committed purge warns that git history, synced copies, exports and derived rows may retain content; rotate exposed credentials.",
+        "description": "Soft-delete a page and remove its markdown file from the source working tree (the source local_path, or sync.repo_path when the source has none). File removal is skipped when sync.write_through is off; the committed receipt reports the persistence mode and write_through outcome. Read the page revision first and pass expected_revision; retain request_id for replay. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h, which re-creates the file. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed. A page whose file another live page of the source records is hidden without touching that file (receipt write_through.skipped: shared_origin): the file and the surviving page remain, nothing is erased, and the next sync imports the file's current content into the surviving page. purge: true is trusted-local CLI only and removes the row, chunks, links and raw data immediately after its recorded markdown artifact is removed. Purge uses the same revision, request_id and recovery protocol, including for existing tombstones. A removal failure preserves the prior row and never reports purge success; repair the artifact and submit a new request_id. A purge of a page whose file is shared refuses and names the soft delete. A committed purge warns that git history, synced copies, exports and derived rows may retain content; rotate exposed credentials.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -6361,13 +6361,14 @@
         "scope": "admin"
       },
       {
-        "description": "Stored contradiction reports are temporarily available only to trusted local callers without a source filter. Remote or source-scoped callers receive {contradictions: [], note} with an availability note. For eligible local callers, return suspected-contradiction findings from the most recent `gbrain eval suspected-contradictions` probe run, optionally filtered by slug and/or severity. Use this when the user asks 'what's inconsistent in my brain', 'show me contradictions about Acme', 'high-severity issues only', or wants to act on the probe's findings without re-running it. Returns {contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. An eligible read loads the stored run without triggering a new probe; users run `gbrain eval suspected-contradictions` for that.",
+        "description": "Return suspected-contradiction findings from the most recent `gbrain eval suspected-contradictions` probe run, optionally filtered by slug and/or severity. Use this when the user asks 'what's inconsistent in my brain', 'show me contradictions about Acme', 'high-severity issues only', or wants to act on the probe's findings without re-running it. Returns {contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. Remote, source-scoped or min_trust callers get only findings whose two sides they can read now (each side re-read live, with source_id, trust_tier and origin) and total_visible instead of the run total. Reads the stored run without triggering a new probe; users run `gbrain eval suspected-contradictions` for that.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
         "name": "find_contradictions",
         "parameters": {
           "limit": "number?",
+          "min_trust": "string?",
           "severity": "string?",
           "slug": "string?"
         },
@@ -6377,6 +6378,18 @@
             "limit": {
               "description": "Max findings to return. Default 20.",
               "type": "number"
+            },
+            "min_trust": {
+              "description": "Lowest trust tier to return (the connection floor still applies).",
+              "enum": [
+                "user_confirmed",
+                "operator_curated",
+                "tool_observed",
+                "agent_written",
+                "unknown",
+                "external_untrusted"
+              ],
+              "type": "string"
             },
             "severity": {
               "description": "Optional severity filter.",
