@@ -60,7 +60,7 @@ import {
   attendanceEvidenceRanges, hasAttendanceEvidence, resolvedLinkCandidate, orientCanonicalAttendance, extractMarkdownLinks,
   extractFrontmatterLinks, isGlobalBasenameEnabled, isCrossSourceLinksEnabled,
   WIKILINK_BASENAME_LINK_TYPE,
-  buildBasenameIndex, queryBasenameIndex, stripCodeBlocks, normalizeBasename,
+  buildBasenameIndex, queryBasenameIndex, stripCodeBlocks, normalizeBasename, exactSlugCandidates,
   parseInlineCitationTimelineEntries,
   type UnresolvedFrontmatterRef, type LinkCandidate, type LinkExtractionPack,
 } from '../core/link-extraction.ts';
@@ -621,12 +621,11 @@ export async function extractLinksFromFile(
       async resolve(name: string, dirHint?: string | string[]): Promise<string | null> {
         if (!name) return null;
         const trimmed = name.trim();
-        // Same broadened slug-shape as makeResolver step 1: accepts
-        // digit-leading folders (`90-people/nicolai`) and nested paths.
-        // Exact Set membership guards it — no false positives.
-        if (/\//.test(trimmed) && /^[a-z0-9][a-z0-9/_-]*$/.test(trimmed) && allSlugs.has(trimmed)) {
-          return canonical(trimmed);
-        }
+        // Same exact candidates as makeResolver step 1 (slug-shaped value,
+        // then the slug sync mints for the path). Exact Set membership
+        // guards it, so no false positives.
+        const exact = exactSlugCandidates(trimmed).find(candidate => allSlugs.has(candidate));
+        if (exact) return canonical(exact);
         const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);
         // Both slug grammars, as in makeResolver step 2 (#4855): the folded
         // basename form and the unfolded page-slug form sync mints.

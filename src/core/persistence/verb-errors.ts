@@ -165,6 +165,8 @@ export async function runMemoryWrite<T>(run: () => Promise<T>): Promise<T> {
     const frozen = verbError(code,diagnostic?.message ?? error.message,diagnostic?.suggestion ?? error.suggestion ?? 'Inspect writer status before retrying.');
     if (diagnostic) frozen.detail = diagnostic.reason;
     if (error.code === 'idempotency_conflict' && error.fix) frozen.fix = error.fix;
+    // #6608: an unbound-source refusal keeps its detail, docs and ask-the-user fix additively; the frozen code stays.
+    if (error.detail === 'unbound_source') Object.assign(frozen, { detail: error.detail, docs: error.docs, fix: error.fix, retryable: error.retryable });
     if (isWriteErrorCode(error.code)) frozen.writeError=error.code;
     throw frozen;
   }

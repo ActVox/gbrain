@@ -255,6 +255,39 @@ describe('channel tiers on journaled writes', () => {
     }
   }), 90_000);
 
+  test('#6550: an agent edit of an unclassified legacy page stamps the writer tier, and the round trip after backfill files no lower_page', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      const b = await brain(engine);
+      const slug = 'notes/legacy-example';
+      await run(b.local, 'put_page', { slug, content: page('Legacy', 'Written before trust tiers.') });
+      await b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], () => tx.executeRaw(
+        `UPDATE pages SET trust_tier='unknown', frontmatter = frontmatter - 'trust_tier' - 'source_kind' - 'ingested_via' WHERE source_id=$1 AND slug=$2`,
+        [b.sourceId, slug]), TEST_WRITE_ATTRIBUTION));
+      const edit = async (body: string) => {
+        const got = await run(b.remote, 'get_page', { slug, include_content: true });
+        const content = String(got.content ?? got.markdown ?? '');
+        expect(content).toContain('title: Legacy');
+        return run(b.remote, 'put_page', { slug, content: content.replace(/\n[^\n]*\n?$/, `\n${body}\n`), force: true });
+      };
+      await edit('Edited by an agent.');
+      const first = await pageRow(b, slug);
+      expect(first.frontmatter.trust_tier).toBe('agent_written');
+      expect(first.trust_tier).toBe('unknown');
+      // The backfill classifies the row from its signals (the agent write request).
+      await b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], () => withTrustBackfill(tx, () => tx.executeRaw(
+        `UPDATE pages SET trust_tier='agent_written' WHERE source_id=$1 AND slug=$2`, [b.sourceId, slug])), TEST_WRITE_ATTRIBUTION));
+      const second = await edit('Edited again after the backfill.');
+      expect(second.trust_lowered).toBeUndefined();
+      expect((await pageRow(b, slug)).trust_tier).toBe('agent_written');
+      expect(await listTrustProposals(engine, { sourceId: b.sourceId, action: 'lower_page' })).toHaveLength(0);
+      // An explicit unknown marker stays a lower-only cap.
+      await run(b.remote, 'put_page', { slug: 'notes/marked-unknown', content: page('Marked', 'Unverified on purpose.', 'trust_tier: unknown\n') });
+      const marked = await pageRow(b, 'notes/marked-unknown');
+      expect(marked.trust_tier).toBe('unknown');
+      expect(marked.frontmatter.trust_tier).toBe('unknown');
+    }
+  }), 90_000);
+
   test('CEO-12: an agent rewrite of an owner page lowers it and files one lower_page proposal that later edits fold into', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
       const b = await brain(engine);
