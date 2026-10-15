@@ -16,6 +16,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { derivedRowsFrom, type DerivationRef } from '../facts/derivation-inputs.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
 import { compareTrust, storedTrustTier, trustRankSql, trustTierFromRankSql, type TrustTier } from './tier.ts';
 
 const TIERED = ['facts', 'takes', 'pages', 'timeline_entries'] as const;
@@ -24,12 +25,11 @@ export interface LoweredRow { table: Tiered; id: number; from: TrustTier; to: Tr
 
 const numericId = (column: string) => `(CASE WHEN ${column} ~ '^[0-9]+$' THEN ${column}::bigint END)`;
 const sourceOf = (table: Tiered) => table === 'facts' || table === 'pages' ? 'x.source_id' : '(SELECT p.source_id FROM pages p WHERE p.id = x.page_id)';
-const WRITABLE = (source: string) => `(NOT EXISTS (SELECT 1 FROM persistence_brain WHERE singleton = 1 AND enabled)
-  OR COALESCE(NULLIF(current_setting('gbrain.write_sources', true), ''), '[]')::jsonb ? ${source})`;
+const WRITABLE = (source: string) => `(NOT $3::boolean OR COALESCE(NULLIF(current_setting('gbrain.write_sources', true), ''), '[]')::jsonb ? ${source})`;
 const INPUT_TIER = 'COALESCE(f.trust_tier, k.trust_tier, p.trust_tier, t.trust_tier)';
 
 /** Each derived row of `table` among `ids` whose current inputs are less trusted than it: the tier it lowers to. */
-async function lowerable(tx: BrainEngine, table: Tiered, ids: readonly string[]) {
+async function lowerable(tx: BrainEngine, table: Tiered, ids: readonly string[], managed: boolean) {
   return tx.executeRaw<{ id: number; source_id: string | null; from_tier: string; to_tier: string; writable: boolean }>(`WITH low AS (
       SELECT di.derived_id, min(${trustRankSql(INPUT_TIER)}) AS r FROM derivation_inputs di
         LEFT JOIN facts f ON di.input_table = 'facts' AND f.id = ${numericId('di.input_id')}
@@ -40,7 +40,7 @@ async function lowerable(tx: BrainEngine, table: Tiered, ids: readonly string[])
       GROUP BY di.derived_id)
     SELECT x.id, ${sourceOf(table)} AS source_id, x.trust_tier AS from_tier, ${trustTierFromRankSql('low.r')} AS to_tier, ${WRITABLE(sourceOf(table))} AS writable
       FROM low JOIN ${table} x ON x.id = ${numericId('low.derived_id')} WHERE low.r < ${trustRankSql('x.trust_tier')}
-      ORDER BY x.id FOR UPDATE OF x`, [table, [...ids]]);
+      ORDER BY x.id FOR UPDATE OF x`, [table, [...ids], managed]);
 }
 
 /** Of `before` (fact ids and their tiers before a write), the facts the write lowered, propagated. */
@@ -55,13 +55,15 @@ export async function propagateFactLowering(tx: BrainEngine, before: ReadonlyArr
 export async function propagateTierLowering(tx: BrainEngine, inputs: readonly DerivationRef[]): Promise<LoweredRow[]> {
   if (!inputs.length) return [];
   const { rows } = await derivedRowsFrom(tx, inputs);
+  if (!rows.length) return [];
+  const managed = await readManagedMode(tx, { refusal: { subject: 'Trust tier propagation' } });
   const lowered: LoweredRow[] = [];
   const deferred: Array<{ table: string; id: string; source_id: string | null }> = [];
   for (const depth of [...new Set(rows.map(r => r.depth))].sort((a, b) => a - b)) {
     for (const table of TIERED) {
       const ids = rows.filter(r => r.depth === depth && r.table === table).map(r => r.id);
       if (!ids.length) continue;
-      const candidates = await lowerable(tx, table, ids);
+      const candidates = await lowerable(tx, table, ids, managed);
       const writable = candidates.filter(c => c.writable);
       deferred.push(...candidates.filter(c => !c.writable).map(c => ({ table, id: String(c.id), source_id: c.source_id })));
       if (!writable.length) continue;

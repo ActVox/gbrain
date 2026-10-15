@@ -291,6 +291,7 @@ or a physical projection that leaves attribution untouched):
 - `src/core/timeline-dedup-repair.ts` (1): runs only from schema migration v139, before migration v193 adds the attribution columns, so it has no actor to record.
 - `src/core/timeline-write-through.ts` (2): the timeline write-through's page row splice and entry insert run in one `maintenanceTransaction`.
 - `src/core/trust/fence-guard.ts` (2): the guarded fence re-projection detaches or moves higher-tier fact rows inside the page's coordinated publication.
+- `src/core/trust/held-removals.ts` (1): an owner accept of a held take or timeline removal re-projects the row as the page says in a coordinated (managed) or attributed (unmanaged) transaction under the page key.
 - `src/core/trust/owner-actions.ts` (1): an owner release inserts the held fact in a coordinated (managed) or attributed (unmanaged) transaction at user_confirmed.
 - `src/core/trust/supersede-handlers.ts` (3): owner accept/undo of a trust proposal re-tiers the new fact (or take) inside the checked supersede's (or takes publication's) transaction.
 <!-- write-attribution-covered:end -->
