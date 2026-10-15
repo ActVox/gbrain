@@ -43,11 +43,11 @@ async function retireStaleChunks(engine: Pick<BrainEngine, 'executeRaw' | 'kind'
   for (;;) {
     const rows = await engine.executeRaw<{ id: number }>(`DELETE FROM content_chunks c
       WHERE c.id IN (SELECT s.id FROM content_chunks s -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
-        WHERE s.page_id=$1 AND s.retired_generation IS NULL
+        WHERE s.page_id=$1
         AND (s.body_generation IS NULL
           OR (s.body_generation<=$2 AND NOT (s.occurrence_id=ANY($3::bigint[])))
           OR (s.body_generation<=$2 AND EXISTS (SELECT 1 FROM content_chunks n WHERE n.page_id=s.page_id AND n.occurrence_id=s.occurrence_id
-            AND n.retired_generation IS NULL AND n.body_generation>s.body_generation AND n.body_generation<=$2)))
+            AND n.body_generation>s.body_generation AND n.body_generation<=$2)))
         LIMIT $4)
       RETURNING c.id`, [pageId, generation, live, DEFAULT_FLIP_RETIRE_MAX_ROWS]);
     retired += rows.length;

@@ -963,6 +963,7 @@
       "code_traversal_cache_pkey": "CREATE UNIQUE INDEX code_traversal_cache_pkey ON public.code_traversal_cache USING btree (id)",
       "code_traversal_cache_source_idx": "CREATE INDEX code_traversal_cache_source_idx ON public.code_traversal_cache USING btree (source_id)",
       "config_pkey": "CREATE UNIQUE INDEX config_pkey ON public.config USING btree (key)",
+      "content_chunks_generation_idx": "CREATE INDEX content_chunks_generation_idx ON public.content_chunks USING btree (page_id, body_generation) WHERE (body_generation IS NOT NULL)",
       "content_chunks_occurrence_idx": "CREATE INDEX content_chunks_occurrence_idx ON public.content_chunks USING btree (page_id, occurrence_id) WHERE (occurrence_id IS NOT NULL)",
       "content_chunks_pkey": "CREATE UNIQUE INDEX content_chunks_pkey ON public.content_chunks USING btree (id)",
       "content_chunks_stale_idx": "CREATE INDEX content_chunks_stale_idx ON public.content_chunks USING btree (page_id, chunk_index) WHERE (embedding IS NULL)",
@@ -1642,8 +1643,7 @@
           "30 local_ordinal integer/int4 NULL",
           "31 raw_byte_start bigint/int8 NULL",
           "32 raw_byte_end bigint/int8 NULL",
-          "33 body_generation bigint/int8 NULL",
-          "34 retired_generation bigint/int8 NULL"
+          "33 body_generation bigint/int8 NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

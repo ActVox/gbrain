@@ -89,6 +89,8 @@ type StreamedImportOptions = {
    * runs in the coordinator's publication transaction.
    */
   coordinated?: { snapshot: PageSnapshot | null; owner: SegmentedStagingOwner; sha256: string;
+    /** A managed sync rename: `snapshot` is the page at its old slug, which the publication moves here first; an implicit type follows the new path. */
+    moved?: boolean;
     prepare(prepared: StreamedPreparedImport): Promise<ImportResult> };
 };
 
@@ -265,7 +267,7 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
     process.stderr.write(`[import] slug collision: ${relativePath} and ${collisionOwner} both map to ${slug} in source ${sourceId}; keeping ${collisionOwner}. Rename one file to import both.\n`);
     return { slug, status: 'skipped', chunks: 0, skip_reason: 'slug_collision' };
   }
-  if (parsed.typeExplicit !== true && existing) parsed.type = existing.type;
+  if (parsed.typeExplicit !== true && existing && !opts.coordinated?.moved) parsed.type = existing.type;
   resolveParsedSubtype(parsed, existing);
   const typeClass = parsed.typeExplicit === true && opts.activePack ? classifyStoredType(parsed.type, opts.activePack) : null;
   const typeWarning = typeClass?.kind === 'alias_of' ? { kind: 'alias_of' as const, type: parsed.type, canonical: typeClass.canonical, directory: typeClass.directory }
@@ -315,7 +317,8 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
     return opts.coordinated ? opts.coordinated.prepare({ slug, observedRevision: opts.coordinated.snapshot?.revision ?? null, noop: true, result: skipped, frontmatter: parsed.frontmatter,
       validate: async () => {}, apply: async () => {} }) : skipped;
   }
-  const identity = await decideImportIdentity(engine, { sourceId, slug, hash, frontmatterId: null, sourcePath: relativePath, sourceRoot, body: { title: parsed.title, compiled_truth: '', timeline: '' } });
+  const identity = opts.coordinated?.moved ? { kind: 'none' as const }
+    : await decideImportIdentity(engine, { sourceId, slug, hash, frontmatterId: null, sourcePath: relativePath, sourceRoot, body: { title: parsed.title, compiled_truth: '', timeline: '' } });
   if (identity.kind === 'shared_hash') process.stderr.write(`[import] WARNING: ${relativePath} shares content_hash with ${identity.dupSlug} in source ${sourceId}. Indexing both.\n`);
   const nowDate = new Date();
   const { loadBrainTimeZone } = await import('../import-file.ts');

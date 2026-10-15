@@ -249,6 +249,7 @@ import { v245 } from './v245-page-search-vector-bounded-timeline.ts';
 import { v246 } from './v246-page-embedding-budget.ts';
 import { v247 } from './v247-page-extraction-state.ts';
 import { v248 } from './v248-segmented-page-storage.ts';
+import { v249 } from './v249-segmented-chunk-gc-index.ts';
 import { v250 } from './v250-page-view-digests.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
@@ -497,5 +498,6 @@ export const MIGRATIONS: Migration[] = [
   v246,
   v247,
   v248,
+  v249,
   v250,
 ];

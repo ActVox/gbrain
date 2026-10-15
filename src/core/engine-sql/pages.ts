@@ -24,6 +24,7 @@ import { sanitizeText } from '../batch-rows.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion } from '../search/safe-chunks.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment } from '../search/private-visibility.ts';
 import { quarantineFilterFragment } from '../quarantine.ts';
+import { rederiveHiddenSql } from '../eligibility/sql.ts';
 import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, isUndefinedTableError, warnOncePerProcess } from '../utils.ts';
 import { DELETE_BATCH_SIZE } from '../engine-constants.ts';
 import { jsonbParam, type SqlExecutor } from './executor.ts';
@@ -310,14 +311,26 @@ export async function purgeDeletedPages(
       }));
       return { slugs: pages.map((p) => p.slug), count: pages.length, pages };
     }
-    const { rows } = await exec.run<{ slug: string }>(sqlFragment`
-      DELETE FROM pages
-      WHERE deleted_at IS NOT NULL
-        AND deleted_at < now() - (${hours} || ' hours')::interval
-      RETURNING slug
-    `);
-    const slugs = rows.map((r) => r.slug);
-    return { slugs, count: slugs.length };
+    // Wave B (spec 11): segment texts only the purged pages' manifests reference go in the same purge, not by later GC.
+    return exec.transaction(async (tx) => {
+      const { rows: texts } = await tx.run<{ source_id: string; sha: string }>(sqlFragment`
+        SELECT DISTINCT m.source_id, encode(m.sha256, 'hex') AS sha FROM page_body_manifest m JOIN pages p ON p.id = m.page_id
+        WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - (${hours} || ' hours')::interval`);
+      const { rows } = await tx.run<{ slug: string; source_id: string }>(sqlFragment`
+        DELETE FROM pages
+        WHERE deleted_at IS NOT NULL
+          AND deleted_at < now() - (${hours} || ' hours')::interval
+        RETURNING slug, source_id
+      `);
+      if (rows.length) await tx.run(sqlFragment`DELETE FROM page_body_stagings s USING unnest(${rows.map(r => r.source_id)}::text[], ${rows.map(r => r.slug)}::text[]) AS d(source_id, slug)
+        WHERE s.source_id = d.source_id AND s.slug = d.slug`);
+      if (texts.length) await tx.run(sqlFragment`DELETE FROM page_segment_texts t
+        USING unnest(${texts.map(r => r.source_id)}::text[], ${texts.map(r => r.sha)}::text[]) AS d(source_id, sha)
+        WHERE t.source_id = d.source_id AND t.sha256 = decode(d.sha, 'hex')
+          AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id = t.source_id AND m.sha256 = t.sha256)`);
+      const slugs = rows.map((r) => r.slug);
+      return { slugs, count: slugs.length };
+    });
   }
 
 export async function refreshPageBody(
@@ -908,9 +921,10 @@ const PAGE_VERSION_METADATA_COLUMNS = trustedSql('pv.id, pv.page_id, pv.frontmat
 const PAGE_VERSION_SEGMENTED_COLUMNS = trustedSql('pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash');
 
 /**
- * Newest first (`pv.id` breaks snapshot_at ties). Scope and privacy
- * predicates sit in WHERE, so `limit` bounds only rows the caller may read;
- * `includeBody: false` never selects the body columns.
+ * Newest first (`pv.id` breaks snapshot_at ties). Scope, privacy and
+ * re-derivation (a page a purge hid) predicates sit in WHERE, so `limit`
+ * bounds only rows the caller may read; `includeBody: false` never selects
+ * the body columns.
  */
 export async function getVersions<B extends boolean = true>(
   exec: LegacyUnscopedRead,
@@ -928,7 +942,7 @@ export async function getVersions<B extends boolean = true>(
       SELECT ${columns}, ${PAGE_VERSION_SEGMENTED_COLUMNS} FROM page_versions pv
       JOIN pages p ON p.id = pv.page_id
       WHERE p.slug = ${slug} ${scope}
-        ${privacy}
+        ${privacy} AND ${trustedSql(rederiveHiddenSql('pages', 'p'))}
       ORDER BY pv.snapshot_at DESC, pv.id DESC
       ${limit}
     `);

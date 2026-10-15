@@ -346,9 +346,10 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- content_chunks columns, so fresh and upgraded brains share their ordinals.
   -- v244: projected_byte_start / projected_byte_end (a prose chunk's UTF-8
   -- span in its source's read projection) are added the same way.
-  -- v248: occurrence_id, local_ordinal, raw_byte_start/end, body_generation and
-  -- retired_generation (segmented-page chunks; NULL for inline pages) and
-  -- content_chunks_occurrence_idx are added the same way.
+  -- v248: occurrence_id, local_ordinal, raw_byte_start/end and body_generation
+  -- (segmented-page chunks; NULL for inline pages) and
+  -- content_chunks_occurrence_idx are added the same way (v248's
+  -- retired_generation is dropped by v249, which adds content_chunks_generation_idx).
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
   embedded_text_hash    TEXT,

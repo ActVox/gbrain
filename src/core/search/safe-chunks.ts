@@ -45,25 +45,36 @@ export function currentTextProjectionFilter(alias: string): string {
 }
 
 /**
- * Wave B: the chunk row belongs to its page's live body generation. Staged rows
- * (`body_generation` above the page's) and retired rows are invisible; every
- * inline-page row (`body_generation IS NULL`) passes. Row predicate, no join.
+ * Wave B: the chunk row belongs to its page's live body: an inline row
+ * (`body_generation IS NULL`) of a page that is not segmented, or a segmented
+ * row at or below the page's generation whose occurrence has a live manifest
+ * row. Staged rows (above the page's generation), rows of retired occurrences
+ * (closed by a flip or a demotion, deleted later when the flip deferred their
+ * retirement) and rows of a preparation that never published are invisible
+ * whether or not they were deleted yet. The manifest probe is one primary-key
+ * lookup per segmented row; `page` must expose `body_storage` and `body_generation`.
  */
 export function chunkGenerationFilter(page: string, chunk: string): string {
-  return `(${chunk}.body_generation IS NULL
+  return `((${chunk}.body_generation IS NULL AND ${page}.body_storage <> 'segmented')
        OR (${chunk}.body_generation <= ${page}.body_generation
-           AND (${chunk}.retired_generation IS NULL OR ${chunk}.retired_generation > ${page}.body_generation)))`;
+           AND EXISTS (SELECT 1 FROM page_body_manifest lm WHERE lm.page_id = ${chunk}.page_id AND lm.occurrence_id = ${chunk}.occurrence_id
+             AND lm.staging_id IS NULL AND lm.gen_from <= ${page}.body_generation AND (lm.gen_to IS NULL OR lm.gen_to > ${page}.body_generation))))`;
 }
 
-/** `chunkGenerationFilter` for a statement that has no page row joined: inline rows pass without the page lookup. */
+/** `chunkGenerationFilter` for a statement that has no page row joined. */
 export function chunkGenerationProbe(chunk: string): string {
-  return `(${chunk}.body_generation IS NULL
-       OR EXISTS (SELECT 1 FROM pages gp WHERE gp.id = ${chunk}.page_id AND ${chunkGenerationFilter('gp', chunk)}))`;
+  return `EXISTS (SELECT 1 FROM pages gp WHERE gp.id = ${chunk}.page_id AND ${chunkGenerationFilter('gp', chunk)})`;
 }
 
-/** Search-facing chunk visibility: the current text projection and the live body generation. */
+/**
+ * Search-facing chunk visibility: the current text projection and the live body generation. A sealed page holds no
+ * rows of a retired occurrence (the flip deletes them in its transaction, or leaves the page unsealed until the
+ * projection job has), so the row predicate needs no manifest probe, whose per-row cost moved vector search off its
+ * HNSW plan (test/e2e/vector-chunk-statistics-postgres.test.ts).
+ */
 export function chunkVisibleFilter(page: string, chunk: string): string {
-  return `(${currentTextProjectionFilter(page)} AND ${chunkGenerationFilter(page, chunk)})`;
+  return `(${currentTextProjectionFilter(page)}
+       AND (${chunk}.body_generation IS NULL OR ${chunk}.body_generation <= ${page}.body_generation))`;
 }
 
 /**
