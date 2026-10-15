@@ -1,7 +1,7 @@
 import { observationDateLine, observationDateRule } from '../ai/date-grounding.ts';
 import { isConsumerDateGroundingOn } from '../facts/extract.ts';
 import { maintenancePreflight, publishMaintenancePage, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
-import { deferPublishOrThrow, postprocessManagedSynthesis, withPostprocessConflicts, withPublishPending, type PostprocessConflict } from './synthesize-postprocess.ts';
+import { deferPublishOrThrow, loadCommittedSynthesisOutputs, postprocessManagedSynthesis, withPostprocessConflicts, withPublishPending, type PostprocessConflict, type RetainedOutput } from './synthesize-postprocess.ts';
 /**
  * Synthesize phase (v0.23; #4152 two-stage cascade) — conversation-to-brain
  * pipeline. Cheap-model triage gates frontier-model synthesis:
@@ -1135,11 +1135,11 @@ async function runPhaseSynthesizeInner(
     // (source, slug) row. #1586: refs are stamped with the cycle's resolved
     // source (children write there via SubagentHandlerData.source_id;
     // cycleSourceId is hoisted above the fan-out for the daily cap).
-    // F6 rule-D visibility: track which children actually wrote pages, so a
-    // rescued/passed transcript whose child declined to write (task D) is
-    // distinguishable from a triage miss in the phase telemetry.
+    // F6 rule-D visibility: track which children wrote pages, so a rescued/passed transcript
+    // whose child declined to write (task D) is distinguishable from a triage miss in telemetry.
     const jobsWithPages = new Set<number>();
-    let writtenRefs = withTranscriptSeats(await collectChildPutPageSlugs(engine, childIds, chunkInfo, cycleSourceId, jobRawSource, jobsWithPages), worthProcessing);
+    const committedOutputs = maintenance ? await loadCommittedSynthesisOutputs(engine, maintenance, childIds) : undefined;
+    let writtenRefs = withTranscriptSeats(await collectChildPutPageSlugs(engine, childIds, chunkInfo, cycleSourceId, jobRawSource, jobsWithPages, committedOutputs), worthProcessing);
     let finalizedRefs = writtenRefs;
 
     // Grounding gate: verify every page the children wrote (whole page when
@@ -1153,7 +1153,7 @@ async function runPhaseSynthesizeInner(
     const grounding = config.quoteVerify ? await resolveGroundingDecide(engine) : undefined;
     if (maintenance) {
       const processed = await postprocessManagedSynthesis(engine, maintenance, writtenRefs, childIds, jobRawSource,
-        worthProcessing, { cycleDate: summaryDate, quoteVerify: config.quoteVerify, sinceByTranscript, signal: opts.signal, grounding, meetingTranscriptsDir: config.meetingTranscriptsDir });
+        worthProcessing, { cycleDate: summaryDate, quoteVerify: config.quoteVerify, sinceByTranscript, signal: opts.signal, grounding, committedOutputs, meetingTranscriptsDir: config.meetingTranscriptsDir });
       writtenRefs = processed.writtenRefs;
       finalizedRefs = processed.finalizedRefs;
       [publishPending, postprocessConflicts] = [processed.pending, processed.conflicts];
@@ -2913,6 +2913,7 @@ async function collectChildPutPageSlugs(
   // collects the job ids that produced ≥1 put_page write, so the caller can
   // count zero-page children without a second subagent_tool_executions scan.
   outJobsWithPages?: Set<number>,
+  committed: RetainedOutput[] = [], // #6616: canonical slug of a managed child's committed write; unmatched keeps its raw slug
 ): Promise<Array<{ slug: string; source_id: string; raw_source?: string; first_write_at?: Date }>> {
   if (childIds.length === 0) return [];
   // Raw fetch — NO SELECT DISTINCT. Preserves per-child slug duplicates so
@@ -2949,7 +2950,8 @@ async function collectChildPutPageSlugs(
     const jobId = Number(r.job_id);
     outJobsWithPages?.add(jobId);
     const ci = chunkInfo.get(jobId);
-    const slug = ci ? rewriteChunkedSlug(r.slug, ci.hash6, ci.idx) : r.slug;
+    const written = committed.find(o => Number(o.job_id) === jobId && o.input_slug === r.slug)?.request.slug ?? r.slug;
+    const slug = ci ? rewriteChunkedSlug(written, ci.hash6, ci.idx) : written;
     if (!rewritten.has(slug) || rewritten.get(slug) === undefined) {
       rewritten.set(slug, jobRawSource?.get(jobId));
     }
