@@ -32,6 +32,7 @@ import { decideTrustProposal } from '../src/core/trust/decide.ts';
 import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
 import { setRowTier } from '../src/core/trust/page-handlers.ts';
 import { extractTakesFromDb } from '../src/core/cycle/extract-takes.ts';
+import { materializeSegmentedBody } from '../src/core/page-body/ingest.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -180,6 +181,87 @@ describe('held removals (W1 #6783 §12 (a))', () => {
       expect(String((await remoteContent(b, slug)).content)).not.toContain('Ivan will run the marathon');
     }
   }), 120_000);
+
+  test('the owner accept of a held strike-through (or kind change) applies it to the take; it does not remove the take', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      const b = await brain(engine);
+      const slug = 'people/lena-example';
+      await run(b.local, 'put_page', { slug, content: page('Lena', 'Lena.') });
+      for (const claim of ['Lena will move to Lima', 'Lena prefers tea']) await run(b.local, 'takes_add', { slug, claim, kind: 'bet', holder: 'world', weight: 0.6 });
+      const before = await takesOf(b, slug);
+      for (const take of before) await confirm(b, 'takes', take.id);
+      const current = await localContent(b, slug);
+      const edited = String(current.content).replace('Lena will move to Lima', '~~Lena will move to Lima~~').replace(/(\| Lena prefers tea \| )bet/, '$1take');
+      expect(edited).not.toBe(String(current.content));
+      const put = await run(b.local, 'put_page', { slug, content: edited, expected_revision: current.revision });
+      expect(put.contested?.proposal_refs).toHaveLength(2);
+      const struck = (await proposalsFor(b, 'takes', before[0]!.id))[0]!;
+      const rekinded = (await proposalsFor(b, 'takes', before[1]!.id))[0]!;
+      expect(struck.before_state).toMatchObject({ change: 'deactivated' });
+      expect(rekinded.before_state).toMatchObject({ change: 'replaced' });
+      expect((await decideTrustProposal(engine, struck.id, 'accept', owner)).status).toBe('accepted');
+      expect((await decideTrustProposal(engine, rekinded.id, 'accept', owner)).status).toBe('accepted');
+      const after = await engine.executeRaw<{ row_num: number; claim: string; kind: string; active: boolean }>(
+        'SELECT row_num, claim, kind, active FROM takes WHERE page_id=$1 ORDER BY row_num', [await pageId(b, slug)]);
+      expect(after).toEqual([
+        { row_num: before[0]!.row_num, claim: 'Lena will move to Lima', kind: 'bet', active: false },
+        { row_num: before[1]!.row_num, claim: 'Lena prefers tea', kind: 'take', active: true },
+      ]);
+      const text = String((await localContent(b, slug)).content);
+      expect(text).toContain('~~Lena will move to Lima~~');
+      expect(text).toContain('Lena prefers tea');
+    }
+  }), 120_000);
+
+  test('on a segmented page, the owner accept of held take and timeline changes applies them; the page and its rows agree', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      const b = await brain(engine);
+      await engine.setConfig('pages.segmented_storage', 'on');
+      try {
+        const slug = 'people/kai-example';
+        const filler = Array.from({ length: 20_000 }, (_, i) => `Kai note line ${i} about the acme-example offsite and its agenda.`).join('\n');
+        // takes_* verbs refuse a segmented page, so the takes are added while the page is inline and a publish over 1 MiB promotes it.
+        await run(b.local, 'put_page', { slug, content: page('Kai', 'Kai.\n\n## Timeline\n\n- **2026-01-05** | note — Kai joined acme-example\n- **2026-02-07** | note — Kai moved to Seoul') });
+        for (const claim of ['Kai will lead the offsite', 'Kai ships the agenda']) await run(b.local, 'takes_add', { slug, claim, kind: 'bet', holder: 'world', weight: 0.6 });
+        const storage = async () => (await engine.executeRaw<{ body_storage: string }>('SELECT body_storage FROM pages WHERE id=$1', [await pageId(b, slug)]))[0]!.body_storage;
+        const small = await localContent(b, slug);
+        const big = String(small.content).replace('Kai.\n', `Kai.\n\n${filler}\n`);
+        await run(b.local, 'put_page', { slug, content: big, expected_revision: small.revision });
+        expect(await storage()).toBe('segmented');
+        const takes = await takesOf(b, slug);
+        const timeline = await engine.executeRaw<{ id: number; summary: string }>('SELECT id::int AS id, summary FROM timeline_entries WHERE page_id=$1 ORDER BY date', [await pageId(b, slug)]);
+        expect(takes).toHaveLength(2);
+        expect(timeline).toHaveLength(2);
+        for (const take of takes) await confirm(b, 'takes', take.id);
+        await confirm(b, 'timeline_entries', timeline[0]!.id);
+        // A local agent publish drops take 1, rewrites take 2 and drops the confirmed timeline row.
+        // A whole-body get_page refuses a segmented page (body: 'none' reads the revision), so the agent edits the text it published.
+        const current = await operationsByName.get_page.handler(b.local, { slug, body: 'none' }) as Record<string, any>;
+        const edited = big.split('\n').filter(line => !line.includes('Kai will lead the offsite') && !line.includes('Kai joined acme-example')).join('\n')
+          .replace('Kai ships the agenda', 'Kai ships the budget');
+        const put = await run(b.local, 'put_page', { slug, content: edited, expected_revision: current.revision });
+        expect(put.contested?.proposal_refs).toHaveLength(3);
+        expect(await storage()).toBe('segmented');
+        // takes_remove refuses a segmented page for every writer before any guard, so it files nothing.
+        const refused = await run(b.remote, 'takes_remove', { slug, row_num: takes[1]!.row_num }).then(() => null, (error: unknown) => error) as any;
+        expect(refused?.code).toBe('page_body_segmented');
+        const pending = (await listTrustProposals(engine, { sourceId: b.sourceId })).filter(p => p.status === 'pending');
+        expect(pending.map(p => `${p.target_table}:${p.target_id}`).sort()).toEqual([`takes:${takes[0]!.id}`, `takes:${takes[1]!.id}`, `timeline_entries:${timeline[0]!.id}`].sort());
+        for (const proposal of pending) expect((await decideTrustProposal(engine, proposal.id, 'accept', owner)).status).toBe('accepted');
+        expect((await takesOf(b, slug)).map(t => [t.row_num, t.claim, t.active])).toEqual([[takes[1]!.row_num, 'Kai ships the budget', true]]);
+        expect((await engine.executeRaw<{ summary: string }>('SELECT summary FROM timeline_entries WHERE page_id=$1', [await pageId(b, slug)])).map(r => r.summary)).toEqual(['Kai moved to Seoul']);
+        expect(await storage()).toBe('segmented');
+        const stored = await materializeSegmentedBody(engine, await pageId(b, slug), b.sourceId);
+        const text = `${stored.compiled_truth}\n${stored.timeline}`;
+        for (const gone of ['Kai will lead the offsite', 'Kai ships the agenda', 'Kai joined acme-example']) expect(text).not.toContain(gone);
+        expect(text).toContain('Kai ships the budget');
+        expect(text).toContain('Kai moved to Seoul');
+        expect(text).toContain('Kai note line 19999');
+      } finally {
+        await engine.setConfig('pages.segmented_storage', 'off');
+      }
+    }
+  }), 240_000);
 
   test('the takes reconcile never prunes or overwrites a held take', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
