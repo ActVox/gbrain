@@ -108,6 +108,10 @@ function runPhases(noShard: boolean, diff: boolean, failStage = '') {
     for (const name of ['git', 'python3', 'ps', 'psql', 'apt-get']) put(`bin/${name}`, 'exit 0');
     put('bin/bun', `
 case "$*" in
+  "scripts/lib/ensure-e2e-database.ts "*)
+    printf 'admin_db:%s:%s\\n' "$2" "$3" >> "$TRACE"
+    [ "$FAIL_STAGE" != admin_db ] || exit 7
+    exit 0 ;;
   "run verify") stage=verify ;;
   "run test:serial") stage=serial ;;
   "run test:slow") stage=slow ;;
@@ -131,7 +135,7 @@ for line in {1..35}; do printf 'fixture progress %s\\n' "$line"; done
 set -eu
 case "$DATABASE_URL" in postgresql://postgres:postgres@postgres-*:5432/gbrain_test) ;; *) exit 42 ;; esac
 [ "$GBRAIN_PGBOUNCER_URL" = postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test ] || exit 43
-[ "$GBRAIN_PGBOUNCER_DIRECT_URL" = postgresql://postgres:postgres@postgres-1:5432/gbrain_test ] || exit 44
+[ "$GBRAIN_PGBOUNCER_DIRECT_URL" = postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test ] || exit 44
 [ "$GBRAIN_CI_REQUIRE_PGBOUNCER" = 1 ] || exit 45
 [ "$GBRAIN_TEST_DB" = 1 ] || exit 46
 printf 'target:%s\\n' "$DATABASE_URL" "$GBRAIN_PGBOUNCER_URL" "$GBRAIN_PGBOUNCER_DIRECT_URL" >> "$TRACE"
@@ -189,6 +193,28 @@ describe('ci-local execution coverage', () => {
       });
     }
   }
+
+  for (const noShard of [false, true]) {
+    test(`the PgBouncer admin database is created first and is no shard's database (#6674, no-shard=${noShard})`, () => {
+      const result = runPhases(noShard, false);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      const targets = result.trace.filter(line => line.startsWith('target:')).map(line => new URL(line.slice(7)));
+      const shards = targets.filter((_, i) => i % 3 === 0);
+      const admins = new Set(targets.filter((_, i) => i % 3 === 2).map(url => `${url.host}${url.pathname}`));
+      expect([...admins]).toEqual(['postgres-1:5432/gbrain_ci_admin_test']);
+      for (const shard of shards) expect(shard.pathname).not.toBe('/gbrain_ci_admin_test');
+      const created = result.trace.indexOf('admin_db:postgresql://postgres:postgres@postgres-1:5432/gbrain_test:gbrain_ci_admin_test');
+      expect(created).toBeGreaterThanOrEqual(0);
+      expect(created).toBeLessThan(result.trace.findIndex(line => line.startsWith('e2e:')));
+    });
+  }
+
+  test('a failed admin database bootstrap starts no shard', () => {
+    const result = runPhases(false, false, 'admin_db');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('could not create gbrain_ci_admin_test; shards not started');
+    expect(result.trace.some(line => line.startsWith('unit:') || line.startsWith('e2e:'))).toBe(false);
+  });
 
   for (const failStage of ['timeout_guard', 'verify', 'serial', 'slow', 'unit', 'e2e']) {
     test(`a failed ${failStage} stage cannot produce a green local CI result`, () => {
