@@ -142,7 +142,12 @@ fault. Full runs crash every seam and run every fault. The manifest's `robot`
 key lists every run (schedule, seed, seam and occurrence or process fault),
 `sequences_x_crash_points`, `lease_bound_seams_skipped`,
 `lease_bound_faults_skipped` and violations with the observed trace;
-`robot_full_gate` is true for a full-budget run with no violations.
+`robot_full_gate` is true for a full-budget run with no violations, no
+`fault_hook_errors` (a fault hook that threw instead of freezing the worker)
+and no `faults_not_reached` (a worker that finished without reaching its
+requested seam, outside the per-scenario `UNREACHED_FAULT_ALLOWLIST` in
+`robot-driver.ts`); either kind of run also fails validation with a nonzero
+exit and is listed in `failing_runs` for `--replay`.
 
 A failing run prints two commands. `--replay=<manifest>` re-runs exactly the
 manifest's failing runs. `--shrink=<manifest>` removes ops from the first

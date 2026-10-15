@@ -2,7 +2,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { execSync, execFileSync, spawnSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, realpathSync } from 'fs';
 import { basename, join, dirname, resolve } from 'path';
-import { parseSemver, semverGt } from '../core/semver.ts';
+import { isNewerVersion, parseSemver, semverGt } from '../core/semver.ts';
 import { jsonRequested, setCliExitVerdict, writeJsonDocument } from '../core/cli-force-exit.ts';
 import { opError, type OperationError } from '../core/ops/contract.ts';
 import { writeCliError } from '../cli/cli-error.ts';
@@ -11,6 +11,9 @@ import type { InteractiveProbe } from '../core/interaction.ts';
 import { forwardProgressPast, migrationLedgerSummary } from '../core/migration-ledger.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { MIGRATIONS_RUNNING_EXIT_CODE, readMigrationLockHolder } from '../core/migration-orchestration-lock.ts';
+import { loadConfig } from '../core/config.ts';
+import { clearSnooze, clearUpdateCache, pendingUpgradeVersion, writeJustUpgraded } from '../core/self-upgrade.ts';
+import { MOVEMENT_SUPERVISOR_STEP } from './movement-step.ts';
 import {
   BUN_FLOOR_EXIT_CODE,
   evaluateBunFloor,
@@ -193,14 +196,14 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   const target = opts.targetVersion;
   if (target && assessUpgradeOutcome(target, newVersion) === 'mismatch') {
     console.error(`Upgrade did not take effect: still running ${newVersion}, expected ${target}.`);
-    console.error('Exact-tag Git installs stay pinned through `bun update`. Reinstall with:');
-    console.error(`  ${bunReinstallCommand(`#v${target}`)}`);
+    const plan = planPinnedReinstall(target, oldVersion);
+    printPinnedReinstall(plan, oldVersion, 'Exact-tag Git installs stay pinned through `bun update`. Reinstall with:');
     recordUpgradeError({
       phase: 'verify-target',
       fromVersion: oldVersion,
       toVersion: target,
       error: `still running ${newVersion} after upgrade`,
-      hint: bunReinstallCommand(`#v${target}`),
+      hint: pinnedReinstallHint(plan),
     });
     setCliExitVerdict(1);
     return;
@@ -212,18 +215,16 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   if (!target && method === 'bun' && newVersion && newVersion === oldVersion) {
     const pin = bunGlobalExactTagPin(resolveBunGlobalRoot());
     if (pin) {
-      const { pendingUpgradeVersion } = await import('../core/self-upgrade.ts');
-      const latest = pendingUpgradeVersion(oldVersion);
-      const reinstall = bunReinstallCommand(latest ? `#v${latest}` : '');
+      const published = planPinnedReinstall(null, oldVersion);
+      const plan = published.version ? published : { version: pendingUpgradeVersion(oldVersion), unpublished: null };
       console.error(`Upgrade did not take effect: still running ${newVersion}, because the global install is pinned to ${pin} and \`bun update\` keeps a pinned tag.`);
-      console.error('Reinstall to move off the pin:');
-      console.error(`  ${reinstall}`);
+      printPinnedReinstall(plan, oldVersion, 'Reinstall to move off the pin:');
       recordUpgradeError({
         phase: 'verify-pin',
         fromVersion: oldVersion,
-        toVersion: latest ?? 'latest',
+        toVersion: plan.version ?? 'latest',
         error: `pinned to ${pin}; still running ${newVersion} after upgrade`,
-        hint: reinstall,
+        hint: pinnedReinstallHint(plan),
       });
       setCliExitVerdict(1);
       return;
@@ -241,10 +242,9 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   //   - clear the update-check cache + snooze so a now-stale "upgrade
   //     available" marker doesn't keep nudging after we've already applied it.
   try {
-    const su = await import('../core/self-upgrade.ts');
-    su.writeJustUpgraded(oldVersion);
-    su.clearUpdateCache();
-    su.clearSnooze();
+    writeJustUpgraded(oldVersion);
+    clearUpdateCache();
+    clearSnooze();
   } catch {
     /* best-effort: never block the upgrade on confirmation bookkeeping */
   }
@@ -292,7 +292,7 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   console.log(`Binary: installed ${newVersion || 'a new version (could not verify)'}`);
   console.log(migrationsLine);
   // #6317 (I2): upgrade owns no relaunch, so the supervisor proves data movement after it restarts serve and the workers.
-  console.log(`Next: ${(await import('./sources-writer-movement.ts')).MOVEMENT_SUPERVISOR_STEP}`);
+  console.log(`Next: ${MOVEMENT_SUPERVISOR_STEP}`);
 }
 
 /**
@@ -378,7 +378,6 @@ function installedDespiteFailure(oldVersion: string): boolean {
 
 export async function describeMigrationFailure(error: unknown, newVersion: string): Promise<string> {
   if ((error as { status?: number }).status === MIGRATIONS_RUNNING_EXIT_CODE) {
-    const { loadConfig } = await import('../core/config.ts');
     const config = loadConfig();
     const holder = config ? await readMigrationLockHolder(config) : null;
     return `Migrations: running (host ${holder?.host ?? 'unknown'}, pid ${holder?.pid ?? 'unknown'}) in another apply-migrations. `
@@ -416,7 +415,101 @@ export function resolveBunGlobalRoot(): string {
  * and bun.lock.
  */
 export function bunReinstallCommand(ref: string): string {
-  return `bun remove -g gbrain && bun add -g github:${GBRAIN_GITHUB_REPO}${ref}`;
+  const tag = /^#(v\d[\w.]*)$/.exec(ref)?.[1];
+  const remove = `bun remove -g gbrain && bun add -g github:${GBRAIN_GITHUB_REPO}${ref}`;
+  return tag ? `${releaseTagProbeCommand(tag)} && ${remove}` : remove;
+}
+
+const GBRAIN_GIT_URL = `https://github.com/${GBRAIN_GITHUB_REPO}`;
+
+/** #6662: the shell guard a printed reinstall runs first, so a missing tag stops it before `bun remove`. */
+function releaseTagProbeCommand(tag: string): string {
+  return `git ls-remote --exit-code --tags ${GBRAIN_GIT_URL} refs/tags/${tag}`;
+}
+
+type GitRunner = (args: string[]) => { status: number | null; stdout: string };
+const runGit: GitRunner = (args) => {
+  const r = spawnSync('git', args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 });
+  return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
+};
+
+/**
+ * #6662: whether release tag v<version> exists on GitHub. Master's VERSION is
+ * stamped before release.yml mints the tag (and superseded versions never get
+ * one), so a version can be offered whose tag 404s. `--exit-code` exits 2 when
+ * no ref matches; anything else (no git, offline, timeout) is unknown.
+ */
+export function probeReleaseTag(version: string, git: GitRunner = runGit): 'published' | 'not_published' | 'unknown' {
+  const { status } = git(['ls-remote', '--exit-code', '--tags', GBRAIN_GIT_URL, `refs/tags/v${version}`]);
+  return status === 0 ? 'published' : status === 2 ? 'not_published' : 'unknown';
+}
+
+/** #6662 (D24): the newest published `v<x>` release tag, or null when it cannot be read. */
+export function latestPublishedVersion(git: GitRunner = runGit): string | null {
+  const { status, stdout } = git(['ls-remote', '--tags', '--refs', GBRAIN_GIT_URL, 'v*']);
+  if (status !== 0) return null;
+  let best: string | null = null;
+  for (const line of stdout.split('\n')) {
+    const v = /\trefs\/tags\/v(\d+\.\d+\.\d+(?:\.\d+)?)$/.exec(line.trim())?.[1];
+    if (v && (!best || isNewerVersion(best, v))) best = v;
+  }
+  return best;
+}
+
+export interface PinnedReinstallPlan {
+  /** The tag-pinned version to reinstall, or null when no published newer release is known. */
+  version: string | null;
+  /** The requested version whose tag is confirmed missing on GitHub. */
+  unpublished: string | null;
+}
+
+/**
+ * #6662 (D24): tag-pinned installs reinstall a published tag. A requested
+ * version is kept unless its tag is confirmed missing; then (or with no
+ * request) the newest published tag newer than the running version is used.
+ */
+export function planPinnedReinstall(requested: string | null, oldVersion: string, git: GitRunner = runGit): PinnedReinstallPlan {
+  const state = requested ? probeReleaseTag(requested, git) : null;
+  if (requested && state !== 'not_published') return { version: requested, unpublished: null };
+  const published = latestPublishedVersion(git);
+  return { version: published && isNewerVersion(oldVersion, published) ? published : null, unpublished: requested };
+}
+
+/**
+ * #6662: the reinstall steps to print. The guarded one-liner works in POSIX
+ * shells and PowerShell 7; Windows PowerShell 5.1 has no `&&`, so on Windows
+ * each step is its own line. Always ends with the restore line for oldVersion.
+ */
+export function reinstallHintLines(version: string, oldVersion: string, platform: NodeJS.Platform = process.platform): string[] {
+  const tag = `v${version}`;
+  const restore = `If the add fails, restore ${oldVersion} with: bun add -g github:${GBRAIN_GITHUB_REPO}#v${oldVersion}`;
+  if (platform !== 'win32') return [bunReinstallCommand(`#${tag}`), restore];
+  return [
+    'Run these one at a time, and stop if the first one fails (the tag is not published yet):',
+    releaseTagProbeCommand(tag),
+    'bun remove -g gbrain',
+    `bun add -g github:${GBRAIN_GITHUB_REPO}#${tag}`,
+    restore,
+  ];
+}
+
+function printPinnedReinstall(plan: PinnedReinstallPlan, oldVersion: string, lead: string): void {
+  if (plan.unpublished) {
+    console.error(`v${plan.unpublished} is not published yet: its release tag is not on GitHub (tags are created after the release checks pass). Nothing was removed.`);
+  }
+  if (!plan.version) {
+    if (plan.unpublished) return console.error('Retry `gbrain upgrade` later.');
+    console.error(lead);
+    console.error(`  ${bunReinstallCommand('')}`);
+    return;
+  }
+  console.error(plan.unpublished ? `The newest published release is ${plan.version}. ${lead}` : lead);
+  for (const line of reinstallHintLines(plan.version, oldVersion)) console.error(`  ${line}`);
+}
+
+function pinnedReinstallHint(plan: PinnedReinstallPlan): string {
+  if (plan.version) return bunReinstallCommand(`#v${plan.version}`);
+  return plan.unpublished ? `v${plan.unpublished} is not published yet; retry gbrain upgrade later` : bunReinstallCommand('');
 }
 
 /**
@@ -897,7 +990,7 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
     // Fail-open per A18: never crash post-upgrade from the banner.
   }
   // #6317 (I2): the supervisor's step; bare, so the check inherits its default window.
-  (json ? console.error : console.log)(`Next: ${(await import('./sources-writer-movement.ts')).MOVEMENT_SUPERVISOR_STEP}`);
+  (json ? console.error : console.log)(`Next: ${MOVEMENT_SUPERVISOR_STEP}`);
   if (json) await writeJsonDocument(JSON.stringify(report));
 }
 

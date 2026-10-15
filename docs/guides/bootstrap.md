@@ -300,9 +300,21 @@ mode wires them in one command, with no `agent.json` and no interview:
   `--yes`. Close active Claude Code sessions for the cleanest user-scope
   settings writes (the host also writes that file).
 
-PGLite note: minting needs the single-writer lock, so on a PGLite brain
-either pre-mint (`gbrain auth create bootstrap-harness --scopes read,write`
-while the serve is stopped) and pass `--token`, or stop/re-run/restart.
+PGLite note: minting needs the single-writer lock, and the health check
+needs the serve running, so on a PGLite brain the harness can't mint its own
+token. Pre-mint it with the harness grant while the serve is stopped, then
+pass `--token` (#6661). The `LIVE_SERVE` refusal prints these steps with the
+exact operation list:
+
+1. Stop the serve.
+2. `gbrain auth create bootstrap-harness --scopes read,write,skills_member_self`
+   (`--scopes read,write` under `--skills memory-only`; `skills_member_self`
+   is what lets the harness join shared skills).
+3. `gbrain auth rescope --token bootstrap-harness --operations <the printed list>`
+   (plus `--sources <id>` when you pass `--source`).
+4. Start `gbrain serve --http` again.
+5. Re-run `gbrain bootstrap harness` with `--token <value>`.
+
 Postgres brains mint fine while the serve runs. A token you supply is never
 revoked by `--remove` or rotation (it is not the harness's to revoke) —
 retire it yourself with `gbrain auth revoke` when you're done with it.

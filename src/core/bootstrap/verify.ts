@@ -30,6 +30,7 @@
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { managedFilesystemRootFor } from '../persistence/filesystem-guard.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { unpurgePage } from '../persistence/page-purge.ts';
 import { withCoordinatedWrite } from '../persistence/context.ts';
 import { pendingReceiptOf, pollCommand, resolveCliWriteWaitMs, WRITE_WAIT_ENV } from '../persistence/write-wait.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
@@ -207,6 +208,11 @@ async function sweepProbeLeftovers(engine: BrainEngine, ws: string, sourceId: st
  * engine primitives. A managed brain (#5280) purges each probe through the
  * coordinator (`delete_page --purge`, bound to its revision, which also removes
  * its canonical file) and removes the probe facts in a coordinated transaction.
+ * #6634: the probe bodies are constant, so a purge tombstone would refuse the
+ * next run's put_page as `purged_content`; each probe's tombstones (page, and
+ * the fact/take purges of the same request) are cleared through the host-only
+ * unpurge path after its purge, and on every sweep, which also clears leftovers
+ * of earlier runs. Probe pages are not user content.
  */
 async function removeProbes(engine: BrainEngine, ws: string, sourceId: string): Promise<string[]> {
   const warnings: string[] = [];
@@ -222,6 +228,11 @@ async function removeProbes(engine: BrainEngine, ws: string, sourceId: string): 
       }
     } catch (e) {
       warnings.push(`${slug}: ${(e as Error).message}`);
+    }
+    try {
+      await unpurgePage(localCtx(engine, sourceId), { slug, source_id: sourceId });
+    } catch {
+      /* page_purges may not exist on a pre-migration brain — doctor_green names that */
     }
     if (managed) continue;
     try {

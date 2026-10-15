@@ -225,11 +225,11 @@ jobs:
         run: bun test --timeout 120000 test/postgres-disconnect-bounded.test.ts
       - name: Backup archive round trip on this host (#5312)
         run: bun test --timeout 60000 test/backup-archive-roundtrip-5312.test.ts
-      # The stale-socket sweep's native AF_UNIX reparse-point path exists only on Windows; the POSIX cases run in the
-      # Linux unit shards. On macOS the PGLite socket lives at a shortened /private/tmp path (the 104-byte AF_UNIX limit),
-      # which this file's data-dir fixtures do not model: wave 16 follow-up, not covered here.
-      - name: Stale AF_UNIX socket sweep through the native tag check (#5312)
-        if: runner.os == 'Windows'
+      # The stale-socket sweep's native AF_UNIX reparse-point path exists only on Windows; macOS runs the POSIX cases
+      # here (#6573: the fixture root is under /private/tmp, so the data-dir socket stays under gbrain's 103-byte limit
+      # instead of moving to the shortened fallback path); Linux runs them in the unit shards.
+      - name: Stale AF_UNIX socket sweep (native tag check on Windows, POSIX cases on macOS) (#5312, #6573)
+        if: runner.os == 'Windows' || runner.os == 'macOS'
         run: bun test --timeout 60000 test/backup-stale-socket-5312.test.ts
       - name: Hidden console windows from detached processes (#4992)
         run: bun test --timeout 300000 test/windows-hidden-console.test.ts test/spawn-windows-hide.test.ts test/scripts/windows-hide-guard.test.ts
