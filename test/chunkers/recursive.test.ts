@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { chunkText } from '../../src/core/chunkers/recursive.ts';
+import { cpuMs } from '../helpers/cpu-time.ts';
 
 describe('Recursive Text Chunker', () => {
   test('returns empty array for empty input', () => {
@@ -219,13 +220,10 @@ describe('large pages: delimiter splitting is linear', () => {
   test('a 4 MiB single-paragraph page chunks in well under a second per MiB', () => {
     const sentence = 'Plain prose about acme-example. ';
     const text = sentence.repeat(Math.floor((4 * 1024 * 1024) / sentence.length));
-    // CPU time, not wall-clock: a loaded runner stretches wall time without the chunker doing more work.
-    const started = process.cpuUsage();
-    const chunks = chunkText(text);
-    const used = process.cpuUsage(started);
-    const cpuMs = (used.user + used.system) / 1000;
+    let chunks: ReturnType<typeof chunkText> = [];
+    const used = cpuMs(() => { chunks = chunkText(text); });
     expect(chunks.length).toBeGreaterThan(1000);
     expect(chunks.every(c => c.text.length <= 6000)).toBe(true);
-    expect(cpuMs).toBeLessThan(3000);
+    expect(used).toBeLessThan(3000);
   });
 });
