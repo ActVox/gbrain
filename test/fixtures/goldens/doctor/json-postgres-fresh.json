@@ -1414,6 +1414,12 @@
           "details": {
             "canary_timeout_ms": "<volatile>",
             "docs": "docs/guides/troubleshooting.md#keyword-search-times-out-on-a-large-postgres-brain",
+            "negative_cache": {
+              "last_timeout_at": null,
+              "skips": 0,
+              "timeouts": 0,
+              "ttl_seconds": 600
+            },
             "outcome": "skipped",
             "reason": "small_brain",
             "timeout_ms": "<volatile>"

@@ -62,7 +62,7 @@
 | [`dream_paid_loop`, or dream keeps skipping one transcript](#dream-paid-loop) | fix the cause, then `gbrain dream reset-key --list` and `gbrain dream reset-key '<key>'` | agent, after the user agrees | `paid` (the key is retried) | `gbrain doctor --only dream_paid_loop --json` |
 | [A page exists (`gbrain get <slug>` returns it) but search never finds text from it](memory-boundaries.md#large-pages) | find the cause: `gbrain reindex --oversized --dry-run --json` lists pages stored before the upgrade with a size-based `embed_skip` marker (run it without `--dry-run` to keyword-index them, free); a page above an operator-lowered `content_sanity.bytes_block` keeps its marker until the operator raises or unsets it; a page the content-quality gate quarantined as junk shows in `gbrain quarantine list`, and `gbrain quarantine clear <slug>` re-checks it once the user agrees; a file over the 24 MiB page ceiling was never stored ([`file_too_large`](write-refusals.md#file_too_large)). Embedding the re-indexed pages is a separate paid step: `gbrain embed --held --max-usd <N>` | agent for the reindex; the user decides embedding spend, a `bytes_block` change and a quarantine clear | none for the reindex (CPU only); `paid` for `gbrain embed` | `gbrain reindex --oversized --dry-run --json` lists nothing; `gbrain doctor --json`; `gbrain search "<phrase from deep in the page>"` returns the page |
 | [Search answers look keyword-only on a large Postgres brain](#hybrid-search-returns-only-keyword-hits) | read doctor's `vector_plan`; run the index command it prints | brain host | none | `gbrain doctor --only vector_plan --json` |
-| [Broad keyword queries take about 8 s and come back vector-only (`keyword_arm_failed`) on a large Postgres brain](#keyword-search-times-out-on-a-large-postgres-brain) | read doctor's `keyword_plan`; narrow with `--source-id`, or raise `search.keyword_statement_timeout_ms` on the brain host and restart the serving process | brain host | none | `gbrain doctor --only keyword_plan --json` |
+| [Broad keyword queries take about 8 s and come back vector-only (`keyword_arm_failed`, or `skipped_after_timeout` for 10 minutes after a timeout) on a large Postgres brain](#keyword-search-times-out-on-a-large-postgres-brain) | read doctor's `keyword_plan`; narrow with `--source-id`, or raise `search.keyword_statement_timeout_ms` on the brain host and restart the serving process | brain host | none | `gbrain doctor --only keyword_plan --json` |
 | A second `gbrain serve` cannot open the brain | the readiness `harness_wiring` fix: every session shares one `gbrain serve --http` | user | `persistent_install`, `credentials` | `gbrain doctor --only harness_wiring --json` |
 | `harness_wiring` reports `http_serve_unreachable` or `http_serve_unhealthy` for an HTTP registration | nothing automatic: doctor probed the registered `/health` without credentials and the endpoint did not answer as a healthy gbrain server; check the URL in the harness config and the server it points at (a hosted brain is its operator's). A `wired_running` verdict with `mcp_access: unverified` proves a listener only: confirm tools in a new session | user | none | `gbrain doctor --only harness_wiring --json` |
 | A tool the fix names is missing after a serve recovered | restart the gbrain MCP server in the harness, or start a new session ([why](../protocol/AGENT_OPERATOR_v1.md#tool-catalog-changes-toolslist_changed)) | user | none | list the tools again |
@@ -510,6 +510,32 @@ most of the corpus still reads and ranks every match, so prefer narrowing with
 [#6495](https://github.com/garrytan/gbrain/issues/6495) for the bounded
 candidate set that will answer broad terms from a capped set instead of
 failing open.
+
+**A timed-out keyword search is skipped for 10 minutes.** After hybrid search's
+keyword statement hits the bound, a serving process (`gbrain serve`, an MCP
+session) skips that exact statement for
+`search.keyword_timeout_negative_cache_seconds` (integer seconds, default 600,
+range 0 to 86400, 0 turns it off) instead of holding a backend for the whole
+bound again. The skipped search answers from the vector arm at once and its
+metadata carries `keyword_arm_failed` with reason `skipped_after_timeout`
+(error code `keyword_skipped_after_timeout` in `gbrain errors`). The skip
+covers the same statement only: the same terms with the same source scope,
+types, dates, slug filters, visibility and trust floor of the caller, and the
+same keyword bound. A narrower query (another `--source-id`, `--types`,
+`--since`) still runs keyword search, another brain is never affected, and
+the skip ends by itself when the entry expires, so a brief contention spike
+recovers without anyone acting. A call with `use_cache: false` runs the
+statement anyway.
+
+Limits: the cache lives in the serving process's memory, so a one-shot CLI
+command (`gbrain search …`) starts with an empty cache and gains nothing from
+it, and a restart clears it. The TTL is read on the first timeout after the
+process starts; a changed value takes effect after a restart. Each timeout
+writes one counter row (`search.keyword_timeout_stats`: timeouts, skips counted
+since the previous timeout, last timeout time), never one per search, and
+`gbrain doctor --only keyword_plan --json` reports it under
+`details.negative_cache`. Postgres only: PGLite has no keyword statement
+timeout.
 
 ## Global maintenance timeouts
 

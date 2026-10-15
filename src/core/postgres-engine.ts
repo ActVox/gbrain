@@ -143,6 +143,7 @@ import type { BodyFlipInput, BodyFlipResult, BodyRegion, BodyStagingInput, BodyS
   SegmentedPageMeta, SegmentSweepOptions, SegmentSweepResult, SegmentTextInput } from './page-body/types.ts';
 import { hasCJK } from './cjk.ts';
 import { searchKeywordCJK as searchKeywordCJKImpl } from './engine-sql/cjk-search.ts';
+import { KeywordTimeoutNegativeCache } from './postgres-engine/keyword-timeout-cache.ts';
 import * as titlesImpl from './engine-sql/titles.ts';
 import * as keywordPagesImpl from './engine-sql/keyword-pages.ts';
 import type { CjkKeywordCtx } from './search/cjk-keyword-sql.ts';
@@ -193,6 +194,7 @@ export function getPostgresSchema(
 export class PostgresEngine implements BrainEngine {
   private vectorIterativeScan?: Promise<boolean>;
   private keywordStatementTimeout?: Promise<string>;
+  private keywordTimeouts = new KeywordTimeoutNegativeCache();
   private readonly vectorScope = vectorScopeLoader(() => this.executeRaw<PageSourceStats>(PAGE_SOURCE_STATS_SQL), ids => this.executeRaw<ScopeChunkCount>(SCOPE_CHUNKS_SQL, [ids]));
   /** Transaction clones keep chunk invalidation and replacement atomic. */
   private _chunkWritesInTransaction = false;
@@ -1136,7 +1138,8 @@ export class PostgresEngine implements BrainEngine {
     // wrap is identical to master's; flag on → set_config('app.scopes')
     // shares the same transaction as the timeout.
     const statementTimeout = await this.keywordStatementTimeoutSetting();
-    const runKeyword = (queryText: string, relaxed = false) =>
+    const runKeyword = (queryText: string, relaxed = false) => this.keywordTimeouts.run(opts?.keywordTimeoutCache === true, this,
+      [statementTimeout, relaxed, rawQuery, collapseWebsearchDashRuns(queryText), params.slice(1), opts?.sourceIds ?? null, opts?.sourceId ?? null], () =>
       this.withScopedReadTransaction(opts?.sourceIds, opts?.sourceId, async (tx) => {
         await tx`SELECT set_config('statement_timeout', ${statementTimeout}, true)`;
         const previous = relaxed ? await tx`SHOW enable_seqscan` : [];
@@ -1146,7 +1149,7 @@ export class PostgresEngine implements BrainEngine {
         const rows = await tx.unsafe(rawQuery, boundParams as Parameters<typeof tx.unsafe>[1]);
         if (relaxed) await tx`SELECT set_config('enable_seqscan', ${previous[0].enable_seqscan}, true)`;
         return rows;
-      }, { alwaysTransaction: true, jitOff: true });
+      }, { alwaysTransaction: true, jitOff: true }));
     let rows = await runKeyword(query);
     // D2 fix (fix/title-retrieval-arm): websearch AND semantics at chunk
     // grain mean one non-co-occurring token zeroes keyword recall. When the

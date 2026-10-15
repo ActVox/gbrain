@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    ".wave18b/**": [],
     "test/**/*.serial.test.ts": [
       "test/scripts/serial-files.test.ts"
     ],
