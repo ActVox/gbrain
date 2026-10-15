@@ -11,6 +11,7 @@ import { parseTimelineEntries } from '../link-extraction.ts';
 import { extractTimelineFromContent, hasExtractorDetail, supersededCitationTimeline, type ExtractedTimelineEntry } from '../timeline-extract.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
+import { bodyUnread } from '../page-body/page-shape.ts';
 import { materializedMarker, materializedMarkerHash, timelineKey, timelineKeyHash } from '../timeline-marker.ts';
 import type { OperationError } from '../ops/contract.ts';
 import { protectedRegions } from '../fence-scan.ts';
@@ -364,7 +365,9 @@ function takeCollision(rows: number[], sections: Map<number, FenceSection>, slug
  * Prepare provider-free projections outside publication. `prior` is the
  * caller's snapshot at its observed revision; stored timeline rows and take
  * row numbers are pinned here so the publication transaction only removes
- * what this writer actually edited.
+ * what this writer actually edited. A prior body left unread (a segmented page
+ * over the single-string ceiling, which holds no fences) contributes no rows of
+ * its own: stored timeline rows and takes stay unless the new body changes them.
  */
 export async function prepareCanonicalProjections(engine: BrainEngine, page: ParsedPage, slug: string, sourceId: string,
   prior: PageSnapshot | null, writer: ProjectionWriter, policy?: TimelineWritePolicy): Promise<(tx: BrainEngine, pageId?: number) => Promise<CanonicalProjectionResult>> {
@@ -372,18 +375,19 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
   // #6259: a page the content-quality gate hid as junk projects no facts or takes. Rows projected before it
   // was quarantined are left as they are (hiding them would need a new row state); only new projection stops.
   const projectFences = !isQuarantined(page.frontmatter);
+  const priorBody = prior && !bodyUnread(prior.page) ? prior.page : null;
   const { timeline, exactIncoming, pinned } = classifyTimeline(prior ? await storedTimeline(engine, prior.page.id) : [],
-    page, prior?.page ?? null, slug, writer, policy);
+    page, priorBody, slug, writer, policy);
   const deletions = JSON.stringify(pinned.filter(row => row.action === 'delete')
     .map(({ id, date, source, summary, detail, state }) => ({ id, date, source, summary, detail, removed: state === 'removed' || state === 'removed_marked' })));
   const refreshes = JSON.stringify(pinned.filter(row => row.action === 'refresh_detail')
     .map(row => ({ id: row.id, detail: row.detail, next: exactIncoming.get(exactTimelineKey(row)) }))
     .filter(row => row.next !== row.detail));
-  const priorTakes = prior ? canonicalTakeRows(prior.page) : new Set<number>();
+  const priorTakes = priorBody ? canonicalTakeRows(priorBody) : new Set<number>();
   // TE1 (#6188): when the prior takes fence does not parse, its stored rows count as prior canonical rows, so a
   // row Tier 1 normalized (same number, holder `system` -> `brain`) updates its stored take instead of colliding.
-  const priorCanonical = prior && [prior.page.compiled_truth, prior.page.timeline ?? ''].some(field => parseTakesFence(field).warnings.length)
-    ? new Set([...priorTakes, ...(await engine.executeRaw<{ row_num: number }>('SELECT row_num FROM takes WHERE page_id=$1', [prior.page.id])).map(r => Number(r.row_num))])
+  const priorCanonical = priorBody && [priorBody.compiled_truth, priorBody.timeline ?? ''].some(field => parseTakesFence(field).warnings.length)
+    ? new Set([...priorTakes, ...(await engine.executeRaw<{ row_num: number }>('SELECT row_num FROM takes WHERE page_id=$1', [priorBody.id])).map(r => Number(r.row_num))])
     : priorTakes;
   const newTakes = JSON.stringify(takes.filter(t => !priorCanonical.has(t.rowNum)).map(t => ({ row_num: t.rowNum, claim: t.claim, kind: t.kind, holder: t.holder })));
   const takeRowsGone = [...priorTakes].filter(n => !takes.some(t => t.rowNum === n));
@@ -430,19 +434,26 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
       WHERE f.source_id=$1 AND f.source_markdown_slug=$2 AND f.row_num=r.row_num`, [sourceId, slug, fieldRows]) : Promise.resolve([]);
     const checkTakes = () => refuseCollisions(tx, id);
     const dropTakes = () => tx.executeRaw('DELETE FROM takes WHERE page_id=$1 AND row_num=ANY($2::integer[])', [id, takeRowsGone]);
-    // Full canonical versions include resolution fields; a revert restores those
-    // fields from Markdown too, without the ordinary immutable-resolution API.
-    const resolutions = JSON.stringify(takes.map(take => ({ row_num: take.rowNum, resolved_at: take.resolvedAt ?? null,
+    // A fence row's resolution cells are written as Markdown says, so a revert to a version that carries them restores
+    // them. A row without resolution cells keeps the stored resolution (a database-only grade, e.g. unmanaged
+    // grade_takes) unless its claim changed in place, which drops the old claim's grade.
+    const fenceResolved = takes.filter(take => take.resolvedAt !== undefined || take.resolvedQuality !== undefined);
+    const claims = JSON.stringify(takes.map(take => ({ row_num: take.rowNum, claim: take.claim })));
+    const clearChangedResolutions = () => takes.length ? tx.executeRaw(`UPDATE takes k SET resolved_at=NULL,resolved_quality=NULL,
+        resolved_outcome=NULL,resolved_source=NULL,resolved_value=NULL,resolved_unit=NULL,resolved_by=NULL
+      FROM jsonb_to_recordset($2::text::jsonb) AS n(row_num integer,claim text)
+      WHERE k.page_id=$1 AND k.row_num=n.row_num AND k.resolved_at IS NOT NULL AND k.claim IS DISTINCT FROM n.claim`, [id, claims]) : Promise.resolve([]);
+    const resolutions = JSON.stringify(fenceResolved.map(take => ({ row_num: take.rowNum, resolved_at: take.resolvedAt ?? null,
       resolved_quality: take.resolvedQuality ?? null,
       resolved_outcome: take.resolvedQuality === 'correct' ? true : take.resolvedQuality === 'incorrect' ? false : null,
       resolved_source: take.resolvedEvidence ?? null, resolved_value: take.resolvedValue ?? null, resolved_unit: take.resolvedUnit ?? null,
       resolved_by: take.resolvedBy ?? null })));
-    const resolveTakes = () => tx.executeRaw(`UPDATE takes k SET resolved_at=r.resolved_at::timestamptz,resolved_quality=r.resolved_quality,
+    const resolveTakes = () => fenceResolved.length ? tx.executeRaw(`UPDATE takes k SET resolved_at=r.resolved_at::timestamptz,resolved_quality=r.resolved_quality,
         resolved_outcome=r.resolved_outcome,resolved_source=r.resolved_source,resolved_value=r.resolved_value,resolved_unit=r.resolved_unit,
         resolved_by=r.resolved_by
       FROM jsonb_to_recordset($2::text::jsonb) AS r(row_num integer,resolved_at text,resolved_quality text,resolved_outcome boolean,
         resolved_source text,resolved_value real,resolved_unit text,resolved_by text)
-      WHERE k.page_id=$1 AND k.row_num=r.row_num`, [id, resolutions]);
+      WHERE k.page_id=$1 AND k.row_num=r.row_num`, [id, resolutions]) : Promise.resolve([]);
     // Event-page references have a different canonical origin and remain intact;
     // new rows carry their Markdown detail on insert, pinned rows refresh only from their preimage.
     const timelineRows = [
@@ -471,7 +482,7 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
         () => pipelined(tx, [expireFacts, ...timelineRows])));
       if (guard.rows.length) await step('facts', () => tx.insertFacts(guard.rows, { source_id: sourceId })); // gbrain-allow-direct-insert: canonical fence projection shares the journal publication transaction
       const contested = await step('fact_trust', () => guard.finish(tx));
-      await step('fact_fields', () => pipelined(tx, [factFields, checkTakes, dropTakes]));
+      await step('fact_fields', () => pipelined(tx, [factFields, checkTakes, dropTakes, clearChangedResolutions]));
       if (takes.length) {
         await step('takes', async () => {
           await tx.addTakesBatch(takes.map(t => takesPreparation.toCanonicalBatchInput(id, t)));

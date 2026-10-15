@@ -1,5 +1,6 @@
 import type { BrainEngine } from '../engine.ts';
 import { contentHash } from '../utils.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { assertPageRevision, type PageSnapshot } from './types.ts';
 import { withCoordinatedWrite } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
@@ -14,6 +15,7 @@ export async function materializePageSnapshot(engine: BrainEngine, snapshot: Pag
     const current = await tx.readPageSnapshot(slug, { sourceId, includeDeleted: true });
     assertPageRevision(current, { expectedRevision: snapshot.revision });
     if (!current || current.sourceIncarnation !== snapshot.sourceIncarnation) throw new Error('Page source incarnation changed');
+    assertInlineBody(current.page, 'materializePageSnapshot');
     const previous = await tx.executeRaw<{ revision: string | null }>("SELECT current_setting('gbrain.materializing_revision',true) AS revision");
     await tx.executeRaw("SELECT set_config('gbrain.materializing_revision',$1,true)", [current.revision]);
     // Only database-derived canonical bytes may use the bypass. Callers cannot

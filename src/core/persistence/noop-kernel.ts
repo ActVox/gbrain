@@ -32,7 +32,7 @@ import type { PreparedMutation } from './coordinator.ts';
 import { persistenceFileHash } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
-import { belowSafeChunkFence } from '../search/safe-chunks.ts';
+import { belowSafeChunkFence, chunkGenerationFilter } from '../search/safe-chunks.ts';
 import { sha256 } from './digest.ts';
 
 export interface NoopKernelResult {
@@ -60,8 +60,8 @@ export interface KernelPage { id: number | string; slug: string; chunker_version
   mode_pending: boolean; unembedded: boolean; source_path: string | null }
 /** The kernel's page read; callers append the `WHERE` (one page by id, or #6712 PR 1 a prescreened run by slug). */
 export const KERNEL_PAGE_SQL = `SELECT p.id,p.slug,p.chunker_version,p.text_projection_revision::text,p.knowledge_revision::text,p.source_path,
-      (p.contextual_retrieval_mode IS NULL AND EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NOT NULL)) AS mode_pending,
-      EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL) AS unembedded
+      (p.contextual_retrieval_mode IS NULL AND EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NOT NULL AND ${chunkGenerationFilter('p', 'c')})) AS mode_pending,
+      EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL AND ${chunkGenerationFilter('p', 'c')}) AS unembedded
     FROM pages p`;
 
 /**

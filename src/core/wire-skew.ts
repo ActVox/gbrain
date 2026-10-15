@@ -9,6 +9,6 @@ export interface WireSkewWindow { field: string; floor: string; accept_until: st
 
 export const WIRE_SKEW_WINDOWS = {
   /** #6712 PR 1: the managed cursor's processing options are inherited, so the explicit-flag list no longer decides anything. */
-  explicitProcessing: { field: 'explicitProcessing', floor: '0.60.251.0', accept_until: '2026-11-14',
+  explicitProcessing: { field: 'explicitProcessing', floor: '0.60.253.0', accept_until: '2026-11-14',
     why: 'Sync clients below the floor send the processing flags their user typed (#6317, #6696); a resume now inherits the cursor\'s opt-outs instead.' },
 } as const satisfies Record<string, WireSkewWindow>;

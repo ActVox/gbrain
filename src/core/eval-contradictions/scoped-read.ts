@@ -19,7 +19,7 @@ import { projectionEligibleSql } from '../eligibility/sql.ts';
 import { stampPageTrust, stampRowTrust } from '../eligibility/stamp.ts';
 import type { Contested } from '../eligibility/labels.ts';
 import { pageReadFilter } from '../search/read-policy-sql.ts';
-import { currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from '../search/safe-chunks.ts';
+import { chunkVisibleFilter, requiresSafeChunks, safeChunksFilter } from '../search/safe-chunks.ts';
 import { admitsTrust, compareTrust, storedTrustTier, type TrustTier } from '../trust/tier.ts';
 import type { PageReadPolicy } from '../types.ts';
 import { renderResolutionCommand } from './auto-supersession.ts';
@@ -57,7 +57,7 @@ async function loadChunks(engine: Pick<BrainEngine, 'executeRaw'>, ids: number[]
   const rows = await engine.executeRaw<LiveChunk>(
     `SELECT cc.id, cc.page_id, cc.chunk_text, p.slug, p.source_id
        FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
-      WHERE cc.id = ANY($1::int[]) AND ${pageSql} AND ${currentTextProjectionFilter('p')}${safe}`, params);
+      WHERE cc.id = ANY($1::int[]) AND ${pageSql} AND ${chunkVisibleFilter('p', 'cc')}${safe}`, params);
   const live = rows.map(r => ({ ...r, id: Number(r.id), page_id: Number(r.page_id), judged_text: r.chunk_text } as LiveChunk & { judged_text: string; trust_tier?: string; origin?: string; unconfirmed?: true; contested?: Contested }));
   const stamped = await stampPageTrust(engine, live, floor);
   return new Map(stamped.map((r): [number, LabeledChunk] => [r.id, { ...r, trust_tier: storedTrustTier(r.trust_tier), origin: r.origin ?? 'unrecorded' }]));
