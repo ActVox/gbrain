@@ -15,8 +15,8 @@
  *   (`both`), or there is no usable record (`unknown`: none, one written before PR 0, or a partial one). `database` is
  *   guarded in every discovery; `both` and `unknown` in a tree walk (first sync, `--full`, an unreachable checkpoint, a
  *   re-discovery), where no Git delta says the file is the side that changed. A page whose current revision a
- *   committed managed-sync request of this incarnation wrote (`pages.revision_write_request_id`) has no database-only
- *   edit to protect and is not guarded. A guarded entry is imported only when the freeze proves the import changes
+ *   committed managed-sync request of this incarnation wrote, or whose writer's write-through wrote to its file
+ *   (`pages.revision_write_request_id`, `fileBackedRevisions`), has no database-only edit to protect and is not guarded. A guarded entry is imported only when the freeze proves the import changes
  *   nothing (`sameContentAtOrigin`); otherwise it is held `file_drift` (sync-run.ts `driftHold`).
  * - Under `storage.keep_db` prefixes a drifted page is not held: its entry leaves the manifest (nothing imported) and is
  *   recorded as a drift candidate the keep_db worker reconciles from the database (`liveFileDrift` confirms the file
@@ -84,8 +84,8 @@ export async function prescreenSyncEntries(engine: BrainEngine, discovered: Sync
     else if (side) { entry.drift = side; guarded.push(entry); }
   }
   if (!guarded.length) return;
-  const synced = await syncWrittenRevisions(engine, discovered, guarded.map(entry => Number(entry.pageId)));
-  const drifted = guarded.filter(entry => synced.has(Number(entry.pageId)) ? (delete entry.drift, false) : true);
+  const backed = await fileBackedRevisions(engine, discovered, guarded.map(entry => Number(entry.pageId)));
+  const drifted = guarded.filter(entry => backed.has(Number(entry.pageId)) ? (delete entry.drift, false) : true);
   await releaseKeepDbDrift(engine, discovered, drifted, input.dryRun);
 }
 
@@ -103,13 +103,20 @@ export async function movedDriftHolds(engine: Pick<BrainEngine, 'executeRaw'>, s
   return new Set(drift.filter(hold => (revisions.get(Number(hold.page_id)) ?? null) !== (hold.meta.page_revision ?? null)).map(hold => hold.path));
 }
 
-/** Pages whose current revision a committed managed-sync request of this incarnation wrote (no database-only edit since). */
-async function syncWrittenRevisions(engine: BrainEngine, discovered: Pick<SyncDiscovery, 'sourceId' | 'incarnation'>, pageIds: number[]): Promise<Set<number>> {
+/**
+ * Pages whose current revision has no database-only edit to protect: a committed managed-sync request of this
+ * incarnation wrote it (the file was its input), or its writer's publication wrote that revision to the page's own
+ * origin file (write-through: a `git` effect with the written bytes' hash, whatever its state). Either way the file held
+ * the page at that revision, so a file that differs now changed in Git afterwards.
+ */
+async function fileBackedRevisions(engine: BrainEngine, discovered: Pick<SyncDiscovery, 'sourceId' | 'incarnation'>, pageIds: number[]): Promise<Set<number>> {
   const out = new Set<number>();
   for (let i = 0; i < pageIds.length; i += PROVENANCE_CHUNK) {
     const rows = await engine.executeRaw<{ id: number | string }>(`SELECT p.id FROM pages p JOIN persistence_requests r ON r.id=p.revision_write_request_id
-      WHERE p.source_id=$1 AND p.id=ANY($2::bigint[]) AND r.state='committed' AND r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete')
-        AND r.source_id=p.source_id AND r.source_incarnation::text=$3 AND (r.page_id IS NULL OR r.page_id=p.id)`, [discovered.sourceId, pageIds.slice(i, i + PROVENANCE_CHUNK), discovered.incarnation]);
+      WHERE p.source_id=$1 AND p.id=ANY($2::bigint[]) AND r.state='committed' AND r.source_id=p.source_id AND (
+        r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND r.source_incarnation::text=$3 AND (r.page_id IS NULL OR r.page_id=p.id)
+        OR EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.revision=p.knowledge_revision
+          AND e.data->>'expected_hash' IS NOT NULL AND (e.data->>'relative_path'=p.source_path OR right(e.data->>'relative_path', length(p.source_path)+1)='/'||p.source_path)))`, [discovered.sourceId, pageIds.slice(i, i + PROVENANCE_CHUNK), discovered.incarnation]);
     for (const row of rows) out.add(Number(row.id));
   }
   return out;

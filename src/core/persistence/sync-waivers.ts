@@ -375,7 +375,8 @@ export async function unchangedSyncImport(engine: BrainEngine, cursor: WaiverCur
       waive: intent.working === true ? ['contextual_mode', 'canonical_file_differs'] : undefined });
     if (inspected.admitReason) return null;
     await prepared.validate?.(engine);
-    return { kernel: inspected.waived ?? [], ...(prepared.importProvenance ? { provenance: prepared.importProvenance } : {}) };
+    // #6712 PR 1: a #5751 waiver records no provenance, since the prescreen would skip the file where the kernel admits it.
+    return { kernel: inspected.waived ?? [], ...(prepared.importProvenance && !inspected.waived?.length ? { provenance: prepared.importProvenance } : {}) };
   } catch (error) {
     rethrowAbort(error, signal);
     return null;
