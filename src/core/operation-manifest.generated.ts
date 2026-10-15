@@ -6038,7 +6038,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "The open-loop engine's killer output: who is waiting on you, what you promised, and the context needed to respond. Grouped by counterparty (default, ranked; each group shows at most 5 loops, the rest counted in loops_omitted) or flat. Loops that name no counterparty are never ranked as a person: they come back in no_counterparty (null when none). Loops come from the deterministic Gmail thread-state detector and the LLM commitment extractor. Remote callers get redacted evidence (no verbatim quotes); trusted local callers also get quotes, Gmail deep links, entity-card context, and a pre-rendered text digest. Carries google-source freshness (stale flag) and completeness: when it is \"partial\", some mail in the window is held after repeated import failures; present the answer as partial and name the held items and their retry command.",
+    "description": "The open-loop engine's killer output: who is waiting on you, what you promised, and the context needed to respond. Grouped by counterparty (default, ranked; each group shows at most 5 loops, the rest counted in loops_omitted) or flat. Loops that name no counterparty are never ranked as a person: they come back in no_counterparty (null when none). Loops come from the deterministic Gmail thread-state detector and the LLM commitment extractor. Remote callers get redacted evidence (no verbatim quotes); trusted local callers also get quotes, Gmail deep links, entity-card context, and a pre-rendered text digest. Carries google-source freshness (stale flag) and completeness: when it is \"partial\", some mail in the window is held after repeated import failures; present the answer as partial and name the held items and their retry command. The grouped view also returns withheld_noise (null when none): open reply-owed loops from senders whose mail the detector now treats as automated, with a per-sender preview_command for closing them.",
     "params": {
       "group_by": {
         "type": "string",
@@ -6141,7 +6141,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "loops_mute",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Suppress a sender (email address) or thread id from opening NEW loops — the detector feedback primitive behind \"never track this sender\". Existing loops keep their state.",
+    "description": "Suppress a sender (email address) or thread id from opening NEW loops — the detector feedback primitive behind \"never track this sender\". It also closes that sender's (or thread's) open reply-owed (unanswered_inbound) loops as dropped with closed_by \"muted\" and lists their ids in `closed`; other loop types keep their state. dry_run lists `would_close` and changes nothing. loops_unmute re-checks the closed loops.",
     "params": {
       "kind": {
         "type": "string",
@@ -6170,7 +6170,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "loops_unmute",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Remove a sender/thread suppression added by loops_mute, so the detector can open NEW loops for it again. Exact-match only. Does not reopen loops closed while the mute was in place.",
+    "description": "Remove a sender/thread suppression added by loops_mute, so the detector can open NEW loops for it again. Exact-match only. The reply-owed loops the mute closed (unless another mute still covers them) are queued for re-check on the next Gmail sync and listed in `requeued`: a loop reopens only when nothing answered its thread since the mute. `unverifiable` lists closed loops with no thread to re-check (they stay closed); `stale_source` means the re-check waits on a sync that has not run in 24h. Manually closed loops are never touched. dry_run lists `would_requeue` and changes nothing.",
     "params": {
       "kind": {
         "type": "string",

@@ -261,6 +261,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'db_only_collector_collision',
   'federation_health',
   'google_file_modes',
+  // #5012 item 9: a Google source's configured calendar was unreadable at its last sync (doctor/checks/google-calendar.ts).
+  'google_calendar_readable',
   'google_oauth',
   'home_dir_in_worktree',
   'index_audit',

@@ -1456,6 +1456,18 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/google-connect.md#unreadable-calendar",
+            "sources": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No Google source recorded an unreadable calendar at its last sync.",
+          "name": "google_calendar_readable",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "ambiguous": 0,
