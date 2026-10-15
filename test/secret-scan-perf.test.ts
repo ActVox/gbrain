@@ -22,9 +22,10 @@
  * ECHO_MAX_VALUE_CHARS, 4096-char values), so what they guard is a constant
  * factor, which a size ratio cannot see.
  *
- * Every timing, ratio or bound, is process CPU time, which measures the work
- * rather than how long the scheduler made it wait (a wall-clock 400 ms bound
- * read 409 ms at 32 busy slots on a shared CI VM).
+ * Every timing, ratio or bound, is CPU time on the test's thread
+ * (helpers/cpu-time.ts), which measures the work rather than how long the
+ * scheduler made it wait (a wall-clock 400 ms bound read 409 ms at 32 busy
+ * slots on a shared CI VM).
  *
  * Every credential-shaped value is synthetic and runtime-joined from >= 2
  * fragments; constant names keep scanner keywords away from the `=`.
@@ -41,32 +42,36 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'crypto';
 import { ECHO_MAX_UNIQUE, ECHO_MAX_VALUE_CHARS, privateKeySpans, redactFindings, scanText } from '../src/core/secret-scan.ts';
+import { cpuMs } from './helpers/cpu-time.ts';
 
 const SCALE = 10;
 const MAX_RATIO = 30;
 const RATIO_TIMEOUT_MS = 60_000;
 
-function cpuMs(fn: () => void): number {
-  const start = process.cpuUsage();
-  fn();
-  const used = process.cpuUsage(start);
-  return (used.user + used.system) / 1000;
-}
+// Process CPU, not cpuMs's thread CPU, for the repetitive-tail bound: an injected allocating echo-sweep regression
+// passed it 3 of 3 on thread CPU (standalone: 1712 ms thread vs 3231 ms process, GC threads) and failed at 2386 ms on process CPU.
+function processCpuMs(fn: () => unknown): number { const s = process.cpuUsage(); fn(); const u = process.cpuUsage(s); return (u.user + u.system) / 1000; }
+
+/** Thread CPU time advances in scheduler ticks (~4 ms on Linux), so each timed window repeats its call until it holds at least this much. */
+const MIN_WINDOW_MS = 40;
 
 /**
- * cpu(large) / cpu(small) for one call on inputs SCALE apart, timed back to back in this process. Process CPU
- * time, not wall clock: a run that waits for a busy CPU accrues none, so load on a shared VM moves neither side
- * (under 6 busy loops at nice 10, wall-clock ratios of the same pair ranged 0-376x, CPU-time ratios 5-18x).
- * `small` runs SCALE times per window so its sub-millisecond time is well above the clock's resolution. The best
- * of up to 3 pairs, stopping at the first under MAX_RATIO; a regression that grows with the input is over
- * MAX_RATIO in every pair. The caller's correctness run warms `large`.
+ * cpu(large) / cpu(small) per call on inputs SCALE apart, timed back to back on this thread. CPU time, not wall
+ * clock: a run that waits for a busy CPU accrues none, so load on a shared VM moves neither side (under 6 busy
+ * loops at nice 10, wall-clock ratios of the same pair ranged 0-376x, CPU-time ratios 5-18x). `large` repeats
+ * `reps` times per window, the smallest power of two that fills MIN_WINDOW_MS, and `small` SCALE times as often,
+ * so both windows are about as long. The best of up to 3 pairs, stopping at the first under MAX_RATIO; a
+ * regression that grows with the input is over MAX_RATIO in every pair. The caller's correctness run warms `large`.
  */
 function scalingRatio(small: () => unknown, large: () => unknown): number {
   small();
+  const repeat = (fn: () => unknown, n: number) => cpuMs(() => { for (let k = 0; k < n; k++) fn(); }) / n;
+  let reps = 1;
+  while (repeat(large, reps) * reps < MIN_WINDOW_MS) reps *= 2;
   let best = Infinity;
   for (let pair = 0; pair < 3 && !(best < MAX_RATIO); pair++) {
-    const t = cpuMs(() => { for (let k = 0; k < SCALE; k++) small(); }) / SCALE;
-    best = Math.min(best, cpuMs(() => { large(); }) / Math.max(t, 0.05));
+    const t = repeat(small, SCALE * reps);
+    best = Math.min(best, repeat(large, reps) / Math.max(t, 0.005));
   }
   return best;
 }
@@ -370,7 +375,7 @@ describe(`the echo pass is at most ${ECHO_MAX_UNIQUE} substring sweeps over the 
     gc?.(true);
     const before = process.memoryUsage();
     let result!: ReturnType<typeof redactFindings>;
-    const ms = cpuMs(() => { result = redactFindings(text); });
+    const ms = processCpuMs(() => { result = redactFindings(text); });
     const after = process.memoryUsage();
     expect(result.redactions.length).toBe(ECHO_MAX_UNIQUE);
     expect(/A{20}/.test(result.text)).toBe(false);
