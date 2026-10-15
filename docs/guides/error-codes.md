@@ -1004,6 +1004,14 @@ More: [docs/guides/troubleshooting.md#embedding-state](../../docs/guides/trouble
 
 More: [docs/guides/move-to-postgres.md#graduated-datastore](../../docs/guides/move-to-postgres.md#graduated-datastore)
 
+### entity_types_unavailable
+
+<a id="entity_types_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A schema pack in scope did not load, so the entity page types are unknown; onboarding's entity_link_coverage and timeline_coverage warn instead of grading the old hardcoded type list. | Entity types come from the active pack per source (the get_health predicate). Grading a fixed person/company list would count the wrong population on a pack with its own entity types, so the checks name the sources whose pack failed. | Run gbrain schema active --json (add --source <id> for a named source) to see which pack is active and why it did not load; fix or reinstall the pack, then gbrain onboard --json. | agent | `gbrain doctor --json` | 1 | no |
+
 ### eval_suite_unwired
 
 <a id="eval_suite_unwired"></a>
