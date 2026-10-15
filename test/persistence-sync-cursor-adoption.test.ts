@@ -207,6 +207,36 @@ test('fan-in: the newest older-key cursor finishes in place; an older one is kep
   expect(await engine.getPage('e', { sourceId: id })).not.toBeNull();
 }), 180_000);
 
+test('fan-in is crash-safe: a run killed right after it supersedes an older-key cursor leaves it retired, and the next run finishes', async () => each(async engine => {
+  const id = await fixture(engine, ['a', 'b', 'c', 'd']);
+  const park = (key: string, op: string) => engine.executeRaw('UPDATE op_checkpoints SET op=$2 WHERE fingerprint=$1 AND op IN (\'managed-sync\',\'managed-sync-parked\')', [key, op]);
+  const older = `${id}-older`, newest = `${id}-newest`;
+  try {
+    __setManagedCursorKeyForTests(() => older);
+    expect(await performManagedSync(engine, opts(id), { maxPages: 1, maxMs: 1000 })).toMatchObject({ status: 'partial' });
+    await park(older, 'managed-sync-parked');
+    __setManagedCursorKeyForTests(() => newest);
+    expect(await performManagedSync(engine, opts(id), { maxPages: 1, maxMs: 1000 })).toMatchObject({ status: 'partial' });
+    await park(older, 'managed-sync');
+    await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()-interval '1 hour' WHERE op='managed-sync' AND fingerprint=$1", [older]);
+  } finally { __setManagedCursorKeyForTests(null); }
+  for (let i = 0; i < 100 && (await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND state IN ('queued','running')", [id])).length; i++) await new Promise(resolve => setTimeout(resolve, 100));
+  installFaultHook(async (point, detail) => { if (point === 'sync:cursor_adopted' && detail.sourceId === id) throw new Error('killed after the supersede'); });
+  await expect(performManagedSync(engine, opts(id))).rejects.toThrow('killed after the supersede');
+  installFaultHook(undefined);
+  const cursors = async () => (await engine.executeRaw<{ key: string }>(
+    "SELECT fingerprint AS key FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1 ORDER BY fingerprint", [id])).map(row => row.key);
+  expect(await cursors()).toEqual([newest]);
+  const resumed = await performManagedSync(engine, opts(id));
+  expect(resumed.status).toBe('first_sync');
+  expect(resumed.cursorFanIn).toEqual({ adopted: true, superseded: 0, retained: 0 });
+  for (const name of ['a', 'b', 'c', 'd']) expect(await engine.getPage(name, { sourceId: id })).not.toBeNull();
+  expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND state NOT IN ('committed','cancelled')", [id])).toHaveLength(0);
+  for (const row of await engine.executeRaw<{ message: string }>("SELECT error_message AS message FROM persistence_requests WHERE source_id=$1 AND state='cancelled'", [id])) {
+    expect(row.message).toBe(SUPERSEDED_BY_ADOPTION_MESSAGE);
+  }
+}), 180_000);
+
 // Outside-voice review: a request claimed between the fan-in's read and its retirement must still hold the pass back.
 test('fan-in: a request claimed between the read and the retirement keeps the pass waiting (writer_pending), not draining beside it', async () => each(async engine => {
   const id = await fixture(engine, ['a', 'b', 'c', 'd']);
