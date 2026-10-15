@@ -24,8 +24,10 @@ next to the withdrawal ledger and the mutation journal, and it carries a
 backup and migration contract (section 8).
 
 V1 answers "what this brain had recorded since its coverage watermark" (section
-7). It does not claim what the owner privately believed, and it does not
-certify historical observation for anything it backfills.
+7), and it certifies that answer only on managed sources, where every write
+of a fact, take or page passes a coordinated path. It does not claim what the
+owner privately believed, and it does not certify historical observation for
+anything it backfills or anything an unmanaged writer changed.
 
 What it is not:
 
@@ -95,19 +97,49 @@ Row ids (`facts.id`, `takes.id`, `pages.id`, `links.id`) and fence positions
 (`row_num`) are payload only. They are recorded for debugging but never joined
 on.
 
-| Subject | Logical key | Notes |
+Two lifetimes scope every key:
+
+- **Source lifetime.** `sources.incarnation` (a UUID minted when a source is
+  created, `persistence/source-lifecycle.ts:246`). Removing a source deletes
+  that row (`:278`), and re-adding a source with the same id mints a new
+  incarnation. Every event stores `source_incarnation`, so an old source's
+  history, watermark and authorization never attach to a new source that
+  reuses its id.
+- **Page lifetime.** `page_lifetime`, a UUID the ledger mints at the page's
+  first event (its creation or its baseline, section 7.1) and stores in a
+  side table `belief_page_lifetimes (source_id, source_incarnation, slug,
+  page_lifetime, started_at, ended_at)`. It is not derived from
+  `knowledge_revision`, which changes on every write (`src/schema.sql:1862`)
+  and whose first value is not recoverable once versions are pruned. A delete
+  then recreate of a slug starts a new lifetime. A rename keeps the lifetime
+  and records the new slug. Subjects with no page (database-only facts whose
+  `entity_slug` names no page) have a NULL `page_lifetime` and are scoped by
+  source lifetime and subject slug alone.
+
+| Subject | Logical key (always under `source_incarnation`) | Notes |
 |---|---|---|
-| page | `(source_id, slug)` + `incarnation` | `incarnation` is the page's first `knowledge_revision` (`src/schema.sql:1821-1829`). A delete then recreate of the same slug is a new incarnation, so its history does not merge with the old page's. |
-| fact | `(source_id, subject_slug, fp_version, fingerprint, visibility, occurrence)` | `subject_slug` is `source_markdown_slug` for fence rows and `entity_slug` for database-only rows. Withdrawals already match on `(source_id, visibility, entity_slug, fingerprint)` (`src/core/facts/withdrawal.ts:77-82`). `fingerprint` is `gbrain_fact_fingerprint(fact)`. It has been re-versioned once (`withdrawal-schema.ts:24-36`), hence `fp_version`. `occurrence` is 0 unless one page holds the same claim twice. |
-| take | `(source_id, slug, row_num, claim_hash)` | A take's row number cannot be reassigned to a different claim while the take exists: the projection refuses with `take_row_collision` (`canonical-projections.ts:390-397`). Once the take is deleted, the number is free again, so `claim_hash` (over claim, kind, holder) tells a reuse from a revision, as `take_purges` does. |
-| link assertion | `(source_id, from_slug, to_slug, link_type, link_source, origin_slug)` | The physical unique key with page ids replaced by slugs (`src/schema.sql:548-549`). The derived-links diff already compares this slug tuple (`derived-links.ts:282-284`). |
+| page | `page_lifetime` | Slug is payload, resolved through the lifetime table. |
+| fact (claim) | `(subject_slug, fp_version, fingerprint, visibility)` | `subject_slug` is `source_markdown_slug` for fence rows and `entity_slug` for database-only rows. Withdrawals already match on `(source_id, visibility, entity_slug, fingerprint)` (`src/core/facts/withdrawal.ts:77-82`). `fingerprint` is `gbrain_fact_fingerprint(fact)`, re-versioned once (`withdrawal-schema.ts:24-36`), hence `fp_version`. Two identical claims on one page are one belief whose value carries `count`, so reordering them emits nothing. |
+| fact (ontology observation) | `(entity_slug, dimension, value_hash, source_markdown_slug, valid_from)` | The stint identity the schema already enforces (`v188-facts-ontology-stint-dedup.ts:15-17`). Stints with identical claim text are distinct beliefs. |
+| take | `(page_lifetime, claim_hash, ordinal)` | `claim_hash` is over claim, kind and holder, as `take_purges` uses. `ordinal` separates identical claims on one page, ordered by `since_date` then row number at first sight, and stays fixed for the take's life. Row number is **not** identity: the collision check covers only new row numbers (`canonical-projections.ts:388`), and the upsert can replace a claim in place (`engine-sql/takes.ts:82-84`). A pure renumber emits nothing. An in-place claim edit at the same row is `take.retracted(old)` plus `take.asserted(new)` linked by `replaces`. |
+| link assertion | `(from_source_id, from_slug, to_source_id, to_slug, link_type, link_source, origin_source_id, origin_slug)` | Every endpoint qualified by source, as the derived-links diff already does (`derived-links.ts:282-284`) and storage resolves (`engine-sql/links.ts:117-119`). Endpoint lifetimes are recorded in the payload. The event belongs to the **origin** page's stream (lock and order), else to the from page. |
 | link transition | link key + `(kind, occurred_on, producer)` | Evidence rows from `link_transitions`. |
 
-A page identity change is one event (`page.renamed`, carrying `old_slug` and
-`new_slug`) that re-keys everything under the old slug. Readers follow the
-chain of rename events. No other event is rewritten. There is no code path
-that changes `pages.source_id` today (census P11), so `page.source_moved` is
-reserved but has no producer in V1.
+Identity changes are explicit events:
+
+- **Rename** (`page.renamed`, carrying `old_slug` and `new_slug`): same
+  lifetime, new slug. Readers resolve slugs through the lifetime table.
+- **Merge** (phantom redirect). Not a rename: the managed merge is two
+  requests (`cycle/phantom-redirect-managed.ts:4-12`), and both pages exist
+  between them. The first transaction appends `page.published` for the
+  canonical page and one `*.transferred` event per moved assertion, each
+  naming the phantom's lifetime as `from_lifetime`. The second transaction,
+  when it commits, appends `page.deleted` for the phantom. A crash between
+  them leaves both pages live in the ledger, exactly as they are in the
+  database. Overlapping claims on both pages stay two beliefs until a
+  transfer names one of them.
+- There is no code path that changes `pages.source_id` today (census P11), so
+  `page.source_moved` is reserved but has no producer in V1.
 
 **Keys are derived, never stored as foreign keys.** That is what makes the
 ledger survive the legacy engine copier (fresh page ids, takes not copied:
@@ -125,22 +157,29 @@ change. Each case maps to exactly one rule.
 | Projection refresh | **No event.** The canonical value under the logical key is unchanged. | `factFields` rewriting identical cells; a takes upsert with the same claim; both relationship scopes re-upserted with the same `evidence_hash`; derived `link_transitions` deleted and reinserted with the same content. |
 | Real assertion | One event per key whose canonical value changed (types below). | A fence row's claim edited; a take resolved; a link added in Markdown. |
 | Visibility-only recomputation | **One page-level event**, never per row. | A page soft-deleted (`page.deleted`), restored (`page.restored`), made private or quarantined (`page.visibility_changed`). The facts the cycle later expires for a deleted page (census F3) and the `world` relationship scope are consequences that readers derive. |
-| Row reuse | Retract the old key and assert the new key, linked by `replaces`. If only the row id or position changed, **no event**. | A different claim written at fence row 3 retracts `fp(old)` and asserts `fp(new)`. A higher-trust row moved to a new row number by the guard emits nothing. |
-| Identity change | One `page.renamed` event. | Sync rename, fallback rename, phantom merge into a canonical slug. |
+| Row reuse | Retract the old key and assert the new key, linked by `replaces`. If only the row id or position changed, **no event**. | A different claim written at fence row 3 retracts `fp(old)` and asserts `fp(new)`. A higher-trust row moved to a new row number by the guard emits nothing. A take renumbered emits nothing. |
+| Identity change | One `page.renamed` event, or a merge (above). | Sync rename and fallback rename are renames; a phantom redirect is a merge. |
 
 ### Event types (V1)
 
-Page: `page.published` (create or replace; carries `revision_before`,
-`revision_after`, and `state_hash`, a digest of the page's belief set after
-publication, used by the coverage check), `page.deleted`, `page.restored`,
-`page.reverted` (cause carries the version's revision), `page.renamed`,
-`page.visibility_changed`, `page.purged`.
+Page: `page.published` (create or replace; carries `revision_before` and
+`revision_after`), `page.deleted`, `page.restored`, `page.reverted` (cause
+carries the version's revision), `page.renamed`, `page.merged` (section 3),
+`page.visibility_changed`, `page.view_changed` (the effective page view
+changed without a publication: a withdrawal and its materialization, section
+10), `page.purged`.
+
+Every event carries `state_hash`: a digest of its slug's whole belief set
+(page, facts, takes, links in its stream) after the transition. The coverage
+check compares a slug's live state with the newest event of any type for that
+slug, so database-only fact events do not read as drift.
 
 Fact: `fact.asserted`, `fact.revised` (non-identity fields changed:
 confidence, `valid_from`, `valid_until`, kind, notability, context, typed
 claim cells), `fact.retracted` (left the canonical set: fence edit, revert,
 replaced), `fact.withdrawn` (`forget`), `fact.superseded` (a `remember` or
-extract supersession that names its successor).
+extract supersession that names its successor), `fact.transferred` (merge),
+`fact.purged`.
 
 Take: `take.asserted`, `take.revised` (weight, since, source), `take.resolved`,
 `take.unresolved` (a revert or a publication that cleared resolution fields),
@@ -152,8 +191,9 @@ Link: `link.asserted`, `link.retracted`, `link.transition_added`,
 Trust and gating (section 6): `trust.contested`, `trust.held`,
 `trust.retiered`.
 
-Coverage (section 7): `coverage.started`, plus backfill rows of any type
-marked `origin = 'backfill'`.
+Coverage (section 7): `coverage.started`, `coverage.stopped`,
+`coverage.restored`, `baseline` (one per subject at activation), plus history
+rows of any type marked `origin = 'backfill'`.
 
 A page delete or restore emits one page event, not one event per fact, take
 and link: the beliefs of a deleted page end with it. This also keeps a
@@ -164,21 +204,39 @@ and link: the beliefs of a deleted page end with it. This also keeps a
 ### 5.1 Who writes the event
 
 **The writer that publishes canonical state writes its events, in the same
-transaction, last.** On the coordinator path that is one call between
-`prepared.apply` (`src/core/persistence/coordinator.ts:417`) and
-`completeWrite` (`:425`), next to `queuePublicationEffects` (`:423`):
+transaction, last.** There is no single publication function to hook:
+`withCoordinatedWrite` supplies permission and attribution, not publication.
+So W1 defines one **finalization contract**, `finalizeBeliefEvents(tx,
+batch)`, and every transaction that commits canonical state calls it after
+its last projection and before its terminal receipt. The publication paths
+that must call it on this tree:
+
+- single publication: `prepared.apply` at `coordinator.ts:417`, before
+  `completeWrite` (`:425`), next to `queuePublicationEffects` (`:423`);
+- grouped publication: `member.apply` at `persistence/group-publish.ts:345`,
+  which also serves eligible single writes on Postgres (`:417-421`), per
+  member, inside the group transaction;
+- withdrawal: `forget` / `forget_fact` record the withdrawal and complete the
+  request in their own transaction (`persistence/memory-mutations.ts:278-287`);
+- fact purge: `facts/purge.ts:295-346`, which completes its own write (`:344`);
+- page purge: `persistence/page-purge.ts:116-190`, inside the delete
+  transaction.
+
+Each publication's batch is built the same way:
 
 1. The preparer already holds the prior snapshot it observed and the incoming
    parsed page (`prepareCanonicalProjections`, `canonical-projections.ts:369`).
    It computes the **canonical diff** there, outside the publication lock:
    fact keys added, changed and removed, take keys likewise, link keys from
-   the derived-links diff, and the page event.
+   the derived-links diff, and the page event. The diff is valid at apply time because
+   the coordinator refuses the publication when the page's revision moved
+   since preparation (`revision_conflict`, `coordinator.ts:385`).
 2. Inside the transaction, the projection closure reports what actually
    happened. `guardFenceRows` returns contested and held rows (section 6.2).
    The expire and delete statements already return only the rows they
    changed (#5969, `:404`), so a row changed since preparation is not
    reported.
-3. `appendBeliefEvents(tx, batch)` inserts the batch in one statement, after
+3. `finalizeBeliefEvents(tx, batch)` inserts the batch in one statement, after
    every projection and before the terminal receipt. If the transaction rolls
    back, nothing was recorded. If it commits, the events and the canonical
    change commit together.
@@ -190,37 +248,44 @@ including cascades, but neither the contested decision nor the rename.
 Entry points, from the census (`~/.capy/work/belief/census.md`, summarized
 here):
 
-- **Coordinator publications** cover most canonical writes: `put_page`,
+- **Journaled publications** cover most canonical writes: `put_page`,
   `capture`, `edit_page`, `delete_page`, `restore_page`, `revert_version`,
-  `takes_*`, `remember`, managed `extract_facts`, `forget`, `purge_fact`, page
-  purge, managed sync and import, file repair, connector materialization,
-  canonical reconcile and every receipted managed-maintenance kind (dream
-  write-back, fence adoption, phantom merge, relink, consolidation). These
-  all reach `coordinator.ts:417`, on managed and unmanaged brains alike.
-  This one emission point covers them, with the per-kind diff supplied by the
-  preparer.
+  `takes_*`, `remember`, managed `extract_facts`, managed sync and import,
+  file repair, connector materialization, canonical reconcile and every
+  receipted managed-maintenance kind (dream write-back, fence adoption,
+  phantom merge, relink, consolidation). They reach the single or grouped
+  publication path on managed and unmanaged brains alike, with the per-kind
+  diff supplied by the preparer. `forget`, `purge_fact` and page purge call
+  the contract from their own transactions (list above).
 - **DB-only coordinated writes** without a page publication
   (`coordinatedDatabaseWrite`, `database-write.ts:21-55`: `ontology_propose`,
   `repair ontology-facts`) and the owner actions that write no receipt (hold
   release, `trust/owner-actions.ts:186-198`; `setRowTier`, `page-handlers.ts:123-144`)
-  call the same append helper inside their transaction.
-- **Unmanaged maintenance writers** run outside the coordinator: cycle
-  extract-facts reconcile and deleted-page expiry, consolidate, phantom
-  redirect, the unmanaged facts pipeline, legacy sync renames, unmanaged
-  repairs, the company-brain legacy import, and bare hard deletes. Census
-  sections 4 to 8 list about 25. V1 does not instrument each one. They are
-  caught by the coverage check (section 7.3), which emits a `reconcile` event
-  when a page's current state no longer matches its last recorded
-  `state_hash`. A `reconcile` event's `recorded_at` is when the drift was
-  noticed, and it says so. Certified recording time is therefore guaranteed
-  only for coordinator-published writes, which on a managed brain is every
-  write the SQL guard admits for facts, takes and pages
-  (`writer-guard-schema.ts:9-80`).
+  call the same contract inside their transaction.
+- **Unmanaged brains do not route Markdown changes through the shared write
+  path.** On an unmanaged brain, sync and import publish pages in a
+  `maintenanceTransaction` (`src/core/import-file.ts:860`), and fence facts
+  and takes are projected later by the cycle (`cycle/extract-facts.ts:464`
+  `writeFenceReconcile`; `cycle/extract-takes.ts:319-322`, whose deletes are
+  bare `engine.executeRaw` calls at `:121`); system-of-record.md:187-192
+  lists the rest (legacy renames, the unmanaged facts pipeline, repairs,
+  consolidate, phantom redirect, bare hard deletes; census sections 4 to 8,
+  about 25 writers). V1 calls the contract from the three projection points
+  that carry most unmanaged belief change (legacy import, `writeFenceReconcile`,
+  takes reextract) with `origin = 'unmanaged'`, so changes are recorded when
+  they are projected. It does not certify them: the other writers can change
+  the same subjects unrecorded, so **coverage on an unmanaged source is never
+  certified** (section 7). Only managed sources, where the SQL guard refuses
+  every fact, take and page write outside a coordinated path
+  (`writer-guard-schema.ts:9-80`), can be certified, and even there links
+  need the next item.
 - **Links are not guarded** by the managed-writer trigger (`src/schema.sql:2176`
   covers pages, tags, aliases, facts, takes, timeline and sources), and
   several link writers bypass the coordinator even on managed brains (census
-  6.4: rows 5-11, 17, 18, 20, 23, 24). Link events from those writers come
-  from the same reconcile path until each writer is routed (section 12,
+  6.4: rows 5-11, 17, 18, 20, 23, 24). Until each is routed, a managed source's
+  link history is certified only for links written by journaled
+  publications; link events from the bypass writers come from the
+  coverage check's reconcile and are marked uncertified (section 12,
   question 5).
 
 ### 5.2 Idempotency key
@@ -248,20 +313,34 @@ writers that retry their own transactions.
 - **Within one page across publications**: the publication holds the page
   key lock through commit (`tx.lockPageKeys`, `coordinator.ts:380`), and the
   ledger's `id BIGSERIAL` is assigned inside that lock, so `id` order is
-  commit order for a given page. Writers outside the coordinator take the
-  same page guard (`createPageVersion` does, `page-state/versions.ts:36-37`).
-  The append helper requires it.
+  commit order for a given page. Every appender must already hold the page
+  keys of its batch: the contract checks the transaction's held-key set
+  (`HeldPageKeys`, `page-state/guards.ts:91-97`) and fails closed when a slug
+  is missing. It never takes the lock itself, because a lock taken late in a
+  transaction, outside `lockPageKeys`'s sorted acquisition (`guards.ts:20`),
+  can deadlock.
 - **Across pages there is no global commit order.** Postgres sequences hand
   out values at insert, not at commit, and PGLite and managed Postgres have
   no commit timestamps. Readers must not compare `id` across pages. Across
-  pages, order is by `recorded_at` with the uncertainty rule below.
-- **`recorded_at`** is `clock_timestamp()` at the append, which is the last
-  statement before the receipt and commit. A transaction that appended at
-  `recorded_at < T` and committed after `T` was not observable at `T`. W2
-  treats the interval `[recorded_at, recorded_at + publication ceiling]` as
-  unproven unless a later event on the same page proves the commit (an event
-  on that page with a higher `id` and `recorded_at <= T`). That rule answers
-  the stalled-transaction cell of W2's interval tests.
+  pages, order is by `recorded_at` with the visibility rule below.
+- **`recorded_at`** is `clock_timestamp()` at the append, the last statement
+  before the receipt and commit. It is a lower bound on visibility, not a
+  commit time. There is no usable upper bound from configuration: the
+  publication ceiling only marks a write overdue, and on PGLite a running
+  transaction cannot be cancelled at all (`persistence/publication-deadline.ts:16-17`;
+  Postgres cancels at ceiling plus grace, `:117`). So W1 stores a durable
+  **post-commit observation**: the contract queues a publication effect
+  (`queuePublicationEffects`) that, after commit, writes
+  `belief_commit_marks (publication_id, observed_at)`. A maintenance writer
+  outside the effects queue writes its mark in a follow-up statement after
+  commit. Any later reader that finds a committed event with no mark (a
+  crash before the mark) writes one with its own `now()`. At a time `T`, an
+  event is **visible** if `observed_at <= T`, **not visible** if
+  `recorded_at > T`, and otherwise **unproven**, unless a later event on the
+  same page (higher `id`) has `recorded_at <= T`, which proves the earlier
+  commit, because that later event was written under the same page lock.
+  W2 answers unproven intervals as unproven. A group publication's members
+  share one mark, so their events become visible together.
 
 ### 5.4 Source time versus recorded time
 
@@ -395,30 +474,76 @@ not redact earlier events, because nothing was asked to be forgotten.
 
 ## 7. Watermark, backfill and coverage
 
-### 7.1 The watermark
+Two properties are kept apart. **Timestamp accuracy** says an event's time is
+right. **Interval completeness** says no unrecorded transition happened to a
+subject between two of its events. W2's intervals and W4's change history
+need completeness, and only instrumentation gives it: a matching hash cannot.
+A take resolved by unmanaged grading (`cycle/grade-takes.ts:814`) and then
+un-resolved by a calibration undo (`calibration/undo-wave.ts:123-134`)
+between two scans returns to the same hash after two real transitions.
 
-`coverage.started` is appended once per source when W1's flag is enabled for
-it. Its `recorded_at` is the **coverage watermark**. Before it, nothing is
-certified. A recorded-time read for `T` earlier than the watermark returns
-the coded refusal `coverage_from` (a catalogue entry, W2). The watermark is
-per source because sources are added at different times. The brain-wide
-value is the latest per-source watermark among the sources a read touches.
+### 7.1 Activation, baseline and the watermark
 
-### 7.2 The marked backfill
+Enabling W1 on a source does not certify anything by itself, because
+nothing records what already existed. Activation is a **baseline run**:
 
-A one-time backfill seeds history from `page_versions` and, where the source
-is a git checkout, from git. Each row it writes has `origin = 'backfill'`,
+1. Append `coverage.started` for the source (its source incarnation and the
+   run id).
+2. For each live page, under that page's key lock and with its revision
+   checked in the same transaction (the same `revision_conflict` rule as a
+   publication), append one `baseline` event per subject of the page (the
+   page itself, its facts, takes and links) with the values as they are now,
+   and mint the page's lifetime. A publication that wins the lock first is
+   simply recorded, and the baseline for that page runs after it. Purge
+   takes the same lock, so a page cannot be purged in the middle of its
+   baseline.
+3. Baseline the database-only assertions (facts whose `entity_slug` names no
+   page, `persistence/memory-prepare.ts:187-189`) under the subject-slug lock
+   the fact writer already takes (`engine-sql/facts.ts:101`).
+4. The run is resumable: it records progress per page, and a page's coverage
+   starts at its own baseline cut. When every page and database-only subject
+   has a cut, the run appends `coverage.complete`, and its `recorded_at` is
+   the source's **watermark**.
+
+A recorded-time read for `T` before a page's cut returns the coded refusal
+`coverage_from` (a catalogue entry, W2). The brain-wide watermark is the
+latest watermark among the sources a read touches.
+
+**Coverage is a set of intervals, not one start.** Turning the flag off
+appends `coverage.stopped`; turning it on again runs a new baseline.
+`gbrain backup restore` appends `coverage.restored` naming the archive's
+creation time, because the restored ledger does not know what happened
+between the backup and the restore: W2 refuses inside that gap.
+
+**Only managed sources are certified.** On an unmanaged source the baseline
+still runs and events are still appended (section 5.1), but every interval is
+marked uncertified, because about 25 unmanaged writers can change the same
+subjects without an event. W2 answers uncertified intervals with a disclosure,
+never as fact. A source becomes certifiable when it becomes managed, from its
+next baseline.
+
+### 7.2 The marked history backfill
+
+The baseline is not history. A separate, optional backfill seeds history
+before the watermark from `page_versions` and, where the source is a git
+checkout, from git. Each row it writes has `origin = 'backfill'`,
 `recorded_at` set to the backfill run's time, and the historical time only in
-`source_time`, marked never certified. Two limits are known in advance:
+`source_time`, marked never certified. Known limits:
 
 - `page_versions` stores preimages, and large pages keep only their last five
   (`page-state/versions.ts:12`, `:26-30`).
 - Versions were redacted by purge and moved by the fallback rename.
+- Git history is outside purge's reach (`deletion-inventory.ts:193`), and the
+  resurrection guards are triggers on `facts`, `takes` and `pages`
+  (`facts/purge-schema.ts:133`, `:151`, `:168`), not on the ledger. So every
+  backfill and reconcile append rechecks `fact_purges`, `take_purges` and
+  `page_purges` in the appending transaction, under the same page key lock
+  purge takes, following rename chains to the historical slug. A payload
+  prepared before a purge and appended after it is refused, not written.
 
 So backfilled intervals are reported as best effort. W2 discloses a page
-whose own backfill is incomplete even when `T` is after the watermark
-(`backfill_complete: false` per page, recorded on the page's backfill
-summary event).
+whose backfill is incomplete (`backfill_complete: false` on the page's
+backfill summary event).
 
 ### 7.3 The doctor coverage check
 
@@ -426,17 +551,18 @@ New check `belief_ledger_coverage` (`src/commands/doctor/checks/belief-ledger.ts
 registered with its category and golden per CONTRIBUTING's doctor-check row).
 It reports:
 
-- the coverage watermark per source;
-- the share of live pages with a `page.published` (or backfill) event;
-- **drift**, meaning pages whose current canonical belief set no longer
-  hashes to the `state_hash` on their last event. Drift means a writer
-  changed state without appending, which is the instrumentation gap section
-  5.1 accepts for unmanaged writers. The check samples by default (bounded by
-  pages and time, like the other hot checks) and is complete under `--deep`.
-  With `--fix` (or the cycle's extract phase) it appends `reconcile` events
-  for the keys that moved, with honest `recorded_at`;
-- events whose keys reference a slug with no page and no rename chain
-  (orphans).
+- coverage intervals per source, with each source's certified or
+  uncertified status and baseline progress;
+- **drift**: slugs whose current belief set no longer hashes to the
+  `state_hash` on their newest event. Drift means a writer changed state
+  without appending. The check samples by default (bounded by pages and time,
+  like the other hot checks) and is complete under `--deep`. With `--fix` (or
+  the cycle's extract phase) it appends `reconcile` events for the keys that
+  moved, with honest `recorded_at`. Reconcile repairs the head only: on a
+  managed source, a drift finding also marks that slug's interval since its
+  previous event uncertified, and a later clean hash never clears that mark;
+- events whose keys reference a lifetime with no page and no rename chain
+  (orphans), and committed events still missing a commit mark.
 
 The check's `fix.next` follows the operator protocol: running the reconcile
 is `run`; enabling the flag on a source is `ask_user`.
@@ -447,7 +573,7 @@ is `run`; enabling the flag on a source is `ask_user`.
 |---|---|---|
 | Graduation, `gbrain migrate --to postgres` (the default PGLite→Postgres route) | Copies every classified table verbatim with primary keys and sequence positions, triggers bypassed (`graduation-copy.ts:13-27`, `:255-282`); an unclassified table aborts the copy (`graduation-inventory.ts:222-254`) | `carry('belief_events')`. Event keys contain no ids, and the local `id` and its sequence are preserved, so the copied ledger is byte-identical. W1's probe asserts equal `event_key` sets and an identical replay. |
 | Legacy copier, `migrate-engine` (to PGLite, or with graduation off) | Re-creates pages through `putPage` with new ids, copies no versions and no takes; already refuses any brain with rows in `persistence_requests`, `fact_withdrawals` or `persistence_worktrees` (`src/core/persistence/maintenance.ts:73-90`) | Add `belief_events` to that refusal list. A brain with a ledger always has journal rows, so in practice it is already refused; the explicit entry makes the refusal name the ledger. |
-| `gbrain backup create` / `restore` (PGLite) | Physical cluster tar under the writer lock; restore requires the same schema version (`src/core/backup/snapshot.ts:129-200`, `:225-342`) | None. The ledger is in the cluster, so a restore reproduces it byte for byte; W1's probe asserts that. |
+| `gbrain backup create` / `restore` (PGLite) | Physical cluster tar under the writer lock; restore requires the same schema version (`src/core/backup/snapshot.ts:129-200`, `:225-342`) | Restore appends one `coverage.restored` event naming the archive's time. The ledger is in the cluster, so a restore otherwise reproduces it byte for byte; W1's probe asserts both. |
 | Postgres | Operator-managed backups (`docs/ENGINES.md:345`) | `docs/ENGINES.md` and the system-of-record DR section name the ledger as state a Markdown rebuild cannot recover. |
 | `gbrain export` | Markdown snapshot, explicitly not a database backup (`commands/export.ts:28-31`) | None; the docs say the ledger is not exported. |
 | Fresh import / `reinit-pglite` + sync | Rebuilds file-backed state only | Starts a new ledger with a new watermark. The DR recipe in `system-of-record.md` says to restore the database backup first if recorded history matters. |
@@ -466,45 +592,63 @@ The DDL goes in `schema.sql` and the bootstrap blob (no column of it is
 referenced by an older blob index, so no bootstrap probe is needed). Then
 `build:schema` and `build:pglite-snapshot`, and regenerate the migrations and
 schema-catalog goldens. It also gets inventory rows in deletion (`swept`) and
-graduation (`carry`), and, because its appends ride canonical writes, a line
-in `docs/architecture/canonical-writers.tsv` naming the append helper.
+graduation (`carry`) for all three tables, and, because its appends ride
+canonical writes, a line in `docs/architecture/canonical-writers.tsv` naming
+the finalization contract.
 
 ```sql
 CREATE TABLE IF NOT EXISTS belief_events (
-  id            BIGSERIAL PRIMARY KEY,      -- local order within a page; never joined on
-  event_key     TEXT NOT NULL UNIQUE,       -- sha256(publication_id, subject_key, event_type)
-  source_id     TEXT NOT NULL,
-  slug          TEXT NOT NULL,              -- subject page slug at recording time
-  incarnation   UUID NOT NULL,
-  subject_kind  TEXT NOT NULL,              -- page | fact | take | link | link_transition | coverage
-  subject_key   TEXT NOT NULL,              -- canonical serialization of the logical key (section 3)
-  event_type    TEXT NOT NULL,
-  origin        TEXT NOT NULL DEFAULT 'live', -- live | backfill | reconcile
-  trust_tier    TEXT NOT NULL,
-  tier_basis    TEXT NOT NULL DEFAULT 'row', -- row | writer
-  publication_id UUID NOT NULL,             -- persistence_requests.id or per-transaction UUID
-  ord           INTEGER NOT NULL,
-  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-  source_time   TIMESTAMPTZ,
-  valid_from    TIMESTAMPTZ,
-  valid_until   TIMESTAMPTZ,
-  value         JSONB,                      -- canonical value after the transition; NULL when purged
-  value_hash    TEXT,
-  prior_hash    TEXT,                       -- value_hash of the key's previous event
-  state_hash    TEXT,                       -- page events only
-  cause         JSONB NOT NULL,             -- op, request ids, proposal refs, rename/replace links
-  purged        BOOLEAN NOT NULL DEFAULT false
+  id                 BIGSERIAL PRIMARY KEY,   -- order within one page stream; never joined on
+  event_key          BYTEA NOT NULL UNIQUE,   -- sha256(publication_id, subject_key, event_type), 32 bytes
+  source_id          TEXT NOT NULL,
+  source_incarnation UUID NOT NULL,           -- sources.incarnation at recording time
+  page_lifetime      UUID,                    -- NULL for page-less subjects (section 3)
+  slug               TEXT NOT NULL,           -- stream slug at recording time (origin page for links)
+  subject_kind       TEXT NOT NULL,           -- page | fact | take | link | link_transition | coverage
+  subject_key        TEXT NOT NULL,           -- canonical serialization of the logical key (section 3)
+  event_type         TEXT NOT NULL,
+  origin             TEXT NOT NULL DEFAULT 'live', -- live | unmanaged | baseline | backfill | reconcile
+  trust_tier         TEXT NOT NULL,
+  tier_basis         TEXT NOT NULL DEFAULT 'row',  -- row | writer
+  visibility         TEXT NOT NULL,           -- the subject's visibility when recorded (section 8, privacy)
+  publication_id     UUID NOT NULL,           -- persistence_requests.id or per-transaction UUID
+  ord                INTEGER NOT NULL,
+  recorded_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  source_time        TIMESTAMPTZ,
+  valid_from         TIMESTAMPTZ,
+  valid_until        TIMESTAMPTZ,
+  value              JSONB,                   -- canonical value after the transition; NULL when purged
+  value_hash         TEXT,
+  prior_hash         TEXT,                    -- value_hash of the key's previous event
+  state_hash         TEXT NOT NULL,           -- the slug's belief set after this event
+  cause              JSONB NOT NULL,          -- op, request ids, proposal refs, rename/merge/replace links
+  purged             BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS belief_events_page ON belief_events (source_id, slug, id);
 CREATE INDEX IF NOT EXISTS belief_events_subject ON belief_events (source_id, subject_kind, subject_key, id);
 CREATE INDEX IF NOT EXISTS belief_events_recorded ON belief_events (recorded_at);
+-- plus belief_page_lifetimes (section 3) and belief_commit_marks (section 5.3)
 ```
 
+The bench's 905-925 bytes per event used a TEXT hex `event_key`; BYTEA saves
+about 64 bytes per row across the heap and the unique index.
+
 Row-level security follows the blob convention. Remote reads go through ops,
-never the table. A private page's events are filtered by the same
-`privatePagesFilterFragment` as its rows, and that filter is applied to the
-event's page at read time, so a page made private later hides its earlier
-events from remote callers too.
+never the table, and table RLS does not authorize them. **Privacy follows the
+existing history reads, which check both the historical and the current
+state** (`engine-sql/pages.ts:911-912` combines `privatePagesFilterFragment`
+on the live page with `privateSnapshotFilterFragment` on the version). A
+remote caller sees an event only when all of these hold, and the read fails
+closed when any owner cannot be resolved:
+
+- the event's own `visibility` was `world` when recorded (an old private
+  value does not become readable when the page is made public later);
+- the stream page's current lifetime is visible now (a page made private
+  later hides its earlier events);
+- for facts, the fact row's visibility is `world`, as the facts read
+  requires (`engine-sql/facts.ts:693`);
+- for links, the from page, the to page and the origin page are all visible,
+  as the links read checks (`engine-sql/links.ts:248`).
 
 ## 9. Event volume and write-path cost (measured)
 
@@ -575,20 +719,29 @@ by picking the latest `page_versions.snapshot_at <= T` (which returns the
 wrong side of an edit, because versions are preimages,
 `page-state/versions.ts:15-19`). From W1 it needs exactly:
 
-1. **Publication events per page incarnation:** create, each replace, delete,
-   restore, revert, rename and purge, each with `revision_before`,
-   `revision_after`, `recorded_at` and the page key lock's per-page `id`
-   order. Version `i`'s interval is `[event_i.recorded_at,
-   event_{i+1}.recorded_at)`. Its body is the `page_versions` row whose
+1. **Publication events per page lifetime:** create, each replace, delete,
+   restore, revert, rename, merge, view change and purge, each with
+   `revision_before`, `revision_after`, `recorded_at` and the per-page `id`
+   order. Version `i`'s interval is `[event_i, event_{i+1})` under the
+   visibility rule of section 5.3. Its body is the `page_versions` row whose
    `knowledge_revision = revision_after(event_i)`, captured as the preimage
    of event `i+1`, or the live page for the head. A creation needs no
    preimage, because the next replacement's preimage is its body.
-   `page_versions.knowledge_revision` exists (`src/schema.sql:1833`). W1
-   adds no column there.
-2. **The commit-uncertainty rule** of section 5.3, so a transaction
-   straddling T is reported as unproven, not answered.
-3. **The watermark** (7.1) and **per-page backfill completeness** (7.2), so W2
-   can return `coverage_from` or disclose a gap after the watermark.
+   `page_versions.knowledge_revision` exists (`src/schema.sql:1833`).
+   **That join holds only if every transition that changes the effective
+   page view leaves a preimage, and today two do not.** A withdrawal bumps
+   the revision with no version (`facts/withdrawal.ts:91-93`), and its
+   materialization rewrites the body with no version
+   (`page-state/materialize.ts:22-24`). After create, forget, materialize,
+   edit, no version holds the creation revision's pre-forget body. So W1
+   adds `createPageVersion` before both writes and appends
+   `page.view_changed` for each. That is one more version row per forgotten
+   fact per affected page, and it is W1 scope, not W2's.
+2. **The visibility rule** of section 5.3 and its commit marks, so a
+   transaction straddling T is reported as unproven, not answered.
+3. **Coverage intervals, per-page baseline cuts and certified status**
+   (7.1) and **per-page backfill completeness** (7.2), so W2 can return
+   `coverage_from`, refuse inside a gap, or disclose an uncertified interval.
 4. **Purge and retention markers:** `page.purged` events and the large-page
    five-version cap, so W2 discloses rather than fabricates a body that was
    pruned or redacted.
@@ -598,10 +751,11 @@ W2's interval tests map onto these directly:
 | W2 cell | What W1 supplies |
 |---|---|
 | Before, at and after creation and each of two edits | (1) |
-| Stalled transaction straddling T | (2) |
+| Stalled transaction straddling T, including one that commits after ceiling plus grace | (2) |
 | Rolled-back write | No event, because the append is in the rolled-back transaction |
-| Delete then recreate | A new `incarnation` |
+| Delete then recreate | A new page lifetime |
 | Version-id tie | Per-page `id` order under the page lock |
+| Create, forget, materialize, edit | (1), the added preimages |
 
 ## 11. Proof obligations for W1 (from the plan, made concrete)
 
@@ -611,40 +765,67 @@ reconstructed state, not counts**, on PGLite and Postgres:
 1. no-op reimport → zero events;
 2. prose-only edit → exactly one `page.published`, no fact, take or link events;
 3. restart mid-stream → no duplicate `event_key`;
-4. rename (cheap and fallback) → one `page.renamed`; later events under the
-   new slug; replay at T before the rename resolves the old slug;
+4. rename (cheap and fallback) → one `page.renamed`; same lifetime; replay
+   at T before the rename resolves the old slug;
 5. row reuse (different claim at fence row 3) → `fact.retracted(fp_old)` +
-   `fact.asserted(fp_new)` linked by `replaces`;
+   `fact.asserted(fp_new)` linked by `replaces`; a take whose claim is edited
+   in place → retract plus assert; a pure take renumber → zero events;
 6. two concurrent relationship refreshes on one key → evidence events
    once, no relationship-state events;
 7. fault injection after durable publication but before acknowledgement →
    the retry appends nothing;
 8. a lower-tier fence rewrite of a higher-tier fact → `trust.contested` with
    its proposal ref, even though the higher-tier row's projection is
-   unchanged;
+   unchanged; likewise for `remember`, `takes_supersede` and a refused remote
+   `forget`;
 9. graduation PGLite → Postgres → identical `event_key` sets and identical
    replay; legacy copier refuses with the ledger named;
 10. `forget --purge`, then replay → redacted values, one purge event, refused
-    re-import, no new events;
-11. backup and restore (PGLite) → ledger byte-identical;
-12. N1 unchanged (388/388, 0 stale).
+    re-import, no new events; purge before a backfill, and purge between a
+    backfill's prepare and its append → only redacted history;
+11. backup and restore (PGLite) → the restored ledger is byte-identical to
+    the archive's plus one `coverage.restored`; W2 refuses inside the gap;
+12. the same exact-value assertions through grouped Postgres publication,
+    a successful `forget` and `purge_fact`, not only the single-write path;
+13. a transaction that resumes and commits after ceiling plus grace → its
+    events stay unproven until their commit mark, then become visible;
+14. privacy: private → public, public → private, a reused slug, a private
+    fact on a public page, a link with one private endpoint or origin → no
+    remote leak;
+15. unmanaged source: resolve then undo between two coverage scans → the
+    interval stays uncertified even though the hash matches;
+16. activation interrupted by a concurrent edit, and activation after
+    large-page version pruning → each page's cut is consistent and resumable;
+17. source removed and re-added with the same id → no old event or watermark
+    attaches to the new source;
+18. two links in one publication to identically spelled slugs in two
+    sources → two keys, no collision;
+19. phantom merge with a crash between its two requests, and overlapping
+    claims on both pages → both pages stay live, transfers are explicit;
+20. ontology stints with identical claim text → distinct keys;
+21. the finalization contract called with a slug whose page key is not held
+    → refused;
+22. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
 
-**Estimate after design:** 7 human-days / 20 agent-hours, up from the drafted
-5.5 / 14. The census found:
+**Estimate after design and review:** 10 human-days / 30 agent-hours, up
+from the drafted 5.5 / 14. The census and the review found:
 
-- one emission point for every coordinator publication, but per-kind diffs in
-  about a dozen preparers;
+- a finalization contract on two publication paths plus three transactions
+  that complete their own writes, with per-kind diffs in about a dozen
+  preparers;
 - six blocked-write producers and the tier-change producers;
-- the reconcile path for about 25 unmanaged writers;
+- three unmanaged projection points, the resumable baseline, coverage
+  intervals and commit marks;
+- version preimages for withdrawal and materialization;
 - inventory and catalogue registrations.
 
 ## 12. Open questions
 
 Each question below has a recommended answer. Questions 1–3 are for GBRA-58,
-whose trust model they touch. Questions 6 and 7 need Garry's call.
+whose trust model they touch. Questions 5, 6 and 7 need Garry's call.
 
 1. **Unguarded removals.** A lower-tier fence rewrite deletes higher-tier
    takes and timeline rows with no guard. Should it be contested, like facts?
@@ -660,13 +841,14 @@ whose trust model they touch. Questions 6 and 7 need Garry's call.
    6.5 handles it. The alternative is text-free events with values read from
    `page_versions`. It fails for database-only facts, which have no version.
    *Recommendation:* store text, sweep on purge.
-5. **Unmanaged writers and unguarded link writers.** Should V1 certify only
-   coordinator-published events and reconcile the rest with honest
-   timestamps, or route each of the about 25 writers before shipping?
-   *Recommendation:* certify coordinator-published events only, report the
-   rest through `belief_ledger_coverage`, and route link writers through the
-   coordinator as a follow-up. That follow-up is the same work the managed
-   writer guard's link gap needs anyway.
+5. **Unmanaged sources and unguarded link writers.** Certified history
+   needs every writer of a subject instrumented, which holds on managed
+   sources only (section 7). *Recommendation:* V1 certifies managed sources;
+   unmanaged sources get recorded but uncertified history from their three
+   projection points; link writers that bypass the coordinator are routed
+   as a follow-up, the same work the managed writer guard's link gap needs.
+   **Needs Garry** if the 10x plan assumed certified history on the default
+   unmanaged PGLite brain: that would mean routing about 25 writers first.
 6. **`resolveTakes` erases database-only resolutions** on every ordinary
    publish of a fence without resolution columns
    (`canonical-projections.ts:433-445`; only two writers preserve them). The
@@ -685,3 +867,7 @@ whose trust model they touch. Questions 6 and 7 need Garry's call.
    needs a graduation `carry` row and a refusal-list entry, not an
    id-remapping copy. W5's `page_versions` copy should be re-scoped to
    history-free brains or dropped.
+9. **More version rows.** Section 10 adds a page version before each
+   withdrawal and materialization, so page-at-time can show the pre-forget
+   body. *Recommendation:* accept; the alternative is reconstructing
+   historical overlays from withdrawal events, which W2 would then own.
