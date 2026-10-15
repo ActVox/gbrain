@@ -61,7 +61,6 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
   }
   const maxTokens = opts.maxChunkTokens ?? resolveMaxChunkTokens();
   const raw = Buffer.from(segment.bytes).toString('utf8');
-  const segEnd = segment.byteStart + segment.bytes.length;
   const pieces: string[] = [];
   const map: MappedPart[] = [];
   const factsTexts: string[] = [];
@@ -83,7 +82,7 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
   const source = segment.region === 'truth' ? 'compiled_truth' : 'timeline';
   const chunks: SegmentChunk[] = [];
   const push = (c: Omit<SegmentChunk, 'local_ordinal'>) => chunks.push({ ...c, local_ordinal: chunks.length });
-  const wholeSegment = { raw_byte_start: segment.byteStart, raw_byte_end: segEnd };
+  const wholeSegment = { raw_byte_start: 0, raw_byte_end: segment.bytes.length };
 
   if (projection.trim()) {
     for (const c of chunkProjectedText(projection, { maxTokens, spans: true })) {
@@ -96,8 +95,8 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
         chunk_source: source,
         projected_byte_start: c.byte_start,
         projected_byte_end: c.byte_end,
-        raw_byte_start: segment.byteStart + rawAt(map, c.byte_start, false),
-        raw_byte_end: segment.byteStart + rawAt(map, c.byte_end, true),
+        raw_byte_start: rawAt(map, c.byte_start, false),
+        raw_byte_end: rawAt(map, c.byte_end, true),
       });
     }
     if (segment.region === 'truth') {

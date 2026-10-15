@@ -340,7 +340,7 @@ export async function occurrencesWithoutChunks(engine: Pick<BrainEngine, 'execut
   if (!rows.length) return [];
   const chunked = new Set((await engine.executeRaw<{ occurrence_id: number }>(`SELECT DISTINCT occurrence_id FROM content_chunks
     -- chunk-visibility-ok: write path; the generation predicate is explicit, at the generation the caller diffed against
-    WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[]) AND body_generation<=$3 AND retired_generation IS NULL`,
+    WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[]) AND body_generation<=$3`,
   [pageId, rows.map(row => row.occurrenceId), generation])).map(row => Number(row.occurrence_id)));
   return rows.filter(row => !chunked.has(row.occurrenceId));
 }

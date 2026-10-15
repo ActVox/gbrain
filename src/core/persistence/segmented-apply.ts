@@ -148,7 +148,10 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
  * (the caller's inline write fills it in the same transaction). The live
  * manifest rows close at the next generation, so versions that pin earlier
  * generations keep theirs; the page's segmented chunk rows are deleted here,
- * before the inline write stages its chunks.
+ * before the inline write stages its chunks. The write holds the page row FOR
+ * UPDATE (lockPageKeys), so a chunk batch in flight (FOR KEY SHARE) commits
+ * before this delete, and a later batch of a racing preparation refuses
+ * (stageSegmentChunks: an inline page at the generation it targets).
  */
 export async function demoteSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<void> {
   await tx.executeRaw(`UPDATE page_body_manifest SET gen_to=(SELECT body_generation+1 FROM pages WHERE id=$1)

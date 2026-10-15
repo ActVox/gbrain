@@ -1048,7 +1048,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
       SELECT * FROM unnest(${requests.map(r => r.page_id)}::int[], ${requests.map(r => r.from_index)}::int[],
                            ${requests.map(r => r.to_index)}::int[], ${requests.map(r => r.priority)}::int[]) AS r(page_id, lo, hi, prio)
     ), auth AS (
-      SELECT p.id, p.slug, p.source_id, p.type, p.knowledge_revision::text AS revision, p.compiled_truth, p.timeline, p.body_generation,
+      SELECT p.id, p.slug, p.source_id, p.type, p.knowledge_revision::text AS revision, p.compiled_truth, p.timeline, p.body_storage, p.body_generation,
              (COALESCE(p.chunker_version, 0) >= ${SAFE_FENCE_CHUNKER_VERSION}) AS sealed,
              (SELECT MIN(req.prio) FROM req WHERE req.page_id = p.id) AS prio
         FROM pages p

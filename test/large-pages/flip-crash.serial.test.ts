@@ -113,7 +113,7 @@ describe('create: a crash after the projection staged its chunks', () => {
     expect(await searchHits(NEEDLE, 'notes/fresh')).toBe(1);
 
     const perOccurrence = async () => engine.executeRaw<{ occurrence_id: number; n: number }>(
-      `SELECT occurrence_id, count(*)::int AS n FROM content_chunks WHERE page_id=$1 AND retired_generation IS NULL GROUP BY occurrence_id ORDER BY occurrence_id`, [sealed.id]);
+      `SELECT occurrence_id, count(*)::int AS n FROM content_chunks WHERE page_id=$1 GROUP BY occurrence_id ORDER BY occurrence_id`, [sealed.id]);
     const once = await perOccurrence();
     await engine.executeRaw(`INSERT INTO page_projection_jobs(source_incarnation, slug, revision, reason)
       SELECT s.incarnation, $1, p.knowledge_revision, 'canonical_change' FROM pages p JOIN sources s ON s.id=p.source_id WHERE p.slug=$1`, ['notes/fresh']);
@@ -139,7 +139,7 @@ describe('replace of a page whose projection never ran', () => {
     const bare = await engine.executeRaw(`SELECT m.occurrence_id FROM page_body_manifest m WHERE m.page_id=$1 AND m.staging_id IS NULL
         AND m.gen_from <= $2 AND (m.gen_to IS NULL OR m.gen_to > $2)
         AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=m.page_id AND c.occurrence_id=m.occurrence_id
-          AND c.body_generation <= $2 AND (c.retired_generation IS NULL OR c.retired_generation > $2))`, [sealed.id, sealed.body_generation]);
+          AND c.body_generation <= $2)`, [sealed.id, sealed.body_generation]);
     expect(bare).toEqual([]);
     expect(await searchHits(NEEDLE, 'notes/unchunked')).toBe(1);
   }, 180_000);
