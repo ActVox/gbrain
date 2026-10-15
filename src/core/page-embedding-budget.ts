@@ -1,7 +1,7 @@
 /**
  * The per-page embedding spend cap for large pages (`embed.max_usd_per_page`,
  * default $2), with its durable ledger `page_embedding_budget` (migration
- * v245).
+ * v246).
  *
  * Scope: pages above `pages.inline_max_bytes` (page-size-policy.ts). A page at
  * or under it costs a few cents at most to embed whole and is not metered.
