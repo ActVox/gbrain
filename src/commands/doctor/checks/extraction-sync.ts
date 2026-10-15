@@ -15,7 +15,7 @@ import { resolveEnvNumber, resolveHoursEnv, warnOnceForEnv } from '../../../core
 import { chunkerStamp } from '../../../core/chunkers/code.ts';
 import { effectiveLinkExtractorWatermark, smallBrainBacklogNote } from '../../../core/link-extraction-watermark.ts';
 import { previewMentionPass } from '../../../core/mentions/stale.ts';
-import { isUndefinedColumnError } from '../../../core/utils.ts';
+import { isMissingSchemaObject, isUndefinedColumnError } from '../../../core/utils.ts';
 import {
   loadStorageConfig,
   effectiveDbOnlyDirs,
@@ -35,6 +35,13 @@ import { connectorAuthorities } from '../../../core/persistence/connector-author
 import { parseSourceConfig } from '../../../core/sources-load.ts';
 import { checkError } from '../check-fix.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
+
+/** Objects ownedContentFreshness reads that an older schema may lack; any other SQL error surfaces (#6599). */
+const OWNED_CONTENT_TABLES = [
+  'persistence_brain', 'persistence_source_bindings', 'persistence_worktrees', 'persistence_host_bindings',
+  'persistence_requests', 'persistence_effects', 'source_ingestion_receipts',
+] as const;
+const OWNED_CONTENT_COLUMNS = ['incarnation', 'source_incarnation', 'recovery', 'owner_host_id'] as const;
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
@@ -1047,8 +1054,7 @@ export async function computeExtractHealthCheck(
     try {
       rows = await engine.executeRaw<RollupRow>(rollupQuery(true), []);
     } catch (err) {
-      const msg = (err as Error).message || String(err);
-      if (!/expected_limit_count/i.test(msg)) throw err;
+      if (!isMissingSchemaObject(err, 'column', 'expected_limit_count')) throw err;
       rows = await engine.executeRaw<RollupRow>(rollupQuery(false), []);
     }
     // #5495: recorded halt reasons per kind over the same 7 days (migration v239).
@@ -1191,7 +1197,7 @@ export async function computeExtractHealthCheck(
     // bootstrap-coverage / migration framework brings the schema forward
     // and the next run resolves naturally. Stay quiet.
     const msg = (err as Error).message || String(err);
-    if (/extract_rollup_7d.*does not exist|no such table/i.test(msg)) {
+    if (isMissingSchemaObject(err, 'table', 'extract_rollup_7d')) {
       return {
         name,
         status: 'ok',
@@ -1252,7 +1258,7 @@ export async function checkSyncFreshness(
     const issues: string[] = [];
     let ownedContent = new Set<string>();
     try { ownedContent = new Set((await ownedContentFreshness(engine)).map(source => source.sourceId)); }
-    catch (error) { if (!/does not exist|no such table/i.test(String(error))) throw error; }
+    catch (error) { if (!isMissingSchemaObject(error, 'table', OWNED_CONTENT_TABLES) && !isMissingSchemaObject(error, 'column', OWNED_CONTENT_COLUMNS)) throw error; }
     let writer_owned_count = 0;
     // v0.41.27.0: D6 count math. Every source falls into
     // EXACTLY ONE bucket per iteration. Invariant pinned by unit test:
