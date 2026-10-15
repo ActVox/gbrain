@@ -77,7 +77,7 @@ export function buildKeywordMatch(query: string, opts: SearchOpts | undefined): 
   else if (opts?.sourceId) filters += add(opts.sourceId, n => `p.source_id = ${n}`);
   const hardExclude = buildHardExcludeClause('p.slug', resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes));
   const factor = buildSourceFactorCase('p.slug', opts?.source_boosts ?? resolveBoostMap(), opts?.detail);
-  const where = `${predicate}${filters} ${hardExclude} ${buildVisibilityClause('p', 's', opts)} AND cc.modality = 'text'`;
+  const where = `${predicate}${filters} ${hardExclude} ${buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' })} AND cc.modality = 'text'`;
   const whereParamCount = params.length;
   return { where, score: `((${rank()}) * ${factor})::float8`, params, whereParamCount };
 }

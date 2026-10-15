@@ -33,6 +33,7 @@ import { FACT_WITHDRAWAL_SCHEMA_STATEMENTS } from '../src/core/facts/withdrawal-
 import { GRANT_AUDIT_SCHEMA_SQL } from '../src/core/grants/schema.ts';
 import { LEASE_TOKEN_SCHEMA_SQL } from '../src/core/lease-schema.ts';
 import { LINK_TEMPORAL_SCHEMA_SQL } from '../src/core/link-temporal-schema.ts';
+import { PAGE_BODY_SCHEMA_SQL, PAGE_GENERATION_BUMP_FN_SQL } from '../src/core/page-body/schema.ts';
 import { PAGE_PROJECTION_SCHEMA_SQL } from '../src/core/page-state/projection-schema.ts';
 import { PAGE_STATE_SCHEMA_SQL } from '../src/core/page-state/schema.ts';
 import { POSTGRES_CONCURRENT_PERSISTENCE_INDEXES, PERSISTENCE_SCHEMA_STATEMENTS } from '../src/core/persistence/schema.ts';
@@ -75,6 +76,7 @@ export interface Fragment {
 const persistenceSql = (statements: readonly string[]) => `${statements.join(';\n')};`;
 
 export const FRAGMENTS: readonly Fragment[] = [
+  { source: 'src/core/page-body/schema.ts', expr: 'PAGE_GENERATION_BUMP_FN_SQL', postgres: PAGE_GENERATION_BUMP_FN_SQL, pglite: PAGE_GENERATION_BUMP_FN_SQL },
   { source: 'src/core/fts-language.ts', expr: 'FTS_INPUT_FUNCTION_SQL', postgres: FTS_INPUT_FUNCTION_SQL, pglite: FTS_INPUT_FUNCTION_SQL },
   { source: 'src/core/grants/schema.ts', expr: 'GRANT_AUDIT_SCHEMA_SQL', postgres: GRANT_AUDIT_SCHEMA_SQL, pglite: GRANT_AUDIT_SCHEMA_SQL },
   {
@@ -84,6 +86,7 @@ export const FRAGMENTS: readonly Fragment[] = [
     pglite: `${FACT_WITHDRAWAL_SCHEMA_STATEMENTS[0]};`,
   },
   { source: 'src/core/lease-schema.ts', expr: 'LEASE_TOKEN_SCHEMA_SQL', postgres: LEASE_TOKEN_SCHEMA_SQL, pglite: LEASE_TOKEN_SCHEMA_SQL },
+  { source: 'src/core/page-body/schema.ts', expr: 'PAGE_BODY_SCHEMA_SQL', postgres: PAGE_BODY_SCHEMA_SQL, pglite: PAGE_BODY_SCHEMA_SQL },
   { source: 'src/core/page-state/schema.ts', expr: 'PAGE_STATE_SCHEMA_SQL', postgres: PAGE_STATE_SCHEMA_SQL, pglite: PAGE_STATE_SCHEMA_SQL },
   {
     source: 'src/core/persistence/schema.ts',

@@ -9,6 +9,7 @@ import { collectWantedLinks, isWantedPagesEnabled, possibleWantedRows } from '..
 import { readFix } from '../ops/op-fix.ts';
 import { readLineGrammarSettings, type LineGrammarSettings } from '../line-grammar.ts';
 import { primeRelationSemantics } from '../link-semantics-pack.ts';
+import { materializedSnapshot } from './segmented-apply.ts';
 
 async function liveSlugAliases(engine: BrainEngine, sourceId: string, targets: string[]): Promise<Map<string, string>> {
   if (!targets.length) return new Map();
@@ -130,7 +131,7 @@ export async function prepareAutomaticLinks(engine: BrainEngine, slug: string,
     { sourceId: row.from_source_id!, slug: row.from_slug }, { sourceId: row.to_source_id!, slug: row.to_slug },
   ])], apply: async (tx: BrainEngine) => {
     if (!attendanceComplete) return { created: 0, removed: 0, errors: 1, unresolved_count: Math.max(1, unresolved.length) };
-    const snapshot = await tx.readPageSnapshot(slug, { sourceId });
+    const snapshot = await materializedSnapshot(tx, await tx.readPageSnapshot(slug, { sourceId }));
     if (!snapshot) throw new Error('Automatic link origin disappeared');
     try {
       const result = await tx.replaceDerivedLinks({ slug, sourceId, expectedRevision: snapshot.revision,

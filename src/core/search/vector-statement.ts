@@ -63,6 +63,7 @@ import { unverifiedExtractionFragment } from '../extraction-review.ts';
 import { buildVectorCastFragment, normalizeEngineColumn } from './embedding-column.ts';
 import { resolveBoostMap, resolveHardExcludes } from './source-boost.ts';
 import { buildBestPerPagePoolCte, buildHardExcludeClause, buildSourceFactorCase, buildVisibilityClause } from './sql-ranking.ts';
+import { chunkGenerationProbe } from './safe-chunks.ts';
 
 export const VECTOR_EXTENSION_VERSION_SQL = `SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
 export const SET_STATEMENT_TIMEOUT_SQL = `SELECT set_config('statement_timeout', $1, true)`;
@@ -172,6 +173,7 @@ export const SCOPE_CHUNK_SAMPLE_PAGES = 400;
  * deterministic (`hashint4`, so interleaved page ids do not alias a stride)
  * and costs one pass over the scope's page ids plus ~400 index probes.
  */
+// chunk-visibility-ok: planner size estimate; staged rows only nudge the sample count
 export const SCOPE_CHUNKS_SQL = `WITH scope_pages AS MATERIALIZED (
     SELECT id FROM pages WHERE source_id = ANY($1::text[]) AND deleted_at IS NULL),
   total AS (SELECT count(*)::int AS pages FROM scope_pages),
@@ -322,7 +324,8 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
   const modalityFilter = resolvedCol.name === 'embedding_image' ? `AND cc.modality = 'image'`
     : resolvedCol.name === 'embedding_multimodal' ? '' : `AND cc.modality = 'text'`;
   // v0.26.5: visibility in the inner CTE so hidden rows never take candidate slots.
-  const visibilityClause = buildVisibilityClause('p', 's', opts);
+  const visibilityClause = buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' });
+  const pageVisibilityClause = buildVisibilityClause('p', 's', opts);
   const candidateFrom = (generation: string) => `FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         JOIN sources s ON s.id = p.source_id
@@ -394,8 +397,9 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
             WHERE true
               ${pageFilters.join('\n              ')}
               ${hardExcludeClause}
-              ${visibilityClause}
+              ${pageVisibilityClause}
           ))
+          AND ${chunkGenerationProbe('cc')}
           AND cc.${col} IS NOT NULL ${modalityFilter}
           ${chunkFilters.join('\n          ')}
           ${relaxedGeneration}

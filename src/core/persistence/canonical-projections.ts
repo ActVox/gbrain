@@ -11,6 +11,7 @@ import { parseTimelineEntries } from '../link-extraction.ts';
 import { extractTimelineFromContent, hasExtractorDetail, supersededCitationTimeline, type ExtractedTimelineEntry } from '../timeline-extract.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
+import { bodyUnread } from '../page-body/page-shape.ts';
 import { materializedMarker, materializedMarkerHash, timelineKey, timelineKeyHash } from '../timeline-marker.ts';
 import type { OperationError } from '../ops/contract.ts';
 import { protectedRegions } from '../fence-scan.ts';
@@ -374,7 +375,9 @@ function takeCollision(rows: number[], sections: Map<number, FenceSection>, slug
  * Prepare provider-free projections outside publication. `prior` is the
  * caller's snapshot at its observed revision; stored timeline rows and take
  * row numbers are pinned here so the publication transaction only removes
- * what this writer actually edited.
+ * what this writer actually edited. A prior body left unread (a segmented page
+ * over the single-string ceiling, which holds no fences) contributes no rows of
+ * its own: stored timeline rows and takes stay unless the new body changes them.
  */
 export async function prepareCanonicalProjections(engine: BrainEngine, page: ParsedPage, slug: string, sourceId: string,
   prior: PageSnapshot | null, writer: ProjectionWriter, policy?: TimelineWritePolicy): Promise<(tx: BrainEngine, pageId?: number) => Promise<CanonicalProjectionResult>> {
@@ -382,18 +385,19 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
   // #6259: a page the content-quality gate hid as junk projects no facts or takes. Rows projected before it
   // was quarantined are left as they are (hiding them would need a new row state); only new projection stops.
   const projectFences = !isQuarantined(page.frontmatter);
+  const priorBody = prior && !bodyUnread(prior.page) ? prior.page : null;
   const { timeline, exactIncoming, pinned } = classifyTimeline(prior ? await storedTimeline(engine, prior.page.id) : [],
-    page, prior?.page ?? null, slug, writer, policy);
+    page, priorBody, slug, writer, policy);
   const deletionRows = pinned.filter(row => row.action === 'delete')
     .map(({ id, date, source, summary, detail, state }) => ({ id, date, source, summary, detail, removed: state === 'removed' || state === 'removed_marked' }));
   const refreshRows = pinned.filter(row => row.action === 'refresh_detail')
     .map(row => ({ id: row.id, detail: row.detail, next: exactIncoming.get(exactTimelineKey(row)) }))
     .filter(row => row.next !== row.detail);
-  const priorTakes = prior ? canonicalTakeRows(prior.page) : new Set<number>();
+  const priorTakes = priorBody ? canonicalTakeRows(priorBody) : new Set<number>();
   // TE1 (#6188): when the prior takes fence does not parse, its stored rows count as prior canonical rows, so a
   // row Tier 1 normalized (same number, holder `system` -> `brain`) updates its stored take instead of colliding.
-  const priorCanonical = prior && [prior.page.compiled_truth, prior.page.timeline ?? ''].some(field => parseTakesFence(field).warnings.length)
-    ? new Set([...priorTakes, ...(await engine.executeRaw<{ row_num: number }>('SELECT row_num FROM takes WHERE page_id=$1', [prior.page.id])).map(r => Number(r.row_num))])
+  const priorCanonical = priorBody && [priorBody.compiled_truth, priorBody.timeline ?? ''].some(field => parseTakesFence(field).warnings.length)
+    ? new Set([...priorTakes, ...(await engine.executeRaw<{ row_num: number }>('SELECT row_num FROM takes WHERE page_id=$1', [priorBody.id])).map(r => Number(r.row_num))])
     : priorTakes;
   const newTakes = JSON.stringify(takes.filter(t => !priorCanonical.has(t.rowNum)).map(t => ({ row_num: t.rowNum, claim: t.claim, kind: t.kind, holder: t.holder })));
   const takeRowsGone = [...priorTakes].filter(n => !takes.some(t => t.rowNum === n));

@@ -931,7 +931,7 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1132 column(s) verified against live schema",
+            "message": "1191 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
@@ -4638,7 +4638,7 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1132 column(s) verified against live schema",
+            "message": "1191 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
