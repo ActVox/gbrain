@@ -10,13 +10,20 @@
  *    skips one above it as `page_body_segmented`; backfill counts segmented
  *    pages as eligible; a remote write's `links` effect on a segmented page
  *    finishes skipped instead of retrying forever; the facts backstop neither
- *    queues for a segmented page nor lets a facts-absorb job throw on one.
+ *    queues for a segmented page nor lets a facts-absorb job throw on one; a
+ *    trusted put_page (auto_link on) publishes a segmented page with its derived
+ *    links and temporal evidence, edit_page edits one, and a put_page that
+ *    shrinks one to inline versions the segmented body before demoting it;
+ *    re-linking one later (autoLinkWrittenPage, `extract --slugs`) reads its
+ *    materialized body; the managed stale-links pass after a managed import
+ *    links a segmented page within the ceiling and skips one over it as
+ *    `page_body_segmented`.
  * 2. Fails when: any of these paths reads `compiled_truth` of a segmented page
  *    object, or sees its NULL column as an empty body.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
@@ -39,12 +46,19 @@ import { makeFactsAbsorbHandler } from '../../src/core/minions/handlers/facts-ab
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
+import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
+import { withVerifiedLocalRegistration } from '../../src/core/persistence/identity.ts';
+import { extractManagedStaleLinks } from '../../src/core/persistence/links-maintenance.ts';
+import { autoLinkWrittenPage } from '../../src/core/ops/pages.ts';
+import { importManagedFile } from '../../src/core/persistence/import-mutations.ts';
+import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 
 const config = { engine: 'pglite' as const, embedding_disabled: true };
 const CLIENT = 'client-segmented-derived';
 const today = new Date().toISOString().slice(0, 10);
 const body = conversationBody(1_200_000, { seed: 61 });
 const meeting = (title: string) => `---\ntype: meeting\ntitle: ${title}\ndate: ${today}\n---\n\n${body}\n`;
+const linkedMeeting = (title: string, extra = '') => `---\ntype: meeting\ntitle: ${title}\ndate: ${today}\n---\n\nMet [[people/alice-example]], who works at [[companies/acme-example]].\n\n${body}\n${extra}`;
 const note = (title: string) => `---\ntype: note\ntitle: ${title}\n---\n\nSee [[people/alice-example]].\n\n${body}\n`;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-segmented-derived-'));
 const engines: BrainEngine[] = [];
@@ -101,6 +115,22 @@ async function storage(engine: BrainEngine, slug: string): Promise<{ id: number;
   const [row] = await engine.executeRaw<{ id: number; body_storage: string; content_hash: string }>(
     "SELECT id, body_storage, content_hash FROM pages WHERE source_id='default' AND slug=$1", [slug]);
   return { ...row!, id: Number(row!.id) };
+}
+
+/** A trusted local tool call through the MCP dispatcher (admission, preparation, publication). */
+async function localCall(engine: BrainEngine, name: string, params: Record<string, unknown>): Promise<{ isError: boolean; body: Record<string, unknown> }> {
+  return withEnv({ GBRAIN_HOME: home }, async () => {
+    const registration = await registerLocalWriter(engine, 'cli');
+    const response = await withVerifiedLocalRegistration(engine, registration, () => dispatchToolCall(engine, name, params,
+      { remote: false, config: { engine: engine.kind }, sourceId: 'default', logger: { info() {}, warn() {}, error() {} } } as never));
+    return { isError: response.isError === true, body: JSON.parse((response.content[0] as { text: string }).text) };
+  });
+}
+
+async function linkTargets(engine: BrainEngine) {
+  for (const [slug, type] of [['people/alice-example', 'person'], ['companies/acme-example', 'company']] as const) {
+    await engine.putPage(slug, { type, title: slug, compiled_truth: `${slug} fixture.`, timeline: '', frontmatter: {} }, { sourceId: 'default' });
+  }
 }
 
 const ledger = (engine: BrainEngine) => engine.executeRaw<{ slug: string; state: string; reason: string | null; scheduled: boolean }>(
@@ -211,4 +241,98 @@ describe('page-write effects on segmented pages', () => {
       expect(result).toEqual({ skipped: 'page_body_segmented', slug: 'notes/segmented-absorb', sourceId: 'default' });
     }
   }, 300_000);
+});
+
+describe('trusted coordinated writes of segmented pages', () => {
+  test('a trusted put_page with auto_link on (the default) publishes the segmented page and its derived links', async () => {
+    for (const engine of engines) {
+      await linkTargets(engine);
+      const committed = await coordinatedPut(engine, 'meetings/segmented-linked', linkedMeeting('Linked'));
+      expect({ state: committed.state, error: committed.error_code }).toEqual({ state: 'committed', error: null });
+      expect((await storage(engine, 'meetings/segmented-linked')).body_storage).toBe('segmented');
+      expect(committed.outcome?.chronicle_backstop).toMatchObject({ pending: 'next_cycle' });
+      const links = await engine.executeRaw<{ slug: string }>(`SELECT t.slug FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id
+        WHERE f.slug='meetings/segmented-linked' ORDER BY t.slug`);
+      expect([...new Set(links.map(link => link.slug))]).toEqual(['companies/acme-example', 'people/alice-example']);
+    }
+  }, 300_000);
+
+  test('edit_page on a segmented page publishes the edit', async () => {
+    for (const engine of engines) {
+      await linkTargets(engine);
+      expect((await localCall(engine, 'put_page', { slug: 'meetings/segmented-edit', content: linkedMeeting('Edit', 'Closing note one.\n') })).isError).toBe(false);
+      const { body: before } = await localCall(engine, 'get_page', { slug: 'meetings/segmented-edit', body: 'none' });
+      const edited = await localCall(engine, 'edit_page', { slug: 'meetings/segmented-edit', expected_revision: before.revision,
+        edits: [{ old_text: 'Closing note one.', new_text: 'Closing note two.' }] });
+      expect({ isError: edited.isError, code: edited.body.code }).toEqual({ isError: false, code: undefined });
+      expect((await storage(engine, 'meetings/segmented-edit')).body_storage).toBe('segmented');
+      const { body: after } = await localCall(engine, 'get_page', { slug: 'meetings/segmented-edit', body: 'none' });
+      expect(after.revision).not.toBe(before.revision);
+    }
+  }, 300_000);
+
+  test('a put_page that shrinks a segmented page to inline commits and versions the segmented body first', async () => {
+    for (const engine of engines) {
+      await linkTargets(engine);
+      expect((await localCall(engine, 'put_page', { slug: 'meetings/segmented-shrink', content: linkedMeeting('Shrink') })).isError).toBe(false);
+      const { body: before } = await localCall(engine, 'get_page', { slug: 'meetings/segmented-shrink', body: 'none' });
+      const shrunk = await localCall(engine, 'put_page', { slug: 'meetings/segmented-shrink', expected_revision: before.revision, allow_shrink: true,
+        content: `---\ntype: meeting\ntitle: Shrink\ndate: ${today}\n---\n\nMet [[people/alice-example]] again, briefly.\n` });
+      expect({ isError: shrunk.isError, code: shrunk.body.code }).toEqual({ isError: false, code: undefined });
+      const page = await storage(engine, 'meetings/segmented-shrink');
+      expect(page.body_storage).toBe('inline');
+      expect(await engine.executeRaw('SELECT body_storage FROM page_versions WHERE page_id=$1 ORDER BY id', [page.id])).toEqual([{ body_storage: 'segmented' }]);
+    }
+  }, 300_000);
+
+  test('re-linking a segmented page later (autoLinkWrittenPage, extract --slugs) reads its materialized body', async () => {
+    for (const engine of engines) {
+      await linkTargets(engine);
+      await engine.setConfig('auto_link', 'false');
+      try {
+        await importFromContent(engine, 'notes/segmented-relink', `${note('Relink')}\n## Timeline\n\n- **2026-09-14** | Met Alice.\n`, { sourceId: 'default', noEmbed: true });
+      } finally { await engine.unsetConfig('auto_link'); }
+      const page = await storage(engine, 'notes/segmented-relink');
+      expect(page.body_storage).toBe('segmented');
+      const links = () => engine.executeRaw<{ slug: string }>(`SELECT t.slug FROM links l JOIN pages t ON t.id=l.to_page_id WHERE l.from_page_id=$1`, [page.id]);
+      expect(await links()).toEqual([]);
+      await autoLinkWrittenPage(engine, 'notes/segmented-relink', { sourceId: 'default' });
+      expect(await links()).toEqual([{ slug: 'people/alice-example' }]);
+      await engine.executeRaw('DELETE FROM timeline_entries WHERE page_id=$1', [page.id]);
+      const extracted = await extractManagedStaleLinks(engine, { sourceId: 'default', slugs: ['notes/segmented-relink'], mentions: false });
+      expect(extracted.timeline).toBe(1);
+    }
+  }, 300_000);
+
+  test('the managed stale-links pass links a segmented page within the ceiling and skips one over it as page_body_segmented', async () => {
+    for (const engine of engines) {
+      await linkTargets(engine);
+      const sourceId = `segmented-${randomUUID().slice(0, 8)}`;
+      const root = join(home, sourceId);
+      mkdirSync(join(root, 'notes'), { recursive: true });
+      const linked = (bytes: number) => `---\ntype: note\ntitle: Managed\n---\n\nSee [[people/alice-example]].\n\n${conversationBody(bytes, { seed: 62 })}\n`;
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
+        await engine.putPage('people/alice-example', { type: 'person', title: 'Alice', compiled_truth: 'Alice fixture.', timeline: '', frontmatter: {} }, { sourceId });
+        await registerLocalWriter(engine, 'cli');
+        await claimWorktree(engine, sourceId, root);
+        await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+        try {
+          for (const [file, bytes] of [['notes/within.md', 1_200_000], ['notes/over.md', PAGE_MAX_BYTES + 1024 * 1024]] as const) {
+            writeFileSync(join(root, file), linked(bytes));
+            expect(await importManagedFile(engine, join(root, file), file, { sourceId, noEmbed: true })).toMatchObject({ status: 'imported' });
+          }
+          // The cycle's extract phase passes the slugs a sync changed (cycle.ts → runExtractCore → extractManagedStaleLinks).
+          const result = await extractManagedStaleLinks(engine, { sourceId, slugs: ['notes/within', 'notes/over'], mentions: false });
+          expect(result.skipped_reasons).toEqual({ page_body_segmented: 1 });
+          const links = await engine.executeRaw<{ slug: string }>(`SELECT f.slug FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id
+            WHERE f.source_id=$1 AND t.slug='people/alice-example' ORDER BY f.slug`, [sourceId]);
+          expect(links).toEqual([{ slug: 'notes/within' }]);
+        } finally {
+          await disposePersistenceConsumer(engine);
+          await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+        }
+      });
+    }
+  }, 600_000);
 });

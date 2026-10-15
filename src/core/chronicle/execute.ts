@@ -18,9 +18,7 @@ import { recordOnTracker } from '../ai/budget-record.ts';
 import { getCurrentBudgetTracker, withBudgetTracker } from '../ai/gateway.ts';
 import type { ExtractAtomsCostGate } from '../cycle/extract-atoms-cost-gate.ts';
 import type { MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
-import { materializedPage } from '../persistence/segmented-apply.ts';
-import { isSegmentedPage, pageBodyBytes } from '../page-body/page-shape.ts';
-import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
+import { materializedPage, segmentedOverCeiling } from '../persistence/segmented-apply.ts';
 import { CHRONICLE_DEFAULTS, CHRONICLE_EXTRACTOR_VERSION, type ChronicleLedgerRow } from './contract.ts';
 import type { ChronicleReasonCode } from './reasons.ts';
 import type { ChronicleSettings } from './config.ts';
@@ -178,7 +176,7 @@ export async function executeChronicleRow(ctx: ChronicleExecContext, row: Chroni
     await finish(engine, row, row.attempts, { state: 'skipped', reason: 'no_extract', nextAttemptAt: null });
     return done('skipped', 'no_extract');
   }
-  if (isSegmentedPage(snapshot.page) && pageBodyBytes(snapshot.page) > PAGE_MAX_BYTES) {
+  if (segmentedOverCeiling(snapshot.page)) {
     await finish(engine, row, row.attempts, { state: 'skipped', reason: 'page_body_segmented', nextAttemptAt: null });
     return done('skipped', 'page_body_segmented');
   }
