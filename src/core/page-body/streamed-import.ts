@@ -17,7 +17,7 @@
  *   and the path-authoritative slug; gate-owned marker strip (a quarantine
  *   override binds the whole body, so it is dropped: fail closed); content
  *   sanity (junk patterns read a 2 KB head, size from the stored byte count);
- *   NUL strip (per segment); type preservation and subtype; provenance,
+ *   type preservation and subtype; provenance,
  *   effective date, tags, frontmatter aliases; the content hash (resumed per
  *   segment); the no-op skip; identity dedup by hash (an external `id` holds);
  *   code-reference edges (per line, skipped when the body has protected
@@ -28,7 +28,8 @@
  *   fences (fence normalization, withdrawal and purge preservation parse the
  *   whole body); derived entity aliases (a linkable page type); NUL bytes (the
  *   size check needs the stored byte count before the hash); invalid UTF-8
- *   (the string path decodes it lossily); a file that changes between passes.
+ *   (the string path decodes it lossily); a deleted existing page (a restore
+ *   rewrites it through the inline writer); a file that changes between passes.
  */
 import { open, type FileHandle } from 'node:fs/promises';
 import { constants } from 'node:fs';
