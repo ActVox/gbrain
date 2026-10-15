@@ -45,12 +45,13 @@ async function runEmbeddingIdentity(ctx: DoctorContext): Promise<Check[]> {
     const { loadConfig } = await import('../../../core/config.ts');
     const configured = loadConfig()?.embedding_model?.trim() || null;
     const fix = embeddingIdentityFix(stored, configured);
-    const target = fix.argv[4]!;
+    const argv = fix.argv ?? [];
+    const target = argv[4]!;
     const differs = !fix.inputs && !target.endsWith(`:${stored}`);
     checks.push({
       name: 'embedding_identity_unqualified', status: 'warn',
       message: `The brain's embedding_model row is ${JSON.stringify(stored)} with no provider prefix (a row from an older install), so managed fact extraction stops with embedding_configuration; gbrain config set cannot change it. `
-        + `Preview the rewrite: ${fix.argv.join(' ')}${differs ? ` (the configured model ${target} is not ${stored}, so applying it switches models)` : ''}. Applying it re-embeds active facts and needs the user's paid authorization.`,
+        + `Preview the rewrite: ${argv.join(' ')}${differs ? ` (the configured model ${target} is not ${stored}, so applying it switches models)` : ''}. Applying it re-embeds active facts and needs the user's paid authorization.`,
       details: { code: NAME, stored_model: stored, configured_model: configured, target_model: fix.inputs ? null : target, target_differs: differs },
       fix,
     });

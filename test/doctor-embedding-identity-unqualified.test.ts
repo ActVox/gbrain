@@ -62,7 +62,7 @@ describe('doctor embedding_identity_unqualified (#6113)', () => {
 
   test('a configured model with another name is filled in and called out as a model switch', async () => {
     const check = await run('text-embedding-3-small', { embedding_model: 'voyage:voyage-4-lite' });
-    expect(check.fix?.argv[4]).toBe('voyage:voyage-4-lite');
+    expect(check.fix?.argv?.[4]).toBe('voyage:voyage-4-lite');
     expect(check.details?.target_differs).toBe(true);
     expect(check.message).toContain('switches models');
   });
