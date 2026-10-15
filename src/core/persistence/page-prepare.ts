@@ -39,6 +39,7 @@ import type { PreparedMutation } from './coordinator.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { isUnboundSourcePage } from './unbound-source.ts';
 import { sealImportedPage, sealPageTextProjection } from '../page-state/projections.ts';
+import { materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { materializeTimeline, prepareCanonicalProjections, type TimelineRowsRemoved } from './canonical-projections.ts';
@@ -398,11 +399,13 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   const source = { sourceId: row.source_id };
   // A coordinated (single-write) preparation sends its independent reads together; the first refusal in this order is reported.
   const together = options.coordinated ? engine : { kind: 'sequential' };
-  const [, snapshot, pack] = await pipelined(together, [
+  const [, stored, pack] = await pipelined(together, [
     () => assertKnowledgePublicationAllowed(engine, row),
     () => engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true }),
     () => loadActivePackForEngine(engine, { remote: row.authority.remote, sourceId: row.source_id }).catch(() => null),
   ]) as [unknown, PageSnapshot | null, Awaited<ReturnType<typeof loadActivePackForEngine>> | null];
+  // Wave B: a segmented page within the single-string ceiling is compared and merged as strings.
+  const snapshot = await materializedSnapshot(unbounded, stored);
   signal?.throwIfAborted();
   enterClaimStep(clock, 'revision_check');
   assertPageRevision(snapshot, preparedIntent ? { expectedRevision: preparedIntent.expectedRevision } : engineMutationPrecondition(parseMutationPrecondition(p)));
@@ -509,6 +512,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   enterClaimStep(clock, 'import_content', undefined, 'db');
   const result = await importFromContent(engine, row.slug, content, {
     ...source, noEmbed: true, remote: row.authority.remote, activePack, fences: projected ? 'coordinated' : 'lenient', coordinated: lean,
+    segmentedOwner: { kind: row.operation === 'edit_page' ? 'edit' : 'put', principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: observedRevision },
     ...(lean ? { existingSnapshot: snapshot } : {}),
     // #6259: only owner-tier intents keep gate-owned markers; an ordinary put_page, local or remote, has them stripped.
     preserveGateMarkers: !row.authority.remote && (p.kind === 'managed_maintenance_page' || p.kind === 'managed_quarantine_clear'),
@@ -599,16 +603,18 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   // An inferred mode is pinned with the first origin it mints, so later pages cannot flip the inference (#5610).
   const pinMode = sourcePath && mintMode && scannerSourcePath(file!.root, file!.root) && !await readSlugRootMode(engine, row.source_id) ? mintMode : undefined;
   const publication: PreparedMutation = { observedRevision, noop, additionalPageKeys:links?.pageKeys, file, ...databaseOnly,
-    ...(core ? { exclusiveSources: core.exclusiveSources } : {}), ...(trust ? { trust } : {}),
+    ...(core ? { exclusiveSources: core.exclusiveSources } : {}), ...(trust ? { trust } : {}), ...(ready.afterCommit ? { afterCommit: ready.afterCommit } : {}),
     validate: async tx => { await ready.validate(tx); await core?.validate(tx); }, apply: async (tx, preimage) => {
     let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
     let removedTimeline: TimelineRowsRemoved | null = null;
     let lowered: { proposal_ref: string } | null = null;
     let contested: string[] = [];
+    let projectionPending = false;
     if (!noop) {
       const prior = snapshot ? await storedPageTier(tx, row.source_id, row.slug) : null;
       // ENG-1: a managed fence edit keeps the page's tier; CEO-12: an agent rewrite that lowers a page files a queue item.
       const applied = await (isFenceEditWrite(row) ? withTrustKeep(tx, ['pages'], () => ready.apply(tx, lean ? preimage : undefined)) : ready.apply(tx, lean ? preimage : undefined));
+      projectionPending = applied?.segmented?.complete === false;
       lowered = prior ? await recordAgentPageLowering(tx, row, { tier: prior, revision: snapshot!.revision }) : null;
       // Mandatory metadata shares publication rollback; exact no-ops never heal it. These, and the
       // projections (facts, takes, timeline rows of the page the import just wrote live), are independent and sent together.
@@ -636,7 +642,8 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
         const final = await tx.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
         const live = final && final.page.deleted_at == null ? final : null;
         await verifyPageReadable(tx, row.slug, ready.contentHash!, row.source_id, 'importFromContent', live?.page ?? null);
-        if (applied?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, applied.chunkerSeal, applied.pageId);
+        if (applied?.segmented) { if (applied.segmented.complete && live) await sealSegmentedPage(tx, Number(live.page.id)); }
+        else if (applied?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, applied.chunkerSeal, applied.pageId);
         else if (live) await sealPageTextProjection(tx, row.slug, row.source_id, live);
         if (core) await core.record(tx, final?.revision ?? null);
         publication.postimage = final;
@@ -644,7 +651,8 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
         if (targetDeleted) await tx.softDeletePage(row.slug, source);
         // Index installation and terminal receipt share this transaction. The import sealed the projection
         // as its last revision-changing step; only a later revision change (restore, tags, links, delete) reseals.
-        if (!(applied?.sealed && row.operation !== 'restore_page' && !versionTags && !links && !targetDeleted)) await sealPageTextProjection(tx, row.slug, row.source_id);
+        if (applied?.segmented) { if (applied.segmented.complete && applied.pageId !== undefined) await sealSegmentedPage(tx, applied.pageId); }
+        else if (!(applied?.sealed && row.operation !== 'restore_page' && !versionTags && !links && !targetDeleted)) await sealPageTextProjection(tx, row.slug, row.source_id);
         if (core) await core.record(tx, (await tx.readPageSnapshot(row.slug, source))?.revision ?? null);
       }
     }
@@ -655,7 +663,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
     return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}), ...(coreUsage ? { core: coreUsage } : {}),
       ...(removedTimeline ? { timeline_rows_removed: timelineRowsRemovedAdvisory(row, removedTimeline) } : {}),
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
-      slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
+      slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop, ...(projectionPending ? { projection: 'pending' } : {}),
       ...sizeState,
       ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'
         : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),

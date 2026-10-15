@@ -72,6 +72,11 @@ interface PreparedMutationBase {
   validate?(tx: BrainEngine): Promise<void>;
   /** #5575: the tier and origin of the rows apply writes; absent: the request's channel tier (trust/channel.ts). */
   trust?: WriteTrust;
+  /**
+   * Wave B: runs once the publication committed and its recovery record is cleared (a segmented page's
+   * deferred projection and segment GC). Best effort: the projection queue and GC converge after a failure.
+   */
+  afterCommit?(engine: BrainEngine): Promise<void>;
 }
 /**
  * A page file target; `publishMode` (Google pages) is the exact mode it publishes with, and its created directories get 0700.
@@ -425,6 +430,13 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     });
     await hooks.boundary?.('after_commit', done);
     if (recovery) await clearResolvedRecovery(engine, row.id, done);
+    if (done.state === 'committed' && prepared.afterCommit) {
+      releaseCapacity?.();
+      releaseCapacity = null;
+      await lock?.release();
+      lock = null;
+      await prepared.afterCommit(engine).catch(() => undefined);
+    }
     return done;
   } catch (error) {
     if (recovery) {
@@ -545,6 +557,7 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       await faultPoint('publication_recovery:before_clear', { requestId: row.request_id, sourceId: row.source_id, operation: row.operation });
       await clearResolvedRecovery(engine, id);
       row = (await getWriteRequestById(engine, id))!;
+      if (row.page_id !== null && row.state === 'committed') await engine.sweepSegments({ pageId: Number(row.page_id) }).catch(() => undefined);
     }
     return row;
   } finally { releaseCapacity?.(); await lock?.release(); }

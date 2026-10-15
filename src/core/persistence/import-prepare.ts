@@ -16,6 +16,7 @@ import { pageFencesNormalized } from '../fence-repair/report.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { sealImportedPage, sealPageTextProjection } from '../page-state/projections.ts';
+import { materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { getWorktreeBinding } from './ownership.ts';
 import { localHostId } from './identity.ts';
@@ -176,7 +177,7 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
     `${p.sourcePath} now normalizes to different content or slug than import request ${row.request_id} accepted for ${row.slug}, so it published nothing. Import it again to publish the current file.`,
     { fix: reimportFix(p.inputPath, row.source_id) });
   const source = { sourceId: row.source_id };
-  const snapshot = screen ? screen.snapshot : await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
+  const snapshot = await materializedSnapshot(engine, screen ? screen.snapshot : await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true }));
   assertPageRevision(snapshot, { expectedRevision: p.expected_revision ?? null }); // null: admitted against an absent page; still a revision_conflict if one appeared (#5385)
   if ((snapshot?.page.id ?? null) !== row.page_id || snapshot?.page.source_path && snapshot.page.source_path !== p.sourcePath) {
     throw opError('page_identity_changed', 'The imported path no longer names the accepted page.',
@@ -194,7 +195,8 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
     : code
     ? await importCodeFile(engine, p.sourcePath, p.content, { ...source, noEmbed: true, prepare })
     : await importFromContent(engine, row.slug, p.content, { ...source, noEmbed: true, remote: false, preserveGateMarkers: true, prepare, fences: 'coordinated', writeGate: await ownerGateInput(engine, row, parseMarkdown(p.content, row.slug).frontmatter, p.sourcePath),
-      coordinated: true, existingSnapshot: snapshot, activePack: p.activePack, sourcePath: p.sourcePath, filename: basename(p.sourcePath, '.md'), allowEmptyOverwrite: true });
+      coordinated: true, existingSnapshot: snapshot, activePack: p.activePack, sourcePath: p.sourcePath, filename: basename(p.sourcePath, '.md'), allowEmptyOverwrite: true,
+      segmentedOwner: { kind: 'import', principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: snapshot?.revision ?? null } });
   if (!prepared && result.refusal?.code === 'invalid_fence') throw managedImportRefusal(result.refusal, p.sourcePath);
   if (!prepared) throw opError('invalid_params', result.error ?? 'The file could not be prepared.',
     `${p.sourcePath} was rejected while preparing import request ${row.request_id} for source ${row.source_id}; nothing was published. Fix the file content or frontmatter named in the message, then import it again.`,
@@ -213,6 +215,7 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
   const project = code || image ? undefined : await prepareCanonicalProjections(engine, ready.parsedPage!, row.slug, row.source_id, snapshot, 'file');
   const mutation: PreparedMutation = { observedRevision: ready.observedRevision, noop: ready.noop && p.targetHash === sha256(rendered),
     trust: await ownerImportTrust(engine, row, ready.parsedPage?.frontmatter, p.sourcePath), deferEmbedding: image || p.noEmbed, validate: async tx => { await checkPaths(tx); await ready.validate(tx); },
+    ...(ready.afterCommit ? { afterCommit: ready.afterCommit } : {}),
     file: { root, path, content: rendered, expectedBeforeHash: p.targetHash },
     apply: async tx => {
       const applied = await ready.apply(tx);
@@ -226,7 +229,8 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
         if (!ready.noop) {
           await verifyPageReadable(tx, row.slug, ready.contentHash!, row.source_id, 'importFromContent', live?.page ?? null);
           await project(tx, final?.page.id);
-          if (applied?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, applied.chunkerSeal, applied.pageId);
+          if (applied?.segmented) { if (applied.segmented.complete && live) await sealSegmentedPage(tx, Number(live.page.id)); }
+          else if (applied?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, applied.chunkerSeal, applied.pageId);
           else if (live) await sealPageTextProjection(tx, row.slug, row.source_id, live);
         }
         mutation.postimage = final;

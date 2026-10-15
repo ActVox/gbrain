@@ -398,7 +398,7 @@ export async function preparePageProjection(prepared: ProjectionSnapshot) {
 const PROJECTION_JOB_PROBES = `CROSS JOIN LATERAL (SELECT s.id FROM sources s
       WHERE s.incarnation=j.source_incarnation AND NOT s.archived OFFSET 0) s
     CROSS JOIN LATERAL (SELECT p.page_kind FROM pages p WHERE p.source_id=s.id AND p.slug=j.slug
-      AND p.deleted_at IS NULL AND p.page_kind IN ('markdown','code') OFFSET 0) p`;
+      AND p.deleted_at IS NULL AND p.page_kind IN ('markdown','code') AND p.body_storage IS DISTINCT FROM 'segmented' OFFSET 0) p`;
 
 /**
  * Rebuilds between statistics refreshes, per engine. Like autovacuum's analyze
