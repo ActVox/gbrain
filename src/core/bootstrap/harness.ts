@@ -781,15 +781,16 @@ async function cleanupStalePriorTargets(
   }
 }
 
-/** A live `gbrain serve` holds this PGLite brain: the two documented escape hatches. */
-function liveServeRefusal(): BootstrapError {
-  return new BootstrapError(
-    'LIVE_SERVE',
-    'a live `gbrain serve` holds this PGLite brain, so the harness cannot mint a token — either ' +
-      'pre-mint one while the serve is stopped (`gbrain auth create bootstrap-harness --scopes read,write`) ' +
-      'and re-run with --token <value>, or stop the serve, re-run this command, and restart it. ' +
-      '(Postgres brains mint fine while the serve runs.)',
-  );
+/** #6661 (D25): a live serve holds this PGLite brain (no mint) and a stopped one fails the health probe: pre-mint with the harness grant, then --token. */
+async function liveServeRefusal(opts: { tokenName: string; follow: boolean; source?: string }): Promise<BootstrapError> {
+  const scopes = opts.follow ? ['read', 'write', 'skills_member_self'] : ['read', 'write'];
+  const operations = await harnessOperationSnapshot(opts.follow);
+  const steps = ['stop the serve that holds this brain', `gbrain auth create ${opts.tokenName} --scopes ${scopes.join(',')}`,
+    `gbrain auth rescope --token ${opts.tokenName} --operations ${operations.join(',')}${opts.source ? ` --sources ${opts.source}` : ''}`,
+    'start `gbrain serve --http` again', 're-run this `gbrain bootstrap harness` command with --token <the token step 2 printed>'];
+  return new BootstrapError('LIVE_SERVE', 'a live `gbrain serve` holds this PGLite brain, so the harness cannot mint a token, and with the serve ' +
+    `stopped its health check fails. Pre-mint the token with the harness grant (scopes ${scopes.join(',')} and its operation list), then use ` +
+    `--token:\n${steps.map((step, i) => `  ${i + 1}. ${step}`).join('\n')}\n(Postgres brains mint fine while the serve runs.)`, { details: { steps, scopes, operations } });
 }
 
 /** The engine could not open because a live serve holds the PGLite brain (vs any other failure). */
@@ -1086,7 +1087,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
       // A live PGLite serve holds the brain. Without a token the mint below
       // would refuse anyway — refuse HERE with the same two escape hatches, so
       // the operator never sees a source-resolution error for a lock problem.
-      if (flags.token === undefined) throw liveServeRefusal();
+      if (flags.token === undefined) throw await liveServeRefusal({ tokenName: flags.tokenName, follow: skillsPolicy === 'follow' });
       // --token lane (the documented PGLite path): nothing is minted, so the
       // grant is the operator's own token. Leave the hooks UNPINNED — a hook
       // request that names no source resolves through the live serve's own
@@ -1265,7 +1266,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (isLiveServeFailure(msg, d)) throw liveServeRefusal();
+        if (isLiveServeFailure(msg, d)) throw await liveServeRefusal({ tokenName: flags.tokenName, follow: skillsPolicy === 'follow', ...(flags.source ? { source: flags.source } : {}) });
         throw e;
       }
       tokens.set(host, minted.token);

@@ -27,6 +27,9 @@ async function runBareUpgrade(spec: string, observedVersion: string): Promise<{ 
   // `gbrain --version` keeps reporting the observed version.
   writeFileSync(join(bin, 'bun'), `#!/bin/sh\necho "$*" >> '${join(home, 'bun-calls.log')}'\nexit 0\n`);
   writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\necho "gbrain ${observedVersion}"\n`);
+  // #6662: the pin path reads published release tags with `git ls-remote`; answer with no newer tag, offline.
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase "$1" in ls-remote) echo "aaa\trefs/tags/v${observedVersion}"; exit 0;; esac\nexit 1\n`);
+  chmodSync(join(bin, 'git'), 0o755);
   chmodSync(join(bin, 'bun'), 0o755);
   chmodSync(join(bin, 'gbrain'), 0o755);
   const globalRoot = join(home, '.bun', 'install', 'global');
@@ -69,6 +72,7 @@ describe('#5311 bare upgrade on an exact-tag pin', () => {
       expect(r.stderr).toContain(`pinned to github:garrytan/gbrain#v${VERSION}`);
       // #5034 / B-NEW-5: remove before add; an in-place global tag swap fails (Bun 1.3) or silently corrupts the lock (Bun 1.4).
       expect(r.stderr).toContain('bun remove -g gbrain && bun add -g github:garrytan/gbrain');
+      expect(r.stderr).not.toContain('not published yet');
       expect(readFileSync(join(r.home, 'bun-calls.log'), 'utf-8')).toContain('update gbrain');
       // No false "just upgraded" breadcrumb for an upgrade that never happened.
       expect(existsSync(join(r.home, '.gbrain', 'just-upgraded-from'))).toBe(false);
@@ -80,7 +84,8 @@ describe('#5311 bare upgrade on an exact-tag pin', () => {
   }, 60_000);
 
   test('every reinstall hint removes the global package before adding the tag (#5034, B-NEW-5)', () => {
-    expect(bunReinstallCommand('#v0.60.1.0')).toBe('bun remove -g gbrain && bun add -g github:garrytan/gbrain#v0.60.1.0');
+    // #6662: a tag reinstall first proves the tag exists, so a missing tag stops before the removal.
+    expect(bunReinstallCommand('#v0.60.1.0')).toBe('git ls-remote --exit-code --tags https://github.com/garrytan/gbrain refs/tags/v0.60.1.0 && bun remove -g gbrain && bun add -g github:garrytan/gbrain#v0.60.1.0');
     expect(bunReinstallCommand('')).toBe('bun remove -g gbrain && bun add -g github:garrytan/gbrain');
   });
 

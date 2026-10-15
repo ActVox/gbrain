@@ -382,6 +382,34 @@ export function isUndefinedTableError(error: unknown): boolean {
 }
 
 /**
+ * #6599: strict old-schema predicate. True only when the error names exactly
+ * one of `names` as a missing table (42P01) or column (42703). With a SQLSTATE
+ * present, the code must match and the named object must too (driver metadata
+ * `table_name`/`column_name` wins over message text); a driver that drops the
+ * code is accepted only on the exact PostgreSQL/PGLite diagnostic. Unlike
+ * `isUndefinedColumnError`, a different missing object, a permission error or
+ * a data error that merely mentions the name never reads as "not migrated yet".
+ */
+export function isMissingSchemaObject(error: unknown, kind: 'table' | 'column', names: string | readonly string[]): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const wanted = new Set(typeof names === 'string' ? [names] : names);
+  const err = error as Record<string, unknown>;
+  const code = err.code === undefined || err.code === null ? '' : String(err.code);
+  if (code && code !== (kind === 'table' ? '42P01' : '42703')) return false;
+  if (code) {
+    const identifiers = (kind === 'table' ? ['table_name', 'table'] : ['column_name', 'column'])
+      .map(field => err[field]).filter((value): value is string => typeof value === 'string');
+    if (identifiers.length) return identifiers.every(identifier => wanted.has(identifier));
+  }
+  const message = typeof err.message === 'string' ? err.message.trim() : '';
+  const match = kind === 'table'
+    ? /^relation "([^"]+)" does not exist$/.exec(message)
+    : /^column (?:"([^"]+)"|([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?))(?: of relation "[^"]+")? does not exist$/.exec(message);
+  const identifier = match?.[1] ?? match?.[2];
+  return identifier !== undefined && wanted.has(identifier.split('.').pop()!);
+}
+
+/**
  * SQLSTATE 22007 / 22008: a date or timestamp the database could not parse.
  * On a read path that is the caller's input, never a degraded result or a
  * server fault: list_pages reports it as invalid_params and the hybrid

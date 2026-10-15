@@ -6,7 +6,8 @@
  *   frontmatter markers (they can only lower).
  * - CEO-21: an ordinary content write below operator_curated stamps the
  *   lower-only `trust_tier` marker into the frontmatter it publishes, at the
- *   lower of the write's tier and the page's stored tier, so the tier survives
+ *   lower of the write's tier and the page's stored tier (an unclassified
+ *   `unknown` row does not lower it, #6550), so the tier survives
  *   the git round trip (sync honors it; an owner restamp needs the marker gone).
  * - ENG-1: gbrain-managed fence edits (remember / takes fence appends, proposal
  *   accept strikes, loop and relink maintenance) and add_timeline_entry rewrite
@@ -60,10 +61,15 @@ export async function storedPageTier(engine: BrainEngine, sourceId: string, slug
   return row ? storedTrustTier(row.trust_tier) : null;
 }
 
-/** CEO-21: the marker an ordinary content write stamps (in place); `stored` is the page's tier before the write. */
+/**
+ * CEO-21: the marker an ordinary content write stamps (in place); `stored` is the page's tier before the write.
+ * #6550: a stored `unknown` means "not classified yet", not "known unverified", so it does not lower the
+ * marker: the marker names the writer's tier and the row keeps min(writer, stored) until the backfill
+ * classifies it. An explicit `trust_tier: unknown` already in the frontmatter still caps (stampTrustMarker).
+ */
 export function stampPageTrustMarker(row: Pick<WriteRequest, 'operation'>, frontmatter: Record<string, unknown>, trust: WriteTrust | undefined, stored: TrustTier | null): void {
   if (!trust || !CONTENT_OPERATIONS.includes(row.operation)) return;
-  const tier = stored ? minTrust(trust.tier, stored) : trust.tier;
+  const tier = stored && stored !== 'unknown' ? minTrust(trust.tier, stored) : trust.tier;
   const stamped = stampTrustMarker(frontmatter, tier);
   if (stamped !== frontmatter) frontmatter.trust_tier = stamped.trust_tier;
 }

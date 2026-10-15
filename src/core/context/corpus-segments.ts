@@ -679,16 +679,23 @@ export function gcCorpusTurnFiles(dir: string, retentionMs: number, now = Date.n
  * gone (previously they lived forever), and a session's seat sidecar once no
  * `.txt` of that session remains (after a grace window, so a sidecar written
  * just ahead of its corpus file survives). Best-effort per file; never throws.
+ * #6611: a session is live while a `.txt` of it exists in ANY of
+ * `liveSessionDirs` (the hook passes the spool and the legacy top level: the
+ * source record is always frozen into the spool, a legacy session's `.txt`
+ * lives in the top level).
  */
 export function gcCorpusArtifacts(
   dir: string,
   maxAgeMs: number,
   sidecarSuffixes: string[],
+  liveSessionDirs: string[] = [dir],
 ): void {
   try {
     const cutoff = Date.now() - maxAgeMs;
     const names = readdirSync(dir);
-    const liveSessions = new Set(names.filter((n) => n.endsWith('.txt')).map(corpusFileSessionId));
+    const liveSessions = new Set(liveSessionDirs.flatMap((d) => {
+      try { return d === dir ? names : readdirSync(d); } catch { return []; }
+    }).filter((n) => n.endsWith('.txt')).map(corpusFileSessionId));
     for (const name of names) {
       const p = join(dir, name);
       try {

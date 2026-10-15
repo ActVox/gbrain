@@ -166,6 +166,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'stub_guard_24h',
   // Fact supersession threshold calibrated for the active embedding model (facts/supersession-threshold.ts).
   'supersession_calibration',
+  // #6590: whether the embedding model has measured fact admission cosine floors (search/fact-relevance.ts).
+  'fact_admission_floors',
   'sync_failures',
   // #5984: unfinished managed sync cursors, their remaining entries and indexing ETA.
   'managed_sync_backlog',
@@ -190,6 +192,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'undeclared_db_only_pages',
   // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
   'ghost_pages',
+  // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
+  'missing_recorded_files',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',

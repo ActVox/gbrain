@@ -30,7 +30,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
  * a stalling hook can model both the reporter's cases: a preparer that honours
  * cancellation (settle on abort) and one that ignores it (hang on).
  */
-export interface FaultDetail { requestId?: string; effectId?: string | number; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string }
+export interface FaultDetail { requestId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string }
+/** Postgres returns `persistence_effects.id` (bigserial) as a BigInt; `faultPoint` hands hooks its decimal string (#6584). */
+export type FaultDetailInput = Omit<FaultDetail, 'effectId'> & { effectId?: string | number | bigint };
 type FaultHook = (point: FaultPoint, detail: FaultDetail) => Promise<void> | void;
 
 /** The mid-effect seam of every effect kind; a new kind without one fails typecheck. */
@@ -45,8 +47,10 @@ export const EFFECT_FAULT_POINTS: Record<EffectKind, FaultPoint> = {
 let installed: FaultHook | undefined;
 /** Gate workers only. */
 export function installFaultHook(hook: FaultHook | undefined): void { installed = hook; }
-export async function faultPoint(point: FaultPoint, detail: FaultDetail = {}): Promise<void> {
-  if (installed) await installed(point, detail);
+export async function faultPoint(point: FaultPoint, detail: FaultDetailInput = {}): Promise<void> {
+  if (!installed) return;
+  const { effectId, ...rest } = detail;
+  await installed(point, effectId === undefined ? rest : { ...rest, effectId: String(effectId) });
 }
 /** Publication hooks that also reach the installed seam; returns the caller's hooks unchanged when none is installed. */
 export function withFaultPoints(hooks: PublicationHooks): PublicationHooks {
