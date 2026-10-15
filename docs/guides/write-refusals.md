@@ -144,7 +144,19 @@ a receipt can report has a row here.
 | `core_remote_edit_refused` | `invalid_params` (detail `core_remote_edit_refused`) | `memory.core.remote_edit` is `refuse`, so remote edits to core pages are refused. Nothing was written. | Ask the user to make the edit on the brain host, or to allow remote edits with notices (`gbrain config set memory.core.remote_edit notify`). See [remote edits](core-memory.md#remote-edits). |
 
 `gbrain doctor` reports parked targets as the `parked_effects` check with the
-exact `retry-effects` command per request. It reports `persistence_capacity`
+exact `retry-effects` command per request. When the original writer was revoked,
+the preview reports `action: owner_revoked` with `authority: {ok: false, code,
+message}` and a `fix` that asks the user first, and doctor names that exit instead
+of the retry command: the Git backup of those pages is incomplete. After the user
+agrees, the owner host retries a parked Git effect once under the brain owner's
+authority with `gbrain sources writer retry-effects <source> --request-id <id>
+--admin-intent writer_retry_effects --expected-state <admin_state>`; the effect
+records `retried_under: owner_host`. A withdrawal effect is never retried under
+another authority. `gbrain sources writer git-durability <source> --pat-file
+<path>` retries every parked push of the worktree after wiring the credential;
+a request refused on its own (revoked writer, replaced source, live claim) is
+listed in `parked_pushes.refused` with its fix, the result has `status: partial`,
+and the command exits 1. It reports `persistence_capacity`
 when lifetime request IDs or receipt bytes reach 80% of a limit, with the
 `gbrain config set` value to use; outstanding-request, queued-byte and
 recovery-byte limits can refuse writes without that warning.
