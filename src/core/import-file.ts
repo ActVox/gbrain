@@ -730,8 +730,10 @@ export async function importFromContent(
       createdAt: fallbackCreatedAt({ existing, fileTimes: opts.fileTimes, now: nowDate }),
     });
 
-    if (existing && !preimage) await tx.createVersion(slug, txOpts); // reads the page itself, so before the page write
-    if (!segmented && bodyStorageOf(existing) === 'segmented') await demoteSegmentedPage(tx, Number(existing!.id));
+    const demote = !segmented && bodyStorageOf(existing) === 'segmented';
+    // Before the page write: an unpinned version reads the page itself, a demoted one references the generation it retires.
+    if (existing && (!preimage || demote)) await tx.createVersion(slug, preimage ? { ...txOpts, preimage } : txOpts);
+    if (demote) await demoteSegmentedPage(tx, Number(existing!.id));
     // Every import keeps each stored row that is identical to its new chunk and
     // writes only the rest, so an edit rewrites only the chunks it changed. The
     // reuse is re-read here, under the page lock, so a kept row is one this
@@ -742,7 +744,7 @@ export async function importFromContent(
     let written: Page | undefined;
     await pipelined(tx, [
       () => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
-      async () => { if (existing && preimage) await tx.createVersion(slug, { ...txOpts, preimage }); },
+      async () => { if (existing && preimage && !demote) await tx.createVersion(slug, { ...txOpts, preimage }); },
       async () => {
         if (segmented) return segmented.apply(tx, { type: parsed.type, title: parsed.title, frontmatter: parsed.frontmatter, page_kind: 'markdown',
           effective_date: effectiveDate, effective_date_source: effectiveDateSource, import_filename: filenameForChain, source_path: opts.sourcePath ?? null,

@@ -77,6 +77,11 @@ export async function materializedPage<T extends Page>(engine: BrainEngine, page
   return copy as T;
 }
 
+/** A segmented page whose body is over the single-string ceiling: `materializedPage` leaves its throwing body fields as they are. */
+export function segmentedOverCeiling(page: { body_storage?: string | null; body_bytes?: number | null }): boolean {
+  return page.body_storage === 'segmented' && Number(page.body_bytes ?? 0) > PAGE_MAX_BYTES;
+}
+
 /** `materializedPage` over a snapshot (null passes through). */
 export async function materializedSnapshot(engine: BrainEngine, snapshot: PageSnapshot | null): Promise<PageSnapshot | null> {
   if (!snapshot || bodyStorageOf(snapshot.page) !== 'segmented') return snapshot;

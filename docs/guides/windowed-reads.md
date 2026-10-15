@@ -98,9 +98,12 @@ writes the whole body as one string. It stopped before reading or changing
 anything, so the page is intact. Read the page's revision and stored size with
 `get_page` `body: "none"` (`gbrain get --body none <slug>`; the size is
 `size.body_bytes`); windowed reads of a segmented body arrive with the segment
-reader. Queue work (fact reconcile, link and mention passes, effect scans)
-skips a segmented page with this code as its logged reason instead of
-stopping.
+reader. Queue work (fact reconcile, the facts backstop, link and mention
+passes, effect scans) skips a segmented page with this code as its logged
+reason instead of stopping. Life Chronicle extraction, `edit_page` and the
+derived-link passes (a trusted page write's links, the managed stale-links
+pass, post-batch auto-link) read a segmented page up to 24 MiB as one string;
+the extraction and link passes skip a larger one with this code.
 
 ## page_shrink_refused
 
