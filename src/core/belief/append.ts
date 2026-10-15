@@ -99,7 +99,18 @@ async function applyRedactions(tx: BrainEngine, sourceId: string, drafts: Belief
   return redacted;
 }
 
-export async function appendBeliefEvents(tx: BrainEngine, drafts: BeliefEventDraft[], ctx: AppendContext): Promise<number> {
+let emitterFault: ((drafts: BeliefEventDraft[]) => BeliefEventDraft[]) | null = null;
+/**
+ * Test seam for the forced probes (section 11): a deliberately broken emitter
+ * rewrites the drafts before the insert (drop a type, corrupt a value), and the
+ * probe that must catch it is asserted to fail. Null restores the real emitter.
+ */
+export function __setBeliefEmitterFaultForTests(fault: ((drafts: BeliefEventDraft[]) => BeliefEventDraft[]) | null): void {
+  emitterFault = fault;
+}
+
+export async function appendBeliefEvents(tx: BrainEngine, input: BeliefEventDraft[], ctx: AppendContext): Promise<number> {
+  const drafts = emitterFault ? emitterFault(input) : input;
   if (!drafts.length) return 0;
   const ordered = orderDrafts(drafts);
   const sourceId = ordered[0]!.sourceId;
