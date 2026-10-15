@@ -370,11 +370,22 @@ async function runLinksTimelinePass(
   if (linksEnabled && !pack) throw new Error('Cannot extract links: active schema pack is unavailable.');
 
   type Extracted = Awaited<ReturnType<typeof extractPageLinks>>;
+  type Snapshot = NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>;
+  // A segmented body is read block by block (page-body/segment-links.ts), never as one string.
+  const { extractSegmentedPageLinks } = await import('./page-body/segment-links.ts');
+  const { bodyBlocks } = await import('./page-body/segment-blocks.ts');
+  const linksOf = (snapshot: Snapshot, opts: Parameters<typeof extractPageLinks>[5] & { temporal?: boolean }): ReturnType<typeof extractSegmentedPageLinks> => {
+    const { page } = snapshot;
+    return isSegmentedPage(page)
+      ? extractSegmentedPageLinks(engine, { id: Number(page.id), slug: page.slug, source_id: sourceId, type: page.type, frontmatter: page.frontmatter }, resolver, opts)
+      : extractPageLinks(page.slug, `${page.compiled_truth}\n${page.timeline}`, page.frontmatter, page.type, resolver, opts);
+  };
+  const temporalBodies = new Map<string, NonNullable<Awaited<ReturnType<typeof extractSegmentedPageLinks>>['temporalBody']>>();
 
   const tlBatch: TimelineBatchInput[] = [];
   const processedRefs: Array<{ slug: string; source_id: string; extractedAt: string }> = [];
   const pageCandidates: Array<{ slug: string; candidates: Extracted['candidates'] }> = [];
-  const snapshots = new Map<string, NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>>();
+  const snapshots = new Map<string, Snapshot>();
 
   // Phase 1: per-page extraction. The per-slug getPage loop stays a loop —
   // BrainEngine has no batch read-by-slug-list primitive (resolveSlugsByPaths
@@ -387,31 +398,27 @@ async function runLinksTimelinePass(
     const slug = recent[i].slug;
     const page = await engine.getPage(slug, { sourceId });
     if (!page) continue;
-    if (isSegmentedPage(page)) {
-      skip('page_body_segmented:links_timeline');
-      continue;
-    }
     const snapshot = await engine.readPageSnapshot(slug, { sourceId });
-    if (!snapshot || snapshot.page.compiled_truth !== page.compiled_truth || snapshot.page.timeline !== page.timeline
+    const segmented = isSegmentedPage(page);
+    if (!snapshot || segmented !== isSegmentedPage(snapshot.page)
+      || (!segmented && (snapshot.page.compiled_truth !== page.compiled_truth || snapshot.page.timeline !== page.timeline))
       || snapshot.page.type !== page.type || JSON.stringify(snapshot.page.frontmatter) !== JSON.stringify(page.frontmatter)) continue;
     snapshots.set(slug, snapshot);
-
-    const fullContent = page.compiled_truth + '\n' + page.timeline;
 
     if (linksEnabled) {
       // skipFrontmatter matches user-invoked `gbrain extract links`
       // (frontmatter backfill stays a migration-orchestrator concern).
-      const extracted = await extractPageLinks(
-        slug, fullContent, page.frontmatter, page.type, resolver,
-        { skipFrontmatter: true, globalBasename, pack },
-      );
+      const extracted = await linksOf(snapshot, { skipFrontmatter: true, globalBasename, pack, temporal: segmented });
+      if (extracted.temporalBody) temporalBodies.set(slug, extracted.temporalBody);
       if (extracted.candidates.length > 0) {
         pageCandidates.push({ slug, candidates: extracted.candidates });
       }
     }
 
     if (timelineEnabled) {
-      for (const entry of parseTimelineEntries(fullContent)) {
+      const entries = segmented ? [] : parseTimelineEntries(page.compiled_truth + '\n' + page.timeline);
+      if (segmented) for await (const block of bodyBlocks(engine, snapshot.page)) entries.push(...parseTimelineEntries(block.text));
+      for (const entry of entries) {
         // Same row shape as extractTimelineFromDB's batch push (extract.ts):
         // #3957 — parsed source label threaded so FS- and DB-extracted rows
         // share one dedup shape; detail '' when empty.
@@ -472,9 +479,8 @@ async function runLinksTimelinePass(
     ]);
     let crossSourceDrops = 0;
     for (const { slug } of pageCandidates) {
-      const page = snapshots.get(slug)!.page;
-      const { candidates, attendanceComplete } = await extractPageLinks(slug, `${page.compiled_truth}\n${page.timeline}`, page.frontmatter,
-        page.type, resolver, { skipFrontmatter: true, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
+      const { candidates, attendanceComplete } = await linksOf(snapshots.get(slug)!,
+        { skipFrontmatter: true, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
           const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
             sourceId, allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId });
           return resolved.ok ? endpointMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
@@ -557,7 +563,7 @@ async function runLinksTimelinePass(
         const result = await engine.replaceDerivedLinks({ slug: ref.slug, sourceId,
           expectedRevision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation }, desired,
         { includeFrontmatter: false, preserveExisting: true, lineGrammar: grammar,
-          wanted: { producers: ['body'], rows: wantedBySlug.get(ref.slug) ?? [] }, expectedEndpoints: [...new Set(desired.flatMap(row =>
+          wanted: { producers: ['body'], rows: wantedBySlug.get(ref.slug) ?? [] }, temporalBody: temporalBodies.get(ref.slug), expectedEndpoints: [...new Set(desired.flatMap(row =>
           [`${row.from_source_id}\0${row.from_slug}`, `${row.to_source_id}\0${row.to_slug}`]))].map(key => {
           const endpoint = endpointMetadata.get(key)!;
           return { slug: endpoint.slug, sourceId: endpoint.source_id, revision: endpoint.knowledge_revision };
