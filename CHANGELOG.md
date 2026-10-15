@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.249.0] - 2026-10-15
 
 - **#6712 PR 1 (lane B): content-addressed resume.** Discovery prescreens each existing page against its import provenance (bytes on disk, the revision the import wrote, the parser fingerprint) with one `ls-tree`; a match is passed by the guarded no-op kernel's bounded checks in one transaction, with no freeze or preparation. A no-change tree walk of a 2,000-page fixture dropped from 10.5 s to 0.9 s (PGLite) and 9.1 s to 0.8 s (local Postgres). Receipts carry `prescreened`. Code, image, file-repair and published no-op publishes now write full provenance.
 - **#6712 PR 1 (lane B): `file_drift`.** A managed sync no longer imports a file over a database version of its page that sync never saw (the page moved since the file's last recorded import, or, in a tree walk, has no usable record on an upgraded brain); the file is held `file_drift` unless the import is a proven no-op or a sync request wrote the current revision. `gbrain repair file-drift` is the exit; `storage.keep_db` prefixes go to the keep_db worker instead of a hold.
