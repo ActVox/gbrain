@@ -14,6 +14,9 @@
  *   equal-content controls (no edit, an unattributed revision whose content equals the file, a changed file on a page
  *   sync wrote last) still skip or import as before;
  * - a cursor whose manifest is gone re-discovers against HEAD and finishes, the pages the lost run imported prescreened.
+ * - review follow-ups: `sync.holds=fail` refuses the drift with `file_drift`; a lost manifest walks HEAD's whole tree (a
+ *   file the lost run imported and HEAD reverted is restored, a page it added is removed); a fingerprint that changes
+ *   after discovery and an oversized working copy each fall through to the ordinary path.
  *
  * Each test fails on the base: there `prescreened` is absent, the tree walk overwrites the database edit, and the
  * missing manifest stops the run with `storage_error`.
@@ -30,6 +33,7 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { readGitHold, readSyncImportProvenance, SYNC_IMPORT_PARSER_VERSION, SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { readDriftSkips } from '../src/core/persistence/drift-conflicts.ts';
+import { SYNC_READ_BOUND } from '../src/core/persistence/sync-blobs.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
@@ -107,6 +111,28 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(full).toMatchObject({ prescreened: 0, waived: { imports: SLUGS.length } });
   }, { databaseUrl, setup }), 180_000);
 
+  test('a fingerprint that changes after discovery froze the prescreen falls through to the ordinary path', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    rewriteHistory(root);
+    // One page per slice: the kernel passes notes/a and the rest of the frozen manifest waits, still marked prescreened.
+    expect(await performManagedSync(engine, OPTS, { maxPages: 1, maxMs: 60_000 })).toMatchObject({ status: 'partial', prescreened: 1 });
+    // As if another binary (another parser) resumed the cursor.
+    for (const slug of SLUGS.slice(1)) await tamper(engine, slug, [['parser,parser_version', 'an-older-parser']]);
+    expect(await performManagedSync(engine, OPTS)).toMatchObject({ status: 'synced', prescreened: 1 });
+    const incarnation = await incarnationOf(engine);
+    for (const slug of SLUGS.slice(1)) expect((await readSyncImportProvenance(engine, 'default', incarnation, await pageIdOf(engine, slug)))?.parser?.parser_version).toBe(SYNC_IMPORT_PARSER_VERSION);
+  }, { databaseUrl, setup }), 180_000);
+
+  test('an oversized working copy of a prescreened file falls through to the ordinary path instead of failing the run', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    rewriteHistory(root);
+    writeFileSync(join(root, 'notes/a.md'), Buffer.alloc(SYNC_READ_BOUND + 1, 'a'));
+    const walk = await performManagedSync(engine, OPTS);
+    expect(walk).toMatchObject({ status: 'synced', prescreened: SLUGS.length - 1 });
+    expect(heldOf(walk)).toEqual([{ path: 'notes/a.md', code: 'file_too_large' }]);
+    expect(await bodyOf(engine, 'notes/a')).toContain('The committed body of notes/a.');
+  }, { databaseUrl, setup }), 180_000);
+
   test('a database-only edit to a page whose file did not change is held file_drift and not imported', () => managedBrain(async ({ engine, ctx, root }) => {
     await engine.setConfig('sync.write_through', 'false');
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
@@ -132,6 +158,17 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     const delta = await performManagedSync(engine, OPTS);
     expect(heldOf(delta)).toEqual([{ path: 'notes/a.md', code: 'file_drift' }]);
     expect(await bodyOf(engine, 'notes/a')).toContain('A second database-only edit of notes/a.');
+  }, { databaseUrl, setup }), 180_000);
+
+  test('with sync.holds=fail the same drift stops the run with file_drift instead of importing over the database edit', () => managedBrain(async ({ engine, ctx, root }) => {
+    await engine.setConfig('sync.write_through', 'false');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await databaseOnlyEdit(engine, ctx, 'notes/a', 'The database-only edit of notes/a.');
+    await engine.setConfig('sync.holds', 'fail');
+    rewriteHistory(root);
+    const outcome = await performManagedSync(engine, OPTS).then(result => result, (error: unknown) => error);
+    expect(outcome).toMatchObject({ code: 'file_drift' });
+    expect(await bodyOf(engine, 'notes/a')).toContain('The database-only edit of notes/a.');
   }, { databaseUrl, setup }), 180_000);
 
   test('under a storage.keep_db prefix the drifted page is neither held nor imported; the keep_db worker gets it as a candidate', () => managedBrain(async ({ engine, ctx, root }) => {
@@ -188,5 +225,26 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(resumed.status).toBe('first_sync');
     expect(resumed.prescreened).toBeGreaterThanOrEqual(2);
     for (const slug of SLUGS) expect(await bodyOf(engine, slug)).toContain(`The committed body of ${slug}.`);
+  }, { databaseUrl, setup }), 180_000);
+
+  test('a lost manifest re-discovers the whole tree at HEAD: files the lost run imported and HEAD reverted are restored, its added page is removed', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const original = SLUGS.map(slug => note(slug, `The committed body of ${slug}.`));
+    writeFileSync(join(root, 'notes/0-added.md'), note('notes/0-added', 'A page the lost run added.'));
+    for (const slug of SLUGS) writeFileSync(join(root, `${slug}.md`), note(slug, `The lost run's body of ${slug}.`));
+    commit(root, 'change everything');
+    const abort = new AbortController();
+    const partial = await performManagedSync(engine, { ...OPTS, signal: abort.signal, onProgress: p => { if (p.bankedFiles === 2) abort.abort(); } });
+    expect(partial).toMatchObject({ status: 'partial', filesImported: 2 });
+    expect(await bodyOf(engine, 'notes/a')).toContain("The lost run's body of notes/a.");
+    await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync-manifest'");
+    // HEAD reverts every file the lost run saw, so last_commit..HEAD is empty: only a walk of HEAD's tree finds them.
+    SLUGS.forEach((slug, i) => writeFileSync(join(root, `${slug}.md`), original[i]!));
+    git(root, 'rm', '-q', 'notes/0-added.md'); commit(root, 'revert');
+    let resumed = await performManagedSync(engine, OPTS);
+    for (let i = 0; i < 5 && resumed.status === 'partial'; i++) { await new Promise(resolve => setTimeout(resolve, 500)); resumed = await performManagedSync(engine, OPTS); }
+    expect(resumed.status).toBe('synced');
+    for (const slug of SLUGS) expect(await bodyOf(engine, slug)).toContain(`The committed body of ${slug}.`);
+    expect(await engine.getPage('notes/0-added', { sourceId: 'default' })).toBeNull();
   }, { databaseUrl, setup }), 180_000);
 });

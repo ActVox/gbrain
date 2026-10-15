@@ -39,7 +39,8 @@ export type SyncDriftSide = 'database' | 'both' | 'unknown';
 /** Provenance rows read per statement. */
 const PROVENANCE_CHUNK = 5000;
 
-const sameParser = (a: SyncImportParser | null | undefined, b: SyncImportParser) => !!a && a.parser_version === b.parser_version
+/** Whether a recorded parser fingerprint is this binary's for the page (the prescreen and its kernel run both check it). */
+export const sameParser = (a: SyncImportParser | null | undefined, b: SyncImportParser) => !!a && a.parser_version === b.parser_version
   && a.markdown_chunker === b.markdown_chunker && (a.schema_pack ?? null) === b.schema_pack;
 
 /** The drift side of one entry from its record and pinned blob, or null when nothing needs guarding (`prescreened`: a kernel candidate). */

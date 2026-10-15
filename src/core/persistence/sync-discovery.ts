@@ -263,12 +263,12 @@ function cutDiscoveryToSlice(discovered: SyncDiscovery, slicing: Pick<SyncSliceC
   if (cut.done && discovered.target === head) delete discovered.stagedHead; else discovered.stagedHead = head;
 }
 export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, context?: ManagedSyncContext,
-  stage?: { target: string; head: string; slice?: Pick<SyncSliceCursor, 'phase' | 'after'> }): Promise<SyncDiscovery> {
+  stage?: { target: string; head: string; slice?: Pick<SyncSliceCursor, 'phase' | 'after'> }, walk = false): Promise<SyncDiscovery> {
   const { binding, root, gitRoot, sourceId, incarnation, source } = context ?? await resolveManagedSyncContext(engine, opts);
   const company = currentCompanyBrainSync(sourceId);
   if (!company && !stage && !opts.dryRun) {
     const resume = await resumableSliceStage(engine, opts, gitRoot, sourceId, incarnation);
-    if (resume) return discoverManagedSync(engine, opts, context ?? { binding, root, gitRoot, sourceId, incarnation, source }, resume);
+    if (resume) return discoverManagedSync(engine, opts, context ?? { binding, root, gitRoot, sourceId, incarnation, source }, resume, walk);
   }
   const strategy = opts.strategy ?? source.config?.strategy ?? 'markdown';
   const nativeRoot = realpathSync.native(root), nativeGitRoot = realpathSync.native(gitRoot);
@@ -292,7 +292,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // #6349: a staged run stops at a commit, so uncommitted working-tree changes wait for the stage that reaches HEAD.
   const working = !company && !stage && (detached || (opts.workingTree ?? (await engine.getConfig('sync.include_working_tree') === 'true')));
   const dirty = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitRoot);
-  const delta = !opts.full && source.last_commit ? computeSyncDelta(gitRoot, source.last_commit, target) : null;
+  const delta = !opts.full && !walk && source.last_commit ? computeSyncDelta(gitRoot, source.last_commit, target) : null;
   const entries = new Map<string, SyncEntry>();
   const renamedFrom = new Map<string, string>();
   let workingTreeKept: string[] | undefined;
@@ -445,7 +445,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       `This sync of ${sourceId} selected ${selected.length} entries, above the 100,000-entry and 16 MiB cursor bound; nothing was written. Narrow it with --exclude or the sync.exclude config, then run gbrain sync --no-pull --source ${sourceId}.`);
     // #6349 (P4.4): a first sync or a `--full` tree walk has no commit axis to stage on; the target is cut into path slices
     // (re-entered as a stage so the slices read the pinned tree alone, never the working tree).
-    return discoverManagedSync(engine, opts, context ?? { binding, root, gitRoot, sourceId, incarnation, source }, { target, head, slice: { phase: 'import', after: null } });
+    return discoverManagedSync(engine, opts, context ?? { binding, root, gitRoot, sourceId, incarnation, source }, { target, head, slice: { phase: 'import', after: null } }, walk);
   }
   const discovered: SyncDiscovery = { discoveredAt, ...(released.length ? { releasedHolds: released } : {}), ...(retryTaken.length ? { retryTaken } : {}),
     ...(refused.size ? { fileRefusals: [...refused.values()] } : {}), binding: { ...binding, owner_epoch: String(binding.owner_epoch), topology_generation: String(binding.topology_generation) }, root, gitRoot, sourceId, incarnation, from: source.last_commit, target, entries: selected, slugMode, ...(company ? { companyPlan: company.plan } : {}), ...(stage ? { stagedHead: stage.head } : {}),

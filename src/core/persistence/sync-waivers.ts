@@ -9,7 +9,10 @@ import { join } from 'node:path';
 import type { BrainEngine, PageSnapshot } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { prepareManagedSyncMutation, type SyncIntent } from './sync-prepare.ts';
-import { heldGitPaths, readSyncImportProvenances, recordSyncImportProvenances, syncDiskProvenance, type SyncImportProvenance, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { heldGitPaths, readSyncImportProvenances, syncImportParserFor, recordSyncImportProvenances, syncDiskProvenance, type SyncImportProvenance, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { sameParser } from './sync-prescreen.ts';
+import { isSyncReadBound } from './sync-screen.ts';
+import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { sha256 } from './digest.ts';
 import { startClaimPhase } from './claim-phase.ts';
 import { inspectUnchanged, KERNEL_PAGE_SQL, kernelPageWork, screeningRequest, type KernelPage, type NoopKernelWaiver } from './noop-kernel.ts';
@@ -264,10 +267,12 @@ export function prescreenedHead(entries: ReadonlyArray<SyncEntry>, index: number
  * caller imports that entry through the ordinary path. Only this run skips durably; the prescreen never does.
  */
 export async function waivePrescreenedRun<C extends WaiverCursor & { binding: { owner_epoch: string | number } }>(engine: BrainEngine, cursor: C,
-  run: readonly PrescreenedEntry[], key: string, input: { embeddingRequested: boolean },
+  run: readonly PrescreenedEntry[], key: string, input: { embeddingRequested: boolean; noSchemaPack: boolean },
   advance: (tx: BrainEngine, count: number) => Promise<C>, reread: (tx: BrainEngine) => Promise<C>): Promise<{ cursor: C; waived: number } | null> {
   if (!run.length || !noopWaiversEnabled()) return null;
   for (let i = 0; i < run.length; i += 16) await Promise.all(run.slice(i, i + 16).map(entry => validateSyncAuthority(engine, cursor.authority, entry.slug)));
+  // A cursor frozen by another binary or under another schema pack re-checks the parser fingerprint its prescreen matched.
+  const pack = input.noSchemaPack ? null : await loadActivePackForEngine(engine, { remote: false, sourceId: cursor.sourceId }).catch(() => null);
   try {
     return await engine.transaction(async tx => {
       await tx.executeRaw("SELECT set_config('lock_timeout','2s',true),set_config('statement_timeout','10s',true)");
@@ -292,8 +297,9 @@ export async function waivePrescreenedRun<C extends WaiverCursor & { binding: { 
           const page = pages.get(entry.slug), record = records.get(entry.pageId);
           if (!page || Number(page.id) !== entry.pageId || page.knowledge_revision !== entry.revision || unfinished[i]!.length || holds.has(entry.path)) break chunks;
           if (kernelPageWork(page, { sourcePath: entry.sourcePath, embeddingRequested: input.embeddingRequested }) !== null) break chunks;
-          if (!record?.disk_sha256 || record.revision !== entry.revision) break chunks;
-          const bytes = readSyncFile(cursor.root, entry.path);
+          if (!record?.disk_sha256 || record.revision !== entry.revision || !sameParser(record.parser, syncImportParserFor(entry.sourcePath, pack?.identity ?? null))) break chunks;
+          let bytes: Buffer | null;
+          try { bytes = readSyncFile(cursor.root, entry.path); } catch (error) { if (isSyncReadBound(error)) break chunks; throw error; }
           if (!bytes || sha256(bytes) !== record.disk_sha256) break chunks;
           valid++;
         }

@@ -441,10 +441,10 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
       }
     }
     // #6712 PR 1: an import whose page moved since its file was last imported runs only as a proven no-op (sync-prescreen.ts).
-    if (entry.drift && holdsOn && !occupantRebound && content !== null && snapshot && !(image ? sameImageBytes(imageBytes, snapshot.page)
+    if (entry.drift && !occupantRebound && content !== null && snapshot && !(image ? sameImageBytes(imageBytes, snapshot.page)
       : await sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly, run.signal))) {
-      const proof = await pageChangeProof(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, pageId, expectedRevision: null });
-      assertActive();
+      if (!holdsOn) throw syncRunRefusal('file_drift', 'An import would overwrite a database version of the page that sync never saw.', retry, `Page ${slug} in source ${cursor.sourceId} changed in the database since ${entry.path} was last imported, and the file differs from it, so the run stopped before admitting it (sync.holds=fail).`);
+      const proof = await pageChangeProof(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, pageId, expectedRevision: null }); assertActive();
       return { hold: fileDriftHold(entry, slug, pageId, frozenIntent, { sides: entry.drift, revision: snapshot.revision, proof }) };
     }
     if (screening && !image) {
@@ -1012,7 +1012,7 @@ async function prescreenRun(engine: BrainEngine, cursor: Cursor, key: string, ru
   const entries = prescreenedHead(cursor.entries, cursor.index, run.missed, run.limit);
   if (!entries.length || cursor.pending) return null;
   stampDrainStep('waiver_run', run.signal);
-  const done = await waivePrescreenedRun(engine, cursor, entries, key, { embeddingRequested: run.embeddingRequested }, (tx, count) => {
+  const done = await waivePrescreenedRun(engine, cursor, entries, key, { embeddingRequested: run.embeddingRequested, noSchemaPack: !!cursor.processingOptions?.noSchemaPack }, (tx, count) => {
     let next: Cursor = cursor;
     for (let i = 0; i < count; i++) next = waivedCursor(next, { kind: 'import', kernel: [] });
     return writeCursor(tx, key, cursor, { ...next, counts: { ...next.counts, prescreened: (cursor.counts.prescreened ?? 0) + count },
@@ -1474,8 +1474,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     catch (error) {
       if (!(error instanceof MissingSyncManifest) || opts.dryRun || company) throw error;
       missingManifestCursor = error.cursor; phase = 'discovery'; discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
-      // #6712 PR 1 (L1): a lost manifest re-discovers against HEAD; the prescreen passes what the lost run imported, so the old cursor is a skip-ahead.
-      const replaced = await replaceCursor(engine, key, error.cursor, { ...await discoverManagedSync(engine, opts, context), authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
+      // #6712 PR 1 (L1): a lost manifest re-discovers HEAD's whole tree (the lost run may have imported files last_commit..HEAD no longer names); the prescreen passes what it imported.
+      const replaced = await replaceCursor(engine, key, error.cursor, { ...await discoverManagedSync(engine, opts, context, undefined, true), authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
       if ('wait' in replaced) return { ...result(error.cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: replaced.wait }) };
       cursor = replaced;
     }
