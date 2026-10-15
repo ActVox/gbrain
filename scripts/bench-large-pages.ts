@@ -21,7 +21,7 @@
  * Flags: --size <N>[KB|MB|GB] (default 100MB; above PAGE_MAX_BYTES, where the streamed path starts), --engine pglite|postgres (default pglite; postgres reads DATABASE_URL), --json.
  */
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -93,6 +93,15 @@ async function ingest(engine: BrainEngine, file: string) {
 
 const round = (n: number) => Math.round(n * 10) / 10;
 
+/**
+ * This process's own peak RSS. Linux keeps getrusage's maxRSS across execve, so a child spawned by a parent that has
+ * ingested a large page reports at least the parent's peak; VmHWM belongs to the new address space.
+ */
+function peakRssBytes(): number {
+  const hwm = existsSync('/proc/self/status') ? /^VmHWM:\s+(\d+) kB$/m.exec(readFileSync('/proc/self/status', 'utf8')) : null;
+  return (hwm ? Number(hwm[1]) : process.resourceUsage().maxRSS) * 1024;
+}
+
 /** Child mode: ingest `--file` in a fresh process (the parent generated it) and report its peak RSS. */
 async function child(file: string, kind: string): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-bench-large-'));
@@ -101,7 +110,7 @@ async function child(file: string, kind: string): Promise<void> {
     await engine.setConfig('pages.segmented_storage', 'on');
     await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [SLUG]);
     await ingest(engine, file);
-    process.stdout.write(JSON.stringify({ peak_rss_bytes: process.resourceUsage().maxRSS * 1024 }) + '\n');
+    process.stdout.write(JSON.stringify({ peak_rss_bytes: peakRssBytes() }) + '\n');
   } finally {
     await engine.disconnect();
     rmSync(dir, { recursive: true, force: true });
