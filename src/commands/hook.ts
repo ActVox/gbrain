@@ -59,7 +59,7 @@ import {
   type TurnContextResponse,
   type ContextPackResponse,
 } from '../core/context/resolve-ipc.ts';
-import { requestSessionStartPack, sessionStartAwaitsServe } from '../core/context/session-start-pack.ts';
+import { contextSourceId, requestSessionStartPack, sessionStartAwaitsServe } from '../core/context/session-start-pack.ts';
 import type { WindowTurn } from '../core/context/entity-salience.ts';
 import {
   confineTranscriptPath,
@@ -555,8 +555,9 @@ async function hookSessionStart(io: HookIo): Promise<number> {
         // the remaining deadline. Same session-id sanitizer as the compact
         // banking path (a raw id would split the cursor key).
         serveNotReady = awaitServe; // still true if the deadline fires mid-wait
+        const sourceId = await contextSource(io, cfg, j?.session_id, ws);
         const res = await requestSessionStartPack(cfg, {
-          sourceId: process.env.GBRAIN_SOURCE || undefined,
+          sourceId,
           sessionId: sanitizeSessionId(j?.session_id),
           trigger: typeof j?.source === 'string' ? `session-start:${j.source as string}` : 'session-start',
           deadlineAt: t0 + deadlineMs,
@@ -564,6 +565,7 @@ async function hookSessionStart(io: HookIo): Promise<number> {
         });
         serveNotReady = res.serveNotReady;
         const pack = res.pack;
+        if (pack && !pack.ok && pack.error === 'source_mismatch' && outcome === 'ok') { outcome = 'degraded'; reason = 'source_mismatch'; } // #5941
         if (pack?.ok && pack.block?.text) out.push(pack.block.text);
         if (pack?.ok && pack.block?.core && process.env.GBRAIN_CORE !== '0') coreBox.core = pack.block.core;
         else if (pack?.ok && !pack.block?.core) coreBox.reason = 'stale_serve_no_core';
@@ -1175,15 +1177,15 @@ async function hookUserPrompt(io: HookIo): Promise<number> {
     // Postgres off hash12(database_url) under ~/.gbrain/run. Null = no
     // keying material at all (no config, thin-client remote) — ENGINE-FREE
     // means no direct-engine fallback here; pull-mode covers it.
-    const socketPath = await hookResolveSocketForConfig(cfg, process.env.GBRAIN_SOURCE);
+    const sessionId = typeof j.session_id === 'string' ? j.session_id : undefined;
+    const sourceId = await contextSource(io, cfg, sessionId, io.cwd ?? (typeof j.cwd === 'string' ? j.cwd : process.cwd()));
+    const socketPath = await hookResolveSocketForConfig(cfg, sourceId);
     if (!socketPath) {
       return { outcome: 'degraded', reason: 'no_pglite_path' };
     }
     const secret = readIpcSecretForConfig(cfg);
     if (!secret) return { outcome: 'degraded', reason: 'no_serve' };
 
-    const sessionId = typeof j.session_id === 'string' ? j.session_id : undefined;
-    const sourceId = process.env.GBRAIN_SOURCE || undefined;
     const res = await requestTurnContext(socketPath, {
       secret,
       window: turns,
@@ -1622,6 +1624,12 @@ async function corpusDir(cfg: GBrainConfig | null): Promise<string> {
 /** #6268: the session's spool dir and frozen source stamp (`source` unset while unresolved). */
 const sessionCorpus = async (io: HookIo, cfg: GBrainConfig | null, sessionId: string, cwd: string) =>
   openSessionCorpus(await corpusDir(cfg), sessionId, { cwd, harness: io.harness ?? 'claude-code' });
+
+/** #5941: the context arms' source (session-start-pack.ts `contextSourceId`): the session's frozen record when there is a session id. */
+const contextSource = (io: HookIo, cfg: GBrainConfig | null, rawSessionId: unknown, cwd: string) => {
+  const sid = sanitizeSessionId(rawSessionId);
+  return contextSourceId(sid !== 'unknown' ? () => sessionCorpus(io, cfg, sid, cwd) : null, cwd);
+};
 
 function corpusRetentionDays(cfg: GBrainConfig | null): number {
   // Key is plan-defined [G15] but not yet in the GBrainConfig type (config.ts
