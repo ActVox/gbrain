@@ -558,11 +558,11 @@ export function readBodyPieces(pieces: readonly BodyPiece[], file: Uint8Array): 
 
 /** String form: the scan plus both regions read back as text (tests and the in-memory `put_page` path). */
 export function scanMarkdownString(content: string, filePath?: string, opts?: ParseOpts):
-  (BodyScan & { compiled_truth: string; timeline: string }) | BodyScanRefusal {
+  (BodyScan & { text: { compiled_truth: string; timeline: string } }) | BodyScanRefusal {
   const bytes = Buffer.from(content, 'utf8');
   const scanner = new BodyScanner(filePath, opts);
   scanner.push(bytes);
   const scan = scanner.finish();
   if (scan.kind !== 'ok') return scan;
-  return { ...scan, compiled_truth: readBodyPieces(scan.truth, bytes), timeline: readBodyPieces(scan.timeline, bytes) };
+  return { ...scan, text: { compiled_truth: readBodyPieces(scan.truth, bytes), timeline: readBodyPieces(scan.timeline, bytes) } };
 }
