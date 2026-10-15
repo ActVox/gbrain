@@ -526,3 +526,6 @@ src/eval/brainbench/metrics/trust-reads.ts	canaryPersisted	sql	STREAM
 src/eval/chronicle/harness.ts	seedChronicleEvalCorpus	call:putPage	SEGW	
 src/eval/longmemeval/call-plan.ts	planPages	call:prepareMarkdownChunks	INLINE	
 src/eval/longmemeval/call-plan.ts	planPages	field	INLINE	
+src/core/page-body/segmenter.ts	Segmenter.blocked	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
+src/core/page-body/segmenter.ts	Segmenter.line	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
+src/core/page-body/segmenter.ts	Segmenter.piece	field	NONE	not the page body: st.timeline is the segmenter's timeline-run parser state
