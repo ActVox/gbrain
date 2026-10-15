@@ -444,6 +444,14 @@ export function corpusFileParked(full: string, fingerprint: string | null, nowMs
   return !!record && corpusFailureGate(record, record.key, record.source_incarnation, fingerprint, nowMs) !== 'run';
 }
 
+/** Whether a failure record's window (`<turn sha256>@<offset>`) still lies at or after `cursor` in `turns`. */
+function failureAhead(key: string, turns: CorpusTurn[], cursor: { turn: number; offset: number }): boolean {
+  const at = key.lastIndexOf('@');
+  const sha = key.slice(0, at);
+  const offset = Number(key.slice(at + 1));
+  return turns.some((t, i) => t.sha256 === sha && (i > cursor.turn || (i === cursor.turn && offset >= cursor.offset)));
+}
+
 /**
  * The key of the window the next run of `full` starts at (the frontier a
  * failure record names), or null when the file or its progress is
@@ -693,14 +701,14 @@ export async function runCorpusWindows(opts: {
         break;
       }
       state = next;
-      // Any record left is this window's or stale (the frontier moved past it).
-      if (failure) {
-        await clearCorpusFailure(full).catch(() => {});
-        failure = null;
-      }
       if (r) done++;
       if (isLast) holding = false;
       cursor = win.endOffset === null ? { turn: win.endTurn + 1, offset: 0 } : { turn: win.endTurn, offset: win.endOffset };
+      // This window's record, or one whose window is gone (another incarnation, or its turn no longer ahead), is done.
+      if (failure && (failure.key === key || failure.source_incarnation !== incarnation || !failureAhead(failure.key, turns, cursor))) {
+        await clearCorpusFailure(full).catch(() => {});
+        failure = null;
+      }
     }
     if (windows.length === 0) {
       const finished = await updateProgress(full, (cur) =>

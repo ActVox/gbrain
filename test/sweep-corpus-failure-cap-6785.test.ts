@@ -513,4 +513,26 @@ describe('#6785: a window that keeps failing after its model call is capped', ()
     expect(run.status).toBe('contended');
     expect(existsSync(file + '.failures.json')).toBe(false);
   });
+  test('rewriting an earlier, consumed turn keeps the cap of an unchanged stopped window after it', async () => {
+    const { corpusFileStat, recordCorpusFailure, runCorpusWindows } = await import('../src/core/context/corpus-windows.ts');
+    const { statSync } = await import('node:fs');
+    const file = join(dir, 'earlier-rewrite.txt');
+    const turn = (marker: string) => `${marker} ${marker.toLowerCase().repeat(5000)}`;
+    const b = `[assistant]\n${turn('B')}`;
+    writeFileSync(file, `[user]\n${turn('A')}\n\n${b}`);
+    const empty = () => ({ inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [] });
+    const opts = () => ({ full: file, raw: readFileSync(file, 'utf8'), fileStat: corpusFileStat(statSync(file)), signal: new AbortController().signal,
+      overBudget: () => false, source: { id: 'default', incarnation: 'inc-a' }, failures: { fingerprint: 'f1' } });
+    await runCorpusWindows({ ...opts(), maxWindows: 1, extract: async () => empty() });
+    const key = `${parseCorpusTurns(b)[0].sha256}@0`;
+    let record = null;
+    for (let i = 0; i < 5; i++) record = await recordCorpusFailure(file, record, key, 'inc-a', 'f1', 0, new Error('B fails'));
+
+    writeFileSync(file, `[user]\n${turn('C')}\n\n${b}`);
+    const seen: string[] = [];
+    const run = await runCorpusWindows({ ...opts(), maxWindows: 3, extract: async (text) => { seen.push(text.includes('\nB ') || text.startsWith('B ') ? 'B' : 'C'); return empty(); } });
+    expect(seen).toEqual(['C']);
+    expect(run.status).toBe('dead_lettered');
+    expect(JSON.parse(readFileSync(file + '.failures.json', 'utf8')).count).toBe(5);
+  });
 });
