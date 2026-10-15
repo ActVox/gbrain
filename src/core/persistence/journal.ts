@@ -402,13 +402,9 @@ export function publicationGroupKey(row: Pick<WriteRequest, 'operation' | 'inten
   const batch = row.intent?.page_batch as { id?: unknown } | undefined;
   return !row.intent?.kind && typeof batch?.id === 'string' ? `batch:${batch.id}` : null;
 }
-/**
- * Groups whose members are independent page writes: one member's failure never cancels the others. #6712 (L2): a bulk
- * managed-sync group (`sync:`) is independent too; one page's failure is that page's fate alone, and the sync side
- * settles each member by its own receipt. Fate only: its claim and preparation widths stay its own (`syncGroup`).
- */
+/** Groups whose members are independent page writes: one member's failure never cancels the others. */
 export function independentGroup(key: string | null): boolean {
-  return key !== null && (key.startsWith('batch:') || key.startsWith('import:') || key.startsWith('sync:'));
+  return key !== null && (key.startsWith('batch:') || key.startsWith('import:'));
 }
 /** #6712: a bulk managed-sync group key; such a group claims up to its admitted size (63 followers) and prepares four members at a time. */
 export function syncGroup(key: string | null): boolean {

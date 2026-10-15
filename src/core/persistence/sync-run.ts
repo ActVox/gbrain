@@ -1352,9 +1352,17 @@ async function retryFailedStart(engine: BrainEngine, cursor: Cursor, key: string
   const { opts, context, authority, processingOptions, syncOptions, assertActive } = input;
   const failed = cursor.pending ? await getWriteRequest(engine, cursor.authority.writer.principal, cursor.pending.requestId) : null;
   assertActive();
+  // #6712: --retry-failed resets the in-place re-freeze bound of an entry the run stopped on for a fault not its page's; the drain re-freezes it again.
+  if (failed && cursor.pending && (cursor.pending.stops ?? 0) >= STOPS_PER_ENTRY && ['failed', 'conflict', 'cancelled'].includes(failed.state) && (isSyncKnockOn(failed) || receiptClass(failed) !== 'page')) {
+    const { stops: _stops, ...pending } = cursor.pending;
+    return { cursor: await saveCursor(engine, key, cursor, { ...cursor, pending }, false, assertActive) };
+  }
   // #6643/#6712: a legacy knock-on (re-frozen in place, `refreezeInPlace`) and a checkpoint refused only by a receipt that no
-  // longer blocks it recover in the drain (settleFailedRequest); neither rediscovers the frozen manifest.
-  if (failed && cursor.pending && (isSyncKnockOn(failed) || (cursor.pending.intent.kind === 'managed_sync_checkpoint' && cursor.index === cursor.entries.length && revivableCheckpointRefusal(failed)))) return null;
+  // longer blocks it recover in the drain (settleFailedRequest); neither rediscovers the frozen manifest. A checkpoint a
+  // receipt still blocks (since #6712 a legacy knock-on the cursor never settled is one) rediscovers, as --retry-failed says.
+  if (failed && cursor.pending && isSyncKnockOn(failed)) return null;
+  if (failed && cursor.pending?.intent.kind === 'managed_sync_checkpoint' && cursor.index === cursor.entries.length && revivableCheckpointRefusal(failed)
+    && !await findIncompleteSyncReceipt(engine, cursor.binding.worktree_id, cursor.runId, cursor.convertedFromFailed ?? [], cursor.settled ?? null)) return null;
   const recorded = await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'run_id'=$2", [key, cursor.runId]);
   assertActive();
   if (!((failed && ['failed', 'conflict', 'cancelled'].includes(failed.state)) || (recorded.length && (failed?.state === 'committed' || !failed)))) return null;

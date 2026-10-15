@@ -95,4 +95,27 @@ describe.skipIf(!process.env.DATABASE_URL)('a bulk group member has its own fate
     const rows = await engine.executeRaw<{ slug: string; state: string }>(`SELECT slug,state FROM persistence_requests WHERE source_id=$1 ORDER BY completed_at, sequence`, [sources[0]!.id]);
     expect(rows).toEqual([{ slug: 'order/b', state: 'committed' }, { slug: 'order/c', state: 'committed' }]);
   }), 120_000);
+
+  test('#6712 (Eng 2): a sync group keeps its claim size and its preparation width of four; only its fate changed', () => withBrain(async ({ engine, config, sources }) => {
+    const headId = randomUUID();
+    const slugs = Array.from({ length: 12 }, (_, i) => `order/m${i}`);
+    for (const [i, slug] of slugs.entries()) {
+      const intent = { content: `${slug} body`, group: headId };
+      await admitWrite(engine, admission(config, sources[0]!, slug, '', 0, { requestId: i === 0 ? headId : randomUUID(), callerIntent: intent, intent }));
+    }
+    let inFlight = 0, widest = 0;
+    const groups = new Set<unknown>();
+    const instance = new PersistenceConsumer(engine, { engine: 'postgres' }, async (reads, row) => {
+      groups.add(reads); widest = Math.max(widest, ++inFlight);
+      try { await new Promise(resolve => setTimeout(resolve, 50)); return prepared(row, sources); } finally { inFlight--; }
+    }, { hostId: config.hostId, concurrency: 1, pollMs: 20 });
+    try {
+      instance.start();
+      await waitFor(async () => (await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND state<>'committed'", [sources[0]!.id])).length === 0,
+        { timeoutMs: 30_000, label: 'every member commits' });
+    } finally { await instance.stop(); }
+    // One claim took all twelve members (a batch group would stop at PAGE_BATCH_GROUP_MAX), prepared four at a time.
+    expect(groups.size).toBe(1);
+    expect(widest).toBe(4);
+  }), 120_000);
 });

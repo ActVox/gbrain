@@ -194,7 +194,7 @@ test('the checkpoint waits on every receipt the cursor did not settle, a legacy 
   } finally { await clearConfig(); }
 }), 120_000);
 
-for (const retryFailed of [false, true]) test(`a checkpoint refused by a receipt that turns out to be a knock-on revives under ${retryFailed ? 'the --retry-failed repro command' : 'the plain sync'}, without rediscovery`, async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+for (const retryFailed of [false, true]) test(`#6712: a checkpoint a legacy knock-on still blocks ${retryFailed ? 'is rediscovered by the --retry-failed repro command and finishes' : 'stays blocked under the plain sync, naming the knock-on'}`, async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   try {
     const f = await stoppedRun();
     // The pre-#6643 shape: the cursor passed the stopped page (no settled ranges recorded) and froze its checkpoint.
@@ -204,16 +204,18 @@ for (const retryFailed of [false, true]) test(`a checkpoint refused by a receipt
     const refused = await performManagedSync(engine, f.opts);
     expect(refused.status).toBe('blocked_by_failures');
     expect(refused.failures?.[0]).toMatchObject({ code: 'recovery_required', phase: 'checkpoint', root_cause: { request_id: f.stopped } });
-    const before = await readSyncStatus(engine, f.id);
-    const runId = before.run_id;
-    expect(before.checkpoint_blockers).toEqual([expect.objectContaining({ request_id: f.stopped, slug: 'b', knock_on: false })]);
-    // The receipt that refused it was a knock-on all along (a pre-#6643 producer's message): status previews that nothing blocks now.
+    expect((await readSyncStatus(engine, f.id)).checkpoint_blockers).toEqual([expect.objectContaining({ request_id: f.stopped, slug: 'b', knock_on: false })]);
+    // The receipt that refused it was a knock-on (a pre-#6643 producer's message): it still blocks, and status says what it is.
     await asKnockOn(f.stopped, WINDOW_CANCEL_MESSAGE, null);
-    expect((await readSyncStatus(engine, f.id)).checkpoint_blockers).toEqual([]);
-    const revived = await performManagedSync(engine, { ...f.opts, retryFailed });
-    expect(revived.status).not.toBe('blocked_by_failures');
-    const status = await readSyncStatus(engine, f.id);
-    expect(status).toMatchObject({ run_id: runId, cursor: { done: true } });
+    expect((await readSyncStatus(engine, f.id)).checkpoint_blockers).toEqual([expect.objectContaining({ request_id: f.stopped, slug: 'b', knock_on: true })]);
+    const resumed = await performManagedSync(engine, { ...f.opts, retryFailed });
+    if (!retryFailed) {
+      expect(resumed.status).toBe('blocked_by_failures');
+      expect((await readSyncStatus(engine, f.id)).cursor?.done).not.toBe(true);
+      return;
+    }
+    expect(resumed.status).not.toBe('blocked_by_failures');
+    expect((await readSyncStatus(engine, f.id)).cursor).toMatchObject({ done: true });
     const [source] = await engine.executeRaw<{ last_commit: string }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]);
     expect(source!.last_commit).toBe(git(f.root, 'rev-parse', 'HEAD'));
   } finally { await clearConfig(); }
