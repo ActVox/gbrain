@@ -10,6 +10,40 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.249.0] - 2026-10-15
+
+**One page that fails no longer drags the rest of a managed sync down with it (#6712, #6565, #6600).** Until now a page that did not commit cancelled every other page in its bulk group and every group admitted after it, and the next sync had to re-freeze them all, sometimes until `knock_on_exhausted` stopped the source. Now each page gets its own fate: a page with a problem is held or retried on its own, the pages around it still publish, and the run is counted from each page's own receipt. A file you edit while a sync is running is retried after the rest of the manifest and then held `worktree_dirty`, instead of stalling the run. An unknown database refusal stops the run with a named cause, and the next plain sync picks up again once the cause is gone, with no `--retry-failed` needed.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| One page in a bulk group refuses (bad frontmatter, identity conflict) | that group and later groups cancelled; the next syncs re-freeze them | only that page is held or fails; every other page commits |
+| You edit a file while a sync is running | the run could stall at a lane group and never finish; one in-place retry | the page is retried after the last manifest entry (up to 3 times), then held `worktree_dirty`; the rest of the run finishes |
+| A database trigger raises an unrecognized P0001 or a 55000 on page writes | `storage_error`; every page the refusal failed needed `--retry-failed` | the run stops naming the SQLSTATE; the next plain sync re-freezes the stopped pages (at most 3 times in a row) and converges once the refusal is lifted |
+| A held deletion whose page an authorized delete already removed | stays held | settles as done and the hold clears (#6600) |
+| Two changes to one page in one sync, and the first is held | the second published against a page whose earlier change never landed | the second is held too, naming the first (`blocked_on`), and is re-screened when the first clears |
+| `preparation_stalled` holds | waited for `gbrain sources retry-held` | every sync retries them until the third hold |
+| `gbrain config set sync.knock_on_refreeze_limit` / `sync.knock_on_run_limit` | tuned knock-on recovery | refused: the keys are retired, since nothing produces knock-ons any more |
+| an older receipt with `knock_on_exhausted` | the error code's fix | read as superseded, with `gbrain sync --source <id> --no-pull` as the fix |
+
+The write owner (the host that runs `gbrain serve` or the sync) must run this release for the new behavior.
+
+### Itemized changes
+
+- `src/core/persistence/group-publish.ts`, `src/core/persistence/sync-window.ts`, `src/core/persistence/sync-lanes.ts`, `src/core/persistence/consumer.ts`: the producers of cascade cancels are gone (bulk-group cancel, window cancels, lane `predecessor_failed`, the claimed-head cancel). A member whose preparation failed settles before its group publishes; a sync member refused inside a lane group's transaction settles alone and the rest of the group is requeued, instead of falling back to the single path, whose exclusive lock waits behind the lanes. Sync groups keep their claim size (63 followers) and preparation width (4).
+- `src/core/persistence/sync-run.ts` (`settleFailedRequest`, `freezeNext`, `refreezeInPlace`, `resumableStop`, `stopRecorded`): a non-committed receipt is routed by its `SYNC_FAULT_TABLE` class: a page fault is held or deferred, a transport fault is re-frozen in place, a systemic stop is recorded and re-frozen by the next plain sync when the fault table retries it (bounded by `STOPS_PER_ENTRY` = 3). `source_changed` is deferred past the manifest end (`DEFER_PER_ENTRY` = 3) before `worktree_dirty`. Under `sync.holds=fail` the pages that committed after the failed page are recorded as settled.
+- `src/core/persistence/sync-cursor-moves.ts` (new): the pure cursor transitions, split out of `sync-run.ts`.
+- `src/core/persistence/sync-group.ts`, `src/core/persistence/sync-page-fault.ts`, `src/core/persistence/sync-holds.ts`, `src/core/persistence/sync-discovery.ts`: dependency edges (one slug or page id twice in a sync), `blocked_on` holds, `idempotentDeletionProof` (#6600), and re-screen of `preparation_stalled` (until `HOLD_ATTEMPTS_NEEDS_HUMAN`), `blocked_on` and `concurrent_write` holds whose basis moved.
+- Retired: `sync.knock_on_refreeze_limit`, `sync.knock_on_run_limit`, knock-on recovery and the checkpoint's knock-on exemption (`checkpoint-validation.ts`). `knock_on_exhausted` stays registered with `retired_in` so older receipts still render.
+- `--retry-failed` now rediscovers a run whose checkpoint a receipt still blocks.
+- Docs: `docs/guides/sync-unblock-runbook.md`, `docs/guides/error-codes.md`, key-files entries.
+
+### For contributors
+
+- Fault points `sync:held_settled` and `sync:retry_deferred` join the convergence kill list; convergence modes e (mid-run edit), knock-on and systemic run on every convergence job.
+- Tests: `test/error-registry-retired.test.ts` (no printed fix names a retired key or flag), forced probes in `test/managed-sync-bulk.test.ts` (window followers that commit after the failure and a drainer kill, under both hold policies; a database refusal re-freezing every page it failed), `test/managed-sync-lanes.test.ts` (a page edited after its freeze inside a lane group), `test/sync-group-member-order.test.ts` (sync-group claim size and width).
+
 ## [0.60.248.0] - 2026-10-15
 
 **`gbrain sync status --json` now always includes `checkpoint_blockers`, and managed sync has a convergence gate in CI (#6712).** `checkpoint_blockers` used to appear only while a run waited at its checkpoint, so an agent reading the status of a finished run, a run still mid-manifest or a source with no run could not tell "nothing blocks" from "not reported". It is now an array on every status, empty when no checkpoint is pending. Behind the scenes, every change to persistence, sync, projections or storage now has to pass a gate that kills sync clients and the serve at seeded points while other writers keep writing, then checks that one or two plain `gbrain sync --no-pull` runs bring every file and page back into agreement without losing an acknowledged write.
