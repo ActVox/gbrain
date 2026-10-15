@@ -102,16 +102,18 @@ export async function putPage(
     // over real content (ON CONFLICT sets compiled_truth = EXCLUDED.* flat).
     // Only fires when the incoming body is itself blank, so the common
     // non-empty write pays no extra query. Deletes use deletePage; a deliberate
-    // clear passes allowEmptyOverwrite. See isBlankBody.
+    // clear passes allowEmptyOverwrite. See isBlankBody. A segmented page's
+    // body columns are NULL, so its size is body_bytes.
     if (isBlankBody(page.compiled_truth) && !opts?.allowEmptyOverwrite) {
-      const { rows: prior } = await exec.run<{ compiled_truth: string | null }>(sqlFragment`
-        SELECT compiled_truth FROM pages
+      const { rows: prior } = await exec.run<{ compiled_truth: string | null; body_storage: string | null; body_bytes: unknown }>(sqlFragment`
+        SELECT compiled_truth, body_storage, body_bytes FROM pages
         WHERE source_id = ${sourceId} AND slug = ${slug} AND deleted_at IS NULL
         LIMIT 1`);
-      if (prior[0] && !isBlankBody(prior[0].compiled_truth)) {
+      const segmented = prior[0]?.body_storage === 'segmented';
+      if (prior[0] && (segmented || !isBlankBody(prior[0].compiled_truth))) {
         throw new Error(
           `putPage: refusing to overwrite non-empty page '${slug}' ` +
-            `(${prior[0].compiled_truth!.length} chars) with an empty body — ` +
+            `(${segmented ? `${Number(prior[0].body_bytes)} bytes, segmented` : `${prior[0].compiled_truth!.length} chars`}) with an empty body — ` +
             `likely a read-modify-write that read empty. Pass ` +
             `{ allowEmptyOverwrite: true } to force, or deletePage to remove it.`,
         );
@@ -454,7 +456,7 @@ export async function listPages(exec: ScopedRead, filters?: PageFilters): Promis
 
     const columns = filters?.listColumnsOnly === true
       ? sqlFragment`p.id, p.source_id, p.slug, p.type, p.page_kind, p.title, p.created_at, p.updated_at, p.deleted_at,
-          p.effective_date, p.effective_date_source, ''::text AS compiled_truth, ''::text AS timeline, '{}'::jsonb AS frontmatter`
+          p.effective_date, p.effective_date_source, p.body_storage, p.body_bytes, ''::text AS compiled_truth, ''::text AS timeline, '{}'::jsonb AS frontmatter`
       : sqlFragment`p.*`;
       const { rows } = await exec.run(sqlFragment`
         SELECT ${columns}, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso FROM pages p
@@ -514,7 +516,8 @@ const toDomainBankRow = ((normalize) => (raw: Record<string, unknown>): DomainBa
 //
 // `listPrefixSampledPages`: one page per prefix, tiebroken by inbound-link
 // count (connection_count via LEFT JOIN to page_links). Stale-bias optional
-// for LSD mode (D5). Source-scoped (D5). Excludes close-set slugs.
+// for LSD mode (D5). Source-scoped (D5). Excludes close-set slugs, and (like
+// listCorpusSample) segmented pages, whose body column is NULL.
 //
 // Ranking inside each prefix partition:
 //   1. stale_score DESC (when staleBias) — never-retrieved beats >90d-stale beats fresh
@@ -543,7 +546,7 @@ export async function listPrefixSampledPages(scoped: ScopedReadRunner, opts: Dom
         FROM pages p
         LEFT JOIN page_retrievals r ON r.page_id = p.id
         LEFT JOIN page_links pl ON pl.to_page_id = p.id
-        WHERE p.deleted_at IS NULL
+        WHERE p.deleted_at IS NULL AND p.body_storage = 'inline'
           AND substring(p.slug from '^[^/]+/[^/]+') = ANY(${opts.prefixes}::text[])
           AND (cardinality(${exclude}::text[]) = 0 OR NOT (p.slug = ANY(${exclude}::text[])))
           AND (
@@ -629,7 +632,7 @@ export async function listCorpusSample(scoped: ScopedReadRunner, opts: CorpusSam
           (SELECT COUNT(*) FROM page_links pl WHERE pl.to_page_id = p.id) AS connection_count
         FROM pages p
         LEFT JOIN page_retrievals r ON r.page_id = p.id
-        WHERE p.deleted_at IS NULL
+        WHERE p.deleted_at IS NULL AND p.body_storage = 'inline'
           AND (cardinality(${exclude}::text[]) = 0 OR NOT (p.slug = ANY(${exclude}::text[])))
           AND (
             (${sourceIds}::text[] IS NOT NULL AND p.source_id = ANY(${sourceIds}::text[]))
@@ -736,10 +739,13 @@ export async function listStalePagesForExtraction(exec: ScopedRead, opts: {
     // #1768: project a deterministic full-µs UTC string alongside updated_at.
     // to_char (not ::text — DateStyle-fragile) so extractStaleFromDB can stamp
     // links_extracted_at = the exact updated_at and the staleness predicate clears.
+    // A segmented page is not listed (its body columns are NULL: extracting ''
+    // would delete its derived links) but stays counted as stale until the
+    // per-segment extraction reads it.
     const { text, params } = renderFragment(sqlFragment`SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at,
                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
            FROM pages
-           WHERE ${stalePagesWhere(opts)}${afterClause}
+           WHERE ${stalePagesWhere(opts)} AND body_storage = 'inline'${afterClause}
            ORDER BY id
            LIMIT ${opts.batchSize}`);
     const { rows } = await exec.unsafe(text, params);
