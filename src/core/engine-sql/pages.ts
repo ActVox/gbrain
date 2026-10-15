@@ -24,6 +24,7 @@ import { sanitizeText } from '../batch-rows.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion } from '../search/safe-chunks.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment } from '../search/private-visibility.ts';
 import { quarantineFilterFragment } from '../quarantine.ts';
+import { rederiveHiddenSql } from '../eligibility/sql.ts';
 import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, isUndefinedTableError, warnOncePerProcess } from '../utils.ts';
 import { DELETE_BATCH_SIZE } from '../engine-constants.ts';
 import { jsonbParam, type SqlExecutor } from './executor.ts';
@@ -908,9 +909,10 @@ const PAGE_VERSION_METADATA_COLUMNS = trustedSql('pv.id, pv.page_id, pv.frontmat
 const PAGE_VERSION_SEGMENTED_COLUMNS = trustedSql('pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash');
 
 /**
- * Newest first (`pv.id` breaks snapshot_at ties). Scope and privacy
- * predicates sit in WHERE, so `limit` bounds only rows the caller may read;
- * `includeBody: false` never selects the body columns.
+ * Newest first (`pv.id` breaks snapshot_at ties). Scope, privacy and
+ * re-derivation (a page a purge hid) predicates sit in WHERE, so `limit`
+ * bounds only rows the caller may read; `includeBody: false` never selects
+ * the body columns.
  */
 export async function getVersions<B extends boolean = true>(
   exec: LegacyUnscopedRead,
@@ -928,7 +930,7 @@ export async function getVersions<B extends boolean = true>(
       SELECT ${columns}, ${PAGE_VERSION_SEGMENTED_COLUMNS} FROM page_versions pv
       JOIN pages p ON p.id = pv.page_id
       WHERE p.slug = ${slug} ${scope}
-        ${privacy}
+        ${privacy} AND ${trustedSql(rederiveHiddenSql('pages', 'p'))}
       ORDER BY pv.snapshot_at DESC, pv.id DESC
       ${limit}
     `);
