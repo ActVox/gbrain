@@ -15,6 +15,7 @@ import { parseInlineCitationTimelineEntries, findTimelineSourceDelimiter, parseT
 import { isDatedTimelineLine, supersededInlineCitationEntries } from './timeline-citations.ts';
 import type { BrainEngine } from './engine.ts';
 import { firstMaterializedMarkerIndex } from './timeline-marker.ts';
+import { bodyBlocks, detachedValue } from './page-body/segment-blocks.ts';
 
 export interface ExtractedTimelineEntry {
   slug: string;
@@ -138,6 +139,27 @@ function markdownTimelineKeys(text: string, slug: string): Set<string> {
   return keys;
 }
 
+/** What a page text says about its timeline rows: the tuples either parser yields, and the older citation readings it supersedes. */
+export interface TimelineTextKeys { kept: Set<string>; superseded: Set<string> }
+
+/**
+ * TimelineTextKeys of a segmented page's `${compiled_truth}\n${timeline}`, block by block (page-body/segment-blocks.ts),
+ * with the entries parseTimelineEntries reads there, in body order. Blocks start outside timeline detail runs, so
+ * each entry is read whole.
+ */
+export async function segmentedTimelineText(engine: Pick<BrainEngine, 'executeRaw' | 'readSegmentTexts'>, page: { id: number; slug: string; source_id?: string }):
+  Promise<TimelineTextKeys & { entries: ReturnType<typeof parseTimelineEntries> }> {
+  const kept = new Set<string>();
+  const superseded = new Set<string>();
+  const entries: ReturnType<typeof parseTimelineEntries> = [];
+  for await (const block of bodyBlocks(engine as BrainEngine, page)) {
+    for (const key of markdownTimelineKeys(block.text, page.slug)) kept.add(key);
+    for (const entry of supersededCitationTimeline(block.text)) superseded.add(tupleKey(entry));
+    entries.push(...detachedValue(parseTimelineEntries(block.text)));
+  }
+  return { kept, superseded, entries };
+}
+
 /** A page's stored non-event timeline row as reconciliation reads it (`date` is `YYYY-MM-DD`). */
 export type StoredTimelineTuple = TimelineTuple & { id: number; detail: string | null };
 
@@ -150,15 +172,16 @@ export type StoredTimelineTuple = TimelineTuple & { id: number; detail: string |
  * scan only runs when the page holds a row the current text does not produce.
  * Returns the orphaned rows; they are deleted unless `dryRun`. `storedRows`
  * is the caller's own read of those rows (a batched walk), used instead of reading them here.
+ * `current` is the page text, or its keys when the caller read a segmented body (segmentedTimelineText).
  */
 export async function retractRemovedTimelineEntries(
   engine: Pick<BrainEngine, 'executeRaw'>,
   slug: string,
   sourceId: string,
-  currentText: string,
+  current: string | TimelineTextKeys,
   opts: { dryRun?: boolean; storedRows?: ReadonlyArray<StoredTimelineTuple> } = {},
 ): Promise<Array<TimelineTuple & { id: number }>> {
-  const kept = markdownTimelineKeys(currentText, slug);
+  const kept = typeof current === 'string' ? markdownTimelineKeys(current, slug) : current.kept;
   const rows = opts.storedRows ?? await engine.executeRaw<StoredTimelineTuple>(
     `SELECT t.id, to_char(t.date, 'YYYY-MM-DD') AS date, t.source, t.summary, t.detail FROM timeline_entries t
       JOIN pages p ON p.id = t.page_id
@@ -170,7 +193,7 @@ export async function retractRemovedTimelineEntries(
       WHERE p.source_id = $1 AND p.slug = $2`, [sourceId, slug]);
   const produced = new Set<string>();
   // #6226: rows the older citation reading filed for this text or a stored version.
-  const superseded = new Set(supersededCitationTimeline(currentText).map(tupleKey));
+  const superseded = new Set(typeof current === 'string' ? supersededCitationTimeline(current).map(tupleKey) : current.superseded);
   for (const version of versions) {
     const text = `${version.compiled_truth}\n${version.timeline ?? ''}`;
     for (const key of markdownTimelineKeys(text, slug)) produced.add(key);
@@ -202,9 +225,11 @@ async function retractCoordinated(engine: BrainEngine, pageId: number, slug: str
   const attribution = await maintenanceAttribution(engine);
   return engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
     await tx.lockPageKeys([{ sourceId, slug }]);
-    const [page] = await tx.executeRaw<{ compiled_truth: string; timeline: string | null }>(
-      'SELECT compiled_truth, timeline FROM pages WHERE id = $1 AND deleted_at IS NULL', [pageId]);
-    return page ? retractRemovedTimelineEntries(tx, slug, sourceId, `${page.compiled_truth}\n${page.timeline ?? ''}`) : [];
+    const [page] = await tx.executeRaw<{ compiled_truth: string; timeline: string | null; body_storage: string }>(
+      'SELECT compiled_truth, timeline, body_storage FROM pages WHERE id = $1 AND deleted_at IS NULL', [pageId]);
+    if (!page) return [];
+    return retractRemovedTimelineEntries(tx, slug, sourceId, page.body_storage === 'segmented'
+      ? await segmentedTimelineText(tx, { id: pageId, slug, source_id: sourceId }) : `${page.compiled_truth}\n${page.timeline ?? ''}`);
   }, attribution));
 }
 
@@ -225,8 +250,8 @@ export async function pruneTimelineOrphans(
     if (pageSize <= 0) break;
     const params: unknown[] = [afterId, pageSize];
     if (opts.sourceId) params.push(opts.sourceId);
-    const pages = await engine.executeRaw<{ id: number; slug: string; source_id: string; compiled_truth: string; timeline: string | null }>(
-      `SELECT p.id, p.slug, p.source_id, p.compiled_truth, p.timeline FROM pages p
+    const pages = await engine.executeRaw<{ id: number; slug: string; source_id: string; compiled_truth: string; timeline: string | null; body_storage: string }>(
+      `SELECT p.id, p.slug, p.source_id, p.compiled_truth, p.timeline, p.body_storage FROM pages p
         WHERE p.id > $1 AND p.deleted_at IS NULL${opts.sourceId ? ' AND p.source_id = $3' : ''}
           AND EXISTS (SELECT 1 FROM timeline_entries t WHERE t.page_id = p.id AND t.event_page_id IS NULL)
         ORDER BY p.id LIMIT $2`, params);
@@ -234,7 +259,8 @@ export async function pruneTimelineOrphans(
     for (const page of pages) {
       const orphans = opts.coordinated && !opts.dryRun
         ? await retractCoordinated(engine, page.id, page.slug, page.source_id)
-        : await retractRemovedTimelineEntries(engine, page.slug, page.source_id, `${page.compiled_truth}\n${page.timeline ?? ''}`, { dryRun: opts.dryRun });
+        : await retractRemovedTimelineEntries(engine, page.slug, page.source_id, page.body_storage === 'segmented'
+          ? await segmentedTimelineText(engine, page) : `${page.compiled_truth}\n${page.timeline ?? ''}`, { dryRun: opts.dryRun });
       result.orphans += orphans.length;
       if (!opts.dryRun) result.removed += orphans.length;
       for (const row of orphans.slice(0, Math.max(0, 5 - result.examples.length))) {

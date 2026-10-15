@@ -19,10 +19,11 @@
 import type { BrainEngine, TimelineBatchInput } from '../core/engine.ts';
 import type { Page, PageType } from '../core/types.ts';
 import { parseTimelineEntries, deriveTimelineAnchor } from '../core/link-extraction.ts';
-import { retractRemovedTimelineEntries } from '../core/timeline-extract.ts';
+import { retractRemovedTimelineEntries, segmentedTimelineText } from '../core/timeline-extract.ts';
 import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 import { maintenanceTransaction } from '../core/persistence/attribution.ts';
-import { unrecordedCanonicalTimeline } from '../core/persistence/canonical-projections.ts';
+import { storedCanonicalTimeline, unrecordedCanonicalTimeline } from '../core/persistence/canonical-projections.ts';
+import { isSegmentedPage } from '../core/page-body/page-shape.ts';
 import { maintenancePreflight, submitDatabaseMaintenanceIntent, type MaintenanceAuthority } from '../core/persistence/prepared-maintenance.ts';
 import { authorizeWrite } from '../core/persistence/authority.ts';
 import { getWriteRequest } from '../core/persistence/journal.ts';
@@ -178,9 +179,11 @@ export async function extractTimelineFromDB(engine: BrainEngine, opts: TimelineD
     const page = snapshot?.page ?? null;
     if (!page || isQuarantined(page.frontmatter)) continue;
     if (opts.typeFilter && page.type !== opts.typeFilter) continue;
-    const fullContent = page.compiled_truth + '\n' + page.timeline;
+    // A segmented body is read block by block (segmentedTimelineText), never as one string.
+    const segmented = isSegmentedPage(page) ? await segmentedTimelineText(engine, page) : null;
+    const fullContent = segmented ?? page.compiled_truth + '\n' + page.timeline;
     if (!opts.dryRun) await retractRemovedTimelineEntries(engine, slug, source_id, fullContent);
-    let entries = parseTimelineEntries(fullContent);
+    let entries = segmented ? segmented.entries : parseTimelineEntries(page.compiled_truth + '\n' + page.timeline);
     // --infer-dates: pages with no in-body timeline line but a trustworthy
     // content date (frontmatter / filename) get one anchor entry at that date.
     if (entries.length === 0 && opts.inferDates) {
@@ -268,12 +271,15 @@ async function readTimelineBatch(engine: BrainEngine, refs: ReadonlyArray<{ slug
  * the page's rows; without it the checks read them.
  */
 async function plannedTimeline(engine: BrainEngine, page: Page, slug: string, sourceId: string, inferDates: boolean, stored?: StoredTimelineRows[]) {
-  const fullContent = page.compiled_truth + '\n' + page.timeline;
+  // A segmented body is read block by block, through the engine given (inside the coordinator's transaction too).
+  const segmented = isSegmentedPage(page) ? await segmentedTimelineText(engine, page) : null;
+  const fullContent = segmented ?? page.compiled_truth + '\n' + page.timeline;
   const removed = await retractRemovedTimelineEntries(engine, slug, sourceId, fullContent, { dryRun: true,
     ...(stored ? { storedRows: stored.map(({ date_text: _text, ...row }) => row) } : {}) });
-  let entries: Array<{ date: string; source?: string; summary: string; detail?: string }> = await unrecordedCanonicalTimeline(engine, page.id, page, slug,
-    stored?.map(row => ({ date: row.date_text, source: row.source, summary: row.summary })));
-  if (entries.length === 0 && inferDates && parseTimelineEntries(fullContent).length === 0) {
+  let entries: Array<{ date: string; source?: string; summary: string; detail?: string }> = await unrecordedCanonicalTimeline(engine, page.id,
+    segmented ? await storedCanonicalTimeline(engine, page, slug) : page, slug, stored?.map(row => ({ date: row.date_text, source: row.source, summary: row.summary })));
+  const parsed = segmented ? segmented.entries.length : parseTimelineEntries(page.compiled_truth + '\n' + page.timeline).length;
+  if (entries.length === 0 && inferDates && parsed === 0) {
     const anchor = anchorFor(page, slug);
     const [count] = !anchor ? [{ n: 1 }] : stored ? [{ n: stored.length }] : await engine.executeRaw<{ n: number }>(
       'SELECT count(*)::int AS n FROM timeline_entries WHERE page_id=$1 AND event_page_id IS NULL', [page.id]);

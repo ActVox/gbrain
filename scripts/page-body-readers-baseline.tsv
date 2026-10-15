@@ -121,12 +121,7 @@ src/core/cycle/extract-atoms.ts	runPhaseExtractAtoms	call:serializeMarkdown	SEGW
 src/core/cycle/extract-facts.ts	canonicalCacheState	field	STREAM	segmented page: getter throws page_body_segmented
 src/core/cycle/extract-facts.ts	planFenceReconcile	field	STREAM	managed preparer: segmented page: getter throws page_body_segmented before any write
 src/core/cycle/extract-facts.ts	runExtractFacts	field	STREAM	segmented page skipped with warning FACTS_RECONCILE_SEGMENTED; its facts index is preserved (per-segment reconcile, PR 4)
-src/core/cycle/extract-takes.ts	extractTakesFromDb	field	STREAM	
-src/core/cycle/extract-takes.ts	plannedTakes	field	STREAM	
-src/core/cycle/extract-takes.ts	prepareTakesReextract	sql	STREAM	
-src/core/cycle/extract-takes.ts	reconcilePageTakes	field	STREAM	
-src/core/cycle/extract-takes.ts	reextractCoordinated	field	STREAM	
-src/core/cycle/extract-takes.ts	reextractCoordinated	sql	STREAM	
+src/core/cycle/extract-takes.ts	readPageTakes	field	INLINE	inline arm; a segmented page streams through parseTakesFenceBlocks (page-body/segment-takes.ts)
 src/core/cycle/grade-takes.ts	GradeTakesPhase.process	field	STREAM	
 src/core/cycle/link-manifest.ts	buildLinkManifest	field	STREAM	
 src/core/cycle/pattern-claim-sources.ts	dedupePatternClaimSources	call:serializePageToMarkdown	SEGW	
@@ -274,8 +269,9 @@ src/core/import-identity.ts	decideImportIdentity	field	META
 src/core/import-screen.ts	assessImportSanity	field	STREAM	
 src/core/import-screen.ts	screenImportContent	call:contentHash	META	
 src/core/import-screen.ts	screenImportContent	field	STREAM	
-src/core/link-reconciliation.ts	reconcileSourceLinks	field	STREAM	segmented page skipped with failure code page_body_segmented; the cursor moves past it (per-segment links, PR 4)
+src/core/link-reconciliation.ts	reconcileSourceLinks	field	INLINE	inline arm; a segmented page streams through extractSegmentedPageLinks (page-body/segment-links.ts)
 src/core/link-temporal-apply.ts	applyTemporalEvidence	field	STREAM	
+src/core/link-temporal-apply.ts	temporalBodyOf	field	INLINE	bodies held as strings; a segmented page collects its TemporalBody in extractSegmentedPageLinks
 src/core/link-temporal-evidence.ts	deriveTemporalEvidence	field	STREAM	
 src/core/markdown-chunks.ts	overlaidChunks	field	STREAM	
 src/core/markdown-chunks.ts	prepareFenceAwareMarkdownChunks	call:prepareMarkdownChunks	STREAM	
@@ -284,9 +280,9 @@ src/core/markdown.ts	parseMarkdown	field	STREAM
 src/core/markdown.ts	serializePageToMarkdown	call:serializeMarkdown	SEGW	
 src/core/markdown.ts	serializePageToMarkdown	field	STREAM	
 src/core/mentions/aliases.ts	deriveEntityAliases	field	STREAM	
-src/core/mentions/pass.ts	pagesMatchingNames	sql	STREAM	segmented pages excluded in SQL
-src/core/mentions/pass.ts	reconcileSource	field	STREAM	inline rows only
-src/core/mentions/pass.ts	reconcileSource	sql	STREAM	segmented pages excluded in SQL (stay due and pending until the per-segment pass)
+src/core/mentions/pass.ts	pageMentions	field	INLINE	inline arm; a segmented page is scanned block by block
+src/core/mentions/pass.ts	pagesMatchingNames	sql	STREAM	segmented pages are selected by id without a body (each is a candidate; pageMentions streams it)
+src/core/mentions/pass.ts	reconcileSource	sql	INLINE	reads body_storage; a segmented row is scanned block by block (pageMentions)
 src/core/mentions/pass.ts	refreshAliases	sql	STREAM	segmented pages excluded in SQL
 src/core/minions/handlers/facts-absorb.ts	makeFactsAbsorbHandler	field	STREAM	
 src/core/minions/handlers/subagent-oneshot.ts	runSubagentOneshot	call:serializeMarkdown	SEGW	
@@ -354,10 +350,10 @@ src/core/page-window/document.ts	readPageDocument	field	STREAM
 src/core/persistence/atom-maintenance.ts	prepareManagedAtomMutation	field	META	
 src/core/persistence/atom-maintenance.ts	readAtomOrigin	field	META	
 src/core/persistence/atom-retry.ts	retryManagedAtomBatch	field	STREAM	
-src/core/persistence/canonical-projections.ts	canonicalTakeRows	field	STREAM	per-page projection: segmented page: getter throws page_body_segmented
 src/core/persistence/canonical-projections.ts	compileCanonicalProjections	field	STREAM	per-page projection: segmented page: getter throws page_body_segmented
 src/core/persistence/canonical-projections.ts	materializeTimeline	field	STREAM	per-page projection: segmented page: getter throws page_body_segmented
 src/core/persistence/canonical-projections.ts	prepareCanonicalProjections	field	STREAM	per-page projection: segmented page: getter throws page_body_segmented
+src/core/persistence/canonical-projections.ts	priorView	field	INLINE	inline arm; an unread segmented prior streams through segmentedPriorView
 src/core/persistence/canonical-projections.ts	safeBody	field	STREAM	per-page projection: segmented page: getter throws page_body_segmented
 src/core/persistence/connector-google-receipts.ts	prepareGoogleReceiptPatch	call:contentHash	META	
 src/core/persistence/connector-google-receipts.ts	prepareGoogleReceiptPatch	call:serializePageToMarkdown	SEGW	
@@ -366,7 +362,7 @@ src/core/persistence/connector-sync.ts	prepareConnectorMutation	call:serializePa
 src/core/persistence/connector-sync.ts	prepareConnectorMutation	field	SEGW	
 src/core/persistence/core-guard.ts	prepareCoreGuard	field	INLINE	
 src/core/persistence/effect-facts.ts	bodyAlreadyOffered	field	META	
-src/core/persistence/effect-links.ts	mentionTargets	field	STREAM	per-page effect: segmented page: getter throws page_body_segmented
+src/core/persistence/effect-links.ts	mentionTargets	field	INLINE	inline arm; a segmented page streams its compiled truth through extractSegmentedPageLinks
 src/core/persistence/effects.ts	gitPage	call:serializePageToMarkdown	SEGW	segmented target skipped (skipped reason page_body_segmented) before the serialize
 src/core/persistence/effects.ts	mirrorPage	call:serializePageToMarkdown	SEGW	segmented target skipped (skipped reason page_body_segmented) before the serialize; per-segment mirror in PR 2
 src/core/persistence/embedding-settlement.ts	listEmbeddingCandidates	sql	META	
@@ -500,7 +496,7 @@ src/core/search/safe-chunks.ts	protectedBodyFilter	sql	META	segmented page: body
 src/core/shared-skills/migration-export.ts	exportInventory	call:serializeMarkdown	INLINE	
 src/core/shared-skills/migration-export.ts	exportInventory	field	INLINE	
 src/core/shared-skills/migration-projection.ts	assertExportProjectionRoundtrip	field	INLINE	
-src/core/sweep.ts	runLinksTimelinePass	field	STREAM	segmented page skipped (skip reason page_body_segmented:links_timeline)
+src/core/sweep.ts	runLinksTimelinePass	field	INLINE	inline arm; a segmented page streams its links (segment-links.ts) and timeline (bodyBlocks)
 src/core/sweep.ts	runMaintenanceSweep	sql	STREAM	LIKE over NULL never matches a segmented page (skip)
 src/core/think/gather.ts	renderPagesBlockDetailed	field	LEAD	segmented page: getter throws page_body_segmented
 src/core/think/gather.ts	runGather	field	LEAD	visibleLeads reads Page.compiled_truth from listPages/search: segmented page: getter throws page_body_segmented (lead source in PR 2)
