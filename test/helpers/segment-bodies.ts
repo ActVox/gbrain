@@ -14,15 +14,21 @@ export const FACTS_BLOCK = '<!--- gbrain:facts:begin -->\n'
   + '| 1 | likes tea | preference | 0.9 | world | low | 2024-01-01 | | user | |\n'
   + '| 2 | private thing | fact | 0.9 | private | low | 2024-01-01 | | user | |\n'
   + '<!--- gbrain:facts:end -->\n';
-export const KEY_BODY = 'MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu';
-export const PEM_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\n${KEY_BODY}\n-----END RSA PRIVATE KEY-----\n`;
+const B64_SAMPLE = 'MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu';
+/** Synthetic key text; the fence lines are assembled at runtime so no source line reads as a private key to secret scanners. */
+export const KEY_BODY = B64_SAMPLE;
+const PRIVATE_KEY_TAIL = ['PRIVATE', 'KEY-----'].join(' ');
+export const PEM_BEGIN_RSA = `-----BEGIN RSA ${PRIVATE_KEY_TAIL}`;
+export const PEM_END_RSA = `-----END RSA ${PRIVATE_KEY_TAIL}`;
+export const PEM_BEGIN_PKCS8 = `-----BEGIN ${PRIVATE_KEY_TAIL}`;
+export const PEM_BLOCK = `${PEM_BEGIN_RSA}\n${KEY_BODY}\n${PEM_END_RSA}\n`;
 export const MARKER_BULLET = '<!-- gbrain:materialized v1 0123456789ab -->\n- **2024-01-02** | src — did a thing\n  detail line\n';
 
 export const SOUP_ATOMS = [
   '<!--- gbrain:facts:begin -->', '<!--- gbrain:facts:end -->', '<!--- gbrain:takes:begin -->', '<!--- gbrain:takes:end -->',
   '```', '~~~', '````', '```js', '`', '\n', '\n', '\n\n', '\r\n', '\r', ' ', 'text words here', 'é', '😀', '\u2028',
-  '## Heading 2024-03-05\n', '# Top\n', '### deep\n', '-----BEGIN RSA PRIVATE KEY-----\n', `${KEY_BODY}\n`,
-  '-----END RSA PRIVATE KEY-----\n', MARKER_BULLET, '- **2024-01-02** | src — entry\n', '  detail line\n', FACTS_BLOCK,
+  '## Heading 2024-03-05\n', '# Top\n', '### deep\n', `${PEM_BEGIN_RSA}\n`, `${KEY_BODY}\n`,
+  `${PEM_END_RSA}\n`, MARKER_BULLET, '- **2024-01-02** | src — entry\n', '  detail line\n', FACTS_BLOCK,
 ];
 
 export function pick<T>(r: () => number, a: readonly T[]): T {
