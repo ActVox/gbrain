@@ -131,6 +131,50 @@ each lowered row records `write_origin.channel = "trust_relower"`.
 `gbrain sources set-trust <id> <lower tier>` or `--clear` ends a claim. Rows
 it already lifted keep their tier.
 
+## Repair unknown markers
+
+Before v0.60.249.0, an agent edit of a page with no tier yet wrote a
+`trust_tier: unknown` marker into its frontmatter (#6550). The backfill later
+gave the page its real tier, but the marker stayed. Agents copy the
+frontmatter back when they edit, so the next agent edit lowered the page to
+"unverified origin" and filed a `lower_page` item you never needed to see.
+`gbrain trust review` adds a `repair` command to those items.
+
+```bash
+gbrain trust backfill --repair-unknown-markers     # read-only preview
+```
+
+The preview lists every page whose marker is `unknown` while its stored tier
+is higher. For each page it shows the slug, the current marker, the stored
+tier, the proposed marker and the tier after a repair (unchanged). It also
+shows the evidence:
+
+- the first saved version that shows the marker, and whether that was before
+  or after this brain first ran the fixed release (the release date is a hard
+  bound; an upgrade recorded in `~/.gbrain/upgrade-state.json` is more precise);
+- whether the page already had the marker when it was first imported.
+
+The time a marker appeared cannot prove it was accidental, so gbrain never
+decides for you. Pages with a version from before the fix that shows the
+marker, and no marker at first import, are listed as consistent with #6550,
+and the printed apply command names them. Every other page is listed as
+ambiguous. A page imported with the marker was probably marked on purpose.
+Pages an agent edit already lowered are listed with their `gbrain trust
+revert` command. Revert them first, then run the preview again.
+
+The preview ends with the exact command:
+
+```bash
+gbrain trust backfill --repair-unknown-markers --slug notes/a-example --expect mr_0123456789abcdef
+```
+
+Apply rewrites only the pages you name with `--slug` (repeatable). They must
+be at the revisions the preview showed, and the preview must still hash to
+`--expect`; otherwise it refuses with `preview_changed` and changes nothing.
+The marker becomes the page's stored tier (pages at "your notes" or higher
+get no marker), and the page keeps its tier. This runs on the local CLI only.
+Run the preview again to verify: repaired pages no longer show.
+
 ## Scan older memory (only when you agree)
 
 ```bash
