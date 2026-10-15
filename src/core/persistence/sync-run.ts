@@ -16,7 +16,7 @@ import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
 import { slugModeCheckpointRevivable } from './sync-slug-mode.ts';
-import { selectManagedCursor } from './sync-cursor-key.ts';
+import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
 import { assertManagedSyncActive, assertSyncDispatchActive, managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, syncProcessingOptions, SYNC_PROCESSING_KEYS, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
@@ -35,12 +35,12 @@ import { writeFailureDiagnostic } from './verb-errors.ts';
 import { extractManagedStaleLinks } from './links-maintenance.ts';
 import { addSettledRange, CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
-import { principalKey, type WriteRequest } from './model.ts';
+import { principalKey, type Principal, type WriteRequest } from './model.ts';
 import { readJournalLimits } from './limits.ts';
 import { assertManagedSyncAllowed } from './worktree-refresh.ts';
 import type { GBrainConfig } from '../config.ts';
 import { admitGroup, freezeFollowers, groupableIntent, nextGroupSize, type BulkSettings } from './sync-group.ts';
-import { cancelRowsUnderCursor, cancelWindow } from './sync-window.ts';
+import { cancelRowsUnderCursor, cancelWindow, type CursorFence } from './sync-window.ts';
 import { cursorFenceCause, isSyncKnockOn, knockOnDetail, knockOnRoot } from './sync-knock-on.ts';
 import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
@@ -55,6 +55,7 @@ import { checkpointSuperseded } from './sync-checkpoint-replaced.ts';
 import { publicFailureDetail } from './publication-failure.ts';
 import { fileChangedAfterAdmission, headCommittedBytes, originFaultHold, pageChangeProof, pageChangedHold, pinnedWorktreeConflict, receiptPageFaultHold, worktreeDirtyHold } from './sync-page-fault.ts';
 import { faultPoint } from './fault-points.ts';
+import { syncCursorOptions } from './sync-slices.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
@@ -471,23 +472,87 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
       policyFingerprint: currentCompanyBrainSync(cursor.sourceId)!.policyFingerprint } } : {}) } });
 }
 
-/** A resume adopts the cursor's stored processing options unless the caller set a conflicting one explicitly. */
-function assertCursorProcessingOptions(cursor: Cursor, processingOptions: SyncProcessingOptions, explicitProcessing: SyncOpts['explicitProcessing']): void {
+/**
+ * #6712 PR 1: a pass resumes the source's one cursor whoever wrote it (sync-cursor-key.ts), in one compare-and-swap:
+ * - Admitted requests keep the authority frozen in their intent: they are read under that principal (`admittedBy`) and
+ *   publish under it. A frozen entry no request was admitted for yet is dropped (`withoutUnadmitted`), so it is frozen
+ *   again under this pass's authority and nothing new is admitted on an earlier writer's grant.
+ * - This pass's authority is validated and stamped on the cursor in the same transaction; what it freezes from then on
+ *   is authorized for its own grant (`freezeEntry` validates every entry with the cursor's authority).
+ * - A remote caller resumes only its own principal's cursor; any other is left to the brain host's CLI.
+ * - Processing opt-outs: a flagless resume keeps the cursor's accepted ones (`inherited`); a flag the caller set adds
+ *   its opt-out to the requests frozen from now on. Admitted requests keep their frozen options, and a company approval
+ *   keeps its exact options.
+ */
+async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, input: { authority: SyncAuthority; processingOptions: SyncProcessingOptions;
+  embedDeferred?: boolean; assertActive: () => void }): Promise<{ cursor: Cursor; inherited: Array<keyof SyncProcessingOptions>; writerChanged: boolean }> {
+  const { authority } = input;
+  // #6696: a cost-gate deferral is this run's constraint (each request it freezes carries `embedDeferred`), never an opt-out the cursor keeps.
+  const processingOptions = input.embedDeferred ? { ...input.processingOptions, noEmbed: false } : input.processingOptions;
+  const writerChanged = digest(cursor.authority) !== digest(authority);
+  if (writerChanged && authority.writer.remote && (!cursor.authority.writer.remote
+      || principalKey(cursor.authority.writer.principal) !== principalKey(authority.writer.principal))) throw localResumeRequired(cursor.sourceId);
   const stored = cursor.processingOptions;
-  if (stored ? digest(stored) !== digest(processingOptions) : !cursor.pending) {
-    // An unattended or flagless resume adopts the cursor's options; freezeEntry reads them from the cursor.
-    const explicit = explicitProcessing ?? SYNC_PROCESSING_KEYS;
-    if (!stored || explicit.some(key => stored[key] !== processingOptions[key])) {
-      const flags = { noEmbed: '--no-embed', noExtract: '--no-extract', noSchemaPack: '--no-schema-pack' } as const;
-      const resume = stored ? ` Resume it with: gbrain sync --source ${cursor.sourceId} --no-pull${SYNC_PROCESSING_KEYS.filter(key => stored[key]).map(key => ` ${flags[key]}`).join('')}`
-        + ' (or omit the conflicting flag to adopt the stored options).' : '';
-      const error = new OperationError('invalid_params', 'The unfinished sync has different or unknown processing options.',
-        `The unfinished sync cursor for source ${cursor.sourceId} stores ${stored ? SYNC_PROCESSING_KEYS.map(key => `${key}=${stored[key]}`).join(', ') : 'no processing options'}.${resume}`
-        + ' After resolving pending requests, use --retry-failed for explicit rediscovery; existing requests are not rewritten.');
-      error.detail = 'cursor_processing_options_conflict';
-      throw error;
-    }
+  const merged: SyncProcessingOptions = !stored ? processingOptions : cursor.companyReceiptId ? stored
+    : { noEmbed: stored.noEmbed || processingOptions.noEmbed, noExtract: stored.noExtract || processingOptions.noExtract, noSchemaPack: stored.noSchemaPack || processingOptions.noSchemaPack };
+  const inherited = stored && !cursor.companyReceiptId ? SYNC_PROCESSING_KEYS.filter(option => stored[option] && !processingOptions[option]) : [];
+  if (!writerChanged && stored && digest(merged) === digest(stored)) return { cursor, inherited, writerChanged };
+  const next: Cursor = { ...cursor, authority, processingOptions: merged };
+  if (writerChanged) await withoutUnadmitted(engine, next);
+  const saved = await saveCursor(engine, key, cursor, next, false, input.assertActive, tx => validateSyncAuthority(tx, authority, '__managed_sync_checkpoint__'));
+  if (writerChanged) await faultPoint('sync:cursor_adopted', { sourceId: cursor.sourceId });
+  return { cursor: saved, inherited, writerChanged };
+}
+/** A remote caller met a cursor another principal (or the local CLI) wrote: the host's CLI resumes it. */
+function localResumeRequired(sourceId: string): OperationError {
+  return opError('sync_in_progress', `Source ${sourceId} has an unfinished sync run that another writer started.`,
+    `A remote caller resumes only its own sync runs, so nothing was synced. The brain host's CLI finishes the run with the command in fix.`,
+    { reason: 'local_resume_required', fix: { argv: ['gbrain', 'sync', '--no-pull', '--source', sourceId], consent: [], actor: 'user', requires_exclusive: false,
+      why: `Finishes the unfinished sync run of source ${sourceId} under the brain host's CLI writer.`,
+      user_message: `Source ${sourceId} has an unfinished sync that another writer started. Please run the command shown in a terminal on the brain host.`,
+      verify: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] } } });
+}
+/** The principal that admitted (or will admit) a frozen member: the authority frozen in its own intent. */
+const admittedBy = (member: Pending, cursor: Pick<Cursor, 'authority'>): Principal => member.intent.syncAuthority?.writer.principal ?? cursor.authority.writer.principal;
+/** The rows of admitted members, each read under its own admitting principal (one read per principal, normally one). */
+async function readAdmitted(engine: Pick<BrainEngine, 'executeRaw'>, cursor: Pick<Cursor, 'authority'>, members: Pending[], committedOnly = false): Promise<WriteRequest[]> {
+  const byPrincipal = new Map<string, { principal: Principal; ids: string[] }>();
+  for (const member of members) {
+    const principal = admittedBy(member, cursor), slot = principalKey(principal);
+    if (!byPrincipal.has(slot)) byPrincipal.set(slot, { principal, ids: [] });
+    byPrincipal.get(slot)!.ids.push(member.requestId);
   }
+  const rows: WriteRequest[] = [];
+  for (const { principal, ids } of byPrincipal.values()) {
+    rows.push(...await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND request_id=ANY($3::uuid[])${committedOnly ? " AND state='committed'" : ''}`,
+      [principal.kind, principal.id, ids]));
+  }
+  return rows;
+}
+/** Cancels a window's queued members, each group of them under its own admitting principal. */
+async function cancelAdmittedWindow(engine: BrainEngine, cursor: Pick<Cursor, 'authority'>, window: Pending[][], root: string | null,
+  fence?: Omit<CursorFence, 'principal'>): Promise<boolean> {
+  const byPrincipal = new Map<string, { principal: Principal; members: Pending[] }>();
+  for (const member of window.flat()) {
+    const principal = admittedBy(member, cursor), slot = principalKey(principal);
+    if (!byPrincipal.has(slot)) byPrincipal.set(slot, { principal, members: [] });
+    byPrincipal.get(slot)!.members.push(member);
+  }
+  for (const { principal, members } of byPrincipal.values()) {
+    if (!await cancelWindow(engine, [members], principal, root, fence && { ...fence, principal })) return false;
+  }
+  return true;
+}
+/** Drops (in place) the frozen members of `next` no request was admitted for: the head and its group, or the window groups from the first unadmitted one on. */
+async function withoutUnadmitted(engine: BrainEngine, next: Cursor): Promise<void> {
+  const head = next.pending;
+  if (!head) return;
+  const window = next.window ?? [];
+  const admitted = new Set((await readAdmitted(engine, next, [head, ...window.flat()])).map(row => row.request_id));
+  if (!admitted.has(head.requestId)) { delete next.pending; delete next.group; delete next.window; return; }
+  const kept = window.findIndex(group => !group.every(member => admitted.has(member.requestId)));
+  if (kept === -1) return;
+  if (kept === 0) delete next.window; else next.window = window.slice(0, kept);
 }
 
 /** #5988: a managed dry run lists the holds the pending (or newly discovered) imports would earn, read-only. */
@@ -558,7 +623,6 @@ async function holdUnderGate(engine: BrainEngine, input: { cursor: Cursor; key: 
   /** #6643: the re-freeze replaces a knock-on: the new pending carries this instead of `converted`, and the run counts it. */
   knockOn?: { attempts: number; root: string | null } })): Promise<Cursor | 'pending'> {
   const { cursor, key, pending, assertActive } = input;
-  const principal = cursor.authority.writer.principal;
   const base: Cursor = input.base ?? { ...cursor }; delete base.group; delete base.window; delete base.pending;
   const [failedRow] = await engine.executeRaw<{ sequence: string | number | null }>('SELECT sequence::text AS sequence FROM persistence_requests WHERE id=$1::uuid', [input.failedId]);
   const after = failedRow?.sequence == null ? null : String(failedRow.sequence);
@@ -566,14 +630,14 @@ async function holdUnderGate(engine: BrainEngine, input: { cursor: Cursor; key: 
   const deadline = performance.now() + input.waitMs;
   // #6643: the window and the run's queued suffix are cancelled only while the cursor still holds this entry, so a
   // converter that lost the cursor swap to another drainer never cancels the replacement the winner admitted.
-  const fence = { cursorKey: key, expectedRequestId: cursor.pending?.requestId ?? pending.requestId, principal, worktreeId: cursor.binding.worktree_id };
+  const fence = { cursorKey: key, expectedRequestId: cursor.pending?.requestId ?? pending.requestId, worktreeId: cursor.binding.worktree_id };
   for (;;) {
     assertActive();
-    if (cursor.window?.length && !await cancelWindow(engine, cursor.window, principal, pending.requestId, fence)) return currentCursor(engine, key, cursor);
+    if (cursor.window?.length && !await cancelAdmittedWindow(engine, cursor, cursor.window, pending.requestId, fence)) return currentCursor(engine, key, cursor);
     if (after !== null) {
       const queued = await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE worktree_id=$1::uuid AND intent->>'runId'=$2 AND state='queued'
         AND ${SYNC_PAGE_KINDS_SQL} AND sequence>$3::bigint ORDER BY sequence`, [cursor.binding.worktree_id, cursor.runId, after]);
-      if (queued.length && !await cancelRowsUnderCursor(engine, fence, queued, knockOnDetail('suffix_cancelled', pending.requestId))) return currentCursor(engine, key, cursor);
+      if (queued.length && !await cancelRowsUnderCursor(engine, { ...fence, principal: admittedBy(pending, cursor) }, queued, knockOnDetail('suffix_cancelled', pending.requestId))) return currentCursor(engine, key, cursor);
     }
     const saved = await engine.transaction(async tx => {
       assertActive();
@@ -624,7 +688,7 @@ async function holdUnderGate(engine: BrainEngine, input: { cursor: Cursor; key: 
 async function convertBlockedCursor(engine: BrainEngine, blocked: Cursor, key: string, assertActive: () => void,
   run: Parameters<typeof freezeEntry>[4] & { observedAt?: string }): Promise<Cursor> {
   const previous = blocked.pending!;
-  const failed = await getWriteRequest(engine, blocked.authority.writer.principal, previous.requestId);
+  const failed = await getWriteRequest(engine, admittedBy(previous, blocked), previous.requestId);
   if (!failed || !['failed', 'conflict', 'cancelled'].includes(failed.state)) return blocked;
   // #6643: a knock-on is re-frozen by the drain itself (settleFailedRequest → recoverKnockOn), with or without a screen.
   if (isSyncKnockOn(failed)) return blocked;
@@ -1036,7 +1100,7 @@ async function formGroup(engine: BrainEngine, head: Cursor, pending: Pending, ke
     // ungrouped intent. The group is not formed (nothing was admitted) and the single path takes that request; any
     // other intent under the head's request ID stays an idempotency_conflict.
     if (!(error instanceof OperationError && error.code === 'idempotency_conflict')) throw error;
-    const prior = await getWriteRequest(engine, head.authority.writer.principal, pending.requestId);
+    const prior = await getWriteRequest(engine, admittedBy(pending, head), pending.requestId);
     if (prior?.digest !== intentDigest({ operation: 'submit_job', sourceId: head.sourceId, slug: pending.slug, callerIntent: pending.intent })) throw error;
     return currentCursor(engine, key, head);
   }
@@ -1166,10 +1230,7 @@ async function admitAhead(engine: BrainEngine, cursor: Cursor, key: string, bulk
 /** Admits window group `slot` when its requests are missing; false when they are still missing (retried on the next pass, or when it becomes the cursor's group). */
 async function admitWindowGroup(engine: BrainEngine, cursor: Cursor, key: string, slot: number): Promise<boolean> {
   const members = cursor.window![slot]!;
-  const principal = cursor.authority.writer.principal;
-  const admitted = await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND request_id=ANY($3::uuid[])',
-    [principal.kind, principal.id, members.map(member => member.requestId)]);
-  if ((admitted[0]?.n ?? 0) >= members.length) return true;
+  if ((await readAdmitted(engine, cursor, members)).length >= members.length) return true;
   const rows = await admitGroup(engine, members, cursor, async tx => {
     const [held] = await tx.executeRaw<{ request_id: string | null }>(`SELECT completed_keys->0->'window'->($3::int)->0->>'requestId' AS request_id FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, slot]);
     return held?.request_id === members[0]!.requestId;
@@ -1186,9 +1247,7 @@ async function groupStep(engine: BrainEngine, cursor: Cursor, key: string, bulk:
   drainStartedAt: number, onProgress: SyncOpts['onProgress'], ahead?: (cursor: Cursor) => Promise<Cursor>): Promise<{ cursor: Cursor } | { result: SyncResult }> {
   const signal = wait.signal;
   const members = cursor.group!;
-  const principal = cursor.authority.writer.principal;
-  let rows = await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND request_id=ANY($3::uuid[])',
-    [principal.kind, principal.id, members.map(member => member.requestId)]);
+  let rows = await readAdmitted(engine, cursor, members);
   if (rows.length < members.length) {
     // #6075: a pass that froze the head before it was grouped may have admitted it on the single path. The group is
     // dropped and the single path takes that request; the followers were never admitted (a group admits in one
@@ -1240,9 +1299,7 @@ async function groupStep(engine: BrainEngine, cursor: Cursor, key: string, bulk:
     next.window = [...next.window];
     // Window groups that lanes already committed are passed in this same save: the feeder's cost per wait stays
     // one save however many groups committed meanwhile. It stops at the first group not wholly committed.
-    const ids = next.window.flat().map(member => member.requestId);
-    const done = new Map((await engine.executeRaw<WriteRequest>(`SELECT request_id,state,outcome FROM persistence_requests
-      WHERE principal_kind=$1 AND principal_id=$2 AND request_id=ANY($3::uuid[]) AND state='committed'`, [principal.kind, principal.id, ids])).map(row => [row.request_id, row]));
+    const done = new Map((await readAdmitted(engine, cursor, next.window.flat(), true)).map(row => [row.request_id, row]));
     while (next.window.length && next.window[0]!.every(member => done.has(member.requestId))) {
       const group = next.window.shift()!;
       for (const member of group) countCommitted(next.counts, member, done.get(member.requestId)!.outcome);
@@ -1260,7 +1317,7 @@ async function groupStep(engine: BrainEngine, cursor: Cursor, key: string, bulk:
   // A failed page stops the run: groups admitted ahead of it are cancelled, never published after it.
   // #6643: fenced on the cursor this pass read, and naming the stuck request as the cancelled groups' knock-on root.
   if (failed && next.window) {
-    if (!await cancelWindow(engine, next.window, principal, stuck!.requestId, { cursorKey: key, expectedRequestId: cursor.pending!.requestId, principal, worktreeId: cursor.binding.worktree_id })) {
+    if (!await cancelAdmittedWindow(engine, cursor, next.window, stuck!.requestId, { cursorKey: key, expectedRequestId: cursor.pending!.requestId, worktreeId: cursor.binding.worktree_id })) {
       return { cursor: await currentCursor(engine, key, cursor) };
     }
     next.dropped = withDropped(next.dropped, next.window, stuck!.requestId);
@@ -1316,19 +1373,16 @@ async function retireCompletedCursor(engine: BrainEngine, key: string, completed
   return readCursor(engine, key);
 }
 /** What the hold report needs from a managed run: its source, cursor and authority. */
-interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boolean; cursor?: () => Cursor | CursorHeader | null }
+interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boolean; cursor?: () => Cursor | CursorHeader | null;
+  /** #6712 PR 1: what the fan-in folded, and what resuming the source's one cursor kept from it. */
+  fanIn?: NonNullable<SyncResult['cursorFanIn']>; adopted?: { inherited: Array<keyof SyncProcessingOptions>; writerChanged: boolean; optionsDiffer: boolean;
+    syncOptions: SyncCursorOptions | null; processingOptions: SyncProcessingOptions | null } }
 
 /**
  * One immutable page is admitted at a time; foreground writes can never sit behind a whole scan.
  * #5988: every result (resumed, no-change and blocked runs included) carries this run's holds and the source's outstanding total.
  */
 
-/** The durable cursor key performManagedSync would use for these options, so --retry-failed can count only the failures it retries. */
-export async function managedSyncCursorKey(engine: BrainEngine, opts: SyncOpts): Promise<string> {
-  const context = await resolveManagedSyncContext(engine, opts);
-  const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root);
-  return (await selectManagedCursor(engine, { opts, context, authority, company: currentCompanyBrainSync(context.sourceId) })).key;
-}
 /**
  * `--retry-failed` on an unfinished cursor whose pending request failed (or whose run has a ledger row). #6340: a pending
  * request that failed on a page fault (a page that moved, a dirty file) converts in place with the frozen manifest; every
@@ -1338,7 +1392,7 @@ async function retryFailedStart(engine: BrainEngine, cursor: Cursor, key: string
   processingOptions: SyncProcessingOptions; syncOptions: SyncCursorOptions; startupConfig: BrainEngine; frozenRun: Parameters<typeof freezeEntry>[4]; runStartedAt: string;
   discoveryRun: string; assertActive: () => void }): Promise<{ cursor: Cursor; discoveryTarget?: string } | { wait: RetryWait } | null> {
   const { opts, context, authority, processingOptions, syncOptions, assertActive } = input;
-  const failed = cursor.pending ? await getWriteRequest(engine, cursor.authority.writer.principal, cursor.pending.requestId) : null;
+  const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
   assertActive();
   // #6643: a knock-on, and a checkpoint refused only by a receipt that no longer blocks it, recover in place in the drain
   // (settleFailedRequest), which waits only on the narrowed gate; neither rediscovers the frozen manifest.
@@ -1404,13 +1458,21 @@ async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: {
       screened: 'entries' in (cursor ?? {}) ? (cursor as Cursor).entries.slice(0, cursor!.index).filter(entry => entry.action === 'import').length : 0 });
     const recovered = state.remote ? undefined : recoveredReport(state.sourceId, cursor?.counts.recovered);
     const fences = fencesNormalizedReport(state.sourceId, cursor?.counts.fences, state.remote === true);
-    return { ...synced, ...report, ...(!state.remote && cursor?.convertedFromFailed?.length ? { converted_from_failed: cursor.convertedFromFailed } : {}),
+    return { ...synced, ...report, ...adoptionReport(state), ...(!state.remote && cursor?.convertedFromFailed?.length ? { converted_from_failed: cursor.convertedFromFailed } : {}),
       ...(recovered ? { recovered_frontmatter: recovered } : {}), ...(fences ? { fences_normalized: fences } : {}) };
   } catch {
     return synced;
   }
 }
 
+/** #6712 PR 1: the result fields of a resumed cursor: the opt-outs it kept from the cursor, and what the fan-in folded. */
+function adoptionReport(state: HoldRunState): Pick<SyncResult, 'inherited_options' | 'cursorAdopted' | 'cursorFanIn'> {
+  const adopted = state.adopted;
+  return { ...(adopted?.inherited.length ? { inherited_options: adopted.inherited } : {}),
+    ...(adopted && (adopted.writerChanged || state.fanIn?.adopted || adopted.optionsDiffer) ? { cursorAdopted: { writer_changed: adopted.writerChanged, legacy_key: state.fanIn?.adopted === true,
+      ...(state.remote ? {} : { sync_options: adopted.syncOptions, processing_options: adopted.processingOptions }) } } : {}),
+    ...(state.fanIn ? { cursorFanIn: state.fanIn } : {}) };
+}
 async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxPages: number; maxMs: number } | undefined, state: HoldRunState): Promise<SyncResult> {
   await assertManagedSyncActive(engine);
   if (opts.sourceId && !currentCompanyBrainSync(opts.sourceId) && await getCompanyBrainProfile(engine, opts.sourceId)) {
@@ -1422,14 +1484,12 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   if (!opts.dryRun) await assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId);
   const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root);
   const company = currentCompanyBrainSync(context.sourceId);
-  // #6696: the one boundary that normalizes the strategy (fresh cursors only); discovery below reads the selected opts.
-  const selected = await selectManagedCursor(engine, { opts, context, authority, company });
-  opts = selected.opts;
   const processingOptions = syncProcessingOptions(opts);
-  const syncOptions = selected.syncOptions;
+  const syncOptions = syncCursorOptions(opts);
   const frozenRun: Parameters<typeof freezeEntry>[4] = { syncOptions, ...(opts.repoPath ? { repoPath: resolve(opts.repoPath) } : {}), ...(opts.embedDeferred ? { embedDeferred: true } : {}) };
   const runStartedAt = new Date().toISOString();
-  const key = selected.key;
+  // #6712 PR 1: one cursor per incarnation (and company approval); the fan-in below may pick an older key's cursor to finish in place.
+  let key = managedCursorKey(context.incarnation, company);
   let cursor: Cursor | null = null;
   let missingManifestCursor: CursorHeader | null = null;
   if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => cursor });
@@ -1459,6 +1519,13 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   };
   try {
     assertActive();
+    const resolution = await resolveManagedCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, assertActive, readOnly: !!opts.dryRun });
+    key = resolution.key;
+    if (resolution.adoptedLegacyKey || resolution.superseded.length || resolution.retained.length) state.fanIn = { adopted: !!resolution.adoptedLegacyKey, superseded: resolution.superseded.length, retained: resolution.retained.length };
+    // #6712 PR 1: a superseded run's write still in flight settles before the adopted run publishes beside it.
+    const waiting = resolution.waitFor && !opts.dryRun
+      ? (await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]))[0]?.completed_keys?.[0] : undefined;
+    if (waiting) return { ...result(waiting, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: { ...resolution.waitFor!, retry_after_ms: 5000 } }) };
     try { cursor = await readCursor(engine, key); }
     catch (error) {
       if (!(error instanceof MissingSyncManifest) || !opts.retryFailed || opts.dryRun || company) throw error;
@@ -1473,8 +1540,15 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       cursor = replaced;
     }
     assertActive();
+    if (cursor && !cursor.done && !opts.dryRun) {
+      const adopted = await adoptCursor(engine, key, cursor, { authority, processingOptions, embedDeferred: opts.embedDeferred, assertActive });
+      cursor = adopted.cursor;
+      if (adopted.inherited.length || adopted.writerChanged || resolution.adoptedLegacyKey || digest(cursor.syncOptions ?? syncOptions) !== digest(syncOptions)) state.adopted = { inherited: adopted.inherited, writerChanged: adopted.writerChanged,
+        syncOptions: cursor.syncOptions ?? null, processingOptions: cursor.processingOptions ?? null, optionsDiffer: digest(cursor.syncOptions ?? syncOptions) !== digest(syncOptions) };
+    }
+    assertActive();
     if (company && opts.retryFailed && cursor && !cursor.done && !opts.dryRun) {
-      const failed = cursor.pending ? await getWriteRequest(engine, cursor.authority.writer.principal, cursor.pending.requestId) : null;
+      const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
       const unfinished = await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) LIMIT 1", [cursor.sourceId]);
       assertActive();
       // #6643: a knock-on recovers in the drain (recoverKnockOn), which keeps its per-index and per-run budgets.
@@ -1536,7 +1610,6 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? syncOptions, repoPath: frozenRun.repoPath },
         `The unfinished sync cursor of source ${cursor.sourceId} was written under an older binding (its owner epoch, topology generation, worktree or root changed since), so this run stopped without importing; the retry rediscovers against the current binding.`);
     }
-    assertCursorProcessingOptions(cursor, processingOptions, opts.explicitProcessing);
     if (opts.dryRun) return dryRun(cursor);
     frozenRun.screen = company ? null : await loadSyncScreenRun(startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote);
     const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
@@ -1592,7 +1665,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       if (!cursor.pending) continue; // another owner-loop advanced the cursor
       const pending: Pending = cursor.pending;
       phase = 'admission'; stampDrainStep('admission', signal);
-      const prior = await getWriteRequest(engine, cursor.authority.writer.principal, pending.requestId);
+      const prior = await getWriteRequest(engine, admittedBy(pending, cursor), pending.requestId);
       assertActive();
       // #5470/#5984: a frozen entry whose publication would change nothing advances the cursor without an admission.
       const screened: Cursor = cursor;
@@ -1696,7 +1769,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       // waits for them), is transient admission back-pressure, not a sync failure to record. #6340: neither is a lost
       // database connection or a statement timeout: the cursor and its frozen manifest stay, and the next pass resumes them.
       if (!['permission_denied', 'worktree_refreshing', 'refresh_recovery_required'].includes(code) && !isWriteCapacityWait(error) && !(error instanceof LockStolenError)
-        && !isRetryableConnError(error) && !isStatementTimeoutError(error) && !(code === 'invalid_params' && phase === 'resume' && (await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'code' IS DISTINCT FROM 'invalid_params'", [key])).length > 0)) {
+        && !isRetryableConnError(error) && !isStatementTimeoutError(error)) {
         const [stored] = cursor ? [] : await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]);
         const failedCursor = cursor ?? stored?.completed_keys?.[0];
         const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,

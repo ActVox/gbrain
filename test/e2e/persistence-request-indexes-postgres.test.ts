@@ -55,7 +55,7 @@ async function fixture() {
   await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,\'{}\')', [id, root]);
   await claimWorktree(engine, id, root);
   await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
-  return { id, root, opts: { sourceId: id, noPull: true, noEmbed: true, noExtract: true, explicitProcessing: [] } };
+  return { id, root, opts: { sourceId: id, noPull: true, noEmbed: true, noExtract: true } };
 }
 const planNodes = (plan: Record<string, unknown>): Array<Record<string, unknown>> =>
   [plan, ...((plan.Plans as Array<Record<string, unknown>> | undefined) ?? []).flatMap(planNodes)];

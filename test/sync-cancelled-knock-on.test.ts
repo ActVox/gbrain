@@ -76,11 +76,16 @@ test('sync status turns a cancelled knock-on into the retry sync prints, not a h
   expect([...status.next!.argv!].sort()).toEqual([...printed].sort());
 }), 120_000);
 
-test('a resume refused for conflicting cursor options leaves the recorded failure untouched', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+// #6712 PR 1: a resume with other processing flags is no longer refused; it inherits the cursor's opt-outs and meets
+// the same failure, which it must not re-record or replace.
+test('a resume with other processing flags inherits the cursor options and leaves the recorded failure untouched', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   const f = await blockedRun();
   const [before] = await readManagedSyncFailures(engine, [f.id]);
   expect(before!.code).toBe('source_changed');
-  await expect(performManagedSync(engine, { ...f.opts, noEmbed: false, explicitProcessing: ['noEmbed'] })).rejects.toMatchObject({ code: 'invalid_params' });
+  // Holds stay off as in the blocked run, so the page fault is still a failure rather than converted to a hold.
+  await engine.setConfig('sync.holds', 'fail');
+  try { expect(await performManagedSync(engine, { ...f.opts, noEmbed: false })).toMatchObject({ status: 'blocked_by_failures' }); }
+  finally { await engine.executeRaw("DELETE FROM config WHERE key='sync.holds'"); }
   const [after] = await readManagedSyncFailures(engine, [f.id]);
   expect(after).toMatchObject({ code: 'source_changed', observation_id: before!.observation_id, attempts: before!.attempts });
 }), 120_000);

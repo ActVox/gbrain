@@ -23,6 +23,16 @@ export interface SyncResult {
   retryWait?: import('../core/persistence/sync-run.ts').RetryWait;
   /** #6712 PR 1: another drainer holds (or took) the source's drain lease; `resumable`, nothing admitted by this run. */
   leaseHeld?: import('../core/persistence/sync-lease.ts').DrainLeaseHeld;
+  /**
+   * #6712 PR 1 (#6552 §1): processing opt-outs this run kept from the unfinished cursor it resumed though the caller did
+   * not set them (`gbrain embed --stale` / `gbrain extract --stale` settle the pages they skipped).
+   */
+  inherited_options?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
+  /** #6712 PR 1: this run finished a cursor another writer, or an older key, started, under that run's frozen options (shown to local callers). */
+  cursorAdopted?: { writer_changed: boolean; legacy_key: boolean; sync_options?: import('../core/persistence/sync-prepare.ts').SyncCursorOptions | null;
+    processing_options?: import('../core/persistence/sync-authority.ts').SyncProcessingOptions | null };
+  /** #6712 PR 1: older-key cursors of the incarnation this run's fan-in folded (`retained`: left while a request under them is open). */
+  cursorFanIn?: { adopted: boolean; superseded: number; retained: number };
   /** #6643: knock-on pages this run re-froze automatically, and the limits that bound it. */
   /** #6693: caller remembers refused while their page's file awaited import (or was held), replayed after this sync imported it. */
   replayedRemembers?: import('../core/repair/failed-writes.ts').ImportReplayReport;
@@ -180,8 +190,6 @@ export interface SyncOpts {
   noSchemaPack?: boolean;
   /** #6696 (A7): server-only; the drain's first pass checks the run's estimated receipts against the capacity left before admitting. */
   capacityPreflight?: boolean;
-  /** Processing options this caller set; an unfinished managed cursor supplies the rest (unset = all explicit). */
-  explicitProcessing?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
   /** #6696: a runtime paid-work constraint (the cost gate deferred this run's embedding); never a processing option, never lifted by cursor adoption. */
   embedDeferred?: boolean;
   /**
