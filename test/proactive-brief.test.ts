@@ -25,6 +25,7 @@ import {
   recordBriefDelivered,
   renderBriefLine,
   resetBriefLedger,
+  assembleBrief,
   sessionStartBrief,
   turnBrief,
   withBriefDeadline,
@@ -349,6 +350,48 @@ describe('page edits (brains that record a change by editing pages)', () => {
     const body = JSON.parse((res.content[0] as { text: string }).text) as { brief: { items: Array<{ kind: string; text: string }> } };
     expect(body.brief.items.map((i) => i.kind)).toEqual(['edit']);
     expect(body.brief.items[0]!.text).toContain('Tuesday, October 20');
+  });
+
+  test('the edit arm filters a private page itself, even for a counterparty the resolver never produced', async () => {
+    const CANARY = ['EDITPAGECANARY', 'Q7'].join('');
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ['people/secret-direct', { visibility: 'private' }],
+      ['people/derived-direct', { derived_from: 'notes/private-src-direct' }],
+    ];
+    await page('notes/private-src-direct', 'note', 'Private source', { frontmatter: { visibility: 'private' } });
+    for (const [slug, frontmatter] of shapes) {
+      await rewrite(slug, 'Hidden Example', 'Hidden.', { frontmatter });
+      await rewrite(slug, 'Hidden Example', `Hidden.\n- ${CANARY} moved the call.`, { frontmatter });
+      const counterparties = [{ slug, source_id: 'default', display: 'Hidden Example', confidence: 1 }];
+      for (const local of [true, false]) {
+        expect(await assembleBrief(engine, { trigger: 'lexicon', counterparties, local, clock: clock() })).toBeNull();
+      }
+      const widened = await assembleBrief(engine, { trigger: 'pull', counterparties, local: true, includePrivate: true, clock: clock() });
+      expect(widened!.items.map((i) => i.kind)).toEqual(['edit']);
+      expect(widened!.text).toContain(CANARY);
+    }
+  });
+
+  test('a remote caller never gets an edit from a private page or event, or from a page outside its source', async () => {
+    const CANARY = ['REMOTEEDITCANARY', 'W3'].join('');
+    await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('aa-other', 'aa-other', '{}'::jsonb) ON CONFLICT (id) DO NOTHING`);
+    // The same slug in a source the caller is not bound to, written first and sorting first, so an unscoped page read would find it first.
+    await engine.executeRaw(`DELETE FROM pages WHERE source_id = 'default' AND slug = 'people/alice-example'`);
+    for (const body of ['Alice Example.', `Alice Example.\n- ${CANARY} other-source edit.`]) {
+      expect((await importFromContent(engine, 'people/alice-example', `---\ntype: person\ntitle: Alice Example\n---\n\n${body}\n`, { noEmbed: true, sourceId: 'aa-other' })).status).toBe('imported');
+    }
+    await seedAlice();
+    await rewrite('people/secret-remote', 'Secret Remote Example', 'Secret.', { frontmatter: { visibility: 'private' } });
+    await rewrite('people/secret-remote', 'Secret Remote Example', `Secret.\n- ${CANARY} private edit.`, { frontmatter: { visibility: 'private' } });
+    await page('events/private-remote', 'event', 'Private event', { frontmatter: { visibility: 'private' } });
+    const [{ id: pid }] = await engine.executeRaw<{ id: number }>(`SELECT id FROM pages WHERE source_id = 'default' AND slug = 'people/alice-example'`);
+    const [{ id: eid }] = await engine.executeRaw<{ id: number }>(`SELECT id FROM pages WHERE slug = 'events/private-remote'`);
+    await engine.executeRaw(`INSERT INTO timeline_entries (page_id, date, source, summary, event_page_id) VALUES ($1, CURRENT_DATE, 'test', $2, $3)`, [pid, `${CANARY} private event`, eid]);
+    for (const counterparty of ['Alice Example', 'people/alice-example', 'people/secret-remote', 'Secret Remote Example']) {
+      const res = await dispatchToolCall(engine as never, 'context_pack', { counterparty, intent: 'meeting' }, { remote: true, transport: 'stdio', sourceId: 'default' });
+      const text = res.content.map((c) => (c as { text?: string }).text ?? '').join('\n');
+      expect(text).not.toContain(CANARY);
+    }
   });
 
   test('canary fuzz: an edit on a private page, in a fence, or on a private event never surfaces', async () => {
