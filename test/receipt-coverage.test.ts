@@ -52,6 +52,7 @@ const RECEIPT_COVERAGE: Record<string, Coverage> = {
   'src/core/persistence/connector-path.ts': { sites: 1, tables: ['sources'], other: 'clears an unbound connector source local_path (source registration, not knowledge)' },
   'src/core/persistence/connector-sync.ts': { sites: 1, tables: ['sources'], other: 'the connector lease freshness stamp on its own source row' },
   'src/core/persistence/sync-run.ts': { sites: 1, tables: ['sources'], other: 'the managed sync freshness heartbeat on its own source row' },
+  'src/core/page-body/ingest.ts': { sites: 1, tables: [], other: 'segmentWriteScope: staged segment texts and manifest rows of an unpublished generation, and segment GC sweeps (page_segment_texts and page_body_manifest are guarded but hold no live body until the publication flips the generation)' },
 };
 
 /** Facts/takes writers allowed without a receipt this wave, each with its TODO above. */

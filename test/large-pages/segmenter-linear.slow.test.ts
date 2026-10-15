@@ -11,13 +11,13 @@
  * 3. Forced probe: the same ratio check run on an append path that
  *    resegments the whole prefix on each append (the quadratic variant)
  *    exceeds the bound, so the check can tell the two apart.
- * 4. After one warm-up run, each size takes its best of five runs in thread
- *    CPU time (cpuMs).
+ * 4. After one warm-up run, each size takes its best of five interleaved runs
+ *    in thread CPU time, each on a freshly collected heap (cpuScalingRatio).
  */
 import { describe, expect, test } from 'bun:test';
 import { initialEntryState } from '../../src/core/page-body/entry-state.ts';
 import { Segmenter, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
-import { cpuMs } from '../helpers/cpu-time.ts';
+import { cpuScalingRatio } from '../helpers/cpu-time.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
 import { bigPage, PEM_BLOCK, segmentOptions } from '../helpers/segment-bodies.ts';
 
@@ -25,20 +25,10 @@ const MB = 1024 * 1024;
 const BOUND = 2.5;
 const entry = () => initialEntryState({ region: 'truth' });
 
-function bestMs(fn: () => unknown): number {
-  let best = Infinity;
-  for (let k = 0; k < 5; k++) {
-    best = Math.min(best, cpuMs(fn));
-  }
-  return best;
-}
-
 function ratio(make: (bytes: number) => string, small: number, run: (body: string) => unknown): number {
   const a = make(small);
   const b = make(2 * small);
-  run(a);
-  run(b);
-  return bestMs(() => run(b)) / bestMs(() => run(a));
+  return cpuScalingRatio(() => run(a), () => run(b));
 }
 
 const page = bigPage(mulberry32(7), 4.5 * MB);

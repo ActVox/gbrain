@@ -2,7 +2,7 @@
  * Wave B (spec 3.1): pass 1 stays linear in the file size.
  *
  * Protects: the streamed body scan does O(bytes) work: CPU time at 2n bytes is
- * under 2.5x the time at n bytes on a page dense with every state the scan
+ * under 2.5x the time at n bytes (n = 4 MiB, best of five interleaved runs) on a page dense with every state the scan
  * carries (quoted sentinels inside fences, `---` lines awaiting a Timeline
  * H2, bare-section headings that fail their lookahead, CRLF, astral text).
  * Fails when: a step re-reads buffered input per line or per chunk (a
@@ -14,9 +14,9 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { BodyScanner } from '../../src/core/page-body/body-scan.ts';
-import { cpuMs } from '../helpers/cpu-time.ts';
+import { cpuScalingRatio } from '../helpers/cpu-time.ts';
 
-const N = 1024 * 1024;
+const MB = 1024 * 1024;
 const RATIO_LIMIT = 2.5;
 
 function page(bytes: number): Uint8Array {
@@ -45,20 +45,18 @@ function quadraticScan(bytes: Uint8Array): void {
   expect(scanner.finish().kind).toBe('ok');
 }
 
-function ratio(run: (bytes: Uint8Array) => void): number {
-  const small = page(N);
-  const large = page(2 * N);
-  const best = (bytes: Uint8Array) => Math.min(...[0, 1, 2].map(() => cpuMs(() => run(bytes))));
-  run(small);
-  return best(large) / best(small);
+function ratio(run: (bytes: Uint8Array) => void, n: number, runs: number): number {
+  const small = page(n);
+  const large = page(2 * n);
+  return cpuScalingRatio(() => run(small), () => run(large), runs);
 }
 
 describe('body scan cost', () => {
   test(`CPU time at 2n stays under ${RATIO_LIMIT}x the time at n`, () => {
-    expect(ratio(scan)).toBeLessThan(RATIO_LIMIT);
+    expect(ratio(scan, 4 * MB, 5)).toBeLessThan(RATIO_LIMIT);
   }, 60_000);
 
   test('forced probe: the same ratio fails a scan that re-reads its buffered prefix', () => {
-    expect(ratio(quadraticScan)).toBeGreaterThan(RATIO_LIMIT);
+    expect(ratio(quadraticScan, MB, 3)).toBeGreaterThan(RATIO_LIMIT);
   }, 120_000);
 });
