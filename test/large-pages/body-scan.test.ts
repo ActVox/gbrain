@@ -77,9 +77,9 @@ function capture<T>(fn: () => T): T | { thrown: string } {
   try { return fn(); } catch (e) { return { thrown: String(e) }; }
 }
 
-function expectAgrees(content: string, filePath: string, opts: ParseOpts): void {
+function expectAgrees(content: string, filePath: string, opts: ParseOpts, lineBufferBytes?: number): void {
   const expected = capture(() => parseMarkdown(content, filePath, opts));
-  const got = capture(() => scanMarkdownString(content, filePath, opts));
+  const got = capture(() => scanMarkdownString(content, filePath, opts, lineBufferBytes));
   if ('thrown' in expected) {
     expect(got).toEqual(expected);
     return;
@@ -270,4 +270,170 @@ describe('invalid UTF-8', () => {
       expect(firstInvalidUtf8(bytes) === -1).toBe(valid);
     }), { numRuns: 5000 });
   });
+});
+
+describe('lines longer than the line buffer', () => {
+  const ws = fc.array(fc.constantFrom(' ', ' ', '\t', '\u00a0', '\u2028', '\u3000', '\r'), { maxLength: 12 }).map(a => a.join(''));
+  const spaces = fc.array(fc.constantFrom(' ', '\t'), { maxLength: 9 }).map(a => a.join(''));
+  const run = (char: string) => fc.integer({ min: 1, max: 10 }).map(n => char.repeat(n));
+  const word = fc.constantFrom('timeline', 'Timeline', 'HISTORY', 'history', 'notes', 'x', '😀', 'Re: a: b', 'a:', '2024', 'nul\u0000', '');
+  const longTail = fc.constantFrom('', '', 'y'.repeat(300), ' '.repeat(300), `${'z '.repeat(150)}`, '😀'.repeat(140), '`x`');
+  const template = fc.oneof(
+    fc.tuple(ws, run('`'), ws, word, ws).map(p => p.join('')),
+    fc.tuple(spaces, run('~'), spaces, longTail).map(p => p.join('')),
+    fc.tuple(ws, fc.constant('---'), ws, word, ws, fc.constantFrom('---', '--', '')).map(p => p.join('')),
+    fc.tuple(ws, fc.constantFrom('<!--', '<!-- '), ws, word, ws, fc.constant('-->')).map(p => p.join('')),
+    fc.tuple(ws, fc.constantFrom('##', '#', '###'), ws, word, ws, longTail, ws).map(p => p.join('')),
+    fc.tuple(ws, fc.constantFrom('-', '*', '+'), ws, run('*'), fc.constantFrom('2024', '20245', '2024-05-01: x', 'abcd'), longTail).map(p => p.join('')),
+    fc.tuple(fc.constantFrom('title:', 'key:', 'Note:', '_k1:', '1k:'), spaces, fc.constantFrom('', '"q"', 'a: b', 'end:', 'plain', '|x'), longTail, ws).map(p => p.join('')),
+    fc.tuple(fc.constantFrom('# ', '#\t', '#\r ', '#'), longTail, word, ws, fc.constantFrom('', ' ##', '\rmore'), ws).map(p => p.join('')),
+    fc.tuple(ws, longTail, ws).map(p => p.join('')),
+  );
+  const longLine = fc.array(template, { minLength: 1, maxLength: 3 }).map(parts => parts.join('\r'));
+  const longDoc = fc.record({
+    frontmatter: fc.option(fc.record({
+      opener: fc.constantFrom(...OPENERS),
+      block: fc.array(fc.constantFrom(...BLOCK_LINES), { maxLength: 3 }),
+      closer: fc.constantFrom(...CLOSERS),
+    }), { nil: undefined }),
+    body: fc.array(fc.oneof(fc.constantFrom(...BODY_LINES), longLine), { maxLength: 14 }),
+    sep: fc.constantFrom(...SEPARATORS),
+    trailing: fc.boolean(),
+  });
+
+  const join = (parts: string[]) => parts.join('');
+  const embeddedDoc = fc.record({
+    lead: fc.constantFrom('---\ntype: note\n---\n', '---\ntype: note\n---\n\n  \n'),
+    opener: fc.tuple(fc.constant('---'), ws).map(join),
+    lines: fc.array(fc.oneof(
+      fc.tuple(fc.constantFrom('title:', 'title: ', 'title:\t', ' title: '), spaces, fc.constantFrom('Alpha', '"Q"', "'s'", 'a\rb', 'x\u2028y', 'v\r', ''), longTail, ws).map(join),
+      fc.constantFrom('type: x', '', '---', '--- \t'),
+    ), { maxLength: 3 }),
+    closer: fc.tuple(fc.constant('---'), ws).map(join),
+    tail: fc.constantFrom('body', '# H1 wins', ''),
+    sep: fc.constantFrom(...SEPARATORS),
+  }).map(d => d.lead + [d.opener, ...d.lines, d.closer, d.tail].join(d.sep));
+  const bareDoc = fc.record({
+    heading: fc.tuple(ws, fc.constantFrom('##'), ws, fc.constantFrom('Timeline', 'history', 'Timeline notes'), ws).map(join),
+    lines: fc.array(fc.oneof(
+      fc.tuple(ws, fc.constantFrom('-', '*', '+', '**', '*-', 'x'), ws, run('*'), fc.constantFrom('2024', '20245', '2024: x', 'abcd'), longTail).map(join),
+      fc.tuple(ws, fc.constantFrom('cont', '`x`', '')).map(join),
+    ), { maxLength: 5 }),
+    next: fc.constantFrom('', '## Next\nkept', '##  \u00a0Next'),
+    sep: fc.constantFrom(...SEPARATORS),
+  }).map(d => ['intro', d.heading, ...d.lines, d.next].join(d.sep));
+  const fenceLine = fc.tuple(fc.constantFrom('', ' ', '   ', '    ', '\t', '\u00a0'), fc.integer({ min: 2, max: 9 }), fc.constantFrom('`', '~'),
+    fc.constantFrom('', ' ', ' \u00a0', '\u2028', ' \u2028x', 'ts', '`', ' \t', '\u3000', 'info ~'), ws)
+    .map(([lead, n, c, tail, end]) => lead + c.repeat(n) + tail + end);
+  const fenceDoc = fc.record({
+    lines: fc.array(fc.oneof(fenceLine, fenceLine, fc.constantFrom('code', '', '<!-- timeline -->', '## Timeline', '- 2024: x', '---'),
+      fc.array(fenceLine, { minLength: 2, maxLength: 3 }).map(l => l.join('\r'))), { maxLength: 10 }),
+    sep: fc.constantFrom(...SEPARATORS),
+    lead: fc.constantFrom('intro', ' \u00a0\n', ''),
+  }).map(d => [d.lead, ...d.lines].join(d.sep));
+
+  test('embedded fences, bare sections and fence lines agree on both paths', () => {
+    fc.assert(fc.property(fc.oneof(embeddedDoc, bareDoc, fenceDoc), fc.constantFrom(1, 2, 5, 11, 40, undefined), fc.boolean(), (content, buffer, validate) => {
+      expectAgrees(content, 'notes/x.md', { validate }, buffer);
+    }), { numRuns: 4000 });
+  }, 120_000);
+
+  test('generated documents agree when every line takes the long-line path', () => {
+    fc.assert(fc.property(docArb, fc.integer({ min: 1, max: 24 }), fc.boolean(), (doc, buffer, validate) => {
+      expectAgrees(render(doc), 'notes/x.md', { validate }, buffer);
+    }), { numRuns: 2000 });
+  }, 120_000);
+
+  test('long runs, CR sub-lines and astral text split at the buffer edge agree', () => {
+    fc.assert(fc.property(longDoc, fc.integer({ min: 1, max: 40 }), fc.boolean(), fc.constantFrom(...PATHS), (doc, buffer, validate, path) => {
+      expectAgrees(render(doc), path, { validate }, buffer);
+    }), { numRuns: 3000 });
+  }, 120_000);
+
+  test('bounded-head documents agree through the long-line path, including the pre-quote watch', () => {
+    const pad = (line: string) => `${line}\n`.repeat(Math.ceil((FRONTMATTER_HEAD_MAX_BYTES + 1000) / (line.length + 1)));
+    const shapes = [
+      `---\ntitle: x\n---  \n${pad('prose')}---\nend\n`,
+      `---\ntitle: x\n---  \n${pad('prose')}Note: ${'z'.repeat(300)} end\n---\nend\n`,
+      `---\ntitle: x\n---  \n${pad('Note: one two')}end\n`,
+      `---\ntitle: x\n---\n${pad('body')}late\u0000nul ${'w'.repeat(500)}\n`,
+      `---\ntitle: x\n---  \n${pad('prose')}Note: a: b\rmore ${'m'.repeat(300)}\nplain\n---\nend\n`,
+      `---\ntitle: x\n---  \n${pad('prose')}Note: a: b\u2028more\nplain\n---\nend\n`,
+      `---\ntitle: x\n---  \n${pad('prose')}Note: "a: b"\nplain\n---\nend\n`,
+    ];
+    for (const content of shapes) for (const buffer of [1, 7, 64]) expectAgrees(content, 'notes/x.md', { validate: true }, buffer);
+    for (const value of [`one: ${'z'.repeat(300)}`, `${'z'.repeat(300)}:`, `${'k'.repeat(300)}: a: b`]) {
+      for (const buffer of [1, 7, 64]) {
+        const got = scanMarkdownString(`---\ntitle: x\n---  \n${pad('prose')}Note: ${value}\n---\nend\n`, 'notes/x.md', {}, buffer);
+        expect(got.kind === 'frontmatter_head_unbounded' && got.reader).toBe('quote_fence');
+      }
+    }
+  });
+
+  test('embedded fence lines whose whitespace run hides a non-[ \t] unit in its middle', () => {
+    const shapes = [
+      '---\ntype: note\n---\n---  \u00a0  \ntitle: Alpha\n---\nbody\n',
+      '---\ntype: note\n---\n---\ntitle: Alpha\n---  \u00a0  \nbody\n',
+      '---\ntype: note\n---\n---  \r  \ntitle: Alpha\n---\nbody\n',
+      '---\ntype: note\n---\n---\ntitle: Alpha\n--- \t\u3000\t\t \nbody\n',
+      '---\ntype: note\n---\n--- \t \t \t\r\ntitle: Alpha\r\n---\t \t \t \r\nbody\r\n',
+    ];
+    for (const content of shapes) for (const buffer of [1, 3, 8, undefined]) expectAgrees(content, 'notes/x.md', { validate: true }, buffer);
+  });
+
+  test('lines longer than the real 64 KiB buffer', () => {
+    const big = 70_000;
+    const shapes = [
+      `# ${'t'.repeat(big)} ##\nbody\n`,
+      `intro\n# Long ${'t '.repeat(big)}\t\nbody\n`,
+      `# Title\r${'more\r'.repeat(big / 5)}\n# Second\n`,
+      `---\ntype: note\n---\n---\ntitle: ${'v'.repeat(big)}\n---\nbody\n`,
+      `intro\n---${' '.repeat(big)}timeline${'\t'.repeat(big)}---\n- 2024: t\n`,
+      `intro\n${' '.repeat(big)}<!-- timeline -->${' '.repeat(big)}\nt\n`,
+      `intro\n---\n${'\u3000'.repeat(big)}## Timeline${' '.repeat(big)}\n- 2024: t\n`,
+      `intro\n${'`'.repeat(big)}\ncode\n${'`'.repeat(big + 1)}\n<!-- timeline -->\nt\n`,
+      `intro\n${'`'.repeat(big)}\ncode\n${'`'.repeat(big - 1)}\n<!-- timeline -->\nt\n`,
+      `intro\n${'~'.repeat(big)} info ${'i'.repeat(big)}\ncode\n${'~'.repeat(big)}${' \t'.repeat(big)}\nafter\n`,
+      `intro\n\`\`\`ts${' x'.repeat(big)}\u2028\n<!-- timeline -->\n\`\`\`\nt\n`,
+      `${'a\r```\rcode\r```\r'.repeat(big / 10)}\n<!-- timeline -->\nt\r\`\`\`\r`,
+      `intro\n## Timeline\n- ${'*'.repeat(big)}2024 dated\n  ${'w'.repeat(big)}\n## Next\nkept\n`,
+      `intro\n## Timeline\n- ${'*'.repeat(big)}20245 not dated\n## Next\nkept\n`,
+      `plain\n${' \u00a0\u2028'.repeat(big)}\n${'😀'.repeat(big)}\n`,
+      `plain\n${'x'.repeat(big)}\u0000${'y'.repeat(big)}\n`,
+      `${'\r\n'.repeat(10)}${'q'.repeat(big)}\r\n<!-- timeline -->\r\n- 2024: t\r\n`,
+    ];
+    for (const content of shapes) for (const validate of [false, true]) expectAgrees(content, 'notes/alpha-example.md', { validate });
+  });
+
+  test('invalid UTF-8 inside a long line names its offset', () => {
+    for (const at of [3, 65_535, 65_536, 65_537, 150_001]) {
+      const bytes = Buffer.from(`plain\n${'a'.repeat(200_000)}\nend\n`);
+      bytes[at + 6] = 0xff;
+      for (const buffer of [undefined, 5]) {
+        const scanner = new BodyScanner('notes/x.md', {}, buffer);
+        for (let k = 0; k < bytes.length; k += 4093) scanner.push(bytes.subarray(k, k + 4093));
+        expect(scanner.finish()).toEqual({ kind: 'invalid_utf8', offset: at + 6 });
+      }
+    }
+    const cut = Buffer.concat([Buffer.from(`ok\n${'a'.repeat(100)}`), Buffer.from([0xf0, 0x9f, 0x98])]);
+    const scanner = new BodyScanner(undefined, undefined, 8);
+    scanner.push(cut);
+    expect(scanner.finish()).toEqual({ kind: 'invalid_utf8', offset: cut.length - 3 });
+  });
+
+  test('any chunking gives the single-chunk result on the long-line path', () => {
+    fc.assert(fc.property(longDoc, fc.integer({ min: 1, max: 40 }), fc.array(fc.integer({ min: 1, max: 97 }), { minLength: 1, maxLength: 4 }), (doc, buffer, sizes) => {
+      const bytes = Buffer.from(render(doc), 'utf8');
+      const scan = (chunks: number[]) => capture(() => {
+        const scanner = new BodyScanner('notes/x.md', { validate: true }, buffer);
+        for (let at = 0, k = 0; at < bytes.length; k++) {
+          const size = chunks[k % chunks.length]!;
+          scanner.push(bytes.subarray(at, at + size));
+          at += size;
+        }
+        return scanner.finish();
+      });
+      expect(scan(sizes)).toEqual(scan([bytes.length || 1]));
+    }), { numRuns: 500 });
+  }, 120_000);
 });
