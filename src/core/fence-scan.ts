@@ -406,10 +406,10 @@ export function findLineOutsideFencedCode(
   return walk.opener || walk.mispaired ? firstQuoted : firstOutside;
 }
 
-interface FenceWalk { opener: string | null; mispaired: boolean }
+export interface FenceWalk { opener: string | null; mispaired: boolean }
 
 /** Advance the fence pairing by one line (a trailing CR is its line ending). */
-function stepFenceWalk(walk: FenceWalk, line: string): void {
+export function stepFenceWalk(walk: FenceWalk, line: string): void {
   // A fence line starts with indent, ` or ~; every other line is prose to it.
   const c0 = line.charCodeAt(0);
   if (c0 !== 32 && c0 !== 96 && c0 !== 126) return;
