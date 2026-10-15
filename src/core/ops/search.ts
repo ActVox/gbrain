@@ -857,7 +857,7 @@ const query: Operation = {
     return_unit: RETURN_UNIT_PARAM,
     return_window: RETURN_WINDOW_PARAM,
     token_budget: { type: 'number', description: 'Evidence token cap.' },
-    expand: { type: 'boolean', description: 'Default per search mode (tokenmax on).' },
+    expand: { type: 'boolean', description: 'Default off; search.expansion overrides.' },
     detail: { type: 'string', description: 'low (compiled truth), medium (default) or high (all chunks).' },
     fields: FIELDS_PARAM,
     mode: { type: 'string', description: 'Local callers only.' },
@@ -1083,8 +1083,8 @@ const query: Operation = {
       // the first pass actually did (`expansion_applied`), not what was
       // requested: a first pass that produced expansion variants doesn't pay
       // for a second expansion LLM call + rerank over a near-identical query,
-      // while one that ran without expansion (the mode default outside
-      // tokenmax, an explicit opt-out, or an expander that produced nothing)
+      // while one that ran without expansion (the default, an explicit
+      // opt-out, or an expander that produced nothing)
       // can still escalate.
       if (shouldEscalateRetrieval(grade, {
         enabled: escalationCfg === 'true',

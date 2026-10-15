@@ -116,8 +116,9 @@ export interface ModeBundle {
   /**
    * LLM multi-query expansion (one chat call per expanded search). The
    * `query` op's default when a call leaves `expand` unset; `search` and the
-   * memory verbs never expand. Off for conservative/balanced, on for
-   * tokenmax. Override: per-call `expand` → `search.expansion` → bundle.
+   * memory verbs never expand. Off in every bundle: on `tokenmax` it cut
+   * `query` p50 from 2,022 to 227 ms with retrieval unchanged (gbrain-evals
+   * GBRA-94, 2026-10-14). Override: per-call `expand` → `search.expansion` → bundle.
    */
   expansion: boolean;
   /**
@@ -602,11 +603,16 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     intentWeighting: true,
     keywordOrFallback: true,
     tokenBudget: undefined,
-    expansion: true,
+    // Expansion OFF (gbrain-evals 2026-10-14 expansion latency, GBRA-94): on
+    // 300 LongMemEval-S questions with the reranker, no expansion kept strict
+    // recall@10 within the noise floor (298 vs 299; the reference's own re-run
+    // also scored 298) and cut `query` p50 from 2,022 to 227 ms.
+    // `search.expansion true` or per-call `expand: true` turns it back on.
+    expansion: false,
     expansion_variant_budget: null,
     searchLimit: 50,
-    // tokenmax is the high-cost-tolerant tier that already pays for LLM
-    // expansion + 50-result payloads. Reranker is the natural capstone:
+    // tokenmax is the high-cost-tolerant tier that already pays for
+    // 50-result payloads. Reranker is the natural capstone:
     // better ordering of a large candidate set is where rerankers earn
     // their fee. ~$0.0006/query at this shape (rerank-3-lite); rounding error vs the
     // tier's $700/mo @ Opus pairing per CLAUDE.md cost matrix.
