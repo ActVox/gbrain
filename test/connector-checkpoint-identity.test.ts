@@ -10,6 +10,8 @@ import { connectorCheckpointKey, connectorIdentity, connectorIdentityLeaves } fr
 import { orphanConnectorCheckpoints } from '../src/core/persistence/connector-checkpoint-migration.ts';
 import { digest } from '../src/core/persistence/digest.ts';
 import { MIGRATIONS } from '../src/core/schema-migrations/registry.generated.ts';
+import { runMigrations } from '../src/core/migrate.ts';
+import { resumeCheckpoint } from '../src/core/persistence/connector-sync.ts';
 import { connectorCheckpointsRepair, ORPHAN_CHECKPOINT_MIN_AGE_DAYS } from '../src/core/repair/connector-checkpoints.ts';
 import { resolveRepairScope, runRepair } from '../src/core/repair/core.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -132,8 +134,10 @@ test('#5470: a rotating provider cursor costs exactly one checkpoint admission a
 }), 180_000);
 
 // #6561: v0.60.176.0 hashed the new default `contactsDir` into the identity, so a source upgraded across it had
-// a completed pre-field cursor and an interim one. Keys are derived here from the leaves themselves (not from the
-// fixed identity function), so the same test runs against a build that still hashes the default.
+// a completed pre-field cursor and an interim one. Nothing rewrites those rows on upgrade: the loader picks the
+// cursor at run time and every write goes to the stable (pre-field) key. Keys are derived here from the leaves
+// themselves (not from the fixed identity function), so the same test runs against a build that still hashes
+// the default.
 async function identityKeys(engine: BrainEngine, f: { id: string; dir: string }) {
   const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text FROM sources WHERE id=$1', [f.id]);
   const interimLeaves = connectorIdentityLeaves('google', connectorIdentity('google', googleConfig, f.dir).config, false);
@@ -144,11 +148,11 @@ async function identityKeys(engine: BrainEngine, f: { id: string; dir: string })
 type Checkpoint = Array<{ generation?: number; state?: Record<string, unknown> | null }>;
 const readRow = async (engine: BrainEngine, fingerprint: string) => (await engine.executeRaw<{ completed_keys: Checkpoint }>(
   "SELECT completed_keys FROM op_checkpoints WHERE op='managed-connector' AND fingerprint=$1", [fingerprint]))[0]?.completed_keys ?? null;
-const writeRow = (engine: BrainEngine, fingerprint: string, value: Checkpoint) => engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at)
-  VALUES('managed-connector',$1,$2::text::jsonb,now()-interval '30 days') ON CONFLICT(op,fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys,updated_at=EXCLUDED.updated_at`,
-[fingerprint, JSON.stringify(value)]);
-/** The schema migration that carries interim cursors over, run the way runMigrations runs it (absent on a build without the fix). */
-const runAliasMigration = async (engine: BrainEngine) => { await MIGRATIONS.find(m => m.name === 'connector_checkpoint_default_leaf_alias')?.handler?.(engine); };
+const writeRow = (engine: BrainEngine, fingerprint: string, value: Checkpoint, daysAgo: number) => engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at)
+  VALUES('managed-connector',$1,$2::text::jsonb,now()-make_interval(days => $3::integer)) ON CONFLICT(op,fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys,updated_at=EXCLUDED.updated_at`,
+[fingerprint, JSON.stringify(value), daysAgo]);
+const snapshotRows = (engine: BrainEngine, keys: string[]) => engine.executeRaw<{ fingerprint: string; completed_keys: unknown; at: string }>(
+  "SELECT fingerprint,completed_keys,updated_at::text AS at FROM op_checkpoints WHERE fingerprint = ANY($1::text[]) ORDER BY fingerprint", [keys]);
 
 /** One completed sweep, then its cursor laid out the way an upgrade across the interim releases leaves it. */
 async function upgradedSource(engine: BrainEngine, layout: 'pre-field completed + interim partial' | 'interim only') {
@@ -160,71 +164,84 @@ async function upgradedSource(engine: BrainEngine, layout: 'pre-field completed 
   const completed = (await readRow(engine, keys.preField)) ?? (await readRow(engine, keys.interim));
   expect(completed?.[0]?.state?.contacts_sync_token).toBe('contacts-stable');
   await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-connector' AND fingerprint = ANY($1::text[])", [[keys.preField, keys.interim]]);
-  if (layout === 'interim only') await writeRow(engine, keys.interim, completed!);
+  if (layout === 'interim only') await writeRow(engine, keys.interim, completed!, 30);
   else {
-    await writeRow(engine, keys.preField, completed!);
-    await writeRow(engine, keys.interim, [{ generation: 1, state: { ...completed![0]!.state, contacts_sync_token: null } }]);
+    await writeRow(engine, keys.preField, completed!, 40);
+    await writeRow(engine, keys.interim, [{ generation: 1, state: { ...completed![0]!.state, contacts_sync_token: null } }], 30);
   }
   return { f, keys, fetcher, calls };
 }
+const quietCapture = async (engine: BrainEngine, f: { id: string; dir: string }, fetcher: (url: string) => Promise<Response>, calls: string[]) => {
+  const before = await mark(engine, f.id);
+  calls.length = 0;
+  expect((await runGoogleSync(engine, f.id, parseGoogleSourceConfig(googleConfig, f.dir), options, fetcher)).status).toBe('up_to_date');
+  await disposePersistenceConsumer(engine);
+  return { usedCursor: calls.some(url => url.includes('syncToken=contacts-stable')), admitted: await admissions(engine, f.id, before) };
+};
 
-test('#6561: a pre-field completed cursor and an interim partial one both survive the orphan scan; the quiet capture resumes the completed cursor and admits nothing', async () => withEnv(env, async () => {
+test('#6561: only the interim key holds a cursor: the run resumes from it, its one save lands on the stable key, and the next run admits nothing', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const { f, keys, fetcher, calls } = await upgradedSource(engine, 'interim only');
+    const interim = await readRow(engine, keys.interim);
+    expect(await quietCapture(engine, f, fetcher, calls)).toEqual({ usedCursor: true, admitted: { pages: 0, checkpoints: 1 } });
+    const stable = await readRow(engine, keys.preField);
+    expect(stable?.[0]?.state?.contacts_sync_token).toBe('contacts-stable');
+    expect(stable?.[0]?.generation).toBe(Number(interim![0]!.generation ?? 0) + 1);
+    expect(await readRow(engine, keys.interim)).toEqual(interim);
+    expect(await quietCapture(engine, f, fetcher, calls)).toEqual({ usedCursor: true, admitted: { pages: 0, checkpoints: 0 } });
+    expect((await orphanConnectorCheckpoints(engine, { minAgeDays: ORPHAN_CHECKPOINT_MIN_AGE_DAYS })).map(row => row.fingerprint)).not.toContain(keys.interim);
+  }
+}), 180_000);
+
+test('#6561: when the interim cursor is the newer completed backfill, the run resumes from it and saves to the stable key', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const { f, keys, fetcher, calls } = await upgradedSource(engine, 'interim only');
+    const interim = (await readRow(engine, keys.interim))!;
+    const gmail = (newest: number) => ({ gmail_history_id: `h-${newest}`, gmail_backfill_floor_ms: 1, gmail_backfill_done: true, gmail_newest_ms: newest });
+    await writeRow(engine, keys.preField, [{ generation: 5, state: { ...interim[0]!.state, ...gmail(1_000), contacts_sync_token: 'contacts-old' } }], 40);
+    await writeRow(engine, keys.interim, [{ generation: 2, state: { ...interim[0]!.state, ...gmail(2_000) } }], 30);
+    expect(await quietCapture(engine, f, fetcher, calls)).toEqual({ usedCursor: true, admitted: { pages: 0, checkpoints: 1 } });
+    expect(calls.some(url => url.includes('syncToken=contacts-old'))).toBe(false);
+    const stable = await readRow(engine, keys.preField);
+    expect(stable?.[0]).toMatchObject({ generation: 6, state: { gmail_newest_ms: 2_000, contacts_sync_token: 'contacts-stable' } });
+  }
+}), 180_000);
+
+test('#6561: a pre-field completed cursor and a newer interim partial one both survive the orphan scan; the run resumes the completed cursor and admits nothing', async () => withEnv(env, async () => {
   for (const engine of engines) {
     const { f, keys, fetcher, calls } = await upgradedSource(engine, 'pre-field completed + interim partial');
     const retryKey = `retry-${f.id}`;
     await engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at)
       VALUES('managed-connector-retry',$1,$2::text::jsonb,now()-interval '30 days')`, [retryKey, JSON.stringify([{ checkpointKey: keys.interim, baseRequestId: retryKey }])]);
-    await runAliasMigration(engine);
     const orphans = (await orphanConnectorCheckpoints(engine, { minAgeDays: ORPHAN_CHECKPOINT_MIN_AGE_DAYS })).map(row => row.fingerprint);
     for (const kept of [keys.preField, keys.interim, retryKey]) expect(orphans).not.toContain(kept);
     const ctx = { engine, config: { engine: engine.kind }, remote: false, logger: console } as unknown as OperationContext;
     expect((await runRepair(ctx, connectorCheckpointsRepair, await resolveRepairScope(engine), { apply: false })).residuals?.alias_protected).toBeGreaterThanOrEqual(2);
-    const before = await mark(engine, f.id);
-    calls.length = 0;
-    expect((await runGoogleSync(engine, f.id, parseGoogleSourceConfig(googleConfig, f.dir), options, fetcher)).status).toBe('up_to_date');
-    expect(calls.some(url => url.includes('syncToken=contacts-stable'))).toBe(true);
-    expect(await admissions(engine, f.id, before)).toEqual({ pages: 0, checkpoints: 0 });
-    expect(await readRow(engine, keys.interim)).not.toBeNull();
+    expect(await quietCapture(engine, f, fetcher, calls)).toEqual({ usedCursor: true, admitted: { pages: 0, checkpoints: 0 } });
   }
 }), 180_000);
 
-test('#6561: a source created on an interim release carries its cursor to the stable key; the quiet capture admits nothing and a rerun changes nothing', async () => withEnv(env, async () => {
+test('#6561: upgrade writes no connector checkpoint row: schema migrations, including the v176 re-key handler, leave both cursors untouched', async () => withEnv(env, async () => {
   for (const engine of engines) {
-    const { f, keys, fetcher, calls } = await upgradedSource(engine, 'interim only');
-    await runAliasMigration(engine);
-    const carried = await readRow(engine, keys.preField);
-    expect(carried).toEqual(await readRow(engine, keys.interim));
-    await runAliasMigration(engine);
-    expect(await readRow(engine, keys.preField)).toEqual(carried);
-    expect((await orphanConnectorCheckpoints(engine, { minAgeDays: ORPHAN_CHECKPOINT_MIN_AGE_DAYS })).map(row => row.fingerprint)).not.toContain(keys.interim);
-    const before = await mark(engine, f.id);
-    calls.length = 0;
-    expect((await runGoogleSync(engine, f.id, parseGoogleSourceConfig(googleConfig, f.dir), options, fetcher)).status).toBe('up_to_date');
-    expect(calls.some(url => url.includes('syncToken=contacts-stable'))).toBe(true);
-    expect(await admissions(engine, f.id, before)).toEqual({ pages: 0, checkpoints: 0 });
+    const { keys } = await upgradedSource(engine, 'pre-field completed + interim partial');
+    const before = await snapshotRows(engine, [keys.preField, keys.interim]);
+    expect(before).toHaveLength(2);
+    await runMigrations(engine);
+    for (const migration of MIGRATIONS.filter(m => /connector/.test(m.name) && m.handler)) await migration.handler!(engine);
+    expect(await snapshotRows(engine, [keys.preField, keys.interim])).toEqual(before);
   }
 }), 180_000);
 
-test('#6561: when both cursors finished their Gmail backfill, the newer one is loaded and the older one is kept under the interim key', async () => withEnv(env, async () => {
-  for (const engine of engines) {
-    const f = await source(engine, googleConfig);
-    const keys = await identityKeys(engine, f);
-    const gmail = (newest: number, done = true) => ({ gmail_history_id: `h-${newest}`, gmail_backfill_floor_ms: 1, gmail_backfill_done: done, gmail_newest_ms: newest });
-    const preField: Checkpoint = [{ generation: 5, state: gmail(1_000) }];
-    const interim: Checkpoint = [{ generation: 2, state: gmail(2_000) }];
-    await writeRow(engine, keys.preField, preField);
-    await writeRow(engine, keys.interim, interim);
-    await runAliasMigration(engine);
-    expect(await readRow(engine, keys.preField)).toEqual([{ generation: 6, state: gmail(2_000) }]);
-    expect(await readRow(engine, keys.interim)).toEqual(preField);
-    await runAliasMigration(engine);
-    expect(await readRow(engine, keys.preField)).toEqual([{ generation: 6, state: gmail(2_000) }]);
-    // A newer interim cursor that never finished its backfill does not replace a completed one.
-    const g = await source(engine, googleConfig);
-    const other = await identityKeys(engine, g);
-    await writeRow(engine, other.preField, preField);
-    await writeRow(engine, other.interim, [{ generation: 2, state: gmail(9_000, false) }]);
-    await runAliasMigration(engine);
-    expect(await readRow(engine, other.preField)).toEqual(preField);
-  }
-}), 120_000);
+test('#6561 loader rule: an alias wins only when written after the stable row and it is the newer completed backfill; a reset or reopened stable row never falls back', () => {
+  const row = (fingerprint: string, at: number, generation: number, state: Record<string, unknown> | null) => ({ fingerprint, at, completed_keys: [{ generation, state }] });
+  const done = (newest: number) => ({ gmail_backfill_done: true, gmail_newest_ms: newest });
+  expect(resumeCheckpoint(null, [])).toEqual([]);
+  expect(resumeCheckpoint(null, [row('a', 1, 3, done(5))])).toEqual([{ generation: 3, state: done(5) }]);
+  expect(resumeCheckpoint(row('s', 1, 7, done(5)), [row('a', 2, 3, done(9))])).toEqual([{ generation: 7, state: done(9) }]);
+  expect(resumeCheckpoint(row('s', 1, 7, done(9)), [row('a', 2, 3, done(5))])).toEqual([{ generation: 7, state: done(9) }]);
+  expect(resumeCheckpoint(row('s', 1, 7, done(5)), [row('a', 2, 3, { ...done(9), gmail_backfill_done: false })])).toEqual([{ generation: 7, state: done(5) }]);
+  // The stable row this release saved is newer than any alias: a reset (state null) or a reopened backfill stays.
+  expect(resumeCheckpoint(row('s', 3, 8, null), [row('a', 2, 3, done(9))])).toEqual([{ generation: 8, state: null }]);
+  expect(resumeCheckpoint(row('s', 3, 8, { ...done(1), gmail_backfill_done: false }), [row('a', 2, 3, done(9))]))
+    .toEqual([{ generation: 8, state: { ...done(1), gmail_backfill_done: false } }]);
+});
