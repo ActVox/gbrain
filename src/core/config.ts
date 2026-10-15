@@ -1784,6 +1784,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'consent.preapprove.paid.max_usd_per_run', 'consent.preapprove.persistent_install', // A4: file plane, core/consent.ts
   // F4b: PGLite row-delta ANALYZE (src/core/planner-stats.ts); F4a: get_health memo TTL (src/core/health-memo.ts, 0 disables).
   'planner.auto_analyze', 'planner.first_read_budget_ms', 'import.analyze_every_pages', 'health.cache_ttl_ms',
+  // Wave B segmented page storage (src/core/page-body/limits.ts PAGE_BODY_CONFIG_KEYS; switch defaults off).
+  'pages.segmented_storage', 'pages.max_bytes', 'pages.flip_retire_max_rows', 'versions.segmented_max_per_page', 'versions.segmented_max_pinned_bytes',
 ];
 
 /**
