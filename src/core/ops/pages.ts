@@ -389,11 +389,11 @@ async function runAutoLink(
   opts?: { sourceId?: string },
 ) {
   const sourceId = opts?.sourceId ?? 'default';
-  const { materializedSnapshot, segmentedOverCeiling } = await import('../persistence/segmented-apply.ts');
-  const snapshot = await materializedSnapshot(engine, await engine.readPageSnapshot(slug, { sourceId }));
-  if (!snapshot || segmentedOverCeiling(snapshot.page)) return;
+  const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+  if (!snapshot) return;
   const { prepareAutomaticLinks } = await import('../persistence/links-preparation.ts');
-  const prepared = await prepareAutomaticLinks(engine, slug, { ...snapshot.page, frontmatter: snapshot.page.frontmatter ?? {} }, sourceId);
+  snapshot.page.frontmatter ??= {};
+  const prepared = await prepareAutomaticLinks(engine, slug, snapshot.page, sourceId);
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{sourceId,slug}, ...prepared.pageKeys]);
     const current = await tx.readPageSnapshot(slug, {sourceId});
