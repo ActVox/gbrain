@@ -274,7 +274,13 @@ export async function submitRelinkGroup(engine: BrainEngine, config: GBrainConfi
   }
   const snapshot = await engine.readPageSnapshot(slug, { sourceId });
   if (!snapshot) return { ok: false, reason: 'no_page', message: `${slug} no longer exists` };
-  const target = await resolveFactWriteTarget(engine, sourceId, source);
+  let target: Awaited<ReturnType<typeof resolveFactWriteTarget>>;
+  try {
+    target = await resolveFactWriteTarget(engine, sourceId, source, { fileBacked: Boolean(snapshot.page.source_path), remote: false });
+  } catch (error) {
+    if (error instanceof OperationError && error.code === 'owner_unavailable') return { ok: false, reason: 'unfenceable', message: error.message };
+    throw error;
+  }
   if (target.kind === 'unbound') return { ok: false, reason: 'unfenceable', message: `source ${sourceId} writes through to ${target.root} but has no canonical owner` };
   const authority = await submissionAuthority(ctx, RELINK_OPERATION, sourceId, source.incarnation, slug);
   if (target.databaseOnlyReason) authority.databaseOnlyReason = target.databaseOnlyReason;

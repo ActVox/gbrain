@@ -2568,6 +2568,20 @@
         {
           "category": "brain",
           "details": {
+            "count": 0,
+            "docs": "docs/storage-tiering.md#restoring-a-page-whose-file-is-gone",
+            "sources": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Not applicable: no source is a classic checkout on this host (managed sources are checked by ghost_pages).",
+          "name": "missing_recorded_files",
+          "readiness_state": "not_applicable",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/write-refusals.md#invalid_fence",
             "model_repair": {
               "max_usd_per_day": 1,
@@ -2630,6 +2644,10 @@
                 "top_writers": []
               }
             ],
+            "unbound_legacy_facts": {
+              "pages": [],
+              "total": 0
+            },
             "uncommitted_repairs": 0,
             "unrenderable_legacy_facts": {
               "complete": true,
