@@ -8,11 +8,11 @@ import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { ALL_SOURCES, assertValidSourceId } from '../core/source-id.ts';
 import { resolveRestoreTarget, restoreFilePath } from '../core/restore-target.ts';
-import { ExportStage, EXPORT_SNAPSHOT_MS, EXPORT_STREAM_BYTES_PER_MS, exportPathKey, exportPayloadLimit } from '../core/export-stage.ts';
+import { ExportStage, EXPORT_PAYLOAD_LIMIT, EXPORT_SNAPSHOT_MS, EXPORT_STREAM_BYTES_PER_MS, exportPathKey, exportPayloadLimit } from '../core/export-stage.ts';
 import { publishExport } from '../core/export-publish.ts';
 import { nativeFileTarget } from '../core/persistence/native-file-target.ts';
 import { readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../core/export-snapshot.ts';
-import { readPageBodyPolicy, segmentedPageCeiling } from '../core/page-body/limits.ts';
+import { segmentedPageCeiling } from '../core/page-body/limits.ts';
 import { isSegmentedPage } from '../core/page-body/page-shape.ts';
 
 function option(args: string[], name: string): string | undefined {
@@ -68,7 +68,6 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
       if (restoreOnly) ({ source, repo } = await resolveRestoreTarget(tx, source, repo));
       const storage = restoreOnly && repo ? loadStorageConfig(repo) : null;
       if (restoreOnly && !storage) throw new Error('--restore-only requires a storage tiering config (gbrain.yml with a storage section).');
-      const payloadLimit = exportPayloadLimit((await readPageBodyPolicy(tx)).maxBytes);
       const segmentedLimit = exportPayloadLimit(segmentedPageCeiling(tx.kind));
       let cursor = '0';
       for (;;) {
@@ -97,7 +96,7 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
               if (!isDbOnly(key.slug, storage)) continue;
               if (existsSync(nativeFileTarget(repo, restoreFilePath(repo, key.slug, key.source_path, Number(key.source_path_bytes), await scannerSlugRootMode(tx, batchSource, repo))))) continue;
             }
-            if (Number(key.bytes) > (key.segmented ? segmentedLimit : payloadLimit)) throw new Error('Export page payload limit exceeded. No destination output was published.');
+            if (Number(key.bytes) > (key.segmented ? segmentedLimit : EXPORT_PAYLOAD_LIMIT)) throw new Error('Export page payload limit exceeded. No destination output was published.');
             const snapshot = await readExportPage(tx, key, withdrawals);
             const page = snapshot.page;
             // #5966: the slug stamp rule lives in slugStampedFrontmatter (markdown.ts), shared with every render.

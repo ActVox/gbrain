@@ -1,7 +1,7 @@
 /**
  * Wave B PR 2 switch-on: content sanity of a streamed page (a file over the 24 MiB single-string ceiling).
  *
- * 1. Protects: with `content_sanity.bytes_block` unset, the size rule of a segmented page is its page ceiling
+ * 1. Protects: with `pages.segmented_storage` on and `content_sanity.bytes_block` unset, the size rule of a segmented page is its page ceiling
  *    (`pages.max_bytes`), so a streamed page is chunked and keyword-searchable and its frontmatter gets no
  *    `embed_skip` / `content_flag: oversized`; the prose pass judges its head, middle and tail windows (a
  *    markup wall is flagged `markup_heavy` and stays searchable); an operator's lower bytes_block still
@@ -27,6 +27,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  await engine.setConfig('pages.segmented_storage', 'on');
   dir = mkdtempSync(join(tmpdir(), 'gbrain-streamed-sanity-'));
 }, 120_000);
 

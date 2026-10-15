@@ -109,7 +109,10 @@ function positiveInt(raw: string | null, fallback: number): number {
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
-/** The configured `pages.segmented_storage`: unset means the default (`on`); an unrecognized value counts as `off`. */
+/** The effective `pages.segmented_storage` when it is not configured. */
+export const SEGMENTED_STORAGE_DEFAULT: 'on' | 'off' = 'off';
+
+/** The configured `pages.segmented_storage`: unset means SEGMENTED_STORAGE_DEFAULT; an unrecognized value counts as `off`. */
 export function parseSegmentedStorage(raw: string | null): 'on' | 'off' | 'unset' | 'invalid' {
   const value = (raw ?? '').trim();
   if (!value) return 'unset';
@@ -135,6 +138,11 @@ export async function segmentedWriterBlockers(engine: Pick<BrainEngine, 'execute
   return blockers;
 }
 
+/** Whether the configured switch asks for segmented storage, before the writer gate. */
+export function segmentedStorageRequested(setting: ReturnType<typeof parseSegmentedStorage>): boolean {
+  return setting === 'on' || (setting === 'unset' && SEGMENTED_STORAGE_DEFAULT === 'on');
+}
+
 /** Test seam: forget cached writer-gate reads. */
 export function _resetSegmentedWriterGateForTests(): void {
   writerGate = new WeakMap();
@@ -146,9 +154,9 @@ export function segmentedPageCeiling(kind: BrainEngine['kind']): number {
 }
 
 /**
- * Read the segmented-storage policy once per write. The switch is effectively on when it is not configured
- * `off` (or an unrecognized value) and no recent writer predates segmented pages; an unreadable gate counts as
- * blocked. A configured `pages.max_bytes` never exceeds the engine ceiling.
+ * Read the segmented-storage policy once per write. The switch is effectively on when it is configured `on`
+ * (or unset while SEGMENTED_STORAGE_DEFAULT is `on`) and no recent writer predates segmented pages; an
+ * unreadable gate counts as blocked. A configured `pages.max_bytes` never exceeds the engine ceiling.
  */
 export async function readPageBodyPolicy(engine: PolicyEngine): Promise<PageBodyPolicy> {
   const read = (key: string) => engine.getConfig(key).catch(() => null);
@@ -157,7 +165,7 @@ export async function readPageBodyPolicy(engine: PolicyEngine): Promise<PageBody
     read(PAGE_BODY_CONFIG_KEYS.versionsMaxPerPage), read(PAGE_BODY_CONFIG_KEYS.versionsMaxPinnedBytes),
   ]);
   const setting = parseSegmentedStorage(switchRaw);
-  const segmented = (setting === 'on' || setting === 'unset') && (await segmentedWriterBlockers(engine).catch(() => null))?.length === 0;
+  const segmented = segmentedStorageRequested(setting) && (await segmentedWriterBlockers(engine).catch(() => null))?.length === 0;
   const ceiling = segmentedPageCeiling(engine.kind);
   return {
     segmented,

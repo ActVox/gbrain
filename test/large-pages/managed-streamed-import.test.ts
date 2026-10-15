@@ -12,9 +12,9 @@
  *    collects an abandoned preparation's staged rows under the guard. A file that
  *    changes between admission and preparation publishes nothing; a request_id
  *    replayed with other bytes is `idempotency_conflict`; with the switch off
- *    the refusal is the one before Wave B. With the switch unset (default on)
- *    a file-backed source takes a page over 24 MiB only by import of its own
- *    canonical file, never by a managed write of new content.
+ *    the refusal is the one before Wave B. With the switch on a file-backed
+ *    source takes a page over 24 MiB only by import of its own canonical
+ *    file, never by a managed write of new content.
  * 2. Fails when: the journal carries the body, the preparer skips the hash
  *    check, the publication rewrites the canonical file, or the switch-off
  *    refusal changes.
@@ -191,10 +191,10 @@ describe('managed import over the single-string ceiling', () => {
     }
   }), 120_000);
 
-  test('switch unset (default on): a file over 24 MiB imports only from its place in the canonical root; put_page content stays within 24 MiB', async () => withEnv(env, async () => {
+  test('switch on: a file over 24 MiB imports only from its place in the canonical root; put_page content stays within 24 MiB', async () => withEnv(env, async () => {
     for (const engine of engines) {
       await disposePersistenceConsumer(engine);
-      await engine.unsetConfig('pages.segmented_storage');
+      await engine.setConfig('pages.segmented_storage', 'on');
       const f = await fixture(engine);
       const outside = join(home, `${f.sourceId}-outside.md`);
       writeFileSync(outside, content);
