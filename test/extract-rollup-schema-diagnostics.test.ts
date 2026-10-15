@@ -3,12 +3,16 @@
  * wrapped error without a SQLSTATE is accepted only on the exact PostgreSQL diagnostic.
  * Real SQL errors/old schemas are exercised in extract-rollup-schema-errors.test.ts.
  */
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { checkSyncFreshness, computeExtractHealthCheck } from '../src/commands/doctor/checks/extraction-sync.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { readRecordedHaltReasons7d, upsertExtractRollup } from '../src/core/extract/rollup-writer.ts';
 import { isMissingSchemaObject } from '../src/core/utils.ts';
+
+let real: PGLiteEngine;
+beforeAll(async () => { real = new PGLiteEngine(); await real.connect({}); await real.initSchema(); }, 60_000);
+afterAll(async () => { await real.disconnect(); });
 
 function throwingEngine(error: unknown): BrainEngine {
   return { executeRaw: async () => { throw error; } } as unknown as BrainEngine;
@@ -92,27 +96,20 @@ test('isMissingSchemaObject needs the named object and the matching SQLSTATE', (
 });
 
 test('sync freshness surfaces real errors from the owned-content probe instead of skipping it', async () => {
-  const real = new PGLiteEngine();
-  await real.connect({});
-  await real.initSchema();
-  try {
-    await real.executeRaw(`INSERT INTO sources (id, name, local_path, last_sync_at) VALUES ('w17-fresh', 'w17-fresh', '/tmp/w17-fresh', now())`);
-    const failing = (error: Error) => new Proxy(real, {
-      get(target, prop, receiver) {
-        if (prop !== 'executeRaw') return Reflect.get(target, prop, receiver);
-        return async (sql: string, params?: unknown[]) => {
-          if (sql.includes('persistence_source_bindings')) throw error;
-          return target.executeRaw(sql, params as never);
-        };
-      },
-    }) as BrainEngine;
-    const denied = Object.assign(new Error('role "gbrain_reader" does not exist'), { code: '42704' });
-    const deniedCheck = await checkSyncFreshness(failing(denied));
-    expect(deniedCheck.message).toContain('role "gbrain_reader" does not exist');
-    const missing = Object.assign(new Error('relation "persistence_worktrees" does not exist'), { code: '42P01' });
-    const oldCheck = await checkSyncFreshness(failing(missing));
-    expect(oldCheck.message).not.toContain('Could not');
-  } finally {
-    await real.disconnect();
-  }
+  await real.executeRaw(`INSERT INTO sources (id, name, local_path, last_sync_at) VALUES ('w17-fresh', 'w17-fresh', '/tmp/w17-fresh', now())`);
+  const failing = (error: Error) => new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop !== 'executeRaw') return Reflect.get(target, prop, receiver);
+      return async (sql: string, params?: unknown[]) => {
+        if (sql.includes('persistence_source_bindings')) throw error;
+        return target.executeRaw(sql, params as never);
+      };
+    },
+  }) as BrainEngine;
+  const denied = Object.assign(new Error('role "gbrain_reader" does not exist'), { code: '42704' });
+  const deniedCheck = await checkSyncFreshness(failing(denied));
+  expect(deniedCheck.message).toContain('role "gbrain_reader" does not exist');
+  const missing = Object.assign(new Error('relation "persistence_worktrees" does not exist'), { code: '42P01' });
+  const oldCheck = await checkSyncFreshness(failing(missing));
+  expect(oldCheck.message).not.toContain('Could not');
 });

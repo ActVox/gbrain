@@ -44,8 +44,8 @@ import type { McpSurface } from '../mcp/surface.ts';
 import { bindResolveIpcForServe } from '../mcp/resolve-ipc-binding.ts';
 import { createPersistenceIpcProvider, residentPersistenceConfig } from '../core/persistence/provider.ts';
 import { resolveMcpStdioSourceScope } from '../mcp/server.ts';
-import { loadConfig, loadConfigWithEngine, type GBrainConfig } from '../core/config.ts';
-import { isEngineDegraded } from '../core/degraded-marker.ts';
+import { type GBrainConfig } from '../core/config.ts';
+import { loadServeConfigs } from '../mcp/serve-config.ts';
 import { buildError } from '../core/errors.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, type SqlQuery } from '../core/sql-query.ts';
@@ -615,12 +615,7 @@ export async function buildServeHttpApp(app: express.Express, engine: BrainEngin
   // a misconfiguration; we WARN to stderr at startup in that case rather
   // than silently binding loopback only.
   const bind = options.bind ?? '127.0.0.1';
-  // #6589: CLI parity. Operations, resources and startup consumers see file + env over the DB plane
-  // (`gbrain config set`), read once here: a DB-plane change applies after a serve restart (D18). A degraded
-  // engine keeps the file plane, as the bearer transport does.
-  const fileConfig = loadConfig();
-  const config = (isEngineDegraded(engine) ? fileConfig : await loadConfigWithEngine(engine, fileConfig ?? { engine: engine.kind } as GBrainConfig))
-    || { engine: 'pglite' as const };
+  const config = (await loadServeConfigs(engine)).operationConfig || { engine: 'pglite' as const }; // #6589: CLI parity, read once
 
   const skillStatus = await logServeHttpStartup(engine, options, config);
 

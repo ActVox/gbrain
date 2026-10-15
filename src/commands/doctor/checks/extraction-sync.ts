@@ -30,18 +30,11 @@ import { quarantineFilterFragment } from '../../../core/quarantine.ts';
 import { persistenceEnabledForHealth } from '../../../core/persistence/ownership.ts';
 import { upstreamFreshness } from '../../../core/sync-upstream.ts';
 import type { Check } from '../../doctor.ts';
-import { ownedContentFreshness } from '../../../core/shared-skills/content-freshness.ts';
+import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../core/shared-skills/content-freshness.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
 import { checkError } from '../check-fix.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
-
-/** Objects ownedContentFreshness reads that an older schema may lack; any other SQL error surfaces (#6599). */
-const OWNED_CONTENT_TABLES = [
-  'persistence_brain', 'persistence_source_bindings', 'persistence_worktrees', 'persistence_host_bindings',
-  'persistence_requests', 'persistence_effects', 'source_ingestion_receipts',
-] as const;
-const OWNED_CONTENT_COLUMNS = ['incarnation', 'source_incarnation', 'recovery', 'owner_host_id'] as const;
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
@@ -1258,7 +1251,7 @@ export async function checkSyncFreshness(
     const issues: string[] = [];
     let ownedContent = new Set<string>();
     try { ownedContent = new Set((await ownedContentFreshness(engine)).map(source => source.sourceId)); }
-    catch (error) { if (!isMissingSchemaObject(error, 'table', OWNED_CONTENT_TABLES) && !isMissingSchemaObject(error, 'column', OWNED_CONTENT_COLUMNS)) throw error; }
+    catch (error) { if (!isOwnedContentSchemaMissing(error)) throw error; }
     let writer_owned_count = 0;
     // v0.41.27.0: D6 count math. Every source falls into
     // EXACTLY ONE bucket per iteration. Invariant pinned by unit test:
