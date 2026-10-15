@@ -247,6 +247,7 @@ test/link-reads-thin-client-5827.serial.test.ts	R2	R2: mock.module(../src/core/c
 test/llm-intent-hybrid-integration.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests; configureGateway changes the process-wide AI gateway
 test/loops-close-fact.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests; configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console
 test/loops-extract-run.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts) replaces modules for every file in the process
+test/managed-atom-retry-cancellation.serial.test.ts	R2	R2: mock.module replaces atom storage, extraction and cycle-lock modules process-wide
 test/managed-connector-routing.serial.test.ts	global-state	global-state: spyOn globalThis.fetch
 test/managed-push-remedy.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/managed-timeline-facts.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; persistence consumer registry

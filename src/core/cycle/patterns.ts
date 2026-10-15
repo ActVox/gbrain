@@ -43,7 +43,7 @@ import type { Page, PageType } from '../types.ts';
 // drains its own children the same way.
 import { loadAllowedSlugPrefixes, loadOutputRoot, runSubagentsInline } from './synthesize.ts';
 import { stampDreamProvenance } from './dream-provenance.ts';
-import { probeChatModel } from '../ai/gateway.ts';
+import { probeChatModelWithKey } from '../ai/chat-key-probe.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate } from './cycle-date.ts';
@@ -227,13 +227,13 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     // hardcoded env gate misclassified non-Anthropic stacks (litellm,
     // deepseek, openrouter, ...) as "no upstream" even though the subagent
     // routes them through the gateway (agent.use_gateway_loop), and it missed
-    // Anthropic keys set via `gbrain config set anthropic_api_key`. Same
-    // probe semantics as think/index.ts + synthesize's makeJudgeClient:
-    // unknown provider/model or Anthropic-without-key skips cheaply; other
-    // providers' auth is checked lazily at dispatch and surfaces in the job
-    // outcome. (Takeover of PR #2279's intent by @brettdavies.)
+    // Anthropic keys set via `gbrain config set anthropic_api_key`. Unknown
+    // provider/model or any keyed provider without its key skips cheaply
+    // (#6705: probeChatModelWithKey, not the lazy probeChatModel, so a keyless
+    // non-Anthropic model never submits a subagent that fails at dispatch).
+    // (Takeover of PR #2279's intent by @brettdavies.)
     const maintenance = await maintenancePreflight(engine, opts.sourceId ?? 'default', opts.brainDir);
-    const probe = probeChatModel(normalizeModelId(config.model));
+    const probe = probeChatModelWithKey(normalizeModelId(config.model));
     if (!probe.ok) {
       return skipped('no_provider', `pattern detection skipped: ${probe.detail}`);
     }
