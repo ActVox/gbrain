@@ -7,6 +7,7 @@ import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { parseFactsFence, upsertFactRow, formatFenceDate, renderFactsTable, replaceOrInsertFactsFence } from '../facts-fence.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { assertFactNotWithdrawn, decideSingleFact, factWithdrawnRefusal, type FactCandidate } from '../facts/single-prepare.ts';
 import { assertFactNotPurged, isFactWithdrawn } from '../facts/withdrawal.ts';
 import { samePageRewording, warnSamePageShadow } from '../facts/same-page-shadow.ts';
@@ -146,6 +147,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
       `The request holds no facts, or facts attributed to a page other than ${row.slug}, so none were published.`);
   }
   // #6188 (D20): the entity's stored fence is normalized in this same write; a residual refuses typed `target_fence_malformed`.
+  if (snapshot) assertInlineBody(snapshot.page, 'facts fence write');
   const target = snapshot ? await normalizeTargetFences(engine, { sourceId: row.source_id, slug: row.slug, kind: 'facts', page: snapshot.page }) : null;
   let body = target?.page.compiled_truth ?? '';
   const parsed = parseFactsFence(body);

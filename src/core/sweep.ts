@@ -55,6 +55,7 @@ import type { FactsBackstopCtx } from './facts/backstop.ts';
 import type { CapabilityReport } from './capability.ts';
 import { maintenanceTransaction } from './persistence/attribution.ts';
 import { managedPersistenceEnabled } from './persistence/ownership.ts';
+import { isSegmentedPage } from './page-body/page-shape.ts';
 
 /** Delay before the serve-startup sweep fires (post-connect settle). */
 export const STARTUP_SWEEP_DELAY_MS = 3_000;
@@ -386,6 +387,10 @@ async function runLinksTimelinePass(
     const slug = recent[i].slug;
     const page = await engine.getPage(slug, { sourceId });
     if (!page) continue;
+    if (isSegmentedPage(page)) {
+      skip('page_body_segmented:links_timeline');
+      continue;
+    }
     const snapshot = await engine.readPageSnapshot(slug, { sourceId });
     if (!snapshot || snapshot.page.compiled_truth !== page.compiled_truth || snapshot.page.timeline !== page.timeline
       || snapshot.page.type !== page.type || JSON.stringify(snapshot.page.frontmatter) !== JSON.stringify(page.frontmatter)) continue;

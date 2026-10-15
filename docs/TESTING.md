@@ -872,9 +872,7 @@ by the engines and by `migrate.ts`, so an import back up is an ESM cycle that
 can fail with a temporal-dead-zone error at module load. Take the executor as a
 parameter and import types from `src/core/engine.ts`; migration helpers live in
 `schema-migrations/helpers.ts` and the `Migration` type in
-`schema-migrations/types.ts`; persistence embeds via `src/core/embedding.ts`. Fixtures:
-`test/fixtures/guards/check-layering.ts/`; forms are driven in
-`test/scripts/layering.test.ts`.
+`schema-migrations/types.ts`; persistence embeds via `src/core/embedding.ts`.
 
 #### Write-path model guards
 
@@ -946,8 +944,13 @@ remain. Rows only shrink. The guard fails on:
 - a duplicate or malformed row, or a `migrated` row with no module.
 
 When a domain moves, delete its members' rows and add its `migrated` row in
-the same commit. Fixtures: `test/fixtures/guards/check-engine-sql-ratchet.ts/`;
-forms are driven in `test/scripts/engine-sql-ratchet.test.ts`.
+the same commit.
+
+#### Page body readers
+
+`bun run check:page-body-readers` (in verify): every site that reads or writes
+a page body as one string has a row in `scripts/page-body-readers-baseline.tsv`
+naming what it must become; rows only shrink. Rules: the script's header.
 
 #### Engine-sql dynamic SQL
 
@@ -1015,9 +1018,7 @@ read is scoped. The guard fails on:
   `src/core/ops/**`, the MCP-facing surface, is always denied. Take the
   branded executor from the engine façade instead.
 
-The allowlists live in the script. Fixtures:
-`test/fixtures/guards/check-engine-sql-brands.ts/`; forms are driven in
-`test/scripts/engine-sql-brands.test.ts`.
+The allowlists live in the script.
 
 #### Retired-phrase guard
 

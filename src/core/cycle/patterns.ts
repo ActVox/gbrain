@@ -25,6 +25,7 @@ import { join, dirname } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { boundedBodyPrefixSql } from '../page-window/bounded-lead.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { DEFAULT_PRIVATE_QUEUE_LEASE_MS, MinionQueue } from '../minions/queue.ts';
 import { isQueueQuotaExceededError } from '../minions/admission.ts';
@@ -607,7 +608,7 @@ async function gatherReflections(
   const rows = await engine.executeRaw<{
     id: number | string; slug: string; title: string | null; compiled_truth: string | null; updated_at: string | Date; seat: string | null; trust_tier: string | null;
   }>(
-    `SELECT id, slug, title, compiled_truth, updated_at, frontmatter->>'seat' AS seat, trust_tier
+    `SELECT id, slug, title, ${boundedBodyPrefixSql('pages')} AS compiled_truth, updated_at, frontmatter->>'seat' AS seat, trust_tier
        FROM pages
       WHERE slug LIKE $2
         AND source_id = $3 AND deleted_at IS NULL AND COALESCE(frontmatter->>'visibility','') <> 'private'

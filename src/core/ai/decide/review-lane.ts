@@ -21,6 +21,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import type { BrainEngine } from '../../engine.ts';
+import { boundedBodyPrefixSql } from '../../page-window/bounded-lead.ts';
 import { loadConfigSnapshot } from '../../config-snapshot.ts';
 import { readDecideConfig, type DecideConfig } from './config.ts';
 import { CONFLICT_INSTRUCTIONS, CONFLICT_MIN_COSINE, CONFLICT_NEIGHBOURS, CONFLICT_OPTIONS } from './conflict.ts';
@@ -243,7 +244,7 @@ async function withdrawAnchor(engine: BrainEngine, row: QueueRow, cfg: DecideCon
 
 async function pagePairAnchor(engine: BrainEngine, row: QueueRow): Promise<Anchor | { skip: string }> {
   const pages = await engine.executeRaw<{ slug: string; title: string; compiled_truth: string }>(
-    `SELECT slug, title, compiled_truth FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL`,
+    `SELECT slug, title, ${boundedBodyPrefixSql('pages')} AS compiled_truth FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL`,
     [row.source_id, [row.a_ref, row.b_ref]]);
   const a = pages.find(p => p.slug === row.a_ref);
   const b = pages.find(p => p.slug === row.b_ref);

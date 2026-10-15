@@ -21,6 +21,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { formatFenceDate, parseFactsFence, type ParsedFact } from '../facts-fence.ts';
 import { parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { contentHash } from '../utils.ts';
 import { withPageLock } from '../page-lock.ts';
@@ -215,6 +216,7 @@ function publishFile(filePath: string, body: string): void {
 async function mirrorBody(tx: BrainEngine, slug: string, sourceId: string, body: string, fromFile: boolean): Promise<string | null> {
   const page = await tx.getPage(slug, { sourceId });
   if (!page) return null;
+  assertInlineBody(page, 'proposal fence mirror');
   if (fromFile) {
     const reparsed = parseMarkdown(body, `${slug}.md`);
     await tx.refreshPageBody(slug, sourceId, sanitizeText(reparsed.compiled_truth), sanitizeText(reparsed.timeline), page.content_hash || contentHash(page));

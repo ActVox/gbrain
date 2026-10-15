@@ -15,9 +15,15 @@ export function protectedTextFilter(expression: string): string {
   return `COALESCE(${expression}, '') ~ '${PROTECTED_MARKER}'`;
 }
 
-/** Fixed SQL aliases only. Check full bodies because fragments can lose markers. */
+/**
+ * Fixed SQL aliases only. Check full bodies because fragments can lose markers.
+ * A segmented page has no body columns: its `body_flags.has_protected` (set by
+ * the ingest from the segmenter's regions) decides, and a page without the
+ * flag counts as protected (fail closed).
+ */
 export function protectedBodyFilter(alias: string): string {
-  return `(${protectedTextFilter(`${alias}.compiled_truth`)} OR ${protectedTextFilter(`${alias}.timeline`)})`;
+  return `(CASE WHEN ${alias}.body_storage = 'segmented' THEN ${alias}.body_flags->>'has_protected' IS DISTINCT FROM 'false'
+    ELSE (${protectedTextFilter(`${alias}.compiled_truth`)} OR ${protectedTextFilter(`${alias}.timeline`)}) END)`;
 }
 
 /** A body-only write cannot certify old fragments, even after fence removal. */

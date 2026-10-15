@@ -54,6 +54,19 @@ export function __setPurgeProbeLimitsForTests(limits: Partial<typeof probeLimits
   probeLimits = limits ? { ...probeLimits, ...limits } : { ...PURGE_PROBE_LIMITS };
 }
 
+/**
+ * Wave B PR 1: segment text is not probed yet (segment probe in PR 2), so a page-text report over a source
+ * holding segmented pages is `unverified` instead of passing on NULL body columns.
+ */
+async function unprobedSegmentedPages(engine: BrainEngine, sourceId: string, report: StoreReport): Promise<StoreReport> {
+  if (report.status === 'incomplete' || report.status === 'would_remove') return report;
+  const [row] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND body_storage='segmented'`, [sourceId]);
+  const n = Number(row?.n ?? 0);
+  if (!n) return report;
+  return { ...report, status: 'unverified', reason: 'segmented_body',
+    detail: `${n} page(s) in this source store their body in segments, which this receipt does not search yet; the claim may survive there.` };
+}
+
 type ProbeResult = { count: number } | { unverified: string };
 
 /** One bounded probe: `sql` selects matching rows (no LIMIT); the adapter caps rows and the statement time. */
@@ -230,6 +243,7 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
   const prose = { status: 'out_of_scope' as const, reason: 'source_prose', detail: 'The claim text survives outside a facts fence (page prose); purge the page or edit it to remove it.' };
   await swept('pages', `SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND (strpos(lower(compiled_truth),$2)>0 OR strpos(lower(timeline),$2)>0)`,
     [src, needle], plan.pages.length, removed.pages, prose);
+  stores[stores.length - 1] = await unprobedSegmentedPages(engine, src, stores[stores.length - 1]!);
   await swept('content_chunks', `SELECT 1 FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.source_id=$1 AND strpos(lower(c.chunk_text),$2)>0`,
     [src, needle], plan.pages.length, removed.chunks, prose);
   await swept('page_versions', `SELECT 1 FROM page_versions v JOIN pages p ON p.id=v.page_id WHERE p.source_id=$1
@@ -362,7 +376,7 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
       if (at >= 0 && stores[at]!.status !== 'incomplete') stores[at] = report; else if (at < 0) stores.push(report);
     }
     stores.push(all.size ? { store: 'source_prose', status: 'out_of_scope', reason: 'source_prose', remaining: all.size, items: [...all].sort(),
-      detail: 'Other pages still state a claim from the purged page in their prose; edit or purge them.' } : { store: 'source_prose', status: 'not_present' });
+      detail: 'Other pages still state a claim from the purged page in their prose; edit or purge them.' } : await unprobedSegmentedPages(engine, src, { store: 'source_prose', status: 'not_present' }));
   }
   const [source] = await engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [src]);
   const files = source?.local_path ? (context?.paths ?? []).filter(p => !p.startsWith('/') && !p.includes('..')).map(p => join(source.local_path!, p)) : [];

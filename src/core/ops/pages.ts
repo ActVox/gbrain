@@ -33,6 +33,7 @@ import { listPagesPagination, listingTruncatedNotice } from './list-pages-pagina
 import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
 import { invalidParam, readFix } from './op-fix.ts';
 import { isDatetimeInputError } from '../utils.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { rethrowNamingRevisionSource } from './put-page-revision-source.ts';
 import {
   assertExplicitSourceLive,
@@ -194,7 +195,8 @@ const get_page: Operation = {
     // Only explicitly trusted local reads retain protected body sections.
     // Holder grants and page-visibility opt-outs do not bypass this boundary.
     const isUntrustedReader = ctx.remote !== false;
-    const visibleBody = isUntrustedReader
+    // A segmented page keeps its throwing body getters: only body: 'none' answers it in Wave B PR 1.
+    const visibleBody = isUntrustedReader && !isSegmentedPage(page)
       ? stripPrivacyFencesForRemoteReader(page)
       : page;
     // v0.42 (#1699) agent-warning channel: surface the page's content_flag
