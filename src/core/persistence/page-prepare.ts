@@ -42,6 +42,7 @@ import { sealImportedPage, sealPageTextProjection } from '../page-state/projecti
 import { pipelined } from '../page-state/transactions.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { materializeTimeline, prepareCanonicalProjections, type TimelineRowsRemoved } from './canonical-projections.ts';
 import { assertTimelineNotOmitted, timelineWritePolicy } from './timeline-omission.ts';
 import { preserveProtectedTakes } from './protected-takes.ts';
@@ -441,7 +442,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
         'SELECT * FROM page_versions WHERE id=$1 AND page_id=$2', [p.version_id, page.id]);
       if (!version) throw pageRefusal('not_found', 'Version not found for this page.', row,
         `Version ${String(p.version_id)} is not in the history of page ${row.slug}, so nothing was reverted. List the page's versions (get_versions; CLI: gbrain history) and revert to one of them.`);
-      if (version.body_storage === 'segmented' || (page as { body_storage?: unknown }).body_storage === 'segmented') throw segmentedRevertRefusal(row.slug, p.version_id);
+      if (version.body_storage === 'segmented' || isSegmentedPage(page)) throw segmentedRevertRefusal(row.slug, p.version_id);
       targetDeleted = version.is_deleted ?? (snapshot.page.deleted_at != null);
       page = { ...page, compiled_truth: version.compiled_truth, frontmatter: version.frontmatter,
         ...(version.timeline !== null && version.timeline !== undefined ? { timeline: version.timeline } : {}),

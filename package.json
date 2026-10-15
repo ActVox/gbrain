@@ -159,6 +159,7 @@
     "check:windows-hide": "bun scripts/check-windows-hide.ts",
     "check:engine-sql-ratchet": "bun scripts/check-engine-sql-ratchet.ts",
     "check:chunk-visibility": "bun scripts/check-chunk-visibility.ts",
+    "check:page-body-readers": "bun scripts/check-page-body-readers.ts",
     "check:engine-sql-dynamic": "bun scripts/check-engine-sql-dynamic.ts",
     "check:engine-sql-brands": "bun scripts/check-engine-sql-brands.ts",
     "check:sync-run-state": "bun scripts/check-sync-run-state.ts",

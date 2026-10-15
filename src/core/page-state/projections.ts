@@ -17,7 +17,7 @@ import { jsonRowBatches } from '../batch-rows.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
 import { belowSafeChunkFence, movableChunkSql } from '../search/safe-chunks.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
-import { isSegmentedSnapshotPage } from './versions.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { acceptedEmbeddingInputHashes, embeddingInputHash, plainEmbeddingTier, synopsisBodyHash,
   type EmbeddingInputContext, type EmbeddingTier } from '../embedding-input-hash.ts';
 
@@ -159,7 +159,7 @@ export async function readProjectionSnapshot(engine: BrainEngine, slug: string, 
 async function readGuardedProjectionSnapshot(tx: BrainEngine, slug: string, sourceId: string,
   opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean }): Promise<ProjectionSnapshot | null> {
   const snapshot = await tx.readPageSnapshot(slug, { sourceId, ...(opts.requireLiveSource && { requireLiveSource: true }) });
-  if (!snapshot || isSegmentedSnapshotPage(snapshot.page) || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
+  if (!snapshot || isSegmentedPage(snapshot.page) || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
   const context = await indexingContext(tx, snapshot, opts.maxChunkTokens);
   const fenceOverlay = context.pageKind === 'markdown' ? await loadFenceChunkOverlay(tx, { sourceId, slug, compiled_truth: snapshot.page.compiled_truth, timeline: snapshot.page.timeline }) : undefined;
   return { snapshot, chunks: await tx.getChunks(slug, { sourceId, includeUnsealed: true }), indexingContext: context.key,
@@ -288,7 +288,7 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
     await tx.lockPageKeys([{ sourceId, slug }]);
     const current = await tx.readPageSnapshot(slug, { sourceId });
     if (!current || current.page.deleted_at || current.sourceIncarnation !== snapshot.sourceIncarnation || current.page.id !== snapshot.page.id
-      || current.page.text_projection_revision !== current.revision || isSegmentedSnapshotPage(current.page)) return refused;
+      || current.page.text_projection_revision !== current.revision || isSegmentedPage(current.page)) return refused;
     const [source] = await tx.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]);
     if (!source || source.archived) return refused;
     const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);

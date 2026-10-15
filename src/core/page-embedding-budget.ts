@@ -33,7 +33,8 @@
  */
 import type { BrainEngine } from './engine.ts';
 import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './content-sanity.ts';
-import type { ManifestRow } from './page-body/types.ts';
+import type { BodyStorage, ManifestRow } from './page-body/types.ts';
+import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { estimateCostFromChars, lookupEmbeddingPrice } from './embedding-pricing.ts';
 import { PAGE_INLINE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
@@ -75,16 +76,7 @@ export type PageEmbedDecision =
 interface BudgetRow { state: PageBudgetState; reason: string | null; embedding_signature: string | null; spent_usd: number; reserved_usd: number; stale_reservation: boolean; cap_usd: number | null }
 
 /** A segmented page (Wave B) carries `body_bytes` and no body strings; an inline page carries its body. */
-type BudgetPage = { id: number; body_storage?: string | null; body_bytes?: number | string | null; compiled_truth?: string; timeline?: string | null };
-
-function isSegmentedBudgetPage(page: BudgetPage): boolean {
-  return page.body_storage === 'segmented';
-}
-
-function pageBytes(page: BudgetPage): number {
-  if (isSegmentedBudgetPage(page)) return Number(page.body_bytes);
-  return Buffer.byteLength(page.compiled_truth ?? '', 'utf-8') + Buffer.byteLength(page.timeline ?? '', 'utf-8');
-}
+type BudgetPage = { id: number; body_storage?: BodyStorage | null; body_bytes?: number | null; compiled_truth?: string; timeline?: string | null };
 
 /**
  * The head, middle and tail sample windows of a segmented page, read one
@@ -133,7 +125,7 @@ export async function holdPageEmbedding(engine: Pick<BrainEngine, 'executeRaw'>,
 export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
   stale: ReadonlyArray<{ chunk_index: number; chunk_text: string }>,
   opts: { signature?: string | null; approvedCapUsd?: number; maxMarkupRatio?: number } = {}): Promise<PageEmbedDecision> {
-  if (!isLargePageBytes(pageBytes(page)) || stale.length === 0) return { kind: 'unmetered' };
+  if (!isLargePageBytes(pageBodyBytes(page)) || stale.length === 0) return { kind: 'unmetered' };
   const approved = opts.approvedCapUsd !== undefined;
   const configured = await resolvePageEmbedCapUsd(engine);
   const { rate, priced } = currentPricePerMTok(opts.signature);
@@ -145,7 +137,7 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
     if (!row) return { kind: 'unmetered' } as const;
     if (row.state === 'held' && !approved) return { kind: 'held', reason: row.reason ?? 'awaiting_approval' } as const;
     if (!approved && row.state === 'open') {
-      const junk = isSegmentedBudgetPage(page)
+      const junk = isSegmentedPage(page)
         ? assessJunkWindows(await segmentedSampleWindows(tx, page.id), { max_markup_ratio: opts.maxMarkupRatio })
         : assessSampledJunk(`${page.compiled_truth}\n${page.timeline ?? ''}`, { max_markup_ratio: opts.maxMarkupRatio });
       if (junk.junk) {
@@ -314,10 +306,9 @@ export async function readPageSizeStates(engine: Pick<BrainEngine, 'executeRaw'>
 
 /** The receipt field for one written page: `{ size_state }` for a large or embed_skip page, else nothing (no query). */
 export async function sizeStateField(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slug: string,
-  page: { body_storage?: string | null; body_bytes?: number | string | null; compiled_truth?: string | null; timeline?: string | null; frontmatter?: Record<string, unknown> | null } | null | undefined): Promise<{ size_state?: PageSizeState }> {
+  page: { body_storage?: BodyStorage | null; body_bytes?: number | null; compiled_truth?: string | null; timeline?: string | null; frontmatter?: Record<string, unknown> | null } | null | undefined): Promise<{ size_state?: PageSizeState }> {
   if (!page) return {};
-  const bytes = page.body_storage === 'segmented' ? Number(page.body_bytes)
-    : Buffer.byteLength(page.compiled_truth ?? '', 'utf-8') + Buffer.byteLength(page.timeline ?? '', 'utf-8');
+  const bytes = pageBodyBytes(page);
   if (!isLargePageBytes(bytes) && !isEmbedSkipped(page.frontmatter)) return {};
   const [state] = await readPageSizeStates(engine, sourceId, [slug]);
   return state ? { size_state: { embedding: state.embedding, reason: state.reason, bytes: state.bytes } } : {};

@@ -13,6 +13,7 @@ import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { materializePageSnapshot } from '../page-state/materialize.ts';
 import { installPageEmbeddings, readProjectionSnapshot } from '../page-state/projections.ts';
@@ -146,6 +147,14 @@ async function recordSkippedTarget(engine: BrainEngine, effect: PersistenceEffec
   [effect.id, effect.execution_token, JSON.stringify([target]), SKIPPED_TARGET_LIMIT]);
 }
 
+/** Record a scan target as skipped and move past it without writing the page or its file. */
+async function skipTarget(engine: BrainEngine, effect: PersistenceEffect, snapshot: PageSnapshot, reason: SkippedTarget['reason']): Promise<void> {
+  await engine.transaction(async tx => {
+    await recordSkippedTarget(tx, effect, { slug: snapshot.page.slug, reason });
+    await finishPage(tx, effect, snapshot);
+  });
+}
+
 /**
  * #5396: sync never imports a metafile (RESOLVER.md carries the managed durability block by design),
  * so its legacy page and file diverge; a scan never publishes either one to the other.
@@ -169,6 +178,8 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
     `Source ${effect.source_id} was replaced after this withdrawal mirror was queued, so the effect ends without writing; the new source has its own effects. Check the owner if files still look stale.`,
     { fix: effectStatusFix(effect) });
   if (isMetafilePage(snapshot)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId, 'metafile'); return; }
+  // Wave B PR 1: a segmented body has no whole-body mirror yet (per-segment mirror in PR 2).
+  if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
   const content = serializePageToMarkdown(snapshot.page, snapshot.tags);
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
   try {
@@ -241,18 +252,15 @@ async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: 
   const snapshot = await selectedEffectPage(engine, effect);
   if (!snapshot) { await completeEffect(engine, effect); return; }
   attempt.target = snapshot.page.slug;
-  const skip = async (reason: SkippedTarget['reason']) => engine.transaction(async tx => {
-    await recordSkippedTarget(tx, effect, { slug: snapshot.page.slug, reason });
-    await finishPage(tx, effect, snapshot);
-  });
-  if (isMetafilePage(snapshot)) { await skip('metafile'); return; }
+  if (isMetafilePage(snapshot)) { await skipTarget(engine, effect, snapshot, 'metafile'); return; }
+  if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
   try {
     file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
       snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true });
   } catch (error) {
     if (!isFileDatabaseDrift(error)) throw error;
-    await skip('file_database_drift');
+    await skipTarget(engine, effect, snapshot, 'file_database_drift');
     return;
   }
   if (!file) throw opError('source_changed', 'The Git binding changed.',

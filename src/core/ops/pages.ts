@@ -194,7 +194,7 @@ const get_page: Operation = {
     // Only explicitly trusted local reads retain protected body sections.
     // Holder grants and page-visibility opt-outs do not bypass this boundary.
     const isUntrustedReader = ctx.remote !== false;
-    const visibleBody = isUntrustedReader
+    const visibleBody = isUntrustedReader && page.body_storage !== 'segmented'
       ? stripPrivacyFencesForRemoteReader(page)
       : page;
     // v0.42 (#1699) agent-warning channel: surface the page's content_flag

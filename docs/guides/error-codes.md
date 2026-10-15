@@ -2138,6 +2138,16 @@ Reasons: `host_mismatch`, `transfer_in_progress`, `clone_in_progress`, `binding_
 
 More: [docs/guides/troubleshooting.md#owner-unavailable](../../docs/guides/troubleshooting.md#owner-unavailable)
 
+### page_body_segmented
+
+<a id="page_body_segmented"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| This page's body is stored in segments, and the path that hit it reads or writes the whole body as one string, so it stopped before reading or changing anything. | With pages.segmented_storage on, a page over 1 MiB keeps its body in segments instead of the page row; a whole-body path would otherwise see an empty body and could overwrite the page or drop the unread rest. Windowed reads and segment-aware writers replace these paths. | Read the page's revision and stored size with get_page body: 'none' (size.body_bytes); windowed reads of a segmented body arrive with the segment reader. Run: gbrain get --source '{source_id}' --body none -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/windowed-reads.md#page_body_segmented](../../docs/guides/windowed-reads.md#page_body_segmented)
+
 ### page_identity_changed
 
 <a id="page_identity_changed"></a>

@@ -4,7 +4,7 @@ import type { PageSnapshot } from './types.ts';
 import { PAGE_INLINE_MAX_BYTES, isLargePageBytes } from '../page-size-policy.ts';
 import { LARGE_PAGE_VERSIONS_KEPT, readPageBodyPolicy } from '../page-body/limits.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
-import type { RegistryCode } from '../error-registry.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 
 export { LARGE_PAGE_VERSIONS_KEPT };
 
@@ -16,7 +16,7 @@ export { LARGE_PAGE_VERSIONS_KEPT };
 export async function createPageVersion(engine: BrainEngine, slug: string, sourceId: string, preimage?: PageSnapshot): Promise<PageVersion> {
   const insert = async (tx: BrainEngine, snapshot: PageSnapshot) => {
     const { page, tags, revision } = snapshot;
-    if (isSegmentedSnapshotPage(page)) return insertSegmentedVersion(tx, snapshot);
+    if (isSegmentedPage(page)) return insertSegmentedVersion(tx, snapshot);
     const rows = await tx.executeRaw<PageVersion>(`INSERT INTO page_versions
       (page_id,compiled_truth,frontmatter,knowledge_revision,timeline,title,type,tags,is_deleted,source_path)
       VALUES ($1,$2,$3::text::jsonb,$4::uuid,$5,$6,$7,$8::text::jsonb,$9,$10) RETURNING *`,
@@ -38,20 +38,9 @@ export async function createPageVersion(engine: BrainEngine, slug: string, sourc
 }
 
 /**
- * A segmented page row: `body_storage` once the snapshot projects it (lane
- * 1c's page shape), else the NULL body only a segmented row stores
- * (`pages_body_storage_chk`). `body_storage` is read first, so lane 1c's body
- * getters never fire here.
- */
-export function isSegmentedSnapshotPage(page: PageSnapshot['page']): boolean {
-  const storage = (page as { body_storage?: unknown }).body_storage;
-  return storage === undefined ? page.compiled_truth == null : storage === 'segmented';
-}
-
-/**
  * Wave B (spec 5): a segmented page's version is a reference, not a copy: the
  * page's live body generation (its manifest rows stay alive as a GC root),
- * body_bytes and content_hash with NULL body columns, O(1) at any page size.
+ * body_bytes and content_hash; its body columns stay NULL. O(1) at any page size.
  * It references the generation live when it is inserted, so a caller versions
  * before its generation flip, as every caller versions before its page write.
  * Then the page's segmented history is pruned by `pruneSegmentedVersions`.
@@ -59,8 +48,8 @@ export function isSegmentedSnapshotPage(page: PageSnapshot['page']): boolean {
 async function insertSegmentedVersion(tx: BrainEngine, snapshot: PageSnapshot): Promise<PageVersion> {
   const { page, tags, revision } = snapshot;
   const [row] = await tx.executeRaw<PageVersion>(`INSERT INTO page_versions
-    (page_id,compiled_truth,timeline,body_storage,body_generation,body_bytes,content_hash,frontmatter,knowledge_revision,title,type,tags,is_deleted,source_path)
-    SELECT p.id,NULL,NULL,'segmented',p.body_generation,p.body_bytes,p.content_hash,$2::text::jsonb,$3::uuid,$4,$5,$6::text::jsonb,$7,$8
+    (page_id,body_storage,body_generation,body_bytes,content_hash,frontmatter,knowledge_revision,title,type,tags,is_deleted,source_path)
+    SELECT p.id,'segmented',p.body_generation,p.body_bytes,p.content_hash,$2::text::jsonb,$3::uuid,$4,$5,$6::text::jsonb,$7,$8
       FROM pages p WHERE p.id = $1 AND p.body_storage = 'segmented' RETURNING *`,
   [page.id, JSON.stringify(page.frontmatter), revision, page.title, page.type, JSON.stringify(tags), page.deleted_at != null, page.source_path ?? null]);
   if (!row) throw new Error(`createVersion failed: page id ${page.id} is no longer segmented`);
@@ -104,7 +93,7 @@ export async function pruneSegmentedVersions(tx: BrainEngine, pageId: number): P
  * revert path rebuilds the page from an inline body. Refused before anything is written.
  */
 export function segmentedRevertRefusal(slug: string, versionId: unknown): OperationError {
-  return opError('page_body_segmented' as RegistryCode,
+  return opError('page_body_segmented',
     `Page ${slug} or its version ${String(versionId)} is stored in segments, so revert_version cannot restore it yet; nothing was changed.`,
     `Read the version with get_versions (body_bytes, content_hash), then write the content you want with put_page or edit_page.`,
     { reason: 'segmented_revert' });
