@@ -24,7 +24,7 @@ import { initialEntryState } from '../../src/core/page-body/entry-state.ts';
 import { segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
 import { prepareSegmentChunks, type SegmentChunk } from '../../src/core/page-body/segment-chunks.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
-import { bigPage, FACTS_BLOCK, joinedProjection, PEM_BLOCK, segmentOptions } from '../helpers/segment-bodies.ts';
+import { bigPage, FACTS_BLOCK, joinedProjection, KEY_BODY, PEM_BEGIN_RSA, PEM_BLOCK, PEM_END_RSA, segmentOptions } from '../helpers/segment-bodies.ts';
 
 const trustOf = (body: string) => markdownFenceTrusted(stripMaterializedMarkers(body)) ? 'trusted' as const : 'void' as const;
 const squash = (s: string) => s.replace(/\s+/g, '');
@@ -51,6 +51,17 @@ describe('prepareSegmentChunks', () => {
     expect(got.some(c => c.chunk_source === 'fenced_code')).toBe(true);
     expect(got.map(c => c.chunk_text).join('\n')).not.toContain('secret take');
     expect(got.map(c => c.chunk_text).join('\n')).not.toContain('private thing');
+  });
+
+  test('a key inside a world facts row is redacted as prepareMarkdownChunks redacts it', async () => {
+    const facts = FACTS_BLOCK.replace('| 1 | likes tea |', `| 1 | deploy key ${PEM_BEGIN_RSA} ${KEY_BODY} ${PEM_END_RSA} |`);
+    const body = '# Notes\n\nIntro paragraph.\n\n' + facts + '\nAfter the facts.\n\n' + 'filler words here. '.repeat(200) + '\n';
+    const [seg, ...rest] = segment(body);
+    expect(rest).toEqual([]);
+    const got = await prepareSegmentChunks(seg!, { fenceTrust: 'trusted' });
+    const want = await prepareMarkdownChunks({ compiled_truth: body });
+    expect(got.map(c => [c.chunk_text, c.chunk_source])).toEqual(want.map(c => [c.chunk_text, c.chunk_source]));
+    expect(got.map(c => c.chunk_text).join('\n')).not.toContain(KEY_BODY);
   });
 
   test('chunks stay inside their segment and their spans hold their text', async () => {

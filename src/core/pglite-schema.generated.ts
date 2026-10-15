@@ -1314,13 +1314,13 @@ CREATE TABLE IF NOT EXISTS page_body_manifest (
   date_max          DATE,
   hash_state        BYTEA   NOT NULL,
   staging_id        UUID,
-  PRIMARY KEY (page_id, occurrence_id, gen_from),
   FOREIGN KEY (source_id, sha256) REFERENCES page_segment_texts(source_id, sha256)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS page_body_manifest_published ON page_body_manifest (page_id, occurrence_id, gen_from) WHERE staging_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS page_body_manifest_live_seq ON page_body_manifest (page_id, seq) WHERE gen_to IS NULL AND staging_id IS NULL;
 CREATE INDEX IF NOT EXISTS page_body_manifest_live_bytes ON page_body_manifest (page_id, byte_start) WHERE gen_to IS NULL;
 CREATE INDEX IF NOT EXISTS page_body_manifest_text ON page_body_manifest (source_id, sha256);
-CREATE INDEX IF NOT EXISTS page_body_manifest_staging ON page_body_manifest (staging_id) WHERE staging_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS page_body_manifest_staging ON page_body_manifest (staging_id, occurrence_id) WHERE staging_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS page_body_stagings (
   id                 UUID PRIMARY KEY,
   kind               TEXT NOT NULL CHECK (kind IN ('upload','import','sync','put','append','edit','resegment')),

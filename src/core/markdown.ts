@@ -584,12 +584,6 @@ export function classifyImportHold(parsed: ParsedMarkdown, ctx: {
   return null;
 }
 
-/**
- * Inspect raw content for the 7 frontmatter validation classes that gray-matter
- * silently accepts. Mutates `errors` in place. The order of checks is
- * deliberate: cheap byte-level checks first, then structural checks, then
- * YAML-parse-dependent checks.
- */
 /** The NULL_BYTES finding for the first NUL on 1-based `line`. */
 export function nullBytesError(line: number): ParseValidationError {
   return { code: 'NULL_BYTES', message: 'Content contains null bytes (likely binary corruption)', line };
@@ -606,6 +600,12 @@ export function validatorFrontmatterFence(lines: readonly string[]): { firstNonE
   return { firstNonEmpty, opens, closeLine: opens && closeLine < lines.length ? closeLine : -1 };
 }
 
+/**
+ * Inspect raw content for the 7 frontmatter validation classes that gray-matter
+ * silently accepts. Mutates `errors` in place. The order of checks is
+ * deliberate: cheap byte-level checks first, then structural checks, then
+ * YAML-parse-dependent checks.
+ */
 function collectValidationErrors(
   content: string,
   errors: ParseValidationError[],

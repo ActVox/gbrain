@@ -265,11 +265,19 @@ export async function flipBodyGeneration(exec: SqlExecutor, input: BodyFlipInput
           fix: readFix('Returns the current revision and size.', { argv: ['gbrain', 'get', '--source', page.source_id, '--', page.slug],
             mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'none' } } }) });
     }
-    const stagedOccurrences = sqlFragment`(SELECT s.occurrence_id FROM page_body_manifest s WHERE s.page_id = ${input.pageId} AND s.staging_id = ${input.stagingId}::uuid)`;
+    const { rows: stagings } = await tx.run<{ state: string }>(sqlFragment`SELECT state FROM page_body_stagings WHERE id = ${input.stagingId}::uuid FOR UPDATE`);
+    if (!LIVE_STAGING_STATES.includes(stagings[0]?.state ?? '')) {
+      throw opError('body_staging_expired', `The staged body of this write to ${page.slug} is ${stagings[0]?.state ?? 'gone'}, so nothing was published.`,
+        'The write waited past its staging deadline and its staged segments were collected. Send the write again.',
+        { detail: JSON.stringify({ staging_id: input.stagingId, state: stagings[0]?.state ?? null }) });
+    }
+    const newLive = sqlFragment`(SELECT s.occurrence_id FROM page_body_manifest s WHERE s.page_id = ${input.pageId}
+        AND (s.staging_id = ${input.stagingId}::uuid
+          OR (s.staging_id IS NULL AND s.gen_to IS NULL AND NOT (s.occurrence_id = ANY(${[...input.closeOccurrences]}::bigint[])))))`;
     const retire = sqlFragment`c.page_id = ${input.pageId} AND c.retired_generation IS NULL AND (
-        c.occurrence_id = ANY(${[...input.retireChunkOccurrences]}::bigint[])
+        (c.occurrence_id = ANY(${[...input.retireChunkOccurrences]}::bigint[]) AND c.body_generation <= ${input.expectedGeneration}::bigint)
         OR (${input.retireInlineChunks === true}::boolean AND c.body_generation IS NULL)
-        OR (c.body_generation = ${input.newGeneration}::bigint AND c.occurrence_id NOT IN ${stagedOccurrences}))`;
+        OR (c.body_generation = ${input.newGeneration}::bigint AND c.occurrence_id NOT IN ${newLive}))`;
     // chunk-visibility-ok: the flip itself selects the rows it retires, across generations
     const { rows: counted } = await tx.run<{ n: unknown }>(sqlFragment`SELECT count(*)::bigint AS n FROM content_chunks c WHERE ${retire}`);
     const toRetire = Number(counted[0]?.n ?? 0);
@@ -319,8 +327,9 @@ export async function setBodyStagingState(exec: SqlExecutor, id: string, state: 
 /**
  * Garbage collection (spec 3.5). Roots: each segmented page's live generation,
  * every generation a page_versions row references, and staged rows of live
- * stagings (`liveStagingIds`). Deletes retired chunk rows, staged chunk rows
- * no live staging owns, manifest rows outside every root, and unreferenced
+ * stagings (`liveStagingIds`). Deletes chunk rows marked retired at or below
+ * the live generation (the flip deletes the rows it retires, so none are
+ * marked today), staged chunk rows no live staging owns, manifest rows outside every root, and unreferenced
  * texts older than the grace window (a text a concurrent writer is
  * referencing is row-locked by its FK check and skipped). With
  * `expireStagings`, stagings past a deadline (and not request-held) become

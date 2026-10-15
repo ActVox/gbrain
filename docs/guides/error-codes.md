@@ -298,6 +298,14 @@ More: [docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database](../.
 |---|---|---|---|---|---|---|
 | Benchmark rule check unknown op. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### body_staging_expired
+
+<a id="body_staging_expired"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The staged body of a large-page write expired before it was published, so nothing was published. | A segmented write stages its segments first and publishes them in one flip; a staging idle past its deadline is collected by maintenance, and publishing without its segments would leave the page missing text. | Send the same write again; it stages a fresh copy. | agent | `repeat the read that failed` | 1 | yes |
+
 ### bootstrap_empty
 
 <a id="bootstrap_empty"></a>

@@ -112,7 +112,7 @@ export interface BodyFlipInput {
   stagingId: string;
   /** Live manifest rows closed at newGeneration (retired and shifted occurrences). */
   closeOccurrences: readonly number[];
-  /** Occurrences whose chunk rows the flip deletes (retired, not shifted). */
+  /** Occurrences whose chunk rows at or below expectedGeneration the flip deletes (retired occurrences, and older duplicates of re-chunked kept ones). */
   retireChunkOccurrences: readonly number[];
   /** Promotion from inline: the page's inline chunk rows (body_generation NULL) are deleted too. */
   retireInlineChunks?: boolean;

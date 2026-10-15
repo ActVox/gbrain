@@ -22,6 +22,7 @@ import { fencedCodeChunks, newFenceChunkBudget, type FenceChunkBudget } from '..
 import { fenceTrustMarker, markFenceChunk, splitFenceOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { renderFactsRegion } from '../remote-body.ts';
+import { credentialSafeProjection } from '../credential-projection.ts';
 import type { EntryState } from './entry-state.ts';
 import type { SegmentChunkInput, BodyRegion } from './types.ts';
 import { segmentProjectionParts, type StoredRegion } from './segmenter.ts';
@@ -70,7 +71,7 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
     if (part.kind === 'text' || part.kind === 'pem') text = part.text;
     else if (part.kind === 'facts' && part.region!.open_start === undefined) {
       factsTexts.push(part.text);
-      text = renderFactsRegion(splitFenceOverlay(part.text, opts.overlay).main);
+      text = credentialSafeProjection(renderFactsRegion(splitFenceOverlay(part.text, opts.overlay).main));
     }
     if (!text) continue;
     const bytes = Buffer.byteLength(text, 'utf8');

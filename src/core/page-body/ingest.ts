@@ -225,7 +225,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   const rows: ManifestRowInput[] = [];
   const used = new Set<ManifestRow>();
   const matched: Array<ManifestRow | null> = [];
-  let texts = 0, byteStart = 0, lineStart = 0, truthBytes = 0, lines = 0;
+  let texts = 0, byteStart = 0, lineStart = 0, truthBytes = 0;
   const leads: Record<BodyRegion, string> = { truth: '', timeline: '' };
   let hasProtected = false;
   let truthExit: EntryState = initialEntryState({ region: 'truth' });
@@ -272,7 +272,6 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
       rows.push(row);
       byteStart += segment.bytes.length;
       lineStart += segment.lineCount;
-      lines += segment.lineCount;
       if (region === 'truth') truthBytes += segment.bytes.length;
     }
   }
@@ -296,7 +295,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   const retireChunkOccurrences = liveRows.filter(row => !used.has(row)).map(row => Number(row.occurrenceId));
   closeOccurrences.push(...retireChunkOccurrences);
   const body: SegmentedBodyColumns = {
-    content_hash: contentHash, body_bytes: byteStart, truth_bytes: truthBytes, body_lines: lines, segment_count: rows.length,
+    content_hash: contentHash, body_bytes: byteStart, truth_bytes: truthBytes, body_lines: lineStart, segment_count: rows.length,
     segmenter_version: SEGMENTER_VERSION, truth_lead: leads.truth, timeline_lead: leads.timeline,
     body_flags: { ...input.flags, has_protected: hasProtected },
   };
@@ -342,7 +341,8 @@ export async function occurrencesWithoutChunks(engine: Pick<BrainEngine, 'execut
 export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId: number; sourceId: string; slug: string; generation: number;
   occurrences: readonly ManifestRowInput[]; title: string; frontmatter: JsonObject; flags: JsonObject; chunking: SegmentChunkingContext;
   retiredOccurrences: readonly number[];
-  /** Projection: each batch inserts under the page guard, after re-reading which occurrences still lack rows, so two projections never both chunk one. */
+  /** Projection: each batch inserts under the page guard, after re-reading which occurrences still lack rows, so two projections never both chunk one;
+   *  a page whose generation moved past `generation` stops the projection before it inserts. */
   guarded?: boolean }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
   if (input.chunking.quarantined || !input.occurrences.length) return { rows: 0, occurrences: 0, indexes: [] };
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
@@ -376,14 +376,18 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     if (chunks.length && input.retiredOccurrences.length) await reuseSegmentChunkVectors(engine, { pageId: input.pageId,
       retiredOccurrences: input.retiredOccurrences, chunks, title: input.title, corpusGeneration: input.chunking.corpusGeneration, tier: input.chunking.tier });
     if (chunks.length && !input.guarded) indexes.push(...await engine.stageSegmentChunks(input.pageId, input.generation, chunks));
+    let moved = false;
     if (chunks.length && input.guarded) rows -= chunks.length - await engine.transaction(async tx => {
       await tx.lockPageKeys([{ sourceId: input.sourceId, slug: input.slug }]);
+      const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1 FOR UPDATE', [input.pageId]);
+      if (Number(page?.body_generation) !== input.generation) { moved = true; return 0; }
       const open = new Set((await occurrencesWithoutChunks(tx, input.pageId, input.generation, batch)).map(row => row.occurrenceId));
       const still = chunks.filter(chunk => open.has(chunk.occurrence_id));
       if (still.length) await tx.stageSegmentChunks(input.pageId, input.generation, still);
       return still.length;
     });
     rows += chunks.length;
+    if (moved) break;
     done += batch.length;
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
   }

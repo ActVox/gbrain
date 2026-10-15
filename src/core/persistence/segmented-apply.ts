@@ -14,8 +14,8 @@
  *   and the flip retired its rows in the transaction.
  * - Demotion (an inline write onto a segmented page): the page row becomes an
  *   inline row with an empty body in the same transaction as the inline write;
- *   the live manifest rows close (versions keep theirs) and segmented chunk
- *   rows go with the inline chunk replacement.
+ *   the live manifest rows close (versions keep theirs) and the demotion
+ *   deletes the segmented chunk rows before the inline write stages its own.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
@@ -141,8 +141,8 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
  * Demotion: turn a segmented page row into an inline row with an empty body
  * (the caller's inline write fills it in the same transaction). The live
  * manifest rows close at the next generation, so versions that pin earlier
- * generations keep theirs; the segmented chunk rows are deleted with the
- * inline write's chunk replacement.
+ * generations keep theirs; the page's segmented chunk rows are deleted here,
+ * before the inline write stages its chunks.
  */
 export async function demoteSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<void> {
   await tx.executeRaw(`UPDATE page_body_manifest SET gen_to=(SELECT body_generation+1 FROM pages WHERE id=$1)
