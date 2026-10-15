@@ -74,6 +74,12 @@ export interface PatternsPhaseOpts {
    */
   once?: boolean;
   /**
+   * #6297: the operator named this phase (`gbrain dream --phase patterns`). A
+   * direct run, like `--once`, is not held to `dream.patterns.min_interval_hours`;
+   * in-cycle runs (autopilot, bare `gbrain dream`) are.
+   */
+  direct?: boolean;
+  /**
    * Absolute deadline (epoch ms) of the enclosing minion job, or null for
    * direct callers (`gbrain dream`). When set, the subagent's job timeout
    * and the wait timeout are clamped so the phase finishes (or times out)
@@ -106,7 +112,7 @@ export interface PatternsPhaseOpts {
  * working.
  */
 import { CYCLE_DEADLINE_RESERVE_MS } from './base-phase.ts';
-import { recordPatternsLastRun, sizePatternsRun } from './patterns-plan.ts';
+import { patternsCadenceKey, patternsCadenceSkip, patternsChildReadBudgetBytes, recordPatternsLastRun, sizePatternsRun } from './patterns-plan.ts';
 export { CYCLE_DEADLINE_RESERVE_MS };
 
 /**
@@ -145,7 +151,7 @@ export async function runPhasePatterns(
   engine: BrainEngine,
   opts: PatternsPhaseOpts,
 ): Promise<PhaseResult> {
-  let config: PatternsConfig, evidenceKey: string, reflections: ReflectionRef[];
+  let config: PatternsConfig, evidenceKey: string, cadenceKey: string, reflections: ReflectionRef[];
   try {
     throwIfAborted(opts.signal, '[dream] patterns');
     config = await loadPatternsConfig(engine);
@@ -163,6 +169,7 @@ export async function runPhasePatterns(
     const [source] = await managedPersistenceEnabled(engine)
       ? await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [opts.sourceId ?? 'default']) : [];
     evidenceKey = source ? `${LAST_EVIDENCE_KEY}.${opts.sourceId ?? 'default'}.${source.incarnation}` : LAST_EVIDENCE_KEY;
+    cadenceKey = await patternsCadenceKey(engine, opts.sourceId ?? 'default');
 
     // Gather reflections within lookback window.
     reflections = await gatherReflections(engine, config.lookbackDays, config.sourceSlugPrefix, opts.sourceId ?? 'default');
@@ -174,16 +181,16 @@ export async function runPhasePatterns(
   // owner's reflections. External reflections get their own pass (only with
   // enough evidence of their own), and that pass's pattern pages are external.
   const external = reflections.filter(r => isExternalTier(r.taint?.tier ?? 'unknown'));
-  const owner = await runPatternsPass(engine, opts, config, reflections.filter(r => !external.includes(r)), evidenceKey);
+  const owner = await runPatternsPass(engine, opts, config, reflections.filter(r => !external.includes(r)), { evidence: evidenceKey, cadence: cadenceKey });
   if (!external.length) return owner;
   const externalPass = external.length >= config.minEvidence
-    ? await runPatternsPass(engine, opts, config, external, `${evidenceKey}.external`) : null;
+    ? await runPatternsPass(engine, opts, config, external, { evidence: `${evidenceKey}.external`, cadence: `${cadenceKey}.external` }) : null;
   return mergeExternalPass(owner, externalPass, external.length);
 }
 
-/** One patterns child over one partition of the reflections; `evidenceKey` is that partition's watermark. */
+/** One patterns child over one partition of the reflections; `keys` are that partition's evidence watermark and cadence stamp. */
 async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, config: PatternsConfig,
-  reflections: ReflectionRef[], evidenceKey: string): Promise<PhaseResult> {
+  reflections: ReflectionRef[], keys: { evidence: string; cadence: string }): Promise<PhaseResult> {
   const start = Date.now();
   let ownedPrivateQueue: { queue: MinionQueue; name: string } | null = null;
   try {
@@ -203,7 +210,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     // synthesize's checkCooldown; `--once` forces past it.
     const newestEvidenceMs = reflections[0].updatedAt.getTime();
     if (!opts.once) {
-      const stampMs = Date.parse((await engine.getConfig(evidenceKey)) ?? '');
+      const stampMs = Date.parse((await engine.getConfig(keys.evidence)) ?? '');
       if (Number.isFinite(stampMs) && newestEvidenceMs <= stampMs) {
         return skipped(
           'no_new_evidence',
@@ -213,6 +220,9 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
       }
     }
 
+    // #6297: an in-cycle run waits dream.patterns.min_interval_hours after the partition's last completed run.
+    const cadence = opts.once || opts.direct ? null : await patternsCadenceSkip(engine, keys.cadence);
+    if (cadence) return cadence;
     if (opts.dryRun) {
       return ok(`dry-run: would detect patterns over ${reflections.length} reflections`, {
         reflections_considered: reflections.length,
@@ -303,6 +313,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
       require_writes: true,
       allow_clean_zero_writes: true,
       allowed_slug_prefixes: allowedSlugPrefixes,
+      ...await patternsChildReadBudgetBytes(engine).then(bytes => bytes ? { read_budget_bytes: bytes } : {}), // #6297: get_page results past it come back summarized
       // #1586: scope every child tool call to the cycle's resolved source so
       // put_page writes land there instead of the hardcoded 'default'.
       ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
@@ -381,6 +392,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     }
 
     await recordPatternsLastRun(engine, { duration_ms: Date.now() - submittedAt, reflections: submitted.length, outcome, error_text: errorText }); // #6177: every child, timed out or failed too
+    if (outcome === 'completed') await engine.setConfig(keys.cadence, new Date().toISOString()); // #6297: cadence counts from completed runs
     if (outcome === 'completed' && submitOpts.idempotency_key) await clearPatternsSourceDeaths(engine, opts.sourceId ?? 'default'); // #6236: only consecutive deaths trip
 
     if (opts.yieldDuringPhase) {
@@ -397,13 +409,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     // #4077: no post-abort derived-state writes (collection is a read, but
     // the reverse-write below dual-writes files).
     throwIfAborted(opts.signal, '[dream] patterns output');
-    const putPageRefs = await collectChildPutPageSlugs(engine, [job.id], cycleSourceId);
-    // #6302: pages the child changed only through add_timeline_entry get their new entries verified and count as written.
-    const appends = (await collectChildTimelineAppends(engine, [job.id], cycleSourceId))
-      .filter(a => a.slug.startsWith(`${config.outputSlugPrefix}/`) && !putPageRefs.some(ref => ref.slug === a.slug));
-    const writtenRefs = [...putPageRefs, ...[...new Set(appends.map(a => a.slug))].map(slug => ({ slug, source_id: cycleSourceId }))];
-    // Deprecated alias (#6302): completed add_timeline_entry calls, kept two releases for readers of the old field.
-    const appendedUnverified = await countChildTimelineAppends(engine, [job.id]);
+    const { putPageRefs, appends, writtenRefs, appendedUnverified } = await collectPatternOutputs(engine, job.id, cycleSourceId, config.outputSlugPrefix);
 
     // #6052: `finalized` leaves out outputs whose managed publication is held (pending or contended); `held` counts them.
     const { quoteVerify, finalized, held } = await stampPatternOutputs(engine, maintenance, putPageRefs, appends, submitted, derivation, config, cycleSourceId, cycleDate, opts.signal);
@@ -454,7 +460,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     // edited between gather and here has updated_at > stamp, so the next run
     // still fires. Zero writes stamps too: the model saw this evidence and
     // named nothing; re-running it is exactly the spend bug.
-    await engine.setConfig(evidenceKey, new Date(newestEvidenceMs).toISOString());
+    await engine.setConfig(keys.evidence, new Date(newestEvidenceMs).toISOString());
 
     return ok(`${writtenRefs.length} pattern page(s) written/updated${appendedNote} (${outcome})`, details);
   } catch (e) {
@@ -882,6 +888,18 @@ async function collectChildPutPageSlugs(
     .map(r => r.slug)
     .filter((s): s is string => typeof s === 'string' && s.length > 0)
     .map(slug => ({ slug, source_id: sourceId }));
+}
+
+/**
+ * What a patterns child wrote: its put_page refs, the timeline entries it newly published on other pages under the
+ * output prefix (#6302), every changed page as a ref, and the deprecated `appended_unverified` count.
+ */
+async function collectPatternOutputs(engine: BrainEngine, jobId: number, sourceId: string, outputSlugPrefix: string) {
+  const putPageRefs = await collectChildPutPageSlugs(engine, [jobId], sourceId);
+  const appends = (await collectChildTimelineAppends(engine, [jobId], sourceId))
+    .filter(a => a.slug.startsWith(`${outputSlugPrefix}/`) && !putPageRefs.some(ref => ref.slug === a.slug));
+  const writtenRefs = [...putPageRefs, ...[...new Set(appends.map(a => a.slug))].map(slug => ({ slug, source_id: sourceId }))];
+  return { putPageRefs, appends, writtenRefs, appendedUnverified: await countChildTimelineAppends(engine, [jobId]) };
 }
 
 /** #6302: one entry a patterns child newly published with add_timeline_entry. */

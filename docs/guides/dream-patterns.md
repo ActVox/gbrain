@@ -15,6 +15,8 @@ anything.
 | `dream.patterns.min_evidence` | integer ≥ 1 | `3` | Distinct reflections a pattern needs; also the smallest run worth submitting. |
 | `dream.patterns.subagent_timeout_ms` | milliseconds | `1800000` (30 min) | The child job's own timeout. Inside the cycle it is clamped to the time left. |
 | `dream.patterns.subagent_wait_timeout_ms` | milliseconds | `2100000` (35 min) | How long the phase waits for the child. Clamped the same way. |
+| `dream.patterns.min_interval_hours` | hours, 0 to 720 | `6` | Time an in-cycle run waits after the last completed run. `0` turns it off. See [Cadence](#cadence). |
+| `dream.patterns.child_read_budget_kb` | whole KB, 0 to 100000 | `200` | `get_page` output the child reads in full before reads come back summarized. `0` turns it off. See [Child read budget](#child-read-budget). |
 
 ```bash
 gbrain config set dream.patterns.subagent_timeout_ms 2400000
@@ -45,6 +47,42 @@ deprecated and will be removed two releases after this one; read
 **Say to your agent:** *"Did the last dream patterns run check the quotes it added to my pattern pages?"*
 The agent reads the phase result (`gbrain dream --phase patterns --json` on a
 direct run) and reports `quote_verify.timeline_appends`.
+
+## Cadence
+
+Every maintenance pass writes new reflections, so the evidence check alone
+started a paid patterns child on every pass. An in-cycle run (autopilot or a
+bare `gbrain dream`) now waits `dream.patterns.min_interval_hours` (default 6)
+after the last **completed** run. A timed-out or failed child does not start
+the clock, so the next pass retries it.
+
+A skipped run reports `reason: patterns_min_interval` with
+`last_completed_at` and `next_eligible_at`, and submits nothing. A direct
+`gbrain dream --phase patterns` and `--once` are not held to the interval; a
+direct run is paid, so ask the user first.
+
+The stamp is state, not a setting: it lives in
+`dream.patterns.last_completed_at.<source>.<incarnation>`, so a re-created
+source starts fresh. Reflections from external sources run in their own pass
+with their own stamp (the same key plus `.external`), so the owner pass never
+holds them back.
+
+```bash
+gbrain config set dream.patterns.min_interval_hours 12   # 0 turns the cadence off
+```
+
+## Child read budget
+
+A CLI-backed model replays the whole transcript on every turn, so a child that
+read every existing pattern page in full could fill half the model window.
+The child's `get_page` output is budgeted at
+`dream.patterns.child_read_budget_kb` (default 200 KB). The bytes it has read
+are counted from the job's own tool-execution ledger, so a resumed job keeps
+what it already spent. Past the budget a read returns a short summary
+(`truncated: true`, `code: read_budget_exhausted`, the slug, title, type and an
+excerpt of up to 400 characters) instead of the page. Writes still work, and
+the summary tells the child to append with `add_timeline_entry` instead of
+rewriting a page it has not read in full.
 
 ## Budget sizing
 
@@ -94,4 +132,7 @@ slowly than the reflection count and halving may take several cycles to fit.
   quote-verified or provenance-stamped yet (#6302).
 - Fix wave 18b: appended timeline entries are quote-verified, their pages are
   provenance-stamped and counted in `patterns_written`; `appended_unverified`
-  is deprecated (#6302).
+  is deprecated (#6302). In-cycle runs wait
+  `dream.patterns.min_interval_hours` after the last completed run, and the
+  child's `get_page` reads are budgeted by `dream.patterns.child_read_budget_kb`
+  (#6297).

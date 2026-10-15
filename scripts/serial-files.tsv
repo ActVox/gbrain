@@ -97,6 +97,8 @@ test/cycle-lock-steal.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GB
 test/cycle-patterns-completed-outcome.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts, ../src/core/cycle/synthesize.ts, ../src/core/minions/wait-for-completion.ts) replaces modules for every file in the process
 test/cycle-patterns-evidence-gate.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts, ../src/core/cycle/synthesize.ts, ../src/core/minions/wait-for-completion.ts) replaces modules for every file in the process
 test/cycle-patterns-timeline-appends.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts, ../src/core/cycle/synthesize.ts, ../src/core/minions/wait-for-completion.ts) replaces modules for every file in the process
+test/cycle-patterns-cadence.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts, ../src/core/cycle/synthesize.ts, ../src/core/minions/wait-for-completion.ts) replaces modules for every file in the process
+test/cycle-patterns-read-budget.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts, ../src/core/cycle/synthesize.ts, ../src/core/minions/wait-for-completion.ts) replaces modules for every file in the process
 test/cycle-pglite-lock-ordering.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/cycle-start-recovery-throw.serial.test.ts	R2	R2: mock.module(../src/core/minions/queue.ts) replaces modules for every file in the process
 test/cycle/cycle-sync-uncommitted-warn.serial.test.ts	R2	R2: mock.module(../../src/commands/sync.ts) replaces modules for every file in the process
