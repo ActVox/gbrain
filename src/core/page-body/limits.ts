@@ -38,6 +38,8 @@ export const SEGMENT_MAX_BYTES = 1024 * 1024;
 export const BODY_LEAD_BYTES = 64 * 1024;
 /** Frontmatter of a streamed page must close within this many bytes of the file head. */
 export const FRONTMATTER_HEAD_MAX_BYTES = 256 * 1024;
+/** Pass 1 holds a line whole up to this many bytes; a longer line is read in slices of this size into bounded summaries. */
+export const SCAN_LINE_BUFFER_BYTES = 64 * 1024;
 
 /** Default segmented page ceiling per engine (`pages.max_bytes` when the switch is on). */
 export const SEGMENTED_PAGE_CEILING_BYTES: Readonly<Record<'postgres' | 'pglite', number>> = {
