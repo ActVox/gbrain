@@ -64,10 +64,13 @@ test/import-revision-concurrency.test.ts
 test/keyword-statement-timeout-knob-6495.test.ts
 test/lane-apply-pipelining.test.ts
 test/large-pages/chunk-visibility.test.ts
+test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
 test/large-pages/forget-scope.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
+test/large-pages/managed-sync-streamed.test.ts
+test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
 test/large-pages/projection-parity.test.ts
 test/large-pages/purge-segments.test.ts
