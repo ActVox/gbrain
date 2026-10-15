@@ -446,6 +446,10 @@ export async function importFromContent(
   const { assertPreparedFactWithdrawals, preserveWithdrawnFenceRows } = await import('./facts/withdrawal.ts');
   parsed.compiled_truth = await preserveWithdrawnFenceRows(engine, sourceId ?? 'default', parsed.compiled_truth, slug);
   parsed.timeline = await preserveWithdrawnFenceRows(engine, sourceId ?? 'default', parsed.timeline, slug);
+  // #6545: the rewrites above run after parseMarkdown trimmed the body (a fence insert appends "\n"); store the
+  // parse-normal form of the file this row serializes to, so the canonical file still matches its own row.
+  parsed.compiled_truth = parsed.compiled_truth.trim();
+  parsed.timeline = parsed.timeline.trim();
 
   // #1035: absence of an explicit frontmatter `type:` on an EXISTING page
   // means "preserve the stored type", not "re-infer". Pre-fix, a round-trip
