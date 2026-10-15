@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.248.0] - 2026-10-15
 
 **`gbrain sync status --json` now always includes `checkpoint_blockers`, and managed sync has a convergence gate in CI (#6712).** `checkpoint_blockers` used to appear only while a run waited at its checkpoint, so an agent reading the status of a finished run, a run still mid-manifest or a source with no run could not tell "nothing blocks" from "not reported". It is now an array on every status, empty when no checkpoint is pending. Behind the scenes, every change to persistence, sync, projections or storage now has to pass a gate that kills sync clients and the serve at seeded points while other writers keep writing, then checks that one or two plain `gbrain sync --no-pull` runs bring every file and page back into agreement without losing an acknowledged write.
 
