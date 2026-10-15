@@ -9,7 +9,9 @@ import type { ImportResult, ParsedPage } from '../import-file.ts';
  * timeline. `chunkerSeal`: a coordinated apply left the page's chunker version
  * to the caller, which stamps it with its text seal (`sealImportedPage`).
  */
-export interface PreparedImportApplied { pageId?: number; sealed: boolean; chunkerSeal?: number }
+export interface PreparedImportApplied { pageId?: number; sealed: boolean; chunkerSeal?: number;
+  /** Wave B: the apply published a segmented body; when `complete` the caller seals it with `sealSegmentedPage`, never the inline seals. */
+  segmented?: { complete: boolean } }
 
 /** Parsing/provider work is complete. apply must run under the coordinator's transaction. */
 export interface PreparedContentImport {
@@ -23,4 +25,6 @@ export interface PreparedContentImport {
   validate(tx: BrainEngine): Promise<void>;
   /** `preimage` (#5984): the publisher's guarded read of this page at the observed revision (see PreparedMutation.apply). */
   apply(tx: BrainEngine, preimage?: PageSnapshot | null): Promise<PreparedImportApplied | void>;
+  /** Wave B: runs after the publication committed (a segmented page left unsealed is chunked and sealed). */
+  afterCommit?(engine: BrainEngine): Promise<void>;
 }

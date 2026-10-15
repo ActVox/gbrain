@@ -942,6 +942,19 @@ export async function vacuumPersistenceQueues(engine: BrainEngine): Promise<numb
 }
 
 /**
+ * Wave B segment GC (spec 3.5), run by the resident owner next to the queue
+ * vacuum: expires body stagings past their deadlines (their staged manifest
+ * and chunk rows go with them), deletes retired chunk rows and manifest rows
+ * no retained generation needs, and unreferenced segment texts past the grace
+ * window. A brain that never staged a segment pays one existence probe.
+ */
+export async function sweepSegmentStorage(engine: BrainEngine): Promise<void> {
+  const [row] = await engine.executeRaw<{ present: boolean }>(
+    'SELECT EXISTS (SELECT 1 FROM page_body_stagings) OR EXISTS (SELECT 1 FROM page_segment_texts) AS present');
+  if (row?.present) await engine.sweepSegments({ expireStagings: true });
+}
+
+/**
  * #6696 (A9): compaction drops the intent, and a sync receipt's `intent.runId`
  * is how a resumed run finds what it committed. A receipt of a run whose
  * managed-sync cursor is still open (not done) is never compacted, nor the newest

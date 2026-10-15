@@ -399,6 +399,8 @@ export function assessContentSanity(opts: {
   timeline: string;
   /** Post-parseMarkdown title. Some patterns key on title alone. */
   title: string;
+  /** UTF-8 bytes of the whole body when `compiled_truth`/`timeline` hold only its head (a streamed page over the single-string ceiling). */
+  body_bytes?: number;
   /** Effective warn threshold; defaults to DEFAULT_BYTES_WARN. */
   bytes_warn?: number;
   /** Effective block threshold; defaults to DEFAULT_BYTES_BLOCK. */
@@ -442,7 +444,7 @@ export function assessContentSanity(opts: {
   // octet_length() does at the DB layer, so the two surfaces agree on
   // the same page (D2 parity).
   const body = opts.compiled_truth + (opts.timeline ? '\n' + opts.timeline : '');
-  const bytes = Buffer.byteLength(body, 'utf-8');
+  const bytes = opts.body_bytes ?? Buffer.byteLength(body, 'utf-8');
   const oversize = bytes > bytes_block;
 
   // Head-slice for pattern evaluation. Cost stays O(SCAN_HEAD_BYTES)
