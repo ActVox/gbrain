@@ -13,7 +13,7 @@
  * 3. PGLite always; PostgreSQL when DATABASE_URL is set (test/postgres-unit-arms.txt).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -45,10 +45,12 @@ function expectSegmented(run: () => unknown): void {
   try { run(); } catch (e) { error = e; }
   expect((error as { code?: string } | undefined)?.code).toBe('page_body_segmented');
 }
-async function expectSegmentedAsync(run: () => Promise<unknown>): Promise<void> {
+/** Asserts `run` rejects with page_body_segmented raised at `site` (the writer's own guard, not a later getter). */
+async function expectSegmentedAsync(run: () => Promise<unknown>, site: string): Promise<void> {
   let error: unknown;
   try { await run(); } catch (e) { error = e; }
   expect((error as { code?: string } | undefined)?.code).toBe('page_body_segmented');
+  expect((error as Error).message.startsWith(`${site}: `)).toBe(true);
 }
 function expectUnreachable(page: object): void {
   expect(isSegmentedPage(page as never)).toBe(true);
@@ -164,14 +166,40 @@ for (const kind of ['pglite', 'postgres'] as const) {
       // Rows 15-18: preparers render the page as markdown before writing anything.
       expectSegmented(() => serializePageToMarkdown(snapshot.page, snapshot.tags));
       // Row 13: the withdrawal materializer.
-      await expectSegmentedAsync(() => materializePageSnapshot(engine, snapshot));
-      // Row 11: timeline write-through (DB and file).
-      await expectSegmentedAsync(() => writeTimelineEntryThrough(engine, SLUG, sourceId, { date: '2026-10-03', summary: 'probe' }));
+      await expectSegmentedAsync(() => materializePageSnapshot(engine, snapshot), 'materializePageSnapshot');
+      // Row 11: timeline write-through refuses before touching the file or the row (it reports failures as an outcome).
+      const brain = join(fixture, 'brain');
+      mkdirSync(join(brain, 'notes'), { recursive: true });
+      const file = join(brain, `${SLUG}.md`);
+      writeFileSync(file, `---\ntype: note\ntitle: ${SLUG}\n---\n\n${TRUTH}\n<!-- timeline -->\n${TIMELINE}`);
+      const fileBefore = readFileSync(file, 'utf8');
+      await engine.executeRaw('UPDATE sources SET local_path=$2 WHERE id=$1', [sourceId, brain]);
+      try {
+        const outcome = await writeTimelineEntryThrough(engine, SLUG, sourceId, { date: '2026-10-03', summary: 'probe' });
+        expect(outcome).toMatchObject({ handled: false });
+        expect((outcome as { error?: string }).error).toContain('stores its body in segments');
+      } finally {
+        await engine.executeRaw('UPDATE sources SET local_path=NULL WHERE id=$1', [sourceId]);
+      }
+      expect(readFileSync(file, 'utf8')).toBe(fileBefore);
       // Row 19: concept and enrich fence preservation.
       expectSegmented(() => preserveCanonicalFences(snapshot.page, '# replacement\n'));
       // Row 12: tag and timeline writes through the persistence coordinator.
-      expect(await call('add_tag', { slug: SLUG, tag: 'probe', request_id: randomUUID() })).toMatchObject({ error: 'page_body_segmented' });
-      expect(await call('add_timeline_entry', { slug: SLUG, date: '2026-10-03', summary: 'probe', request_id: randomUUID() })).toMatchObject({ error: 'page_body_segmented' });
+      const tag = await call('add_tag', { slug: SLUG, tag: 'probe', request_id: randomUUID() });
+      expect(tag).toMatchObject({ error: 'page_body_segmented' });
+      expect(String(tag.message)).toStartWith('add_tag: ');
+      const entry = await call('add_timeline_entry', { slug: SLUG, date: '2026-10-03', summary: 'probe', request_id: randomUUID() });
+      expect(entry).toMatchObject({ error: 'page_body_segmented' });
+      expect(String(entry.message)).toStartWith('add_timeline_entry: ');
+      expect(await state()).toEqual(before);
+    });
+
+    test('mutation probe: forget_fact records the withdrawal and leaves the segmented body alone', async () => {
+      const before = await state();
+      const [fact] = await engine.executeRaw<{ id: number }>(`INSERT INTO facts (fact, source, source_id, entity_slug, source_markdown_slug, visibility)
+        VALUES ('acme-example ships widgets', 'fixture', $1, $2, $2, 'private') RETURNING id`, [sourceId, SLUG]);
+      const out = await call('forget_fact', { id: Number(fact!.id), request_id: randomUUID() });
+      expect(out).toMatchObject({ state: 'committed', expired: true });
       expect(await state()).toEqual(before);
     });
   });
