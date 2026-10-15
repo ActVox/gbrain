@@ -358,6 +358,16 @@ More: [docs/guides/dream-patterns.md#budget-sizing](../../docs/guides/dream-patt
 
 More: [docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover](../../docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover)
 
+### calendar_unreadable
+
+<a id="calendar_unreadable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A Google source's configured calendar returned HTTP 403 or 404 to its account, so its sync imports no events. | Without the typed result an unreadable calendar looks exactly like an empty one. The calendar sweep records it in the source's connector state (the run is not failed); `gbrain doctor` (google_calendar_readable) reads it with no network call and `gbrain google status` probes it live. | List the calendars the account can read with `gbrain google calendars --account <email>`, then point the source at one with `gbrain sources set-calendar <source> <calendar-id>` and run `gbrain sync --source <source>`. Run: gbrain google calendars --json | agent | `gbrain doctor --only google_calendar_readable --json` | 1 | no |
+
+More: [docs/guides/google-connect.md#unreadable-calendar](../../docs/guides/google-connect.md#unreadable-calendar)
+
 ### cancelled
 
 <a id="cancelled"></a>
