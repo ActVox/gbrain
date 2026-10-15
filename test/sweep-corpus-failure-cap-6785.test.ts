@@ -15,7 +15,11 @@
  * grows; one extraction-config change re-arms it once; the operator retry
  * (`gbrain sweep --retry-failed --apply`, named as doctor's paid fix)
  * extracts it and its facts land; the HTTP drain logs skip reasons and
- * thrown errors instead of discarding them.
+ * thrown errors instead of discarding them. Stopped files never starve a
+ * healthy one; a thrown window counts against the sweep total; a paid
+ * window that cannot commit counts as a failure and a refused call does not;
+ * the writeback harvest honours the cap; the drain and the doctor backlog
+ * classify files like the sweep.
  *
  * The preflight, drain and cost assertions import only modules that predate
  * #6785 and fail on the old tree. Hermetic in-memory PGLite + transport stubs.
@@ -29,10 +33,12 @@ import { armCorpusDrain, CORPUS_INGESTED_SUFFIX, runMaintenanceSweep, type Sweep
 import { __setChatTransportForTests, __setEmbedTransportForTests, configureGateway, resetGateway, type ChatResult } from '../src/core/ai/gateway.ts';
 import type { CapabilityReport } from '../src/core/capability.ts';
 import { toCorpusText } from '../src/core/transcripts/claude-code-jsonl.ts';
-import { appendSegmentLedger, ensureCorpusSpoolDir, segmentFileName, sessionCorpusFileName, writeSegment } from '../src/core/context/corpus-segments.ts';
+import { appendSegmentLedger, ensureCorpusSpoolDir, segmentFileName, sessionCorpusFileName, wbFileName, writeSegment } from '../src/core/context/corpus-segments.ts';
 import { __drainCheckpointHarvestForTests, __resetCheckpointHarvestForTests, HARVEST_RECEIPT_SUFFIX, scheduleCheckpointHarvest } from '../src/core/context/checkpoint-harvest.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
+import { parseCorpusTurns } from '../src/core/context/corpus-turns.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const KEYED: CapabilityReport = {
@@ -220,12 +226,17 @@ describe('#6785: a window that keeps failing after its model call is capped', ()
     await engine.disconnect();
   });
 
-  const at = async (nowMs: number): Promise<{ paid: boolean; report: SweepReport }> => {
+  const at = async (nowMs: number, extra: { batchLimit?: number; env?: Record<string, string> } = {}): Promise<{ paid: boolean; calls: number; report: SweepReport }> => {
     const before = chatCalls;
-    const report = await withEnv({ GBRAIN_HOME: home }, () =>
-      runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED, budgetMs: 120_000, now: () => nowMs, log: (m) => logs.push(m) }));
-    return { paid: chatCalls > before, report };
+    const report = await withEnv({ GBRAIN_HOME: home, ...extra.env }, () =>
+      runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED, budgetMs: 120_000, now: () => nowMs, log: (m) => logs.push(m),
+        ...(extra.batchLimit ? { batchLimit: extra.batchLimit } : {}) }));
+    return { paid: chatCalls > before, calls: chatCalls - before, report };
   };
+  /** A failure record that stops the file's window (count at the cap, no fingerprint to re-arm on). */
+  const stopped = (file: string, key = 'k@0', incarnation: string | null = null): void => writeFileSync(file + '.failures.json', JSON.stringify({
+    version: 1, key, source_incarnation: incarnation, count: 5, first_at: 0, last_at: 0, last_code: 'provider_error', fingerprint: null, rearmed: false,
+  }) + '\n');
 
   /** Five failed attempts on the schedule: now, the next sweep, +10, +20, +40 minutes. */
   async function capped(file: string, t0: number): Promise<void> {
@@ -338,5 +349,116 @@ describe('#6785: a window that keeps failing after its model call is capped', ()
     expect(corpusFailureGate(record, 'abc@0', 'inc-a', 'f2', 1e12)).toBe('run');
     expect(corpusFailureGate({ ...record, rearmed: true }, 'abc@0', 'inc-a', 'f2', 1e12)).toBe('dead_lettered');
     expect(corpusFailureGate({ ...record, fingerprint: null }, 'abc@0', 'inc-a', 'f2', 1e12)).toBe('dead_lettered');
+  });
+  test('stopped files never take every batch slot: a healthy file behind them is still extracted', async () => {
+    failing = false;
+    const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>(`SELECT incarnation::text AS incarnation FROM sources WHERE id = 'default'`);
+    for (const n of ['a-stopped-1.txt', 'a-stopped-2.txt', 'a-stopped-3.txt']) {
+      writeFileSync(join(dir, n), turnsText(2));
+      stopped(join(dir, n), `${parseCorpusTurns(turnsText(2))[0].sha256}@0`, incarnation);
+    }
+    const healthy = join(dir, 'z-healthy.txt');
+    writeFileSync(healthy, turnsText(2));
+    const r = await at(Date.UTC(2026, 9, 15, 12), { batchLimit: 2 });
+    expect(r.report.corpusIngested).toBe(1);
+    expect(r.calls).toBe(1);
+    expect(skipped(r.report, 'corpus_window_dead_lettered')).toBe(1);
+    expect(existsSync(healthy + CORPUS_INGESTED_SUFFIX)).toBe(true);
+    expect(existsSync(join(dir, 'a-stopped-1.txt') + CORPUS_INGESTED_SUFFIX)).toBe(false);
+  });
+
+  test('a thrown window counts against the sweep total: GBRAIN_CORPUS_WINDOWS_PER_SWEEP=1 pays once', async () => {
+    for (const n of ['fail-1.txt', 'fail-2.txt']) writeFileSync(join(dir, n), turnsText(2));
+    const spool = ensureCorpusSpoolDir(dir);
+    await engine.setConfig('memory.auto_writeback', 'salient');
+    try {
+      for (const h of ['c', 'd']) writeFileSync(join(spool, wbFileName(`sess-${h}`, h.repeat(24), 'default')), '[user]\nWB I keep a written log of every decision I make.\n');
+      const r = await at(Date.UTC(2026, 9, 15, 12), { env: { GBRAIN_CORPUS_WINDOWS_PER_SWEEP: '1' } });
+      expect(r.calls).toBe(1);
+      expect(skipped(r.report, 'corpus_window_cap')).toBeGreaterThan(0);
+    } finally {
+      await engine.unsetConfig('memory.auto_writeback');
+    }
+  });
+
+  test('a paid window whose progress cannot commit counts as a failure', async () => {
+    failing = false;
+    const file = join(dir, 'lock-held.txt');
+    writeFileSync(file, turnsText(1));
+    __setChatTransportForTests(async (): Promise<ChatResult> => {
+      chatCalls++;
+      writeFileSync(file + '.progress.lock', `${process.pid}\n`);
+      return { text: fact(null), blocks: [], stopReason: 'end', usage, model: 'anthropic:test-stub', providerId: 'anthropic' };
+    });
+    const r = await at(Date.UTC(2026, 9, 15, 12));
+    rmSync(file + '.progress.lock', { force: true });
+    expect(r.paid).toBe(true);
+    expect(existsSync(file + CORPUS_INGESTED_SUFFIX)).toBe(false);
+    const record = JSON.parse(readFileSync(file + '.failures.json', 'utf8'));
+    expect([record.count, record.last_code]).toEqual([1, 'corpus_progress_contended']);
+  });
+
+  test('a call the spend guard refuses before the provider is not counted', async () => {
+    const file = join(dir, 'refused.txt');
+    writeFileSync(file, turnsText(2));
+    const r = await withAIInvocationGuard(async () => { throw Object.assign(new Error('spend cap reached'), { code: 'budget_exceeded' }); },
+      () => at(Date.UTC(2026, 9, 15, 12)));
+    expect(r.calls).toBe(0);
+    expect(existsSync(file + '.failures.json')).toBe(false);
+    expect(existsSync(file + CORPUS_INGESTED_SUFFIX)).toBe(false);
+  });
+
+  test('the writeback harvest honours the cap: a stopped turn file is not paid for', async () => {
+    failing = false;
+    const spool = ensureCorpusSpoolDir(dir);
+    const name = wbFileName('sess-wb-stopped', 'e'.repeat(24), 'default');
+    const wb = join(spool, name);
+    writeFileSync(wb, '[user]\nWB I keep a written log of every decision I make.\n');
+    stopped(wb, 'turn');
+    await engine.setConfig('memory.auto_writeback', 'salient');
+    const before = chatCalls;
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        for (let i = 0; i < 3; i++) {
+          expect(scheduleCheckpointHarvest({ engine, sourceId: 'default', sessionId: 'sess-wb-stopped', corpusDir: spool, file: name, lane: 'writeback', capabilities: KEYED }).status).toBe('scheduled');
+          await __drainCheckpointHarvestForTests();
+        }
+      });
+    } finally {
+      await engine.unsetConfig('memory.auto_writeback');
+    }
+    expect(chatCalls).toBe(before);
+    expect(existsSync(wb + CORPUS_INGESTED_SUFFIX)).toBe(false);
+    expect(JSON.parse(readFileSync(wb + '.failures.json', 'utf8')).count).toBe(5);
+  });
+
+  test('the drain and the doctor backlog use the completion classifier: a rewritten finished file is pending, a stopped one does not wake the drain', async () => {
+    failing = false;
+    const file = join(dir, 'rewritten.txt');
+    writeFileSync(file, turnsText(2));
+    expect((await at(Date.UTC(2026, 9, 15, 12))).report.corpusIngested).toBe(1);
+    const { corpusBacklog } = await import('../src/core/context/corpus-segments.ts');
+    expect(corpusBacklog(dir, 30 * 1440 * MIN).pending).toBe(0);
+    let drained = 0;
+    const drain = () => armCorpusDrain(engine, { env: {}, setIntervalFn: () => 0, clearIntervalFn: () => {},
+      sweep: async () => { drained++; return { skipped: [] }; }, log: () => {} } as never)!;
+    const d1 = drain();
+    await withEnv({ GBRAIN_HOME: home }, () => d1.tick());
+    d1.cancel();
+    expect(drained).toBe(0);
+
+    writeFileSync(file, turnsText(3));
+    expect(corpusBacklog(dir, 30 * 1440 * MIN).pending).toBe(1);
+    const d2 = drain();
+    await withEnv({ GBRAIN_HOME: home }, () => d2.tick());
+    d2.cancel();
+    expect(drained).toBe(1);
+
+    rmSync(file + CORPUS_INGESTED_SUFFIX);
+    stopped(file);
+    const d3 = drain();
+    await withEnv({ GBRAIN_HOME: home }, () => d3.tick());
+    d3.cancel();
+    expect(drained).toBe(1);
   });
 });

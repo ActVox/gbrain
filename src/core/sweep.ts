@@ -631,6 +631,11 @@ async function runCorpusIngestPass(
   const windows = await import('./context/corpus-windows.ts');
   type Candidate = { base: string; name: string; location: 'spool' | 'legacy'; label: string };
   const candidates: Candidate[] = [];
+  const deferred: Candidate[] = [];
+  // #6785: a capped window re-arms once when this fingerprint changed since its last failure.
+  const { extractionConfigFingerprint } = await import('./facts/extraction-availability.ts');
+  const fingerprint = await extractionConfigFingerprint(engine).catch(() => null);
+  const parkedAt = now();
   for (const [base, location] of [[spoolDir, 'spool'], [dir, 'legacy']] as const) {
     let entries: string[];
     try {
@@ -643,12 +648,14 @@ async function runCorpusIngestPass(
     const txtFiles = entries.filter(n => n.endsWith('.txt')).sort();
     if (txtFiles.length === 0) continue;
     // #5887: finished files re-enter when changed since their `.progress`.
-    const picked = await windows.selectCorpusCandidates(base, txtFiles, entrySet, batchLimit - candidates.length, overBudget);
+    const picked = await windows.selectCorpusCandidates(base, txtFiles, entrySet, batchLimit - candidates.length, overBudget,
+      (full) => windows.corpusFileParked(full, fingerprint, parkedAt));
     skip('already_ingested', picked.alreadyIngested);
-    for (const name of picked.candidates) {
-      candidates.push({ base, name, location, label: location === 'spool' ? join(CORPUS_SPOOL_SUBDIR, name) : name });
-    }
+    const label = (name: string) => location === 'spool' ? join(CORPUS_SPOOL_SUBDIR, name) : name;
+    for (const name of picked.candidates) candidates.push({ base, name, location, label: label(name) });
+    for (const name of picked.deferred) deferred.push({ base, name, location, label: label(name) });
   }
+  candidates.push(...deferred.slice(0, Math.max(0, batchLimit - candidates.length)));
   if (candidates.length === 0) return;
 
   // #6091: every corpus file answers to the capture gate, resolved once per
@@ -696,9 +703,6 @@ async function runCorpusIngestPass(
     return;
   }
 
-  // #6785: a capped window re-arms once when this fingerprint changed since its last failure.
-  const { extractionConfigFingerprint } = await import('./facts/extraction-availability.ts');
-  const fingerprint = await extractionConfigFingerprint(engine).catch(() => null);
   const writerRefused = await corpusWriterPreflight(engine, log);
 
   const { runFactsPipeline } = await import('./facts/backstop.ts');
@@ -727,6 +731,7 @@ async function runCorpusIngestPass(
     }
 
     let abortLoop = false;
+    const attempted = { count: 0 };
     try {
       // Re-check under the claim: another sweep may have finished this file
       // between our readdir and our claim (it releases its claim only after
@@ -806,10 +811,9 @@ async function runCorpusIngestPass(
       let r: Awaited<ReturnType<typeof runFactsPipeline>>;
       if (wbMeta) {
         const turn = await windows.runCorpusTurn({
-          full, signal, incarnation: fileSource.incarnation, failures: { fingerprint, now },
+          full, signal, incarnation: fileSource.incarnation, failures: { fingerprint, now }, attempted,
           extract: () => runFactsPipeline(corpusTextForExtraction(name, raw), pipelineCtx),
         });
-        if (turn.status !== 'backoff' && turn.status !== 'dead_lettered') windowsLeft -= 1;
         if (turn.status !== 'complete') {
           abortLoop = turn.status === 'unavailable';
           skip(CORPUS_WINDOW_SKIP[turn.status], abortLoop ? candidates.length - i : 1);
@@ -823,9 +827,8 @@ async function runCorpusIngestPass(
           source: { id: fileSource.sourceId, incarnation: fileSource.incarnation },
           maxWindows: Math.min(windows.CORPUS_WINDOWS_PER_SWEEP, windowsLeft),
           extract: text => runFactsPipeline(text, pipelineCtx),
-          failures: { fingerprint, now },
+          failures: { fingerprint, now }, attempted,
         });
-        windowsLeft -= run.windowsDone;
         report.corpus_files.push({ file: label, windows_done: run.windowsDone, windows_remaining: run.windowsRemaining });
         if (run.status !== 'complete') {
           abortLoop = run.status === 'aborted' || run.status === 'unavailable';
@@ -884,6 +887,8 @@ async function runCorpusIngestPass(
         log(`[sweep] corpus ingest failed for ${name}${typeof code === 'string' ? ` (${code})` : ''}: ${e instanceof Error ? e.message : String(e)}`);
       }
     } finally {
+      // #6785: every attempted window counts against the total, a thrown one included.
+      windowsLeft -= attempted.count;
       // Success (its .ingested sidecar now stands in) and failure (retry next
       // sweep) both release the claim.
       await rm(claimPath, { force: true }).catch(() => {});
@@ -1043,18 +1048,35 @@ export interface CorpusDrainOpts {
   log?: (msg: string) => void;
 }
 
-/** True when the corpus dir holds a `.txt` with no final `.ingested` sidecar (#6786). Missing dir = false. */
+/**
+ * True when the corpus dir holds a `.txt` the sweep would extract: not
+ * finished by the one classifier (#6786), and not stopped at the failure cap
+ * (#6785; a backing-off file still counts). Missing dir = false.
+ */
 async function corpusHasPendingFiles(engine: BrainEngine): Promise<boolean> {
   let dir = await engine.getConfig('dream.synthesize.session_corpus_dir');
   if (!dir) {
     const { configDir } = await import('./config.ts');
     dir = join(configDir(), 'transcripts', 'corpus');
   }
-  const { corpusSidecarState, corpusSpoolDir } = await import('./context/corpus-segments.ts');
+  const { CORPUS_FAILURE_SUFFIX, corpusFileAwaitsExtraction, corpusSpoolDir, readCorpusFailure } = await import('./context/corpus-segments.ts');
+  const { corpusFailureGate } = await import('./context/corpus-windows.ts');
+  const { extractionConfigFingerprint } = await import('./facts/extraction-availability.ts');
+  let fingerprint: Promise<string | null> | null = null;
+  const stopped = async (full: string): Promise<boolean> => {
+    const rec = readCorpusFailure(full);
+    if (!rec) return false;
+    fingerprint ??= extractionConfigFingerprint(engine).catch(() => null);
+    return corpusFailureGate(rec, rec.key, rec.source_incarnation, await fingerprint, Date.now()) === 'dead_lettered';
+  };
   for (const base of [corpusSpoolDir(dir), dir]) {
     const names = await readdir(base).catch(() => [] as string[]);
     const present = new Set(names);
-    if (names.some(n => n.endsWith('.txt') && (!present.has(n + CORPUS_INGESTED_SUFFIX) || corpusSidecarState(join(base, n)) !== 'final'))) return true;
+    for (const n of names) {
+      if (!n.endsWith('.txt') || !corpusFileAwaitsExtraction(join(base, n), n)) continue;
+      if (present.has(n + CORPUS_FAILURE_SUFFIX) && await stopped(join(base, n))) continue;
+      return true;
+    }
   }
   return false;
 }

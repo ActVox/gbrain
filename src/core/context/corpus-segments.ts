@@ -699,6 +699,15 @@ export function corpusFileFinished(state: CorpusFileCompletion): boolean {
   return state === 'done' || state === 'legacy';
 }
 
+/** Whether a corpus file still waits for extraction, by `corpusFileCompletion`; a file that is gone does not. */
+export function corpusFileAwaitsExtraction(full: string, name: string): boolean {
+  try {
+    return !corpusFileFinished(corpusFileCompletion(full, name));
+  } catch {
+    return existsSync(full);
+  }
+}
+
 /**
  * #6785: per-file record of the one corpus window (or writeback turn) whose
  * extraction keeps failing after the model call. Written under the file's
@@ -757,7 +766,7 @@ export function listCorpusFailures(dir: string): Array<{ name: string; full: str
 }
 
 export interface CorpusBacklog {
-  /** `.txt` files with no final `.ingested` sidecar. */
+  /** `.txt` files not finished by `corpusFileCompletion` (no final sidecar, or windows left). */
   pending: number;
   /** mtime of the oldest pending file, or null with none pending. */
   oldestPendingMtimeMs: number | null;
@@ -777,7 +786,7 @@ export function corpusBacklog(dir: string, retentionMs: number, now = Date.now()
   const present = new Set(names);
   for (const name of names) {
     if (!name.endsWith('.txt')) continue;
-    if (present.has(name + INGESTED_SUFFIX) && corpusSidecarState(join(dir, name)) === 'final') continue;
+    if (present.has(name + INGESTED_SUFFIX) && !corpusFileAwaitsExtraction(join(dir, name), name)) continue;
     let mtimeMs: number;
     try {
       mtimeMs = statSync(join(dir, name)).mtimeMs;

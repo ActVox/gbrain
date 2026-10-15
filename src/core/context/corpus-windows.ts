@@ -32,7 +32,7 @@ import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MAX_TURN_TEXT_CHARS } from '../facts/extract.ts';
 import type { runFactsPipeline } from '../facts/backstop.ts';
-import { isAIInvocationPolicyError, withAIInvocationPreflight } from '../ai/invocation-guard.ts';
+import { isAIInvocationPolicyError, withAIInvocationGuard } from '../ai/invocation-guard.ts';
 import { parseCorpusTurns, type CorpusTurn } from './corpus-turns.ts';
 import {
   CORPUS_FAILURE_SUFFIX, CORPUS_NON_TERMINAL_SKIPS, CORPUS_PROGRESS_LOCK_SUFFIX, CORPUS_PROGRESS_SUFFIX, CORPUS_WINDOW_FAILURE_CAP,
@@ -435,11 +435,29 @@ function rearms(record: CorpusFailureRecord, fingerprint: string | null): boolea
 }
 
 /**
- * #6785: run one extraction; when it throws after reaching a chat model call
- * (the spend), count a failure against the window at `key`, then rethrow.
- * A throw before any model call, an abort, a spend-policy refusal, or capture
- * switched off mid-call (the next sweep retires the file) costs nothing to
- * retry and is not counted.
+ * #6785: whether the file's recorded failing window is backing off or
+ * stopped right now. Selection serves these files last, so stopped files
+ * never take every batch slot from healthy ones.
+ */
+export function corpusFileParked(full: string, fingerprint: string | null, nowMs: number): boolean {
+  const record = readCorpusFailure(full);
+  return !!record && corpusFailureGate(record, record.key, record.source_incarnation, fingerprint, nowMs) !== 'run';
+}
+
+function isPolicyRefusal(e: unknown): boolean {
+  for (let cur: unknown = e, depth = 0; cur && depth < 8; cur = (cur as { cause?: unknown }).cause, depth++) {
+    if (isAIInvocationPolicyError(cur)) return true;
+  }
+  return false;
+}
+
+/**
+ * #6785: run one extraction; when it throws after a chat model call was
+ * admitted (the spend), count a failure against the window at `key`, then
+ * rethrow. A throw before any admitted model call (a spend-policy refusal
+ * included, however the extractor wraps it), an abort, or capture switched
+ * off mid-call (the next sweep retires the file) costs nothing to retry and
+ * is not counted.
  */
 export async function extractUnderFailureCount<T>(
   failure: { full: string; record: CorpusFailureRecord | null; key: string; incarnation: string | null; fingerprint: string | null; nowMs: () => number; signal?: AbortSignal },
@@ -447,10 +465,14 @@ export async function extractUnderFailureCount<T>(
 ): Promise<T> {
   let chatCalled = false;
   try {
-    return await withAIInvocationPreflight(async (call) => { if (call.kind === 'chat') chatCalled = true; }, extract);
+    // Inherit: an outer guard admits first, so this one only sees admitted calls.
+    return await withAIInvocationGuard(async (call) => {
+      if (call.kind === 'chat') chatCalled = true;
+      return { settle: async () => {} };
+    }, extract, { inherit: true });
   } catch (e) {
     const counts = chatCalled && !failure.signal?.aborted && !(e instanceof Error && e.name === 'AbortError')
-      && !isAIInvocationPolicyError(e) && (e as { code?: unknown } | null)?.code !== 'ambient_capture_off';
+      && !isPolicyRefusal(e) && (e as { code?: unknown } | null)?.code !== 'ambient_capture_off';
     if (counts) {
       await recordCorpusFailure(failure.full, failure.record, failure.key, failure.incarnation, failure.fingerprint, failure.nowMs(), e).catch(() => {});
     }
@@ -514,6 +536,8 @@ export async function runCorpusTurn(opts: {
   signal?: AbortSignal;
   incarnation: string | null;
   failures?: { fingerprint: string | null; now?: () => number };
+  /** Incremented before each attempted extraction, thrown or not: the caller's window budget. */
+  attempted?: { count: number };
   extract: () => Promise<PipelineResult>;
 }): Promise<{ status: 'complete'; result: PipelineResult } | { status: 'unavailable' | 'backoff' | 'dead_lettered' }> {
   const fingerprint = opts.failures?.fingerprint ?? null;
@@ -521,6 +545,7 @@ export async function runCorpusTurn(opts: {
   const record = readCorpusFailure(opts.full);
   const gate = corpusFailureGate(record, CORPUS_TURN_FAILURE_KEY, opts.incarnation, fingerprint, clock());
   if (gate !== 'run') return { status: gate };
+  if (opts.attempted) opts.attempted.count++;
   const result = await extractUnderFailureCount(
     { full: opts.full, record, key: CORPUS_TURN_FAILURE_KEY, incarnation: opts.incarnation, fingerprint, nowMs: clock, signal: opts.signal },
     opts.extract,
@@ -568,6 +593,8 @@ export async function runCorpusWindows(opts: {
   source?: CorpusProgressSource;
   /** #6785: the extraction-config fingerprint that may re-arm a capped window once (null: never), and the clock. */
   failures?: { fingerprint: string | null; now?: () => number };
+  /** Incremented before each attempted window, thrown or not: the caller's window budget. */
+  attempted?: { count: number };
 }): Promise<CorpusWindowRun> {
   const { full, fileStat, signal, source } = opts;
   const incarnation = source?.incarnation ?? null;
@@ -608,6 +635,7 @@ export async function runCorpusWindows(opts: {
         const gate = corpusFailureGate(failure, key, incarnation, fingerprint, clock());
         if (gate !== 'run') { status = gate; break; }
         const text = win.text;
+        if (opts.attempted) opts.attempted.count++;
         r = await extractUnderFailureCount({ full, record: failure, key, incarnation, fingerprint, nowMs: clock, signal }, () => opts.extract(text));
         if (r.skipped_reason && CORPUS_NON_TERMINAL_SKIPS.includes(r.skipped_reason)) { status = 'unavailable'; break; }
       }
@@ -617,7 +645,7 @@ export async function runCorpusWindows(opts: {
       const expectGen = state.generation;
       const expectLast = lastSha(state);
       const advances = finishedTurns.length > 0 || (win.endOffset ?? 0) > cursor.offset;
-      const next: CorpusProgress | null = await updateProgress(full, (cur) => {
+      const commit = updateProgress(full, (cur) => {
         if (!advances || !cur || cur.generation !== expectGen || lastSha(cur) !== expectLast || cur.lease?.owner !== owner) return null;
         const slugs = r ? [...new Set([...cur.entity_slugs, ...r.entity_slugs])].slice(-MAX_ENTITY_SLUGS) : cur.entity_slugs;
         return {
@@ -634,7 +662,22 @@ export async function runCorpusWindows(opts: {
           lease: isLast ? null : { owner, at: Date.now() },
         };
       });
-      if (!next) { status = 'contended'; break; }
+      // #6785: a paid window whose progress did not commit is paid again next time; it counts like a thrown one.
+      const countUncommitted = (e: unknown) => r
+        ? recordCorpusFailure(full, failure, key, incarnation, fingerprint, clock(), e).catch(() => failure)
+        : Promise.resolve(failure);
+      let next: CorpusProgress | null;
+      try {
+        next = await commit;
+      } catch (e) {
+        await countUncommitted(e);
+        throw e;
+      }
+      if (!next) {
+        failure = await countUncommitted({ code: 'corpus_progress_contended' });
+        status = 'contended';
+        break;
+      }
       state = next;
       if (failure?.key === key) {
         await clearCorpusFailure(full).catch(() => {});
@@ -672,7 +715,9 @@ export async function runCorpusWindows(opts: {
  * since `.progress` recorded them (stat compare, no rehash). A
  * pre-window `.ingested` file is adopted at its current turns (budget
  * permitting) so only later growth is extracted. Returns the candidates (at
- * most `batchLimit`) and how many files are already done.
+ * most `batchLimit`), the files `parked` says are backing off or stopped
+ * (#6785: at most `batchLimit`, served after every candidate so they never
+ * starve healthy files), and how many files are already done.
  */
 export async function selectCorpusCandidates(
   dir: string,
@@ -680,8 +725,10 @@ export async function selectCorpusCandidates(
   entrySet: Set<string>,
   batchLimit: number,
   overBudget: () => boolean,
-): Promise<{ candidates: string[]; alreadyIngested: number }> {
+  parked: (full: string) => boolean = () => false,
+): Promise<{ candidates: string[]; deferred: string[]; alreadyIngested: number }> {
   const candidates: string[] = [];
+  const deferred: string[] = [];
   let alreadyIngested = 0;
   for (const name of txtFiles) {
     const full = join(dir, name);
@@ -691,7 +738,9 @@ export async function selectCorpusCandidates(
       if (state === 'legacy' && !overBudget()) await adoptFinishedCorpusFile(full).catch(() => false);
     }
     if (corpusFileFinished(state)) alreadyIngested++;
-    else if (candidates.length < batchLimit) candidates.push(name);
+    else if (entrySet.has(name + CORPUS_FAILURE_SUFFIX) && parked(full)) {
+      if (deferred.length < batchLimit) deferred.push(name);
+    } else if (candidates.length < batchLimit) candidates.push(name);
   }
-  return { candidates, alreadyIngested };
+  return { candidates, deferred, alreadyIngested };
 }

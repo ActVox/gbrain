@@ -37,7 +37,7 @@ import type { CapabilityReport } from '../capability.ts';
 import { acquireCorpusClaim, CORPUS_CLAIM_SUFFIX, CORPUS_INGESTED_SUFFIX } from '../sweep.ts';
 import { appendCheckpointManifest } from './session-state.ts';
 import { corpusFileSessionId, corpusTextForExtraction, parseSegmentFileName, readSegmentLedger, selfCaptureSidecarJson, HARVEST_RECEIPT_SUFFIX } from './corpus-segments.ts';
-import { corpusFileStat, readCorpusProgress, runCorpusWindows } from './corpus-windows.ts';
+import { corpusFileStat, readCorpusProgress, runCorpusTurn, runCorpusWindows } from './corpus-windows.ts';
 import { isClaudeCliSelfSessionId } from '../ai/providers/claude-cli-scratch.ts';
 import { writeHeartbeat } from './hook-heartbeat.ts';
 import { OperationError } from '../ops/contract.ts';
@@ -431,6 +431,7 @@ async function runOne(job: HarvestJob): Promise<{
         // Paste stripping happens per turn inside the window planner (#5812).
         run = await runCorpusWindows({
           full, raw, fileStat, maxWindows: 1, overBudget: () => false, signal: abort.signal,
+          failures: { fingerprint: await harvestFingerprint(job) },
           ...(job.sourceIncarnation ? { source: { id: job.sourceId, incarnation: job.sourceIncarnation } } : {}),
           extract: (text) => runFactsPipeline(text, {
             engine: job.engine,
@@ -593,25 +594,33 @@ async function runWritebackTurn(job: HarvestJob, full: string, ingestedPath: str
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), job.timeoutMs ?? HARVEST_JOB_TIMEOUT_MS);
   currentAbort = abort;
-  let r: Awaited<ReturnType<typeof runFactsPipeline>>;
+  let turn: Awaited<ReturnType<typeof runCorpusTurn>>;
   try {
-    r = await runFactsPipeline(corpusTextForExtraction(job.file, raw), {
-      engine: job.engine,
-      sourceId: job.sourceId,
-      sessionId: job.sessionId,
-      source: 'hook:writeback',
-      mode: 'inline',
-      remote: false,
-      abortSignal: abort.signal,
-      notabilityFilter: gate.mode === 'salient' ? 'medium-and-up' : 'all',
-      // visibility deliberately unset → resolveDefaultVisibility [ENG-8] —
-      // the backstop inherits extract_facts' contract, never widened (req 6).
+    // #6785: the same failure cap as the sweep's turn files (one record per file).
+    turn = await runCorpusTurn({
+      full, signal: abort.signal, incarnation: job.sourceIncarnation ?? null,
+      failures: { fingerprint: await harvestFingerprint(job) },
+      extract: () => runFactsPipeline(corpusTextForExtraction(job.file, raw), {
+        engine: job.engine,
+        sourceId: job.sourceId,
+        sessionId: job.sessionId,
+        source: 'hook:writeback',
+        mode: 'inline',
+        remote: false,
+        abortSignal: abort.signal,
+        notabilityFilter: gate.mode === 'salient' ? 'medium-and-up' : 'all',
+        // visibility deliberately unset → resolveDefaultVisibility [ENG-8] —
+        // the backstop inherits extract_facts' contract, never widened (req 6).
+      }),
     });
   } finally {
     clearTimeout(timer);
     currentAbort = null;
   }
   if (abort.signal.aborted) return { outcome: 'degraded', reason: 'aborted' };
+  if (turn.status === 'unavailable') return { outcome: 'degraded', reason: 'extract_skipped_chat_unavailable' };
+  if (turn.status !== 'complete') return { outcome: 'degraded', reason: `corpus_window_${turn.status}` };
+  const r = turn.result;
   if (r.skipped_reason) {
     // Non-transport extraction skip (refusal / content_filter /
     // malformed_output / non_terminal_stop / chat_unavailable): NOT terminal
@@ -643,6 +652,12 @@ async function runWritebackTurn(job: HarvestJob, full: string, ingestedPath: str
  * write after extraction; the turn stays banked (no sidecar) for the sweep,
  * which holds it under the same check until `gbrain sources writer activate`.
  */
+/** #6785: the extraction-config fingerprint a capped window re-arms on (null: never re-arms). */
+async function harvestFingerprint(job: HarvestJob): Promise<string | null> {
+  const { extractionConfigFingerprint } = await import('../facts/extraction-availability.ts');
+  return extractionConfigFingerprint(job.engine).catch(() => null);
+}
+
 async function writerRefused(job: HarvestJob): Promise<boolean> {
   const { assertSourceLegacyWriter } = await import('../persistence/filesystem-guard.ts');
   try {
