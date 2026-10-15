@@ -47,6 +47,7 @@ import { isMultimodalEnabled } from '../sync.ts';
 import { VERSION } from '../../version.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../chunkers/recursive.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
+import { HOLD_ATTEMPTS_NEEDS_HUMAN } from './sync-fault-class.ts';
 
 export const GIT_HOLD_OP = 'sync-hold';
 export const GIT_HOLD_SUMMARY_OP = 'sync-hold-summary';
@@ -114,6 +115,11 @@ export interface GitHoldMeta {
   stall?: PreparationStallMeta;
   /** #6278: the held entry is a deletion (the file is gone); discovery re-screens it on request or a gbrain change, not on its absence. */
   deleted?: true;
+  /**
+   * #6712 dependency edge: the path of an earlier entry of the same sync, sharing this entry's slug or page id, that was
+   * held in that sync; this entry waits on it with the same code, and discovery re-screens it once that hold is gone.
+   */
+  blocked_on?: string;
 }
 
 /** #6188: why the last fence repair left a hold in place, and when the maintenance run tries it again (null: it does not). */
@@ -389,13 +395,16 @@ export async function readGitHoldListing(engine: Exec, sourceIds: string[], limi
  * parser regressions), or when the gbrain that wrote it read frontmatter or
  * screened fences with an older version than this one. #6278: a
  * `preparation_stalled` hold re-screens when the gbrain version changed (the
- * stall was the owner's, not the file's); otherwise it waits for
- * `sources retry-held`. #6529: a `managed_image_sync_unsupported` hold
+ * stall was the owner's, not the file's), and #6712 on every sync until it
+ * has been held `HOLD_ATTEMPTS_NEEDS_HUMAN` times (attempts count real
+ * re-holds); past that it waits for `sources retry-held`. #6529: a `managed_image_sync_unsupported` hold
  * re-screens whenever multimodal embedding is on, since managed sync then
  * imports the image instead of holding it.
  */
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
   return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression'].includes(record.code)
+    // #6712: a transient hold (the write owner stalled, not the file) is retried by every sync until it has been held HOLD_ATTEMPTS_NEEDS_HUMAN times.
+    || (record.code === 'preparation_stalled' && (record.meta.attempts ?? 1) < HOLD_ATTEMPTS_NEEDS_HUMAN)
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
     || record.meta.recovery_version < RECOVERY_VERSION
     || (record.code === 'invalid_fence' && (record.meta.fence_version ?? 0) < FENCE_VERSION)

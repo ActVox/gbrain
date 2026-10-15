@@ -36,7 +36,7 @@ import { readSyncFile, syncGitPath, type SyncDiscovery, type SyncEntry, type Syn
 import { readTreeBlobs } from './sync-blobs.ts';
 import type { SyncIntent } from './sync-prepare.ts';
 import type { HeldEntry } from './sync-screen.ts';
-import type { GitHoldMeta } from './sync-holds.ts';
+import type { GitHoldMeta, GitHoldRecord } from './sync-holds.ts';
 import { concurrentWriteHold, concurrentWriteProof } from './sync-concurrent-write.ts';
 
 export { HOLD_ATTEMPTS_NEEDS_HUMAN } from './sync-fault-class.ts';
@@ -77,6 +77,42 @@ export async function pageChangeProof(engine: Pick<BrainEngine, 'executeRaw'>, i
   if (!writer || writer.state !== 'committed' || String(writer.kind ?? '').startsWith('managed_sync_')
     || writer.incarnation !== input.incarnation || Number(writer.page_id) !== input.pageId) return null;
   return { request_id: writer.request_id, operation: writer.operation, revision: page.revision };
+}
+
+/**
+ * #6600: proof that a deletion entry the origin check refuses was already carried out: its exact page (the id and the
+ * revision this sync enumerated) is soft-deleted, the revision was written by a committed, authorized delete of that
+ * page in the same source incarnation, and no live page records the entry's origin. Such an entry settles as an
+ * idempotent deletion and clears its hold; a live replacement at the origin, a revision that moved since enumeration or
+ * any other writer keeps the hold.
+ */
+export async function idempotentDeletionProof(engine: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; incarnation: string; pageId: number | null;
+  revision: string | null; sourcePath: string }): Promise<{ request_id: string } | null> {
+  if (input.pageId === null || input.revision === null) return null;
+  const [page] = await engine.executeRaw<{ revision: string; writer: string | null; deleted: boolean }>(
+    'SELECT knowledge_revision::text AS revision, revision_write_request_id::text AS writer, deleted_at IS NOT NULL AS deleted FROM pages WHERE id=$1 AND source_id=$2', [input.pageId, input.sourceId]);
+  if (!page?.deleted || !page.writer || page.revision !== input.revision) return null;
+  const [writer] = await engine.executeRaw<{ request_id: string; operation: string; kind: string | null; state: string; incarnation: string; page_id: number | null }>(
+    `SELECT request_id::text, operation, intent->>'kind' AS kind, state, source_incarnation::text AS incarnation, page_id FROM persistence_requests WHERE id=$1::uuid`, [page.writer]);
+  if (!writer || writer.state !== 'committed' || writer.incarnation !== input.incarnation || Number(writer.page_id) !== input.pageId
+    || !(writer.operation === 'delete_page' || writer.kind === 'managed_sync_delete')) return null;
+  const live = await engine.executeRaw('SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND id<>$2 AND source_path=$3 LIMIT 1', [input.sourceId, input.pageId, input.sourcePath]);
+  return live.length ? null : { request_id: writer.request_id };
+}
+
+/**
+ * #6712 dependency edge: the hold of an entry whose slug or page id an earlier entry of the same sync shares, when that
+ * entry was held in the sync: it takes the predecessor's code and waits on it (`meta.blocked_on`) instead of publishing
+ * against a page whose earlier change never landed.
+ */
+export function dependentHold(entry: HoldEntry, slug: string, pageId: number | null, intent: Pick<SyncIntent, 'content' | 'blobOid'>,
+  predecessor: { path: string; code: GitHoldRecord['code'] }): HeldEntry {
+  const rename: SyncRename | undefined = entry.renameFrom ?? entry.renameHeld;
+  return { path: entry.path, source_path: entry.sourcePath, slug, page_id: pageId, code: predecessor.code,
+    message: `${entry.path} changes page ${slug}, which ${predecessor.path} changes earlier in the same sync, and ${predecessor.path} is held (${predecessor.code}); this file waits on it and the next sync after that hold clears imports it.`,
+    upstream_version: typeof intent.content === 'string' ? sha256(intent.content) : null,
+    meta: { recovery_version: RECOVERY_VERSION, ...(typeof intent.blobOid === 'string' ? { blob_oid: intent.blobOid } : {}), ...(entry.working ? { working: true } : {}),
+      ...(rename ? { rename_from: rename } : {}), ...(entry.action === 'delete' ? { deleted: true as const } : {}), blocked_on: predecessor.path } };
 }
 
 /**

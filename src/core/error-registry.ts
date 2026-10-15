@@ -43,6 +43,12 @@ export interface CodeEntry {
   /** CLI exit code; default derives from class (1). */
   exit?: number;
   retryable?: boolean;
+  /**
+   * The release that retired this code: nothing emits it any more, but receipts and ledger rows an older build wrote still
+   * carry it, so the entry stays and `gbrain errors <code>` still answers. Its fix names the current path, never a retired
+   * key or flag (`test/error-registry-retired.test.ts`).
+   */
+  retired_in?: string;
 }
 
 export const CODES = {
@@ -381,12 +387,13 @@ export const CODES = {
   preview_changed: { class: 'caller', summary: "The state changed since the approved preview." },
   profile_incompatible: { class: 'caller', summary: "The stored profile is incompatible with this operation." },
   projection_owner_resident: { class: 'host_only', summary: "A resident owner holds the projection." },
-  // #6643: a managed sync stopped re-freezing pages that only waited on another page of the same sync.
-  knock_on_exhausted: { class: 'server', summary: "A managed sync kept re-freezing a page that only waited on another page of the same sync, and stopped at its limit because that earlier page still did not commit.",
-    why: "A page cancelled or refused only because an earlier page of its sync did not commit published nothing, so the sync re-freezes it under a fresh request by itself; the limit stops a loop when the earlier page keeps failing.",
+  // #6643, retired by #6712 (one page, one fate): no page waits on another page's fate any more, so nothing re-freezes knock-ons.
+  knock_on_exhausted: { class: 'server', retired_in: '0.60.249.0',
+    summary: "Retired: an older gbrain stopped a managed sync that kept re-freezing a page cancelled only because another page of the same sync did not commit. This build never cancels a page for another page's failure, so the stop is superseded.",
+    why: "Since #6712 each page of a sync has its own fate: a page that does not commit is held or stops the run on its own, and the pages after it still publish. A ledger row or receipt with this code was written by an older build.",
     docs: 'docs/guides/sync-unblock-runbook.md#decision-table',
-    suggestion: 'Read gbrain sync status --source <id> --json: last_error.root_cause names the request that keeps failing. Fix that request, or raise sync.knock_on_refreeze_limit / sync.knock_on_run_limit, then rerun the same sync.',
-    fix: { argv: ['gbrain', 'sync', 'status', '--source', '{source_id}', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why: 'Names the root request, its page and error; read-only.' } },
+    suggestion: 'Rerun the same plain gbrain sync --source <id> --no-pull; it resumes the stopped entry under a fresh request. gbrain sync status --source <id> --json shows what remains.',
+    fix: { argv: ['gbrain', 'sync', 'status', '--source', '{source_id}', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why: 'Shows the cursor and the next step; read-only. A plain sync of the source resumes the stopped entry.' } },
   keyword_candidates_incomplete: { class: 'unavailable', summary: "Hybrid search's CJK keyword arm hit its deadline or candidate cap on a large corpus, so some keyword matches can be missing.", why: 'The CJK fallback is an unindexed LIKE scan; the arm is bounded so a large brain cannot stall every hybrid search. An incomplete keyword search is not evidence of absence.', docs: 'docs/guides/multi-language-fts.md#cjk-keyword-budget', suggestion: 'Narrow the search with --source-id (MCP source_id), or ask the user to raise search.cjk_keyword_deadline_ms.', fix: { argv: ['gbrain', 'config', 'get', 'search.cjk_keyword_deadline_ms'], consent: [], actor: 'agent', why: 'Shows the deadline in effect (unset means 3000 ms); read-only.', requires_exclusive: false } },
   projection_pending: { class: 'retryable', summary: "The current text projection is not ready." },
   provenance_required: { class: 'caller', summary: "provenance is required and must be non-empty." },

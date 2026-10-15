@@ -384,10 +384,16 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       return hold && !hold.meta.blob_oid && !hold.meta.working && blob ? [blob] : [];
     });
     const contents = readBlobContents(gitRoot, unversioned);
+    // #6712: a deterministic `concurrent_write` hold re-screens when its page's revision moves (a reconcile, an authorized delete).
+    const watched = checked.flatMap(path => { const hold = holdByPath.get(path); return hold?.code === 'concurrent_write' && hold.page_id != null && hold.meta.page_revision ? [Number(hold.page_id)] : []; });
+    const revisions = new Map(watched.length ? (await engine.executeRaw<{ id: number; revision: string }>('SELECT id, knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND id=ANY($2::int[])',
+      [sourceId, watched])).map(row => [Number(row.id), row.revision]) : []);
     for (const path of checked) {
       const hold = holdByPath.get(path), gitPath = toGitPath(path), blob = blobs.get(gitPath);
       const workingHold = working && (hold?.meta.working === true || !blob);
-      let changed = !hold || holdRescreenDue(hold, retry.has(path));
+      // #6712 dependency edge: a hold that waits on an earlier entry's hold re-screens once that hold is gone.
+      let changed = !hold || holdRescreenDue(hold, retry.has(path)) || (!!hold.meta.blocked_on && !holdByPath.has(hold.meta.blocked_on))
+        || (hold.code === 'concurrent_write' && hold.page_id != null && !!hold.meta.page_revision && revisions.get(Number(hold.page_id)) !== hold.meta.page_revision);
       let present = !!blob;
       if (workingHold) {
         let bytes: Buffer | null = null;

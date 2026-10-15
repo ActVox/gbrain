@@ -21,10 +21,9 @@ export interface SyncResult {
   managedWrite?: import('../core/persistence/sync-run.ts').ManagedSyncWriteDiagnostic;
   /** #6643: the request a `--retry-failed` rediscovery waits for (its producer and slug), instead of a silent no-op. */
   retryWait?: import('../core/persistence/sync-run.ts').RetryWait;
-  /** #6643: knock-on pages this run re-froze automatically, and the limits that bound it. */
   /** #6693: caller remembers refused while their page's file awaited import (or was held), replayed after this sync imported it. */
   replayedRemembers?: import('../core/repair/failed-writes.ts').ImportReplayReport;
-  knockOns?: { refrozen: number }; /** #6722: pages this run left large or embed_skip (chunked, keyword-searchable) and their embedding state. */ size_states?: import('../core/page-embedding-budget.ts').SyncSizeStates;
+  /** #6722: pages this run left large or embed_skip (chunked, keyword-searchable) and their embedding state. */ size_states?: import('../core/page-embedding-budget.ts').SyncSizeStates;
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run' | 'blocked_by_failures' | 'partial';
   fromCommit: string | null;
   toCommit: string;
