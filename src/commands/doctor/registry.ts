@@ -49,6 +49,7 @@ import {
   embeddingsEntry,
 } from './checks/schema-health.ts';
 import { embeddingStateEntry } from './checks/embedding-state.ts';
+import { embeddingIdentityEntry } from './checks/embedding-identity.ts';
 import {
   embeddingProviderEntry,
   alternativeProvidersEntry,
@@ -173,6 +174,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   embeddingQueryPrefixEntry,
   embeddingColumnRegistryEntry,
   embeddingEnvOverrideEntry,
+  embeddingIdentityEntry,
   supersessionCalibrationEntry,
   factAdmissionFloorsEntry,
   chatFallbackChainEntry,

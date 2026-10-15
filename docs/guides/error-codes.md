@@ -954,6 +954,16 @@ More: [docs/guides/write-refusals.md#embedding_auth_failed](../../docs/guides/wr
 |---|---|---|---|---|---|---|
 | Computing embeddings for the content failed. | The server failed; this is not a caller mistake. | Server-side failure, not a caller mistake. Run `gbrain doctor --json` on the brain host; if it repeats, report it to the user. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### embedding_identity_unqualified
+
+<a id="embedding_identity_unqualified"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain's embedding_model config row names a model with no provider prefix, so managed fact extraction cannot verify its embedding identity. | Rows from older installs stored the bare model name. The managed facts resolver reads only the DB row and `config set` refuses to change it, so the supported rewrite is `gbrain migrate embeddings --to <provider:model>`, which re-embeds active facts (paid). | Preview the rewrite with `gbrain migrate embeddings --to <provider:model> --dry-run`, show the user its cost, and apply it only with their paid authorization. Run: gbrain doctor --only embedding_identity_unqualified --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#embedding-identity-unqualified](../../docs/guides/troubleshooting.md#embedding-identity-unqualified)
+
 ### embedding_model_mismatch
 
 <a id="embedding_model_mismatch"></a>
@@ -2272,6 +2282,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | An existing pattern page is waiting on the rewrite that de-duplicates its claim sources, so no patterns child was submitted this run. | The patterns child reads existing pattern pages; until their claim records reference one shared reflection list, the pages can overflow the model's window and the run pays for nothing. | Wait briefly, then retry the same request (writes: reuse the same request_id). Run: gbrain write-requests --source '{source_id}' | agent | `repeat the read that failed` | 1 | yes |
 
+### patterns_min_interval
+
+<a id="patterns_min_interval"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An in-cycle dream patterns run was skipped because the partition's last completed patterns run ended less than dream.patterns.min_interval_hours ago; nothing was submitted. | Every maintenance pass writes new reflections, so the evidence watermark alone re-ran a paid patterns child on each pass. The skip names next_eligible_at; a direct `gbrain dream --phase patterns` or `--once` is not held to the interval, and `gbrain config set dream.patterns.min_interval_hours 0` turns it off. | Wait for next_eligible_at, or, with the user's paid authorization, run `gbrain dream --phase patterns` now. Run: gbrain dream --phase patterns | agent · paid | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/dream-patterns.md#cadence](../../docs/guides/dream-patterns.md#cadence)
+
 ### payload_too_large
 
 <a id="payload_too_large"></a>
@@ -2559,6 +2579,16 @@ More: [docs/guides/pinned-questions.md#who-can-see-pinned-questions](../../docs/
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The request was rate-limited; retry after the stated delay. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
+
+### read_budget_exhausted
+
+<a id="read_budget_exhausted"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A subagent's get_page result came back as a short summary because the job has used its read budget (for the dream patterns child, dream.patterns.child_read_budget_kb). | A CLI-backed model replays the whole transcript on every turn, so a child that read every page in full filled the model window. The summary keeps the slug, title, type and a short excerpt; writes still work. | Work from the pages already read and append with add_timeline_entry instead of rewriting a summarized page. An operator who needs more reads raises dream.patterns.child_read_budget_kb (0 turns the budget off). | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/dream-patterns.md#child-read-budget](../../docs/guides/dream-patterns.md#child-read-budget)
 
 ### receipt_conflict
 

@@ -1058,6 +1058,13 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
+            "message": "The brain records its embedding model with its provider (voyage:voyage-4).",
+            "name": "embedding_identity_unqualified",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
             "message": "Embeddings are off on this brain, so facts are only deduplicated by exact text; no supersession threshold applies.",
             "name": "supersession_calibration",
             "readiness_state": "not_applicable",
@@ -4755,6 +4762,13 @@
             "elapsed_ms": "<volatile>",
             "message": "no embedding migration in flight",
             "name": "embedding_migration_state",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "The brain records its embedding model with its provider (voyage:voyage-4).",
+            "name": "embedding_identity_unqualified",
             "status": "ok"
           },
           {

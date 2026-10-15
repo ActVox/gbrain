@@ -79,6 +79,7 @@
       "  [OK] embedding_column_registry: Registry healthy: 1 columns (embedding_image); primary embeddings disabled",
       "  [OK] embedding_env_override: no embedding env overrides set",
       "  [OK] embedding_migration_state: no embedding migration in flight",
+      "  [OK] embedding_identity_unqualified: The brain records its embedding model with its provider (voyage:voyage-4).",
       "  [INFO] supersession_calibration: Embeddings are off on this brain, so facts are only deduplicated by exact text; no supersession threshold applies.",
       "  [INFO] fact_admission_floors: Embeddings are off on this brain, so facts are admitted by keyword and named entity only; no cosine floor applies.",
       "  [OK] chat_fallback_chain: No chat_fallback_chain is set: every chat call uses only its own model.",

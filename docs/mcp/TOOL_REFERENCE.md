@@ -16,7 +16,7 @@ the row shape per call.
 
 ## `add_timeline_entry`
 
-Append an entry to the canonical Markdown timeline and structured timeline store in one committed write. Exact replay changes neither store. The receipt returns `bullet`, the rendered Markdown line. There is no update or remove verb: the page is the system of record, so to change or remove an entry read the page with `get_page include_content: true`, replace or delete that bullet with `edit_page` (passing `expected_revision`), and the timeline row follows the page.
+Append an entry to the canonical Markdown timeline and structured timeline store in one committed write. Exact replay changes neither store. The receipt returns `bullet`, the rendered Markdown line. Entries a dream patterns child appends are quote-verified against that run's reflections; an entry whose quote is not found moves to the page's `unverified_claims`, and the phase result counts the page in `patterns_written` (`appended_unverified` there is a deprecated alias, removed two releases after fix wave 18b). There is no update or remove verb: the page is the system of record, so to change or remove an entry read the page with `get_page include_content: true`, replace or delete that bullet with `edit_page` (passing `expected_revision`), and the timeline row follows the page.
 
 | Parameter | Type | Guidance |
 | --- | --- | --- |
