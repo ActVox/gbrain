@@ -567,6 +567,10 @@
       },
       {
         "category": "brain",
+        "name": "partial_embedding"
+      },
+      {
+        "category": "brain",
         "name": "scraper_junk_pages"
       },
       {
@@ -796,6 +800,10 @@
       {
         "category": "brain",
         "name": "extract_atoms_held_failed"
+      },
+      {
+        "category": "brain",
+        "name": "extraction_input_truncated"
       },
       {
         "category": "brain",
