@@ -24,8 +24,8 @@ import { ContentHashStream } from './content-hash-stream.ts';
 import type { StoredRegion } from './segmenter.ts';
 import type { BodyRegion, JsonObject, ManifestRow } from './types.ts';
 
-/** Rewrites one fence (the text of a stored facts or takes region, markers included). */
-export type FenceTransform = (fence: string) => Promise<string>;
+/** Rewrites one fence (the text of a stored facts or takes region, markers included), given the body region holding it; called in body order. */
+export type FenceTransform = (fence: string, at: { region: BodyRegion }) => Promise<string>;
 
 /** Rows `from..to` of a generation, replaced by `bytes`. */
 interface FenceUnit { from: number; to: number; bytes: Uint8Array }
@@ -68,7 +68,7 @@ async function changedUnits(engine: BrainEngine, sourceId: string, rows: readonl
     let cursor = 0, changed = false;
     for (const r of regions) {
       const fence = raw.subarray(r.start, r.end).toString('utf8');
-      const next = await transform(fence);
+      const next = await transform(fence, { region: span[0]!.region });
       parts.push(raw.subarray(cursor, r.start), Buffer.from(next, 'utf8'));
       cursor = r.end;
       if (next !== fence) changed = true;

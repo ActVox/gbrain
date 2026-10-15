@@ -28,6 +28,7 @@ import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts'
 import { reconstructedPage, segmentedPageRow } from '../helpers/segmented-page-checks.ts';
 import { TEST_WRITE_ATTRIBUTION } from '../helpers/write-attribution.ts';
 import { withEnv } from '../helpers/with-env.ts';
+import { PAGE_MAX_BYTES } from '../../src/core/page-size-policy.ts';
 
 const CLAIM = 'Prefers the window seat';
 const home = mkdtempSync(join(tmpdir(), 'gbrain-forget-scope-'));
@@ -137,6 +138,77 @@ describe('forget on segmented pages', () => {
       const [hash] = await engine.executeRaw<{ h: string }>('SELECT gbrain_fact_fingerprint($1) AS h', [secret]);
       const targets = await discoverWithdrawalTargets(engine, 'default', [{ visibility: 'private', fact_hash: hash!.h, claim: secret }]);
       expect(targets.map(t => t.slug)).toEqual(['notes/spare-key']);
+    }
+  }), 300_000);
+
+  test('discovery joins a facts fence a forced cut split, finding a private row after the cut, and the withdrawal strikes it', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const secret = 'Hides the vault code inside the atlas';
+    const rows = Array.from({ length: 12_000 }, (_, i) => row(i + 1, `Routine note number ${i + 1} about the weekly planning meeting`));
+    rows.push(row(12_001, secret, 'private'));
+    const text = `---\ntitle: Ledger\ntype: note\n---\n\n# Ledger\n\n${filler('Part one', 300_000)}## Facts\n\n${fence(rows)}\n\n${filler('Part two', 300_000)}`;
+    for (const engine of engines) {
+      await importFromContent(engine, 'notes/ledger', text, { noEmbed: true, sourceId: 'default' });
+      const page = await segmentedPageRow(engine, 'notes/ledger');
+      expect(page.body_storage).toBe('segmented');
+      const split = await engine.executeRaw<{ seq: number; holds: boolean; opens: boolean }>(`SELECT m.seq,position(convert_to($2::text,'UTF8') in t.body)>0 AS holds,
+          EXISTS (SELECT 1 FROM jsonb_array_elements(m.facts_slots) s WHERE s ? 'open_start' AND NOT s ? 'open_end') AS opens
+        FROM page_body_manifest m JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256
+        WHERE m.page_id=$1 AND m.gen_to IS NULL AND m.staging_id IS NULL ORDER BY m.seq`, [page.id, secret]);
+      const opened = split.findIndex(r => r.opens), holding = split.findIndex(r => r.holds);
+      expect(opened).toBeGreaterThanOrEqual(0);
+      expect(holding).toBeGreaterThan(opened);
+      const [hash] = await engine.executeRaw<{ h: string }>('SELECT gbrain_fact_fingerprint($1) AS h', [secret]);
+      expect((await discoverWithdrawalTargets(engine, 'default', [{ visibility: 'private', fact_hash: hash!.h, claim: secret }])).map(t => t.slug)).toEqual(['notes/ledger']);
+
+      const [fact] = await coordinated(engine, tx => tx.executeRaw<{ id: number }>(`INSERT INTO facts(source_id,fact,entity_slug,visibility,source)
+        VALUES ('default',$1,NULL,'private','test') RETURNING id`, [secret]));
+      const result = await coordinated(engine, tx => recordFactWithdrawal(tx, Number(fact!.id), 'default'));
+      expect(result.pages.map(p => p.slug)).toEqual(['notes/ledger']);
+      expect((await segmentedPageRow(engine, 'notes/ledger')).body_generation).toBe(page.body_generation + 1);
+      const { body: stored } = await reconstructedPage(engine, 'notes/ledger');
+      expect(stored.compiled_truth).toContain(`| 12001 | ~~${secret}~~ |`);
+      expect(stored.compiled_truth).toContain(row(12_000, 'Routine note number 12000 about the weekly planning meeting'));
+      // A split fence above the single-string ceiling is refused, never skipped (its slot extent stretched past it here).
+      await coordinated(engine, tx => tx.executeRaw(`UPDATE page_body_manifest SET facts_slots=jsonb_set(facts_slots,'{0,end}',to_jsonb($2::bigint))
+        WHERE page_id=$1 AND gen_to IS NULL AND staging_id IS NULL AND facts_slots->0 ? 'open_start'`, [page.id, PAGE_MAX_BYTES + 1]));
+      const refused = await discoverWithdrawalTargets(engine, 'default', [{ visibility: 'private', fact_hash: hash!.h, claim: secret }]).then(() => 'ok', (e: { code?: string }) => e.code);
+      expect(refused).toBe('page_body_segmented');
+    }
+  }), 300_000);
+
+  test('with two facts fences carrying the same row number, the segmented strike matches the inline one exactly', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    // A second fence whose header orders its columns differently: import cannot merge it into the first (both stay).
+    const reordered = (rows: string[]) => `<!--- gbrain:facts:begin -->
+| # | kind | claim | confidence | visibility | notability | valid_from | valid_until | source | context |
+|---|------|-------|------------|------------|------------|------------|-------------|--------|---------|
+${rows.join('\n')}
+<!--- gbrain:facts:end -->`;
+    const fences = (big: boolean) => {
+      const pad = (tag: string) => big ? filler(tag, 700_000) : '';
+      return {
+        both: `# Twins\n\n${pad('One')}## First\n\n${fence([row(1, 'Alpha twin claim'), row(2, 'Alpha second claim')])}\n\n${pad('Two')}## Second\n\n${reordered([`| 1 | preference | Beta twin claim | 1.0 | world | medium | 2026-01-01 |  | chat |  |`, `| 3 | preference | Beta third claim | 1.0 | world | medium | 2026-01-01 |  | chat |  |`])}\n`,
+        timelineOnly: `# Twins\n\n${pad('One')}No fence in the truth.\n\n<!-- timeline -->\n\n${pad('Two')}${fence([row(1, 'Gamma timeline claim')])}\n`,
+      };
+    };
+    const cases = [{ name: 'both', rowNum: 1 }, { name: 'both', rowNum: 3 }, { name: 'timelineOnly', rowNum: 1 }] as const;
+    const blocks = (text: string) => text.match(/<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/g) ?? [];
+    for (const engine of engines) {
+      for (const [n, c] of cases.entries()) {
+        const results: string[][] = [];
+        for (const big of [false, true]) {
+          const slug = `notes/twins-${n}-${big ? 'segmented' : 'inline'}`;
+          await importFromContent(engine, slug, `---\ntitle: Twins\ntype: note\n---\n\n${fences(big)[c.name]}`, { noEmbed: true, sourceId: 'default' });
+          expect((await segmentedPageRow(engine, slug)).body_storage).toBe(big ? 'segmented' : 'inline');
+          const [fact] = await coordinated(engine, tx => tx.executeRaw<{ id: number }>(`INSERT INTO facts(source_id,fact,entity_slug,visibility,source,source_markdown_slug,row_num)
+            VALUES ('default','Twin row claim',NULL,'world','test',$1,$2) RETURNING id`, [slug, c.rowNum]));
+          await withCoordinatedWrite(engine, ['default'], () => forgetFactInFence(engine, Number(fact!.id), { supersededBy: { rowNum: 9 } }), TEST_WRITE_ATTRIBUTION);
+          const body = big ? (await reconstructedPage(engine, slug)).body : (await engine.getPage(slug, { sourceId: 'default' }))!;
+          results.push([...blocks(body.compiled_truth ?? ''), '<timeline>', ...blocks(body.timeline ?? '')]);
+        }
+        expect(results[1]).toEqual(results[0]!);
+        expect(results[0]!.indexOf('<timeline>')).toBe(c.name === 'both' ? 2 : 0);
+        expect(results[0]!.join('\n').includes('superseded by #9')).toBe(c.name === 'both' && c.rowNum === 1);
+      }
     }
   }), 300_000);
 });
