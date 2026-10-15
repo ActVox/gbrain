@@ -82,7 +82,7 @@ import { abortableSleep } from '../retry.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { createHash } from 'crypto';
 import { slugifySegment } from '../sync.ts';
-import { resolveTierDefault } from '../model-config.ts';
+import { resolveAlias, resolveTierDefault } from '../model-config.ts';
 import { isUndefinedTableError, warnOncePerProcess } from '../utils.ts';
 import { utcDate } from './cycle-date.ts';
 import { normalizeForGrounding } from './synthesize-verify.ts';
@@ -648,33 +648,31 @@ export async function tombstonedTranscriptsForHashes(
   }
 }
 
+export const EXTRACT_ATOMS_MODEL_KEY = 'models.dream.extract_atoms';
+
 /**
- * The exact two-step model resolution `runPhaseExtractAtoms` uses:
- * `models.dream.extract_atoms` DB config wins if set (same plain-`||`
- * truthiness as always — a whitespace-only value IS "configured"), else the
- * key-aware `resolveTierDefault('utility')`. Deliberately NOT
- * `resolveModel()`'s fuller chain (which also honors `models.tier.utility`,
- * `models.default`, and an env var) — extract_atoms has never read those, and
- * unifying the two behaviors is a separate, larger change. Exported so
- * `gbrain models` can report the actual routing instead of a generic chain
- * that can diverge from it in partially-configured installs; `source` comes
- * from the SAME call as `model` so the report's attribution can never
- * disagree with the resolved value. Fail-soft: a throwing config read routes
- * to the tier default (the same end state runPhaseExtractAtoms's config-read
- * try/catch has always produced).
+ * The model resolution `runPhaseExtractAtoms` uses, shared with the
+ * `gbrain models` row so the two cannot diverge (`source` and `label` come
+ * from the SAME call as `model`). Chain (#6675, decision D3 option B):
+ * `models.dream.extract_atoms` > `models.tier.utility` > the key-aware
+ * `resolveTierDefault('utility')`. `models.default` and `GBRAIN_MODEL` are
+ * deliberately skipped: a frontier generic default must not become the model
+ * of the highest-volume dream phase (its cost cap prices the utility tier).
+ * Values are trimmed and alias-resolved like `resolveModelDetailed`'s steps.
+ * Fail-soft: a throwing config read routes to the tier default.
  */
 export async function resolveExtractAtomsModelWithSource(
   engine: BrainEngine,
-): Promise<{ model: string; source: 'config' | 'tier_default' }> {
-  let configuredModel: string | null = null;
+): Promise<{ model: string; source: 'config' | 'tier_config' | 'tier_default'; label?: string }> {
   try {
-    configuredModel = await engine.getConfig('models.dream.extract_atoms');
+    const own = (await engine.getConfig(EXTRACT_ATOMS_MODEL_KEY))?.trim();
+    if (own) return { model: await resolveAlias(engine, own), source: 'config', label: `config: ${EXTRACT_ATOMS_MODEL_KEY}` };
+    const tier = (await engine.getConfig('models.tier.utility'))?.trim();
+    if (tier) return { model: await resolveAlias(engine, tier), source: 'tier_config', label: 'config: models.tier.utility' };
   } catch {
     // Fail-soft — fall through to the tier default.
   }
-  return configuredModel
-    ? { model: configuredModel, source: 'config' }
-    : { model: resolveTierDefault('utility'), source: 'tier_default' };
+  return { model: resolveTierDefault('utility'), source: 'tier_default' };
 }
 
 /** String-returning wrapper for runtime callers (`runPhaseExtractAtoms`). */
