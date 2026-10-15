@@ -34,6 +34,7 @@ import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../cor
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
 import { checkError } from '../check-fix.ts';
+import { firstSyncRunning, noSuccessfulSync, type SyncOutcomeEntry } from '../sync-outcome.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
@@ -1250,6 +1251,8 @@ export async function checkSyncFreshness(
     const currentChunkerVersion = chunkerStamp();
 
     const issues: string[] = [];
+    // #4960: sources with no successful sync carry their own state, fix and wording (no generic "run sync" suffix).
+    const outcomes: SyncOutcomeEntry[] = [];
     let ownedContent = new Set<string>();
     try { ownedContent = new Set((await ownedContentFreshness(engine)).map(source => source.sourceId)); }
     catch (error) { if (!isOwnedContentSchemaMissing(error)) throw error; }
@@ -1324,7 +1327,7 @@ export async function checkSyncFreshness(
       }
 
       // BUG 4: actively syncing (live lock) → healthy, count as synced_recently
-      // and skip the staleness checks. Keeps the 3-bucket invariant intact.
+      // and skip the staleness checks (#4960: a first sync, no success yet, is warn).
       //
       // ...but ONLY up to the staleness ceiling. `withRefreshingLock` bumps the
       // heartbeat on its own timer regardless of whether the import is making
@@ -1337,6 +1340,11 @@ export async function checkSyncFreshness(
       const liveSnap = await liveSyncSnap(source.id);
       if (liveSnap) {
         const ceilingMs = stalenessCeilingSeconds * 1000;
+        if (liveSnap.age_ms <= ceilingMs && !source.last_sync_at) {
+          const first = firstSyncRunning(source.id, display, liveSnap);
+          issues.push(first.issue); outcomes.push(first.entry); hasWarnings = true; stale_count++;
+          continue;
+        }
         if (liveSnap.age_ms <= ceilingMs) {
           inProgress.push(`${display} sync in progress (pid ${liveSnap.holder_pid} on ${liveSnap.holder_host})`);
           synced_recently_count++;
@@ -1358,7 +1366,8 @@ export async function checkSyncFreshness(
       }
 
       if (!source.last_sync_at) {
-        issues.push(`Source ${display} has never been synced`);
+        const never = await noSuccessfulSync(engine, source.id, display, managed);
+        issues.push(never.issue); outcomes.push(never.entry);
         hasFailures = true;
         stale_count++;
         continue;
@@ -1465,26 +1474,29 @@ export async function checkSyncFreshness(
 
     // D6 invariant: every source incremented exactly one bucket.
     const details = { unchanged_count, synced_recently_count, stale_count, ...(writer_owned_count ? { writer_owned_count } : {}),
+      ...(outcomes.length ? { code: outcomes[0]!.code, no_successful_sync: outcomes } : {}),
       ...(upstream_unknown_count ? { upstream_unknown_count } : {}), ...(upstream_behind_count ? { upstream_behind_count } : {}) };
     // BUG 4: append in-progress context when any source is actively syncing.
     // Empty otherwise, so steady-state messages are byte-for-byte unchanged.
     const inProgressNote = (inProgress.length ? `. ${inProgress.join('; ')}` : '')
       + (writer_owned_count ? `. ${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status` : '');
 
+    const remedy = issues.length > outcomes.length;
+    const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix;
     if (hasFailures) {
       return {
         name: 'sync_freshness',
         status: 'fail',
-        message: `${issues.join('; ')}. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source${inProgressNote}`,
-        details,
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source` : ''}${inProgressNote}`,
+        details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }
     if (hasWarnings) {
       return {
         name: 'sync_freshness',
         status: 'warn',
-        message: `${issues.join('; ')}. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh${inProgressNote}`,
-        details,
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh` : ''}${inProgressNote}`,
+        details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }
     if (writer_owned_count === sources.length) return {

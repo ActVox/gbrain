@@ -489,6 +489,14 @@ export const CODES = {
     why: "A repair that changed a file the running sync admits later would make that entry refuse on its raw hash, and a file a write in flight names would be written twice; so the one candidate waits while the rest of the source is repaired. `candidate_in_flight`: the file is named; `busy_set_unreadable`: the busy set could not be read, so every candidate waited.",
     reasons: ['candidate_in_flight', 'busy_set_unreadable'],
     suggestion: 'Nothing to do for the repair: the next run reads the file again. To finish the sync now: gbrain sync --source <id> --no-pull.' },
+  // wave 18b #4960: doctor sync_freshness separates sync outcome from freshness for a source with no successful sync.
+  sync_first_run_in_progress: { class: 'retryable', summary: "A source's first sync is running (it holds a live sync lock inside the staleness ceiling) and no successful sync is recorded yet, so doctor sync_freshness warns instead of reading it as fresh.",
+    why: "A sync stamps last_sync_at only when it succeeds; a running sync is not a fresh source, and starting a second one beside it only contends for the lock. Over the staleness ceiling the lock reads as wedged (fail) instead.",
+    docs: 'docs/guides/troubleshooting.md#sync-freshness-no-successful-sync', suggestion: 'Wait for the running sync, then run gbrain doctor --only sync_freshness --json again.' },
+  sync_no_successful_sync: { class: 'unavailable', summary: "No successful sync is recorded for a source (last_sync_at is NULL) and no sync of it is running; doctor sync_freshness fails with the last attempt's time, result and held files.",
+    why: "The attempt comes from the newest sync job and, on a managed brain, the source's sync status (read-only). `reason` names the state: no_attempt (nothing recorded: run a sync), attempt_queued (a job is queued: wait), holds_pending (held files: inspect them first), last_attempt_unsuccessful (inspect the job or failure, then retry).",
+    reasons: ['no_attempt', 'attempt_queued', 'holds_pending', 'last_attempt_unsuccessful'], docs: 'docs/guides/troubleshooting.md#sync-freshness-no-successful-sync',
+    suggestion: 'Follow the check fix: it waits, inspects holds (gbrain sync status --source <id> --json) or retries (gbrain sync --source <id>) depending on the state.' },
   // wave 16 (GBRA-79) #6513: a managed-sync checkpoint whose cursor another run of the source replaced.
   sync_cursor_replaced: { class: 'caller', summary: "Another sync run of the source replaced the managed-sync cursor before this checkpoint published, so the checkpoint had nothing left to publish.",
     why: "The replacing run (a --retry-failed rediscovery or a newer sync of the source) covers the source from its own discovery; the superseded checkpoint's receipt is a conflict, no managed-sync failure is recorded for it, and the run that awaited it goes on with the winning cursor. A same-run index lag still reports revision_conflict.",
