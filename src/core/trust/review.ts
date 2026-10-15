@@ -74,7 +74,10 @@ const snippet = (text: unknown, max = 80): string => {
   return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
 };
 const trust = (...args: string[]): string[] => ['gbrain', 'trust', ...args];
-const rowRef = (table: string | null, id: number | null): string => id === null ? '' : `${table === 'facts' ? 'f' : table === 'takes' ? 't' : table === 'pages' ? 'page ' : ''}${id}`;
+const rowRef = (table: string | null, id: number | null): string => id === null ? ''
+  : `${table === 'facts' ? 'f' : table === 'takes' ? 't' : table === 'pages' ? 'page ' : table === 'timeline_entries' ? 'timeline row ' : ''}${id}`;
+/** W1 #6783 §12 (a): what a held lower-tier write would have done (trust/fence-guard.ts). */
+const HELD_VERBS: Record<string, string> = { removed: 'remove', replaced: 'replace', deactivated: 'deactivate', detail_changed: 'rewrite' };
 
 export function parseTrustReviewKind(value: string): string {
   if ((TRUST_REVIEW_KINDS as readonly string[]).includes(value) || PROPOSAL_ACTIONS.includes(value)) return value;
@@ -106,8 +109,8 @@ async function pageOf(engine: BrainEngine, p: TrustProposalRow): Promise<string 
     const [f] = await engine.executeRaw<{ slug: string | null }>('SELECT source_markdown_slug AS slug FROM facts WHERE id = $1', [p.target_id]);
     return f?.slug ? pageRef(p.source_id, f.slug) : null;
   }
-  if (p.target_table === 'takes') {
-    const [t] = await engine.executeRaw<{ slug: string }>('SELECT p.slug FROM takes t JOIN pages p ON p.id = t.page_id WHERE t.id = $1', [p.target_id]);
+  if (p.target_table === 'takes' || p.target_table === 'timeline_entries') {
+    const [t] = await engine.executeRaw<{ slug: string }>(`SELECT p.slug FROM ${p.target_table} t JOIN pages p ON p.id = t.page_id WHERE t.id = $1`, [p.target_id]);
     return t ? pageRef(p.source_id, t.slug) : null;
   }
   return null;
@@ -127,7 +130,8 @@ function proposalItem(p: TrustProposalRow, page: string | null): TrustReviewItem
   const tier = storedTrustTier(p.after_state.tier ?? p.before_state.related_tier ?? p.before_state.new_tier);
   const target = rowRef(p.target_table, p.target_id);
   const related = rowRef(p.related_table, p.related_id);
-  const what = p.action === 'forget' ? `An agent asked to forget ${target}`
+  const held = p.action === 'forget' ? HELD_VERBS[String(p.before_state.change)] : undefined;
+  const what = held ? `A lower-trust write would ${held} ${target}` : p.action === 'forget' ? `An agent asked to forget ${target}`
     : `${related || 'A lower-trust write'} would ${p.action === 'confirm' ? 'confirm' : 'supersede'} ${target}`;
   return {
     ref, kind: 'proposal', detail: p.action, source_id: p.source_id, page, day: day(p.created_at), created_at: p.created_at,
