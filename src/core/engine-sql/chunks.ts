@@ -1029,9 +1029,12 @@ export async function getEmbeddingsByChunkIds(exec: LegacyUnscopedRead, ids: num
  * page_id. Every requested page is re-authorized with the search legs'
  * visibility predicate (source scope, deleted, current text projection,
  * archived source, quarantine, private pages, safe chunks); pages that fail
- * are absent. Page rows carry the raw body columns (the assembler sanitizes
- * them whole before slicing); chunk rows (sealed pages only) anchor the hits
- * in that text. Page rows and chunk
+ * are absent. Page rows of inline pages carry the raw body columns (the
+ * assembler sanitizes them whole before slicing); a segmented page's row says
+ * `segmented` and carries no body, and its chunk rows carry their occurrence
+ * and segment-relative projected span, the references the assembler reads
+ * windows around (page-body/read-range.ts). Chunk rows (sealed pages only)
+ * anchor the hits. Page rows and chunk
  * rows come back in one UNION so the row cap never hides a page's
  * authorization.
  */
@@ -1049,7 +1052,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
                            ${requests.map(r => r.to_index)}::int[], ${requests.map(r => r.priority)}::int[]) AS r(page_id, lo, hi, prio)
     ), auth AS (
       SELECT p.id, p.slug, p.source_id, p.type, p.knowledge_revision::text AS revision, p.compiled_truth, p.timeline, p.body_generation,
-             (COALESCE(p.chunker_version, 0) >= ${SAFE_FENCE_CHUNKER_VERSION}) AS sealed,
+             p.body_storage = 'segmented' AS segmented, (COALESCE(p.chunker_version, 0) >= ${SAFE_FENCE_CHUNKER_VERSION}) AS sealed,
              (SELECT MIN(req.prio) FROM req WHERE req.page_id = p.id) AS prio
         FROM pages p
         JOIN sources s ON s.id = p.source_id
@@ -1057,7 +1060,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
          AND p.deleted_at IS NULL AND ${trustedSql(currentTextProjectionFilter('p'))} AND NOT s.archived
          AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)} ${privateSql} ${safeSql}
     ), chunk_rows AS (
-      SELECT cc.page_id, cc.id AS chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.projected_byte_start, cc.projected_byte_end, a.prio
+      SELECT cc.page_id, cc.id AS chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.projected_byte_start, cc.projected_byte_end, cc.occurrence_id, a.prio
         FROM auth a
         JOIN content_chunks cc ON cc.page_id = a.id
        WHERE a.sealed AND ${trustedSql(chunkGenerationFilter('a', 'cc'))}
@@ -1067,15 +1070,15 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
        ORDER BY a.prio, cc.page_id, cc.chunk_index
        LIMIT ${maxRows + 1}
     )
-    SELECT 'page' AS kind, a.id AS page_id, a.slug, a.source_id, a.type, a.revision, a.sealed, a.prio,
+    SELECT 'page' AS kind, a.id AS page_id, a.slug, a.source_id, a.type, a.revision, a.sealed, a.segmented, a.prio,
            (SELECT MAX(c2.chunk_index) FROM content_chunks c2 WHERE c2.page_id = a.id AND ${trustedSql(chunkGenerationFilter('a', 'c2'))}) AS max_chunk_index,
            a.compiled_truth, a.timeline,
            NULL::int AS chunk_id, NULL::int AS chunk_index, NULL::text AS chunk_text, NULL::text AS chunk_source,
-           NULL::bigint AS projected_byte_start, NULL::bigint AS projected_byte_end
+           NULL::bigint AS projected_byte_start, NULL::bigint AS projected_byte_end, NULL::bigint AS occurrence_id
       FROM auth a
     UNION ALL
-    SELECT 'chunk' AS kind, c.page_id, NULL, NULL, NULL, NULL, NULL, c.prio,
-           NULL, NULL, NULL, c.chunk_id, c.chunk_index, c.chunk_text, c.chunk_source, c.projected_byte_start, c.projected_byte_end
+    SELECT 'chunk' AS kind, c.page_id, NULL, NULL, NULL, NULL, NULL, NULL, c.prio,
+           NULL, NULL, NULL, c.chunk_id, c.chunk_index, c.chunk_text, c.chunk_source, c.projected_byte_start, c.projected_byte_end, c.occurrence_id
       FROM chunk_rows c
   `);
   return mapChunkWindowRows(rows, maxRows);

@@ -57,7 +57,7 @@ link it here rather than raising the cap.
 | [Core Services (1/3)](key-files/core-services-1.md) | `src/core/advisor/{types,run,render,recommended-set,history,apply,collect-*}.ts` through `src/core/connectors/` |
 | [Core Services (1/3, continued)](key-files/core-services-1-continued.md) | `src/core/context/` through `src/core/context/ipc-path.ts` |
 | [Core Services (2/3)](key-files/core-services-2.md) | `src/core/conversation-parser/` through `src/core/ops/sources.ts`, except `src/core/persistence/` |
-| [Core Services (2/3, continued)](key-files/core-services-2-continued.md) | `page-state/`, `page-body/page-shape.ts`, `progressive-batch/` |
+| [Core Services (2/3, continued)](key-files/core-services-2-continued.md) | `page-state/`, `page-{body,window}/`, `progressive-batch/` |
 | [Core Services (3/3)](key-files/core-services-3.md) | `src/core/think/index.ts` through `src/core/verbs/usage-log.ts` |
 | [Core Utilities (1/2)](key-files/core-utilities-1.md) | `src/core/archive-crawler-config.ts` through `src/core/remediation-checkpoint.ts`; [`cycle.ts`](key-files/core-cycle-primitive.md) |
 | [Core Utilities (2/2)](key-files/core-utilities-2.md) | `src/core/repair/` through `src/core/verbs.ts` |

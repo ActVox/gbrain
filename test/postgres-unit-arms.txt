@@ -74,6 +74,10 @@ test/large-pages/segmented-body-unreachable.test.ts
 test/large-pages/segmented-derived-work.test.ts
 test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
+test/large-pages/segmented-evidence-read-cost.test.ts
+test/large-pages/segmented-evidence.test.ts
+test/large-pages/segmented-leads.test.ts
+test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-versions.test.ts
 test/link-cross-source.test.ts
