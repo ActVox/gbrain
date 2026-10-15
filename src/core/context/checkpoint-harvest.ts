@@ -409,6 +409,7 @@ async function runOne(job: HarvestJob): Promise<{
       if (!(await isFactsExtractionEnabled(job.engine))) {
         return { outcome: 'degraded', reason: 'extraction_disabled' };
       }
+      if (await writerRefused(job)) return { outcome: 'degraded', reason: 'writer_coordinator_required' };
 
       const fileStat = corpusFileStat(await stat(full));
       const raw = await readFile(full, 'utf-8');
@@ -452,6 +453,9 @@ async function runOne(job: HarvestJob): Promise<{
       if (abort.signal.aborted || run.status === 'aborted') return { outcome: 'degraded', reason: 'aborted' };
       if (run.status === 'contended') return { outcome: 'degraded', reason: 'claimed_elsewhere' };
       if (run.status === 'source_changed') return { outcome: 'degraded', reason: 'corpus_source_changed' };
+      // #6786/#6785: nothing was recorded for window 1; the sweep retries it under the same gates.
+      if (run.status === 'unavailable') return { outcome: 'degraded', reason: 'extract_skipped_chat_unavailable' };
+      if (run.status === 'backoff' || run.status === 'dead_lettered') return { outcome: 'degraded', reason: `corpus_window_${run.status}` };
       windowsPending = run.status !== 'complete';
       const r = run.result;
 
@@ -582,6 +586,7 @@ async function runWritebackTurn(job: HarvestJob, full: string, ingestedPath: str
   if (!(await isFactsExtractionEnabled(job.engine))) {
     return { outcome: 'degraded', reason: 'extraction_disabled' };
   }
+  if (await writerRefused(job)) return { outcome: 'degraded', reason: 'writer_coordinator_required' };
 
   const raw = await readFile(full, 'utf-8');
   const { runFactsPipeline } = await import('../facts/backstop.ts');
@@ -630,6 +635,25 @@ async function runWritebackTurn(job: HarvestJob, full: string, ingestedPath: str
     }) + '\n',
   );
   return { outcome: 'ok', inserted: r.inserted, duplicate: r.duplicate, superseded: r.superseded };
+}
+
+/**
+ * #6785: the facts-absorb owner-readiness preflight (#5362) before any model
+ * call. A claimed but not activated canonical worktree refuses the fence
+ * write after extraction; the turn stays banked (no sidecar) for the sweep,
+ * which holds it under the same check until `gbrain sources writer activate`.
+ */
+async function writerRefused(job: HarvestJob): Promise<boolean> {
+  const { assertSourceLegacyWriter } = await import('../persistence/filesystem-guard.ts');
+  try {
+    await assertSourceLegacyWriter(job.engine, job.sourceId);
+    return false;
+  } catch (e) {
+    if ((e as { code?: unknown }).code !== 'writer_coordinator_required') throw e;
+    logFirstHarvestError(job, 'writer_coordinator_required', new Error(
+      `${e instanceof Error ? e.message : String(e)} Check the writer: gbrain sources writer status ${job.sourceId}`));
+    return true;
+  }
 }
 
 async function readReceipt(path: string): Promise<HarvestReceipt | null> {

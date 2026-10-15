@@ -10,6 +10,34 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Session transcripts are no longer marked done with zero facts, and a write that fails after extraction stops being paid for forever.** Two corpus-sweep bugs. `gbrain bootstrap verify` ran the corpus pass in a process that could not reach the extraction model, so every pending transcript came back `chat_unavailable`, got an `.ingested` marker with zero facts, and was deleted by retention a month later (#6786). Separately, when the fact write after extraction was refused (a canonical worktree claimed but not activated), nothing recorded the window, so the `serve --http` drain paid for the same extraction every 10 minutes, for hours, and threw the error away (#6785).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain bootstrap verify` with pending transcripts | each one marked `.ingested` with `skipped: chat_unavailable` and 0 facts | verify skips the corpus pass; the transcripts stay pending |
+| The sweep or a harvest has no usable extraction model | the file was marked done with 0 facts | the file stays pending (`corpus_chat_unavailable`) and is extracted once a model works |
+| A file an earlier build marked `skipped: chat_unavailable` | never extracted; deleted after 30 days | extracted again by the next sweeps, with its source binding and retired turns kept; kept until then (90 days by default) |
+| A source whose canonical worktree is claimed but not activated | paid for the extraction, then the write was refused, every sweep | held before any model call (`writer_coordinator_required`), naming `gbrain sources writer status <source>` |
+| A window keeps failing after its model call | paid again on every sweep, without limit | retried on the next sweep, then after 10, 20 and 40 minutes, then stopped (`corpus_window_dead_lettered`); one model or provider change retries it once |
+| Retrying stopped windows | no supported way | `gbrain sweep --retry-failed` previews, `--apply` retries (paid); `gbrain doctor` names it as the fix |
+| `serve --http` drain errors | discarded | skip reasons and failures go to serve's stderr |
+
+After upgrading, transcripts an earlier verify marked this way are extracted again. That is a one-time paid catch-up, bounded by the sweep's window caps (8 windows per file, 32 per sweep; `GBRAIN_CORPUS_WINDOWS_PER_SWEEP` lowers the total). `GBRAIN_SWEEP=0` or `gbrain config set facts.extraction_enabled false` pauses it. The upgrade itself rewrites nothing.
+
+### Itemized changes
+
+- `src/core/context/corpus-segments.ts`: `corpusFileCompletion` is the one completion classifier for sweep selection, the under-claim re-check and retention GC (`corpusSidecarState` for the HTTP drain and the doctor backlog). A sidecar whose `skipped` is `chat_unavailable` is pending, and only finished files get the plain retention; unavailable, partial and rewritten files keep the un-ingested ceiling. The failure record format (`<file>.failures.json`, `CORPUS_WINDOW_FAILURE_CAP` 5) lives here too, and the session-end hook reaps it with its `.txt`.
+- `src/core/context/corpus-windows.ts`: `runCorpusWindows` returns `unavailable` without recording the window, and rewinds a progress an earlier build finished as `chat_unavailable` to its retired turns under the same compare-and-set that takes the lease. A failure thrown after a chat call counts against the window's start and the source incarnation; neither tail growth nor the error label resets it, and a commit of that window clears it. One change of the extraction-config fingerprint (model, provider, key presence; no values) re-arms a stopped window once.
+- `src/core/sweep.ts`: the corpus pass runs the facts-absorb owner-readiness preflight (#5362) per source before any model call, applies the failure cap to writeback turn files as well, stops the pass on `chat_unavailable`, and logs thrown errors with their code. `corpus: false` skips the pass. `armCorpusDrain` logs the sweep's diagnostics (each distinct line once) and its skip reasons whenever they change.
+- `src/core/context/checkpoint-harvest.ts`: the compact and writeback lanes run the same preflight; the compact lane writes no receipt for an `unavailable`, backing-off or stopped window.
+- `src/core/bootstrap/verify.ts`: the in-process sweep runs passes 1 and 2 only.
+- `gbrain sweep --retry-failed [--apply] [--json]` (`src/commands/sweep.ts`); doctor `memory_writeback` warns about stopped windows and names `gbrain sweep --retry-failed --apply` (paid) as its fix. `corpus_chat_unavailable`, `corpus_window_backoff` and `corpus_window_dead_lettered` are registered, so `gbrain errors <code>` explains them.
+- Tests: `test/sweep-corpus-chat-unavailable-6786.test.ts` (unservable model in the sweep and the compact harvest; legacy sidecars with and without `.progress`, asserting the facts exist; GC then sweep and sweep then GC with an aged file) and `test/sweep-corpus-failure-cap-6785.test.ts` (a claim landing mid-call, the harvest preflight, the drain log, the retry schedule, the re-arm, doctor's fix and the operator retry). A new `bootstrap-verify.serial.test.ts` case runs the real verify with a keyed report and no gateway. The new behavior cases fail on the previous tree.
+
 ## [0.60.250.0] - 2026-10-15
 
 **Hosted and remote agents can now pull contradiction findings.** Before this release, `find_contradictions` gave any remote agent, and any caller with a source filter or a token trust floor, an empty list with a "temporarily available" note. The reason was that a stored probe report copies both sides' text verbatim, including private takes, and doesn't record which source each side came from. Now those callers get the findings they are allowed to see. gbrain re-reads each side from the brain under the caller's own permissions and returns a finding only when the caller can read both sides now and both still say what the judge saw. Each side comes with its source and trust tier. The bare local `gbrain find-contradictions` works exactly as before.
