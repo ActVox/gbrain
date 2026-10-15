@@ -15,6 +15,7 @@ import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
+import { slugModeCheckpointRevivable } from './sync-slug-mode.ts';
 import { selectManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
@@ -446,6 +447,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
   }
   await validateSyncAuthority(engine, cursor.authority, slug);
   assertActive();
+  if (entry?.action === 'import') await faultPoint('sync:after_freeze', { sourceId: cursor.sourceId, slug, path: entry.path });
   return remember(frozenSnapshot, { requestId: randomUUID(), slug, pageId, ...(occupantRebound ? { rebound: true as const } : {}), intent: { kind: !entry ? 'managed_sync_checkpoint' : entry.action === 'import' ? 'managed_sync_import' : 'managed_sync_delete',
     expected_revision: revision, sourcePath: entry?.sourcePath ?? null, path: entry?.path ?? null, rawHash, content, lineEndingOnly,
     ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}),
@@ -798,10 +800,11 @@ const revivableCheckpointRefusal = (done: Pick<WriteRequest, 'state' | 'error_co
  * knock-on, a receipt at an index the cursor settled), a fresh checkpoint request replaces it by cursor swap, and its
  * publication validates everything again. The completed manifest and the old receipt stay as they are. Null when it
  * still blocks, or after `CHECKPOINT_REVIVAL_LIMIT` revivals in this invocation (the next invocation re-assesses).
+ * #6694: a checkpoint refused for its slug-root mode is revived the same way once the source admits it (sync-slug-mode.ts).
  */
 async function reviveCheckpoint(engine: BrainEngine, input: SettleInput): Promise<Cursor | null> {
   const { cursor, key, pending, done } = input;
-  const refused = revivableCheckpointRefusal(done);
+  const refused = revivableCheckpointRefusal(done) || (pending.intent.kind === 'managed_sync_checkpoint' && await slugModeCheckpointRevivable(engine, cursor, pending.intent, done));
   const revivals = checkpointRevivalsByRun.get(input.run) ?? 0;
   if (pending.intent.kind !== 'managed_sync_checkpoint' || !refused || done.recovery || cursor.index !== cursor.entries.length || revivals >= CHECKPOINT_REVIVAL_LIMIT) return null;
   const base: Cursor = { ...cursor }; delete base.pending; delete base.group; delete base.window;
