@@ -63,6 +63,8 @@ identifiers and attribution are available in the pre-removal Git revision
 - **Ghost pages** (`src/core/ghost-pages.ts`, `src/commands/doctor/checks/ghost-pages.ts`, `src/commands/pages-ghosts.ts`): one classifier for a live page whose canonical file is gone on the owner host (a stat pre-filter, then `liveFileDrift` reason `canonical_file_missing`). Doctor `ghost_pages` counts them with samples and a fix (ok off the owner host or with no bound source; unknown on unreadable storage); `gbrain pages ghosts --source <id> [--json]` lists them read-only; `get_brain_health` adds them as a band. A write refused for a removed canonical file now carries `detail: canonical_file_missing` (`page-prepare.ts`, `drift-conflicts.ts`).
 - **`gbrain repair ghost-pages`** (`src/core/repair/ghost-pages.ts`): `--source <id>` previews the ghosts and prints the apply command; `--apply --expect <hash> --yes` soft-deletes exactly the previewed set through `delete_page` with the canonical file's absence rechecked in preparation and at publication (a file restored meanwhile is kept and reported `file_restored`). It refuses off the owner host (`not_owner_host`), on unreadable storage (`ghost_storage_unknown`) and past the mass-delete valve (`ghost_mass_delete_refused`), keeps declared `db_only` pages, and without consent exits 3 with nothing changed. `gbrain restore <slug> --force` undoes a removal within the 72-hour purge window.
 
+## [0.60.235.0] - 2026-10-14
+
 **Writes stop failing at the cumulative quota wall (#6696).** A brain running autopilot hit `queue_capacity` on every write once its receipt bytes reached the 1.5 GiB principal cap, because every receipt held a 16 KiB reservation it never gave back and nothing warned before the wall. Receipts are now charged for what they keep, the defaults cover a year at 5,000 writes a day, background work pauses before the wall so your own writes keep working, and doctor, notices and `/metrics` say how many days are left.
 
 ### Itemized changes
@@ -74,6 +76,33 @@ identifiers and attribution are available in the pre-removal Git revision
 - **Sync**: a capacity preflight refuses `write_quota_insufficient` before the first admission; a later cap refusal ends the drain `resumable` / `capacity_paused`.
 - **Compaction**: `gbrain repair receipt-compaction` (explicit-only, preview-bound) compacts on demand, floored at the configured retention unless `--force`; compaction skips open sync runs and the newest sync receipt per worktree; the consumer records each pass (`persistence.maintenance.last_compaction`); doctor adds `persistence_compaction` and `persistence_counter_drift`.
 - **Known-failing writes**: maintenance refuses a page whose canonical file is gone before admission (`canonical_file_missing`) and holds back a write refused three times in a day (`persistence.maintenance.refusal_breaker_threshold`); doctor `maintenance_write_drift` lists them.
+
+## [0.60.233.0] - 2026-10-14
+
+**An autopilot `sync` job on a managed brain now drains its source until it is caught up or its deadline arrives, instead of landing about one page per job (#6706).** On a managed brain each `sync` Minions job ran a single pass: it admitted one page write, waited 5 s for it and returned `partial`. Where a write takes 10-20 s to commit, each freshness job landed about one page and still reported `completed`, so a 10-entry delta took 3 hours while `gbrain sync` drained the same backlog in under 2 minutes. Now the job drains on one lane until the source is synced or its deadline (less a reserve for cleanup) arrives, queues one follow-up job when work is left, and reports its result in the same shape as the CLI. To go back: `gbrain config set sync.job_drain false`. Inline `gbrain jobs work` and supervisor workers need a restart to pick it up.
+
+### Itemized changes
+
+- **The job drains to its deadline** (`src/core/minions/handlers/sync-job-drain.ts`, `src/core/minions/handlers/sync.ts`): the deadline is the job's `timeout_at`, or the queue's wall-clock kill instant for a job without `timeout_ms`, capped at an hour and less `min(60 s, remaining/4)` so git, cleanup and the embed submission finish in time. Embeds are queued once when the job ends, as before.
+- **Bounded drain** (`src/core/persistence/sync-drain.ts`): `runDrain` takes a caller deadline, and the earlier of it and the CLI run deadline wins. A deadline already past makes no pass. A deadline that lands in a retry backoff, a capacity wait or a hung reconnect returns `resumable / deadline` instead of throwing; fatal errors still throw. A pass that ignores the abort is abandoned after 10 s and fenced at its next step.
+- **One drainer per source** (`src/commands/autopilot-dispatch.ts`): freshness dispatch keeps at most one pending sync job per source and skips a source that already has a live sync job. A second managed sync job that starts while another drains its source completes as `skipped: sync_in_progress` with `running_job_id` and a `next` that watches it.
+- **One follow-up job** (`src/core/minions/handlers/sync.ts`): when a drain stops with work left, made progress and is safe to loop, the job queues one continuation (priority 5 or lower, behind waiting embeds, with the parent's `timeout_ms`) and names it in `continuation_job_id`. Only worker-backed brains and trusted submitters get one.
+- **Job results** (`src/core/minions/handlers/sync-job-drain.ts`): a drained job result carries `outcome`, `drain`, `next` and `incomplete`, with `pagesAffected` and `held` trimmed to 50 entries plus counts, and `gbrain jobs get` shows progress while it runs. Results from non-managed brains are unchanged.
+- **Liveness** (`src/core/persistence/sync-movement.ts`, `src/core/persistence/sync-status.ts`): `gbrain sources status` and `writer movement` treat a live sync job as the source's drain (`live.drain_job_id`), and `gbrain sync status` names it in `live_job_id` and points `next` at it instead of starting a second drainer.
+- **Tests:** `test/sync-handler-drain-6706.test.ts` (PGLite and Postgres) holds each write past the 5 s single pass: the previous handler lands no page, the new one lands all four in one job. `test/sync-drain-deadline-6706.test.ts` covers every deadline stop, the abandoned-pass fence and `jobDisposition` per stop reason.
+
+## [0.60.232.0] - 2026-10-14
+
+**MCP `list_write_conflicts` refuses a source outside the caller's grant and bounds its window to that source's own requests (#6643 follow-up).** A remote caller that named a source outside its grant used to get an empty report back. The response's `window` sequences were also brain-wide, so polling one granted source showed write activity in sources the caller cannot see. Both were found by GBRA-60's D5 agent smoke.
+
+### Itemized changes
+
+- **Out-of-grant `source_id`** (`src/core/ops/persistence.ts`): the op checks an explicit `source_id` with `resolveRequestedScope`, like the other source-scoped reads. A remote caller outside its grant gets `permission_denied`, whether or not the source exists.
+- **Source-scoped window** (`src/core/persistence/drift-conflicts.ts`):
+  - The window ends at the source's own newest request in its current incarnation, read through the `(source_incarnation, sequence)` index, and the scan reads only that incarnation.
+  - A cursor naming a later sequence is clamped.
+  - A source the caller may not read returns before anything is computed.
+- **Tests:** `test/maintenance-file-drift-6643.test.ts` covers the refusal for a real and an unregistered source, a window that does not move when another source is written, and the clamped forged cursor. Each half fails on the previous code.
 
 ## [0.60.231.0] - 2026-10-14
 
