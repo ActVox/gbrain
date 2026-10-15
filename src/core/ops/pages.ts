@@ -194,7 +194,7 @@ const get_page: Operation = {
     // Only explicitly trusted local reads retain protected body sections.
     // Holder grants and page-visibility opt-outs do not bypass this boundary.
     const isUntrustedReader = ctx.remote !== false;
-    const visibleBody = isUntrustedReader
+    const visibleBody = isUntrustedReader && page.body_storage !== 'segmented'
       ? stripPrivacyFencesForRemoteReader(page)
       : page;
     // v0.42 (#1699) agent-warning channel: surface the page's content_flag
@@ -389,8 +389,9 @@ async function runAutoLink(
   opts?: { sourceId?: string },
 ) {
   const sourceId = opts?.sourceId ?? 'default';
-  const snapshot = await engine.readPageSnapshot(slug, { sourceId });
-  if (!snapshot) return;
+  const { materializedSnapshot, segmentedOverCeiling } = await import('../persistence/segmented-apply.ts');
+  const snapshot = await materializedSnapshot(engine, await engine.readPageSnapshot(slug, { sourceId }));
+  if (!snapshot || segmentedOverCeiling(snapshot.page)) return;
   const { prepareAutomaticLinks } = await import('../persistence/links-preparation.ts');
   const prepared = await prepareAutomaticLinks(engine, slug, { ...snapshot.page, frontmatter: snapshot.page.frontmatter ?? {} }, sourceId);
   return engine.transaction(async tx => {

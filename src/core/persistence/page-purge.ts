@@ -38,6 +38,7 @@ import { readRequestIndexStates, REQUEST_INDEXES_REPAIR_COMMAND, type RequestInd
 import { faultPoint } from './fault-points.ts';
 import { findRequestsForSlugs, recheckRequestsCarrying, redactRequestIntents, sweepRequestsCarrying, type JournalSweep } from './intent-redaction.ts';
 import { dropPurgedFenceRows } from '../facts/purge-overlay.ts';
+import { derivedRowsFrom, hideDerivedRows } from '../facts/derivation-inputs.ts';
 import { contentHash } from '../utils.ts';
 
 export const PURGE_RESIDUALS = 'Removed from live stores: the page row with its chunks, versions, takes, timeline, links and raw data, the facts filed on it (tombstoned), '
@@ -141,6 +142,10 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     ON CONFLICT (source_id,content_hash) DO UPDATE SET slug=EXCLUDED.slug,request_id=EXCLUDED.request_id,purged_at=now()`, [sourceId, [...hashes], slug, row.id]);
   const { factRows, takeRows, needles } = await readPurgeClaims(tx, sourceId, slug, page.id);
   const factIds = factRows.map(f => Number(f.id)), takeIds = takeRows.map(t => Number(t.id));
+  const derivedFrom = await derivedRowsFrom(tx, [{ table: 'pages', id: page.id }, ...factIds.map(id => ({ table: 'facts', id })), ...takeIds.map(id => ({ table: 'takes', id }))]);
+  const purgedHere = new Set([...factIds.map(id => `facts:${id}`), ...takeIds.map(id => `takes:${id}`)]);
+  const derived = await hideDerivedRows(tx, derivedFrom.rows.filter(r => !purgedHere.has(`${r.table}:${r.id}`)),
+    { sourceId, requestId: row.id, reason: 'page purge' });
   const count = async (sql: string, params: unknown[]) => (await tx.executeRaw(sql, params)).length;
   const refs = factIds.map(String);
   const removed: Record<string, number> = {
@@ -188,6 +193,7 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
   while (purgeContext.size > PURGE_CONTEXT_LIMIT) purgeContext.delete(purgeContext.keys().next().value!);
   return { status: 'purged', slug, source_id: sourceId, residuals: PURGE_RESIDUALS, journal_sweep: journalSweep,
     purge: { content_hash8: storedHash?.slice(0, 8) ?? null, tombstoned: hashes.size > 0, content_hashes_tombstoned: hashes.size, removed,
+      derived: { ...derived, truncated: derivedFrom.truncated },
       blobs: files.map(f => f.storage_path).filter(Boolean) } };
 }
 

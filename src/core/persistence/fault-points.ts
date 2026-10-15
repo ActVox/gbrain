@@ -4,7 +4,7 @@
  * recovery path must finish: publication boundaries, after an effect's side
  * effect but before its completion is recorded, before a recovery record is
  * cleared, between sync checkpoints, after the consumer prepared a
- * claimed request, (`sync:after_freeze`) after a managed sync import entry is frozen and before it is admitted, (`lane:applied`) when a lane group has applied its pages and waits for its commit turn, and (`stuck_recovery:*`) between the steps of a stuck-recovery resolution. Production never installs a hook, so every call is a
+ * claimed request, (`sync:after_freeze`) after a managed sync import entry is frozen and before it is admitted, (`lane:applied`) when a lane group has applied its pages and waits for its commit turn, (`stuck_recovery:*`) between the steps of a stuck-recovery resolution, and (`segmented:*`) between the stages of a segmented write. Production never installs a hook, so every call is a
  * no-op there; the gate's workers install one that SIGKILLs or stalls the
  * process at a chosen point.
  */
@@ -24,7 +24,10 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'purge:sweep_chunk' | 'purge:carrying_lookup'
   // #6650: `gbrain repair stuck-recovery` (recovery-resolve.ts): after the backup is durable (before its journal step), after the prior
   // bytes are written (before their journal step), after a --keep disk write is abandoned (its journal step written), and after recoverPublication returns.
-  | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered';
+  | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered'
+  // Wave B segmented writes (spec 3.4 crash windows): after the texts, the staged manifest rows and the staged chunks of a
+  // preparation, after the generation flip (inside the publication transaction), and after a projection staged its chunks (before its seal).
+  | 'segmented:texts_staged' | 'segmented:manifest_staged' | 'segmented:chunks_staged' | 'segmented:flipped' | 'segmented:projection_staged';
 /**
  * `signal` (#6278, `consumer:preparing` only): the preparation's abort signal, so
  * a stalling hook can model both the reporter's cases: a preparer that honours
