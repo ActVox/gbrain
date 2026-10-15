@@ -8,6 +8,7 @@ import { embeddingWriteTarget, embeddingInputContext } from './page-state/projec
 import { canReuseMarkdownVector, planEmbeddingReuse } from './embed-reuse.ts';
 import { modeRequiresSynopsis } from './embedding-context.ts';
 import type { Chunk, ChunkInput, CRMode } from './types.ts';
+import type { SegmentChunkInput } from './page-body/types.ts';
 
 /**
  * A13 reuse for one page import: copies each stored vector the reuse gate
@@ -69,4 +70,15 @@ export async function reuseStoredChunkVectors(
     }
   }
   return reused;
+}
+
+/**
+ * Wave B (lane 1e): vector reuse for a segmented write, scoped to the chunk
+ * rows of the occurrences the write retires (never the whole page). Copies
+ * each admitted stored vector onto the new chunk with the same source and
+ * text; returns how many chunks got one.
+ */
+export async function reuseSegmentChunkVectors(_exec: BrainEngine, _input: { pageId: number; retiredOccurrences: readonly number[];
+  chunks: SegmentChunkInput[]; title: string; corpusGeneration: string | null; tier: 'title' | 'none' }): Promise<number> {
+  throw new Error('reuseSegmentChunkVectors: implemented by Wave B lane 1e');
 }
