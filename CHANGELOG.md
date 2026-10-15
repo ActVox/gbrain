@@ -12,14 +12,16 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.232.0] - 2026-10-14
 
-**Large pages no longer crash or stall edit_page, parsing, chunking or code indexing, and a long timeline no longer fails the page write (large pages Wave A, crash fixes).** Several steps did work that grew with the square of the page size. On a 1.79 MB chat page (about 30,000 lines), `edit_page`'s receipt diff built a full line-by-line table and ran the process out of memory. Splitting a page that uses `---` separators took 54 s at 4 MB. Chunking newline-free text took 155 s at 10 MB. The code edge extractor took over 200 s on a 10 MB source file. Separately, the page keyword vector indexed the whole timeline, so roughly 1 MB of varied timeline text overflowed Postgres's 1 MB `tsvector` limit and aborted the write. All of these now run in linear time and bounded memory. Every fix produces byte-identical output, proven by differential tests against the old code, except the two bounded behaviors below.
+**MCP `list_write_conflicts` refuses a source outside the caller's grant and bounds its window to that source's own requests (#6643 follow-up).** A remote caller that named a source outside its grant used to get an empty report back. The response's `window` sequences were also brain-wide, so polling one granted source showed write activity in sources the caller cannot see. Both were found by GBRA-60's D5 agent smoke.
 
 ### Itemized changes
 
-- **edit_page receipt diff** (`src/core/persistence/page-edit.ts`, `src/core/skillpack/diff-text.ts`): the diff trims common leading and trailing lines and keeps the line table under 4 million cells. Past that it emits one coarse hunk marked `diff_coarse: true`. `unifiedDiff` output is unchanged for every other caller. Tested on a 50,000-line page under a 3 GB memory cap.
-- **Timeline split** (`src/core/markdown.ts`): the check for content above a `---` or `## Timeline` line is O(1) per line instead of re-joining every line above it. Output is byte-identical, so `content_hash` is unchanged.
-- **Chunker and edge extractor** (`src/core/chunkers/recursive.ts`, `src/core/chunkers/edge-extractor.ts`): `splitAtDelimiters` is covered by a differential test and a scan-count probe. The edge extractor resolves receivers through a lazy per-file binding index and locates chunks by binary search, and emits identical edges.
-- **Bounded page keyword vector** (migration v245, `src/schema.sql`, `src/core/fts-language.ts`): the title arm indexes the first 65,536 characters of the timeline and the first 32,768 characters of timeline entries. The densest worst-case page stays under the 1 MB limit on both engines. The upgrade rebuilds pages with long timelines once.
+- **Out-of-grant `source_id`** (`src/core/ops/persistence.ts`): the op checks an explicit `source_id` with `resolveRequestedScope`, like the other source-scoped reads. A remote caller outside its grant gets `permission_denied`, whether or not the source exists.
+- **Source-scoped window** (`src/core/persistence/drift-conflicts.ts`):
+  - The window ends at the source's own newest request in its current incarnation, read through the `(source_incarnation, sequence)` index, and the scan reads only that incarnation.
+  - A cursor naming a later sequence is clamped.
+  - A source the caller may not read returns before anything is computed.
+- **Tests:** `test/maintenance-file-drift-6643.test.ts` covers the refusal for a real and an unregistered source, a window that does not move when another source is written, and the clamped forged cursor. Each half fails on the previous code.
 
 ## [0.60.231.0] - 2026-10-14
 
