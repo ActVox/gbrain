@@ -8,27 +8,35 @@
  * the segment's bounds and carry no overlap from the previous segment, so a
  * segment's chunks depend only on its bytes, entry state and stored regions.
  *
- * The projection is built from the stored regions the segmenter computed
- * under the page's fence trust: takes, truncated tail and materialized
- * markers out, private keys as the projection token, and each facts region
- * rendered (world rows through the fence overlay) where its slot sits. A
- * facts region that crosses the segment's bounds is omitted, fail closed.
+ * The projection is the segment's read projection (segment-projection.ts),
+ * the same text a window of the page shows: takes, truncated tail and
+ * materialized markers out, private keys as the projection token, each facts
+ * region rendered (world rows through the fence overlay, credential-projected)
+ * where its slot sits, a facts region that crosses the segment's bounds
+ * omitted, all after the page's withdrawal overlay (`text`). That is the
+ * safe-fence contract of the inline chunker (chunkText over
+ * credentialSafeProjection(sanitizeRemoteBody()) of the overlaid body), so a
+ * sealed segmented page carries the markdown chunker's version and remote
+ * reads serve its chunks.
  * Inline pages keep prepareMarkdownChunks; this is a separate chunker identity.
  */
-import { chunkProjectedText, chunkText } from '../chunkers/recursive.ts';
+import { chunkProjectedText, chunkText, MARKDOWN_CHUNKER_VERSION } from '../chunkers/recursive.ts';
 import { estimateEmbedTokens } from '../chunkers/token-estimate.ts';
 import { resolveMaxChunkTokens } from '../embedding-input-limit.ts';
 import { fencedCodeChunks, newFenceChunkBudget, type FenceChunkBudget } from '../markdown-chunks.ts';
-import { fenceTrustMarker, markFenceChunk, splitFenceOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
+import { fenceTrustMarker, markFenceChunk, renderFenceLowTier, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { isQuarantined } from '../quarantine.ts';
-import { renderFactsRegion } from '../remote-body.ts';
-import { credentialSafeProjection } from '../credential-projection.ts';
 import type { EntryState } from './entry-state.ts';
 import type { SegmentChunkInput, BodyRegion } from './types.ts';
-import { segmentProjectionParts, type StoredRegion } from './segmenter.ts';
+import type { StoredRegion } from './segmenter.ts';
+import { projectSegment } from './segment-projection.ts';
 
-/** Bump when the per-segment projection or chunk layout changes (stamped with the segmenter version). */
-export const SEGMENTED_CHUNKER_VERSION = 1;
+/**
+ * `pages.chunker_version` of a sealed segmented page: segments are chunked by the markdown pipeline
+ * (chunkProjectedText, fencedCodeChunks) under the same safe-fence contract, so they share its version, at or above
+ * SAFE_FENCE_CHUNKER_VERSION. A change to the cuts or the stored per-segment metadata bumps SEGMENTER_VERSION.
+ */
+export const SEGMENTED_CHUNKER_VERSION = MARKDOWN_CHUNKER_VERSION;
 
 export type SegmentChunk = Omit<SegmentChunkInput, 'occurrence_id'>;
 
@@ -48,6 +56,8 @@ export interface SegmentChunkOptions {
   frontmatter?: Record<string, unknown> | null;
   maxChunkTokens?: number;
   overlay?: FenceChunkOverlay;
+  /** The segment text after the page's withdrawal overlay; defaults to the stored text. */
+  text?: string;
   /** One budget per page, shared by every segment's call, so the fence caps stay per page. */
   fenceBudget?: FenceChunkBudget;
 }
@@ -60,26 +70,16 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
     throw new Error(`segment_regions_stale: regions at byte ${segment.byteStart} were computed under fence trust ${segment.fenceTrust}, the page is ${opts.fenceTrust}; rescan before chunking`);
   }
   const maxTokens = opts.maxChunkTokens ?? resolveMaxChunkTokens();
-  const raw = Buffer.from(segment.bytes).toString('utf8');
   const segEnd = segment.byteStart + segment.bytes.length;
-  const pieces: string[] = [];
+  const projected = projectSegment({ ...segment, lineStart: 0 }, { text: opts.text, fenceOverlay: opts.overlay });
   const map: MappedPart[] = [];
-  const factsTexts: string[] = [];
   let projBytes = 0;
-  for (const part of segmentProjectionParts(raw, segment.protectedRegions, segment.byteStart)) {
-    let text = '';
-    if (part.kind === 'text' || part.kind === 'pem') text = part.text;
-    else if (part.kind === 'facts' && part.region!.open_start === undefined) {
-      factsTexts.push(part.text);
-      text = credentialSafeProjection(renderFactsRegion(splitFenceOverlay(part.text, opts.overlay).main));
-    }
-    if (!text) continue;
-    const bytes = Buffer.byteLength(text, 'utf8');
-    map.push({ projStart: projBytes, projEnd: projBytes + bytes, rawStart: part.start, rawEnd: part.end, linear: part.kind === 'text' });
-    pieces.push(text);
+  for (const piece of projected.pieces) {
+    const bytes = Buffer.byteLength(piece.text, 'utf8');
+    map.push({ projStart: projBytes, projEnd: projBytes + bytes, rawStart: piece.rawStart, rawEnd: piece.rawEnd, linear: piece.linear });
     projBytes += bytes;
   }
-  const projection = pieces.join('');
+  const projection = projected.pieces.map(piece => piece.text).join('');
   const source = segment.region === 'truth' ? 'compiled_truth' : 'timeline';
   const chunks: SegmentChunk[] = [];
   const push = (c: Omit<SegmentChunk, 'local_ordinal'>) => chunks.push({ ...c, local_ordinal: chunks.length });
@@ -110,12 +110,10 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
     }
   }
 
-  if (factsTexts.length) {
-    for (const { tier, unconfirmed, body } of splitFenceOverlay(factsTexts.join('\n'), opts.overlay).lowTier) {
-      const room = Math.max(1, maxTokens - estimateEmbedTokens(fenceTrustMarker(tier, unconfirmed)) - 1);
-      for (const c of chunkText(body, { maxTokens: room })) {
-        push({ chunk_text: markFenceChunk(tier, c.text, unconfirmed), chunk_source: source, ...wholeSegment });
-      }
+  for (const { tier, unconfirmed, body } of renderFenceLowTier(projected.lowTier)) {
+    const room = Math.max(1, maxTokens - estimateEmbedTokens(fenceTrustMarker(tier, unconfirmed)) - 1);
+    for (const c of chunkText(body, { maxTokens: room })) {
+      push({ chunk_text: markFenceChunk(tier, c.text, unconfirmed), chunk_source: source, ...wholeSegment });
     }
   }
   return chunks;

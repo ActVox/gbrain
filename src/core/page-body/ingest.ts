@@ -25,13 +25,15 @@ import { stepFenceWalk, type FenceWalk } from '../fence-scan.ts';
 import { BODY_LEAD_BYTES, BODY_STAGING_HARD_MS, BODY_STAGING_IDLE_MS, STAGE_BATCH_BYTES } from './limits.ts';
 import type { BodyRegion, BodyStagingKind, BodyStorage, JsonObject, ManifestRow, ManifestRowInput, SegmentChunkInput,
   SegmentedBodyColumns, SegmentTextInput } from './types.ts';
-import { segmentProjectionParts, segmentStream, SEGMENTER_VERSION, type StoredRegion } from './segmenter.ts';
+import { segmentStream, SEGMENTER_VERSION, type StoredRegion } from './segmenter.ts';
 import { initialEntryState, readEntryState, timelineEntryState, type EntryState } from './entry-state.ts';
 import { ContentHashStream } from './content-hash-stream.ts';
 import { prepareSegmentChunks } from './segment-chunks.ts';
 import { reuseSegmentChunkVectors } from '../import-chunk-reuse.ts';
 import { newFenceChunkBudget } from '../markdown-chunks.ts';
 import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
+import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
+import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
 
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
@@ -360,6 +362,7 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
   if (input.chunking.quarantined || !input.occurrences.length) return { rows: 0, occurrences: 0, indexes: [] };
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   const fenceBudget = newFenceChunkBudget();
+  let ledger: BodyLedger | undefined;
   let rows = 0, done = 0;
   const indexes: number[] = [];
   for (let start = 0; start < input.occurrences.length;) {
@@ -368,21 +371,22 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     const batch = input.occurrences.slice(start, end);
     start = end;
     const texts = await engine.readSegmentTexts(input.sourceId, batch.map(row => row.sha256));
-    const segments = batch.map(row => {
+    ledger ??= await readBodyLedger(engine, input.sourceId, input.slug);
+    const segments = [];
+    for (const row of batch) {
       const bytes = texts.get(hex(row.sha256));
       if (bytes === undefined) throw new Error(`Segment text ${hex(row.sha256)} of page ${input.pageId} is missing.`);
       const entryState = readEntryState(row.entryState);
       if (!entryState) throw new Error(`Manifest row ${row.occurrenceId} of page ${input.pageId} has an entry state of another version; resegment the page.`);
       const fenceTrust = regionTrust(input.flags, row.region);
-      return { row, fenceTrust, segment: { region: row.region, bytes, byteStart: row.byteStart, entryState, fenceTrust, protectedRegions: row.protectedRegions as StoredRegion[] } };
-    });
-    const factsTexts = segments.flatMap(({ segment }) => segment.protectedRegions.some(region => region.kind === 'facts')
-      ? segmentProjectionParts(utf8.decode(segment.bytes), segment.protectedRegions, segment.byteStart)
-        .filter(part => part.kind === 'facts' && part.region?.open_start === undefined).map(part => part.text) : []);
+      const text = await overlaySegmentText(engine, ledger, { sourceId: input.sourceId, byteStart: row.byteStart, entryState }, utf8.decode(bytes), 'read');
+      segments.push({ row, fenceTrust, text, segment: { region: row.region, bytes, byteStart: row.byteStart, entryState, fenceTrust, protectedRegions: row.protectedRegions as StoredRegion[] } });
+    }
+    const factsTexts = segments.flatMap(({ text }) => text.includes('gbrain:facts:begin') ? withdrawalFenceBlocks(text).map(block => text.slice(block.start, block.end)) : []);
     const overlay = factsTexts.length ? await loadFenceChunkOverlay(engine, { sourceId: input.sourceId, slug: input.slug, compiled_truth: factsTexts.join('\n') }) : undefined;
     const chunks: SegmentChunkInput[] = [];
-    for (const { row, fenceTrust, segment } of segments) {
-      for (const chunk of await prepareSegmentChunks(segment, { fenceTrust, frontmatter: input.frontmatter, overlay, fenceBudget })) {
+    for (const { row, fenceTrust, segment, text } of segments) {
+      for (const chunk of await prepareSegmentChunks(segment, { fenceTrust, frontmatter: input.frontmatter, overlay, fenceBudget, text })) {
         chunks.push({ ...chunk, occurrence_id: row.occurrenceId });
       }
     }

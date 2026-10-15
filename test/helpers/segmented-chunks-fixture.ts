@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../../src/core/search/embedding-column.ts';
 import { installFixtureChunks } from './page-projection.ts';
+import { SEGMENTED_CHUNKER_VERSION } from '../../src/core/page-body/segment-chunks.ts';
 
 export interface FixtureChunk {
   text: string;
@@ -84,7 +85,8 @@ export async function segmentPage(engine: BrainEngine, slug: string, opts: {
       chunkIds.set(chunk.text, Number(row!.id));
     }
   }
-  // Clearing the body and replacing the rows unseals the projection; the fixture's rows are the projection.
-  await engine.executeRaw('UPDATE pages SET text_projection_revision = knowledge_revision WHERE id = $1', [pageId]);
+  // Clearing the body and replacing the rows unseals the projection; the fixture's rows are the projection, sealed at
+  // the chunker version sealSegmentedPage stamps.
+  await engine.executeRaw('UPDATE pages SET text_projection_revision = knowledge_revision, chunker_version = $2 WHERE id = $1', [pageId, SEGMENTED_CHUNKER_VERSION]);
   return { pageId, chunkIds };
 }
