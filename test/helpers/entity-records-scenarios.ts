@@ -478,3 +478,20 @@ export async function recordLinksStayInSources(engine: BrainEngine): Promise<voi
     expect(v2.supersedes).toEqual([{ slug: 'contracts/acme-msa' }]);
   }
 }
+
+/** Card in-edges come back in link order (like out-edges), so the EDGE_CAP cut and every repeated read are stable when page rows move on disk. */
+export async function cardInEdgesInLinkOrder(engine: BrainEngine): Promise<void> {
+  await seedRecordsWorld(engine);
+  const inSlugs = async () => ((await call(engine, 'context_pack', { entities: 'crm/acme-example' })).body.cards[0].edges as Array<{ slug: string; direction: string }>)
+    .filter(e => e.direction === 'in').map(e => e.slug);
+  const linkOrder = (await engine.executeRaw<{ slug: string }>(
+    `SELECT f.slug FROM links l JOIN pages f ON f.id = l.from_page_id JOIN pages t ON t.id = l.to_page_id
+      WHERE t.slug = 'crm/acme-example' AND t.source_id = $1 AND f.slug <> 'contracts/acme-private' ORDER BY l.id`, [SRC])).map(r => r.slug);
+  const before = await inSlugs();
+  expect(before).toEqual(linkOrder.slice(0, before.length));
+  // Rewrite the earliest referrers' rows so they move to the end of the heap; the card must not reorder.
+  await engine.executeRaw(`UPDATE pages SET title = title WHERE source_id = $1 AND slug IN ('contracts/acme-msa', 'contracts/acme-amend-1')`, [SRC]);
+  await engine.executeRaw(`UPDATE links SET context = context WHERE from_page_id IN (SELECT id FROM pages WHERE source_id = $1 AND slug IN ('contracts/acme-msa', 'contracts/acme-amend-1'))`, [SRC]);
+  expect(await inSlugs()).toEqual(before);
+}
+

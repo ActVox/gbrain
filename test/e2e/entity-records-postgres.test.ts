@@ -33,4 +33,5 @@ d('entity records (Postgres)', () => {
   test('F3 page_status on get_backlinks and context_pack rows: additive, bounded, hidden pages none; its key removes it there', () => S.pageStatusOnRows(engine), 60_000);
   test('F1 on, F3 off: record rows keep page_status on initial and continued outputs; other rows have none', () => S.recordsKeepPageStatusWithRowKeyOff(engine), 60_000);
   test('amends and supersedes targets outside the caller\'s sources never reach record rows', () => S.recordLinksStayInSources(engine), 60_000);
+  test('card in-edges come back in link order, stable when page rows move', () => S.cardInEdgesInLinkOrder(engine), 60_000);
 });

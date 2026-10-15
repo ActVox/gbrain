@@ -492,7 +492,8 @@ async function assembleCard(
            JOIN pages t ON t.id = l.to_page_id
            ${temporalLinkJoinSql('l', excludePrivate)}
           WHERE t.slug = $1 AND t.source_id = $2 AND f.source_id = $2 AND f.deleted_at IS NULL
-            AND COALESCE(l.link_source, '') <> 'mentions'${inboundPrivacy}`,
+            AND COALESCE(l.link_source, '') <> 'mentions'${inboundPrivacy}
+          ORDER BY l.id`,
         [pageSlug, sourceId],
       )
       .then(rs => rs.map(r => annotateTemporalRow(r)))
