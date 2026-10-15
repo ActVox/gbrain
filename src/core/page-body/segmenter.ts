@@ -45,7 +45,7 @@ import { SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES, SEGMENT_RANK4_BYTES, SEGMENT_TARG
 import type { BodyRegion, SegmentCutKind } from './types.ts';
 import { cloneEntryState, type EntryState } from './entry-state.ts';
 import {
-  feedPemScan, findTokens, initialPemScan, markPemCut, newLineSplit, pemBodyLike, pemResolvedTo, PEM_CONTEXT_CHARS,
+  feedPemScan, findTokens, forcePemCut, initialPemScan, markPemCut, pemExposedFrom, newLineSplit, pemBodyLike, pemResolvedTo, PEM_CONTEXT_CHARS,
   PROTECTED_MARKERS, scanRegionLine, scanRegionPiece, splitLines, takePemCut, utf8Len,
   type Cover, type LineSplit, type PemScanState, type RegionTrack, type ScanOut, type SplitEvent,
 } from './region-scan.ts';
@@ -58,6 +58,8 @@ const GEAR_TOP_BITS = 10;
 const OUTLINE_MAX_HEADINGS = 64;
 /** Projection text is handed to the PEM scan in batches of this many chars (its buffer is re-read per feed). */
 const PEM_FEED_CHARS = 64 * 1024;
+/** Closed segments waiting on the PEM lookahead are held up to this many bytes, then released fail closed. */
+const HOLD_MAX_BYTES = 2 * SEGMENT_MAX_BYTES;
 const PEM_FENCE_TAIL = 'PRIVATE KEY-----';
 const ATX_TOP = /^#{1,2}\s/;
 const ATX_DEEP = /^#{3,6}\s/;
@@ -98,9 +100,20 @@ export interface SegmentOptions {
   end: 'region_end' | 'eof';
 }
 
-export type StoredRegionKind = 'facts' | 'takes' | 'tail' | 'marker' | 'pem';
+/**
+ * `pem_guard`: the end of a segment released before a private-key claim could
+ * be ruled out over it (a protected region longer than the hold bound stalled
+ * the projection), projected as nothing: never more visible than whole-body
+ * sanitization, possibly less.
+ */
+export type StoredRegionKind = 'facts' | 'takes' | 'tail' | 'marker' | 'pem' | 'pem_guard';
 
-/** A protected run of a segment: segment-relative raw bytes; `open_*` give the full extent in stored-stream bytes when it crosses the segment's bounds (`open_end` absent while unknown). */
+/**
+ * A protected run of a segment: segment-relative raw bytes; `open_*` give the
+ * full extent in stored-stream bytes when it crosses the segment's bounds.
+ * `open_end` is set only when the run ends by the segment's end; a run still
+ * open there has none, and the segment holding its end carries both.
+ */
 export interface StoredRegion { kind: StoredRegionKind; start: number; end: number; open_start?: number; open_end?: number }
 
 /** A facts region of a segment, rendered at read time where its zero-length slot sits in the static projection. */
@@ -160,11 +173,22 @@ interface OpenSegment {
   projStart: number;
 }
 
-interface ClosedSegment extends OpenSegment { cutKind: SegmentCutKind; exit: EntryState; projEnd: number }
+interface ClosedSegment extends OpenSegment {
+  cutKind: SegmentCutKind;
+  exit: EntryState;
+  projEnd: number;
+  /** The truncated tail as known at the cut, so stored kinds never depend on when a segment is released. */
+  tailFrom: number | null;
+}
 
 /**
  * Incremental segmenter for one region: push text, take the segments that are
- * final. Memory is O(segment + PEM_CONTEXT_CHARS + one line).
+ * final. A closed segment waits until no private-key claim can still start
+ * before its end; at a cut, segments held past HOLD_MAX_BYTES are released
+ * with a `pem_guard` over what a later claim could still cover. Memory is
+ * O(HOLD_MAX_BYTES + segment + PEM_CONTEXT_CHARS). Release decisions are made
+ * at cuts, where the PEM scan has read exactly the projection before the cut,
+ * so the output does not depend on how the input is pushed.
  */
 export class Segmenter {
   private readonly st: EntryState;
@@ -177,6 +201,7 @@ export class Segmenter {
   private regionEnds = new Map<number, number>();
   private cur: OpenSegment;
   private closed: ClosedSegment[] = [];
+  private ready: SegmentOut[] = [];
   private outline: { fence: boolean; midLine: boolean };
   private done = false;
 
@@ -215,9 +240,21 @@ export class Segmenter {
 
   private close(cutKind: SegmentCutKind): void {
     const exit = cloneEntryState(this.st);
-    this.closed.push({ ...this.cur, cutKind, exit, projEnd: this.proj });
-    if (!this.done) markPemCut(this.pem, this.proj);
+    this.closed.push({ ...this.cur, cutKind, exit, projEnd: this.proj, tailFrom: this.actual().truncatedAt });
     this.cur = this.openSegment(exit, this.cur.byteStart + this.cur.bytes, this.cur.lineStart + this.cur.lines);
+    if (this.done) return;
+    markPemCut(this.pem, this.proj);
+    this.feedPem(false);
+    this.release();
+    let held = this.closed.reduce((n, seg) => n + seg.bytes, 0);
+    while (held > HOLD_MAX_BYTES) {
+      const seg = this.closed.shift()!;
+      held -= seg.bytes;
+      seg.exit.pem = forcePemCut(this.pem, seg.projEnd);
+      const exposed = pemExposedFrom(this.pem);
+      const guardFrom = exposed >= seg.projEnd ? null : exposed <= seg.projStart || this.projPieces.length === 0 ? seg.byteStart : this.rawAt(exposed, false);
+      this.ready.push(this.emit(seg, guardFrom));
+    }
   }
 
   private onEvent(e: SplitEvent): void {
@@ -410,7 +447,12 @@ export class Segmenter {
   }
 
   private drain(): SegmentOut[] {
-    const out: SegmentOut[] = [];
+    this.release();
+    return this.ready.splice(0);
+  }
+
+  /** Emit the held segments no private-key claim can still reach, in order. */
+  private release(): void {
     while (this.closed.length) {
       const seg = this.closed[0]!;
       let pem = takePemCut(this.pem, seg.projEnd);
@@ -418,23 +460,23 @@ export class Segmenter {
       if (!pem || (!this.done && pemResolvedTo(this.pem) < seg.projEnd)) break;
       this.closed.shift();
       seg.exit.pem = pem;
-      out.push(this.emit(seg));
+      this.ready.push(this.emit(seg, null));
     }
-    return out;
   }
 
-  private emit(seg: ClosedSegment): SegmentOut {
+  private emit(seg: ClosedSegment, guardFrom: number | null): SegmentOut {
     const raw = seg.parts.join('');
     const bytes = Buffer.from(raw, 'utf8');
     const segEnd = seg.byteStart + seg.bytes;
-    const tailFrom = this.actual().truncatedAt;
+    const tailFrom = seg.tailFrom;
     const regions: StoredRegion[] = [];
     for (const r of seg.removals) {
       const kind = tailFrom !== null && r.kind !== 'marker' && r.regionStart >= tailFrom ? 'tail' : r.kind;
       const region: StoredRegion = { kind, start: r.start - seg.byteStart, end: r.end - seg.byteStart };
       if (kind !== 'marker') {
-        const regionEnd = kind === 'tail' ? undefined : this.regionEnds.get(r.regionStart);
-        if (r.regionStart < seg.byteStart || regionEnd === undefined || regionEnd > segEnd) {
+        const known = kind === 'tail' ? undefined : this.regionEnds.get(r.regionStart);
+        const regionEnd = known !== undefined && known <= segEnd ? known : undefined;
+        if (r.regionStart < seg.byteStart || regionEnd === undefined) {
           region.open_start = r.regionStart;
           if (regionEnd !== undefined) region.open_end = regionEnd;
           else if (kind === 'tail' && seg.cutKind === this.opts.end && this.done) region.open_end = segEnd;
@@ -448,6 +490,7 @@ export class Segmenter {
       if (s.start < seg.byteStart || s.end > segEnd) { region.open_start = s.start; region.open_end = s.end; }
       regions.push(region);
     }
+    if (guardFrom !== null && guardFrom < segEnd) regions.push({ kind: 'pem_guard', start: guardFrom - seg.byteStart, end: seg.bytes });
     this.pemSpans = this.pemSpans.filter(s => s.end > segEnd);
     for (const [start, end] of this.regionEnds) if (end <= segEnd) this.regionEnds.delete(start);
     regions.sort((a, b) => a.start - b.start || b.end - a.end);
@@ -578,7 +621,8 @@ export interface ProjectionPart {
 
 /**
  * A segment's static projection in parts, from its raw text and stored
- * regions: text kept, takes / tail / marker runs removed, facts runs as
+ * regions: text kept, takes / tail / marker / pem_guard runs removed (a
+ * removal that overlaps an earlier part removes its remainder), facts runs as
  * slots (`text` holds the raw fence for read-time rendering), and each
  * private-key span as the projection token (in the segment where the span
  * starts) plus the newlines of its projected text. `byteStart` is the
@@ -595,7 +639,13 @@ export function segmentProjectionParts(raw: string, regions: readonly StoredRegi
   charAt.set(0, 0);
   for (let i = 0; i < sorted.length; i++) {
     const r = sorted[i]!;
-    if (r.start < cursor) continue;
+    if (r.end <= cursor) continue;
+    if (r.start < cursor) {
+      if (r.kind === 'facts' || r.kind === 'pem') continue;
+      parts.push({ kind: 'removed', start: cursor, end: r.end, text: '', region: r });
+      cursor = r.end;
+      continue;
+    }
     text(r.start);
     const from = charAt.get(r.start)!;
     const to = charAt.get(r.end)!;
