@@ -919,6 +919,7 @@ async function runSetCrMode(engine: BrainEngine, args: string[]): Promise<void> 
   } else {
     console.log(`Set source "${id}" contextual_retrieval_mode = ${mode}.`);
   }
+  console.log((await import('./config/contextual-mode-hint.ts')).contextualModeHint(id));
 }
 
 async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
