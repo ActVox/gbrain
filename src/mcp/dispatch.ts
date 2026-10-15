@@ -1072,9 +1072,8 @@ export async function dispatchToolCall(
       logVerb(true, {
         ...(typeof r?.dropped_count === 'number' ? { budget_dropped: r.dropped_count } : {}),
         ...(name === 'entity' && typeof r?.found === 'boolean' ? { entity_found: r.found } : {}),
-        // remember's frozen status enum (inserted|duplicate|superseded) —
-        // the memory_writeback doctor counters read this (all-MCP-callers
-        // semantics, labeled honestly there; OV-A11).
+        // remember's frozen status enum (inserted|duplicate|superseded) — the memory_writeback
+        // doctor counters read this (all-MCP-callers semantics, labeled honestly there; OV-A11).
         ...(name === 'remember' && typeof r?.status === 'string' ? { remember_status: r.status } : {}),
         ...((name === 'entity' || name === 'context_pack') && recordsFiring(result) ? { records_firing: recordsFiring(result)! } : {}),
       });
