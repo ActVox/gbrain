@@ -222,11 +222,7 @@ function quoteAmbiguousFrontmatterScalars(content: string, quoted?: Array<{ key:
 
 const QUOTE_FENCE_RE = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/;
 
-/**
- * How the pre-quote pass sees `lifted` (content after
- * stripLeadingBlanksBeforeFence): 'none' without a bare `---` opener line,
- * 'closed' when its fence closes inside `lifted`, else 'open'.
- */
+/** The pre-quote pass's fence in `lifted`: 'none' without a bare `---` opener line, 'closed' when it closes inside `lifted`. */
 export function frontmatterQuoteFence(lifted: string): 'none' | 'closed' | 'open' {
   if (!/^---\r?\n/.test(lifted)) return 'none';
   return QUOTE_FENCE_RE.test(lifted) ? 'closed' : 'open';
@@ -335,13 +331,10 @@ export function parseMarkdown(
 }
 
 /**
- * What parseMarkdown reads before the body split: the raw frontmatter, the
- * body (after the closing fence, or the whole content when the block could
- * not be read) and the validation findings. `lifted` (leading blank lines
- * dropped before a fence) and `safeContent` (after the pre-quote pass) are the
- * strings the frontmatter readers saw; page-body/body-scan.ts checks that a
- * bounded file head yields the same reading as the whole file.
+ * What parseMarkdown reads before the body split. `lifted` and `safeContent` are the strings the frontmatter
+ * readers saw; page-body/body-scan.ts checks that a bounded file head reads the same as the whole file.
  */
+export type ParsedMarkdownFields = Omit<ParsedMarkdown, 'frontmatter' | 'compiled_truth' | 'timeline'>;
 export interface ParsedMarkdownHead {
   frontmatter: Record<string, unknown>;
   body: string;
@@ -445,17 +438,8 @@ export function parseMarkdownHead(content: string, opts?: ParseOpts): ParsedMark
   return { frontmatter, body, lifted, safeContent, errors, warnings, recovery };
 }
 
-/**
- * Every ParsedMarkdown field derived from the head (all but frontmatter and
- * the body regions). `bodyTitle` (the body's first H1, then an embedded
- * leading fence block's `title:`) is consulted only without a frontmatter title.
- */
-export function parsedMarkdownFields(
-  head: ParsedMarkdownHead,
-  bodyTitle: () => string,
-  filePath?: string,
-  opts?: ParseOpts,
-): Omit<ParsedMarkdown, 'frontmatter' | 'compiled_truth' | 'timeline'> {
+/** ParsedMarkdown's head-derived fields; `bodyTitle` (first H1, then an embedded fence `title:`) only without a frontmatter title. */
+export function parsedMarkdownFields(head: ParsedMarkdownHead, bodyTitle: () => string, filePath?: string, opts?: ParseOpts): ParsedMarkdownFields {
   const { frontmatter, errors, warnings, recovery } = head;
   // #1948/#1939: frontmatter values can be non-strings (YAML coerces `title: 123`
   // → number, a bare date → Date). The `as string` cast used to lie: a truthy
@@ -480,7 +464,7 @@ export function parsedMarkdownFields(
   const tags = extractTags(frontmatter);
   const slug = coerceFrontmatterString(frontmatter.slug) || inferSlug(filePath);
 
-  const result: Omit<ParsedMarkdown, 'frontmatter' | 'compiled_truth' | 'timeline'> = {
+  const result: ParsedMarkdownFields = {
     slug,
     type,
     typeExplicit: explicitType !== '',
@@ -611,11 +595,7 @@ export function nullBytesError(line: number): ParseValidationError {
   return { code: 'NULL_BYTES', message: 'Content contains null bytes (likely binary corruption)', line };
 }
 
-/**
- * The validator's view of the fence over `content.split('\n')`: the first
- * non-empty line (-1 when none), whether it opens a block, and the first later
- * line that trims to `---` (-1 when none, or when the first line does not open).
- */
+/** The validator's fence over `content.split('\n')`: first non-empty line, whether it opens, and the line closing it (-1: none). */
 export function validatorFrontmatterFence(lines: readonly string[]): { firstNonEmpty: number; opens: boolean; closeLine: number } {
   let firstNonEmpty = 0;
   while (firstNonEmpty < lines.length && lines[firstNonEmpty]!.trim().length === 0) firstNonEmpty++;
@@ -943,11 +923,7 @@ function isTimelineSentinelLine(lines: string[], i: number, firstContent: number
   return false;
 }
 
-/**
- * The sentinel a trimmed body line can be: an explicit marker, or a bare `---`
- * ('dash'), which counts only when content precedes it and the next non-blank
- * line passes isTimelineHeadingAfterDash.
- */
+/** A trimmed sentinel line: a marker, or a `---` ('dash') that counts only after content and before isTimelineHeadingAfterDash. */
 export function timelineSentinelKind(trimmed: string): 'marker' | 'dash' | null {
   if (trimmed === '<!-- timeline -->' || trimmed === '<!--timeline-->') return 'marker';
   if (trimmed === '--- timeline ---' || /^---\s+timeline\s+---$/i.test(trimmed)) return 'marker';
@@ -1011,11 +987,7 @@ export function isBareTimelineHeading(raw: string): boolean {
   return /^##\s+(timeline|history)\b/i.test(raw.trim());
 }
 
-/**
- * One line of a bare timeline section after its heading: the next H2 ends it,
- * blank lines, dated bullets and (after a bullet) wrapped continuations keep
- * it, anything else ('other') disqualifies the heading.
- */
+/** A line after a bare timeline heading: the next H2 ends the section, 'other' disqualifies the heading. */
 export function bareTimelineSectionLine(raw: string, datedBullets: number): 'end' | 'blank' | 'bullet' | 'wrap' | 'other' {
   const trimmed = raw.trim();
   if (/^##\s+\S/.test(trimmed)) return 'end';
