@@ -35,12 +35,13 @@ import { writeFailureDiagnostic } from './verb-errors.ts';
 import { extractManagedStaleLinks } from './links-maintenance.ts';
 import { addSettledRange, CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
-import { principalKey, type Principal, type WriteRequest } from './model.ts';
+import { principalKey, type WriteRequest } from './model.ts';
 import { readJournalLimits } from './limits.ts';
 import { assertManagedSyncAllowed } from './worktree-refresh.ts';
 import type { GBrainConfig } from '../config.ts';
 import { admitGroup, freezeFollowers, groupableIntent, nextGroupSize, type BulkSettings } from './sync-group.ts';
-import { cancelRowsUnderCursor, cancelWindow, type CursorFence } from './sync-window.ts';
+import { cancelRowsUnderCursor } from './sync-window.ts';
+import { admittedBy, cancelAdmittedWindow, localResumeRequired, readAdmitted, withoutUnadmitted } from './sync-admitted.ts';
 import { cursorFenceCause, isSyncKnockOn, knockOnDetail, knockOnRoot } from './sync-knock-on.ts';
 import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
@@ -485,6 +486,15 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
  *   keeps its exact options.
  */
 async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, input: { authority: SyncAuthority; processingOptions: SyncProcessingOptions;
+  syncOptions: SyncCursorOptions; embedDeferred?: boolean; assertActive: () => void; state: HoldRunState }): Promise<Cursor> {
+  const adopted = await adoptCursorCas(engine, key, cursor, input);
+  const optionsDiffer = digest(adopted.cursor.syncOptions ?? input.syncOptions) !== digest(input.syncOptions);
+  if (adopted.inherited.length || adopted.writerChanged || input.state.fanIn?.adopted || optionsDiffer) input.state.adopted = { inherited: adopted.inherited,
+    writerChanged: adopted.writerChanged, syncOptions: adopted.cursor.syncOptions ?? null, processingOptions: adopted.cursor.processingOptions ?? null, optionsDiffer };
+  return adopted.cursor;
+}
+/** The adoption compare-and-swap (see `adoptCursor`). */
+async function adoptCursorCas(engine: BrainEngine, key: string, cursor: Cursor, input: { authority: SyncAuthority; processingOptions: SyncProcessingOptions;
   embedDeferred?: boolean; assertActive: () => void }): Promise<{ cursor: Cursor; inherited: Array<keyof SyncProcessingOptions>; writerChanged: boolean }> {
   const { authority } = input;
   // #6696: a cost-gate deferral is this run's constraint (each request it freezes carries `embedDeferred`), never an opt-out the cursor keeps.
@@ -503,58 +513,6 @@ async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, inp
   if (writerChanged) await faultPoint('sync:cursor_adopted', { sourceId: cursor.sourceId });
   return { cursor: saved, inherited, writerChanged };
 }
-/** A remote caller met a cursor another principal (or the local CLI) wrote: the host's CLI resumes it. */
-function localResumeRequired(sourceId: string): OperationError {
-  return opError('sync_in_progress', `Source ${sourceId} has an unfinished sync run that another writer started.`,
-    `A remote caller resumes only its own sync runs, so nothing was synced. The brain host's CLI finishes the run with the command in fix.`,
-    { reason: 'local_resume_required', fix: { argv: ['gbrain', 'sync', '--no-pull', '--source', sourceId], consent: [], actor: 'user', requires_exclusive: false,
-      why: `Finishes the unfinished sync run of source ${sourceId} under the brain host's CLI writer.`,
-      user_message: `Source ${sourceId} has an unfinished sync that another writer started. Please run the command shown in a terminal on the brain host.`,
-      verify: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] } } });
-}
-/** The principal that admitted (or will admit) a frozen member: the authority frozen in its own intent. */
-const admittedBy = (member: Pending, cursor: Pick<Cursor, 'authority'>): Principal => member.intent.syncAuthority?.writer.principal ?? cursor.authority.writer.principal;
-/** The rows of admitted members, each read under its own admitting principal (one read per principal, normally one). */
-async function readAdmitted(engine: Pick<BrainEngine, 'executeRaw'>, cursor: Pick<Cursor, 'authority'>, members: Pending[], committedOnly = false): Promise<WriteRequest[]> {
-  const byPrincipal = new Map<string, { principal: Principal; ids: string[] }>();
-  for (const member of members) {
-    const principal = admittedBy(member, cursor), slot = principalKey(principal);
-    if (!byPrincipal.has(slot)) byPrincipal.set(slot, { principal, ids: [] });
-    byPrincipal.get(slot)!.ids.push(member.requestId);
-  }
-  const rows: WriteRequest[] = [];
-  for (const { principal, ids } of byPrincipal.values()) {
-    rows.push(...await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND request_id=ANY($3::uuid[])${committedOnly ? " AND state='committed'" : ''}`,
-      [principal.kind, principal.id, ids]));
-  }
-  return rows;
-}
-/** Cancels a window's queued members, each group of them under its own admitting principal. */
-async function cancelAdmittedWindow(engine: BrainEngine, cursor: Pick<Cursor, 'authority'>, window: Pending[][], root: string | null,
-  fence?: Omit<CursorFence, 'principal'>): Promise<boolean> {
-  const byPrincipal = new Map<string, { principal: Principal; members: Pending[] }>();
-  for (const member of window.flat()) {
-    const principal = admittedBy(member, cursor), slot = principalKey(principal);
-    if (!byPrincipal.has(slot)) byPrincipal.set(slot, { principal, members: [] });
-    byPrincipal.get(slot)!.members.push(member);
-  }
-  for (const { principal, members } of byPrincipal.values()) {
-    if (!await cancelWindow(engine, [members], principal, root, fence && { ...fence, principal })) return false;
-  }
-  return true;
-}
-/** Drops (in place) the frozen members of `next` no request was admitted for: the head and its group, or the window groups from the first unadmitted one on. */
-async function withoutUnadmitted(engine: BrainEngine, next: Cursor): Promise<void> {
-  const head = next.pending;
-  if (!head) return;
-  const window = next.window ?? [];
-  const admitted = new Set((await readAdmitted(engine, next, [head, ...window.flat()])).map(row => row.request_id));
-  if (!admitted.has(head.requestId)) { delete next.pending; delete next.group; delete next.window; return; }
-  const kept = window.findIndex(group => !group.every(member => admitted.has(member.requestId)));
-  if (kept === -1) return;
-  if (kept === 0) delete next.window; else next.window = window.slice(0, kept);
-}
-
 /** #5988: a managed dry run lists the holds the pending (or newly discovered) imports would earn, read-only. */
 async function managedDryRun(engine: BrainEngine, value: Cursor, base: Cursor, run: { company: boolean; processingOptions: SyncProcessingOptions;
   syncOptions: SyncCursorOptions; repoPath?: string; remote: boolean }): Promise<SyncResult> {
@@ -1474,6 +1432,23 @@ function adoptionReport(state: HoldRunState): Pick<SyncResult, 'inherited_option
       ...(state.remote ? {} : { sync_options: adopted.syncOptions, processing_options: adopted.processingOptions }) } } : {}),
     ...(state.fanIn ? { cursorFanIn: state.fanIn } : {}) };
 }
+/**
+ * #6712 PR 1: the key this pass reads and the older keys folded in (`resolveManagedCursor`). A remote caller folds nothing
+ * in: the cursors it would cancel or retire may belong to another principal (it adopts only its own). A superseded run's
+ * write still in flight settles before the adopted run publishes beside it (`waiting`, `writer_pending`).
+ */
+async function resolvePassCursor(engine: BrainEngine, input: { sourceId: string; incarnation: string; company: Parameters<typeof resolveManagedCursor>[1]['company'];
+  remote: boolean; dryRun: boolean; assertActive: () => void; state: HoldRunState }): Promise<{ key: string; waiting?: SyncResult }> {
+  const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: input.company, assertActive: input.assertActive,
+    readOnly: input.dryRun, foldIn: !input.remote });
+  if (resolution.adoptedLegacyKey || resolution.superseded.length || resolution.retained.length) {
+    input.state.fanIn = { adopted: !!resolution.adoptedLegacyKey, superseded: resolution.superseded.length, retained: resolution.retained.length };
+  }
+  const header = resolution.waitFor && !input.dryRun
+    ? (await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, resolution.key]))[0]?.completed_keys?.[0] : undefined;
+  if (!header) return { key: resolution.key };
+  return { key: resolution.key, waiting: { ...result(header, 'partial', 'writer_pending'), ...(input.remote ? {} : { retryWait: { ...resolution.waitFor!, retry_after_ms: 5000 } }) } };
+}
 async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxPages: number; maxMs: number } | undefined, state: HoldRunState): Promise<SyncResult> {
   await assertManagedSyncActive(engine);
   if (opts.sourceId && !currentCompanyBrainSync(opts.sourceId) && await getCompanyBrainProfile(engine, opts.sourceId)) {
@@ -1489,8 +1464,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   const syncOptions = syncCursorOptions(opts);
   const frozenRun: Parameters<typeof freezeEntry>[4] = { syncOptions, ...(opts.repoPath ? { repoPath: resolve(opts.repoPath) } : {}), ...(opts.embedDeferred ? { embedDeferred: true } : {}) };
   const runStartedAt = new Date().toISOString();
-  // #6712 PR 1: one cursor per incarnation (and company approval); the fan-in below may pick an older key's cursor to finish in place.
-  let key = managedCursorKey(context.incarnation, company);
+  let key = managedCursorKey(context.incarnation, company); // #6712 PR 1: one per incarnation; resolvePassCursor may pick an older key's cursor
   let cursor: Cursor | null = null;
   let missingManifestCursor: CursorHeader | null = null;
   if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => cursor });
@@ -1520,15 +1494,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   };
   try {
     assertActive();
-    // A remote caller folds nothing in: the cursors it would cancel or retire may belong to another principal (it adopts only its own).
-    const resolution = await resolveManagedCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, assertActive, readOnly: !!opts.dryRun,
-      foldIn: !authority.writer.remote });
-    key = resolution.key;
-    if (resolution.adoptedLegacyKey || resolution.superseded.length || resolution.retained.length) state.fanIn = { adopted: !!resolution.adoptedLegacyKey, superseded: resolution.superseded.length, retained: resolution.retained.length };
-    // #6712 PR 1: a superseded run's write still in flight settles before the adopted run publishes beside it.
-    const waiting = resolution.waitFor && !opts.dryRun
-      ? (await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]))[0]?.completed_keys?.[0] : undefined;
-    if (waiting) return { ...result(waiting, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: { ...resolution.waitFor!, retry_after_ms: 5000 } }) };
+    const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
+    key = resolved.key;
+    if (resolved.waiting) return resolved.waiting;
     try { cursor = await readCursor(engine, key); }
     catch (error) {
       if (!(error instanceof MissingSyncManifest) || !opts.retryFailed || opts.dryRun || company) throw error;
@@ -1543,12 +1511,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       cursor = replaced;
     }
     assertActive();
-    if (cursor && !cursor.done && !opts.dryRun) {
-      const adopted = await adoptCursor(engine, key, cursor, { authority, processingOptions, embedDeferred: opts.embedDeferred, assertActive });
-      cursor = adopted.cursor;
-      if (adopted.inherited.length || adopted.writerChanged || resolution.adoptedLegacyKey || digest(cursor.syncOptions ?? syncOptions) !== digest(syncOptions)) state.adopted = { inherited: adopted.inherited, writerChanged: adopted.writerChanged,
-        syncOptions: cursor.syncOptions ?? null, processingOptions: cursor.processingOptions ?? null, optionsDiffer: digest(cursor.syncOptions ?? syncOptions) !== digest(syncOptions) };
-    }
+    if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, syncOptions, embedDeferred: opts.embedDeferred, assertActive, state });
     assertActive();
     if (company && opts.retryFailed && cursor && !cursor.done && !opts.dryRun) {
       const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
