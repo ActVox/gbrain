@@ -42,7 +42,8 @@ import {
   decisionResult, registerTrustProposalHandler, transitionTrustProposal, type TrustProposalAction,
   type TrustDecisionContext, type TrustDecisionResult, type TrustProposalRow,
 } from './proposals.ts';
-import { effectiveWriteTrust, storedTrustTier, type TrustTier, type WriteTrust } from './tier.ts';
+import { compareTrust, effectiveWriteTrust, storedTrustTier, type TrustTier, type WriteTrust } from './tier.ts';
+import { propagateTierLowering } from './propagation.ts';
 
 /** The journaled operation that publishes an owner page action on a managed brain. */
 export const TRUST_OWNER_PAGE_OPERATION = 'trust_owner_page';
@@ -130,6 +131,7 @@ export async function setRowTier(engine: BrainEngine, input: {
   return engine.transaction(async tx => {
     const run = async () => {
       if (input.expect && !(await input.expect(tx))) return false;
+      const [prior] = await tx.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM ${input.table} WHERE id = $1`, [input.id]);
       const update = () => tx.executeRaw<{ id: number }>(
         `UPDATE ${input.table} SET trust_tier = $2,
             write_origin = COALESCE(write_origin, '{}'::jsonb) || jsonb_build_object('owner_decision', $3::text::jsonb)
@@ -137,6 +139,8 @@ export async function setRowTier(engine: BrainEngine, input: {
       const rows = input.ceiling ? await withTrustPromotion(tx, input.ceiling, update) : await update();
       if (rows.length !== 1) return false;
       await queueTierProjection(tx, input.table, input.id);
+      // W1 #6783 §12 (b): a lowering reaches what was derived from the row; a raise never does.
+      if (prior && compareTrust(input.tier, storedTrustTier(prior.trust_tier)) < 0) await propagateTierLowering(tx, [{ table: input.table, id: input.id }]);
       await input.also?.(tx);
       return true;
     };
