@@ -1,6 +1,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import type { ImportResult, ParsedPage } from '../import-file.ts';
+import type { SegmentedImport } from './segmented-apply.ts';
 
 /**
  * #6007: what an apply reports to its caller. `pageId` is the page it
@@ -27,4 +28,6 @@ export interface PreparedContentImport {
   apply(tx: BrainEngine, preimage?: PageSnapshot | null): Promise<PreparedImportApplied | void>;
   /** Wave B: runs after the publication committed (a segmented page left unsealed is chunked and sealed). */
   afterCommit?(engine: BrainEngine): Promise<void>;
+  /** Wave B: the segmented body this preparation staged, for a later preparation of the same write to reuse (`importFromContent`'s `reuseSegments`). */
+  segmented?: SegmentedImport;
 }

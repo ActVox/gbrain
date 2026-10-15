@@ -19,6 +19,7 @@ import { isWriteTargetContained } from '../path-confine.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { sealImportedPage, sealPageTextProjection } from '../page-state/projections.ts';
 import { materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
+import { withoutBody } from '../page-body/page-shape.ts';
 import { importStreamedMarkdownFile, type StreamedPreparedImport } from '../page-body/streamed-import.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES, readPageBodyPolicy, type PageBodyPolicy } from '../page-body/limits.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
@@ -254,7 +255,7 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
     { fix: receiptFix(row) });
   const tags = [...new Set([...(snapshot?.tags ?? []), ...(ready.parsedPage?.tags ?? [])])].sort();
   const rendered = imageBytes ?? (code ? content : serializePageToMarkdown({
-    ...(snapshot?.page ?? { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage,
+    ...(snapshot ? withoutBody(snapshot.page) : { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage,
   } as Page, tags));
   const project = code || image ? undefined : await prepareCanonicalProjections(engine, ready.parsedPage!, row.slug, row.source_id, snapshot, 'file');
   const mutation: PreparedMutation = { observedRevision: ready.observedRevision, noop: ready.noop && p.targetHash === sha256(rendered),

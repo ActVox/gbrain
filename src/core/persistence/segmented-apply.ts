@@ -31,6 +31,7 @@ import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { pageSearchVectorSql } from '../fts-language.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { faultPoint } from './fault-points.ts';
+import { stableJson } from './digest.ts';
 
 const BODY_KEYS = new Set(['compiled_truth', 'timeline', 'content']);
 
@@ -161,6 +162,8 @@ export async function abortSegmentedStaging(engine: BrainEngine, prepared: Prepa
 /** A string write staged as a segmented body: its apply runs in the write's transaction, its projection after commit. */
 export interface SegmentedImport {
   prepared: PreparedSegmentedBody;
+  /** What the staging was prepared from; a later preparation of the same write with equal inputs reuses it (`stageSegmentedImport`'s `reuse`). */
+  stagedFrom: { title: string; type: string; compiled_truth: string; timeline: string; key: string };
   /** Set by apply. */
   applied: SegmentedApplied | null;
   apply(tx: BrainEngine, meta: SegmentedPageMeta, contextual: { mode: string; corpusGeneration: string | null }): Promise<SegmentedApplied>;
@@ -171,22 +174,31 @@ export interface SegmentedImport {
 /**
  * Stage a parsed page (the string write paths, bodies within the
  * single-string ceiling) as a segmented body: the in-memory regions are the
- * seekable source, the existing page row (if any) is the diff base.
+ * seekable source, the existing page row (if any) is the diff base. `reuse`
+ * is an earlier, unpublished staging of the same write (a managed rename
+ * prepares where the page stands, then again at its new slug inside the
+ * publication): when it was prepared from equal inputs against the same live
+ * generation, its staged rows publish under this slug and nothing is staged again.
  */
 export async function stageSegmentedImport(engine: BrainEngine, input: { slug: string; sourceId: string; existing: Page | null;
   page: { title: string; type: string; compiled_truth: string; timeline: string; frontmatter: Record<string, unknown>; tags: readonly string[] };
-  policy: PageBodyPolicy; owner?: SegmentedStagingOwner; chunking: SegmentChunkingContext; baseRevision: string | null }): Promise<SegmentedImport> {
+  policy: PageBodyPolicy; owner?: SegmentedStagingOwner; chunking: SegmentChunkingContext; baseRevision: string | null; reuse?: SegmentedImport }): Promise<SegmentedImport> {
   const live = input.existing ? await segmentedLivePage(engine, Number(input.existing.id)) : null;
+  const { title, type, compiled_truth, timeline } = input.page;
+  const stagedFrom = { title, type, compiled_truth, timeline, key: stableJson({ sourceId: input.sourceId, page: live && { id: live.id, generation: live.generation,
+    storage: live.storage, flags: live.flags }, frontmatter: input.page.frontmatter, tags: input.page.tags, chunking: input.chunking }) };
+  const prior = input.reuse?.stagedFrom;
+  const reused = !!prior && prior.key === stagedFrom.key && prior.title === title && prior.type === type && prior.compiled_truth === compiled_truth && prior.timeline === timeline;
   let owner = input.owner;
   if (!owner) {
     const { principal } = await maintenanceAttribution(engine);
     owner = { kind: 'import', principalKind: principal.kind, principalId: principal.id, baseRevision: input.baseRevision };
   }
-  const prepared = await prepareSegmentedBody(engine, { sourceId: input.sourceId, slug: input.slug, live, title: input.page.title, type: input.page.type,
-    frontmatter: input.page.frontmatter, tags: input.page.tags, truth: stringRegion(input.page.compiled_truth), timeline: stringRegion(input.page.timeline),
-    hasTimeline: input.page.timeline.length > 0, flags: stringBodyFlags(input.page.compiled_truth, input.page.timeline),
-    declaredBytes: Buffer.byteLength(input.page.compiled_truth, 'utf-8') + Buffer.byteLength(input.page.timeline, 'utf-8'), owner, chunking: input.chunking });
-  const staged: SegmentedImport = { prepared, applied: null,
+  const prepared = reused ? input.reuse!.prepared : await prepareSegmentedBody(engine, { sourceId: input.sourceId, slug: input.slug, live, title, type,
+    frontmatter: input.page.frontmatter, tags: input.page.tags, truth: stringRegion(compiled_truth), timeline: stringRegion(timeline),
+    hasTimeline: timeline.length > 0, flags: stringBodyFlags(compiled_truth, timeline),
+    declaredBytes: Buffer.byteLength(compiled_truth, 'utf-8') + Buffer.byteLength(timeline, 'utf-8'), owner, chunking: input.chunking });
+  const staged: SegmentedImport = { prepared, stagedFrom, applied: null,
     apply: async (tx, meta, contextual) => {
       staged.applied = await applySegmentedBody(tx, { slug: input.slug, sourceId: input.sourceId, pageId: live?.id ?? null, prepared, meta,
         promotion: live?.storage === 'inline', retireMaxRows: input.policy.flipRetireMaxRows });
