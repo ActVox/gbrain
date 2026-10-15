@@ -662,7 +662,7 @@ export class PostgresEngine implements BrainEngine {
         Object.defineProperty(txEngine, 'sql', { get: () => tx });
         Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
         return fn(txEngine);
-      }) as Promise<T>));
+      }) as Promise<T>), { cancelSettleMs: cancelSettleMs() });
     } finally {
       if (!this._pageTransaction) this.checkoutGauge.release('tx');
     }
