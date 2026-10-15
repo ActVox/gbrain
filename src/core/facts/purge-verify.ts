@@ -75,6 +75,8 @@ async function boundedCount(engine: BrainEngine, sql: string, params: unknown[],
 const textMatch = (column: string, at: number) => `(strpos(lower(${column}::text),$${at})>0 OR strpos(lower(${column}::text),$${at + 1})>0)`;
 /** Vector and lexeme columns carry no probe-able text. */
 const PROBE_SKIP = /embedding|search_vector/;
+/** Stores whose probe columns are bytea; their bytes are matched exactly (case-sensitive) against the UTF-8 needle. */
+const BINARY_PROBE_TABLES: ReadonlySet<string> = new Set(['minion_attachments', 'page_segment_texts', 'page_body_staging_parts']);
 
 /** Probe one inventory table for any of `needles` (exact, case-insensitive; JSON also in its escaped form). Scoped to the source when the table has one. */
 async function probeTable(engine: BrainEngine, entry: InventoryEntry, sourceId: string, needles: readonly string[], deadline: number): Promise<ProbeResult> {
@@ -82,8 +84,7 @@ async function probeTable(engine: BrainEngine, entry: InventoryEntry, sourceId: 
   const list = needles.filter(Boolean).slice(0, 32);
   if (!columns.length || !list.length) return { count: 0 };
   const scoped = entry.columns.includes('source_id');
-  // Bytes are matched exactly (case-sensitive) against the UTF-8 needle.
-  const binary = entry.table === 'minion_attachments';
+  const binary = BINARY_PROBE_TABLES.has(entry.table);
   const params: unknown[] = [sourceId];
   const ors: string[] = [];
   for (const needle of list) {
