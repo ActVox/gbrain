@@ -145,6 +145,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one; `--only`/`--skip` narrow by canonical file path glob. Opt-in `storage.keep_db` lets the owner host's resident consumer resolve drift under declared prefixes with the database copy. See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
 | `ghost-pages` | `ghost_pages` | Explicit-only, preview-bound, destructive consent. Soft-deletes live pages whose canonical file is missing on the owner host (ghost pages: every write refuses `canonical_file_missing` and no sync can import a file that is not there), through `delete_page` bound to the previewed owner, path and revision. `--apply --expect <hash> --yes`. See [ghost pages](#ghost-pages). | Declared db_only and never-filed derived pages (never listed); a page whose file came back before the apply (`file_restored`); pages changed after the preview (`changed_since_preview`). |
 | `receipt-compaction` | `persistence_capacity` (terminal bytes) | Explicit-only, preview-bound, destructive consent. Compacts terminal write receipts now instead of on the idle maintenance tick (#6696): the intent and error message are dropped, the outcome, error code and detail stay, and the unused reservation returns to the receipt-bytes counters. `--older-than <72h\|30d>` is floored at the configured retention unless `--force`; committed receipts only unless `--include-failures`. No admission, so it runs at a full cap. See [receipt compaction](#receipt-compaction). | `failures_kept`: failed, conflict and cancelled receipts left without `--include-failures`. Receipts of a run whose sync cursor is still open, and the newest sync receipt of each worktree, are never listed. |
+| `aliases` | `dangling_aliases` (orphaned rows) | Explicit-only. Deletes free-text page aliases and slug redirects whose target page has no row at all (a page purged before purge removed its aliases, #6619, or a hard-deleted page), each target rechecked under its page lock; a coordinated maintenance write on a managed brain. A redirect from an old name of a page that still exists is never touched. See [aliases](#aliases). | `soft_deleted_target`: aliases of a soft-deleted page, kept for `gbrain restore` and removed when the page is purged. |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -585,6 +586,32 @@ gbrain doctor --only stale_frontmatter_keys                   # ok
 A page whose keys a write cleared between preview and apply is counted
 `already_clean`. Nested user keys with the same names (`metadata.title`) are
 never touched; only the four top-level keys are.
+
+### Aliases
+
+<a id="aliases"></a>
+Doctor `dangling_aliases` counts alias rows whose target page is gone. Two
+kinds are reported apart:
+
+- **Orphaned:** the target slug has no page row at all, usually a page purged
+  before purge removed its aliases (#6619). A free-text alias can still resolve
+  a name to that missing page. Preview per source, then apply:
+
+  ```bash
+  gbrain repair aliases --source <id>
+  gbrain repair aliases --source <id> --apply
+  ```
+
+  The apply deletes `page_aliases` rows whose `slug` is the missing page and
+  `slug_aliases` rows whose `canonical_slug` is the missing page. A redirect
+  whose old name happens to be the missing slug but points at a live page (a
+  rename) is kept.
+- **Soft-deleted target:** the page is in its restore window. Its aliases are
+  kept so `gbrain restore` brings them back; purging the page removes them.
+  Nothing needs running.
+
+Both alias tables carry the managed writer guard, so deleting rows with raw SQL
+fails on a managed brain; use the repair.
 
 ### Orphan children
 
