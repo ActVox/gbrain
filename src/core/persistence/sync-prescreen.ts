@@ -28,7 +28,7 @@ import type { BrainEngine } from '../engine.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
 import { readSyncImportProvenances, syncImportParserFor, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
-import { readTreeBlobs, type TreeBlob } from './sync-blobs.ts';
+import { pinnedWindowBlock, readTreeBlobs, seedPinnedWindow, type TreeBlob } from './sync-blobs.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { liveFileDrift, recordDriftSkip } from './drift-conflicts.ts';
 import type { SyncDiscovery, SyncEntry } from './sync-discovery.ts';
@@ -68,7 +68,11 @@ export async function prescreenSyncEntries(engine: BrainEngine, discovered: Sync
   if (!candidates.length) return;
   const nativeRoot = realpathSync.native(discovered.root), nativeGitRoot = realpathSync.native(discovered.gitRoot);
   const gitPathOf = (entry: SyncEntry) => relative(nativeGitRoot, join(nativeRoot, entry.path)).split(sep).join('/');
-  const blobs = readTreeBlobs(discovered.gitRoot, discovered.target, candidates.map(gitPathOf));
+  // One listing answers the candidates and seeds the run's first pinned window (the manifest's first block of committed
+  // imports), so the prescreen adds no `ls-tree` to the run.
+  const block = pinnedWindowBlock(0), first = discovered.entries.slice(block.start, block.end).filter(entry => entry.action === 'import' && !entry.working).map(gitPathOf);
+  const blobs = readTreeBlobs(discovered.gitRoot, discovered.target, [...new Set([...first, ...candidates.map(gitPathOf)])]);
+  seedPinnedWindow(discovered.gitRoot, discovered.target, first, blobs);
   const records = new Map<number, SyncImportProvenance>();
   for (let i = 0; i < candidates.length; i += PROVENANCE_CHUNK) {
     const read = await readSyncImportProvenances(engine, discovered.sourceId, discovered.incarnation, candidates.slice(i, i + PROVENANCE_CHUNK).map(entry => Number(entry.pageId)));

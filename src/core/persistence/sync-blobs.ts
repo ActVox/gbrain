@@ -92,6 +92,25 @@ export function __setPinnedWindowForTests(size: number | null): () => void {
   return () => { pinnedWindowSize = previous; pinned = null; };
 }
 
+/**
+ * The aligned block of manifest indexes whose committed imports one pinned window lists. Every entry of a block asks
+ * for the same window, so concurrent follower freezes, which reach their pinned read in any order, never list it twice.
+ */
+export function pinnedWindowBlock(index: number): { start: number; end: number } {
+  const start = pinnedWindowSize ? index - index % pinnedWindowSize : index;
+  return { start, end: start + (pinnedWindowSize || PINNED_WINDOW) };
+}
+
+/**
+ * #6712 PR 1: installs a window another reader already listed (the discovery prescreen's `ls-tree` of the frozen
+ * manifest's first block), so the run's first pinned read does not list the same paths again.
+ */
+export function seedPinnedWindow(gitRoot: string, target: string, paths: string[], found: ReadonlyMap<string, TreeBlob>): void {
+  if (!pinnedWindowSize || !COMMIT_ID.test(target) || !paths.length) return;
+  const kept = paths.slice(0, pinnedWindowSize);
+  pinned = { gitRoot, target, paths: kept, blobs: new Map(kept.map(path => [path, found.get(path) ?? null])), slices: null, loaded: [] };
+}
+
 function pinnedWindow(gitRoot: string, target: string, gitPath: string, upcoming: () => string[]) {
   if (pinned?.gitRoot === gitRoot && pinned.target === target && pinned.blobs.has(gitPath)) return pinned;
   const paths = [gitPath, ...new Set(upcoming().filter(path => path !== gitPath))].slice(0, pinnedWindowSize);
@@ -121,8 +140,8 @@ function windowSlices(window: PinnedWindow): number[] {
 /**
  * The blob of `gitPath` at the pinned `target`, or null when the commit has no
  * blob there: the answer of `readTreeBlobs` for that one path. `upcoming` lists
- * the Git paths the run reads next; a path outside the current window lists
- * itself and up to `PINNED_WINDOW` of them in one `ls-tree`.
+ * the Git paths of the entry's aligned block (`pinnedWindowBlock`); a path
+ * outside the current window lists itself and them in one `ls-tree`.
  */
 export function readPinnedBlob(gitRoot: string, target: string, gitPath: string, upcoming: () => string[]): TreeBlob | null {
   const window = pinnedWindowSize && COMMIT_ID.test(target) ? pinnedWindow(gitRoot, target, gitPath, upcoming) : null;
