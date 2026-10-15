@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 238577,
-    "stdoutSha256": "acff0492f087336a874aaa738286b4cb0143681ea6d0303d886f180ef6a2de8d",
+    "stdoutBytes": 238925,
+    "stdoutSha256": "48e1395287f6d7cc7418aa35788642033780fadcdfc344e549c04be6740a6e47",
     "toolNames": [
       "remember",
       "entity",
@@ -6361,13 +6361,14 @@
         "scope": "admin"
       },
       {
-        "description": "Stored contradiction reports are temporarily available only to trusted local callers without a source filter. Remote or source-scoped callers receive {contradictions: [], note} with an availability note. For eligible local callers, return suspected-contradiction findings from the most recent `gbrain eval suspected-contradictions` probe run, optionally filtered by slug and/or severity. Use this when the user asks 'what's inconsistent in my brain', 'show me contradictions about Acme', 'high-severity issues only', or wants to act on the probe's findings without re-running it. Returns {contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. An eligible read loads the stored run without triggering a new probe; users run `gbrain eval suspected-contradictions` for that.",
+        "description": "Return suspected-contradiction findings from the most recent `gbrain eval suspected-contradictions` probe run, optionally filtered by slug and/or severity. Use this when the user asks 'what's inconsistent in my brain', 'show me contradictions about Acme', 'high-severity issues only', or wants to act on the probe's findings without re-running it. Returns {contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. Remote, source-scoped or min_trust callers get only findings whose two sides they can read now (each side re-read live, with source_id, trust_tier and origin) and total_visible instead of the run total. Reads the stored run without triggering a new probe; users run `gbrain eval suspected-contradictions` for that.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
         "name": "find_contradictions",
         "parameters": {
           "limit": "number?",
+          "min_trust": "string?",
           "severity": "string?",
           "slug": "string?"
         },
@@ -6377,6 +6378,18 @@
             "limit": {
               "description": "Max findings to return. Default 20.",
               "type": "number"
+            },
+            "min_trust": {
+              "description": "Lowest trust tier to return (the connection floor still applies).",
+              "enum": [
+                "user_confirmed",
+                "operator_curated",
+                "tool_observed",
+                "agent_written",
+                "unknown",
+                "external_untrusted"
+              ],
+              "type": "string"
             },
             "severity": {
               "description": "Optional severity filter.",
