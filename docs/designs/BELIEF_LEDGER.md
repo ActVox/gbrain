@@ -635,7 +635,23 @@ The contract W1 adds for the ledger:
      value) in `belief_redactions`. Only an append whose field value hashes to
      `released_hash` records it as written; any later change goes back to the
      marker until the next release. Agent writes, sync, reconcile and
-     backfill never release, whatever their tier. Purge-verify reports the live carrier
+     backfill never release, whatever their tier.
+
+     **Suppression follows the field across identity changes.** A claim
+     edit changes the fingerprint, so the successor is a new key linked by
+     `replaces`, and the new row takes the incoming context
+     (`engine-sql/facts.ts:183-184`). So when an append is linked to an
+     earlier key by `replaces`, `*.adopted` or `*.transferred`, every active
+     (unreleased) suppression on the earlier key is copied to the successor
+     for the same field, keeping its purge request, and the same owner
+     release is needed there. Separately, any append in the source whose
+     field value hashes to an active suppression's `field_hash` (a verbatim
+     copy of the whole field into an unlinked subject) gets the marker too.
+     What remains is a stated limit, the same one the live resurrection
+     guards have (they match fingerprints, not text): a writer that copies
+     part of a suppressed field into a new, unlinked subject is not
+     detected, because the purged text is no longer stored anywhere to match
+     against. Purge-verify reports the live carrier
      itself (the surviving row's context) as `out_of_scope: source_prose`,
      naming the key, so the user can edit it.
    - **Derived keys:** a paraphrase cannot be matched by a needle, so the
@@ -1172,7 +1188,12 @@ reconstructed state, not counts**, on PGLite and Postgres:
     an agent edit that changes Y's context but keeps the quote → still the
     marker; a trusted local owner replacement → the next event records the
     new value, and a later agent change to it → the marker again;
-38. N1 unchanged (388/388, 0 stale).
+38. purge X, then an agent edits only the claim of fact Y whose context
+    quotes X → the successor key's event carries the marker and needs the
+    owner release; the same through `fact.adopted` and `fact.transferred`;
+    a verbatim copy of Y's whole context into an unlinked fact → the
+    marker;
+39. N1 unchanged (388/388, 0 stale).
 
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
