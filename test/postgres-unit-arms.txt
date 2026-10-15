@@ -83,6 +83,7 @@ test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
+test/large-pages/segmented-switch.test.ts
 test/large-pages/segmented-versions.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts

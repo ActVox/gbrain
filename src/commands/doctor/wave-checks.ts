@@ -244,6 +244,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async engine => (await import('./checks/writer-version.ts')).writerVersionCheck(engine),
   },
   {
+    id: 'segmented_storage', resolution: 'operator', registration: 'wave',
+    impact: 'A recent writer older than this release keeps segmented page storage off, so pages over 1 MiB are written inline up to 24 MiB',
+    instruction: 'Run `gbrain upgrade` on each host doctor names (by host UUID), then restart its gbrain processes; the hold clears seven days after that writer\'s last request.',
+    count: d => (Array.isArray(d.blockers) ? d.blockers.length : 0),
+    run: async engine => (await import('./checks/segmented-storage.ts')).segmentedStorageCheck(engine),
+  },
+  {
     id: 'self_capture', resolution: 'operator', registration: 'wave',
     count: d => Number(d.classified ?? 0),
     impact: 'The session corpus still holds files captured from gbrain\'s own model sessions',
