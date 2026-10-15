@@ -8,7 +8,7 @@
  * short-in-characters but long-in-bytes non-ASCII path move; the key is the canonical data dir, case-folded, per kind;
  * the turn_context secret stays in the data dir. Off Windows the end-to-end cases force `process.platform` to win32
  * (the platform is read per call); the native bind, round trip and stability probe live in
- * test/windows-ipc-long-path-6573.test.ts on the windows-latest row. Fails on master: the win32 branch returned the
+ * test/windows-ipc-long-path-6573.serial.test.ts on the windows-latest row. Fails on master: the win32 branch returned the
  * data-dir path unchanged, so every listen() on a long data dir failed and only GBRAIN_DEBUG said why.
  */
 import { afterEach, describe, expect, test } from 'bun:test';

@@ -262,7 +262,7 @@ jobs:
       # under a non-ASCII profile path, with a 20-cycle bind/close stability probe (Bun Windows IPC crash class, #6462).
       - name: Long Windows PGLite IPC paths use the per-user run dir (#6573)
         if: runner.os == 'Windows'
-        run: bun test --timeout 120000 test/windows-ipc-long-path-6573.test.ts
+        run: bun test --timeout 120000 test/windows-ipc-long-path-6573.serial.test.ts
 
   # bun audit blocks on pushes, schedules, manual runs, and pull requests or
   # merge-queue entries that change bun.lock, admin/bun.lock, patches/ or a

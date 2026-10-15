@@ -257,7 +257,7 @@ user before step 1: it stops their memory service.
    managed layout, so while it is under the cap, `GBRAIN_HOME=<new-home>
    gbrain backup create --output <new archive>` also archives it.
 
-The restore drill in `test/backup-preflight-6649.test.ts` runs these steps on a
+The restore drill in `test/backup-preflight-6649.serial.test.ts` runs these steps on a
 `.gbrain` alias to another directory: it copies the stopped brain, opens the
 copy in its own home with the data intact, archives the copy and restores that
 archive into a third root. Archives over 8 GiB are not supported yet; this
