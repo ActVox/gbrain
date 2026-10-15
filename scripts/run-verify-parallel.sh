@@ -180,6 +180,9 @@ CHECKS=(
   # Wave B segmented storage (spec 1.5 layer 4): whole-body page readers only
   # shrink; baseline scripts/page-body-readers-baseline.tsv.
   "check:page-body-readers"
+  # Wave B large pages: every content_chunks reader applies the chunk-visibility
+  # predicate or carries a reason; baseline scripts/chunk-visibility-baseline.tsv only shrinks.
+  "check:chunk-visibility"
   # CQ3 / EO17 (refactor wave 1): engine-sql splices only constant text, no
   # composed $n, no expanded IN lists.
   "check:engine-sql-dynamic"

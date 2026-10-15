@@ -32,11 +32,14 @@
  * budget it may already have used.
  */
 import type { BrainEngine } from './engine.ts';
-import { assessSampledJunk } from './content-sanity.ts';
+import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './content-sanity.ts';
+import type { BodyStorage, ManifestRow } from './page-body/types.ts';
+import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { estimateCostFromChars, lookupEmbeddingPrice } from './embedding-pricing.ts';
 import { PAGE_INLINE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
 import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
+import { chunkGenerationFilter } from './search/safe-chunks.ts';
 
 export const PAGE_EMBED_CAP_KEY = 'embed.max_usd_per_page';
 export const DEFAULT_PAGE_EMBED_CAP_USD = 2;
@@ -72,10 +75,33 @@ export type PageEmbedDecision =
 
 interface BudgetRow { state: PageBudgetState; reason: string | null; embedding_signature: string | null; spent_usd: number; reserved_usd: number; stale_reservation: boolean; cap_usd: number | null }
 
-type BudgetPage = { id: number; compiled_truth: string; timeline?: string | null };
+/** A segmented page (Wave B) carries `body_bytes` and no body strings; an inline page carries its body. */
+type BudgetPage = { id: number; body_storage?: BodyStorage | null; body_bytes?: number | null; compiled_truth?: string; timeline?: string | null };
 
-function pageBytes(page: BudgetPage): number {
-  return Buffer.byteLength(page.compiled_truth, 'utf-8') + Buffer.byteLength(page.timeline ?? '', 'utf-8');
+/**
+ * The head, middle and tail sample windows of a segmented page, read one
+ * segment at a time from the live manifest (never the whole body): the head
+ * window from the first segments, the middle window from the segment at the
+ * middle byte on, the tail window from the last segments back.
+ */
+async function segmentedSampleWindows(engine: BrainEngine, pageId: number): Promise<string[]> {
+  const manifest = await engine.readManifest(pageId);
+  if (manifest.length === 0) return [''];
+  const decoder = new TextDecoder();
+  const read = async (row: ManifestRow) => {
+    const texts = await engine.readSegmentTexts(row.sourceId, [row.sha256]);
+    return decoder.decode(texts.get(Buffer.from(row.sha256).toString('hex')) ?? new Uint8Array());
+  };
+  const forward = async (from: number) => {
+    let text = '';
+    for (let i = from; i < manifest.length && text.length < JUNK_SAMPLE_CHARS; i++) text += await read(manifest[i]!);
+    return text.slice(0, JUNK_SAMPLE_CHARS);
+  };
+  let tail = '';
+  for (let i = manifest.length - 1; i >= 0 && tail.length < JUNK_SAMPLE_CHARS; i--) tail = await read(manifest[i]!) + tail;
+  const totalBytes = manifest.reduce((n, row) => n + row.byteLen, 0);
+  const middle = manifest.findIndex(row => row.byteStart + row.byteLen > totalBytes / 2);
+  return [await forward(0), await forward(Math.max(0, middle)), tail.slice(-JUNK_SAMPLE_CHARS)];
 }
 
 function currentPricePerMTok(signature: string | null | undefined): { rate: number; priced: boolean } {
@@ -99,7 +125,7 @@ export async function holdPageEmbedding(engine: Pick<BrainEngine, 'executeRaw'>,
 export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
   stale: ReadonlyArray<{ chunk_index: number; chunk_text: string }>,
   opts: { signature?: string | null; approvedCapUsd?: number; maxMarkupRatio?: number } = {}): Promise<PageEmbedDecision> {
-  if (!isLargePageBytes(pageBytes(page)) || stale.length === 0) return { kind: 'unmetered' };
+  if (!isLargePageBytes(pageBodyBytes(page)) || stale.length === 0) return { kind: 'unmetered' };
   const approved = opts.approvedCapUsd !== undefined;
   const configured = await resolvePageEmbedCapUsd(engine);
   const { rate, priced } = currentPricePerMTok(opts.signature);
@@ -111,7 +137,9 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
     if (!row) return { kind: 'unmetered' } as const;
     if (row.state === 'held' && !approved) return { kind: 'held', reason: row.reason ?? 'awaiting_approval' } as const;
     if (!approved && row.state === 'open') {
-      const junk = assessSampledJunk(`${page.compiled_truth}\n${page.timeline ?? ''}`, { max_markup_ratio: opts.maxMarkupRatio });
+      const junk = isSegmentedPage(page)
+        ? assessJunkWindows(await segmentedSampleWindows(tx, page.id), { max_markup_ratio: opts.maxMarkupRatio })
+        : assessSampledJunk(`${page.compiled_truth}\n${page.timeline ?? ''}`, { max_markup_ratio: opts.maxMarkupRatio });
       if (junk.junk) {
         const reason = junk.reasons.join(',');
         await tx.executeRaw(`UPDATE page_embedding_budget SET state = 'held', reason = $2, updated_at = now() WHERE page_id = $1`, [page.id, reason]);
@@ -168,8 +196,8 @@ export async function listBudgetLimitedPages(engine: Pick<BrainEngine, 'executeR
   if (opts.state) filters.push(`b.state = $${params.push(opts.state)}`);
   if (opts.sourceId) filters.push(`p.source_id = $${params.push(opts.sourceId)}`);
   const rows = await engine.executeRaw<PageBudgetReport>(`SELECT p.slug, p.source_id, b.state, b.reason, b.spent_usd, b.cap_usd,
-      (SELECT count(*)::int FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedded_at IS NULL) AS pending_chunks,
-      (SELECT COALESCE(sum(length(cc.chunk_text)), 0)::bigint FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedded_at IS NULL) AS pending_chars
+      (SELECT count(*)::int FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedded_at IS NULL AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chunks,
+      (SELECT COALESCE(sum(length(cc.chunk_text)), 0)::bigint FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedded_at IS NULL AND ${chunkGenerationFilter('p', 'cc')}) AS pending_chars
     FROM page_embedding_budget b JOIN pages p ON p.id = b.page_id
     WHERE ${filters.join(' AND ')} ORDER BY b.updated_at DESC, p.id LIMIT $1`, params);
   return rows.map(row => ({ ...row, spent_usd: Number(row.spent_usd), cap_usd: row.cap_usd === null ? null : Number(row.cap_usd), pending_chunks: Number(row.pending_chunks), pending_chars: Number(row.pending_chars) }));
@@ -263,7 +291,7 @@ export function pageSizeState(bytes: number, frontmatter: Record<string, unknown
  */
 export async function readPageSizeStates(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slugs: readonly string[] | null): Promise<Array<{ slug: string } & PageSizeState>> {
   if (slugs?.length === 0) return [];
-  const bytes = `(octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')))`;
+  const bytes = `(CASE WHEN p.body_storage = 'segmented' THEN p.body_bytes ELSE octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')) END)`;
   const rows = await engine.executeRaw<{ slug: string; bytes: number; frontmatter: Record<string, unknown> | null; state: PageBudgetState | null; reason: string | null }>(
     `SELECT p.slug, ${bytes}::bigint AS bytes, p.frontmatter, b.state, b.reason
        FROM pages p LEFT JOIN page_embedding_budget b ON b.page_id = p.id
@@ -278,9 +306,9 @@ export async function readPageSizeStates(engine: Pick<BrainEngine, 'executeRaw'>
 
 /** The receipt field for one written page: `{ size_state }` for a large or embed_skip page, else nothing (no query). */
 export async function sizeStateField(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slug: string,
-  page: { compiled_truth?: string | null; timeline?: string | null; frontmatter?: Record<string, unknown> | null } | null | undefined): Promise<{ size_state?: PageSizeState }> {
+  page: { body_storage?: BodyStorage | null; body_bytes?: number | null; compiled_truth?: string | null; timeline?: string | null; frontmatter?: Record<string, unknown> | null } | null | undefined): Promise<{ size_state?: PageSizeState }> {
   if (!page) return {};
-  const bytes = Buffer.byteLength(page.compiled_truth ?? '', 'utf-8') + Buffer.byteLength(page.timeline ?? '', 'utf-8');
+  const bytes = pageBodyBytes(page);
   if (!isLargePageBytes(bytes) && !isEmbedSkipped(page.frontmatter)) return {};
   const [state] = await readPageSizeStates(engine, sourceId, [slug]);
   return state ? { size_state: { embedding: state.embedding, reason: state.reason, bytes: state.bytes } } : {};

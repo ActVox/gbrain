@@ -44,6 +44,44 @@ export function currentTextProjectionFilter(alias: string): string {
   return `(${alias}.text_projection_revision = ${alias}.knowledge_revision) IS TRUE`;
 }
 
+/**
+ * Wave B: the chunk row belongs to its page's live body generation. Staged rows
+ * (`body_generation` above the page's) and retired rows are invisible; every
+ * inline-page row (`body_generation IS NULL`) passes. Row predicate, no join.
+ */
+export function chunkGenerationFilter(page: string, chunk: string): string {
+  return `(${chunk}.body_generation IS NULL
+       OR (${chunk}.body_generation <= ${page}.body_generation
+           AND (${chunk}.retired_generation IS NULL OR ${chunk}.retired_generation > ${page}.body_generation)))`;
+}
+
+/** `chunkGenerationFilter` for a statement that has no page row joined: inline rows pass without the page lookup. */
+export function chunkGenerationProbe(chunk: string): string {
+  return `(${chunk}.body_generation IS NULL
+       OR EXISTS (SELECT 1 FROM pages gp WHERE gp.id = ${chunk}.page_id AND ${chunkGenerationFilter('gp', chunk)}))`;
+}
+
+/** Search-facing chunk visibility: the current text projection and the live body generation. */
+export function chunkVisibleFilter(page: string, chunk: string): string {
+  return `(${currentTextProjectionFilter(page)} AND ${chunkGenerationFilter(page, chunk)})`;
+}
+
+/**
+ * The live manifest row of a segmented chunk (no row for an inline chunk), for
+ * `chunkDocumentOrder`. LEFT JOIN text; `page` must expose `body_generation`.
+ */
+export function chunkManifestJoin(page: string, chunk: string, manifest: string): string {
+  return `LEFT JOIN page_body_manifest ${manifest} ON ${chunk}.occurrence_id IS NOT NULL
+       AND ${manifest}.page_id = ${chunk}.page_id AND ${manifest}.occurrence_id = ${chunk}.occurrence_id
+       AND ${manifest}.gen_from <= ${page}.body_generation
+       AND (${manifest}.gen_to IS NULL OR ${manifest}.gen_to > ${page}.body_generation)`;
+}
+
+/** Document order: (manifest byte_start, local_ordinal) for segmented rows; inline rows keep chunk_index order. */
+export function chunkDocumentOrder(chunk: string, manifest: string): string {
+  return `${manifest}.byte_start, ${chunk}.local_ordinal, ${chunk}.chunk_index`;
+}
+
 /** A page of any kind chunked before the fence; remote reads withhold it until it is re-sealed. */
 export function belowSafeChunkFence(chunkerVersion: number | null | undefined): boolean {
   return (chunkerVersion ?? 0) < SAFE_FENCE_CHUNKER_VERSION;
@@ -68,6 +106,7 @@ export function safeChunksFilter(alias: string): string {
  */
 export function* chunkWriteInvalidations(pageId: number, chunks: ChunkInput[]): Generator<{ sql: string; params: unknown[] }> {
   const metadata = ['language', 'symbol_name', 'symbol_type', 'start_line', 'end_line', 'parent_symbol_path', 'doc_comment', 'symbol_name_qualified'] as const;
+  // chunk-visibility-ok: inline chunk write invalidation; segmented pages stage rows through stageSegmentChunks
   const sql = `UPDATE pages SET chunker_version = -1 WHERE id = $1 AND (
       NOT (${safeChunksFilter('pages')})
       OR EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = $1 AND cc.chunk_index <> ALL($3::int[]))

@@ -314,10 +314,8 @@ src/core/page-body/content-hash-stream.ts	ContentHashStream.fromState	field	NONE
 src/core/page-body/content-hash-stream.ts	streamingContentHash	field	NONE	not a stored body: hashes an incoming page streamed region by region
 src/core/page-body/page-shape.ts	pageBodyBytes	field	INLINE	inline branch of pageBodyBytes; a segmented page answers body_bytes
 src/core/page-body/schema.ts	PAGE_GENERATION_BUMP_FN_SQL	sql	STREAM	trigger DDL: compares the body columns of inline rows; segmented rows compare body_generation (lane 1a)
-src/core/page-embedding-budget.ts	pageBytes	field	META	lane 1e file: body_bytes for segmented pages
 src/core/page-embedding-budget.ts	planPageEmbedding	field	META	lane 1e file: body_bytes for segmented pages
 src/core/page-embedding-budget.ts	readPageSizeStates	sql	META	lane 1e file: body_bytes for segmented pages
-src/core/page-embedding-budget.ts	sizeStateField	field	META	lane 1e file: body_bytes for segmented pages
 src/core/page-snapshot-batch.ts	readPageSnapshotsBatch	field	STREAM	same as readPageSnapshot: overlay skipped for a segmented page
 src/core/page-snapshot-batch.ts	readPageSnapshotsBatch	sql	STREAM	p.* feeds rowToPage; the byte budget counts a segmented row as 0 (no body shipped); fingerprint over a NULL body is empty
 src/core/page-state/credential-reseal.ts	PENDING	sql	STREAM	regex over NULL is false: segmented pages postdate the v189 unseal and are chunked by the credential-safe segment chunker; pem regions in PR 2
