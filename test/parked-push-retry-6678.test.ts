@@ -246,3 +246,15 @@ describe('#6697 revoked writer: parked Git effect', () => {
     expect(check.message).toContain(`doctor-healthy (git_push_unavailable); gbrain sources writer retry-effects ${sourceId} --request-id ${await publicId(healthy)} --dry-run`);
   }), 120_000);
 });
+
+describe('#6665 doctor parked_effects', () => {
+  test('names the fix for a parked git_target_pending target', () => isolated(async home => {
+    const root = await gitRoot(home);
+    const { sourceId } = await claimedSource(root);
+    await parked(root, sourceId, 'gone', {}, 'git_target_pending');
+    const check = await checkParkedEffects(engine, [sourceId]);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('gone (git_target_pending)');
+    expect(check.message).toContain('git -c core.fscache=false status');
+  }), 120_000);
+});

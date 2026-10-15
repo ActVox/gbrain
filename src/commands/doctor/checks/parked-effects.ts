@@ -48,7 +48,9 @@ export async function checkParkedEffects(engine: BrainEngine, sourceIds?: string
     return { name: 'parked_effects', status: 'warn', details,
       message: `${count} Git or withdrawal effect(s) have parked targets after five consecutive failures; their withdrawal or Git backup is incomplete. ` +
         `Inspect \`gbrain sources writer status <source>\`, fix the cause, preview with the command shown, then rerun it without --dry-run to authorize one more attempt: ${listed.join(' | ')}` +
-        (count > rows.length ? ` (first ${rows.length} of ${count} shown)` : '') };
+        (count > rows.length ? ` (first ${rows.length} of ${count} shown)` : '') +
+        (effects.some(effect => effect.parked.some(target => target.error_code === 'git_target_pending'))
+          ? '. git_target_pending: Git still lists a removed page file in the index; on Windows close the program holding it open (a sync watcher, indexer or antivirus), check with `git -c core.fscache=false status` on the brain host, then run the retry command.' : '') };
   } catch (error) {
     return { name: 'parked_effects', status: 'warn',
       message: `Parked effects could not be read: ${error instanceof Error ? error.message : String(error)}. Health is unknown.`,

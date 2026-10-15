@@ -1304,6 +1304,14 @@ More: [docs/guides/shared-checkout-git.md#stuck-rebase](../../docs/guides/shared
 |---|---|---|---|---|---|---|
 | The canonical commit is durable locally; its push will retry. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### git_target_pending
+
+<a id="git_target_pending"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Git still lists a removed canonical file in the index; the removal was not committed yet. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
+
 ### git_target_unsafe
 
 <a id="git_target_unsafe"></a>

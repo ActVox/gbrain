@@ -219,6 +219,7 @@ export const CODES = {
   git_detached_head: { class: 'host_only', summary: "The canonical checkout is on a detached HEAD, so a push would target the wrong ref.", suggestion: 'Check out the branch the remote should track (git switch <branch>) on the brain host, then rerun.' },
   git_index_locked: { class: 'retryable', summary: "Another Git process holds the canonical checkout index lock." },
   git_index_stale: { class: 'caller', summary: "Git index stale." },
+  git_target_pending: { class: 'retryable', summary: "Git still lists a removed canonical file in the index; the removal was not committed yet." },
   git_operation_in_progress: { class: 'caller', summary: "A rebase, merge, cherry-pick or revert is in progress in the checkout, so gbrain will not commit or move it.", docs: 'docs/guides/shared-checkout-git.md#stuck-rebase' },
   git_push_unavailable: { class: 'retryable', summary: "The canonical commit is durable locally; its push will retry." },
   git_target_unsafe: { class: 'caller', summary: "Git cannot identify the existing canonical file by its native spelling." },
