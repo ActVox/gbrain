@@ -15,7 +15,7 @@ import { resolveEnvNumber, resolveHoursEnv, warnOnceForEnv } from '../../../core
 import { chunkerStamp } from '../../../core/chunkers/code.ts';
 import { effectiveLinkExtractorWatermark, smallBrainBacklogNote } from '../../../core/link-extraction-watermark.ts';
 import { previewMentionPass } from '../../../core/mentions/stale.ts';
-import { isMissingSchemaObject, isUndefinedColumnError } from '../../../core/utils.ts';
+import { isMissingSchemaObject } from '../../../core/utils.ts';
 import {
   loadStorageConfig,
   effectiveDbOnlyDirs,
@@ -94,7 +94,8 @@ export const EXTRACTION_LAG_MIN_PAGES = 100;
  * would break a CI/cron pipeline gating on `gbrain doctor`.
  *
  * Vacuous-skip on tiny brains (<100 pages, no --source) like orphan_ratio.
- * Pre-v112 brains (column missing) degrade to OK via isUndefinedColumnError.
+ * Pre-v112 brains (links_extracted_at missing) degrade to OK; any other missing
+ * column is a real failure.
  * Strictly SQL — no filesystem/git access — so it's safe to wire into the
  * thin-client doctorReportRemote path (CDX-5 trust boundary).
  *
@@ -135,7 +136,7 @@ export async function checkLinksExtractionLag(
       stale = await engine.countStalePagesForExtraction({ sourceId, versionTs, attendance: 'exclude' });
       attendanceBlocked = await engine.countStalePagesForExtraction({ sourceId, versionTs, attendance: 'blocked' });
     } catch (e) {
-      if (!isUndefinedColumnError(e, 'links_attendance_blocked_revision')) throw e;
+      if (!isMissingSchemaObject(e, 'column', 'links_attendance_blocked_revision')) throw e;
       stale = await engine.countStalePagesForExtraction({ sourceId, versionTs });
     }
     const pct = (stale / total) * 100;
@@ -177,7 +178,7 @@ export async function checkLinksExtractionLag(
   } catch (e) {
     // Pre-v112 brain: links_extracted_at column doesn't exist yet. Graceful OK
     // (migration/bootstrap adds it; nothing to assess until then).
-    if (isUndefinedColumnError(e, 'links_extracted_at')) {
+    if (isMissingSchemaObject(e, 'column', 'links_extracted_at')) {
       return { name, status: 'ok', message: 'links_extracted_at not present (pre-v112 brain)' };
     }
     return checkError(name, 'check links_extraction_lag', e);

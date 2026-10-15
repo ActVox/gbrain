@@ -23,7 +23,7 @@ import { sanitizeText } from '../batch-rows.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion } from '../search/safe-chunks.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment } from '../search/private-visibility.ts';
 import { quarantineFilterFragment } from '../quarantine.ts';
-import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, isUndefinedTableError, warnOncePerProcess } from '../utils.ts';
+import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, isMissingSchemaObject, warnOncePerProcess } from '../utils.ts';
 import { DELETE_BATCH_SIZE } from '../engine-constants.ts';
 import { jsonbParam, type SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead, ScopedRead } from './brands.ts';
@@ -1027,7 +1027,7 @@ export async function resolveSlugWithAliasDetailed(
     } catch (e) {
       // Pre-v105 brain: slug_aliases table doesn't exist yet. Defense-in-depth
       // per the engine interface contract.
-      if (isUndefinedTableError(e)) return null;
+      if (isMissingSchemaObject(e, 'table', 'slug_aliases')) return null;
       throw e;
     }
   }

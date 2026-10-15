@@ -904,6 +904,20 @@ entry fails. Fixtures: `test/fixtures/guards/check-durable-flush.ts/`. The
 test.yml `security-regressions` job; `test/helpers/win32-flush-semantics.ts`
 makes them discriminate on POSIX.
 
+#### Schema-error predicate guard
+
+`scripts/check-schema-error-predicates.ts` (`bun run check:schema-error-predicates`,
+in `bun run verify`) fails on a call to `isUndefinedColumnError` or
+`isUndefinedTableError`, or a comparison against the SQLSTATE string `'42703'`,
+anywhere in `src/` outside `src/core/utils.ts`. The column helper matches any
+42703 and the table helper also matches `column "x" of relation "y" does not
+exist`, so a handler that reads them as "pre-migration" reports ok or skipped
+for an unrelated missing object. Fix: name the objects the old schema lacks
+with `isMissingSchemaObject(e, 'column' | 'table', [names])`. A reviewed degrade
+that can never read as ok goes in the guard's `ALLOWLIST` with a reason; a stale
+entry fails. Fixtures: `test/fixtures/guards/check-schema-error-predicates.ts/`;
+test: `test/scripts/check-schema-error-predicates.test.ts`.
+
 #### Windows hidden-console guard
 
 `scripts/check-windows-hide.ts` (`bun run check:windows-hide`, in `verify`;

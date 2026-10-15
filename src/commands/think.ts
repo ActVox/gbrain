@@ -177,7 +177,7 @@ prints what would have been the input (exit 0).
       let allowedSources: string[] | undefined;
       const { resolveSourceWithTier, localFederatedSourceIds, ALL_SOURCES } =
         await import('../core/source-resolver.ts');
-      const { isUndefinedTableError } = await import('../core/utils.ts');
+      const { isMissingSchemaObject } = await import('../core/utils.ts');
       try {
         const resolved = await resolveSourceWithTier(engine, source ?? null);
         // __all__ spans the brain; runThink has no sentinel handling of its
@@ -188,7 +188,7 @@ prints what would have been the input (exit 0).
         // Only the structural pre-init failure (no sources table) keeps the
         // legacy unscoped gather; every other resolver error — an unknown
         // ambient source, a connection failure, a genuine bug — propagates.
-        if (source !== undefined || !isUndefinedTableError(err)) throw err;
+        if (source !== undefined || !isMissingSchemaObject(err, 'table', 'sources')) throw err;
       }
       result = await runThink(engine, {
         question, anchor, rounds, save, take, model, since, until,
