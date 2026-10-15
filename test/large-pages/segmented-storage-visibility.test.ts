@@ -20,7 +20,7 @@
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
@@ -31,8 +31,7 @@ import { stageSegmentedImport } from '../../src/core/persistence/segmented-apply
 import * as pageBodySql from '../../src/core/engine-sql/page-body.ts';
 import type { SqlExecutor } from '../../src/core/engine-sql/executor.ts';
 import { sqlFragment, type SqlFragment } from '../../src/core/engine-sql/fragment.ts';
-import { chunk, publishSegmentedPage, segmentText } from '../helpers/page-body-fixtures.ts';
-import { cpuMsAsync } from '../helpers/cpu-time.ts';
+import { chunk, manifestRow, publishSegmentedPage, segmentText } from '../helpers/page-body-fixtures.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { segmentedPageRow } from '../helpers/segmented-page-checks.ts';
 import { testBackends } from '../helpers/test-backends.ts';
@@ -204,28 +203,55 @@ for (const kind of testBackends()) {
       expect((await engine.sweepSegments({ sourceId: 'default' })).textsDeleted).toBe(1);
     }, 180_000);
 
-    test.skipIf(kind !== 'pglite')('a page-scoped sweep costs the same in a source ten times larger', async () => {
-      const seeded = async (texts: number) => {
-        const sourceId = `sweep-${texts}`;
-        await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [sourceId]);
-        const { pageId } = await publishSegmentedPage(engine, `notes/sweep-${texts}`, [segmentText('# Page\nbody\n')], { sourceId });
-        for (let start = 0; start < texts; start += 2000) {
-          await engine.stageSegmentTexts(sourceId, Array.from({ length: Math.min(2000, texts - start) }, (_, i) => segmentText(`text ${start + i} of ${sourceId}\n`)));
+    test('a page-scoped sweep examines the same rows in a source ten times larger', async () => {
+      const sourceId = 'sweep-rows';
+      await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [sourceId]);
+      const { pageId } = await publishSegmentedPage(engine, 'notes/sweep-rows', [segmentText('# Page\nbody\n')], { sourceId });
+      let filler = 0;
+      const grow = async (to: number) => {
+        for (; filler < to; filler += 1000) {
+          await engine.stageSegmentTexts(sourceId, Array.from({ length: 1000 }, (_, i) => segmentText(`text ${filler + i} of ${sourceId}\n`)));
         }
-        return pageId;
+        await engine.executeRaw("UPDATE page_segment_texts SET created_at = now() + interval '1 hour' WHERE source_id = $1", [sourceId]);
+        await engine.executeRaw('ANALYZE page_segment_texts');
       };
-      const small = await seeded(1000);
-      const large = await seeded(10_000);
-      const best = async (pageId: number) => {
-        let ms = Infinity;
-        for (let k = 0; k < 3; k++) ms = Math.min(ms, await cpuMsAsync(async () => { for (let n = 0; n < 300; n++) await engine.sweepSegments({ pageId }); }));
-        return ms;
+      /** Rows each plan node produced or filtered out; a bitmap index scan's TIDs are counted by its heap scan instead (they include dead entries). */
+      const examined = (node: Record<string, unknown>): number => {
+        const loops = Number(node['Actual Loops'] ?? 1);
+        const own = node['Node Type'] === 'Bitmap Index Scan' ? 0 : ['Actual Rows', 'Rows Removed by Filter', 'Rows Removed by Join Filter', 'Rows Removed by Index Recheck']
+          .reduce((n, key) => n + Number(node[key] ?? 0) * loops, 0);
+        return own + ((node.Plans as Record<string, unknown>[] | undefined) ?? []).reduce((n, child) => n + examined(child), 0);
       };
-      await best(small);
-      await best(large);
-      const ratios: number[] = [];
-      for (let round = 0; round < 3; round++) ratios.push(await best(large) / await best(small));
-      expect(ratios.sort((a, b) => a - b)[1]!).toBeLessThan(1.5);
+      /** One released text, then the page sweep: every statement is first run under EXPLAIN ANALYZE and rolled back to count the rows its plan touched. */
+      const sweepRows = async (round: number) => {
+        const released = segmentText(`released ${round}\n`);
+        await engine.stageSegmentTexts(sourceId, [released]);
+        await engine.stageManifestRows([manifestRow({ pageId, occurrenceId: 1_000_000 + round, genFrom: 2, seq: 0, text: released,
+          byteStart: 0, stagingId: randomUUID(), sourceId })]);
+        let rows = 0;
+        const result = await engine.transaction(async tx => {
+          const exec = (tx as unknown as { engineSql: SqlExecutor }).engineSql;
+          const counting = Object.assign(Object.create(exec) as SqlExecutor, {
+            run: async (fragment: SqlFragment, opts?: Parameters<SqlExecutor['run']>[1]) => {
+              await exec.run(sqlFragment`SAVEPOINT sweep_rows`);
+              const { rows: plan } = await exec.run<Record<string, unknown>>(sqlFragment`EXPLAIN (ANALYZE, FORMAT JSON) ${fragment}`);
+              await exec.run(sqlFragment`ROLLBACK TO SAVEPOINT sweep_rows`);
+              const json = Object.values(plan[0]!)[0];
+              rows += examined((typeof json === 'string' ? JSON.parse(json) : json)[0].Plan);
+              return exec.run(fragment, opts);
+            },
+          });
+          return pageBodySql.sweepSegments(counting, { pageId, graceMs: 60_000, now: new Date(Date.now() + 120_000) });
+        });
+        expect(result.textsDeleted).toBe(1);
+        return rows;
+      };
+      await grow(1000);
+      const small = await sweepRows(1);
+      await grow(10_000);
+      const large = await sweepRows(2);
+      expect(await engine.executeRaw('SELECT 1 FROM page_segment_texts WHERE source_id = $1', [sourceId])).toHaveLength(10_001);
+      expect(large).toBe(small);
     }, 180_000);
 
     test('chunks of a shifted occurrence keep stored spans that hold their text in the new body', async () => {
