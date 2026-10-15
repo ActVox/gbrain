@@ -20,6 +20,8 @@ import { SyncLockBusyError } from '../src/core/sync-lock.ts';
 import { noteForwardProgress, registerRunDeadline } from '../src/core/forward-progress.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import type { MinionJobContext } from '../src/core/minions/types.ts';
+import { makeSyncHandler } from '../src/core/minions/handlers/sync.ts';
 
 // #6712 PR 1: the drain lease. One managed drainer per source, whoever started it, fenced on the lock's acquisition
 // token; a plain CLI sync follows a live holder within its budget instead of draining beside it. Each test here fails on
@@ -172,6 +174,37 @@ test('fencing: a pass whose lease was taken over after its TTL admits nothing an
   expect(await managedRows(engine, id)).toEqual({ cursors: 0, requests: 0 });
   await thief!.release();
   expect((await performSync(engine, plain(id))).status).toBe('first_sync');
+}), 120_000);
+
+// Outside-voice review: a lease that lapsed with nobody taking it over is lost too; the token alone does not admit.
+test('fencing: a pass whose lease expired untaken admits nothing and advances no checkpoint', async () => isolated(async engine => {
+  const id = await fixture(engine);
+  let lapsed = false;
+  installFaultHook(async (point, detail) => {
+    if (point !== 'sync:lease_acquired' || detail.sourceId !== id || lapsed) return;
+    lapsed = true;
+    await engine.executeRaw(`UPDATE gbrain_cycle_locks SET ttl_expires_at=now()-interval '1 second' WHERE id=$1`, [syncLockId(id)]);
+  });
+  const stale = await performSync(engine, plain(id));
+  installFaultHook(undefined);
+  expect(lapsed).toBe(true);
+  expect(stale).toMatchObject({ reason: 'drain_lease_held', leaseHeld: { lost: true } });
+  expect(await managedRows(engine, id)).toEqual({ cursors: 0, requests: 0 });
+  expect((await performSync(engine, plain(id))).status).toBe('first_sync');
+}), 120_000);
+
+// Outside-voice review: a job result is readable remotely (get_job), so the skip names the holder's kind, never its host, pid or id.
+test('a sync job that finds the lease held skips with the public holder only', async () => isolated(async engine => {
+  const id = await fixture(engine);
+  const holder = hold(engine, id, 'cli');
+  await holder.ready;
+  try {
+    const ctx = { id: 9101, name: 'sync', data: { sourceId: id, pull: false }, attempts_made: 0, signal: new AbortController().signal, shutdownSignal: new AbortController().signal,
+      deadlineAtMs: Date.now() + 60_000, updateProgress: async () => undefined, updateTokens: async () => undefined, log: async () => undefined, isActive: async () => true,
+      readInbox: async () => [] } as unknown as MinionJobContext;
+    const skipped = await makeSyncHandler(engine)(ctx) as Record<string, unknown>;
+    expect(skipped).toMatchObject({ skipped: true, reason: 'sync_in_progress', holder: { kind: 'cli', host: null, pid: null, id: null } });
+  } finally { await holder.release(); }
 }), 120_000);
 
 test('the follower stops before the process watchdog: the lesser of its deadline and the hard deadline, less a margin', () => {

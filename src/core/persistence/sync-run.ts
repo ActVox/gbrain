@@ -1440,11 +1440,12 @@ async function oldRunBlocker(engine: Pick<BrainEngine, 'executeRaw'>, cursor: Pi
 export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, slice?: { maxPages: number; maxMs: number }): Promise<SyncResult> {
   if (opts.dryRun || currentDrainLease(opts.sourceId ?? 'default')) return performManagedPass(engine, opts, slice);
   const sourceId = opts.sourceId ?? 'default';
-  return withDrainLease(engine, sourceId, { holder: opts.drainHolder ?? { kind: slice ? 'owner_slice' : 'cli', id: null } },
+  const remote = currentSubmissionAuthority()?.kind === 'remote_generic';
+  return withDrainLease(engine, sourceId, { holder: opts.drainHolder ?? { kind: slice ? 'owner_slice' : 'cli', id: null }, remote },
     signal => performManagedPass(engine, signal ? { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, signal]) : signal } : opts, slice))
     .catch(async error => {
       if (!(error instanceof LockUnavailableError) || error.lockId !== syncLockId(sourceId)) throw error;
-      return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null), { remote: currentSubmissionAuthority()?.kind === 'remote_generic' });
+      return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null), { remote });
     });
 }
 async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: { maxPages: number; maxMs: number }): Promise<SyncResult> {
@@ -1519,7 +1520,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   };
   try {
     assertActive();
-    const resolution = await resolveManagedCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, assertActive, readOnly: !!opts.dryRun });
+    // A remote caller folds nothing in: the cursors it would cancel or retire may belong to another principal (it adopts only its own).
+    const resolution = await resolveManagedCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, assertActive, readOnly: !!opts.dryRun,
+      foldIn: !authority.writer.remote });
     key = resolution.key;
     if (resolution.adoptedLegacyKey || resolution.superseded.length || resolution.retained.length) state.fanIn = { adopted: !!resolution.adoptedLegacyKey, superseded: resolution.superseded.length, retained: resolution.retained.length };
     // #6712 PR 1: a superseded run's write still in flight settles before the adopted run publishes beside it.

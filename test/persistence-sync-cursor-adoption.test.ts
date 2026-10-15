@@ -207,6 +207,71 @@ test('fan-in: the newest older-key cursor finishes in place; an older one is kep
   expect(await engine.getPage('e', { sourceId: id })).not.toBeNull();
 }), 180_000);
 
+// Outside-voice review: a request claimed between the fan-in's read and its retirement must still hold the pass back.
+test('fan-in: a request claimed between the read and the retirement keeps the pass waiting (writer_pending), not draining beside it', async () => each(async engine => {
+  const id = await fixture(engine, ['a', 'b', 'c', 'd']);
+  const park = (key: string, op: string) => engine.executeRaw('UPDATE op_checkpoints SET op=$2 WHERE fingerprint=$1 AND op IN (\'managed-sync\',\'managed-sync-parked\')', [key, op]);
+  const newest = `${id}-newest`, raced = `${id}-raced`;
+  let release = () => {};
+  try {
+    __setManagedCursorKeyForTests(() => newest);
+    expect(await performManagedSync(engine, opts(id), { maxPages: 1, maxMs: 1000 })).toMatchObject({ status: 'partial' });
+    await park(newest, 'managed-sync-parked');
+    __setManagedCursorKeyForTests(() => raced);
+    release = stallPreparation(async () => true);
+    expect(await performManagedSync(engine, opts(id))).toMatchObject({ status: 'partial', reason: 'writer_pending' });
+    await park(newest, 'managed-sync');
+    await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()-interval '1 hour' WHERE op='managed-sync' AND fingerprint=$1", [raced]);
+  } finally { __setManagedCursorKeyForTests(null); }
+  // The fan-in's first read of the raced cursor's requests sees nothing open (the claim lands right after it).
+  const execute = engine.executeRaw;
+  let hidden = false;
+  engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
+    if (!hidden && sql.includes("intent->>'cursorKey'=$2") && sql.startsWith('SELECT * FROM persistence_requests') && params?.[1] === raced) { hidden = true; return []; }
+    return execute.call(this, sql, params);
+  } as BrainEngine['executeRaw'];
+  let waited;
+  try { waited = await performManagedSync(engine, opts(id)); } finally { engine.executeRaw = execute; }
+  expect(hidden).toBe(true);
+  expect(waited).toMatchObject({ status: 'partial', reason: 'writer_pending', retryWait: { state: 'running' }, cursorFanIn: { adopted: true, superseded: 0, retained: 1 } });
+  release();
+  installFaultHook(undefined);
+  for (let i = 0; i < 100 && (await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND state IN ('queued','running')", [id])).length; i++) await new Promise(resolve => setTimeout(resolve, 100));
+  expect((await performManagedSync(engine, opts(id))).status).toBe('first_sync');
+}), 180_000);
+
+// Outside-voice review: a remote caller refused adoption must not have cancelled or retired the local runs it passed over.
+test('a remote job refused the local winner folds nothing in: every older-key cursor and its requests stay as they were', async () => each(async engine => {
+  const id = await fixture(engine, ['a', 'b', 'c', 'd']);
+  const park = (key: string, op: string) => engine.executeRaw('UPDATE op_checkpoints SET op=$2 WHERE fingerprint=$1 AND op IN (\'managed-sync\',\'managed-sync-parked\')', [key, op]);
+  const newest = `${id}-newest`, older = `${id}-older`;
+  const keys = async () => (await engine.executeRaw<{ key: string }>("SELECT fingerprint AS key FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1 ORDER BY fingerprint", [id])).map(row => row.key);
+  try {
+    __setManagedCursorKeyForTests(() => older);
+    expect(await performManagedSync(engine, opts(id), { maxPages: 1, maxMs: 1000 })).toMatchObject({ status: 'partial' });
+    await park(older, 'managed-sync-parked');
+    __setManagedCursorKeyForTests(() => newest);
+    expect(await performManagedSync(engine, opts(id), { maxPages: 1, maxMs: 1000 })).toMatchObject({ status: 'partial' });
+    await park(older, 'managed-sync');
+    await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()-interval '1 hour' WHERE op='managed-sync' AND fingerprint=$1", [older]);
+  } finally { __setManagedCursorKeyForTests(null); }
+  const before = { keys: await keys(), requests: await requests(engine, id) };
+  expect(before.keys).toEqual([newest, older].sort());
+  const clientId = `adopt-client-${randomUUID()}`;
+  await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,client_secret_hash,scope,source_id,allowed_operations)
+    VALUES($1,'example-client','test-only','admin',$2,ARRAY['submit_job'])`, [clientId, id]);
+  try {
+    const ctx = { engine, remote: true, sourceId: id, auth: { clientId, principal: { kind: 'oauth_client', id: clientId }, scopes: ['admin'], sourceId: id,
+      allowedOperations: ['submit_job'] } } as unknown as OperationContext;
+    const accepted = await prepareRemoteJob(ctx, 'sync', { noPull: true });
+    const refused = await withSubmissionAuthority(accepted.authority, () => performManagedSync(engine, { ...accepted.data } as SyncOpts)).then(() => null, (error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'sync_in_progress', reason: 'local_resume_required' });
+  } finally { await engine.executeRaw('DELETE FROM oauth_clients WHERE client_id=$1', [clientId]); }
+  expect({ keys: await keys(), requests: await requests(engine, id) }).toEqual(before);
+  // The host CLI then folds them in.
+  expect((await performManagedSync(engine, opts(id))).status).toBe('first_sync');
+}), 180_000);
+
 test('a company approval\'s cursor is never adopted or superseded by an ordinary run of the source', async () => each(async engine => {
   const id = await fixture(engine);
   const inc = (await engine.executeRaw<{ i: string }>('SELECT incarnation::text AS i FROM sources WHERE id=$1', [id]))[0]!.i;

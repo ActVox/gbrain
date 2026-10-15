@@ -64,7 +64,7 @@ export interface DrainHolder { kind: DrainHolderKind | 'unknown'; id: string | n
   version: string | null; progress: DrainHolderProgress | null }
 /** `safe_to_loop` and `retry_after_ms` are the `next` fields of the drain's other owner stops (`owner_wedged_here`). */
 export interface DrainLeaseHeld { code: typeof SYNC_DRAIN_LEASE_HELD; holder: DrainHolder | null; retry_after_ms: number; safe_to_loop: true; lost?: true; fix: Action }
-interface DrainLease { lockId: string; sourceId: string; token: string }
+interface DrainLease { lockId: string; sourceId: string; token: string; signal: AbortSignal }
 
 const leases = new AsyncLocalStorage<ReadonlyMap<string, DrainLease>>();
 
@@ -80,7 +80,9 @@ export function currentDrainLease(sourceId: string): DrainLease | null {
 export async function assertDrainLease(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<void> {
   const lease = currentDrainLease(sourceId);
   if (!lease) return;
-  const rows = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid FOR SHARE', [lease.lockId, lease.token]);
+  // A renewal that failed aborts the lease's signal before its row is released; an expired row is lost even untaken.
+  if (lease.signal.aborted) throw new LockStolenError(lease.lockId, `the drain lease of source ${sourceId} lapsed in this pass`);
+  const rows = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE', [lease.lockId, lease.token]);
   if (!rows.length) throw new LockStolenError(lease.lockId, `the drain lease of source ${sourceId} is no longer held by this pass`);
 }
 
@@ -121,7 +123,8 @@ export function holderStalled(holder: DrainHolder | null, now = Date.now()): boo
 }
 
 /** What a remote caller may see of a holder: its kind and times, never its host, pid or job id. */
-const redacted = (holder: DrainHolder | null): DrainHolder | null => holder && { ...holder, id: null, host: null, pid: null };
+export const publicDrainHolder = (holder: DrainHolder | null): DrainHolder | null => holder && { ...holder, id: null, host: null, pid: null };
+const redacted = publicDrainHolder;
 
 /** The `resumable` result of a run that did not get (or lost) the lease. Nothing was admitted by it; the cursor stands. */
 export function leaseHeldResult(sourceId: string, holder: DrainHolder | null, opts: { lost?: boolean; remote?: boolean; resumeArgv?: string[] } = {}): SyncResult {
@@ -214,7 +217,7 @@ export async function withDrainLease(engine: BrainEngine, sourceId: string, opts
   for (;;) {
     try {
       return await withRefreshingLock(engine, lockId, async (signal, handle) => {
-        const lease: DrainLease = { lockId, sourceId, token: handle.acquisitionToken };
+        const lease: DrainLease = { lockId, sourceId, token: handle.acquisitionToken, signal };
         await writeHolderRecord(engine, sourceId, lease, opts.holder);
         const beacon = setInterval(() => {
           void engine.executeRaw(`UPDATE minion_jobs SET lock_until=now()+make_interval(mins => $3),updated_at=now() WHERE queue=$1 AND lock_token=$2`,

@@ -122,11 +122,13 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
       if (err instanceof SyncLockBusyError) {
         // #6712 PR 1 (folds #6706's live-job guard): one drainer per source is the drain lease; a job that finds it held completes as a skip.
         const id = sourceId ?? 'default';
-        const read = await (await import('../../persistence/sync-lease.ts')).readDrainHolder(engine, id).catch(() => null);
+        const { readDrainHolder, publicDrainHolder } = await import('../../persistence/sync-lease.ts');
+        const read = await readDrainHolder(engine, id).catch(() => null);
         const holder = read && read.kind !== 'unknown' ? read : null;
         const runningJob = holder?.kind === 'job' && holder.id && /^\d+$/.test(holder.id) ? Number(holder.id) : null;
         console.error(`[sync] skipped: sync already in progress for ${id} (lock ${err.lockKey} held${holder ? ` by a ${holder.kind} drainer` : ''}).`);
-        return { skipped: true, reason: 'sync_in_progress', source_id: id, ...(holder ? { holder } : {}),
+        // A job result is readable by remote callers (get_job), so it carries the public holder: kind and times only.
+        return { skipped: true, reason: 'sync_in_progress', source_id: id, ...(holder ? { holder: publicDrainHolder(holder) } : {}),
           ...(runningJob !== null ? { running_job_id: runningJob, next: { command: `gbrain jobs get ${runningJob} --json`, safe_to_loop: true, retry_after_ms: 30_000,
             why: `Sync job #${runningJob} is draining source ${id}; it resumes the cursor, so nothing else needs to run.` } } : {}) };
       }

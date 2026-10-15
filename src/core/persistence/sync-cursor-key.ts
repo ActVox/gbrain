@@ -68,9 +68,12 @@ export interface CursorResolution {
 
 interface CursorRow { key: string; done: boolean; company_receipt_id: string | null; run_id: string | null }
 
-/** Picks the cursor a pass uses and folds in the others (module header); `readOnly` (a dry run) only picks. */
+/**
+ * Picks the cursor a pass uses and folds in the others (module header). `readOnly` (a dry run) only picks; `foldIn: false`
+ * (a remote caller) picks and finds what to wait for, but cancels and retires nothing.
+ */
 export async function resolveManagedCursor(engine: BrainEngine, input: { sourceId: string; incarnation: string; company: CompanySync; assertActive: () => void;
-  readOnly?: boolean }): Promise<CursorResolution> {
+  readOnly?: boolean; foldIn?: boolean }): Promise<CursorResolution> {
   const { sourceId, incarnation, company, assertActive } = input;
   const canonical = managedCursorKey(incarnation, company);
   const rows = (await engine.executeRaw<CursorRow>(`SELECT fingerprint AS key, COALESCE(completed_keys->0->>'done','false')='true' AS done,
@@ -85,7 +88,12 @@ export async function resolveManagedCursor(engine: BrainEngine, input: { sourceI
   const fence = (tx: BrainEngine) => assertDrainLease(tx, sourceId);
   for (const row of input.readOnly ? [] : rows) {
     if (row.key === key || row.key === canonical && row.done) continue;
-    if (row.done) {
+    if (input.foldIn === false) {
+      if (row.done) continue;
+      const busy = await busyRequest(engine, input.sourceId, row.key);
+      resolution.retained.push(row.key);
+      if (busy) resolution.waitFor ??= waitOn(busy);
+    } else if (row.done) {
       if (company) continue;
       await engine.transaction(async tx => {
         await fence(tx);
@@ -99,13 +107,24 @@ export async function resolveManagedCursor(engine: BrainEngine, input: { sourceI
         await faultPoint('sync:cursor_adopted', { sourceId });
       } else {
         resolution.retained.push(row.key);
-        if (open !== 'kept') resolution.waitFor ??= { request_id: open.request_id, kind: (open.intent as { kind?: string } | null)?.kind ?? null, slug: open.slug,
-          state: open.state, recovery: !!open.recovery };
+        // `kept`: a consumer claimed a request between the read and the retirement; wait for whatever is open now.
+        const busy = open === 'kept' ? await busyRequest(engine, input.sourceId, row.key) : open;
+        if (busy) resolution.waitFor ??= waitOn(busy);
       }
     }
     assertActive();
   }
   return resolution;
+}
+
+const waitOn = (request: WriteRequest): NonNullable<CursorResolution['waitFor']> => ({ request_id: request.request_id,
+  kind: (request.intent as { kind?: string } | null)?.kind ?? null, slug: request.slug, state: request.state, recovery: !!request.recovery });
+
+/** The first request under a cursor key that is not merely queued: running, recovering, publishing or carrying recovery. */
+async function busyRequest(engine: BrainEngine, sourceId: string, key: string): Promise<WriteRequest | null> {
+  const open = await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE source_id=$1 AND intent->>'cursorKey'=$2
+    AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) ORDER BY sequence`, [sourceId, key]);
+  return open.find(request => request.state !== 'queued' || request.recovery || request.publication_started) ?? null;
 }
 
 /**
