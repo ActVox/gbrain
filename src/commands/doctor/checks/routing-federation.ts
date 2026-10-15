@@ -9,6 +9,7 @@ import type { BrainEngine } from '../../../core/engine.ts';
 import { gbrainPath } from '../../../core/config.ts';
 import { embedBackfillWorkerSurface } from '../../../core/minions/embed-backfill-admission.ts';
 import { isMissingSchemaObject } from '../../../core/utils.ts';
+import { adoptedSkillPackSourceIds } from '../../../core/shared-skills/adopted-packs.ts';
 import { ALLOWED_SCOPES_LIST, DCR_REGISTRABLE_SCOPES } from '../../../core/scope.ts';
 import type { Check } from '../../doctor.ts';
 
@@ -82,30 +83,6 @@ export async function checkSourceRoutingHealth(engine: BrainEngine): Promise<Che
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { name: 'source_routing_health', status: 'warn', message: `Check failed: ${msg}` };
-  }
-}
-
-/**
- * Non-default sources holding an adopted skill pack: a `shared_skill_packs`
- * row for the source's current incarnation with at least one live
- * (`NOT deleted`) `shared_skill_heads` row. A pack left behind by an earlier
- * incarnation does not count. A schema without the shared-skills tables (or
- * `sources.incarnation`) has no adopted packs.
- */
-async function adoptedSkillPackSourceIds(engine: BrainEngine): Promise<Set<string>> {
-  try {
-    const rows = await engine.executeRaw<{ id: string }>(
-      `SELECT s.id FROM sources s
-        WHERE s.id <> 'default' AND EXISTS (
-          SELECT 1 FROM shared_skill_packs p
-            JOIN shared_skill_heads h ON h.source_id = p.source_id AND h.source_incarnation = p.source_incarnation
-                                     AND h.pack_id = p.pack_id AND NOT h.deleted
-           WHERE p.source_id = s.id AND p.source_incarnation = s.incarnation)`,
-    );
-    return new Set(rows.map((r) => r.id));
-  } catch (e) {
-    if (isMissingSchemaObject(e, 'table', ['shared_skill_packs', 'shared_skill_heads']) || isMissingSchemaObject(e, 'column', 'incarnation')) return new Set();
-    throw e;
   }
 }
 

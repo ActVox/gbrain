@@ -31,6 +31,7 @@ import { persistenceEnabledForHealth } from '../../../core/persistence/ownership
 import { upstreamFreshness } from '../../../core/sync-upstream.ts';
 import type { Check } from '../../doctor.ts';
 import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../core/shared-skills/content-freshness.ts';
+import { readOnlyCatalogPackSourceIds } from '../../../core/shared-skills/adopted-packs.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
 import { checkError } from '../check-fix.ts';
@@ -1256,10 +1257,13 @@ export async function checkSyncFreshness(
     let ownedContent = new Set<string>();
     try { ownedContent = new Set((await ownedContentFreshness(engine)).map(source => source.sourceId)); }
     catch (error) { if (!isOwnedContentSchemaMissing(error)) throw error; }
+    // #6076: an adopted read-only catalog pack (no commit history) has nothing to sync.
+    const catalogPacks = await readOnlyCatalogPackSourceIds(engine, sources, localOnly);
     let writer_owned_count = 0;
+    let read_only_pack_count = 0;
     // v0.41.27.0: D6 count math. Every source falls into
     // EXACTLY ONE bucket per iteration. Invariant pinned by unit test:
-    //   unchanged_count + synced_recently_count + stale_count + writer_owned_count === sources.length
+    //   unchanged + synced_recently + stale + writer_owned + read_only_pack counts === sources.length
     // Stale subsumes warn + fail + never-synced + future-timestamp; we keep
     // hasWarnings/hasFailures for the existing return-status logic.
     let unchanged_count = 0;
@@ -1312,6 +1316,7 @@ export async function checkSyncFreshness(
     let upstream_behind_count = 0;
     for (const source of sources) {
       if (ownedContent.has(source.id)) { writer_owned_count++; continue; }
+      if (catalogPacks.ids.has(source.id)) { read_only_pack_count++; continue; }
       // Embed source.id in user-visible messages so `gbrain sync --source <id>`
       // matches what the user copy-pastes. Show display name in parens when set.
       const display = source.name && source.name !== source.id
@@ -1474,12 +1479,14 @@ export async function checkSyncFreshness(
 
     // D6 invariant: every source incremented exactly one bucket.
     const details = { unchanged_count, synced_recently_count, stale_count, ...(writer_owned_count ? { writer_owned_count } : {}),
+      ...(read_only_pack_count ? { read_only_pack_count } : {}), ...(catalogPacks.note ? { read_only_pack_note: catalogPacks.note } : {}),
       ...(outcomes.length ? { code: outcomes[0]!.code, no_successful_sync: outcomes } : {}),
       ...(upstream_unknown_count ? { upstream_unknown_count } : {}), ...(upstream_behind_count ? { upstream_behind_count } : {}) };
     // BUG 4: append in-progress context when any source is actively syncing.
     // Empty otherwise, so steady-state messages are byte-for-byte unchanged.
     const inProgressNote = (inProgress.length ? `. ${inProgress.join('; ')}` : '')
-      + (writer_owned_count ? `. ${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status` : '');
+      + (writer_owned_count ? `. ${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status` : '')
+      + (read_only_pack_count ? `. ${read_only_pack_count} read-only skill-pack source(s): no commits to sync` : '') + (catalogPacks.note ? `. ${catalogPacks.note}` : '');
 
     const remedy = issues.length > outcomes.length;
     const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix;
@@ -1503,7 +1510,8 @@ export async function checkSyncFreshness(
       name: 'sync_freshness', status: 'ok',
       message: `${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status.`, details,
     };
-    const upstreamCount = sources.length - writer_owned_count;
+    const upstreamCount = sources.length - writer_owned_count - read_only_pack_count;
+    if (upstreamCount === 0) return { name: 'sync_freshness', status: 'ok', message: `No upstream-synced sources${inProgressNote}.`, details };
     // v0.41.27.0: D2 ok-message reshape. Three branches surface what the
     // git short-circuit actually did so operators understand "unchanged
     // since last sync" vs "synced recently".
