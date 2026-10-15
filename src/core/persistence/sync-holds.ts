@@ -43,9 +43,10 @@ import { fenceHoldFix, fenceHoldLocation, fencePreviewArgv, readFenceAutoRepair,
 import { contentHoldDocs, contentHoldFix } from '../content-repair/hold-fix.ts';
 import { STRUCTURED_WRITE_ADVICE, type FencesNormalized } from '../fence-repair/report.ts';
 import type { SyncRename } from './sync-discovery.ts';
-import { isMultimodalEnabled } from '../sync.ts';
+import { isCodeFilePath, isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { VERSION } from '../../version.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../chunkers/recursive.ts';
+import { chunkerStamp } from '../chunkers/code.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
 
 export const GIT_HOLD_OP = 'sync-hold';
@@ -684,7 +685,7 @@ export interface SyncImportProvenance {
   /**
    * #6712 PR 0 (write-only until a reader lands): the bytes the publish left on disk, the canonical writeback when it
    * wrote one, else the file as admitted; null when no file was on disk. `disk_blob_oid` is their Git blob id, comparable
-   * with `git ls-tree` without reading the file. Absent on records written before the stamp, and on records a repair wrote.
+   * with `git ls-tree` without reading the file. Absent on records written before the stamp (PR 1 adds them to code, image and repair records).
    */
   disk_sha256?: string | null;
   disk_blob_oid?: string | null;
@@ -714,6 +715,16 @@ export function syncDiskProvenance(bytes: Uint8Array | null, target: string | nu
 
 export function syncImportParser(schemaPack: string | null): SyncImportParser {
   return { parser_version: SYNC_IMPORT_PARSER_VERSION, markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: schemaPack };
+}
+
+/**
+ * #6712 PR 1: the parser fingerprint an import of `path` records and the discovery prescreen expects: a code page names
+ * the code chunker and its grammars (`chunkerStamp`), an image the image importer, a Markdown page `syncImportParser`.
+ */
+export function syncImportParserFor(path: string, schemaPack: string | null): SyncImportParser {
+  if (isImageFilePath(path)) return { parser_version: 'image=1', markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: null };
+  if (isCodeFilePath(path)) return { parser_version: `code=1;chunker=${chunkerStamp()}`, markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: null };
+  return syncImportParser(schemaPack);
 }
 
 const provenanceFingerprint = (sourceId: string, incarnation: string, pageId: number) => `${sourceId}:${incarnation}:${pageId}`;
