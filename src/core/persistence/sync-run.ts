@@ -1497,8 +1497,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       missingManifestCursor = error.cursor; phase = 'discovery'; discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
       // #6712 PR 1 (L1): a lost manifest re-discovers HEAD's whole tree (the lost run may have imported files last_commit..HEAD no longer names); the prescreen passes what it imported.
       const replaced = await replaceCursor(engine, key, error.cursor, { ...await discoverManagedSync(engine, opts, context, undefined, true), authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
-      if ('wait' in replaced) return { ...result(error.cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: replaced.wait }) };
-      cursor = replaced;
+      if ('wait' in replaced) return { ...result(error.cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: replaced.wait }) }; cursor = replaced;
     }
     assertActive();
     if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, syncOptions, embedDeferred: opts.embedDeferred, assertActive, state });
