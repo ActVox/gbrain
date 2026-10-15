@@ -96,6 +96,26 @@ export async function discoverWithdrawalTargets(engine: BrainEngine, sourceId: s
     if (pages.length < WITHDRAWAL_LIMITS.batch) break;
     after = pages[pages.length - 1].id;
   }
+  // Wave B (spec 11): a segmented page's fences live in its segments; only live rows flagged with facts slots are
+  // read, and only each slot's bytes (a fence split by a forced cut is left to the chunk scan below).
+  const slotText = `convert_from(substring(t.body from (s->>'start')::int + 1 for (s->>'end')::int - (s->>'start')::int),'UTF8')`;
+  for (let after = [0, 0]; ;) {
+    if (performance.now() > deadline) refuse();
+    const rows = await engine.executeRaw<{ id: number; occurrence_id: string; slug: string; fences: string[] }>(`SELECT p.id,m.occurrence_id::text AS occurrence_id,p.slug,
+        ARRAY(SELECT ${slotText} FROM jsonb_array_elements(m.facts_slots) s WHERE NOT s ? 'open_start') AS fences
+      FROM page_body_manifest m JOIN pages p ON p.id=m.page_id JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256
+      WHERE p.source_id=$1 AND p.body_storage='segmented' AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.facts_slots<>'[]'::jsonb
+        AND (m.page_id,m.occurrence_id)>($3::int,$6::bigint) AND ($5::text[] IS NULL OR p.slug=ANY($5::text[]))
+        AND EXISTS (SELECT 1 FROM jsonb_to_recordset($2::text::jsonb) k(subject text,patterns text[]), jsonb_array_elements(m.facts_slots) s
+          WHERE (k.subject='*' OR k.subject=p.slug) AND NOT s ? 'open_start' AND ${shortlist(slotText)})
+      ORDER BY m.page_id,m.occurrence_id LIMIT $4`, [sourceId, keys, after[0], WITHDRAWAL_LIMITS.batch, subjects, after[1]]);
+    await match(rows.flatMap(row => row.fences.flatMap(fence => [
+      ...withdrawalFenceBlocks(fence).filter(block => !block.parsed.warnings.length).flatMap(block => block.parsed.facts.map(f => ({ id: row.id, slug: row.slug, claim: f.claim, visibility: f.visibility, ambiguous: false }))),
+      ...ambiguousFenceClaims(fence).map(f => ({ id: row.id, slug: row.slug, ...f, ambiguous: true })),
+    ])));
+    if (rows.length < WITHDRAWAL_LIMITS.batch) break;
+    after = [Number(rows[rows.length - 1].id), Number(rows[rows.length - 1].occurrence_id)];
+  }
   for (let after = 0; ;) {
     if (performance.now() > deadline) refuse();
     const chunks = await engine.executeRaw<{ id: number; page_id: number; slug: string; chunk_text: string }>(`SELECT c.id,c.page_id,p.slug,c.chunk_text
