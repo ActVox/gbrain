@@ -54,13 +54,18 @@ async function withHome<T>(config: Record<string, unknown> | null, fn: () => Pro
   }
 }
 
-/** Write a page the way gbrain did before the ceiling: under a 500 KB block. */
+/**
+ * Leave a page the way gbrain did before the ceiling: written under a 500 KB block, with the
+ * gate's marker and zero chunks. A write today keeps an embed_skip page's chunks (#6722), so
+ * the legacy chunkless state is restored by removing them, as an old brain holds it.
+ */
 async function seedSizeSkipped(slug: string, bytes: number): Promise<void> {
   await engine.setConfig('content_sanity.bytes_block', '500000');
   await importFromContent(engine, slug, FRONTMATTER + body(bytes), { noEmbed: true });
   await engine.unsetConfig('content_sanity.bytes_block');
   const page = await engine.getPage(slug);
   expect(isEmbedSkipped(page!.frontmatter as Record<string, unknown>)).toBe(true);
+  await engine.executeRaw('DELETE FROM content_chunks WHERE page_id = $1', [page!.id]);
   expect((await engine.getChunks(slug)).length).toBe(0);
 }
 
@@ -140,14 +145,26 @@ describe('gbrain reindex --oversized (keyless upgrade path)', () => {
     });
   }, 120_000);
 
-  test('a page still over the operator bytes_block keeps its marker', async () => {
+  test('a page still over the operator bytes_block keeps its marker and is re-chunked for keyword search (#6722)', async () => {
     await withHome({ embedding_disabled: true }, async () => {
       await seedSizeSkipped('chats/operator-limit', 700_000);
       await engine.setConfig('content_sanity.bytes_block', '500000');
-      const receipt = await runOversizedBackfill(engine);
-      expect(receipt).toMatchObject({ candidates: 0, reindexed: 0, over_block: 1, block_bytes: 500_000 });
-      expect(isEmbedSkipped((await engine.getPage('chats/operator-limit'))!.frontmatter as Record<string, unknown>)).toBe(true);
-      await engine.unsetConfig('content_sanity.bytes_block');
+      try {
+        expect(await keywordHits()).toEqual([]);
+        const receipt = await runOversizedBackfill(engine);
+        expect(receipt).toMatchObject({ candidates: 1, reindexed: 1, rechunked_over_block: 1, over_block: 1, held_for_approval: 0,
+          chunks_pending_embedding: 0, remaining: 0, block_bytes: 500_000 });
+        expect(isEmbedSkipped((await engine.getPage('chats/operator-limit'))!.frontmatter as Record<string, unknown>)).toBe(true);
+        expect(await keywordHits()).toEqual(['chats/operator-limit']);
+        const chunks = await engine.getChunks('chats/operator-limit');
+        expect(chunks.length).toBeGreaterThan(100);
+        expect(chunks.every(c => c.embedded_at == null)).toBe(true);
+        expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+        expect(providerCalls).toBe(0);
+        expect(await runOversizedBackfill(engine)).toMatchObject({ candidates: 0, reindexed: 0, over_block: 1 });
+      } finally {
+        await engine.unsetConfig('content_sanity.bytes_block');
+      }
     });
   }, 120_000);
 });

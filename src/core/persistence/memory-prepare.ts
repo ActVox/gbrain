@@ -169,7 +169,7 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     if (page.observedRevision !== observedRevision) conflict(row);
   }
   return { observedRevision, file: page?.file, ...(page?.exclusiveSources ? { exclusiveSources: page.exclusiveSources } : {}), validate: async tx => { await validate(tx); await page?.validate?.(tx); }, apply: async tx => {
-    if (page) await withPageTierKept(tx, { sourceId: row.source_id, slug: row.slug }, () => page!.apply(tx));
+    const pageReceipt = page ? await withPageTierKept(tx, { sourceId: row.source_id, slug: row.slug }, () => page!.apply(tx)) as { size_state?: unknown } | undefined : undefined;
     let id: number;
     if (rowNum !== undefined) {
       const inserted = await tx.insertFacts([{ ...fact, row_num: rowNum, source_markdown_slug: row.slug }], { source_id: row.source_id }); // gbrain-allow-direct-insert: coordinator atomically publishes the prepared canonical fact fence and its new indexed row
@@ -192,6 +192,7 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     const superseded = status === 'superseded' ? decision.candidate! : undefined;
     return { ...outcome(id, status, input.entity_slug, validUntil, degraded, p, superseded?.id,
       superseded !== undefined && superseded.entity_slug == null && input.entity_slug !== null), ...fencesNormalized,
-      ...(contestedBy ? { contested: contestedBy } : {}), ...(flagged ? { gate: flagged } : {}) };
+      ...(contestedBy ? { contested: contestedBy } : {}), ...(flagged ? { gate: flagged } : {}),
+      ...(pageReceipt?.size_state ? { size_state: pageReceipt.size_state } : {}) };
   } };
 }

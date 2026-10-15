@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { sizeStateField } from '../page-embedding-budget.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { boundedReads } from './bounded-reads.ts';
 import { basename, dirname, join } from 'node:path';
@@ -699,8 +700,10 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
           raw_sha256: sha256(p.content!), ...(p.blobOid ? { blob_oid: p.blobOid } : {}), working: p.working === true, gbrain_version: VERSION, ...(recovery?.length ? { recovery } : {}) }); },
       ]);
       preparedImport.postimage = final;
+      // #6722: a large or embed_skip page says what this write left its embedding in.
+      const sizeState = applied.noop ? {} : await sizeStateField(tx, row.source_id, row.slug, live?.page);
       return { status: moved ? 'renamed' : applied.noop ? 'skipped' : snapshot ? 'updated' : 'created', slug: row.slug, source_id: row.source_id,
-        chunks: applied.result.chunks, noop: applied.noop && !moved, imported_file: true, ...(moved ? { renamed_from: moved.slug } : {}),
+        chunks: applied.result.chunks, noop: applied.noop && !moved, imported_file: true, ...(moved ? { renamed_from: moved.slug } : {}), ...sizeState,
         ...(recovery?.length ? { recovered_frontmatter: true } : {}), ...(commentValue ? { comment_value: true } : {}),
         ...(fenceFixes.length ? { fences_normalized: fenceFixesWire(fenceFixes) } : {}) };
     } };

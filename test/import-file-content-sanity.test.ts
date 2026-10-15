@@ -255,29 +255,34 @@ describe('importFromContent — soft-block (D9 transition + embed_skip)', () => 
     });
   });
 
-  test('soft-block deletes existing chunks (D9 transition invariant)', async () => {
+  test('soft-block replaces existing chunks with the new body\'s chunks (D9 transition invariant, #6722)', async () => {
     await withIsolatedHome(async () => {
       // First write a normal page to seed some chunks.
       const small = FRONTMATTER + 'Short content with multiple sentences. Plenty of words here. Enough to chunk.';
-      await importFromContent(engine, 'test/grow', small, { noEmbed: true });
-      const beforeChunks = await engine.getChunks('test/grow');
+      await importFromContent(engine, 'notes/grow', small, { noEmbed: true });
+      const beforeChunks = await engine.getChunks('notes/grow');
       expect(beforeChunks.length).toBeGreaterThan(0);
 
       // Now re-import with content that grew past the block threshold.
-      const big = FRONTMATTER + 'a'.repeat(600_000);
-      await importFromContent(engine, 'test/grow', big, { noEmbed: true });
-      const afterChunks = await engine.getChunks('test/grow');
-      // D9: transition to embed_skip should delete chunks.
-      expect(afterChunks.length).toBe(0);
+      const big = FRONTMATTER + 'Growing transcript line about acme-example. '.repeat(14_000) + 'The marker word is quillfeatherbeacon.';
+      await importFromContent(engine, 'notes/grow', big, { noEmbed: true });
+      const afterChunks = await engine.getChunks('notes/grow');
+      // D9: the transition to embed_skip drops the old chunks; #6722: the new body is chunked, never embedded.
+      expect(afterChunks.length).toBeGreaterThan(10);
+      expect(afterChunks.some(c => c.chunk_text.includes('Plenty of words here'))).toBe(false);
+      expect(afterChunks.every(c => c.embedding == null && c.embedded_at == null)).toBe(true);
+      expect((await engine.searchKeyword('quillfeatherbeacon', { limit: 5 })).map(hit => hit.slug)).toEqual(['notes/grow']);
     });
   });
 
-  test('soft-block skips chunking entirely (no new chunks created)', async () => {
+  test('soft-block keeps the page in keyword search: chunks with no vectors (#6722)', async () => {
     await withIsolatedHome(async () => {
       const content = FRONTMATTER + 'a'.repeat(600_000);
       await importFromContent(engine, 'test/big2', content, { noEmbed: true });
       const chunks = await engine.getChunks('test/big2');
-      expect(chunks.length).toBe(0);
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.every(c => c.embedding == null && c.embedded_at == null)).toBe(true);
+      expect(await engine.countStaleChunks()).toBe(0);
     });
   });
 
@@ -335,7 +340,8 @@ describe('importFromContent — stale size-gate recovery', () => {
       await engine.setConfig('content_sanity.bytes_block', '1000');
       try {
         await importFromContent(engine, 'notes/threshold', content, { noEmbed: true });
-        expect((await engine.getChunks('notes/threshold')).length).toBe(0);
+        expect(isEmbedSkipped((await engine.getPage('notes/threshold'))!.frontmatter)).toBe(true);
+        expect((await engine.getChunks('notes/threshold')).length).toBeGreaterThan(0);
         await engine.setConfig('content_sanity.bytes_block', '10000');
         const recovered = await importFromContent(engine, 'notes/threshold', content, { noEmbed: true });
         expect(recovered.status).toBe('imported');
@@ -344,7 +350,8 @@ describe('importFromContent — stale size-gate recovery', () => {
         expect((await importFromContent(engine, 'notes/threshold', content, { noEmbed: true })).status).toBe('skipped');
         await engine.setConfig('content_sanity.bytes_block', '1000');
         expect((await importFromContent(engine, 'notes/threshold', content, { noEmbed: true })).status).toBe('imported');
-        expect((await engine.getChunks('notes/threshold')).length).toBe(0);
+        expect(isEmbedSkipped((await engine.getPage('notes/threshold'))!.frontmatter)).toBe(true);
+        expect((await engine.getChunks('notes/threshold')).length).toBeGreaterThan(0);
       } finally {
         await engine.unsetConfig('content_sanity.bytes_block');
       }
@@ -367,7 +374,8 @@ describe('importFromContent — stale size-gate recovery', () => {
       const content = FRONTMATTER.replace('---\n\n', 'embed_skip:\n  reason: oversized\n---\n\n') + 'A small useful note.';
       await importFromContent(engine, 'notes/bypassed', content, { noEmbed: true, remote: false, preserveGateMarkers: true });
       expect(isEmbedSkipped((await engine.getPage('notes/bypassed'))!.frontmatter)).toBe(true);
-      expect((await engine.getChunks('notes/bypassed')).length).toBe(0);
+      expect((await engine.getChunks('notes/bypassed')).every(c => c.embedding == null)).toBe(true);
+      expect((await engine.getChunks('notes/bypassed')).length).toBeGreaterThan(0);
     }));
   });
 
@@ -376,7 +384,8 @@ describe('importFromContent — stale size-gate recovery', () => {
       const content = FRONTMATTER.replace('---\n\n', 'embed_skip:\n  reason: manual\n---\n\n') + 'A small useful note.';
       await importFromContent(engine, 'notes/manual-skip', content, { noEmbed: true, remote: false, preserveGateMarkers: true });
       expect(isEmbedSkipped((await engine.getPage('notes/manual-skip'))!.frontmatter)).toBe(true);
-      expect((await engine.getChunks('notes/manual-skip')).length).toBe(0);
+      expect((await engine.getChunks('notes/manual-skip')).every(c => c.embedding == null)).toBe(true);
+      expect((await engine.getChunks('notes/manual-skip')).length).toBeGreaterThan(0);
     });
   });
 });

@@ -34,7 +34,8 @@
 import type { BrainEngine } from './engine.ts';
 import { assessSampledJunk } from './content-sanity.ts';
 import { estimateCostFromChars, lookupEmbeddingPrice } from './embedding-pricing.ts';
-import { isLargePageBytes } from './page-size-policy.ts';
+import { PAGE_INLINE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
+import { isEmbedSkipped } from './embed-skip.ts';
 import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
 
 export const PAGE_EMBED_CAP_KEY = 'embed.max_usd_per_page';
@@ -233,4 +234,76 @@ export async function heldEmbedArgv(engine: BrainEngine, args: readonly string[]
   }
   const rest = args.filter((a, i) => a !== '--held' && a !== '--source' && args[i - 1] !== '--source');
   return { argv: [...rest, '--source', sources[0], '--slugs', ...limited.map(row => row.slug)] };
+}
+
+/**
+ * #6722: what a write left a page's embedding in, for write, sync and
+ * remember receipts. Null for an ordinary page (embedded with the write, or by
+ * the post-write job). `deferred`: over the inline threshold, embedded after
+ * the commit under the per-page cap. `partial`: the cap stopped it with chunks
+ * left keyword-only. `held`: it waits for the user's approval. `skipped`: an
+ * embed_skip marker (`oversized` when the gate set it because the page is over
+ * the operator's bytes_block). Every such page is chunked and keyword-searchable.
+ */
+export interface PageSizeState { embedding: 'deferred' | 'partial' | 'held' | 'skipped'; reason: string; bytes: number }
+
+export function pageSizeState(bytes: number, frontmatter: Record<string, unknown> | null | undefined,
+  budget?: { state: PageBudgetState; reason: string | null } | null): PageSizeState | null {
+  if (isEmbedSkipped(frontmatter)) {
+    return { embedding: 'skipped', reason: (frontmatter!.embed_skip as { reason?: unknown } | null)?.reason === 'oversized' ? 'oversized' : 'operator_marker', bytes };
+  }
+  if (budget?.state === 'held') return { embedding: 'held', reason: budget.reason ?? 'awaiting_approval', bytes };
+  if (budget?.state === 'capped') return { embedding: 'partial', reason: 'spend_cap', bytes };
+  return isLargePageBytes(bytes) ? { embedding: 'deferred', reason: 'large_page', bytes } : null;
+}
+
+/**
+ * pageSizeState for stored pages of one source with a non-null state: the given slugs, or (null) every
+ * such page in the source, as a full sync walked them all.
+ */
+export async function readPageSizeStates(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slugs: readonly string[] | null): Promise<Array<{ slug: string } & PageSizeState>> {
+  if (slugs?.length === 0) return [];
+  const bytes = `(octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')))`;
+  const rows = await engine.executeRaw<{ slug: string; bytes: number; frontmatter: Record<string, unknown> | null; state: PageBudgetState | null; reason: string | null }>(
+    `SELECT p.slug, ${bytes}::bigint AS bytes, p.frontmatter, b.state, b.reason
+       FROM pages p LEFT JOIN page_embedding_budget b ON b.page_id = p.id
+      WHERE p.source_id = $1 AND p.deleted_at IS NULL${slugs ? ' AND p.slug = ANY($3::text[])' : ''}
+        AND (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip' OR ${bytes} > $2 OR b.page_id IS NOT NULL) ORDER BY p.slug`,
+    slugs ? [sourceId, PAGE_INLINE_MAX_BYTES, [...slugs]] : [sourceId, PAGE_INLINE_MAX_BYTES]);
+  return rows.flatMap(row => {
+    const state = pageSizeState(Number(row.bytes), row.frontmatter, row.state ? { state: row.state, reason: row.reason } : null);
+    return state ? [{ slug: row.slug, ...state }] : [];
+  });
+}
+
+/** The receipt field for one written page: `{ size_state }` for a large or embed_skip page, else nothing (no query). */
+export async function sizeStateField(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slug: string,
+  page: { compiled_truth?: string | null; timeline?: string | null; frontmatter?: Record<string, unknown> | null } | null | undefined): Promise<{ size_state?: PageSizeState }> {
+  if (!page) return {};
+  const bytes = Buffer.byteLength(page.compiled_truth ?? '', 'utf-8') + Buffer.byteLength(page.timeline ?? '', 'utf-8');
+  if (!isLargePageBytes(bytes) && !isEmbedSkipped(page.frontmatter)) return {};
+  const [state] = await readPageSizeStates(engine, sourceId, [slug]);
+  return state ? { size_state: { embedding: state.embedding, reason: state.reason, bytes: state.bytes } } : {};
+}
+
+/** #6722: the sync receipt's tally of pages a run left large or embed_skip: the total and the first SIZE_STATE_SAMPLE. */
+export interface SyncSizeStates { total: number; pages: Array<{ slug: string; path?: string } & PageSizeState> }
+export const SIZE_STATE_SAMPLE = 50;
+
+export function addSizeState(tally: SyncSizeStates | undefined, entry: { slug: string; path?: string } & PageSizeState): SyncSizeStates {
+  const pages = tally?.pages ?? [];
+  return { total: (tally?.total ?? 0) + 1, pages: pages.length < SIZE_STATE_SAMPLE ? [...pages, entry] : pages };
+}
+
+/** One line per sampled page for the sync output, and the rest as a count. */
+export function sizeStateLines(tally: SyncSizeStates | undefined): string[] {
+  if (!tally?.total) return [];
+  const what = (s: PageSizeState) => s.embedding === 'skipped'
+    ? `no vectors (${s.reason === 'oversized' ? 'over the content_sanity.bytes_block limit' : 'embed_skip marker'}); chunks keep it in keyword search`
+    : s.embedding === 'held' ? `embedding held (${s.reason}); \`gbrain reindex --held\` previews the cost`
+    : s.embedding === 'partial' ? 'partly embedded under embed.max_usd_per_page; the rest stays keyword-only'
+    : 'large page; embedding runs after the commit under embed.max_usd_per_page';
+  const lines = tally.pages.slice(0, 20).map(p => `  Size ${p.path ?? p.slug} (${p.bytes} bytes): ${what(p)}.`);
+  if (tally.total > lines.length) lines.push(`  ... and ${tally.total - lines.length} more large or embed_skip page(s) (--json lists the first ${tally.pages.length}).`);
+  return lines;
 }

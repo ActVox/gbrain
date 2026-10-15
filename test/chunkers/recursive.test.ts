@@ -219,11 +219,13 @@ describe('large pages: delimiter splitting is linear', () => {
   test('a 4 MiB single-paragraph page chunks in well under a second per MiB', () => {
     const sentence = 'Plain prose about acme-example. ';
     const text = sentence.repeat(Math.floor((4 * 1024 * 1024) / sentence.length));
-    const started = performance.now();
+    // CPU time, not wall-clock: a loaded runner stretches wall time without the chunker doing more work.
+    const started = process.cpuUsage();
     const chunks = chunkText(text);
-    const elapsed = performance.now() - started;
+    const used = process.cpuUsage(started);
+    const cpuMs = (used.user + used.system) / 1000;
     expect(chunks.length).toBeGreaterThan(1000);
     expect(chunks.every(c => c.text.length <= 6000)).toBe(true);
-    expect(elapsed).toBeLessThan(3000);
+    expect(cpuMs).toBeLessThan(3000);
   });
 });

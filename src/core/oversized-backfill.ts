@@ -15,9 +15,10 @@
  * once; the embedding sweep fills vectors later.
  *
  * Limits are preserved: a page still above the effective `bytes_block`
- * (env `GBRAIN_PAGE_BLOCK_BYTES`, file or DB `content_sanity.bytes_block`) is
- * left as it is, and only the gate-written marker shape (`reason: oversized`)
- * is touched. A large page (over `pages.inline_max_bytes`) is held in
+ * (env `GBRAIN_PAGE_BLOCK_BYTES`, file or DB `content_sanity.bytes_block`)
+ * keeps its marker and gets no vectors, and only the gate-written marker shape
+ * (`reason: oversized`) is touched. A chunkless one is still re-chunked with
+ * the marker kept (#6722), so every page up to the ceiling is keyword-searchable. A large page (over `pages.inline_max_bytes`) is held in
  * `page_embedding_budget` before its rewrite, so no paid embedding starts
  * until the user approves the previewed cost (`gbrain embed --held --max-usd N`).
  *
@@ -46,6 +47,8 @@ export const BACKFILL_HOLD_REASON = 'upgrade_backfill';
 
 const OVERSIZED_MARKER_SQL = `p.deleted_at IS NULL AND p.frontmatter->'${EMBED_SKIP_KEY}'->>'reason' = 'oversized'`;
 const PAGE_BYTES_SQL = `(octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')))`;
+/** Under the block (marker removed), or over it, under the ceiling and chunkless (re-chunked, marker kept). $1 is the block. */
+const CANDIDATE_SQL = `(${PAGE_BYTES_SQL} <= $1 OR (${PAGE_BYTES_SQL} <= ${PAGE_MAX_BYTES} AND NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)))`;
 
 export interface OversizedBackfillReceipt {
   dry_run: boolean;
@@ -59,8 +62,10 @@ export interface OversizedBackfillReceipt {
   failed: Array<{ slug: string; source_id: string; error: string }>;
   /** Candidates this run did not reach (limit or time budget); the same command continues. */
   remaining: number;
-  /** Size-skipped pages still over the block; they stay as they are. */
+  /** Size-skipped pages still over the block: they keep the marker and get no vectors. */
   over_block: number;
+  /** Chunkless pages over the block this run re-chunked for keyword search, marker kept (#6722). */
+  rechunked_over_block: number;
   chunks_pending_embedding: number;
   /** null when embeddings are off on this brain. */
   estimated_usd: number | null;
@@ -75,28 +80,30 @@ async function listCandidates(engine: BrainEngine, block: number, opts: { source
   const params: unknown[] = [block, opts.afterId, opts.limit];
   const source = opts.sourceId ? ` AND p.source_id = $${params.push(opts.sourceId)}` : '';
   const rows = await engine.executeRaw<Candidate>(`SELECT p.id, p.slug, p.source_id, ${PAGE_BYTES_SQL}::bigint AS bytes FROM pages p
-    WHERE ${OVERSIZED_MARKER_SQL} AND ${PAGE_BYTES_SQL} <= $1 AND p.id > $2${source} ORDER BY p.id LIMIT $3`, params);
+    WHERE ${OVERSIZED_MARKER_SQL} AND ${CANDIDATE_SQL} AND p.id > $2${source} ORDER BY p.id LIMIT $3`, params);
   return rows.map(row => ({ ...row, id: Number(row.id), bytes: Number(row.bytes) }));
 }
 
-async function countMarked(engine: BrainEngine, block: number, sourceId: string | undefined): Promise<{ under: number; over: number }> {
+async function countMarked(engine: BrainEngine, block: number, sourceId: string | undefined): Promise<{ candidates: number; over: number }> {
   const params: unknown[] = [block];
   const source = sourceId ? ` AND p.source_id = $${params.push(sourceId)}` : '';
-  const [row] = await engine.executeRaw<{ under: number; over: number }>(`SELECT
-      COUNT(*) FILTER (WHERE ${PAGE_BYTES_SQL} <= $1)::int AS under, COUNT(*) FILTER (WHERE ${PAGE_BYTES_SQL} > $1)::int AS over
+  const [row] = await engine.executeRaw<{ candidates: number; over: number }>(`SELECT
+      COUNT(*) FILTER (WHERE ${CANDIDATE_SQL})::int AS candidates, COUNT(*) FILTER (WHERE ${PAGE_BYTES_SQL} > $1)::int AS over
     FROM pages p WHERE ${OVERSIZED_MARKER_SQL}${source}`, params);
-  return { under: Number(row?.under ?? 0), over: Number(row?.over ?? 0) };
+  return { candidates: Number(row?.candidates ?? 0), over: Number(row?.over ?? 0) };
 }
 
-/** Rewrite one page without its size-gate markers, re-chunked, with no embedding. */
-async function reindexPage(engine: BrainEngine, page: Candidate, managed: boolean): Promise<void> {
+/** Rewrite one page re-chunked with no embedding: without its size-gate markers under the block, with them kept over it. */
+async function reindexPage(engine: BrainEngine, page: Candidate, managed: boolean, overBlock: boolean): Promise<void> {
   const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
   if (!snapshot || snapshot.page.id !== page.id) return;
   const fm = { ...((snapshot.page.frontmatter ?? {}) as Record<string, unknown>) };
   if ((fm[EMBED_SKIP_KEY] as { reason?: unknown } | undefined)?.reason !== 'oversized') return;
-  delete fm[EMBED_SKIP_KEY];
-  if ((fm[CONTENT_FLAG_KEY] as { reason?: unknown } | undefined)?.reason === 'oversized') delete fm[CONTENT_FLAG_KEY];
-  if (isLargePageBytes(page.bytes)) await holdPageEmbedding(engine, page.id, BACKFILL_HOLD_REASON);
+  if (!overBlock) {
+    delete fm[EMBED_SKIP_KEY];
+    if ((fm[CONTENT_FLAG_KEY] as { reason?: unknown } | undefined)?.reason === 'oversized') delete fm[CONTENT_FLAG_KEY];
+    if (isLargePageBytes(page.bytes)) await holdPageEmbedding(engine, page.id, BACKFILL_HOLD_REASON);
+  }
   const markdown = serializeMarkdown(fm, snapshot.page.compiled_truth ?? '', snapshot.page.timeline ?? '', {
     type: (snapshot.page.type as PageType) ?? 'note', title: snapshot.page.title ?? '', tags: snapshot.tags,
   });
@@ -122,8 +129,8 @@ export async function runOversizedBackfill(engine: BrainEngine, opts: {
   const embeddingEnabled = loadConfig()?.embedding_disabled !== true;
   const scope = opts.sourceId ? ['--source', opts.sourceId] : [];
   const receipt: OversizedBackfillReceipt = {
-    dry_run: opts.dryRun === true, block_bytes: block, candidates: before.under, reindexed: 0, held_for_approval: 0, failed: [],
-    remaining: before.under, over_block: before.over, chunks_pending_embedding: 0, estimated_usd: null, embedding_enabled: embeddingEnabled,
+    dry_run: opts.dryRun === true, block_bytes: block, candidates: before.candidates, reindexed: 0, held_for_approval: 0, failed: [],
+    remaining: before.candidates, over_block: before.over, rechunked_over_block: 0, chunks_pending_embedding: 0, estimated_usd: null, embedding_enabled: embeddingEnabled,
     commands: { finish: ['gbrain', 'reindex', '--oversized', ...scope], approve: ['gbrain', 'embed', '--held', ...scope, '--max-usd', '<N>'],
       preview: ['gbrain', 'embed', '--held', ...scope, '--dry-run'] },
   };
@@ -140,15 +147,18 @@ export async function runOversizedBackfill(engine: BrainEngine, opts: {
       afterId = page.id;
       attempted++;
       opts.onPage?.(page);
+      const overBlock = page.bytes > block;
       if (receipt.dry_run) {
+        if (overBlock) { receipt.rechunked_over_block++; continue; }
         if (isLargePageBytes(page.bytes)) receipt.held_for_approval++;
         pendingChars += page.bytes;
         continue;
       }
       try {
-        await reindexPage(engine, page, managed);
-        touched.push(page.id);
+        await reindexPage(engine, page, managed, overBlock);
         receipt.reindexed++;
+        if (overBlock) { receipt.rechunked_over_block++; continue; }
+        touched.push(page.id);
         if (isLargePageBytes(page.bytes)) receipt.held_for_approval++;
       } catch (error) {
         receipt.failed.push({ slug: page.slug, source_id: page.source_id, error: (error instanceof Error ? error.message : String(error)).split('\n')[0].slice(0, 300) });
@@ -162,18 +172,19 @@ export async function runOversizedBackfill(engine: BrainEngine, opts: {
     receipt.chunks_pending_embedding = Number(pending?.chunks ?? 0);
     pendingChars = Number(pending?.chars ?? 0);
   }
-  receipt.remaining = receipt.dry_run ? before.under : (await countMarked(engine, block, opts.sourceId)).under;
+  receipt.remaining = receipt.dry_run ? before.candidates : (await countMarked(engine, block, opts.sourceId)).candidates;
   if (embeddingEnabled) receipt.estimated_usd = estimatePageEmbedUsd(pendingChars, currentEmbeddingSignature());
   return receipt;
 }
 
 /** Human lines for a receipt (stdout of `gbrain reindex --oversized` and post-upgrade). */
 export function formatOversizedBackfillReceipt(r: OversizedBackfillReceipt): string[] {
-  const lines = [`[reindex --oversized] ${r.dry_run ? 'Would re-index' : 'Re-indexed'} ${r.dry_run ? r.candidates : r.reindexed} size-skipped page(s) under the ${r.block_bytes}-byte bytes_block`
+  const lines = [`[reindex --oversized] ${r.dry_run ? 'Would re-index' : 'Re-indexed'} ${r.dry_run ? r.candidates : r.reindexed} size-skipped page(s)`
     + `${r.dry_run ? '' : `; ${r.chunks_pending_embedding} chunk(s) are keyword-searchable now and wait for embedding`}.`];
   if (r.failed.length) lines.push(`  ${r.failed.length} page(s) failed (first: ${r.failed[0].source_id}/${r.failed[0].slug}: ${r.failed[0].error}); rerun: ${r.commands.finish.join(' ')}`);
   if (!r.dry_run && r.remaining > r.failed.length) lines.push(`  ${r.remaining} page(s) remain; continue with: ${r.commands.finish.join(' ')}`);
-  if (r.over_block) lines.push(`  ${r.over_block} page(s) stay size-skipped: they are over content_sanity.bytes_block (${r.block_bytes} bytes).`);
+  if (r.over_block) lines.push(`  ${r.over_block} page(s) get no vectors: they are over content_sanity.bytes_block (${r.block_bytes} bytes)`
+    + `${r.rechunked_over_block ? `; ${r.rechunked_over_block} of them ${r.dry_run ? 'would be' : 'were'} re-chunked for keyword search` : ''}. Chunks keep them in keyword search.`);
   if (!r.embedding_enabled) lines.push('  Embeddings are off on this brain, so keyword search is the whole result; nothing is spent.');
   else if (r.held_for_approval) {
     lines.push(`  ${r.held_for_approval} large page(s) wait for approval before embedding (about $${(r.estimated_usd ?? 0).toFixed(2)} in total). `
@@ -192,7 +203,7 @@ export function formatOversizedBackfillReceipt(r: OversizedBackfillReceipt): str
 export async function printOversizedBackfillUpgradeNotice(engine: BrainEngine): Promise<void> {
   try {
     const block = await effectiveBytesBlock(engine);
-    if ((await countMarked(engine, block, undefined)).under === 0) return;
+    if ((await countMarked(engine, block, undefined)).candidates === 0) return;
     const receipt = await runOversizedBackfill(engine, { deadlineMs: 120_000 });
     const lines = ['', ...formatOversizedBackfillReceipt(receipt)];
     if (receipt.embedding_enabled && receipt.held_for_approval > 0) {

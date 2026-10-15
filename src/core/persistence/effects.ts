@@ -1,4 +1,5 @@
 import { withAIAttribution } from '../ai/invocation-guard.ts';
+import { isEmbedSkipped } from '../embed-skip.ts';
 import { trueUpRequests } from './receipt-true-up.ts';
 import { randomUUID } from 'node:crypto';
 import { targetedWithdrawalEffect, upgradeWithdrawalEffect } from './effect-targets.ts';
@@ -308,6 +309,7 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
   if (!signature) throw opError('embedding_unconfigured', 'Configure an embedding provider before explicitly retrying.',
     `Page ${snapshot.page.slug} in source ${effect.source_id} was saved but cannot be embedded: this brain has no embedding provider. Pages and keyword search keep working; check embedding readiness and ask the user before configuring a paid provider.`,
     { fix: embeddingsFix() });
+  if (isEmbedSkipped(snapshot.page.frontmatter)) { await completeEffect(engine, effect, { embedding: 'skipped', reason: 'embed_skip' }); return; }
   const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model);
   const { prepared } = projection;
   let pending = projection.pending;

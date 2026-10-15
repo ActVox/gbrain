@@ -634,18 +634,19 @@ export async function importFromContent(
   // reach the provider.
   // A large page commits with NULL vectors; the stale sweep embeds it under the
   // per-page cap and the sampled junk check, so no provider call holds the write.
+  const noEmbed = opts.noEmbed || isEmbedSkipped(parsed.frontmatter);
   const largePage = isLargePageBytes(Buffer.byteLength(parsed.compiled_truth, 'utf-8') + Buffer.byteLength(parsed.timeline ?? '', 'utf-8'));
   const postCommitEmbedding = largePage ? undefined : opts.onPostCommitEmbedding;
   const reusable = !!existing && !existing.deleted_at && !opts.forceRechunk && !postCommitEmbedding && chunks.length > 0
     && !(opts.prepare && modeRequiresSynopsis(effectiveCRMode)) && !hasProtectedBody(`${existing.compiled_truth}\n${existing.timeline ?? ''}`) && !hasProtectedBody(`${parsed.compiled_truth}\n${parsed.timeline ?? ''}`);
   const reuseCtx = { slug, sourceId: sourceId ?? 'default', title: parsed.title, corpusGeneration, tier: effectiveCRMode === 'title' ? 'title' as const : 'none' as const };
   const reuseStoredVectors = (exec: BrainEngine, into: ChunkInput[], keepUnembedded = false) => reuseStoredChunkVectors(exec, into, { ...reuseCtx, prepared: !!opts.prepare, keepUnembedded });
-  const reused = reusable && !opts.noEmbed && !opts.prepare ? await reuseStoredVectors(engine, chunks) : new Map<number, number | null>();
+  const reused = reusable && !noEmbed && !opts.prepare ? await reuseStoredVectors(engine, chunks) : new Map<number, number | null>();
 
   let embeddingPartial: EmbeddingZeroNormError | undefined;
   const embedChunks = async () => {
     const pending = chunks.map((_, i) => i).filter(i => !reused.has(i));
-    if (opts.noEmbed || pending.length === 0) return;
+    if (noEmbed || pending.length === 0) return;
     const prefix =
       modeRequiresWrapper(effectiveCRMode) && !modeRequiresSynopsis(effectiveCRMode)
         ? buildContextualPrefix(parsed.title, null)
@@ -666,7 +667,7 @@ export async function importFromContent(
   // commit with NULL vectors and no embedding signature, and the stale sweep
   // (`gbrain embed --stale`, sync's embed pass, the cycle) embeds them once
   // the provider recovers.
-  let embeddingDeferred = largePage && !opts.noEmbed && chunks.length > 0;
+  let embeddingDeferred = largePage && !noEmbed && chunks.length > 0;
   if (!opts.onPostCommitEmbedding && !largePage) {
     try {
       await embedChunks();
@@ -788,7 +789,7 @@ export async function importFromContent(
           // embedded (not --no-embed), so a later model/dims swap is detectable
           // as stale via embed --stale. The deferred/backfill + per-slug embed
           // paths stamp too; this covers the inline import/sync path.
-          if (!opts.noEmbed && !postCommitEmbedding && !embeddingDeferred) {
+          if (!noEmbed && !postCommitEmbedding && !embeddingDeferred) {
             // D9: signature is null when the gateway is unconfigured — skip the
             // stamp (a wrong signature is worse than none).
             const importSig = currentEmbeddingSignature();
@@ -842,7 +843,7 @@ export async function importFromContent(
     if (!opts.coordinated) await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
     await opts.beforeCommit?.(tx, slug);
     await disposition.persistReceipt(tx, { existed: !!existing });
-    if (postCommitEmbedding && !opts.noEmbed && chunks.length > 0) {
+    if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
       // Capture the complete installed projection before releasing the page
       // guard. Deferred provider results cannot replace newer text or chunks.
       persistedProjection = await readProjectionSnapshot(tx, slug, txOpts.sourceId);
@@ -874,7 +875,7 @@ export async function importFromContent(
   });
 
 
-  if (postCommitEmbedding && !opts.noEmbed && chunks.length > 0) {
+  if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
     postCommitEmbedding(async () => {
       try {
         if (!persistedProjection) return { status: 'superseded' };

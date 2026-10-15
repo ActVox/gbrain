@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { addSizeState, type PageSizeState, type SyncSizeStates } from '../page-embedding-budget.ts';
 import type { BrainEngine, PageSnapshot } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import { loadConfig } from '../config.ts';
@@ -97,7 +98,7 @@ interface Cursor extends SyncDiscovery { runId: string; index: number; authority
     /** #5988: imports held, and files imported only after quoting frontmatter. */
     held?: number; recovered?: { count: number; sample_paths: string[]; comment_values?: number };
     /** #6188: files whose fences Tier 1 rewrote (and the Git effect committed). */
-    fences?: FencesTally };
+    fences?: FencesTally; /** #6722: committed pages left large or embed_skip, and their embedding state. */ sizeStates?: SyncSizeStates };
   /** #5988: failed content-refusal requests this run converted in place. */
   convertedFromFailed?: string[];
   /** #6643: the indexes this cursor passed without a commit (waived or held), recorded from `settled.from` on; the checkpoint carries them. */
@@ -316,6 +317,7 @@ function result(cursor: Cursor | CursorHeader, status: SyncResult['status'], rea
     managedCursor: { index: cursor.index, total: 'total' in cursor ? cursor.total : cursor.entries.length, ...(cursor.progress ? { progress: cursor.progress } : {}) },
     ...(cursor.uncommitted ? { uncommitted: cursor.uncommitted } : {}), ...(reason ? { reason } : {}),
     ...(cursor.knockOns ? { knockOns: { refrozen: cursor.knockOns } } : {}),
+    ...(cursor.counts.sizeStates?.total ? { size_states: cursor.counts.sizeStates } : {}),
     ...(cursor.counts.skippedContextualMode || cursor.counts.skippedCanonicalBytes ? { legacySkips: {
       contextualMode: cursor.counts.skippedContextualMode ?? 0, canonicalBytes: cursor.counts.skippedCanonicalBytes ?? 0 } } : {}) };
 }
@@ -936,6 +938,8 @@ function countCommitted(counts: Cursor['counts'], pending: Pending, outcome: Wri
   counts.chunks += Number(outcome?.chunks ?? 0);
   if ((outcome?.recovered_frontmatter || outcome?.comment_value) && pending.intent.path) counts.recovered = addRecovered(counts.recovered,
     { paths: outcome.recovered_frontmatter ? [pending.intent.path] : [], commentValues: outcome.comment_value ? 1 : 0 });
+  const sizeState = outcome?.size_state as PageSizeState | undefined;
+  if (sizeState && typeof outcome?.slug === 'string') counts.sizeStates = addSizeState(counts.sizeStates, { slug: outcome.slug, ...(pending.intent.path ? { path: pending.intent.path } : {}), ...sizeState });
   const fences = outcome?.fences_normalized;
   if (Array.isArray(fences) && fences.length && pending.intent.path) counts.fences = addFencesNormalized(counts.fences, pending.intent.path, fences as Array<{ class: string }>);
 }

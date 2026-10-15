@@ -1,4 +1,5 @@
 import { isEmbedSkipped } from '../embed-skip.ts';
+import { sizeStateField } from '../page-embedding-budget.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { boundedReads } from './bounded-reads.ts';
 import { isQuarantined, quarantineOutcome } from '../quarantine.ts';
@@ -649,10 +650,13 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
     }
     const coreUsage = core?.usage();
     const gate = noop ? undefined : gateField(ready.result.gate, `p:${row.source_id}/${row.slug}`, null);
+    // #6722: a large or embed_skip page says what this write left its embedding in.
+    const sizeState = noop ? {} : await sizeStateField(tx, row.source_id, row.slug, ready.parsedPage);
     return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}), ...(coreUsage ? { core: coreUsage } : {}),
       ...(removedTimeline ? { timeline_rows_removed: timelineRowsRemovedAdvisory(row, removedTimeline) } : {}),
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
+      ...sizeState,
       ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'
         : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),
       // #6259: say the gate hid the page, not only why it has no chunks.

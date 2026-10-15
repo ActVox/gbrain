@@ -109,9 +109,30 @@ whole body again in history on every write.
 
 An operator who set a lower `content_sanity.bytes_block` (the
 `GBRAIN_PAGE_BLOCK_BYTES` env var, the config file, or the database config)
-keeps the old behavior above that value: such a page is stored with an
-`embed_skip` marker and no chunks, so search doesn't find it. The default is
+stops embedding above that value: such a page is stored with an `embed_skip`
+marker and gets no vectors, but it is still chunked, so keyword search finds
+it. The same holds for any page with an `embed_skip` marker. The default is
 the 24 MiB ceiling, so nothing is skipped for size unless someone lowered it.
+
+**What a write says about size.** `put_page`, `remember` and sync receipts
+carry the same field for a large or `embed_skip` page, so the writer learns on
+the write itself, without reading the sync log. `size_state` on a page receipt
+(and on `remember` when it appended to such a page) is
+`{ embedding, reason, bytes }`; a sync receipt has `size_states`:
+`{ total, pages }` with the first 50 pages, each with its `slug`, `path` (a
+managed sync) and the same fields, and the sync output prints a line per page.
+An ordinary page carries no field.
+
+| `embedding` | `reason` | What happened |
+| --- | --- | --- |
+| `deferred` | `large_page` | Over 1 MiB: committed with chunks and no vectors; the embedding sweep embeds it after the commit, under `embed.max_usd_per_page`. |
+| `partial` | `spend_cap` | The per-page cap stopped embedding; the rest stays keyword-only. |
+| `held` | e.g. `upgrade_backfill` | Embedding waits for the user's approval of the previewed cost (`gbrain embed --held`). |
+| `skipped` | `oversized` | Over the operator's `bytes_block`: chunked and keyword-searchable, never embedded. |
+| `skipped` | `operator_marker` | Another `embed_skip` marker: chunked and keyword-searchable, never embedded. |
+
+A body over the 24 MiB ceiling has no receipt: the write is refused as
+`request_too_large`.
 
 <a id="large-page-limits"></a>
 ### Limits per entry point
@@ -165,7 +186,8 @@ for up to two minutes, on the CPU, on keyless brains too, and prints a receipt;
 `gbrain reindex --oversized` does the rest. The backfill is idempotent and
 resumes where it stopped. It removes only gate-written markers whose reason is
 `oversized`, and the matching `content_flag: oversized`; a page above the
-operator's effective `bytes_block` keeps both. The backfill never embeds.
+operator's effective `bytes_block` keeps both and is re-chunked for keyword
+search with no vectors. The backfill never embeds.
 Backfilled pages over 1 MiB are held for consent; the post-upgrade notice and
 doctor's `partial_embedding` check show how many are held and what embedding
 them would cost. Pages between 500 KB and 1 MiB cost a cent or two each and

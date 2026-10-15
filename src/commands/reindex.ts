@@ -105,9 +105,10 @@ TARGETS (exactly one required)
   --vectors         Rebuild every HNSW vector index from the stored vectors
                     (no re-embedding, no cost). Run after a PGLite WAL repair.
   --oversized       Re-chunk pages an older gbrain stored without chunks
-                    because they were over 500 KB (embed_skip: oversized),
-                    when they are under content_sanity.bytes_block (default:
-                    the 24 MiB page ceiling). CPU only and free: it works
+                    because they were over 500 KB (embed_skip: oversized).
+                    Under content_sanity.bytes_block (default: the 24 MiB
+                    page ceiling) the marker is removed; over it the marker
+                    stays and the page gets no vectors. CPU only and free: it works
                     with embeddings off and makes them keyword-searchable
                     now. Pages over 1 MiB wait for approval before any paid
                     embedding (gbrain embed --held). Resumable.

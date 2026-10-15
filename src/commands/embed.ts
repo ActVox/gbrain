@@ -33,7 +33,7 @@ import { slog, serr } from '../core/console-prefix.ts';
 import { embedBudgetStopVerdict, noteEmbedBudgetStop } from '../core/embed-budget-stop.ts';
 import { embedCostCap, embedCostStopVerdict, noteEmbedCostStop } from '../core/embed-cost-cap.ts';
 import type { Authorization } from '../core/consent.ts';
-import { filterOutEmbedSkipped } from '../core/embed-skip.ts';
+import { filterOutEmbedSkipped, isEmbedSkipped } from '../core/embed-skip.ts';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted, anySignal, AbortError } from '../core/abort-check.ts';
 import { type DbPacer, createDbPacer, createNoopPacer, observed } from '../core/db-pacer.ts';
@@ -1087,6 +1087,7 @@ async function embedPage(
   }
   const snapshot = origin.snapshot;
   const page = snapshot.page;
+  if (isEmbedSkipped(page.frontmatter)) { if (!quiet) serr(`  ${slug}: skipped (frontmatter.embed_skip set); its chunks stay keyword-searchable`); return; }
 
   // Get existing chunks or create new ones.
   // In dryRun, we still chunk the text locally to count what WOULD be
