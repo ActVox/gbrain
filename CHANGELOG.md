@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.250.0] - 2026-10-15
 
 **One drainer per managed source, one cursor per source, and a resume never refuses over processing flags (#6712 PR 1).** Two processes could drain one source at once (a cron `gbrain sync` beside a serve, a `--no-delegate` run beside a job), racing each other's checkpoints, and every writer, authority and option set got its own cursor, so a resume by a different process started over or refused with `cursor_processing_options_conflict`. Now every managed pass runs under the source's drain lease, a second run follows the holder instead of competing, the cursor key is the source itself, and the cursor's opt-outs are inherited.
 
