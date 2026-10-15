@@ -130,15 +130,17 @@ const ENTITY = 'people/alice-example';
  * file-publication pair (`before_publication`/`after_publication`) never fires for it. Per-page seams are counted
  * per submit_job request (nth inside the first 60% of a round); `lane:applied` and `sync:before_group_admission`
  * fire once per bulk group, and a small round may form one group, so they kill at the first; `sync:mid_checkpoint`
- * fires on every cursor save (the first or second); #6712's `sync:held_settled` and `sync:retry_deferred` fire on the
- * cursor step that holds a failed entry or defers a changed one (the first or second), and only in a round that has one.
+ * fires on every cursor save (the first or second). #6712's `sync:retry_deferred` (the first or second deferral) and
+ * `sync:held_settled` (the hold) need a file that changes after its freeze: their round primes one with an uncommitted
+ * edit at `sync:after_freeze`, which is deferred `DEFER_PER_ENTRY` times and then held `worktree_dirty`; the harness
+ * commits the edit after the round.
  */
 const KILL_POINTS = [
   { point: 'publication:before_commit', per: 'page' }, { point: 'publication:after_commit', per: 'page' },
   { point: 'consumer:preparing', per: 'page' }, { point: 'lane:applied', per: 'group' },
   { point: 'sync:before_group_admission', per: 'group' }, { point: 'sync:mid_checkpoint', per: 'save' },
-  { point: 'sync:held_settled', per: 'save' }, { point: 'sync:retry_deferred', per: 'save' },
-] as const satisfies ReadonlyArray<{ point: FaultPoint; per: 'page' | 'group' | 'save' }>;
+  { point: 'sync:held_settled', per: 'held' }, { point: 'sync:retry_deferred', per: 'deferred' },
+] as const satisfies ReadonlyArray<{ point: FaultPoint; per: 'page' | 'group' | 'save' | 'held' | 'deferred' }>;
 const MAX_RECOVERY_RUNS = 2;
 /** Oracle tests are named by the persistence gate's violation class (scripts/persistence/model.ts) they would report. */
 const as = (violation: ViolationClass, title: string): string => `[${violation}] ${title}`;
@@ -310,7 +312,8 @@ class LatencyProxy {
 // ---------------------------------------------------------------- one brain
 
 interface Fault { point: FaultPoint; nth: number; marker: string; operation?: string; path?: string; action?: 'kill' | 'edit' | 'stall' | 'throw';
-  edit?: { file: string; content: string }; release?: string; ms?: number; sqlstate?: string }
+  edit?: { file: string; content: string }; release?: string; ms?: number; sqlstate?: string;
+  prime?: { point: FaultPoint; nth: number; path?: string; edit: { file: string; content: string } } }
 interface Run { code: number; out: string; err: string; ms: number }
 interface SyncRun { proc: ReturnType<typeof Bun.spawn>; result: Promise<Run> }
 
@@ -834,8 +837,8 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
     const plan = Array.from({ length: kinds.length ? KILLS : 0 }, (_, k) => {
       const kind = kinds[(k + offset) % kinds.length];
       const { point, per } = KILL_POINTS[(k + pointOffset) % KILL_POINTS.length];
-      const nth = per === 'page' ? b.between(2, Math.floor(perRound * 0.6)) : per === 'group' ? 1 : b.between(1, 2);
-      return { round: k + 1, kind, point, nth, operation: per === 'page' || point === 'lane:applied' ? 'submit_job' : undefined };
+      const nth = per === 'page' ? b.between(2, Math.floor(perRound * 0.6)) : per === 'group' || per === 'held' ? 1 : b.between(1, 2);
+      return { round: k + 1, kind, point, nth, operation: per === 'page' || point === 'lane:applied' ? 'submit_job' : undefined, primed: per === 'held' || per === 'deferred' };
     });
     b.plan = plan.map(p => `round ${p.round} ${p.kind} ${p.point} #${p.nth}`);
     const putTargets = runs('c') ? [...new Set(Array.from({ length: 40 }, () => b.between(0, NOTES - 1)))].slice(0, Math.round(NOTES * 0.05)).map(noteSlug) : [];
@@ -846,9 +849,12 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
     for (const p of plan) {
       const started = performance.now();
       const tag = `round-${p.round}`;
-      const fault: Fault = { point: p.point, nth: p.nth, marker: b.marker(tag), operation: p.operation };
       const first = (p.round * perRound) % NOTES;
       const indexes = Array.from({ length: perRound }, (_, i) => (first + i) % NOTES);
+      const edited = p.primed ? indexes[Math.floor(perRound / 2)]! : null;
+      const fault: Fault = { point: p.point, nth: p.nth, marker: b.marker(tag), operation: p.operation,
+        ...(edited !== null ? { prime: { point: 'sync:after_freeze', nth: 1, path: `${noteSlug(edited)}.md`,
+          edit: { file: join(b.repo, `${noteSlug(edited)}.md`), content: noteText(edited, `Round ${p.round} edit`) } } } : {}) };
       b.writeNotes(indexes, `Round ${p.round}`, `round ${p.round}`, p.round % 3 === 1 ? [b.bigFile(120 + 20 * p.round, 400 + 40 * p.round, `v${p.round}`)] : []);
       let line: string;
       if (p.kind === 'client') {
@@ -867,6 +873,11 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
         line = `serve ${serve.alive ? 'survived' : 'killed'}; client exit ${r.code}${client.proc.signalCode ? ` (${client.proc.signalCode})` : ''} in ${(r.ms / 1000).toFixed(1)}s, worst stall ${worstStall(r.err)}s`;
         if (plan[p.round - 2]?.kind === 'client') afterClientKill.push(tag);
         await serve.stop();
+      }
+      if (edited !== null) {
+        const editStart = performance.now();
+        b.git('add', '--', `${noteSlug(edited)}.md`); b.git('commit', '-qm', `round ${p.round}: the editor commits`, '--', `${noteSlug(edited)}.md`);
+        b.ledger.record({ kind: 'commit', slug: noteSlug(edited), marker: noteMarker(edited, `Round ${p.round} edit`), touches: ['db', 'file'], start: editStart, ack: performance.now() });
       }
       const fired = b.recordFault(tag, `round ${p.round} ${p.kind} ${p.point} #${p.nth}`);
       b.note(`round ${p.round} (${p.kind}): ${fired ? `fault fired ${fired}` : 'no fault fired'}; ${line}`);
