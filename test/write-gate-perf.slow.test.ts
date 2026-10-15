@@ -27,7 +27,10 @@
  * than how long the scheduler made it wait. The 5 MB check keeps its own 5 MB
  * size: #6733 raised the page import limit to 24 MiB, and sizing this check by
  * that limit timed ~5x the bytes against bounds calibrated for 5 MB (p95 1585 ms
- * against 1500 on a loaded runner).
+ * against 1500 on a loaded runner). The page-limit check guards the 24 MiB size
+ * with a linearity ratio against 5 MB samples alternated with it in the same
+ * process: ~5x the bytes reads ~5x the CPU, and a quadratic pass reads ~25x, so
+ * the bound is 15x.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -36,6 +39,7 @@ import { createHash } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { assessPageForGate, DEFAULT_WRITE_GATE_CONFIG } from '../src/core/write-gate.ts';
 import { recordPageGateReceipt } from '../src/core/write-gate-store.ts';
+import { MAX_FILE_SIZE as PAGE_LIMIT_BYTES } from '../src/core/import-screen.ts';
 import { cpuMsAsync } from './helpers/cpu-time.ts';
 
 const ROOT = join(import.meta.dir, '..');
@@ -126,7 +130,7 @@ function withRoundSamples(rounds: Round[], check: () => void): void {
   }
 }
 
-/** Thread CPU time per sample (PGLite's WASM runs on this thread, and nothing else runs in the process across the await). */
+/** Thread CPU time per sample (PGLite's WASM runs on this thread, and nothing else runs in the process across the await) */
 async function measure(text: string, runs: number, warmup: number): Promise<{ p50: number; p95: number; max: number }> {
   const times: number[] = [];
   for (let i = 0; i < warmup + runs; i++) {
@@ -194,5 +198,27 @@ describe('write gate p95 (assessment + receipt insert)', () => {
     // Linear bound: no worse than ~100x the 300 KB budget for ~17x the bytes.
     expect(adv.p95).toBeLessThan(BUDGET_MS * 300);
     expect(typical.p95).toBeLessThan(BUDGET_MS * 100);
+  }, 240_000);
+
+  test('page import limit (MAX_FILE_SIZE) scales linearly from 5 MB', async () => {
+    const scale = PAGE_LIMIT_BYTES / FIVE_MB;
+    const sample = (text: string) => cpuMsAsync(async () => {
+      const a = assessPageForGate({ title: 'Perf', compiled_truth: text }, { tier: 'external_untrusted', requestId: 'perf' }, DEFAULT_WRITE_GATE_CONFIG);
+      await recordPageGateReceipt(engine, { slug: 'notes/perf', sourceId: 'default', assessment: a, requestId: 'perf' });
+    });
+    for (const [name, corpus] of [['adversarial', adversarial], ['typical', typicalCorpus]] as const) {
+      const smallText = corpus(FIVE_MB);
+      const largeText = corpus(PAGE_LIMIT_BYTES);
+      const small: number[] = [];
+      const large: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        const s = await sample(smallText);
+        const l = await sample(largeText);
+        if (i > 0) { small.push(s); large.push(l); }
+      }
+      const ratio = stats(large).p50 / stats(small).p50;
+      console.log(`[write-gate perf] ${name} ${(PAGE_LIMIT_BYTES / 2 ** 20).toFixed(0)} MiB vs 5 MB: p50 ${stats(large).p50.toFixed(0)} / ${stats(small).p50.toFixed(0)} ms = ${ratio.toFixed(1)}x for ${scale.toFixed(1)}x the bytes`);
+      expect(ratio).toBeLessThan(15);
+    }
   }, 240_000);
 });
