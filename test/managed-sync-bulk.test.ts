@@ -14,6 +14,7 @@ import { withEnv } from './helpers/with-env.ts';
 import type { WriteRequest } from '../src/core/persistence/model.ts';
 import { claimedHeadOrder, windowPredecessor } from '../src/core/persistence/sync-window.ts';
 import { waitFor } from './helpers/wait-for.ts';
+import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-bulk-'));
 let engine: BrainEngine | undefined;
@@ -94,6 +95,9 @@ test('a bulk drain publishes groups in one transaction while every page keeps it
   expect(cursor!.n).toBe(0);
 }), 300_000);
 
+/** #6712: the entries of a run that were admitted more than once (a duplicate admission). */
+const admittedTwice = (e: BrainEngine, id: string, except = '') => e.executeRaw<{ run: string; idx: string; n: number }>(`SELECT intent->>'runId' AS run,intent->>'index' AS idx,count(*)::int AS n
+  FROM persistence_requests WHERE source_id=$1 AND intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND slug<>$2 GROUP BY 1,2 HAVING count(*)>1`, [id, except]);
 /** #6712: every admitted request of the source has settled (the consumer keeps publishing after the run returns). */
 const settledAll = (e: BrainEngine, id: string) => waitFor(async () => (await e.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND state IN ('queued','running','recovering') LIMIT 1", [id])).length === 0,
   { timeoutMs: 60_000, label: 'admitted requests settle' });
@@ -151,7 +155,7 @@ test('a draining sync admits the next group while the current one publishes; eve
   // Publication order follows manifest (admission) order.
   const published = rows.map(row => row.published);
   expect([...published].sort()).toEqual(published);
-  const [cursor] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM op_checkpoints WHERE op='managed-sync' AND (completed_keys->0 ? 'window' OR completed_keys->0 ? 'group')");
+  const [cursor] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM op_checkpoints WHERE op='managed-sync' AND (completed_keys->0 ? 'window' OR completed_keys->0 ? 'group') AND completed_keys->0->>'sourceId'=$1", [f.id]);
   expect(cursor!.n).toBe(0);
 }), 300_000);
 
@@ -181,13 +185,90 @@ test('#6712: a failed page leaves the groups admitted ahead of it in the cursor 
     execFileSync('git', ['-C', f.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qam', 'fix']);
     const resumed = await performSync(engine, { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true, drain: true, retryFailed: true });
     expect(resumed.drain).toMatchObject({ outcome: 'synced' });
-    const committed = await engine.executeRaw<{ slug: string; n: number }>(
-      `SELECT slug,count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import' AND state='committed' GROUP BY slug`, [f.id]);
-    expect(committed).toHaveLength(40);
-    expect(committed.every(row => row.n === 1)).toBe(true);
+    // --retry-failed rediscovered the manifest under a new run; within each run every entry was admitted at most once.
+    expect(await admittedTwice(engine, f.id)).toEqual([]);
+    for (let i = 0; i < 40; i++) expect(await engine.getPage(`notes/n${i}`, { sourceId: f.id })).not.toBeNull();
     const conflicts = await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND error_code='revision_conflict'", [f.id]);
     expect(conflicts).toHaveLength(0);
   } finally { await engine.unsetConfig('sync.holds'); }
+}), 300_000);
+
+/**
+ * #6712 Eng finding ("followers that commit after the failure CAS"): the group admitted ahead of a failed page is
+ * held back in preparation until the drain has saved the failure and is gone (under `sync.holds=fail` it stops blocked;
+ * under the default policy it is killed right after the cursor step that holds the failed page); it then commits. The
+ * cursor must still name every such request, so the resume reads their receipts: nothing is admitted twice, nothing
+ * reads a false revision_conflict, and the checkpoint waits for them. The failed page is a content refusal under
+ * `sync.holds=fail`, and a preparation that outlives its budget (`preparation_stalled`, held) under the default policy.
+ */
+for (const policy of ['fail', 'hold'] as const) test(`#6712: window followers that commit after the failure CAS and a drainer kill are read on resume, never re-admitted (sync.holds=${policy})`, async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+  if (!engine) return;
+  const e = engine;
+  const conflict = '---\ntitle: Conflict\nslug: notes/other\n---\nA conflicting identity must not be imported.\n';
+  const f = await fixture(e, notes(40, i => i === 2 && policy === 'fail' ? conflict : null));
+  const config: Array<[string, string]> = policy === 'fail' ? [['sync.holds', 'fail']] : [];
+  for (const [key, value] of config) await e.setConfig(key, value);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const stalled = new Set<string>();
+  let failedRequest: string | null = null;
+  installFaultHook(async (point, detail) => {
+    // Default policy: the cursor step that holds or defers the failed page is the last thing the drainer does.
+    if ((point === 'sync:held_settled' || point === 'sync:retry_deferred') && detail.sourceId === f.id) throw new Error('drainer killed after the failure CAS');
+    if (point !== 'consumer:preparing' || detail.sourceId !== f.id || !detail.requestId) return;
+    const [row] = await e.executeRaw<{ slug: string; grp: string | null; idx: number }>("SELECT slug,intent->>'group' AS grp,(intent->>'index')::int AS idx FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
+    if (row?.slug === 'notes/n2') {
+      failedRequest ??= detail.requestId;
+      // Default policy: the file changes under the admitted request (uncommitted bytes), so its publication refuses it.
+      if (policy === 'hold') writeFileSync(join(f.root, 'notes/n2.md'), '---\ntitle: Note 2\n---\nEdited after admission, not committed.\n');
+      return;
+    }
+    const [failed] = await e.executeRaw<{ grp: string | null; idx: number }>("SELECT intent->>'group' AS grp,(intent->>'index')::int AS idx FROM persistence_requests WHERE source_id=$1 AND slug='notes/n2' ORDER BY sequence LIMIT 1", [f.id]);
+    // Hold back every request admitted in a group after the failed page's group until the drain is gone.
+    if (!row || !failed || row.grp === failed.grp || row.idx <= failed.idx) return;
+    stalled.add(detail.requestId);
+    await Promise.race([gate, new Promise(resolve => detail.signal?.addEventListener('abort', resolve))]);
+  });
+  try {
+    const killed = await performSync(e, { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true, drain: true }).catch((error: Error) => error);
+    if (policy === 'fail') expect((killed as { drain?: unknown }).drain).toMatchObject({ outcome: 'blocked' });
+    else expect(String(killed)).toContain('drainer killed after the failure CAS');
+    expect(failedRequest).not.toBeNull();
+    expect(stalled.size).toBeGreaterThan(0);
+    // The drain is gone; the cursor saved the failure (or the hold) and still names every request admitted after it.
+    const cursorKeys = async () => (await e.executeRaw<{ keys: { done?: boolean; pending?: { requestId: string }; group?: Array<{ requestId: string }>; window?: Array<Array<{ requestId: string }>> } }>(
+      "SELECT completed_keys->0 AS keys FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [f.id]))[0]!.keys;
+    const before = await cursorKeys();
+    const named = new Set([before.pending?.requestId, ...(before.group ?? []).map(m => m.requestId), ...(before.window ?? []).flat().map(m => m.requestId)]);
+    for (const id of stalled) expect(named.has(id)).toBe(true);
+    // Now the held-back followers commit, after the failure CAS, with nobody observing them.
+    release();
+    await settledAll(e, f.id);
+    for (const id of stalled) expect((await e.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [id]))[0]!.state).toBe('committed');
+    // No premature checkpoint: the source did not advance, the cursor is not done.
+    expect((await cursorKeys()).done).not.toBe(true);
+    expect((await e.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0]!.last_commit).toBeNull();
+    installFaultHook(undefined);
+    if (policy === 'fail') {
+      // A plain resume stays on the failed page and admits nothing again.
+      const again = await performSync(e, { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true, drain: true });
+      expect(again.drain).toMatchObject({ outcome: 'blocked' });
+      // Only the failed page may be re-frozen, once for the same bytes (#5988 E6); no follower is admitted again.
+      expect(await admittedTwice(e, f.id, 'notes/n2')).toEqual([]);
+      writeFileSync(join(f.root, 'notes/n2.md'), '---\ntitle: Note 2\n---\nA durable observation number 2.\n');
+      execFileSync('git', ['-C', f.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qam', 'fix']);
+    }
+    const resumed = await performSync(e, { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true, drain: true, ...(policy === 'fail' ? { retryFailed: true } : {}) });
+    expect(resumed.drain).toMatchObject({ outcome: 'synced' });
+    await settledAll(e, f.id);
+    expect(await admittedTwice(e, f.id, 'notes/n2')).toEqual([]);
+    for (const id of stalled) expect((await e.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [id]))[0]!.state).toBe('committed');
+    expect(await e.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND error_code='revision_conflict'", [f.id])).toHaveLength(0);
+    for (let i = 0; i < 40; i++) if (i !== 2 || policy === 'fail') expect(await e.getPage(`notes/n${i}`, { sourceId: f.id })).not.toBeNull();
+  } finally {
+    installFaultHook(undefined); release();
+    for (const [key] of config) await e.unsetConfig(key);
+  }
 }), 300_000);
 
 test('#6712: a claimed window head publishes whatever its predecessor became; it is never cancelled for it', async () => withEnv({ GBRAIN_HOME: home }, async () => {
