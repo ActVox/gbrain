@@ -16,7 +16,12 @@
  * machine wall time measures the machine, so the 300 KB check alternates gate
  * samples with a fixed reference workload in the same process and applies the
  * absolute 5 ms check only to rounds whose reference ran at quiet speed
- * (calibration below), logging it as skipped otherwise. The detector's cost
+ * (calibration below), logging it as skipped otherwise. The 5 MB check does
+ * the same for its absolute bounds (the import limit is MAX_FILE_SIZE, 24 MiB)
+ * and always asserts linearity as the ratio of import-limit to 300 KB samples
+ * taken alternately in one round, which load scales alike: CI shard VMs ran
+ * the adversarial case at 1.5-2.0 s against its 1.5 s bound with no gate
+ * change, while the ratio stays near the byte ratio (~84x) quiet or loaded. The detector's cost
  * itself is pinned machine-independently by the work counters in
  * test/write-gate-work-counters-6490.test.ts (#6490: the earlier gate/reference
  * timing ratio was a one-machine calibration and tripped on other hardware
@@ -48,6 +53,9 @@ const BUDGET_MS = Number(process.env.GBRAIN_WRITE_GATE_P95_MS ?? '5');
  */
 const QUIET_REFERENCE_P95_MS = 1.95;
 const QUIET_TOLERANCE = 1.25;
+const SMALL_BYTES = 300_000;
+/** Linear work grows with the bytes; allow 2x that for fixed costs and noise. Quadratic work grows with their square (~84x more at the 24 MiB import limit). */
+const LINEAR_RATIO_LIMIT = 2 * MAX_IMPORT_BYTES / SMALL_BYTES;
 let engine: PGLiteEngine;
 
 function walk(dir: string, ext: string, out: string[] = []): string[] {
@@ -180,11 +188,40 @@ describe('write gate p95 (assessment + receipt insert)', () => {
   }, 120_000);
 
   test('5 MB import limit, adversarial worst case and typical, stays linear', async () => {
-    const adv = await measure(adversarial(MAX_IMPORT_BYTES), 5, 1);
-    const typical = await measure(typicalCorpus(MAX_IMPORT_BYTES), 5, 1);
-    console.log(`[write-gate perf] 5 MB adversarial: p95 ${adv.p95.toFixed(0)} ms; 5 MB typical: p95 ${typical.p95.toFixed(0)} ms`);
-    // Linear bound: no worse than ~100x the 300 KB budget for ~17x the bytes.
-    expect(adv.p95).toBeLessThan(BUDGET_MS * 300);
-    expect(typical.p95).toBeLessThan(BUDGET_MS * 100);
+    const texts = { adversarial: [adversarial(SMALL_BYTES), adversarial(MAX_IMPORT_BYTES)], typical: [typicalCorpus(SMALL_BYTES), typicalCorpus(MAX_IMPORT_BYTES)] } as const;
+    const quietText = typicalCorpus(SMALL_BYTES);
+    const rounds: Array<{ ratio: Record<keyof typeof texts, number>; big: Record<keyof typeof texts, Stats>; reference: Stats }> = [];
+    for (let i = 0; i < 3; i++) {
+      const samples = { adversarial: [[], []] as number[][], typical: [[], []] as number[][] };
+      const reference: number[] = [];
+      for (let j = 0; j < 5; j++) {
+        for (const kind of ['adversarial', 'typical'] as const) {
+          for (const size of [0, 1]) {
+            const start = performance.now();
+            const a = assessPageForGate({ title: 'Perf', compiled_truth: texts[kind][size] }, { tier: 'external_untrusted', requestId: 'perf' }, DEFAULT_WRITE_GATE_CONFIG);
+            await recordPageGateReceipt(engine, { slug: 'notes/perf', sourceId: 'default', assessment: a, requestId: 'perf' });
+            samples[kind][size]!.push(performance.now() - start);
+          }
+        }
+        const start = performance.now();
+        await referenceWork(quietText);
+        reference.push(performance.now() - start);
+      }
+      const round = {
+        ratio: { adversarial: stats(samples.adversarial[1]!).p50 / stats(samples.adversarial[0]!).p50, typical: stats(samples.typical[1]!).p50 / stats(samples.typical[0]!).p50 },
+        big: { adversarial: stats(samples.adversarial[1]!), typical: stats(samples.typical[1]!) },
+        reference: stats(reference),
+      };
+      rounds.push(round);
+      console.log(`[write-gate perf] import-limit round ${i + 1}: adversarial p50 ${round.big.adversarial.p50.toFixed(0)} / p95 ${round.big.adversarial.p95.toFixed(0)} ms (x${round.ratio.adversarial.toFixed(1)} of 300 KB); `
+        + `typical p50 ${round.big.typical.p50.toFixed(0)} / p95 ${round.big.typical.p95.toFixed(0)} ms (x${round.ratio.typical.toFixed(1)} of 300 KB); reference p95 ${round.reference.p95.toFixed(2)} ms`);
+    }
+    if (process.env.PERF_CALIBRATE) return;
+    expect(Math.min(...rounds.map(r => r.ratio.adversarial))).toBeLessThan(LINEAR_RATIO_LIMIT);
+    expect(Math.min(...rounds.map(r => r.ratio.typical))).toBeLessThan(LINEAR_RATIO_LIMIT);
+    const quiet = rounds.filter(r => r.reference.p95 <= QUIET_REFERENCE_P95_MS * QUIET_TOLERANCE);
+    if (!quiet.length) { console.log(`[write-gate perf] absolute import-limit check skipped for load: reference p95 above ${(QUIET_REFERENCE_P95_MS * QUIET_TOLERANCE).toFixed(2)} ms in every round`); return; }
+    expect(Math.min(...quiet.map(r => r.big.adversarial.p95))).toBeLessThan(BUDGET_MS * 300);
+    expect(Math.min(...quiet.map(r => r.big.typical.p95))).toBeLessThan(BUDGET_MS * 100);
   }, 240_000);
 });
