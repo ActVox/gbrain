@@ -182,7 +182,7 @@ src/core/engine-sql/pages.ts	listStalePagesForExtraction	sql	STREAM	segmented pa
 src/core/engine-sql/pages.ts	PAGE_VERSION_COLUMNS	sql	SEGW	lane 1e: versions of segmented pages carry no body
 src/core/engine-sql/pages.ts	putPage	call:contentHash	META	hash of the incoming inline body
 src/core/engine-sql/pages.ts	putPage	field	SEGW	incoming PageInput body (a string); see putPage sql
-src/core/engine-sql/pages.ts	putPage	sql	SEGW	blank-guard reads body_bytes for a segmented page and refuses a whole-body put over it with page_body_segmented
+src/core/engine-sql/pages.ts	putPage	sql	SEGW	blank-guard reads body_bytes for a segmented page (an empty put over it refuses); a non-empty put over a segmented row is refused by the body-storage CHECK
 src/core/engine-sql/pages.ts	refreshPageBody	sql	SEGW	UPDATE of the body columns; the body-storage CHECK refuses it over a segmented row; callers assert first
 src/core/engine-sql/pages.ts	revertToVersion	sql	SEGW	lane 1e: refuses a segmented page/version (revert deferred to PR 3)
 src/core/engine-sql/pages.ts	toDomainBankRow	field	LEAD	maps sampled rows; segmented pages are never sampled
@@ -190,7 +190,7 @@ src/core/engine-sql/salience.ts	listEnrichCandidates	sql	META
 src/core/engine-sql/timeline.ts	getTimeline	sql	NONE	not the page body: SELECT * FROM pages inside a LATERAL used for the page id only
 src/core/enrichment-service.ts	enrichEntity	call:putPage	INLINE	
 src/core/enrichment-service.ts	enrichEntity	call:serializeMarkdown	INLINE	
-src/core/export-snapshot.ts	readExportPage	field	STREAM	
+src/core/export-snapshot.ts	readExportPage	field	STREAM	export refuses a segmented page: segmented page: getter throws page_body_segmented (streaming export in PR 2)
 src/core/export-snapshot.ts	readExportPage	sql	STREAM	
 src/core/extract-ner.ts	extractNerLinks	field	STREAM	
 src/core/extract-takes-from-pages.ts	extractTakesFromPages	call:serializePageToMarkdown	SEGW	

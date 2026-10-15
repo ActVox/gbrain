@@ -1,5 +1,3 @@
-import type { BodyStorage } from './page-body/types.ts';
-
 // Page types
 // v0.38: `PageType` opens from a closed 23-element union to `string`. The
 // closed union was always a fiction — every gbrain user accumulated organic
@@ -94,13 +92,8 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
-  /**
-   * Wave B: where the body lives. On a `segmented` page `compiled_truth` and
-   * `timeline` are getters that throw `page_body_segmented`
-   * (`page-body/page-shape.ts`); read its size from `body_bytes`. Absent on
-   * paths that do not project the column (an inline page).
-   */
-  body_storage?: BodyStorage;
+  /** Wave B: on a `segmented` page `compiled_truth`/`timeline` throw `page_body_segmented` (page-body/page-shape.ts); absent = inline. */
+  body_storage?: import('./page-body/types.ts').BodyStorage;
   /** Wave B: UTF-8 bytes of truth + timeline; always set on a segmented page (`pageBodyBytes`). */
   body_bytes?: number | null;
   /** Source-relative canonical file identity; snapshot reads expose it for guarded import comparisons. */
