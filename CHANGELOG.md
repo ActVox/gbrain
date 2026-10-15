@@ -10,6 +10,24 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.242.0] - 2026-10-14
+
+**Pages up to 24 MiB are now searchable, and an older brain's skipped large pages come back on upgrade.** Before, any page over 500 KB was stored with `embed_skip` and no chunks, so keyword and vector search never found it. A long chat-log page was the usual victim. The page ceiling is now 24 MiB at every entry point: import, sync, `gbrain put` stdin (was 5 MB) and MCP stdio (was 10 MiB). A page over 1 MiB commits with keyword-searchable chunks and embeds after the write, newest chunks first, under a per-page spend cap of $2 by default (`embed.max_usd_per_page`). `gbrain upgrade` re-indexes the pages an older gbrain skipped for size. That pass makes no model calls and works with embeddings off, and it asks before any embedding spend on pages over 1 MiB.
+
+### Itemized changes
+
+- **One ceiling.** `content_sanity.bytes_block` defaults to 24 MiB (was 500 KB). One byte over the ceiling is refused with the limit named. Code files keep their 5 MB limit. An over-ceiling `put_page` or `capture` body is refused as `request_too_large` before it enters the write journal, so it no longer comes back as a retryable `queue_capacity`.
+- **`embed_skip` keeps chunks (#6722).** A page with an `embed_skip` marker, including one over an operator's lower `bytes_block`, stays keyword-searchable and only goes without vectors. It no longer drops to zero chunks. `put_page`, `remember` and sync receipts report a large or skipped page's embedding state as `size_state` (`deferred`, `partial`, `held` or `skipped`). Sync receipts use `size_states`.
+- **Large-page embedding.** A page over 1 MiB embeds after its write through the stale sweep, `gbrain embed` or the post-write job. Its lifetime spend per embedding model stays under `embed.max_usd_per_page`: the default is $2, it's unlimited under `spend.posture tokenmax` when unset, and `off` turns the cap off. Run caps still apply and the lowest cap wins. Before embedding, gbrain samples the page's head, middle and tail and holds a page that looks like markup or junk. The new doctor check `partial_embedding` lists capped or held pages with the approval command (`gbrain embed --held --max-usd N`). Large pages use the free title context tier.
+- **Upgrade backfill.** `gbrain reindex --oversized` (`--dry-run`, `--source`, `--limit`, `--json`) re-chunks pages stored with the old gate-written `embed_skip: oversized` marker. `gbrain upgrade` runs it for up to two minutes, and the command finishes the rest. It removes only that marker and its `content_flag`. `gbrain pages unsearchable` now points at this free command instead of suggesting a lower `bytes_block`.
+- **Doctor `oversized_pages`** honors a `content_sanity.bytes_block` set in the database (#6526). Contributed by @RerankerGuo.
+- **Extraction on long pages.** Fact extraction on a page over 8,000 characters reads the text appended since its last run instead of the first 8,000 characters every time, so messages appended to a long conversation now yield facts. `extract_atoms` reads appended text the same way. `extract-conversation-facts` checks a `raw_transcript` sidecar's size before reading it. A new `page_extraction_state` table records partial reads, and the new doctor check `extraction_input_truncated` reports them.
+- **Storage bounds.** Chunk replacement writes in batches of at most 500 rows and 16 MiB per statement, inside one transaction. A chunk's vector follows its text, so an edit above it no longer drops its embedding. An embed that finishes after the page changed keeps the vectors for chunks that didn't change. A page over 1 MiB keeps its newest 5 large version snapshots. The write journal admits 64 MiB of pending writes per principal (was 32 MiB). Write-through never writes a file over the 25 MiB pre-push secret-scan limit.
+- **`get_chunks`.** When the list is cut, its last chunk carries `truncated: true` and `next_from_index`. The result is still an array.
+- **Schema.** Migrations add `page_embedding_budget` and `page_extraction_state`.
+
+Supersedes #6585
+
 ## [0.60.241.0] - 2026-10-15
 
 **Timing tests that guard CPU-bound work no longer fail on a busy CI machine (tests only, no behavior change).** Tests that bound how long a parser, scanner or redactor may take used to measure wall-clock time, so a loaded runner could fail them without any regression. On a loaded runner `chunker-spans-linear` read 3.50 against its bound of 3. Under 6 busy loops at nice 10, `relational-plan`'s 50 ms bound failed 4 runs of 5. These tests now measure CPU time on the test's own thread, which counts the work rather than how long the scheduler made it wait. The bounds and correctness asserts are unchanged.
