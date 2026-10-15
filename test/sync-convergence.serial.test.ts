@@ -130,10 +130,10 @@ const ENTITY = 'people/alice-example';
  * file-publication pair (`before_publication`/`after_publication`) never fires for it. Per-page seams are counted
  * per submit_job request (nth inside the first 60% of a round); `lane:applied` and `sync:before_group_admission`
  * fire once per bulk group, and a small round may form one group, so they kill at the first; `sync:mid_checkpoint`
- * fires on every cursor save (the first or second). #6712's `sync:retry_deferred` (the first or second deferral) and
- * `sync:held_settled` (the hold) need a file that changes after its freeze: their round primes one with an uncommitted
- * edit at `sync:after_freeze`, which is deferred `DEFER_PER_ENTRY` times and then held `worktree_dirty`; the harness
- * commits the edit after the round.
+ * fires on every cursor save (the first or second). #6712's `sync:retry_deferred` and `sync:held_settled` need a file
+ * that changes after its freeze: their round primes one with an uncommitted edit at `sync:after_freeze`, which is
+ * deferred once (the first) and, when its retry finds the same newer bytes, held `worktree_dirty` (the hold); the
+ * harness commits the edit after the round.
  */
 const KILL_POINTS = [
   { point: 'publication:before_commit', per: 'page' }, { point: 'publication:after_commit', per: 'page' },
@@ -837,7 +837,7 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
     const plan = Array.from({ length: kinds.length ? KILLS : 0 }, (_, k) => {
       const kind = kinds[(k + offset) % kinds.length];
       const { point, per } = KILL_POINTS[(k + pointOffset) % KILL_POINTS.length];
-      const nth = per === 'page' ? b.between(2, Math.floor(perRound * 0.6)) : per === 'group' || per === 'held' ? 1 : b.between(1, 2);
+      const nth = per === 'page' ? b.between(2, Math.floor(perRound * 0.6)) : per === 'group' || per === 'held' || per === 'deferred' ? 1 : b.between(1, 2);
       return { round: k + 1, kind, point, nth, operation: per === 'page' || point === 'lane:applied' ? 'submit_job' : undefined, primed: per === 'held' || per === 'deferred' };
     });
     b.plan = plan.map(p => `round ${p.round} ${p.kind} ${p.point} #${p.nth}`);
