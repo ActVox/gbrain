@@ -13,6 +13,7 @@ import {
 import { currentJobSignal } from '../../core/minions/submission-authority.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../../core/company-brain/profile.ts';
 import type { BrainEngine } from '../../core/engine.ts';
+import type { OperationContext } from '../../core/ops/contract.ts';
 import { refreshProjectionStatistics } from '../../core/search/projection-statistics.ts';
 import { withRefreshingLock, LockUnavailableError, LockStolenError, syncLockId } from '../../core/db-lock.ts';
 import { readSyncAnchor } from '../../core/sync-anchor.ts';
@@ -80,6 +81,10 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     }
     if (!opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
     if (!opts.dryRun && ['synced', 'first_sync', 'up_to_date'].includes(result.status)) await clearSettledFailures(engine, opts.sourceId ?? 'default');
+    if (!opts.dryRun) {
+      const replayed = await replayImportedRemembers(engine, opts.sourceId ?? 'default');
+      if (replayed) result = { ...result, replayedRemembers: replayed };
+    }
     return result;
   }
   const filesystemRoot = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
@@ -121,6 +126,28 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
       throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
     }
     throw err;
+  }
+}
+
+/**
+ * #6693: after a managed sync (any outcome: a partial run can still import the file), replay the caller remembers refused while
+ * their page's file awaited import or was held, whose page this run brought back in line with its file. Best effort: a failure
+ * is one stderr line and never fails the sync. Returns null when nothing was examined.
+ */
+async function replayImportedRemembers(engine: BrainEngine, sourceId: string): Promise<SyncResult['replayedRemembers'] | null> {
+  try {
+    const { loadConfig } = await import('../../core/config.ts');
+    const { replayImportedRemembers: replay } = await import('../../core/repair/failed-writes.ts');
+    const logger = { info: () => {}, warn: (m: string) => serr(m), error: (m: string) => serr(m) };
+    const report = await replay({ engine, config: loadConfig() ?? { engine: engine.kind }, logger, remote: false, dryRun: false, sourceId } as OperationContext, sourceId);
+    if (!report.examined) return null;
+    serr(`[sync] replayed ${report.replayed} of ${report.examined} remember(s) refused while their page's file awaited import`
+      + `${report.waiting ? `; ${report.waiting} still waiting` : ''}${report.skipped ? `; ${report.skipped} not replayable (gbrain repair failed-writes --source ${sourceId} lists them)` : ''}`
+      + `${report.remaining ? `; ${report.remaining} left for the next sync` : ''}.`);
+    return report;
+  } catch (error) {
+    serr(`[sync] could not replay remembers refused while their page's file awaited import: ${error instanceof Error ? error.message : String(error)} (gbrain repair failed-writes --source ${sourceId} replays them).`);
+    return null;
   }
 }
 
