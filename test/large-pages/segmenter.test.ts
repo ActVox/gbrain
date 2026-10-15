@@ -28,7 +28,7 @@ import { SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES } from '../../src/core/page-body/l
 import { regionFlags, Segmenter, segmentStream, segmentString, type SegmentOut } from '../../src/core/page-body/segmenter.ts';
 import { mulberry32 } from '../helpers/seeded-random.ts';
 import {
-  bigPage, FACTS_BLOCK, joinedProjection, KEY_BODY, MARKER_BULLET, PEM_BLOCK, segmentOptions, segmentPieces, segmentShapeErrors, soup,
+  bigPage, FACTS_BLOCK, joinedProjection, KEY_BODY, MARKER_BULLET, PEM_BLOCK, pick, segmentOptions, segmentPieces, segmentShapeErrors, soup,
 } from '../helpers/segment-bodies.ts';
 
 const MAX = SEGMENT_MAX_BYTES;
@@ -41,6 +41,17 @@ const fingerprint = (s: SegmentOut) => JSON.stringify({
   facts: s.factsSlots, proj: [s.staticProjBytes, s.staticProjLines], outline: s.outline, dates: [s.dateMin, s.dateMax],
 });
 const KEY_COUNT = (s: string) => s.split(KEY_BODY).length - 1;
+
+/** Whether `a` is `b` with some characters deleted (shows nothing `b` does not). */
+function isSubsequence(a: string, b: string): boolean {
+  let j = 0;
+  for (let i = 0; i < a.length; i++) {
+    j = b.indexOf(a[i]!, j);
+    if (j === -1) return false;
+    j++;
+  }
+  return true;
+}
 
 function filler(bytes: number): string {
   const line = 'plain words without structure '.repeat(3) + '\n';
@@ -228,16 +239,18 @@ describe('forced cuts with open state', () => {
     expect(segs.slice(0, -1).every(s => s.cutKind === 'forced')).toBe(true);
   });
 
-  test('an unterminated protected region becomes the truncated tail; later segments project nothing', () => {
+  test('an unterminated protected region: open takes runs, the truncated tail at EOF, later segments project nothing', () => {
     const lead = filler(200_000);
     const body = lead + '<!--- gbrain:takes:begin -->\n' + ('## secret heading\n\n' + filler(1_000)).repeat(3_000);
     const segs = segmentString(body, truthEntry(), segmentOptions('trusted'));
     const flags = regionFlags(segs[segs.length - 1]!.exitState, 'trusted');
     expect(flags.protectedTailFrom).toBe(Buffer.byteLength(lead));
     expect(segs.length).toBeGreaterThan(2);
-    for (const s of segs.slice(1)) {
+    for (const [i, s] of segs.entries()) {
+      if (i === 0) continue;
       expect(s.staticProjBytes).toBe(0);
-      expect(s.protectedRegions).toEqual([expect.objectContaining({ kind: 'tail', start: 0, end: s.bytes.length, open_start: Buffer.byteLength(lead) })]);
+      const kind = i === segs.length - 1 ? 'tail' : 'takes';
+      expect(s.protectedRegions).toEqual([expect.objectContaining({ kind, start: 0, end: s.bytes.length, open_start: Buffer.byteLength(lead) })]);
     }
     expect(joinedProjection(Buffer.from(body), segs)).toBe(credentialSafeProjection(sanitizeRemoteBody(body)));
   });
@@ -254,7 +267,57 @@ describe('forced cuts with open state', () => {
     expect(regionFlags(all[all.length - 1]!.exitState, 'trusted').protectedTailFrom).toBe(Buffer.byteLength(lead));
   });
 
-  test('a protected region crossing a forced cut keeps its full extent on both sides', () => {
+  for (const [name, open, close] of [
+    ['an unterminated takes block', '<!--- gbrain:takes:begin -->\n', ''],
+    ['a closed takes block', '<!--- gbrain:takes:begin -->\n', '<!--- gbrain:takes:end -->\n'],
+    ['a giant facts fence', '<!--- gbrain:facts:begin -->\n', '<!--- gbrain:facts:end -->\n'],
+  ] as const) {
+    test(`${name} longer than the hold bound: segments leave as they close, the same for any feed chunking`, () => {
+      const body = filler(200_000) + KEY_BODY + '\n' + open + filler(12 * MAX) + close + '## after\n' + filler(300_000);
+      const seg = new Segmenter(truthEntry(), segmentOptions('trusted'));
+      const early: SegmentOut[] = [];
+      let maxHeld = 0;
+      for (let i = 0; i < body.length; i += 256 * 1024) {
+        early.push(...seg.push(body.slice(i, i + 256 * 1024)));
+        const closed = Buffer.byteLength(body.slice(0, Math.min(body.length, i + 256 * 1024))) - early.reduce((n, x) => n + x.bytes.length, 0);
+        maxHeld = Math.max(maxHeld, closed);
+      }
+      const all = [...early, ...seg.finish()];
+      expect(maxHeld).toBeLessThanOrEqual(4 * MAX);
+      expect(all.map(fingerprint)).toEqual(segmentString(body, truthEntry(), segmentOptions('trusted')).map(fingerprint));
+      const r = mulberry32(name.length);
+      expect(all.map(fingerprint)).toEqual(segmentPieces(body, segmentOptions('trusted'), () => 1 + Math.floor(r() * 400_000)).map(fingerprint));
+      const bytes = Buffer.from(body, 'utf8');
+      expect(segmentShapeErrors(bytes, all, MAX)).toEqual([]);
+      expect(isSubsequence(joinedProjection(bytes, all), credentialSafeProjection(sanitizeRemoteBody(body)))).toBe(true);
+    }, 60_000);
+  }
+
+  test('released early, a segment never shows what whole-body sanitization hides (key lines around giant regions)', () => {
+    const r = mulberry32(91);
+    const keyish = [`${KEY_BODY}\n`, `  ${KEY_BODY.slice(0, 40)}\n`, 'prose line here\n', '\n', '-----BEGIN RSA PRIVATE KEY-----\n',
+      '-----END RSA PRIVATE KEY-----\n', `"k": "${KEY_BODY}\\n${KEY_BODY}\\n`, 'é😀\n', '## heading\n'];
+    const regions = [['<!--- gbrain:takes:begin -->\n', '<!--- gbrain:takes:end -->\n'], ['<!--- gbrain:takes:begin -->\n', ''],
+      ['<!--- gbrain:facts:begin -->\n', '<!--- gbrain:facts:end -->\n']];
+    let guarded = 0;
+    for (let t = 0; t < 12; t++) {
+      const around = (n: number) => Array.from({ length: n }, () => pick(r, keyish)).join('');
+      const [open, close] = pick(r, regions);
+      const body = filler(Math.floor(r() * 300_000)) + around(1 + Math.floor(r() * 12)) + open + filler(Math.floor((2.5 + r() * 2) * MAX))
+        + (close ? close + around(1 + Math.floor(r() * 12)) + filler(Math.floor(r() * 300_000)) : '');
+      const bytes = Buffer.from(body, 'utf8');
+      const segs = segmentPieces(body, segmentOptions(trustOf(body)), () => 1 + Math.floor(r() * 500_000));
+      const want = credentialSafeProjection(sanitizeRemoteBody(body));
+      const got = joinedProjection(bytes, segs);
+      expect(isSubsequence(got, want)).toBe(true);
+      expect(KEY_COUNT(got)).toBeLessThanOrEqual(KEY_COUNT(want));
+      if (segs.some(s => s.protectedRegions.some(x => x.kind === 'pem_guard'))) guarded++;
+      else if (!open.includes('facts')) expect(got).toBe(want);
+    }
+    expect(guarded).toBeGreaterThan(0);
+  });
+
+  test('a protected region crossing a forced cut: its start on both sides, its end where it ends', () => {
     const lead = filler(900_000);
     const region = '<!--- gbrain:takes:begin -->\n' + filler(400_000) + '<!--- gbrain:takes:end -->\n';
     const body = lead + region + filler(10_000);
@@ -262,8 +325,7 @@ describe('forced cuts with open state', () => {
     const start = Buffer.byteLength(lead);
     const end = start + Buffer.byteLength(region) - 1;
     const parts = segs.flatMap(s => s.protectedRegions.filter(r => r.kind === 'takes').map(r => ({ ...r, segStart: s.byteStart })));
-    expect(parts.length).toBe(2);
-    for (const p of parts) expect([p.open_start, p.open_end]).toEqual([start, end]);
+    expect(parts.map(p => [p.open_start, p.open_end])).toEqual([[start, undefined], [start, end]]);
   });
 });
 

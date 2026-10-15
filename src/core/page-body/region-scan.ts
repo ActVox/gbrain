@@ -492,6 +492,43 @@ export function takePemCut(st: PemScanState, at: number): { clean: boolean; star
   return st.cuts.splice(i, 1)[0]!.done!;
 }
 
+/** The answer for a marked cut taken before it resolved: never clean; where a resumed scan restarts. */
+export function forcePemCut(st: PemScanState, at: number): { clean: boolean; start: PemStart } {
+  const i = st.cuts.findIndex(c => c.at === at);
+  const done = i === -1 ? undefined : st.cuts.splice(i, 1)[0]!.done;
+  if (done) return done;
+  const rel = at - st.base;
+  return { clean: false, start: rel <= 0 && st.base >= 0 ? 'region_start' : st.buf.charCodeAt(rel - 1) === 10 ? 'line_start' : 'mid_line' };
+}
+
+const PEM_LINE_DONE = /^[ \t]*[A-Za-z0-9+/=]+[ \t]*(?:\r|\\r)?$/;
+const PEM_LINE_OPEN = /^[ \t]*[A-Za-z0-9+/=]*[ \t]*(?:\r|\\r?|\\)?$/;
+
+/**
+ * The earliest projection offset a span reported after this point could
+ * start at, whatever text follows: a fence not yet decided or a BEGIN still
+ * waiting for its lookahead, or the run of lines at the end of the text that
+ * a later END fence's backward claim could cover (each line one base64 run
+ * between indents, as pemBackwardStart reads them; a superset). Spans
+ * starting before it have all been reported.
+ */
+export function pemExposedFrom(st: PemScanState): number {
+  const buf = st.buf;
+  const end = st.base + buf.length;
+  const lo = Math.max(st.base, Math.min(end, pemResolvedTo(st))) - st.base;
+  let exposed = Math.min(end, st.find.begin.safe, st.find.end.safe, headFence(st)?.start ?? end);
+  let start = buf.length;
+  for (let i = buf.length, open = true; i > lo; open = false) {
+    let j = i;
+    while (j > lo && buf.charCodeAt(j - 1) !== 10 && !(buf.charCodeAt(j - 1) === 110 && buf.charCodeAt(j - 2) === 92)) j--;
+    if (!(open ? PEM_LINE_OPEN : PEM_LINE_DONE).test(buf.slice(j, i))) break;
+    start = j;
+    i = buf.charCodeAt(j - 1) === 10 ? j - 1 : j - 2;
+  }
+  exposed = Math.min(exposed, start + st.base);
+  return Math.max(lo + st.base, exposed);
+}
+
 function discoverPem(st: PemScanState, kind: 'begin' | 'end'): void {
   const re = kind === 'begin' ? BEGIN_RE : END_RE;
   const prefix = kind === 'begin' ? '-----BEGIN ' : '-----END ';
