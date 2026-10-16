@@ -53,6 +53,14 @@ describe('#6803 connector cycle extract_facts scope', () => {
       // The next cycle starts from this cycle's stamp: nothing in the source changed since.
       const again = await makeAutopilotCycleHandler(engine)({ id: 2, data: { source_id: connector } } as never) as typeof out;
       expect(again.report.phases.find(p => p.phase === 'recompute_emotional_weight')?.details).toMatchObject({ mode: 'incremental', pages_recomputed: 0 });
+      // A page that changed while a cycle ran (after it listed its pages, before its stamp) is picked up by the next one.
+      const [stamps] = await engine.executeRaw<{ window_at: string; stamp: string }>(
+        "SELECT config->>'last_source_cycle_window_at' AS window_at, config->>'last_source_cycle_at' AS stamp FROM sources WHERE id=$1", [connector]);
+      expect(Date.parse(stamps.window_at)).toBeLessThan(Date.parse(stamps.stamp));
+      await engine.executeRaw("UPDATE pages SET updated_at=$2::timestamptz + interval '1 millisecond' WHERE source_id=$1 AND slug='emails/example'", [connector, stamps.window_at]);
+      expect((await engine.executeRaw<{ before: boolean }>("SELECT updated_at < $2::timestamptz AS before FROM pages WHERE source_id=$1 AND slug='emails/example'", [connector, stamps.stamp]))[0].before).toBe(true);
+      const third = await makeAutopilotCycleHandler(engine)({ id: 3, data: { source_id: connector } } as never) as typeof out;
+      expect(third.report.phases.find(p => p.phase === 'recompute_emotional_weight')?.details).toMatchObject({ mode: 'incremental', pages_recomputed: 1 });
       await disposePersistenceConsumer(engine);
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     }

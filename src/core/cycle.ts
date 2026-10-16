@@ -1972,6 +1972,8 @@ async function runCycleUnscoped(
     ? (opts.sourceId ?? (await resolveSourceForDir(engine, brainDir)))
     : opts.sourceId;
   const orphansSourceId = opts.forceGlobalOrphans ? undefined : cycleSourceId;
+  /** #6803: when this cycle began listing the source's changed pages (connector cycles only). */
+  let sourceWindowAt: string | undefined;
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 
@@ -2260,9 +2262,12 @@ async function runCycleUnscoped(
     let syncAttempted = false;
     let synthesizeWrittenSlugs: string[] | undefined;
     const sourceChangedSlugs = engine && cycleSourceId && opts.sourceChangedSince !== undefined
-      ? (await engine.executeRaw<{ slug: string }>(
-        'SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND ($2::timestamptz IS NULL OR updated_at>$2::timestamptz) ORDER BY slug',
-        [cycleSourceId, opts.sourceChangedSince])).map(row => row.slug)
+      ? await (async () => {
+        sourceWindowAt = (await engine.executeRaw<{ at: string }>('SELECT clock_timestamp()::text AS at'))[0]?.at;
+        return (await engine.executeRaw<{ slug: string }>(
+          'SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND ($2::timestamptz IS NULL OR updated_at>$2::timestamptz) ORDER BY slug',
+          [cycleSourceId, opts.sourceChangedSince])).map(row => row.slug);
+      })()
       : undefined;
     if (phases.includes('sync')) {
       checkAborted(cycleSignal);
@@ -3169,6 +3174,8 @@ async function runCycleUnscoped(
       await engine.updateSourceConfig(opts.sourceId, {
         last_source_cycle_at: nowIso,
         last_full_cycle_at: nowIso,
+        // #6803: where the next connector cycle's changed-page window starts (read before this cycle listed its pages).
+        ...(sourceWindowAt ? { last_source_cycle_window_at: sourceWindowAt } : {}),
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

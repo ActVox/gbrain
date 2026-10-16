@@ -68,7 +68,7 @@ export function makeAutopilotCycleHandler(engine: BrainEngine): MinionHandler {
       // source's own checkout (the #2227/#2194 mixed-scope fix).
       const rows = await engine.executeRaw<{ archived: boolean | null; local_path: string | null; kind: string | null; last_cycle: string | null }>(
         `SELECT archived, local_path, config->>'kind' AS kind,
-                COALESCE(config->>'last_source_cycle_at', config->>'last_full_cycle_at') AS last_cycle FROM sources WHERE id = $1`,
+                COALESCE(config->>'last_source_cycle_window_at', config->>'last_source_cycle_at', config->>'last_full_cycle_at') AS last_cycle FROM sources WHERE id = $1`,
         [rawSourceId],
       );
       if (rows.length === 0) {
