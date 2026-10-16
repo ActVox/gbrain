@@ -154,6 +154,8 @@
       "  [OK] subagent_capability: Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability",
       "  [OK] facts_health: facts_health(default): 0 active, 0 today, 0 this week, 0 consolidated, top entities —",
       "  [OK] global_maintenance_timeouts: Brain-wide maintenance jobs are finishing within their deadline.",
+      "  [OK] embed_backfill_stalled: No automatic embed-backfill is repeating the same failure.",
+      "  [OK] connector_account_mismatch: No connector source is waiting for its account to be repinned.",
       "  [OK] legacy_job_authority: No queued job predates submission authority.",
       "  [OK] legacy_token_grant_shape: Every active legacy token uses the unified grant columns. The permissions mirror for older gbrain binaries is kept until 2026-11-04.",
       "  [OK] legacy_token_grant_drift: No legacy token grant has drifted from its permissions mirror.",

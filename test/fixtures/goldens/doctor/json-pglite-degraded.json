@@ -1778,6 +1778,20 @@
         },
         {
           "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "No automatic embed-backfill is repeating the same failure.",
+          "name": "embed_backfill_stalled",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "No connector source is waiting for its account to be repinned.",
+          "name": "connector_account_mismatch",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
           "details": {
             "active_ids": [],
             "authorizable": {},
