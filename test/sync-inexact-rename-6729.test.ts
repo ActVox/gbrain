@@ -225,6 +225,8 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect(confirmed.renamed.every(rename => rename.from.replace('notes/n', '') === rename.to.replace('notes/m', ''))).toBe(true);
     expect(confirmed.added).toEqual([]);
     expect(confirmed.deleted).toEqual([]);
+    // Stated budget: 4,000 frontmatter heads (both sides) through one cat-file stream plus the pure decision in under 20 s on a
+    // 4-vCPU CI machine (about 2.5 s measured locally), so a large reorganization never stalls discovery.
     expect(elapsed).toBeLessThan(20_000);
   }, 300_000);
 
@@ -262,6 +264,25 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect(y.id).not.toBe(x.id);
     expect((await pageRow(s.id, 'notes/x'))!.id).toBe(x.id);
   }), 180_000);
+
+  test('dirty tree reads the working-tree side from disk: an id only the working file carries, and an unstaged id conflict on a staged rename, both stay delete plus add (classic and managed)', () => withEnv(env, async () => {
+    for (const mode of ['classic', 'managed'] as const) {
+      const s = await (mode === 'classic' ? classic : managed)({ 'notes/w.md': doc('title: Working one'), 'notes/s.md': doc('id: staged-6729-one\ntitle: Staged one') });
+      const w = (await pageRow(s.id, 'notes/w'))!, st = (await pageRow(s.id, 'notes/s'))!;
+      git(s.root, 'mv', 'notes/w.md', 'notes/w-2.md'); write(s.root, 'notes/w-2.md', doc('id: working-6729\ntitle: Working two', 'Edited.\n'));
+      git(s.root, 'mv', 'notes/s.md', 'notes/s-2.md'); write(s.root, 'notes/s-2.md', doc('id: staged-6729-one\ntitle: Staged two', 'Edited.\n'));
+      git(s.root, 'add', '-A');
+      // The index still pairs s.md -> s-2.md under the same id; only the working file changes it.
+      write(s.root, 'notes/s-2.md', doc('id: staged-6729-two\ntitle: Staged two', 'Edited.\n'));
+      expect(git(s.root, 'diff', '--cached', '--name-status', '-M').split('\n').every(line => /^R0\d\d\t/.test(line))).toBe(true);
+      const result = await s.sync({ workingTree: true });
+      expect(result.status).toBe('synced');
+      expect(result.identityDowngrades?.map(entry => [entry.from, entry.reason, entry.read]).sort()).toEqual([
+        ['notes/s.md', 'id_conflict', { from: 'commit', to: 'working_tree' }], ['notes/w.md', 'id_one_side', { from: 'commit', to: 'working_tree' }]]);
+      expect((await pageRow(s.id, 'notes/w-2'))!.id).not.toBe(w.id);
+      expect((await pageRow(s.id, 'notes/s-2'))!.id).not.toBe(st.id);
+    }
+  }), 240_000);
 
   test('managed: crossed inexact pairs with one shared title never swap identities; a unique title keeps one', () => withEnv(env, async () => {
     const s = await managed({

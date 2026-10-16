@@ -31,7 +31,11 @@ export interface SyncManifest {
 
 /** #6729: why an inexact Git rename did not keep its page identity (see `confirmRenameIdentities`). */
 export type RenameDowngradeReason = 'id_conflict' | 'id_shared' | 'id_one_side' | 'title_not_unique' | 'slug_not_unique' | 'no_identity_signal';
-export interface DowngradedRename { from: string; to: string; similarity: number; reason: RenameDowngradeReason }
+/** Where a rename side's frontmatter was read: a committed blob, or the file on disk (the dirty-tree manifest's target side). */
+export type RenameSideSource = 'commit' | 'working_tree';
+export interface DowngradedRename { from: string; to: string; similarity: number; reason: RenameDowngradeReason;
+  /** #6729: the source each side's frontmatter was read from (absent on a pair recorded before this field). */
+  read?: { from: RenameSideSource; to: RenameSideSource } }
 
 export interface RawManifestEntry {
   action: 'A' | 'M' | 'D' | 'R';

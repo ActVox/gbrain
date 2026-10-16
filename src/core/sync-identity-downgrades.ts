@@ -58,7 +58,7 @@ export async function recordIdentityDowngrades(engine: BrainEngine, sourceId: st
         (SELECT count(*) FROM links WHERE from_page_id = $3 OR to_page_id = $3) AS links,
         (SELECT count(*) FROM page_aliases WHERE source_id = $1 AND slug = $2) AS aliases`, [sourceId, old.slug, Number(old.id)]);
     const recorded = new Date(old.deleted_at);
-    const record: IdentityDowngrade = { source_id: sourceId, from: pair.from, to: pair.to, similarity: pair.similarity, reason: pair.reason,
+    const record: IdentityDowngrade = { source_id: sourceId, from: pair.from, to: pair.to, similarity: pair.similarity, reason: pair.reason, ...(pair.read ? { read: pair.read } : {}),
       old_slug: old.slug, old_page_id: Number(old.id), new_slug: fresh?.slug ?? null,
       facts: Number(counts?.facts ?? 0), links: Number(counts?.links ?? 0), aliases: Number(counts?.aliases ?? 0),
       recorded_at: recorded.toISOString(), expires_at: new Date(recorded.getTime() + IDENTITY_DOWNGRADE_WINDOW_HOURS * 3600_000).toISOString() };

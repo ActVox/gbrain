@@ -30,7 +30,7 @@ import { JSON_SCHEMA, load as yamlLoad } from 'js-yaml';
 import type { BrainEngine } from './engine.ts';
 import { spawn } from './spawn.ts';
 import { gitChildEnv } from './git-env.ts';
-import { isMarkdownFilePath, resolveSlugForPath, type DowngradedRename, type RenameDowngradeReason, type SyncManifest } from './sync.ts';
+import { isMarkdownFilePath, resolveSlugForPath, type DowngradedRename, type RenameDowngradeReason, type RenameSideSource, type SyncManifest } from './sync.ts';
 import { computeSyncDelta, type SyncDeltaResult } from './sync-delta.ts';
 
 const HEAD_BYTES = 64 * 1024;
@@ -126,6 +126,8 @@ export interface RenameIdentityInputs {
   live: LiveIdentityHolder[];
   /** Maps a Git path to its source-relative form; a page recording either form belongs to the range. */
   sourcePathOf?: (gitPath: string) => string;
+  /** Where the target side was read (the base side is always a committed blob); defaults to `commit`. */
+  targetSource?: RenameSideSource;
 }
 
 /** Inexact pairs, or an add/delete pool rule (c) can pair; with neither the manifest passes through untouched. */
@@ -169,7 +171,8 @@ export function decideRenameIdentities(manifest: SyncManifest, inputs: RenameIde
   const downgraded: DowngradedRename[] = [];
   for (const rename of inexact) {
     const before = inputs.base(rename.from), after = inputs.target(rename.to);
-    const downgrade = (reason: RenameDowngradeReason) => downgraded.push({ from: rename.from, to: rename.to, similarity: rename.similarity!, reason });
+    const downgrade = (reason: RenameDowngradeReason) => downgraded.push({ from: rename.from, to: rename.to, similarity: rename.similarity!, reason,
+      read: { from: 'commit', to: inputs.targetSource ?? 'commit' } });
     // A respelled path (case or separators) that keeps its slug is the same-slug takeover managed discovery already
     // performs: it keeps the page unless an explicit id conflicts.
     const sameSlug = resolveSlugForPath(sourcePathOf(rename.from)) === resolveSlugForPath(sourcePathOf(rename.to));
@@ -245,7 +248,7 @@ export async function confirmRenameIdentities(engine: Pick<BrainEngine, 'execute
   return decideRenameIdentities(manifest, {
     base: path => baseIdentity.get(path) ?? NO_IDENTITY,
     target: path => targetIdentity.get(path) ?? NO_IDENTITY,
-    live, sourcePathOf: opts.sourcePathOf,
+    live, sourcePathOf: opts.sourcePathOf, targetSource: target === null ? 'working_tree' : 'commit',
   });
 }
 
