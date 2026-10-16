@@ -9,6 +9,7 @@
     "exit_code": 0,
     "report": {
       "brain_checks_score": 100,
+      "budget_ms": "<volatile>",
       "capped_by": [
         "embeddings_disabled"
       ],
@@ -792,6 +793,41 @@
           "name": "embedding_state",
           "readiness_state": "disabled_by_choice",
           "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "Extraction lag not applicable (no pages)",
+          "name": "links_extraction_lag",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No pages exceed 25165824 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
+          "name": "oversized_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No large page is held or capped by embed.max_usd_per_page.",
+          "name": "partial_embedding",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No junk-pattern hits in 0 recent page(s) (use --content-audit for full scan)",
+          "name": "scraper_junk_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No content-sanity events in last 7 days (audit JSONL is local to this host; share GBRAIN_AUDIT_DIR for multi-host visibility)",
+          "name": "content_sanity_audit_recent",
           "status": "ok"
         },
         {
@@ -1690,34 +1726,6 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "No pages exceed 25165824 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
-          "name": "oversized_pages",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "No junk-pattern hits in 0 recent page(s) (use --content-audit for full scan)",
-          "name": "scraper_junk_pages",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "No content-sanity events in last 7 days (audit JSONL is local to this host; share GBRAIN_AUDIT_DIR for multi-host visibility)",
-          "name": "content_sanity_audit_recent",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).",
-          "name": "partial_embedding",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
           "message": "No quarantined pages",
           "name": "quarantined_pages",
           "status": "ok"
@@ -2038,13 +2046,6 @@
           "elapsed_ms": "<volatile>",
           "message": "Single-source brain — sync --all consolidation not applicable.",
           "name": "sync_consolidation",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "Extraction lag not applicable (no pages)",
-          "name": "links_extraction_lag",
           "status": "ok"
         },
         {
@@ -3104,11 +3105,14 @@
           "status": "ok"
         }
       ],
+      "complete": true,
       "db_url_source": null,
+      "elapsed_ms": "<volatile>",
       "engine": "pglite",
       "health_score": 95,
       "schema_version": 2,
       "status": "warnings",
+      "tier": "standard",
       "top_issues": [
         {
           "fix": "64 new built-in skill(s) available that this workspace hasn't installed: academic-verify, archive-crawler, article-enrichment, ask-user, blog-ingest, book-mirror, brain-ingest-gate, brain-link-discipline, … +56 more. Add them with `gbrain skillpack sync`.",
@@ -3116,9 +3120,11 @@
           "status": "warn",
           "tier": "symptom"
         }
-      ]
+      ],
+      "unknown_sections": []
     },
     "stderr": [
+      "[gbrain doctor] non-interactive run: the check run (not connect or migrations) is capped at 90000 ms (doctor.default_budget_ms); checks past it report health unknown. Off for one run: --budget-ms 0; off for good: gbrain config set doctor.default_budget_ms 0. On PGLite a statement already running cannot be stopped, so a check can finish late.",
       "[backup] checked 1 asset(s): 0 without a git remote (computed_by=doctor)"
     ],
     "stdout": "<json>"

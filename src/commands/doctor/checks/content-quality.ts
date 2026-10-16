@@ -12,7 +12,8 @@ import { startHeartbeat } from '../../../core/progress.ts';
 import { checkUnverifiedExtractions } from './extraction-sync.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
-import { agentFix, checkError } from '../check-fix.ts';
+import { agentFix, checkError, doctorVerify } from '../check-fix.ts';
+import { scanDeadline } from '../budget.ts';
 
 async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
   const { args, progress } = ctx;
@@ -356,10 +357,11 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
   progress.heartbeat('frontmatter_integrity');
   const fmHb = startHeartbeat(progress, 'scanning frontmatter…');
   const { frontmatterScanTimeoutMs, frontmatterRepairableFromReport } = await import('./frontmatter-repairable.ts');
-  const fmTimeoutMs = frontmatterScanTimeoutMs();
+  // #6803 C3: the walk also stops at the entry's (and so the run's) deadline, and reports what it read.
+  const fmDeadline = scanDeadline(ctx, frontmatterScanTimeoutMs());
+  const fmTimeoutMs = Math.max(0, fmDeadline - Date.now());
   try {
     const { scanBrainSources } = await import('../../../core/brain-writer.ts');
-    const fmDeadline = Date.now() + fmTimeoutMs;
     const fmAbort = AbortSignal.timeout(fmTimeoutMs);
     // Per-source DB denominator. Coarse — DB pages and on-disk syncable
     // files are overlapping but not identical (unsynced disk files,
@@ -367,6 +369,7 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
     // message makes the mismatch honest. Failure of the COUNT degrades to
     // null and the message falls back to bare numerator.
     const dbPageCountForSource = async (sourceId: string): Promise<number | null> => {
+      if (Date.now() >= fmDeadline) return null;
       try {
         const rows = await engine.executeRaw<{ n: string }>(
           `SELECT COUNT(*)::text AS n FROM pages WHERE source_id = $1 AND deleted_at IS NULL`,

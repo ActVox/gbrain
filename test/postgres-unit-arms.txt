@@ -26,6 +26,7 @@ test/belief-ledger-purge-review.test.ts
 test/belief-ledger-purge.test.ts
 test/belief-ledger-restore.test.ts
 test/belief-ledger-trust.test.ts
+test/capacity-bounded-read-6803.test.ts
 test/capture-consent-admission.test.ts
 test/capture-dispatch-provenance-6524.test.ts
 test/chronicle-backfill-max-usd.test.ts

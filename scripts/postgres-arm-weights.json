@@ -13,6 +13,7 @@
   "test/belief-ledger-purge.test.ts": 82113,
   "test/belief-ledger-restore.test.ts": 137755,
   "test/belief-ledger-trust.test.ts": 15917,
+  "test/capacity-bounded-read-6803.test.ts": 3000,
   "test/capture-consent-admission.test.ts": 10340,
   "test/capture-dispatch-provenance-6524.test.ts": 7890,
   "test/chronicle-backfill-max-usd.test.ts": 6426,
