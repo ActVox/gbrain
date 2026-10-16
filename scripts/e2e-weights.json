@@ -101,6 +101,7 @@
   "test/e2e/derived-page-visibility.test.ts": 5780,
   "test/e2e/derived-visibility-repair.test.ts": 9940,
   "test/e2e/doctor-connectors-pglite.test.ts": 2150,
+  "test/e2e/doctor-entry-deadline-postgres.test.ts": 32000,
   "test/e2e/doctor-hot-checks-golden.test.ts": 23850,
   "test/e2e/doctor-json-golden.test.ts": 8760,
   "test/e2e/doctor-ops-tier-postgres.test.ts": 2009.9999999999998,
