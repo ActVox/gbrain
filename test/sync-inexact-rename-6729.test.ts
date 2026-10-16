@@ -2,7 +2,7 @@
  * #6729: an inexact Git rename (R<100) is a similarity guess, so it keeps the old page's identity only when the files
  * confirm it (a shared frontmatter id, or a unique slug: line or title). Every other pair is a delete plus an add, the
  * old page keeps its facts, links and aliases on its soft-deleted slug for 72 h, the run records it, the purge leaves it
- * alone, doctor names it, and gbrain repair rename-identity carries the identity when a person confirms the move.
+ * alone, doctor names it, and a restore keeps the old page when a person asks for it.
  * Classic sync, managed sync and the dirty-tree manifest each keep an R<100 fixture; R100 variants sit beside them.
  * New modules are imported lazily so this file loads (and fails by behavior) on a master without them.
  */
@@ -77,7 +77,7 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
   const redirects = (sourceId: string) => engine.executeRaw<{ alias_slug: string; canonical_slug: string }>('SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id=$1 ORDER BY alias_slug', [sourceId]);
   const aliasOwner = async (sourceId: string, alias: string) => (await engine.executeRaw<{ slug: string }>('SELECT slug FROM page_aliases WHERE source_id=$1 AND alias_norm=$2 ORDER BY slug', [sourceId, alias])).map(row => row.slug);
 
-  test('classic: crossed inexact pairs with one shared title keep their own facts and aliases, are recorded, held from purge, named by doctor, and the remedy carries a confirmed one', () => withEnv(env, async () => {
+  test('classic: crossed inexact pairs with one shared title keep their own facts and aliases, are recorded, held from purge, named by doctor, and the restore fix keeps one', () => withEnv(env, async () => {
     const s = await classic({
       'people/a-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Ali]', 'Works on payments.\n'),
       'people/b-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Bea]', 'Works on search.\n'),
@@ -111,36 +111,32 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs.filter(slug => slug.endsWith('-x-com'))).toEqual([]);
     expect(await pageRow(s.id, 'people/a-x-com')).toBeDefined();
 
-    // Doctor names them with the read-only remedy preview.
+    // Doctor names them; the fix restores the first old page once the user asks (ask_user), and verify clears it.
     const { renameIdentityDowngradesEntry } = await import('../src/commands/doctor/checks/rename-identity-downgrades.ts');
-    const doctor = async () => (await renameIdentityDowngradesEntry.run({ engine } as unknown as DoctorContext)) as unknown as Array<{ status: string; details: { count: number; by_source: Array<{ source_id: string; count: number }> }; fix?: Record<string, unknown> & { argv: string[] } }>;
+    const doctor = async () => (await renameIdentityDowngradesEntry.run({ engine } as unknown as DoctorContext)) as unknown as Array<{ status: string; details: { count: number; by_source: Array<{ source_id: string; count: number }> }; fix?: Record<string, unknown> & { argv: string[]; verify: { argv: string[] } } }>;
+    const mine = (finding: Awaited<ReturnType<typeof doctor>>[number]) => finding.details.by_source.find(entry => entry.source_id === s.id)?.count ?? 0;
     const [finding] = await doctor();
     expect(finding!.status).toBe('warn');
-    expect(finding!.details.by_source.find(entry => entry.source_id === s.id)?.count).toBe(2);
-    expect(finding!.fix).toMatchObject({ argv: ['gbrain', 'repair', 'rename-identity', '--source', expect.any(String), '--json'], consent: [], actor: 'agent',
-      verify: { argv: ['gbrain', 'doctor', '--only', 'rename_identity_downgrades', '--json'] } });
-    expect(finding!.fix).not.toHaveProperty('ask_user');
+    expect(mine(finding!)).toBe(2);
+    const [, , slug, , sourceId] = finding!.fix!.argv;
+    const restored = { 'people/a-x-com': { id: a.id, fact: 'A works on payments', alias: 'ali' }, 'people/b-x-com': { id: b.id, fact: 'B works on search', alias: 'bea' } }[slug!]!;
+    const other = slug === 'people/a-x-com' ? { slug: 'people/b-x-com', id: b.id } : { slug: 'people/a-x-com', id: a.id };
+    expect(finding!.fix).toMatchObject({ argv: ['gbrain', 'restore', expect.stringMatching(/^people\/[ab]-x-com$/), '--source-id', s.id, '--force'], consent: [], actor: 'agent', ask_user: true,
+      user_message: expect.stringContaining(slug!), verify: { argv: ['gbrain', 'doctor', '--only', 'rename_identity_downgrades', '--json'] } });
     const { deriveNext } = await import('../src/core/agent-output.ts');
-    expect(deriveNext(finding!.fix as never, { transport: 'cli', isCallable: () => false, preapproved: () => false })).toBe('run');
-
-    // The person confirms a-x-com really became alice: preview, then apply exactly the previewed pair.
-    const { renameIdentityRepair } = await import('../src/core/repair/rename-identity.ts');
-    const scope = { brain_id: 'test', source_ids: [s.id] };
-    const preview = await renameIdentityRepair.plan(engine, scope, null, { apply: false });
-    expect(preview.items.map(item => [item.slug, item.change?.to]).sort()).toEqual([['people/a-x-com', 'people/alice'], ['people/b-x-com', 'people/bob']]);
-    await expect(renameIdentityRepair.plan(engine, scope, null, { apply: true })).rejects.toMatchObject({ code: 'invalid_params' });
-    const approved = await renameIdentityRepair.plan(engine, scope, null, { apply: true, expect: preview.preview_hash });
-    const pick = approved.items.find(item => item.slug === 'people/a-x-com')!;
-    expect(await renameIdentityRepair.apply(repairCtx(engine), pick)).toMatchObject({ applied: true, outcome: 'carried' });
-    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'people/alice', fact: 'A works on payments' }, { entity_slug: 'people/b-x-com', fact: 'B works on search' }]);
-    expect(await aliasOwner(s.id, 'ali')).toEqual(['people/alice']);
-    expect(await engine.executeRaw('SELECT from_page_id FROM links WHERE to_page_id=$1', [peer.id])).toEqual([{ from_page_id: alice.id }]);
-    expect(await redirects(s.id)).toEqual([{ alias_slug: 'people/a-x-com', canonical_slug: 'people/alice' }]);
-    // Verify: the carried pair left the finding, and its old page is no longer held from the purge.
+    expect(deriveNext(finding!.fix as never, { transport: 'cli', isCallable: () => false, preapproved: () => true })).toBe('ask_user');
+    // Run the argv (gbrain restore <slug> --source-id <id> --force) through its operation, then the verify.
+    const { operationsByName } = await import('../src/core/operations.ts');
+    await operationsByName.restore_page!.handler({ ...repairCtx(engine), sourceId } as never, { slug, source_id: sourceId, force: true });
+    expect((await pageRow(s.id, slug!))).toMatchObject({ id: restored.id, deleted_at: null });
+    expect(await factSlugs(s.id)).toContainEqual({ entity_slug: slug, fact: restored.fact });
+    expect(await aliasOwner(s.id, restored.alias)).toEqual([slug]);
     const [after] = await doctor();
-    expect(after!.details.by_source.find(entry => entry.source_id === s.id)?.count).toBe(1);
-    expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain('people/a-x-com');
-    expect((await pageRow(s.id, 'people/b-x-com'))!.deleted_at).not.toBeNull();
+    expect(mine(after!)).toBe(1);
+    expect((await pageRow(s.id, other.slug))!.deleted_at).not.toBeNull();
+    // A record whose window ended no longer holds its old page from the purge.
+    await engine.executeRaw("UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,expires_at}', to_jsonb((now() - interval '1 hour')::text)) WHERE op = 'sync-identity-downgrade' AND fingerprint = $1", [String(other.id)]);
+    expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain(other.slug);
   }), 180_000);
 
   test('classic: a move plus edit keeps its identity through a unique title, and an exact move needs no signal', () => withEnv(env, async () => {

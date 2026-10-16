@@ -9,9 +9,7 @@ import { softDeleteSyncPages } from '../../core/company-brain/profile.ts';
 import { serr } from '../../core/console-prefix.ts';
 import { DELETE_BATCH_SIZE } from '../../core/engine-constants.ts';
 import { importFile, isImageFilePath as isImageImportPath, importImageFile } from '../../core/import-file.ts';
-import { maintenanceAttribution, maintenanceTransaction } from '../../core/persistence/attribution.ts';
-import { withCoordinatedWrite } from '../../core/persistence/context.ts';
-import { readManagedMode } from '../../core/persistence/managed-mode.ts';
+import { maintenanceTransaction } from '../../core/persistence/attribution.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import { movePageIdReferences, moveSlugBindings, recordRenameAlias } from '../../core/page-state/rename-alias.ts';
 import { renamePageOntoSlug } from './rename-collision.ts';
@@ -363,13 +361,11 @@ export async function carryRenameIdentity(engine: BrainEngine, sourceId: string,
   if (!from || !to || from.id === to.id) return;
   const publication = await maintenanceTransaction(engine, async tx => {
     await tx.lockPageKeys([{ sourceId, slug: staleSlug }, { sourceId, slug: newSlug }]);
-    const carry = () => recordFallbackRename(tx, { sourceId, staleSlug, newSlug, fromPageId: Number(from.id), toPageId: Number(to.id) }, async () => {
+    return recordFallbackRename(tx, { sourceId, staleSlug, newSlug, fromPageId: Number(from.id), toPageId: Number(to.id) }, async () => {
       await recordRenameAlias(tx, sourceId, staleSlug, newSlug);
       await moveSlugBindings(tx, sourceId, staleSlug, newSlug);
       await movePageIdReferences(tx, Number(from.id), Number(to.id));
     });
-    // #6729: `gbrain repair rename-identity` also carries on a managed brain, whose page tables take writes only inside a coordinated write.
-    return await readManagedMode(tx) ? withCoordinatedWrite(tx, [sourceId], carry, await maintenanceAttribution(tx)) : carry();
   });
   if (publication) await markBeliefCommits(engine, [publication]).catch(() => undefined);
 }

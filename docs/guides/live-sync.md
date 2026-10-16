@@ -350,11 +350,20 @@ starts a fresh page, and the old page keeps its facts, links and aliases on
 its soft-deleted slug. The sync report prints each such pair, `gbrain sync
 status --source <id> --json` lists it under `identity_downgrades`, doctor
 `rename_identity_downgrades` names it, and the purge leaves the old page alone
-for 72 hours. If the pair really was one page that moved, carry its identity
-before the window ends: `gbrain repair rename-identity --source <id>` previews
-the pairs, and `--apply --expect <hash>` moves the previewed set onto the new
-pages (the same carrier a confirmed rename uses, with an `old -> new` slug
-redirect). The reverse also holds: a new file whose `frontmatter.id` uniquely
+for 72 hours. To keep an old page, restore it before the window ends with
+`gbrain restore <old-slug> --source-id <id> --force` (it then lives beside the
+new page; where the old file cannot be re-created the restore names
+`--detach`). To move and rewrite a page so it keeps its identity, give it a
+stable id or move, commit and sync first, then edit:
+
+```yaml
+---
+id: roadmap-2026
+title: Roadmap
+---
+```
+
+The reverse also holds: a new file whose `frontmatter.id` uniquely
 matches a file deleted in the same range is treated as its rename, even when
 Git did not pair them. A managed sync refuses `page_identity_changed`
 (`rename_identity_conflict`) when a file would take over a page whose

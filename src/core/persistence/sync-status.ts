@@ -89,7 +89,7 @@ export interface SyncStatus {
   rate_pages_per_min: number | null;
   eta_seconds: number | null;
   holds: SyncStatusHold[];
-  /** #6729: renames synced in the last 72 h whose page identity was not kept (old page soft-deleted with its facts and links; `gbrain repair rename-identity` carries them). */
+  /** #6729: renames synced in the last 72 h whose page identity was not kept (old page soft-deleted with its facts and links; `gbrain restore` keeps one). */
   identity_downgrades: import('../sync-identity-downgrades.ts').IdentityDowngrade[];
   last_error: SyncStatusError | null;
   /** Whether anything (a hold or the last error) waits on a person; the first such reason. */

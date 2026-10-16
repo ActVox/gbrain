@@ -214,7 +214,7 @@ test('a chained rename carries the held identity, and a changed old page keeps t
   expect((await engine.getPage('notes/x', { sourceId: s.id }))?.id).toBe(x.id);
 }), 240_000);
 
-test('#6729: an inexact rename onto a broken file is a delete plus an add; the old page stays recorded and the remedy carries it once the file is fixed', () => each(async engine => {
+test('#6729: an inexact rename onto a broken file is a delete plus an add; the old page stays recorded, and once the file is fixed the record names the new page', () => each(async engine => {
   const s = await source(engine, { 'notes/old.md': long('Old') });
   await s.sync();
   const page = (await engine.getPage('notes/old', { sourceId: s.id }))!;
@@ -230,14 +230,8 @@ test('#6729: an inexact rename onto a broken file is a delete plus an add; the o
   await s.sync();
   const fresh = (await engine.getPage('notes/new', { sourceId: s.id }))!;
   expect(fresh.id).not.toBe(page.id);
-  const { renameIdentityRepair } = await import('../src/core/repair/rename-identity.ts');
-  const scope = { brain_id: 'test', source_ids: [s.id] };
-  const preview = await renameIdentityRepair.plan(engine, scope, null, { apply: false });
-  expect(preview.items.map(item => item.change)).toEqual([{ from: 'notes/old', to: 'notes/new' }]);
-  const [item] = (await renameIdentityRepair.plan(engine, scope, null, { apply: true, expect: preview.preview_hash })).items;
-  const ctx = { engine, config: { engine: engine.kind }, remote: false, dryRun: false, logger: { info() {}, warn() {}, error() {} } };
-  expect(await renameIdentityRepair.apply(ctx as never, item!)).toMatchObject({ applied: true, outcome: 'carried' });
-  expect(await engine.executeRaw('SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id=$1', [s.id])).toEqual([{ alias_slug: 'notes/old', canonical_slug: 'notes/new' }]);
+  const { listIdentityDowngrades } = await import('../src/core/sync-identity-downgrades.ts');
+  expect((await listIdentityDowngrades(engine, [s.id])).map(record => [record.old_slug, record.new_slug])).toEqual([['notes/old', 'notes/new']]);
 }), 240_000);
 
 test('the hold write and the cursor step past it commit together: a crash between them persists neither', () => each(async engine => {

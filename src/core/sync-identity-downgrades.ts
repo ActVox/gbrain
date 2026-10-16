@@ -2,12 +2,11 @@
  * #6729: inexact Git renames a sync could not confirm (see sync-rename-identity.ts) were split into a delete plus an
  * add, so the old page's facts, links and aliases stay on its soft-deleted slug. Each one is recorded here for the
  * 72-hour recovery window: `gbrain sync status --json` lists it, doctor `rename_identity_downgrades` names it, the
- * purge leaves its old page alone while the record is open, and `gbrain repair rename-identity` carries the identity
- * onto the new page when the operator confirms the pair was a real rename.
+ * purge leaves its old page alone while the record is open, and the report names the detached restore of the old page.
  *
  * One `op_checkpoints` row per old page (op `sync-identity-downgrade`, fingerprint = the old page id);
- * `completed_keys[0]` holds the record. A record closes when its window ends, when the remedy carries it, or when its
- * old page is restored or purged (the readers join the soft-deleted page).
+ * `completed_keys[0]` holds the record. A record closes when its window ends, or when its old page is restored or
+ * purged (the readers join the soft-deleted page).
  */
 import type { BrainEngine } from './engine.ts';
 import { resolveSlugForPath, type DowngradedRename, type RenameDowngradeReason } from './sync.ts';
@@ -85,11 +84,6 @@ export async function listIdentityDowngrades(engine: Pick<BrainEngine, 'executeR
   return rows.map(row => ({ ...(typeof row.record === 'string' ? JSON.parse(row.record) as IdentityDowngrade : row.record), new_slug: row.new_slug }));
 }
 
-/** Closes one record (the remedy carried it). */
-export async function clearIdentityDowngrade(engine: Pick<BrainEngine, 'executeRaw'>, oldPageId: number): Promise<void> {
-  await engine.executeRaw('DELETE FROM op_checkpoints WHERE op = $1 AND fingerprint = $2', [IDENTITY_DOWNGRADE_OP, String(oldPageId)]);
-}
-
 /** A recorded downgrade (as opposed to a raw pair a sync has not recorded yet). */
 export const isRecordedDowngrade = (entry: DowngradedRename): entry is IdentityDowngrade => 'old_page_id' in entry;
 
@@ -112,17 +106,22 @@ export async function noteIdentityDowngrades<T extends { status: string; identit
   }
 }
 
-/** The read-only preview of the remedy for one source. */
-export const identityRemedyPreviewArgv = (sourceId: string): string[] => ['gbrain', 'repair', 'rename-identity', '--source', sourceId];
+/**
+ * Restores one old page with its facts, links and aliases, beside the new page. Where the restore cannot re-create the
+ * old file, it refuses `canonical_file_absent` and names `--detach` (database-only) as the user's choice.
+ */
+export const identityRestoreArgv = (record: Pick<IdentityDowngrade, 'source_id' | 'old_slug'>): string[] =>
+  ['gbrain', 'restore', record.old_slug, '--source-id', record.source_id, '--force'];
+/** The read-only listing of a source's open records. */
+export const identityStatusArgv = (sourceId: string): string[] => ['gbrain', 'sync', 'status', '--source', sourceId, '--json'];
 
 /** The sync report's lines for the downgraded pairs of one run. */
 export function identityDowngradeLines(records: readonly IdentityDowngrade[]): string[] {
   if (!records.length) return [];
-  const sources = [...new Set(records.map(record => record.source_id))];
   return [
     ...records.map(record => `  Identity not kept: ${record.from} -> ${record.to} (git similarity ${record.similarity}%; ${REASON_TEXT[record.reason]}). `
       + `${record.facts} fact(s), ${record.links} link(s) and ${record.aliases} alias(es) stay on the soft-deleted ${record.old_slug} until ${record.expires_at} (72 h); `
-      + `${record.new_slug ? `${record.new_slug} starts fresh.` : 'the new file did not import.'}`),
-    `  If a pair above is one page that moved, carry its identity before the window ends: preview ${sources.map(source => identityRemedyPreviewArgv(source).join(' ')).join(' ; ')}, then apply with --apply --expect <hash>.`,
+      + `${record.new_slug ? `${record.new_slug} starts fresh.` : 'the new file did not import.'} To keep the old page, restore it before then: ${identityRestoreArgv(record).join(' ')}`),
+    '  A move keeps its page when the files share a frontmatter id: (or a unique slug: line or title); to move and rewrite a page, move, commit and sync, then edit.',
   ];
 }
