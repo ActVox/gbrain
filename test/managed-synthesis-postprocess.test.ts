@@ -758,7 +758,7 @@ const quietly = async <T>(fn: () => Promise<T>): Promise<T> => {
   try { return await fn(); } finally { write.mockRestore(); }
 };
 
-test('#6757: a committed-outputs read past the statement timeout defers the pass; after the transcript grows and the child rows are pruned, the replay itself runs zero child jobs and stamps the output verification-deferred instead of grounding it against the rewritten file', async () => {
+test('#6757: a committed-outputs read past the statement timeout defers the pass; after the transcript grows and the child rows are pruned, the replay itself runs zero child jobs and verifies the output\'s quotes against the current transcript', async () => {
   await fixture(async ({ engine, sourceId, root, opts, calls }) => {
     const timeout = failCommittedOutputsRead(engine);
     let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
@@ -798,12 +798,12 @@ test('#6757: a committed-outputs read past the statement timeout defers the pass
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name = 'subagent' AND data->>'source_id'=$1", [sourceId])).toEqual([]);
     expect(next.details.postprocess_resumed).toEqual([slug]);
     expect(next.details.written_slugs).toEqual([slug]);
-    expect(next.details.verification_deferred).toEqual([slug]);
     const stamped = (await engine.readPageSnapshot(slug, { sourceId }))!.page;
     expect(stamped.frontmatter.dream_generated).toBe(true);
-    expect(stamped.frontmatter.quote_verification).toBe('verification-deferred');
-    expect(stamped.frontmatter.quote_verified_at).toBeUndefined();
-    expect(stamped.compiled_truth).toContain('"an entirely invented');
+    // The grown transcript still lacks the invented quotation, so it fails grounding the way any unfound quote does.
+    expect(stamped.compiled_truth).not.toContain('"an entirely invented');
+    expect(stamped.frontmatter.unverified_claims).toEqual([expect.objectContaining({ reason: 'quote_not_in_source', detail: 'an entirely invented quotation that should lose its marks' })]);
+    expect(stamped.frontmatter.quote_verification).toBeUndefined();
     expect(readFileSync(join(root, `${slug}.md`), 'utf8')).toContain('dream_generated: true');
     expect(JSON.parse(await engine.getConfig(POSTPROCESS_PENDING_KEY) ?? '{}')[sourceId]).toBeUndefined();
   });
