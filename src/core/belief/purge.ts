@@ -5,12 +5,15 @@
  * 1. purged keys: every event of a purged claim fingerprint (fact and take
  *    events carry the claim-only fingerprint in `claim_fp`, so kind, holder,
  *    subject and the rename chain cannot evade it) and every event of the purged
- *    page's lifetimes loses its value and is marked `purged`;
+ *    page's lifetimes loses its value and its prior_hash and is marked `purged`;
  * 2. carrying fields: every event in the source whose value contains a purge
  *    needle has each carrying field that quotes a claim replaced by the
  *    redaction marker, its value_hash recomputed and the field listed in
  *    `redacted_fields`; each replacement is registered in `belief_redactions`
- *    so later appends keep the marker until an owner release (append.ts);
+ *    so later appends keep the marker until an owner release (append.ts). A
+ *    later event of the key that named the old hash as its prior_hash names the
+ *    new one, and the redacted event keeps its own prior_hash only when it names
+ *    an earlier recorded value, so no hash of the quoted text stays readable;
  * 3. derived keys: each row the derivation walk hides gets one `derived.hidden`
  *    event naming the purge request; `readBeliefHistory` hides the key's events
  *    up to it (and its backfill events at any id).
@@ -81,9 +84,9 @@ async function registerRedaction(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: 
 /** Pass 1: purged keys lose their values. Returns the events marked. */
 export async function redactPurgedKeys(tx: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; claimFps: readonly string[]; lifetimes: readonly string[] }): Promise<number> {
   if ((!input.claimFps.length && !input.lifetimes.length) || redactionFault === 'skip_purged_keys') return 0;
-  const rows = await tx.executeRaw(`UPDATE belief_events SET value = NULL, value_hash = NULL, purged = true
+  const rows = await tx.executeRaw(`UPDATE belief_events SET value = NULL, value_hash = NULL, prior_hash = NULL, purged = true
     WHERE source_id = $1 AND ((subject_kind IN ('fact','take') AND claim_fp = ANY($2::text[])) OR page_lifetime = ANY($3::uuid[]))
-      AND (purged = false OR value IS NOT NULL) RETURNING id`, [input.sourceId, [...input.claimFps], [...input.lifetimes]]);
+      AND (purged = false OR value IS NOT NULL OR prior_hash IS NOT NULL) RETURNING id`, [input.sourceId, [...input.claimFps], [...input.lifetimes]]);
   return rows.length;
 }
 
@@ -114,7 +117,7 @@ export async function redactCarryingFields(tx: Pick<BrainEngine, 'executeRaw'>, 
         return typeof text === 'string' && quotes(text, forms);
       });
       if (!fields.length) continue;
-      const [event] = await tx.executeRaw<{ value: unknown; redacted_fields: string[] | null }>('SELECT value, redacted_fields FROM belief_events WHERE id = $1', [row.id]);
+      const [event] = await tx.executeRaw<{ value: unknown; value_hash: string | null; redacted_fields: string[] | null }>('SELECT value, value_hash, redacted_fields FROM belief_events WHERE id = $1', [row.id]);
       const value = (typeof event!.value === 'string' ? JSON.parse(event!.value) : event!.value) as Record<string, unknown>;
       const next = { ...value };
       for (const field of fields) {
@@ -125,8 +128,11 @@ export async function redactCarryingFields(tx: Pick<BrainEngine, 'executeRaw'>, 
         out.push({ subject_key: row.subject_key, field, event_id: Number(row.id) });
       }
       const listed = [...new Set([...(event!.redacted_fields ?? []), ...fields])];
-      await tx.executeRaw('UPDATE belief_events SET value = $2::text::jsonb, value_hash = $3, redacted_fields = $4::text[] WHERE id = $1',
-        [row.id, canonicalJson(next), valueHash(next), listed]);
+      await tx.executeRaw(`UPDATE belief_events e SET value = $2::text::jsonb, value_hash = $3, redacted_fields = $4::text[],
+          prior_hash = CASE WHEN EXISTS (SELECT 1 FROM belief_events o WHERE o.source_id = e.source_id AND o.subject_key = e.subject_key AND o.id < e.id
+            AND o.value_hash = e.prior_hash) THEN e.prior_hash END WHERE e.id = $1`, [row.id, canonicalJson(next), valueHash(next), listed]);
+      if (event!.value_hash) await tx.executeRaw(`UPDATE belief_events SET prior_hash = $4 WHERE source_id = $1 AND subject_key = $2 AND id > $5 AND prior_hash = $3`,
+        [input.sourceId, row.subject_key, event!.value_hash, valueHash(next), row.id]);
     }
     if (rows.length < SCAN_BATCH) break;
   }

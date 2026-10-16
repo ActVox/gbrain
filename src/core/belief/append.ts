@@ -142,7 +142,7 @@ export async function appendBeliefEvents(tx: BrainEngine, input: BeliefEventDraf
       trust_tier: d.trustTier, writer_tier: d.writerTier && d.writerTier !== d.trustTier ? d.writerTier : null, tier_basis: d.tierBasis ?? 'row',
       visibility: d.visibility, publication_id: ctx.publicationId, ord, source_time: d.sourceTime ?? null, valid_from: d.validFrom ?? null,
       valid_until: d.validUntil ?? null, value: value == null ? null : canonicalJson(value), value_hash: value == null ? null : valueHash(value),
-      prior_hash: d.priorHash ?? null, state_hash: d.stateHash, cause: canonicalJson(d.cause), claim_fp: d.claimFp ?? null, purged,
+      prior_hash: purged || d.eventType.endsWith('.purged') || redactions.has(d) ? null : d.priorHash ?? null, state_hash: d.stateHash, cause: canonicalJson(d.cause), claim_fp: d.claimFp ?? null, purged,
       redacted_fields: redactions.get(d) ?? null,
     };
   });

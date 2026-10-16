@@ -173,6 +173,20 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(r).toEqual([['page.published', 'private'], ['take.asserted', 'private'], ['page.published', 'world'], ['take.asserted', 'world']]);
     }, 240_000);
 
+    test('#36: no recorded hash of a purged or redacted value survives as a prior_hash', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        const slug = 'companies/acme-example';
+        await b.put(slug, beliefPage({ facts: [X, { claim: 'Acme sells widgets', context: `notes say ${X}` }] }));
+        await b.put(slug, beliefPage({ facts: [{ claim: X, confidence: '0.9' }, { claim: 'Acme sells widgets', context: `notes say ${X}`, confidence: '0.8' }] }));
+        const quoted = new Set((await b.events()).filter(e => JSON.stringify(e.value ?? {}).includes(X)).flatMap(e => [e.value_hash, e.prior_hash]).filter((h): h is string => !!h));
+        await purgeFact(b, X);
+        const events = await b.events();
+        report({ quoted: quoted.size >= 4, prior: events.filter(e => e.prior_hash && quoted.has(e.prior_hash)).map(e => [e.event_type, e.purged]),
+          value: events.filter(e => e.value_hash && quoted.has(e.value_hash)).length });
+      }));
+      expect(r).toEqual({ quoted: true, prior: [], value: 0 });
+    }, 240_000);
+
     test('#14: a hard delete (purge, managed and unmanaged retention) records every cascaded inbound link as link.retracted in its own stream', async () => {
       const run = (managed: boolean, remove: (b: BeliefBrain, slug: string) => Promise<unknown>) => collect<string[]>(report => brain(async b => {
         await b.put('people/target-example', beliefPage({ type: 'person', title: 'Target Example' }));
