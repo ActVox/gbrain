@@ -105,7 +105,7 @@ export function terminalVerifyArgv(sourceId: string): string[] { return failures
 export function terminalInspectArgv(requestId: string): string[] { return ['gbrain', 'write-request', requestId, '--json']; }
 
 function syncRetry(sourceId: string, why: string): Action {
-  return { argv: ['gbrain', 'sync', '--source', sourceId, '--no-pull', '--retry-failed', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why,
+  return { argv: ['gbrain', 'sync', '--source', sourceId, '--no-pull', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why,
     verify: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] }, docs: 'docs/guides/sync-unblock-runbook.md' };
 }
 function inspect(sourceId: string, why: string, userMessage?: string): Action {

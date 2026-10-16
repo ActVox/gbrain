@@ -128,9 +128,12 @@ export async function readRequestIndexStates(engine: Pick<BrainEngine, 'executeR
 
 const shellWord = (value: string) => /^[\w./@:=+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 
-/** The exact retry for the failed checkpoint: same source and cursor-selecting options, plus the recorded processing flags. */
+/**
+ * The exact retry for the failed run: the same source and discovery options, plus the recorded processing flags. #6712
+ * PR 3 (L7): a plain sync retries a recorded failure by itself, so the command carries no retry flag.
+ */
 export function checkpointRetryCommand(input: { sourceId: string; processingOptions?: Partial<SyncProcessingOptions> | null; syncOptions?: SyncCursorOptions | null; repoPath?: string | null }): string {
-  const base = `gbrain sync --source ${shellWord(input.sourceId)} --no-pull --retry-failed`;
+  const base = `gbrain sync --source ${shellWord(input.sourceId)} --no-pull`;
   // A compacted receipt (intent cleared) or a checkpoint admitted before the options were recorded
   // cannot name its cursor; never print assumed defaults for it.
   if (!input.syncOptions) return `${base} with the same options as the failed run (this receipt no longer records them)`;

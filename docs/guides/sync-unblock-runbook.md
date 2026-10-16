@@ -54,7 +54,7 @@ moving again; ask me only about the ones gbrain will not decide by itself."*
    refuses every repair-class hold instead, as releases before #6377 did.
 3. Run that sync. It re-screens the scheduled files, imports each one that now
    passes and holds again what still fails; the rest of the source is never
-   blocked. With `--retry-failed` a cursor an older release left blocked on a
+   blocked. A cursor an older release left blocked on a
    page fault converts in place (same run, no rediscovery).
 4. If `needs_human` is true, stop looping and page a person with the slug and
    `human_reason` from `status` (`next.user_message` is written for relay).
@@ -174,7 +174,8 @@ earlier one is held. A file that changed after its request was admitted
 (`source_changed`) is retried after the manifest's last entry, at most three
 times, then held `worktree_dirty`. A transport fault re-freezes the entry in
 place; a systemic stop is re-frozen in place by the next plain sync, at most
-three times in a row before the failure stays recorded for `--retry-failed`.
+three times in a row, and once that bound is spent the next plain sync
+resets it and tries again.
 
 A `knock_on` or `knock_on_exhausted` error was written by an older gbrain
 (a page cancelled only because another page of its sync did not commit, or
@@ -187,7 +188,7 @@ the extra drain and reports it); an older build's `window_dropped` reads as
 a knock-on. A checkpoint refused by a receipt at an index the cursor passed
 without a commit is re-assessed on every resume and commits without
 rediscovering the manifest; one a receipt still blocks is rediscovered by
-`--retry-failed`.
+the next plain sync.
 
 An unknown code is systemic and human: `gbrain errors <code>` explains it
 offline, `gbrain doctor --json` says what the brain thinks.
@@ -223,7 +224,7 @@ it and kept going; the receipt lists the hold (`held`, `held_count`) and
   run ([held files](write-refusals.md#held-files-and-content-refusals)).
 - `revision_conflict`, `page_identity_changed`, `pinned_git_worktree_conflict`
   as a `last_error` come from a run on an older release; this release holds
-  them. Rerun with `--retry-failed`: the stopped entry converts in place, the
+  them. Rerun the plain sync: the stopped entry converts in place, the
   manifest is not re-frozen. A `revision_conflict` or `cancelled` error with
   `detail: knock_on` needs no flag: the next plain sync re-freezes the entry
   (act on `root_cause` instead).
@@ -250,8 +251,11 @@ repair: a source in a subdirectory of its repository pins one
 Ask the user which mode the source keeps. Restoring the pin to the run's mode
 lets the next plain `gbrain sync --no-pull --source <id>` finish (the refused
 checkpoint is retried by itself); keeping the new pin takes
-`gbrain sync --no-pull --source <id> --retry-failed`, and the pages the refused
-run wrote keep their old slugs beside the new ones. A source rooted at its
+`gbrain repair managed-sync-orphans --source <id>` (it lists the cursor as
+`slug_mode_refused`; preview, then `--apply --expect <hash>`), after which the
+next sync discovers the source again under the kept pin. No sync retries that
+checkpoint by itself. The pages the refused run wrote keep their old slugs
+beside the new ones. A source rooted at its
 repository root never gets this code: both modes give it the same slugs, and
 a checkpoint an older release refused there as `revision_conflict` finishes on
 the next plain sync.
@@ -260,10 +264,10 @@ the next plain sync.
 
 The frozen manifest always lived in the cursor (`op_checkpoints`, op
 `managed-sync`). What threw it away was the failure ledger: every run death
-wrote a row, and `--retry-failed` read the row and rediscovered from index 0
+wrote a row, and the retry read the row and rediscovered from index 0
 (eight to twelve minutes of silence on a 14k-entry source). Page faults are
-now holds and connection faults are not recorded, so a relaunch, with or
-without `--retry-failed`, finds the cursor and resumes it. Only a systemic
+now holds and connection faults are not recorded, so a relaunch finds
+the cursor and resumes it. Only a systemic
 failure still writes a ledger row.
 
 When HEAD moved past the pinned target while the run drained, the drain takes
@@ -291,7 +295,7 @@ how often a person or an agent had to step in, per UTC day for the last seven
 days, so a soak can show that sync keeps moving on its own.
 
 - `interventions`: `sync_non_plain` (a `gbrain sync` with a recovery flag such
-  as `--retry-failed`, `--full`, `--break-lock` or `--skip-failed`; the plain
+  as the deprecated `--retry-failed`, `--full`, `--break-lock` or `--skip-failed`; the plain
   scheduler flags `--all`, `--no-pull`, `--hard-deadline`, `--no-embed`,
   `--no-lanes`, `--no-bulk` and `--json` do not count), `repair_apply` (a
   `gbrain repair … --apply` of any kind but file-drift), `unblock_apply`,
