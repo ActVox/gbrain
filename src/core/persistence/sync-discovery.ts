@@ -47,7 +47,9 @@ export interface SyncEntry { path: string; sourcePath: string; action: 'import' 
   /** #6712 PR 1: the page moved since its last recorded import (or has no record); imported only when the freeze proves it a no-op, else held `file_drift`. */
   drift?: SyncDriftSide;
   /** #6727: live pages with no recorded origin whose slugs fold to this file's slug, several or one the importer cannot write; the freeze holds it `legacy_slug_conflict`. */
-  legacySlugs?: string[]; }
+  legacySlugs?: string[];
+  /** #6729 x #6727: the one legacy page carries an explicit frontmatter id that differs from the file's, so it is another document; held `legacy_slug_conflict` (`explicit_id_conflict`). */
+  legacyIdVeto?: true; }
 /** Files that map to a slug another origin keeps; they are left out of the manifest until one is renamed. */
 export interface SyncSlugCollision { slug: string; kept: string; skipped: string[]; }
 /** #5032: a file sync skipped on this host with a named refusal, without failing the run. */
@@ -486,7 +488,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (!slug) throw opError('invalid_params', 'The imported file has no usable page slug.',
       `${entry.sourcePath} in ${sourceId} yields no page slug from its path or frontmatter; nothing was written. Rename the file or set a frontmatter slug and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
     if (!company && entry.action === 'import' && !origin && !isCodeFilePath(entry.sourcePath)) {
-      slug = await adoptLegacyPage(engine, identities, bySlug.get(slug), slug, entry);
+      slug = await adoptLegacyPage(engine, discovered, identities, bySlug.get(slug), slug, entry);
       entry.slug = slug;
       claims.set(slug, [...(claims.get(slug) ?? []), entry]);
       continue;
@@ -572,7 +574,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   }
   return discovered;
 }
-type LegacyIdentity = { id: number; slug: string; source_path: string | null; deleted_at: Date | string | null };
+type LegacyIdentity = { id: number; slug: string; source_path: string | null; deleted_at: Date | string | null; fm_id: string | null };
 /**
  * #6727: per discovery, its live pages with no recorded origin whose slug the current fold changes, by folded slug. Built on
  * first need; database-only pages (never imported from a file) are left out by one read over just those candidates, so a
@@ -590,15 +592,19 @@ async function foldLegacyPages(engine: BrainEngine, identities: LegacyIdentity[]
  * #6727: the slug a file with no recorded origin imports as. With no live page at its folded slug, exactly one legacy page
  * (an older gbrain imported it before the current fold) folding to it is the file's: it imports into that page (same id,
  * links and history). Several, or one whose slug the importer cannot write as it stands (`validateSlug` lowercases), keep
- * the folded slug and are named on the entry, so the freeze holds the file `legacy_slug_conflict`.
+ * the folded slug and are named on the entry, so the freeze holds the file `legacy_slug_conflict`. #6729: so does the one
+ * page when its explicit frontmatter id differs from the file's (`explicitIdVeto`): it is another document.
  */
-async function adoptLegacyPage(engine: BrainEngine, identities: LegacyIdentity[], holder: LegacyIdentity | undefined, slug: string, entry: SyncEntry): Promise<string> {
+async function adoptLegacyPage(engine: BrainEngine, discovery: SyncDiscovery, identities: LegacyIdentity[], holder: LegacyIdentity | undefined, slug: string, entry: SyncEntry): Promise<string> {
   if (holder && holder.deleted_at == null) return slug;
   let folded = legacyByFold.get(identities);
   if (!folded) legacyByFold.set(identities, folded = foldLegacyPages(engine, identities));
   const legacy = (await folded).get(slug) ?? [];
   const writable = () => { try { return validateSlug(legacy[0]!) === legacy[0]; } catch { return false; } };
-  if (legacy.length === 1 && writable()) return legacy[0]!;
+  const legacyId = legacy.length === 1 ? identities.find(page => page.slug === legacy[0] && page.deleted_at == null)?.fm_id ?? null : null;
+  const vetoed = legacyId !== null && explicitIdVeto(incomingId(discovery, entry), legacyId);
+  if (legacy.length === 1 && writable() && !vetoed) return legacy[0]!;
+  if (vetoed) entry.legacyIdVeto = true;
   if (legacy.length) entry.legacySlugs = [...legacy].sort();
   return slug;
 }

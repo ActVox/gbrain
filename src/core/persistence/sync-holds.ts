@@ -82,7 +82,7 @@ export interface PreparationStallMeta {
   /** The `gbrain sync` arguments that resume the cursor with its stored options (after `sources retry-held`). */
   sync_argv: string[];
 }
-export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | FenceReason;
+export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason;
 
 export interface GitHoldMeta {
   reason?: GitHoldReason;
@@ -669,8 +669,11 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
     case 'legacy_slug_conflict': {
       const slugs = record.meta.legacy_slugs ?? [];
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
-      return { argv: verify.argv, consent: [], actor: 'user', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#legacy_slug_conflict',
-        user_message: slugs.length > 1
+      return { argv: verify.argv, consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code, record.meta.reason),
+        user_message: record.meta.reason === 'explicit_id_conflict'
+          ? `${record.path} folds to page ${JSON.stringify(slugs[0] ?? '')}, which an older gbrain imported without recording its file, but the file's frontmatter id differs from that page's, so it is a different document and sync held it rather than give it that page's facts, links and history. `
+            + `If it is the same document, give the file the page's id; if not, rename the file to a name that folds to another slug (it imports as a new page), or remove the old page with gbrain delete --source ${source} -- '${slugs[0] ?? '<slug>'}' (recoverable for 72 h); then run gbrain sync --source ${source} --no-pull.`
+          : slugs.length > 1
           ? `${record.path} belongs to one of the pages ${slugs.map(slug => JSON.stringify(slug)).join(', ')}, which an older gbrain imported without recording their file, so sync held it rather than guess or create another page. `
             + `Pick the page that is this file's and remove each other one with gbrain delete --source ${source} -- '<slug>' (recoverable for 72 h), or rename the file if none of them is its page, then run gbrain sync --source ${source} --no-pull.`
           : `${record.path} matches page ${JSON.stringify(slugs[0] ?? '')}, which an older gbrain imported without recording its file under a slug with capitals that sync cannot write and no gbrain command can address yet, so sync held the file rather than create a second page. `
