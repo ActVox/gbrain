@@ -743,6 +743,10 @@
       },
       {
         "category": "brain",
+        "name": "managed_sync_latency"
+      },
+      {
+        "category": "brain",
         "name": "git_convergence"
       },
       {

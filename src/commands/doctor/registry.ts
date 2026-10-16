@@ -119,6 +119,7 @@ import { syncConfigKeysEntry } from './checks/sync-config-keys.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
+import { managedSyncLatencyEntry } from './checks/managed-sync-latency.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
 import {
@@ -214,6 +215,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   imageAssetsEntry,
   imageEmbeddingCoverageEntry,
   syncFreshnessEntry,
+  managedSyncLatencyEntry,
   gitConvergenceEntry,
   decideHealthEntry,
   unlinkedFactsEntry,

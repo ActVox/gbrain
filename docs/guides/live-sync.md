@@ -123,7 +123,8 @@ Timing knobs the drain uses:
 `gbrain config` keeps three kinds of `sync.*` keys (`src/core/sync-config-keys.ts`):
 
 - **Tunables** you set and keep: `sync.bulk_size`, `sync.lanes`, `sync.exclude`, `sync.include_hidden`,
-  `sync.include_working_tree`, `sync.holds`, `sync.write_through`, `sync.cost_gate_min_usd`.
+  `sync.include_working_tree`, `sync.holds`, `sync.write_through`, `sync.cost_gate_min_usd`, `sync.on_commit`,
+  `sync.freshness_target_seconds` ([On-commit sync](#on-commit-sync)).
 - **Rollback keys**, the way back a notice or migration promised: `sync.job_drain`, `sync.foreground_priority`,
   `sync.federated_v2`, `sync.waive_batch`, `sync.bulk`. Each one set to `false` restores the earlier behavior, and
   stays honored until at least 2027-01-14 (`CONFIG_ROLLBACK_WINDOWS` in `src/core/wire-skew.ts`). They are not
@@ -207,6 +208,45 @@ Two more tips:
 
 A shell loop around `gbrain sync --source <id> --no-pull` until it prints
 `synced` also works; each run drains as far as its deadline allows.
+
+## On-commit sync
+
+On a managed brain, `gbrain serve` can sync a source as soon as a commit lands
+in its checkout, instead of waiting for the next scheduled sync. It is off by
+default; turn it on with:
+
+```bash
+gbrain config set sync.on_commit true
+```
+
+The serve reads the flag every 30 seconds, so no restart is needed in either
+direction. While it is on, the stdio `gbrain serve` polls `git rev-parse HEAD`
+in the checkout of every managed source this host owns, every 3 seconds
+(`GBRAIN_SERVE_HEAD_POLL_MS`, 1 to 30 s), with a file watch on the git
+directory that only brings the next poll forward. When HEAD has stopped moving
+for 3 seconds (`GBRAIN_SERVE_HEAD_DEBOUNCE_MS`) and differs from what the
+source last synced, the serve runs one managed sync (`--no-pull`) as this
+host's CLI writer. A sync that is already running, here or in another process,
+is never doubled: the commit waits and gets one more sync when that one ends.
+A sync that stops resumable is resumed up to three times. Nothing is written
+into the checkout or `.git`, and an idle poll costs one git call per checkout.
+`gbrain serve --http` does not run the watcher yet.
+
+For a small page, expect a commit to be searchable in about 5 to 15 seconds:
+up to 3 s to notice, the 3 s debounce, then the page write. Embedding follows
+the sync's own embedding path, so commit→embedded is longer.
+
+Each managed source's freshness over the last 24 hours shows in
+`gbrain sync status --source <id>` (the `freshness` block in `--json`) and
+in `gbrain status`: p50 and p95 of commit→searchable (from the commit's
+committer time to the page write's `completed_at`) and commit→embedded (to
+the page's last chunk embedding). A first sync and working-tree entries are not
+counted, and a run that spans several commits is dated by its newest. Doctor
+`managed_sync_latency` warns when p95 commit→searchable is over
+`sync.freshness_target_seconds` (default 300) and fails over one hour; it
+grades only a brain with `sync.on_commit` on or a target set, and otherwise
+reports the numbers. A stopped or stalled sync is reported by doctor
+`managed_sync_not_moving`, not by this check.
 
 ## Implementation
 
