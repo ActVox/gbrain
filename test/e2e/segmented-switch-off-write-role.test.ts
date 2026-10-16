@@ -71,6 +71,7 @@ const SEGMENT_TABLES = ['page_body_manifest', 'page_body_staging_parts', 'page_b
     if (writer) { await disposePersistenceConsumer(writer); await writer.disconnect(); }
     if (engine) {
       await disposePersistenceConsumer(engine);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
       for (const t of granted) await engine.executeRaw('DROP POLICY IF EXISTS ' + WRITER + '_all ON ' + t);
       await engine.executeRaw('DROP OWNED BY ' + WRITER).catch(() => undefined);
       await engine.executeRaw('DROP ROLE IF EXISTS ' + WRITER);

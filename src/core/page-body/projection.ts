@@ -70,6 +70,12 @@ export const STALE_CHUNKS_SQL = `WITH RECURSIVE occ(o) AS (
   SELECT c.id FROM content_chunks c -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
   WHERE c.page_id=$1 AND c.occurrence_id IS NULL AND (c.body_generation IS NULL OR (cardinality($3::bigint[])=0 AND c.body_generation<=$2::bigint))`;
 
+/** The occurrence ids of page $1's manifest at generation $2. */
+export async function liveOccurrenceIds(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, generation: number): Promise<number[]> {
+  return (await engine.executeRaw<{ occurrence_id: number | string }>(`SELECT occurrence_id FROM page_body_manifest WHERE page_id=$1 AND staging_id IS NULL
+    AND gen_from <= $2 AND (gen_to IS NULL OR gen_to > $2)`, [pageId, generation])).map(row => Number(row.occurrence_id));
+}
+
 /** The page still stores a chunk row its live generation does not hold (a deferred retirement): sealing it would show the row. */
 export async function hasStaleChunks(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, generation: number, live: readonly number[]): Promise<boolean> {
   return (await engine.executeRaw(`${STALE_CHUNKS_SQL} LIMIT 1`, [pageId, generation, live])).length > 0;
@@ -135,7 +141,11 @@ async function projectSegmentedPage(engine: BrainEngine, ref: { sourceId: string
   opts: { expectedRevision?: string }): Promise<SegmentedProjectionResult> {
   const page = await readProjectionPage(engine, ref);
   if (!page || (opts.expectedRevision !== undefined && page.knowledge_revision !== opts.expectedRevision)) return { chunks: 0, retired: 0, sealed: false };
-  if (page.text_projection_revision === page.knowledge_revision) return { chunks: 0, retired: 0, sealed: true };
+  // A sealed page holding a retired occurrence's row (sealed by an older binary over a deferred retirement) is built again to retire it.
+  if (page.text_projection_revision === page.knowledge_revision
+    && !await hasStaleChunks(engine, Number(page.id), Number(page.body_generation), await liveOccurrenceIds(engine, Number(page.id), Number(page.body_generation)))) {
+    return { chunks: 0, retired: 0, sealed: true };
+  }
   if (!await claimProjection(engine, ref)) return { chunks: 0, retired: 0, sealed: false };
   try {
     return await buildClaimedProjection(engine, ref, page);

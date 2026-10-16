@@ -25,7 +25,7 @@ import type { PageSnapshot } from '../page-state/types.ts';
 import type { JsonObject, SegmentedPageMeta } from '../page-body/types.ts';
 import type { PreparedSegmentedBody, SegmentChunkingContext, SegmentedLivePage, SegmentedStagingOwner } from '../page-body/ingest.ts';
 import { materializeSegmentedBody, prepareSegmentedBody, segmentWriteScope, stringBodyFlags, stringRegion } from '../page-body/ingest.ts';
-import { buildSegmentedProjection } from '../page-body/projection.ts';
+import { buildSegmentedProjection, hasStaleChunks, liveOccurrenceIds } from '../page-body/projection.ts';
 import { maintenanceAttribution } from './attribution.ts';
 import { readPageBodyPolicy, chooseBodyStorage, SEGMENTED_DEMOTE_AT_OR_BELOW_BYTES, type PageBodyPolicy } from '../page-body/limits.ts';
 import { SEGMENTED_CHUNKER_VERSION } from '../page-body/segment-chunks.ts';
@@ -127,7 +127,7 @@ export interface SegmentedApplyInput {
   requestId?: string | null;
 }
 
-/** `complete`: every occurrence has chunks and the flip retired the old rows, so the caller seals as its last step (`sealSegmentedPage`). */
+/** `complete`: every occurrence has chunks and no retired occurrence's row is still stored, so the caller seals as its last step (`sealSegmentedPage`). */
 export interface SegmentedApplied { pageId: number; complete: boolean; retireDeferred: boolean }
 
 /**
@@ -168,7 +168,10 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
   await faultPoint('segmented:flipped', { sourceId: input.sourceId });
   await tx.setBodyStagingState(prepared.stagingId, 'committed', { commitRequestId: input.requestId ?? null });
   const chunked = prepared.createRows ? createChunks !== null : prepared.unchunked === 0;
-  return { pageId, complete: chunked && !flip.retireDeferred, retireDeferred: flip.retireDeferred };
+  // The flip retires only the occurrences this write closes: rows an earlier write's deferred retirement left keep the page unsealed.
+  const complete = chunked && !flip.retireDeferred
+    && !await hasStaleChunks(tx, pageId, prepared.newGeneration, await liveOccurrenceIds(tx, pageId, prepared.newGeneration));
+  return { pageId, complete, retireDeferred: flip.retireDeferred };
 }
 
 /**
