@@ -23,6 +23,7 @@ import {
   chmodSync,
   existsSync,
   readdirSync,
+  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -765,6 +766,7 @@ describe('eval-spend-guard.sh stale run leases (r3-d1)', () => {
       expect(next.stderr).toContain('ps -o pid,pgid,cmd -g ' + leader);
       expect(next.stderr).toContain('kill -TERM -- -' + leader);
       expect(next.stderr).toContain('nothing was stopped');
+      expect(next.stderr).toContain('retired automatically once the group exits (or now: rm ' + lease + '.reported)');
       expect(unknownRows()).toEqual([expect.objectContaining({ stale_run_id: runId, pgid: leader, lease, cost_usd: 0, reason: 'guard_gone_group_may_run' })]);
       expect(unknownRows()[0]).not.toHaveProperty('run_id');
       expect(alive(leader)).toBe(true);
@@ -792,4 +794,27 @@ describe('eval-spend-guard.sh stale run leases (r3-d1)', () => {
     expect(existsSync(foreign)).toBe(true);
     expect(unknownRows()).toEqual([]);
   });
+  test('a reported lease is retired on the next start once its group has exited, with no new ledger row; one whose group still runs is kept', async () => {
+    const host = spawnSync('hostname', { encoding: 'utf-8' }).stdout.trim();
+    const deadGuard = spawnSync('true').pid;
+    const deadGroup = spawnSync('true').pid;
+    const live = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    try {
+      await waitFor(() => alive(live.pid ?? 0), 'the live group');
+      const exited = writeLease('exited-run', { run_id: 'exited-run', guard_pid: deadGuard, pgid: deadGroup, host, boot_id: 'unknown' }) + '.reported';
+      renameSync(exited.replace(/\.reported$/, ''), exited);
+      const running = writeLease('running-run', { run_id: 'running-run', guard_pid: deadGuard, pgid: live.pid!, host, boot_id: 'unknown' }) + '.reported';
+      renameSync(running.replace(/\.reported$/, ''), running);
+      const r = run(['10', '1', '--', 'true']);
+      expect(r.status).toBe(0);
+      expect(r.stderr).not.toContain('STALE RUN');
+      expect(existsSync(exited)).toBe(false);
+      expect(existsSync(running)).toBe(true);
+      expect(alive(live.pid!)).toBe(true);
+      expect(unknownRows()).toEqual([]);
+    } finally {
+      killQuietly(live.pid ?? 0);
+    }
+  }, 20_000);
 });
+

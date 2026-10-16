@@ -779,8 +779,10 @@ reader pins and the judge pins all land on one receipt.
   guard on that host reports it on stderr with the lease path, the pgid and
   the commands to inspect (`ps -o pid,pgid,cmd -g <pgid>`) and stop it
   (`kill -TERM -- -<pgid>`), and records a cost-0 `status: "unknown"`
-  ledger row. It stops nothing itself, and that run's reservation stays
-  counted at the estimate.
+  ledger row, once. It stops nothing itself, and that run's reservation
+  stays counted at the estimate. The lease is kept as `<lease>.reported`
+  and retired by a later guard once the group has exited (or by
+  `rm <lease>.reported`).
 
 Row fields with `--judge`: exactly one of `judge_correct` / `judge_error`
 (+ `judge_error_detail`) / `judge_skipped`, plus `judge_model`,

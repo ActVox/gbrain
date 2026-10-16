@@ -203,7 +203,8 @@ group_alive() {  # <pgid>; falls back to kill -0 where ps cannot list processes
 # boot id that cannot be read, and the group still has members), it reports
 # the lease path, the pgid and the exact inspect/stop commands, appends a
 # cost-0 status "unknown" row (no run_id, so the stale reservation stays
-# counted at its estimate) and renames the lease to .reported. It never
+# counted at its estimate) and renames the lease to .reported, which a later
+# start removes once the group is gone (or the host rebooted). It never
 # signals anything: whether those processes are still that run's is the
 # operator's call. A lease whose group is gone (or whose host rebooted) is
 # removed; another host's lease is left alone.
@@ -215,7 +216,7 @@ BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.boo
 report_stale_leases() {
   local f k v run pid pgid host boot
   [ -d "$LEASES" ] || return 0
-  for f in "$LEASES"/*.lease; do
+  for f in "$LEASES"/*.lease "$LEASES"/*.lease.reported; do
     [ -f "$f" ] || continue
     run=""; pid=""; pgid=""; host=""; boot=""
     while IFS='=' read -r k v; do
@@ -226,12 +227,14 @@ report_stale_leases() {
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     case "$pgid" in ''|*[!0-9]*) continue ;; esac
     [ "$host" = "$GUARD_HOST" ] || continue
-    kill -0 "$pid" 2>/dev/null && continue
+    case "$f" in *.reported) ;; *) kill -0 "$pid" 2>/dev/null && continue ;; esac
     if [ "$boot" != "$BOOT_ID" ] && [ "$boot" != unknown ] && [ "$BOOT_ID" != unknown ]; then rm -f "$f"; continue; fi
     if ! group_alive "$pgid"; then rm -f "$f"; continue; fi
+    case "$f" in *.reported) continue ;; esac
     echo "eval-spend-guard: STALE RUN $run: its guard (pid $pid) is gone but its process group $pgid may still be running; nothing was stopped. Lease: $f" >&2
     echo "eval-spend-guard:   inspect: ps -o pid,pgid,cmd -g $pgid" >&2
     echo "eval-spend-guard:   stop it, only if those processes are that run's: kill -TERM -- -$pgid" >&2
+    echo "eval-spend-guard:   the lease is kept as $f.reported and retired automatically once the group exits (or now: rm $f.reported)" >&2
     printf '{"ts":"%s","status":"unknown","stale_run_id":"%s","pgid":%s,"lease":"%s","reason":"guard_gone_group_may_run","cost_usd":0}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$run")" "$pgid" "$(json_escape "$f")" >> "$LEDGER" \
       || echo "eval-spend-guard: could not record the stale run in $LEDGER" >&2
