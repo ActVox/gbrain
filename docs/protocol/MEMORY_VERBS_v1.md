@@ -554,6 +554,9 @@ errors: `scope_denied`, `not_found`, `invalid_params`. `prefer_source_id`
 reorders the walk without narrowing it (thin clients send their
 .gbrain-source there). When the ambient binding's source has no match, a
 `source_binding_narrowed` notice names where each name resolved.
+The starter MCP tool list does not advertise `source_id`, `prefer_source_id`
+or `context_pack`'s `entity_refs` (it keeps the list inside its size budget);
+the full surface does, and every surface accepts them.
 
 Every card carries `card.entity.source_id`, every `names` row `source_id`,
 and each suggestion its `source_id`: `(source_id, slug)` is the entity's

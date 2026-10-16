@@ -133,7 +133,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "source_id": {
         "type": "string",
-        "description": "Read only this source. Default: your source first, then every source you can read."
+        "description": "Read only this source. Default: your source first, then every source you can read.",
+        "fullSurfaceOnly": true
       },
       "prefer_source_id": {
         "type": "string",
@@ -5189,7 +5190,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "source_id": {
         "type": "string",
-        "description": "Resolve entities in this source only. Default: your source first, then every source you can read."
+        "description": "Resolve entities in this source only. Default: your source first, then every source you can read.",
+        "fullSurfaceOnly": true
       },
       "entity_refs": {
         "type": "array",
@@ -5204,7 +5206,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
             }
           }
         },
-        "description": "Source-qualified entities: [{\"source_id\":\"wiki\",\"slug\":\"people/alice-example\"}]."
+        "description": "Source-qualified entities: [{\"source_id\":\"wiki\",\"slug\":\"people/alice-example\"}].",
+        "fullSurfaceOnly": true
       },
       "prefer_source_id": {
         "type": "string",

@@ -71,6 +71,10 @@ beforeAll(async () => {
     sourceId: 'wiki', dedupKey: 'commit:zoe0001', loopType: 'commitment_owed_by_me', counterpartySlug: 'people/zoe-example',
     summary: 'LOOP-SENTINEL send Zoe the draft', evidence: [{ message_id: 'm-1', quote: 'quote' }], detector: 'llm_extract',
   });
+  for (const sourceId of ['default', 'wiki']) await upsertOpenLoop(engine, {
+    sourceId, dedupKey: `commit:sam-${sourceId}`, loopType: 'commitment_owed_by_me', counterpartySlug: 'people/sam-example',
+    summary: `SAM-LOOP-SENTINEL ${sourceId} send Sam the deck`, evidence: [{ message_id: `m-${sourceId}`, quote: 'quote' }], detector: 'llm_extract',
+  });
 }, 120_000);
 
 afterAll(async () => { await engine.disconnect(); });
@@ -115,6 +119,13 @@ describe('#6723 federated entity resolution', () => {
     expect(pack.cards.map((c: any) => [c.source_id, c.slug, c.summary])).toEqual([
       ['default', 'people/sam-example', expect.stringContaining('default-source Sam')],
       ['wiki', 'people/sam-example', expect.stringContaining('wiki-source Sam')],
+    ]);
+    expect(pack.cards.flatMap((c: any) => c.open_threads).some((t: any) => t.loop_id !== undefined)).toBe(false);
+    expect(JSON.stringify(pack)).not.toContain('SAM-LOOP-SENTINEL');
+    const local = await call('context_pack', ctx({ remote: false, grant: ['default', 'wiki'] }), { include_private: true,
+      entity_refs: [{ source_id: 'default', slug: 'people/sam-example' }, { source_id: 'wiki', slug: 'people/sam-example' }] });
+    expect(local.cards.map((c: any) => c.open_threads.filter((t: any) => /SAM-LOOP-SENTINEL/.test(t.text)).map((t: any) => t.text))).toEqual([
+      [expect.stringContaining('SAM-LOOP-SENTINEL default')], [expect.stringContaining('SAM-LOOP-SENTINEL wiki')],
     ]);
   });
 

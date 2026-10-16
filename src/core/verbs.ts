@@ -221,7 +221,7 @@ const entity: Operation = {
   params: {
     name: { type: 'string', description: 'Name, alias or slug.' },
     names: { type: 'array', items: { type: 'string' }, description: 'Or up to 50 names/codes at once: compact rows.' },
-    source_id: { type: 'string', description: 'Read only this source. Default: your source first, then every source you can read.' },
+    source_id: { type: 'string', description: 'Read only this source. Default: your source first, then every source you can read.', fullSurfaceOnly: true },
     prefer_source_id: { type: 'string', description: 'Source to try first (thin clients send .gbrain-source here); never narrows.', fullSurfaceOnly: true },
   },
   scope: 'read',
