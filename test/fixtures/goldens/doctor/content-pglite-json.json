@@ -9,6 +9,7 @@
     "exit_code": 1,
     "report": {
       "brain_checks_score": 60,
+      "budget_ms": "<volatile>",
       "capped_by": [
         "embeddings_disabled"
       ],
@@ -821,6 +822,41 @@
           "name": "embedding_state",
           "readiness_state": "disabled_by_choice",
           "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "Extraction lag not applicable (5 pages — too few to assess)",
+          "name": "links_extraction_lag",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No pages exceed 25165824 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
+          "name": "oversized_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No junk-pattern hits in 5 recent page(s) (use --content-audit for full scan)",
+          "name": "scraper_junk_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No content-sanity events in last 7 days (audit JSONL is local to this host; share GBRAIN_AUDIT_DIR for multi-host visibility)",
+          "name": "content_sanity_audit_recent",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).",
+          "name": "partial_embedding",
           "status": "ok"
         },
         {
@@ -1756,34 +1792,6 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "No pages exceed 25165824 bytes (excluding embed_skip pages, which already took the accepted non-embeddable remediation)",
-          "name": "oversized_pages",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "No junk-pattern hits in 5 recent page(s) (use --content-audit for full scan)",
-          "name": "scraper_junk_pages",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "No content-sanity events in last 7 days (audit JSONL is local to this host; share GBRAIN_AUDIT_DIR for multi-host visibility)",
-          "name": "content_sanity_audit_recent",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).",
-          "name": "partial_embedding",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
           "message": "No quarantined pages",
           "name": "quarantined_pages",
           "status": "ok"
@@ -2241,13 +2249,6 @@
           "elapsed_ms": "<volatile>",
           "message": "2 active sources on a managed brain. Recommended cron on the owner host, every 15 minutes: `gbrain sync --all --no-pull --hard-deadline 13m`. Managed sync never pulls: for each checkout that tracks a remote, chain `gbrain sources refresh <id>;` in front of it to take upstream commits. Keep the deadline under the interval: managed sync takes no per-source lock, so a tick that outlives the interval would overlap the next one.",
           "name": "sync_consolidation",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
-          "message": "Extraction lag not applicable (5 pages — too few to assess)",
-          "name": "links_extraction_lag",
           "status": "ok"
         },
         {
@@ -3360,11 +3361,14 @@
           "status": "ok"
         }
       ],
+      "complete": true,
       "db_url_source": null,
+      "elapsed_ms": "<volatile>",
       "engine": "pglite",
       "health_score": 55,
       "schema_version": 2,
       "status": "unhealthy",
+      "tier": "standard",
       "top_issues": [
         {
           "action": {
@@ -3516,9 +3520,11 @@
           "status": "warn",
           "tier": "symptom"
         }
-      ]
+      ],
+      "unknown_sections": []
     },
     "stderr": [
+      "[gbrain doctor] non-interactive run: the check run (not connect or migrations) is capped at 90000 ms (doctor.default_budget_ms); checks past it report health unknown. Off for one run: --budget-ms 0; off for good: gbrain config set doctor.default_budget_ms 0. On PGLite a statement already running cannot be stopped, so a check can finish late.",
       "[backup] checked 2 asset(s): 1 without a git remote (computed_by=doctor)"
     ],
     "stdout": "<json>"

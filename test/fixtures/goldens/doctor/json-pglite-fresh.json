@@ -812,13 +812,6 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "No large page is held or capped by embed.max_usd_per_page.",
-          "name": "partial_embedding",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "elapsed_ms": "<volatile>",
           "message": "No junk-pattern hits in 0 recent page(s) (use --content-audit for full scan)",
           "name": "scraper_junk_pages",
           "status": "ok"
@@ -828,6 +821,13 @@
           "elapsed_ms": "<volatile>",
           "message": "No content-sanity events in last 7 days (audit JSONL is local to this host; share GBRAIN_AUDIT_DIR for multi-host visibility)",
           "name": "content_sanity_audit_recent",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).",
+          "name": "partial_embedding",
           "status": "ok"
         },
         {
