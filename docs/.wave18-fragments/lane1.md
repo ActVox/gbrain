@@ -42,7 +42,7 @@ Rows are tagged [S1] (#6757, #6782: wave 18a) or [S2]. For 18a, see "S1 cherry-p
 
 ## BEHAVIOR_CHANGES rows (`src/core/behavior-change-notice.ts`, `since: '<wave version>'`)
 
-- [S1] **#6757:** "Dream synthesis postprocess finds committed outputs by request id through a new online index (`persistence_requests_request_id`, built concurrently on Postgres, covered by `gbrain repair request-indexes`). A statement timeout on that read now defers the postprocess to a later pass (kept in `dream.synthesize.postprocess_pending`, finished without another synthesis call) instead of failing the pass (the replay runs no child job; an output whose transcript changed since synthesis is stamped `quote_verification: verification-deferred` instead of being verified against the rewritten file); three deferrals in a row add a line to doctor `persistence_request_indexes`, whose messages now say \"request-table indexes\"."
+- [S1] **#6757:** "Dream synthesis postprocess finds committed outputs by request id through a new online index (`persistence_requests_request_id`, built concurrently on Postgres, covered by `gbrain repair request-indexes`). A statement timeout on that read now defers the postprocess to a later pass (kept in `dream.synthesize.postprocess_pending`, finished without another synthesis call) instead of failing the pass (the replay runs no child job and verifies the output's quotes against the current transcript; a quote not found goes to `unverified_claims`); three deferrals in a row add a line to doctor `persistence_request_indexes`, whose messages now say \"request-table indexes\"."
 - [S1] **#6782:** "`propose_takes` now treats a reply of `[]` followed by prose as an empty extraction and tombstones the page, instead of retrying the paid call every cycle. Pages that were retried forever get a tombstone on their next run. There is no per-page force flag: the tombstone is keyed by a hash of the page body, so any edit to the body re-extracts the page (docs/guides/cron-schedule.md)."
 - [S2] **#6778:** "Facts absorb now waits for its write up to the job deadline instead of 5 s. A write still committing is logged `write_pending_accepted` and writer contention before admission `write_deferred_unadmitted`; neither counts toward the doctor's facts_extraction_health threshold, and persistent contention gets its own warning (`gbrain sources writer status --source <id> --json`)."
 - [S2] **#6761:** "facts_extraction_health reports its 24 h failure count as history (rolling, with an ages-out time) and separately names facts-absorb jobs still dead, with `gbrain jobs retry <id>` as the fix; it no longer suggests raising `facts.absorb_warn_threshold`, and the thresholds are unchanged."
@@ -64,11 +64,12 @@ The S1 items are #6757 and #6782. Their commits, in order, depend on no S2 commi
 2. `da0bcac7f` fix(propose_takes) #6782 extractorOutcome
 3. `1c23ae2d8` test(persistence) #6757 suites list the request-id index
 4. `76f4349b0` docs(propose_takes) #6782 no per-page force re-extract
-5. `40ccfcbea` fix(dream) #6757 replay stamps verification-deferred on a changed transcript
-6. INTEGRATOR-ROW `d28162a45` (pglite-upgrade-replay catalog golden, S1 only)
+5. `40ccfcbea` fix(dream) #6757 replay stamps verification-deferred on a changed transcript (reverted by 6)
+6. `6d22a2dec` fix(dream) #6757 replay verifies against the current transcript
+7. INTEGRATOR-ROW `d28162a45` (pglite-upgrade-replay catalog golden, S1 only)
 
 `61909f1df` is the other INTEGRATOR-ROW for #6757 but also carries the #6753 plugin trees and llms-full.txt, so
 for 18a regenerate instead of cherry-picking it: `bun run regen:all --goldens`, the five unit goldens and the three
-Postgres goldens in slot-time step 3. Checked on a detached worktree of `cadaf5cd7` with commits 1 to 6 picked:
+Postgres goldens in slot-time step 3. Checked on a detached worktree of `cadaf5cd7` with commits 1 to 7 picked (before 6 existed; 6 only reverts 5's source change):
 they apply cleanly; the regenerated registry, latest and PGLite blob, migrations records and doctor json golden are
 identical to `61909f1df`'s; typecheck passes; the S1 suites give 135 pass, 0 fail.
