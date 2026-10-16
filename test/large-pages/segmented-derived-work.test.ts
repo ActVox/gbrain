@@ -51,6 +51,7 @@ import { __setChatTransportForTests, resetGateway, type ChatOpts, type ChatResul
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
+import { SEGMENTED_CREATE_SEAL_MAX_BYTES } from '../../src/core/page-body/limits.ts';
 import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
 import { withVerifiedLocalRegistration } from '../../src/core/persistence/identity.ts';
 import { extractManagedStaleLinks } from '../../src/core/persistence/links-maintenance.ts';
@@ -331,7 +332,15 @@ describe('trusted coordinated writes of segmented pages', () => {
         inside--;
       });
       try {
-        expect((await localCall(engine, 'put_page', { slug, content: linkedMeeting('Single flight') })).isError).toBe(false);
+        // Over SEGMENTED_CREATE_SEAL_MAX_BYTES, so the create commits unsealed and its chunks are built after commit.
+        const content = linkedMeeting('Single flight', conversationBody(SEGMENTED_CREATE_SEAL_MAX_BYTES, { seed: 62 }));
+        expect((await localCall(engine, 'put_page', { slug, content, wait_ms: 30_000 })).isError).toBe(false);
+        for (const until = Date.now() + 120_000; Date.now() < until;) {
+          const [row] = await engine.executeRaw<{ sealed: boolean }>(`SELECT text_projection_revision=knowledge_revision AS sealed FROM pages
+            WHERE source_id='default' AND slug=$1`, [slug]);
+          if (row?.sealed) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       } finally { installFaultHook(undefined); }
       concurrent[engine.kind] = most;
       pages[engine.kind] = await engine.executeRaw(`SELECT body_storage, text_projection_revision=knowledge_revision AS sealed FROM pages
