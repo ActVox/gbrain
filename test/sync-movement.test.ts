@@ -419,6 +419,33 @@ describe('#6781: a failed backlog read is unknown, never nothing_pending', () =>
     } finally { await lock!.release(); await finish(f); }
   }), 60_000);
 
+  test('a failed read between two not_moving ticks: the window verdict is unknown and the serve watch holds its flip (no false recovery, no repeat notice)', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const f = await managedSource();
+    await cursor(f, 2, 7, { progress: { startedAt: Date.now() - 400_000, startIndex: 0, lastAt: Date.now() - 300_000, lastIndex: 2 } });
+    await request(f, 'committed', { completedAt: ago(300_000) });
+    const flaky = { fail: false };
+    const broken = failingBacklog(engine);
+    const toggling = new Proxy(engine, { get: (t, prop) => { const src = flaky.fail ? broken : t; const value = Reflect.get(src, prop, src); return typeof value === 'function' ? value.bind(src) : value; } }) as typeof engine;
+    const lines: string[] = [];
+    const watch = startMovementWatch(toggling, { log: line => lines.push(line), everyMs: 3_600_000 });
+    const lock = await tryAcquireDbLock(engine, syncLockId(f.id));
+    try {
+      const control = (await readSourceMovement(engine, { sourceIds: [f.id] }))[0]!;
+      expect(control.movement_state).toBe('not_moving');
+      const injected = (await readSourceMovement(broken, { sourceIds: [f.id] }))[0]!;
+      expect(judgeMovement(injected, control)).toBe('unknown');
+      const mine = () => lines.filter(line => line.includes(f.id));
+      await watch.tick();
+      expect(mine().filter(line => line.includes('kind=degraded'))).toHaveLength(1);
+      flaky.fail = true;
+      await watch.tick();
+      flaky.fail = false;
+      await watch.tick();
+      expect(mine().filter(line => line.includes('moving again'))).toEqual([]);
+      expect(mine().filter(line => line.includes('kind=degraded'))).toHaveLength(1);
+    } finally { watch.stop(); await lock!.release(); await finish(f); }
+  }), 60_000);
+
   test('writer movement exits 1 with movement_unknown (never managed_sync_not_moving); --warn-only exits 0', () => withEnv({ GBRAIN_HOME: home }, async () => {
     const f = await managedSource();
     await cursor(f, 2, 7);

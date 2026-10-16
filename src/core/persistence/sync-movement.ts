@@ -211,6 +211,7 @@ export function formatSourceMovement(m: SourceMovement): string | null {
 export type MovementVerdict = 'moved' | 'within_allowance' | 'held' | 'parked' | 'not_moving' | 'nothing_pending' | 'unknown';
 export function judgeMovement(before: SourceMovement | undefined, after: SourceMovement): MovementVerdict {
   if (after.movement_state === 'nothing_pending' || after.movement_state === 'unknown') return after.movement_state;
+  if (before?.movement_state === 'unknown') return 'unknown';
   if (!before) return after.movement_state === 'moving' ? 'moved' : after.movement_state;
   if (after.last_commit_at && (!before.last_commit_at || after.last_commit_at > before.last_commit_at)) return 'moved';
   if (after.holds.last_hold_at && (!before.holds.last_hold_at || after.holds.last_hold_at > before.holds.last_hold_at)) return 'held';
@@ -223,7 +224,9 @@ export function judgeMovement(before: SourceMovement | undefined, after: SourceM
 export interface MovementWatch { stop(): void; tick(): Promise<void> }
 /**
  * The serve's ticker: reads movement every `everyMs` and logs one notice when a source flips to `not_moving`
- * (and one recovery line when it moves again). Read failures are swallowed; the timer never keeps the process alive.
+ * (and one recovery line when it moves again). Read failures are swallowed, and a source whose backlog read failed
+ * (`unknown`, #6781) keeps its flip state, so a failed read neither repeats nor clears the notice; the timer never keeps
+ * the process alive.
  */
 export function startMovementWatch(engine: BrainEngine, opts: { log: (line: string) => void; everyMs?: number; setInterval?: typeof setInterval; clearInterval?: typeof clearInterval } ): MovementWatch {
   const flipped = new Set<string>();
@@ -233,6 +236,7 @@ export function startMovementWatch(engine: BrainEngine, opts: { log: (line: stri
     inflight = true;
     try {
       for (const m of await readSourceMovement(engine)) {
+        if (m.movement_state === 'unknown') continue;
         if (m.movement_state === 'not_moving' && !flipped.has(m.source_id)) {
           flipped.add(m.source_id);
           opts.log(`[gbrain notice managed_sync_not_moving kind=degraded] ${formatSourceMovement(m)}\nnext: run ${m.writer_status_command} (read-only) and act on the running claim's next step.`);
