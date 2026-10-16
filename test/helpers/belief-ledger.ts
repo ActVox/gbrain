@@ -3,7 +3,7 @@
  * section 11): a brain whose source has active coverage, page writes through
  * the shared write path, and readers for the events it appended. Runs on
  * PGLite, and on Postgres when DATABASE_URL names a test database
- * (`beliefEngineCases`), so every probe asserts the same values on both.
+ * (`beliefEngineCase`), so every probe asserts the same values on both.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -19,6 +19,7 @@ import { enableBeliefLedger } from '../../src/core/belief/coverage.ts';
 import { managedBrain } from './managed-brain.ts';
 import { isolatedPersistencePostgres } from './persistence-postgres.ts';
 import { withEnv } from './with-env.ts';
+import { requirePostgresTestDatabase, type TestBackend } from './test-backends.ts';
 
 export interface BeliefEvent {
   id: number; source_id: string; source_incarnation: string; page_lifetime: string | null; slug: string; subject_kind: string; subject_key: string;
@@ -37,9 +38,9 @@ export interface BeliefBrain {
   lastId(): Promise<number>;
 }
 
-export const beliefEngineCases = (): Array<{ name: 'pglite' | 'postgres'; databaseUrl?: string }> => [
-  { name: 'pglite' }, ...(process.env.DATABASE_URL ? [{ name: 'postgres' as const, databaseUrl: process.env.DATABASE_URL }] : []),
-];
+/** One engine case per backend; call it as `testBackends().map(beliefEngineCase)` so check:postgres-lanes sees the gated arm. */
+export const beliefEngineCase = (name: TestBackend): { name: TestBackend; databaseUrl?: string } =>
+  name === 'postgres' ? { name, databaseUrl: requirePostgresTestDatabase() } : { name };
 
 async function readEvents(engine: BrainEngine, sourceId: string, afterId = 0): Promise<BeliefEvent[]> {
   const rows = await engine.executeRaw<BeliefEvent>(`SELECT id, source_id, source_incarnation::text AS source_incarnation, page_lifetime::text AS page_lifetime,

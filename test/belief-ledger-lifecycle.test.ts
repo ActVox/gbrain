@@ -13,7 +13,8 @@ import { valueHash, lifetimeRef } from '../src/core/belief/keys.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { submitRememberMutation } from '../src/core/persistence/memory-mutations.ts';
-import { beliefBrain, beliefEngineCases, beliefPage, shape, type BeliefBrain, type BeliefEvent } from './helpers/belief-ledger.ts';
+import { testBackends } from './helpers/test-backends.ts';
+import { beliefBrain, beliefEngineCase, beliefPage, shape, type BeliefBrain, type BeliefEvent } from './helpers/belief-ledger.ts';
 
 afterEach(() => { __setBeliefEmitterFaultForTests(null); installFaultHook(undefined); });
 
@@ -29,7 +30,7 @@ async function seeded(b: BeliefBrain) {
   return b.lastId();
 }
 
-for (const engineCase of beliefEngineCases()) {
+for (const engineCase of testBackends().map(beliefEngineCase)) {
   describe(`belief ledger lifecycle (${engineCase.name})`, () => {
     const brain = (run: (b: BeliefBrain) => Promise<void>, managed = true) => beliefBrain(run, { managed, databaseUrl: engineCase.databaseUrl });
 
