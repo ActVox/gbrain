@@ -111,7 +111,7 @@ Every hold and error has three fields, from one table
 | `preparation_stalled` | page | retry, upgrade | no | 3 failed attempts over 24 h, or writer status names a step that never finishes |
 | `invalid_fence` | page | repair | no | the fence repair preview offers no plan (a manual reason) |
 | `invalid_frontmatter` | page | repair | no | the repair preview needs an interpretation (--include-ambiguous) |
-| `frontmatter_slug_conflict` | page | repair | no | the content-repair lane recorded what it could not do (an existing named page, other frontmatter fixes, a hand edit) |
+| `frontmatter_slug_conflict` | page | repair | no | the lane recorded what it could not do (a live named page, other fixes, a hand edit) |
 | `rename_held` | page | repair | no | the repair preview needs an interpretation |
 | `file_too_large` | page | none | yes | always |
 | `content_rejected` | page | none | yes | always |
@@ -215,10 +215,9 @@ it and kept going; the receipt lists the hold (`held`, `held_count`) and
   `gbrain sources writer status --source <id> --json` names the step.
   `unblock --apply` schedules the re-screen.
 - `invalid_fence` and `frontmatter_slug_conflict`: the content-repair lane
-  clears them. A `slug:` line that names no page and no file is removed by the
-  managed sync itself right after it releases its drain lease
-  (`sync.slug_conflicts.auto_remove`, default on; the result's
-  `slug_lines_removed` counts them, #6865). `unblock --apply` runs it on the held paths now; the maintenance
+  clears them. A managed sync drops a `slug:` line naming no page or file
+  itself (#6865, `sync.slug_conflicts.auto_remove`).
+  `unblock --apply` runs it on the held paths now; the maintenance
   run's `fence_repair` and `content_repair` phases run it by themselves;
   `gbrain repair content --source <id>` previews it. A hold the lane will not
   decide is `needs_human` with the paragraph in `human_reason`
