@@ -100,6 +100,7 @@ test/managed-maintenance-links.test.ts
 test/managed-sweep-corpus-windows.test.ts
 test/managed-sweep-refused-window-retry.test.ts
 test/managed-sweep-timeline.test.ts
+test/managed-sync-blocked-job-6858.test.ts
 test/managed-sync-bulk.test.ts
 test/managed-sync-checkpoint-replaced.test.ts
 test/managed-sync-chunker-version.test.ts
@@ -107,9 +108,11 @@ test/managed-sync-concurrent-write-hold.test.ts
 test/managed-sync-connection-loss.test.ts
 test/managed-sync-drain.test.ts
 test/managed-sync-foreground-priority.test.ts
+test/managed-sync-gate-markers-6858.test.ts
 test/managed-sync-group-completion.test.ts
 test/managed-sync-group-uncommitted-head.test.ts
 test/managed-sync-images-5493.test.ts
+test/managed-sync-keep-disk-6858.test.ts
 test/managed-sync-lanes.test.ts
 test/managed-sync-orphans-incarnation-6518.test.ts
 test/managed-sync-page-fault-holds.test.ts
