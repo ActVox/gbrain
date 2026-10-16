@@ -107,6 +107,14 @@ function workingTreeHead(root: string, path: string): Buffer | null {
   } catch { return null; }
 }
 
+/**
+ * The explicit-id veto every identity takeover consults (#6729): a file whose frontmatter id differs from the id of the
+ * page it would inherit is a different document. Exported for the managed freeze loop's takeover branches.
+ */
+export function explicitIdVeto(incomingId: string | null, holderId: string | null): boolean {
+  return !!incomingId && !!holderId && incomingId !== holderId;
+}
+
 /** A live page that shares an identity value with a renamed file; `source_path` and `slug` tell whether it belongs to a path of this range. */
 export interface LiveIdentityHolder { slug: string; source_path: string | null; fm_id: string | null; title: string | null }
 
@@ -162,8 +170,12 @@ export function decideRenameIdentities(manifest: SyncManifest, inputs: RenameIde
   for (const rename of inexact) {
     const before = inputs.base(rename.from), after = inputs.target(rename.to);
     const downgrade = (reason: RenameDowngradeReason) => downgraded.push({ from: rename.from, to: rename.to, similarity: rename.similarity!, reason });
+    // A respelled path (case or separators) that keeps its slug is the same-slug takeover managed discovery already
+    // performs: it keeps the page unless an explicit id conflicts.
+    const sameSlug = resolveSlugForPath(sourcePathOf(rename.from)) === resolveSlugForPath(sourcePathOf(rename.to));
+    if (sameSlug && !explicitIdVeto(after.id, before.id)) { confirmed.push(rename); continue; }
     if (before.id && after.id) {
-      if (before.id !== after.id) downgrade('id_conflict');
+      if (explicitIdVeto(after.id, before.id)) downgrade('id_conflict');
       else if (uniqueId(before.id)) confirmed.push(rename);
       else downgrade('id_shared');
       continue;

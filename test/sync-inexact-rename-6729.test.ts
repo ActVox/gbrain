@@ -232,6 +232,41 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect(elapsed).toBeLessThan(20_000);
   }, 300_000);
 
+  test('a case-respelling move plus edit keeps its page in classic and managed sync; in managed sync a conflicting explicit id does not inherit', () => withEnv(env, async () => {
+    for (const mode of ['classic', 'managed'] as const) {
+      const s = await (mode === 'classic' ? classic : managed)({ 'notes/Foo Bar.md': doc('title: First title'), 'notes/Id Doc.md': doc('id: id-doc-one-6729\ntitle: Id doc') });
+      const foo = (await pageRow(s.id, 'notes/foo-bar'))!, idDoc = (await pageRow(s.id, 'notes/id-doc'))!;
+      git(s.root, 'mv', 'notes/Foo Bar.md', 'notes/foo-bar.md'); write(s.root, 'notes/foo-bar.md', doc('title: A new title', 'An edit.\n'));
+      commit(s.root, 'respell and edit');
+      expect(diffStatus(s.root)).toEqual([expect.stringMatching(/^R0\d\d\tnotes\/Foo Bar.md\tnotes\/foo-bar.md$/)]);
+      const result = await s.sync();
+      expect(result.status).toBe('synced');
+      expect((await pageRow(s.id, 'notes/foo-bar'))).toMatchObject({ id: foo.id, deleted_at: null });
+      expect(result.identityDowngrades ?? []).toEqual([]);
+      if (mode === 'classic') continue;
+      // Managed discovery's same-slug takeover: only a conflicting explicit id vetoes it, before anything is written.
+      git(s.root, 'mv', 'notes/Id Doc.md', 'notes/id-doc.md'); write(s.root, 'notes/id-doc.md', doc('id: id-doc-two-6729\ntitle: Id doc', 'Another document.\n'));
+      commit(s.root, 'respell with a different id');
+      await expect(s.sync()).rejects.toMatchObject({ code: 'page_identity_changed', detail: 'rename_identity_conflict' });
+      expect((await pageRow(s.id, 'notes/id-doc'))).toMatchObject({ id: idDoc.id, deleted_at: null });
+    }
+  }), 240_000);
+
+  test('managed: a held rename whose fixed file carries a different explicit id does not inherit the held page', () => withEnv(env, async () => {
+    const s = await managed({ 'notes/x.md': doc('id: held-6729-one\ntitle: Held X\nslug: notes/x') });
+    const x = (await pageRow(s.id, 'notes/x'))!;
+    git(s.root, 'mv', 'notes/x.md', 'notes/y.md'); commit(s.root, 'exact move onto a stale slug: line');
+    expect(diffStatus(s.root)).toEqual(['R100\tnotes/x.md\tnotes/y.md']);
+    const held = await s.sync();
+    expect(held.held?.[0]).toMatchObject({ path: 'notes/y.md' });
+    write(s.root, 'notes/y.md', doc('id: held-6729-two\ntitle: Another document'));
+    commit(s.root, 'replace the held file with a different document');
+    await s.sync();
+    const y = (await pageRow(s.id, 'notes/y'))!;
+    expect(y.id).not.toBe(x.id);
+    expect((await pageRow(s.id, 'notes/x'))!.id).toBe(x.id);
+  }), 180_000);
+
   test('managed: crossed inexact pairs with one shared title never swap identities; a unique title keeps one', () => withEnv(env, async () => {
     const s = await managed({
       'people/a-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Ali]', 'Works on payments.\n'),

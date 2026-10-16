@@ -9,7 +9,7 @@ import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-fla
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
-import { confirmedSyncDelta, confirmRenameIdentities, frontmatterIdentity } from '../sync-rename-identity.ts';
+import { confirmedSyncDelta, confirmRenameIdentities, explicitIdVeto, frontmatterIdentity } from '../sync-rename-identity.ts';
 import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath, type DowngradedRename, type SyncManifest } from '../sync.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
@@ -547,7 +547,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     // #5988: a held rename destination (or a held one renamed again) still owes its page the move; the deletion of a held path stays to clear its hold.
     const held = holdByPath.get(winner.path)?.meta.rename_from ?? (deletion ? holdByPath.get(deletion.path)?.meta.rename_from : undefined);
     const origin = held ? identities.find(page => page.id === held.pageId) : undefined;
-    if (held && origin && !deleted.has(origin.id) && origin.source_path != null && sameSyncOrigin(origin.source_path, held.sourcePath, originScope, origin.slug)) {
+    if (held && origin && !deleted.has(origin.id) && origin.source_path != null && sameSyncOrigin(origin.source_path, held.sourcePath, originScope, origin.slug) && !explicitIdVeto(incomingId(discovered, winner), origin.fm_id)) {
       if (origin.knowledge_revision === held.revision) winner.renameFrom = held;
       else winner.renameHeld = held;
     }
@@ -577,13 +577,16 @@ function identityDowngradesOf(manifests: Array<SyncManifest | null>, eligible: (
  * happen to map to one slug. The sync is refused before any write, naming both.
  */
 function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
-  if (!holder.fm_id) return;
-  const incoming = frontmatterIdentity(readSyncContent(discovery, winner)).id;
-  if (!incoming || incoming === holder.fm_id) return;
+  const incoming = holder.fm_id ? incomingId(discovery, winner) : null;
+  if (!explicitIdVeto(incoming, holder.fm_id)) return;
   throw opError('page_identity_changed', 'A file would take over a page whose frontmatter id differs from its own.',
     `${winner.sourcePath} in ${discovery.sourceId} maps to page ${holder.slug}, whose file is gone, but its frontmatter id '${incoming}' differs from the page's id '${holder.fm_id}', so it is a different document and must not inherit that page's facts, links and history; nothing was written. `
     + `Give the file the page's id if it is the same document, or rename it so its slug differs, commit, then run gbrain sync --no-pull --source ${discovery.sourceId}.`,
     { detail: 'rename_identity_conflict' });
+}
+/** #6729: the frontmatter id of the file an entry imports (null when it has none or cannot be read). */
+function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string | null {
+  try { return frontmatterIdentity(readSyncContent(discovery, entry)).id; } catch { return null; }
 }
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */
 function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {
