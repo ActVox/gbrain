@@ -15,6 +15,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
 import { COVERAGE_KEY, heldKey, pageKey, sha256Hex, canonicalJson, factKeySubject, slugRef } from './keys.ts';
 import { readBeliefState, readFactsById, type RawPage, type RawState } from './state.ts';
 import { keyedSubjects, keyFact, pageNeeds, type KeyContext, type Subject } from './subjects.ts';
@@ -68,17 +69,16 @@ export function beliefBatchCovers(sourceId: string, slugs: readonly string[]): b
 }
 
 /** Coverage and purge probes for one source, in one read. */
-export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<{ incarnation: string; purgeEpoch: number; coverage: string | null; managed: boolean; purgesPossible: boolean } | null> {
+export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<{ incarnation: string; purgeEpoch: number; coverage: string | null; purgesPossible: boolean } | null> {
   const [row] = await tx.executeRaw<Record<string, unknown>>(`SELECT s.incarnation::text AS incarnation, s.purge_epoch,
       (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $2
         AND e.source_incarnation = s.incarnation ORDER BY e.id DESC LIMIT 1) AS coverage,
-      COALESCE((SELECT b.enabled FROM persistence_brain b WHERE b.singleton = 1), false) AS managed,
       (s.purge_epoch > 0 OR EXISTS (SELECT 1 FROM fact_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM take_purges WHERE source_id = s.id)
         OR EXISTS (SELECT 1 FROM page_purges WHERE source_id = s.id)) AS purges
     FROM sources s WHERE s.id = $1`, [sourceId, COVERAGE_KEY]);
   if (!row) return null;
   return { incarnation: String(row.incarnation), purgeEpoch: Number(row.purge_epoch), coverage: (row.coverage as string | null) ?? null,
-    managed: row.managed === true, purgesPossible: row.purges === true };
+    purgesPossible: row.purges === true };
 }
 
 export const coverageActive = (coverage: string | null) => coverage != null && coverage !== 'coverage.stopped';
@@ -88,7 +88,7 @@ async function beginBeliefBatch(tx: BrainEngine, opts: BeliefBatchOptions): Prom
   if (!source || !coverageActive(source.coverage)) return null;
   assertHeldPageKeys(tx, opts.slugs.map(slug => ({ sourceId: opts.sourceId, slug })));
   const pre = await readBeliefState(tx, opts.sourceId, opts.slugs);
-  return { opts, publicationId: opts.publicationId ?? randomUUID(), incarnation: source.incarnation, managed: source.managed,
+  return { opts, publicationId: opts.publicationId ?? randomUUID(), incarnation: source.incarnation, managed: await readManagedMode(tx),
     purgesPossible: source.purgesPossible, pre, notes: [] };
 }
 
