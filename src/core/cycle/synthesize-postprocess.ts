@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
@@ -135,34 +134,22 @@ export async function loadCommittedOutputsOrDefer(engine: BrainEngine, authority
 
 /** A transcript as postprocessing reads it: the discovered one, or a carried output's file read again (#6757). */
 type TranscriptInput = Pick<DiscoveredTranscript, 'filePath' | 'contentHash' | 'content' | 'seat'>;
-/** `drifted`: a replayed output whose transcript no longer has the hash it was synthesized from (#6757). */
-interface Item { ref: OutputRef; output?: RetainedOutput; path?: string; transcript?: TranscriptInput; hash?: string; drifted?: boolean }
+interface Item { ref: OutputRef; output?: RetainedOutput; path?: string; transcript?: TranscriptInput; hash?: string }
 
 const pendingOf = (item: Item): PendingOutput[] => item.output && item.path && item.hash && typeof item.output.request.outcome?.revision === 'string'
   ? [{ request_id: String(item.output.request.request_id), slug: item.output.request.slug, input_slug: item.output.input_slug,
     revision: item.output.request.outcome.revision, job_key: item.output.job_key, raw_source: item.path, transcript_hash: item.hash,
     ...(item.transcript?.seat ? { seat: item.transcript.seat } : {}), ...(item.ref.first_write_at ? { first_write_at: item.ref.first_write_at.toISOString() } : {}) }] : [];
 
-/**
- * A carried output's transcript: the one discovered this pass at its path, else its file; null for one no longer
- * readable. `drifted` when its current content no longer hashes to the transcript the output was synthesized from:
- * the replay then never grounds the output against the rewritten file (a file read raw compares its raw hash, so a
- * filtered .txt can read as drifted; that only defers verification).
- */
-function carriedTranscript(p: PendingOutput, byPath: Map<string, DiscoveredTranscript>): (TranscriptInput & { drifted: boolean }) | null | undefined {
+/** A carried output's transcript: the one discovered this pass at its path, else its file; null for one no longer readable. */
+function carriedTranscript(p: PendingOutput, byPath: Map<string, DiscoveredTranscript>): TranscriptInput | null | undefined {
   const found = byPath.get(p.raw_source);
-  if (found) return { ...found, drifted: found.contentHash !== p.transcript_hash };
+  if (found) return found;
   // A conversation page is discovered from the database, never read here; it stays pending until a pass discovers it.
   if (!p.raw_source.startsWith('/')) return undefined;
-  try {
-    const content = readFileSync(p.raw_source, 'utf8');
-    const drifted = createHash('sha256').update(content, 'utf8').digest('hex') !== p.transcript_hash;
-    return { filePath: p.raw_source, contentHash: p.transcript_hash, content, drifted, ...(p.seat ? { seat: p.seat } : {}) };
-  } catch { return null; }
+  try { return { filePath: p.raw_source, contentHash: p.transcript_hash, content: readFileSync(p.raw_source, 'utf8'), ...(p.seat ? { seat: p.seat } : {}) }; }
+  catch { return null; }
 }
-
-/** Frontmatter stamp of a replayed output whose transcript changed after synthesis: its quotes were not verified. */
-export const VERIFICATION_DEFERRED = 'verification-deferred';
 
 export async function postprocessManagedSynthesis(
   engine: BrainEngine,
@@ -181,7 +168,6 @@ export async function postprocessManagedSynthesis(
   const writtenRefs: OutputRef[] = [];
   const finalizedRefs: OutputRef[] = [];
   const conflicts: PostprocessConflict[] = [];
-  const verificationDeferred: string[] = [];
   let pending = 0;
   const { sourceId, sourceIncarnation } = authority.writer;
   // #6757: outputs an earlier pass deferred are finished here, whether or not their child is in this pass.
@@ -190,9 +176,9 @@ export async function postprocessManagedSynthesis(
   let deferred: CommittedOutputs['deferred'];
   if (opts.committedOutputs?.deferred) {
     const deferral = await recordPostprocessPass(engine, sourceId, sourceIncarnation, { settled, deferred: opts.committedOutputs.deferred });
-    return { writtenRefs, finalizedRefs, stats, pending: deferral?.outputs ?? 0, conflicts, deferral, verificationDeferred };
+    return { writtenRefs, finalizedRefs, stats, pending: deferral?.outputs ?? 0, conflicts, deferral };
   }
-  if (!refs.length && !carried.length) return { writtenRefs, finalizedRefs, stats, pending, conflicts, deferral: null, verificationDeferred };
+  if (!refs.length && !carried.length) return { writtenRefs, finalizedRefs, stats, pending, conflicts, deferral: null };
   const reported = await readReportedConflicts(engine);
   const supersession = opts.quoteVerify ? await attributionChecksEnabled(engine) : false; // #5425 [UC4], default off
   const outputs = opts.committedOutputs?.outputs ?? await loadCommittedSynthesisOutputs(engine, authority, childIds);
@@ -226,7 +212,7 @@ export async function postprocessManagedSynthesis(
         continue;
       }
       items.push({ ref: { slug: output.request.slug, source_id: sourceId, raw_source: p.raw_source, ...(p.seat ? { seat: p.seat } : {}),
-        ...(p.first_write_at ? { first_write_at: new Date(p.first_write_at) } : {}) }, output, path: p.raw_source, transcript, hash: p.transcript_hash, drifted: transcript.drifted });
+        ...(p.first_write_at ? { first_write_at: new Date(p.first_write_at) } : {}) }, output, path: p.raw_source, transcript, hash: p.transcript_hash });
     }
   }
   // #6757: a statement timeout on this request's own read defers it and every output after it.
@@ -241,7 +227,7 @@ export async function postprocessManagedSynthesis(
     }
   };
   let grounded: GroundedSource | undefined;
-  for (const [index, { ref, output, path, transcript, hash, drifted }] of items.entries()) {
+  for (const [index, { ref, output, path, transcript, hash }] of items.entries()) {
     throwIfAborted(opts.signal, '[dream] synthesis postprocessing');
     if (ref.source_id !== authority.writer.sourceId) {
       throw opError('source_changed', 'The synthesis output source changed.',
@@ -310,12 +296,7 @@ export async function postprocessManagedSynthesis(
       const since = ref.first_write_at ?? opts.sinceByTranscript.get(transcript.filePath);
       let page = isDreamOwnedPage(snapshot.page, since) ? { ...snapshot.page, frontmatter: { ...snapshot.page.frontmatter, dream_generated: true,
         dream_cycle_date: firstDate, dream_created_cycle_date: firstDate, raw_source: path, ...(transcript.seat ? { seat: transcript.seat } : {}) } } : snapshot.page;
-      if (opts.quoteVerify && drifted) {
-        // #6757: the transcript changed after this output was synthesized; grounding it against the rewritten file
-        // could quarantine quotes the original said, so its quotes stay unverified and the page says so.
-        page = { ...page, frontmatter: { ...page.frontmatter, quote_verification: VERIFICATION_DEFERRED } };
-        verificationDeferred.push(ref.slug);
-      } else if (opts.quoteVerify) {
+      if (opts.quoteVerify) {
         const prior = since ? await resolveVerifyPrior(engine, snapshot.page, ref.source_id, since) : null;
         if (prior === 'unchanged') stats.skipped_unchanged++;
         else {
@@ -351,10 +332,7 @@ export async function postprocessManagedSynthesis(
   if (deferred?.read === 'postprocess_request') pending += items.length - readsFrom;
   if (conflicts.length) await rememberConflicts(engine, reported, conflicts);
   const deferral = await recordPostprocessPass(engine, sourceId, sourceIncarnation, { settled, carry, deferred });
-  if (verificationDeferred.length) {
-    process.stderr.write(`[dream] synthesize: ${verificationDeferred.length} replayed output page(s) stamped quote_verification: ${VERIFICATION_DEFERRED}; their transcript changed after synthesis, so their quotes were not verified against the rewritten file: ${verificationDeferred.join(', ')}\n`);
-  }
-  return { writtenRefs, finalizedRefs, stats, pending, conflicts, deferral, verificationDeferred };
+  return { writtenRefs, finalizedRefs, stats, pending, conflicts, deferral };
 }
 
 async function readReportedConflicts(engine: BrainEngine): Promise<Map<string, string>> {
@@ -437,7 +415,6 @@ export async function finishDeferredPostprocess(engine: BrainEngine,
   const written = processed.writtenRefs.map(r => r.slug);
   const resumed = written.length ? { ...result, summary: `${result.summary}; ${written.length} deferred output page(s) postprocessed`,
     details: { ...result.details, pages_written: Number(result.details?.pages_written ?? 0) + written.length,
-      written_slugs: [...(Array.isArray(result.details?.written_slugs) ? result.details.written_slugs as string[] : []), ...written], postprocess_resumed: written,
-      ...(processed.verificationDeferred.length ? { verification_deferred: processed.verificationDeferred } : {}) } } : result;
+      written_slugs: [...(Array.isArray(result.details?.written_slugs) ? result.details.written_slugs as string[] : []), ...written], postprocess_resumed: written } } : result;
   return withPostprocessConflicts(processed.conflicts, withPublishPending(processed.pending, resumed, processed.deferral));
 }
