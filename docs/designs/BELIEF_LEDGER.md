@@ -1614,8 +1614,9 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    Subjects net on hashes (the first event's prior hash against the last
    one's value hash). Page events net per lifetime: a delete and its restore,
    or a rename and its revert, report nothing, and so does a page created and
-   gone again inside the window; a purge, expiry, merge or hard delete is one
-   `removed` page entry.
+   gone again inside the window, together with its beliefs; a page created and
+   renamed inside the window is reported under its final slug. A purge,
+   expiry, merge or hard delete is one `removed` page entry.
 3. **A subject with no earlier event.** Section 4 records a page's creation
    as one snapshot event, so a fact or take first edited inside the window may
    have no event before `since`. Its `before` is read from the page body as
@@ -1649,7 +1650,8 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
 7. **Budget.** Under `budget_tokens`, belief lines pack into what pages,
    facts and threads leave; a dropped line sets `truncated`. Without a
    budget the list is capped at 200 entries, and a window with more than
-   50,000 events stops reading and sets `truncated`.
+   50,000 events the caller may read stops reading and sets `truncated`
+   (events it may not read never count, so they cannot change the answer).
 8. **Measured at $0.** Four seeded synthetic weeks (37 gold changes) give
    set-F1 1.0 with exact before and after values on PGLite and Postgres
    (`test/belief-ledger-weekly-probes.test.ts`). The cited diff costs 258,

@@ -10,6 +10,8 @@ import { operationsByName } from '../src/core/operations.ts';
 import { __setBeliefChangesPageSizeForTests, beliefChanges, renderBeliefChange, type BeliefChange } from '../src/core/belief/changes.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain } from './helpers/belief-ledger.ts';
+import { renamePageOntoSlug } from '../src/commands/sync/rename-collision.ts';
+import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 
 const pause = () => new Promise(resolve => setTimeout(resolve, 25));
 const dbNow = async (b: BeliefBrain) => (await b.engine.executeRaw<{ t: string }>('SELECT clock_timestamp() AS t'))[0]!.t;
@@ -179,6 +181,43 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(sorted(brief((await changes(b, t0, t2)).changes))).toEqual([['page', 'deleted', slug]]);
     }), 120_000);
 
+    test('the event cap counts what the caller may read: events it may not read never set truncated', () => brain(async b => {
+      const t0 = await at(b);
+      for (let i = 0; i < 3; i++) await b.put('people/secret-example', beliefPage({ title: 'Secret', type: 'person', facts: [`Secret fact ${i}`], frontmatter: { visibility: 'private' } }));
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+      const t1 = await at(b);
+      try {
+        __setBeliefChangesPageSizeForTests(2, 4);
+        const remote = await changes(b, t0, t1, { remote: true });
+        expect([remote.truncated, sorted(brief(remote.changes))]).toEqual([false, sorted([['page', 'added', slug], ['fact', 'added', 'Acme sells widgets']])]);
+        expect((await changes(b, t0, t1)).truncated).toBe(true);
+      } finally { __setBeliefChangesPageSizeForTests(); }
+    }), 120_000);
+
+    test('beliefs of a page created in the window: an edit and its revert still list them as added; a page gone again lists nothing', () => brain(async b => {
+      const t0 = await at(b);
+      await b.put('companies/newco-example', beliefPage({ title: 'Newco', facts: [{ claim: 'Newco has 10 staff', confidence: '0.5' }] }));
+      await b.put('companies/newco-example', beliefPage({ title: 'Newco', facts: [{ claim: 'Newco has 10 staff', confidence: '0.9' }] }));
+      await b.put('companies/newco-example', beliefPage({ title: 'Newco', facts: [{ claim: 'Newco has 10 staff', confidence: '0.5' }] }));
+      await b.put('companies/gone-example', beliefPage({ title: 'Gone', facts: [{ claim: 'Gone has 5 staff', confidence: '0.5' }] }));
+      await b.put('companies/gone-example', beliefPage({ title: 'Gone', facts: [{ claim: 'Gone has 5 staff', confidence: '0.9' }] }));
+      const revision = (await b.engine.executeRaw<{ r: string }>('SELECT knowledge_revision::text AS r FROM pages WHERE source_id=$1 AND slug=$2', [b.sourceId, 'companies/gone-example']))[0]!.r;
+      await b.op('delete_page', { slug: 'companies/gone-example', expected_revision: revision });
+      const t1 = await at(b);
+      expect(sorted(brief((await changes(b, t0, t1)).changes))).toEqual(sorted([['page', 'added', 'companies/newco-example'], ['fact', 'added', 'Newco has 10 staff']]));
+    }), 120_000);
+
+    test('a link that came with its page, removed and restored inside the window, reports nothing', () => brain(async b => {
+      await b.put('companies/widget-co', beliefPage({ title: 'Widget' }));
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'], links: ['companies/widget-co'] }));
+      const t0 = await at(b);
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'], links: ['companies/widget-co'] }));
+      const t1 = await at(b);
+      expect((await b.events()).some(e => e.subject_kind === 'link' && e.event_type === 'link.retracted')).toBe(true);
+      expect(brief((await changes(b, t0, t1)).changes)).toEqual([]);
+    }), 120_000);
+
     test('delta {beliefs: true} carries the diff and its text section; budget_tokens truncates it, and a remote caller gets the world view', () => brain(async b => {
       await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
       const t0 = await at(b);
@@ -202,6 +241,30 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       const quiet = [await delta({ since: later }), await delta({ since: later, beliefs: true })];
       expect(quiet[1]!.beliefs.changes).toEqual([]);
       expect(quiet[1]!.text).toBe(quiet[0]!.text);
+    }), 120_000);
+
+    test('a page created and renamed inside the window is reported under its final slug', () => beliefBrain(async b => {
+      const t0 = await at(b);
+      await b.put('notes/old-example', beliefPage({ type: 'note', title: 'Old', facts: ['Old example has a roof'] }));
+      await renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'notes/old-example', newSlug: 'notes/new-example', to: 'notes/new-example.md' });
+      const t1 = await at(b);
+      const diff = await changes(b, t0, t1);
+      expect(sorted(diff.changes.map(c => [c.kind, c.change, c.slug]))).toEqual(sorted([['page', 'added', 'notes/new-example'], ['fact', 'added', 'notes/new-example']]));
+      expect((await changes(b, t0, t1, { entities: ['notes/new-example'] })).changes).toEqual(diff.changes);
+    }, { databaseUrl: engineCase.databaseUrl }), 120_000);
+
+    test('a take removal after a retier keeps the holder of the take it removed (remote callers see it)', () => brain(async b => {
+      const page = (takes: Array<{ claim: string; who: string; weight: string }>) => beliefPage({ facts: ['Acme sells widgets'], takes });
+      await b.put(slug, page([]));
+      await b.put(slug, page([{ claim: 'Acme will sell', who: 'world', weight: '0.4' }]));
+      // A retier between the assertion and the removal: its value is the tier change, with no holder.
+      __setBeliefEmitterFaultForTests(drafts => drafts.flatMap(d => d.eventType === 'take.revised' ? [d, { ...d, eventType: 'trust.retiered', value: { from: 'agent_written', to: 'user_written' } }] : [d]));
+      try { await b.put(slug, page([{ claim: 'Acme will sell', who: 'world', weight: '0.6' }])); } finally { __setBeliefEmitterFaultForTests(null); }
+      expect((await b.events()).filter(e => e.subject_kind === 'take').map(e => e.event_type)).toEqual(['take.asserted', 'take.revised', 'trust.retiered']);
+      const t0 = await at(b);
+      await b.put(slug, page([]));
+      const t1 = await at(b);
+      expect(brief((await changes(b, t0, t1, { remote: true })).changes)).toEqual([['take', 'removed', 'Acme will sell']]);
     }), 120_000);
 
     test('gbrain beliefs changes prints the same diff for an entity and a --since window, and refuses a bad --since', () => brain(async b => {

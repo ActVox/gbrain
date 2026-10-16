@@ -26,7 +26,7 @@ import { readBeliefHistoryPage, type BeliefHistoryRow, type BeliefHistoryQuery }
 import { coverageAt } from './coverage-report.ts';
 import { readPageAtTime, remoteMayRead } from './page-at-time.ts';
 import { bodySubjects } from './backfill.ts';
-import { canonicalJson } from './keys.ts';
+import { canonicalJson, valueHash } from './keys.ts';
 import { estimateTokens, packToBudget } from '../search/token-budget.ts';
 
 export type BeliefChangeKind = 'page' | 'fact' | 'take' | 'link' | 'link_transition';
@@ -78,20 +78,22 @@ const iso = (v: unknown) => new Date(v as string).toISOString();
 const isCreation = (e: BeliefHistoryRow) => e.event_type === 'page.published' && e.value != null && e.value.revision_before == null;
 
 let pageSize = PAGE_SIZE;
-/** Test seam: a small page size, so a cell can cross page boundaries without 10,000 events. */
-export function __setBeliefChangesPageSizeForTests(n?: number): void { pageSize = n ?? PAGE_SIZE; }
+let maxEvents = MAX_EVENTS;
+/** Test seam: a small page size and event cap, so a cell can cross page boundaries and reach the cap without 10,000 events. */
+export function __setBeliefChangesPageSizeForTests(n?: number, cap?: number): void { pageSize = n ?? PAGE_SIZE; maxEvents = cap ?? MAX_EVENTS; }
 
-/** Every event matching `q`, paged on what each page scanned (a remote page is filtered after its LIMIT); `truncated` when the cap stopped it. */
+/**
+ * Every event matching `q`, paged on what each page scanned (a remote page is filtered after its LIMIT); `truncated`
+ * when the cap stopped it. The cap counts rows the caller may read, so events it may not read never change the answer.
+ */
 async function readAll(engine: BrainEngine, q: BeliefHistoryQuery): Promise<{ rows: BeliefHistoryRow[]; truncated: boolean }> {
   const rows: BeliefHistoryRow[] = [];
   let afterId = 0;
-  let scanned = 0;
   for (;;) {
     const page = await readBeliefHistoryPage(engine, { ...q, afterId, limit: pageSize });
     rows.push(...page.rows);
-    scanned += page.scanned;
     if (page.lastScannedId == null || page.scanned < pageSize) return { rows, truncated: false };
-    if (scanned >= MAX_EVENTS) return { rows, truncated: true };
+    if (rows.length >= maxEvents) return { rows, truncated: true };
     afterId = page.lastScannedId;
   }
 }
@@ -102,7 +104,7 @@ async function readPrior(engine: BrainEngine, q: BeliefChangesQuery, wanted: Rea
   if (!wanted.size) return { prior, truncated: false };
   const subjectKeys = [...new Set(wanted.values())];
   let beforeId: number | undefined;
-  let scanned = 0;
+  let readable = 0;
   for (;;) {
     const page = await readBeliefHistoryPage(engine, { sourceId: q.sourceId, remote: q.remote, takesHolders: q.takesHolders, subjectKeys, recordedUntil: until,
       beforeId, descending: true, limit: pageSize });
@@ -111,9 +113,9 @@ async function readPrior(engine: BrainEngine, q: BeliefChangesQuery, wanted: Rea
       const id = `${e.subject_kind}\u0000${e.subject_key}`;
       if (wanted.has(id) && !prior.has(id)) prior.set(id, e);
     }
-    scanned += page.scanned;
+    readable += page.rows.length;
     if (page.lastScannedId == null || page.scanned < pageSize || prior.size === wanted.size) return { prior, truncated: false };
-    if (scanned >= MAX_EVENTS) return { prior, truncated: true };
+    if (readable >= maxEvents) return { prior, truncated: true };
     beforeId = page.lastScannedId;
   }
 }
@@ -148,23 +150,24 @@ const pageEntry = (e: BeliefHistoryRow, change: BeliefChange['change'], before: 
  * nothing; a page created and gone again inside the window reports nothing. Returns the entries and the creation
  * event when the created page is still there at the end (its fence subjects are listed too).
  */
-function netPage(evs: BeliefHistoryRow[], remote: boolean): { entries: BeliefChange[]; creation: BeliefHistoryRow | null } {
+function netPage(evs: BeliefHistoryRow[], remote: boolean): { entries: BeliefChange[]; creation: BeliefHistoryRow | null; slug: string } {
   const creation = evs.find(isCreation) ?? null;
   const terminal = [...evs].reverse().find(e => TERMINAL.has(e.event_type) || e.event_type === 'page.deleted' && e.value?.hard === true);
-  if (terminal) return { entries: creation ? [] : [pageEntry(terminal, PAGE_EVENTS[terminal.event_type]!, null, null)], creation: null };
+  if (terminal) return { entries: creation ? [] : [pageEntry(terminal, PAGE_EVENTS[terminal.event_type]!, null, null)], creation: null, slug: terminal.slug };
   const toggles = evs.filter(e => e.event_type === 'page.deleted' || e.event_type === 'page.restored');
   const renames = evs.filter(e => e.event_type === 'page.renamed' && e.value);
   const startDeleted = creation ? creation.value?.deleted === true : toggles[0]?.event_type === 'page.restored';
   const endDeleted = toggles.length ? toggles.at(-1)!.event_type === 'page.deleted' : startDeleted;
   if (creation) {
-    if (endDeleted) return { entries: [], creation: null };
-    return { entries: [pageEntry(creation, 'added', null, remote ? null : { counts: creation.value?.counts ?? null })], creation };
+    const slug = String(renames.at(-1)?.value?.new_slug ?? creation.slug);
+    if (endDeleted) return { entries: [], creation: null, slug };
+    return { entries: [{ ...pageEntry(creation, 'added', null, remote ? null : { counts: creation.value?.counts ?? null }), slug, subject: { slug } }], creation, slug };
   }
   const entries: BeliefChange[] = [];
   if (startDeleted !== endDeleted) entries.push(pageEntry(toggles.at(-1)!, endDeleted ? 'deleted' : 'restored', null, null));
   const from = renames[0]?.value?.old_slug, to = renames.at(-1)?.value?.new_slug;
   if (renames.length && from !== to) entries.push(pageEntry(renames.at(-1)!, 'renamed', { slug: from }, { slug: to }));
-  return { entries, creation: null };
+  return { entries, creation: null, slug: evs.at(-1)!.slug };
 }
 
 export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery): Promise<BeliefChanges> {
@@ -191,17 +194,21 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
     if (!list) pageEvents.set(e.page_lifetime, list = []);
     list.push(e);
   }
+  // Lifetimes created inside the window, and those of them gone again by its end (their beliefs went with them).
   const created = new Set<string>();
+  const gone = new Set<string>();
   for (const [lifetime, evs] of pageEvents) {
     const net = netPage(evs, q.remote);
     if (evs.some(isCreation)) created.add(lifetime);
+    if (evs.some(isCreation) && !net.creation) gone.add(lifetime);
     for (const entry of net.entries.filter(c => touches(c.slug, c.subject))) items.push({ id: entry.evidence.event_id, run: async () => [entry] });
     const creation = net.creation;
-    if (creation && touches(creation.slug, { subject_slug: creation.slug })) {
-      items.push({ id: creation.id, run: async () => [...await readCreationSubjects(engine, q, creation, out.until) ?? []].flatMap(([id, value]) => {
+    const slug = net.slug;
+    if (creation && touches(slug, { subject_slug: slug })) {
+      items.push({ id: creation.id, run: async () => [...await readCreationSubjects(engine, q, creation, slug, out.until) ?? []].flatMap(([id, value]) => {
         if (byKey.has(id)) return [];
         const kind = id.split('\u0000')[0] as 'fact' | 'take';
-        return [{ kind, slug: creation.slug, change: 'added' as const, subject: subjectOf(kind, id.split('\u0000')[1]!, { subject_slug: creation.slug }, [value]),
+        return [{ kind, slug, change: 'added' as const, subject: subjectOf(kind, id.split('\u0000')[1]!, { subject_slug: slug }, [value]),
           before: null, after: value, before_known: true, cause: causeOf(creation), evidence: evidenceOf(creation), trust_tier: creation.trust_tier }];
       }) });
     }
@@ -222,9 +229,12 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
   };
   const keys = [...byKey].filter(([id, rows]) => {
     const first = rows[0]!, last = rows.at(-1)!;
-    const finalHash = REMOVALS.has(last.event_type) ? null : last.value_hash;
-    // Netted on hashes before anything is read: the window ends where it started.
-    if (first.prior_hash != null && first.prior_hash === finalHash) return false;
+    if (first.page_lifetime && gone.has(first.page_lifetime)) return false;
+    // Netted on hashes before anything is read: the window ends where it started. A link's prior hash covers its identity
+    // without the carried context; a subject of a page created in the window started absent.
+    const finalHash = REMOVALS.has(last.event_type) ? null
+      : last.subject_kind === 'link' && last.value ? valueHash(Object.fromEntries(Object.entries(last.value).filter(([k]) => k !== 'context'))) : last.value_hash;
+    if (first.prior_hash != null && first.prior_hash === finalHash && !(first.page_lifetime && created.has(first.page_lifetime))) return false;
     return touches(last.slug, subjectFor(id, rows));
   });
   const prior = await readPrior(engine, q, new Map(keys.map(([id, rows]) => [id, rows[0]!.subject_key])), out.since);
@@ -278,7 +288,8 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
  * purge hid is dropped for every caller; a remote caller gets them only where it may read the interval, and only
  * world rows (takes of holders it may read) whose claim was not made private after the interval's event.
  */
-async function subjectsOf(engine: BrainEngine, q: BeliefChangesQuery, at: Awaited<ReturnType<typeof readPageAtTime>>, interval: NonNullable<Awaited<ReturnType<typeof readPageAtTime>>['current']>) {
+async function subjectsOf(engine: BrainEngine, q: BeliefChangesQuery, at: Awaited<ReturnType<typeof readPageAtTime>>, interval: NonNullable<Awaited<ReturnType<typeof readPageAtTime>>['current']>,
+  privateAfter = interval.event.id) {
   if (!interval.page || interval.body === 'unavailable' || interval.body === 'segmented' || interval.page.compiled_truth == null) return null;
   if (q.remote && !await remoteMayRead(engine, at.page_id, interval)) return null;
   const { subjects } = await bodySubjects(engine, interval.lifetime, `${interval.page.compiled_truth}\n${interval.page.timeline ?? ''}`, interval.event.visibility);
@@ -292,7 +303,7 @@ async function subjectsOf(engine: BrainEngine, q: BeliefChangesQuery, at: Awaite
       WHERE e.source_id = $1 AND e.source_incarnation = (SELECT s.incarnation FROM sources s WHERE s.id = $1)
         AND (e.event_type = 'derived.hidden' AND e.subject_key = ANY($2::text[])
           OR $4::boolean AND e.visibility = 'private' AND e.id > $3::bigint AND e.claim_fp = ANY($5::text[]))`,
-    [q.sourceId, readable.map(s => s.key), interval.event.id, q.remote, readable.map(s => s.claimFp).filter((fp): fp is string => typeof fp === 'string')]);
+    [q.sourceId, readable.map(s => s.key), privateAfter, q.remote, readable.map(s => s.claimFp).filter((fp): fp is string => typeof fp === 'string')]);
   const hiddenKeys = new Set(hidden.filter(h => h.subject_key).map(h => `${h.subject_kind}\u0000${h.subject_key}`));
   const laterPrivate = new Set(hidden.filter(h => h.claim_fp).map(h => `${h.subject_kind}\u0000${h.claim_fp}`));
   return new Map(readable.filter(s => !hiddenKeys.has(`${s.kind}\u0000${s.key}`) && !laterPrivate.has(`${s.kind}\u0000${s.claimFp}`))
@@ -305,11 +316,16 @@ async function readBodySubjects(engine: BrainEngine, q: BeliefChangesQuery, slug
   return read?.current ? subjectsOf(engine, q, read, read.current) : null;
 }
 
-/** The fence subjects of the body a creation event published (its interval, from the page's history up to `until`). */
-async function readCreationSubjects(engine: BrainEngine, q: BeliefChangesQuery, creation: BeliefHistoryRow, until: string) {
-  const read = await readPageAtTime(engine, { sourceId: q.sourceId, slug: creation.slug, at: new Date(until), history: true, withBodies: true }).catch(() => null);
-  const interval = read?.intervals.find(i => i.event.id === creation.id);
-  return read && interval ? subjectsOf(engine, q, read, interval) : null;
+/**
+ * The fence subjects of the body a creation event published, from the history of the page at `slug` at `until`. When a
+ * later publication on the lifetime (a rename's) replaced the creation's interval, its first remaining interval answers:
+ * a subject that changed since the creation has its own events, which the caller skips. Claims made private after the
+ * creation are dropped either way.
+ */
+async function readCreationSubjects(engine: BrainEngine, q: BeliefChangesQuery, creation: BeliefHistoryRow, slug: string, until: string) {
+  const read = await readPageAtTime(engine, { sourceId: q.sourceId, slug, at: new Date(until), history: true, withBodies: true }).catch(() => null);
+  const interval = read?.intervals.find(i => i.event.id === creation.id) ?? read?.intervals.find(i => i.lifetime === creation.page_lifetime && i.event.id > creation.id);
+  return read && interval ? subjectsOf(engine, q, read, interval, creation.id) : null;
 }
 
 const lineCost = (line: string) => estimateTokens(line + '\n');
