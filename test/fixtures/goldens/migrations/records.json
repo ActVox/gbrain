@@ -1,11 +1,12 @@
 {
   "golden": {
-    "count": 245,
+    "count": 246,
     "gaps": [
       17,
       18,
       19,
-      100
+      100,
+      251
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
@@ -58,7 +59,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 250,
+    "latest": 252,
     "records": [
       {
         "handler": {
@@ -3787,12 +3788,12 @@
         },
         "sqlFor": {
           "pglite": {
-            "length": 8521,
-            "sha256": "41b3978089d002a00953c00d951b41a35cb25a998513e98507b75edfb42976a5"
+            "length": 8855,
+            "sha256": "4f838080e20c7d145652c5d3a068b8e984436d0b565caf530c9300c068f1df2f"
           },
           "postgres": {
-            "length": 8730,
-            "sha256": "4d2cf34486e3fb35c8922bf128190d5c544eff3d92a332201ad229866bbe6fe9"
+            "length": 9064,
+            "sha256": "49813d44e4db7783e301f7358c6ef6cd2c1bea8c660e18ba9c94346c15d2aa65"
           }
         },
         "transaction": false,
@@ -3814,8 +3815,8 @@
         "idempotent": true,
         "name": "segmented_chunk_gc_index",
         "sql": {
-          "length": 68,
-          "sha256": "004ba9dd1ed2cdc010622bc58689e5bf912d937212ec3b8b83307d9f6824e1c9"
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         },
         "sqlFor": "absent",
         "transaction": false,
@@ -3834,6 +3835,19 @@
         "transaction": "absent",
         "verify": "absent",
         "version": 250
+      },
+      {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "page_body_staging_texts",
+        "sql": {
+          "length": 424,
+          "sha256": "8ab1b335cd497dba1d2a9840a846f704d39bb27924a6baac455d3801ac112788"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 252
       }
     ],
     "versions": [
@@ -4081,7 +4095,8 @@
       247,
       248,
       249,
-      250
+      250,
+      252
     ]
   },
   "normalizer": "migrations-record-v1"
