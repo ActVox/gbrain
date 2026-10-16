@@ -858,13 +858,16 @@ async function runRoundtrip(
     }
 
     // 2. Sweep — the `gbrain sweep --once` equivalent, run in-process because
-    // verify's caller holds the engine [CX2-5].
+    // verify's caller holds the engine [CX2-5]. #6786: passes 1 and 2 only.
+    // The probes never need the corpus pass, and verify's engine runs without
+    // the gateway extraction would use: every pending transcript came back
+    // chat_unavailable and was marked ingested with zero facts.
     const caps = opts.capabilities ?? detectCapabilities();
     try {
       const report = await runMaintenanceSweep(engine, {
         sourceId,
         budgetMs: opts.sweepBudgetMs ?? 20_000,
-        capabilities: caps,
+        corpus: false,
         log: opts.log,
       });
       opts.log?.(`[verify] sweep: facts=${report.factsReconciled} links=${report.linksExtracted} timeline=${report.timelineExtracted}`);

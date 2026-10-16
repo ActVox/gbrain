@@ -42,11 +42,11 @@ import { companyBrainProfile } from '../company-brain/profile.ts';
 import { companyBrainPolicyFingerprint } from '../company-brain/policy.ts';
 import { isUnboundSourcePage, UNBOUND_COLLISION_MESSAGE } from './unbound-source.ts';
 import { checkpointRetryCommand, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
-import { CURSOR_CHANGED_REFUSAL_MESSAGE, EARLIER_PAGE_REFUSAL_MESSAGE, knockOnDetail, SYNC_CURSOR_FENCE_ORIGIN } from './sync-knock-on.ts';
+import { CURSOR_CHANGED_REFUSAL_MESSAGE, SYNC_CURSOR_FENCE_ORIGIN } from './sync-knock-on.ts';
 import { checkpointCursorReplaced } from './sync-checkpoint-replaced.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
-import { clearGitHold, countGitHolds, recordSyncImportProvenance, syncDiskProvenance, syncImportParser, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { clearGitHold, countGitHolds, recordSyncImportProvenance, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
 import { clearSyncSlice, writeSyncSlice, type SyncSliceState } from './sync-slices.ts';
 import { CHECKPOINT_MOVED_MESSAGE, emptySyncScope, pinnedSlugModeMismatch, slugModeMismatchCause } from './sync-slug-mode.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
@@ -56,7 +56,6 @@ import { describeFixes } from '../fence-repair/report.ts';
 import { fenceFixesWire } from '../fence-repair/tier1.ts';
 import type { FenceFix } from '../fence-repair/types.ts';
 import { VERSION } from '../../version.ts';
-import { earlierGroupMemberFailed, windowPredecessor, windowPredecessorAllows } from './sync-window.ts';
 
 /** The options that select a managed sync cursor (its key), recorded so a refusal can print the exact retry. */
 export interface SyncCursorOptions { full: boolean; workingTree: boolean; srcSubpath: string | null; exclude: string[]; includeHidden: string[]; strategy: string | null }
@@ -103,15 +102,12 @@ export interface SyncIntent extends Record<string, unknown> {
  * admitted ahead (`window`). FOR KEY SHARE keeps the cursor row in place without blocking the drain's
  * cursor saves, so the next group is admitted while this one publishes.
  */
-export interface SyncCursorFence { run_id: string; request_id: string | null; group: string[] | null; index: string | number | null;
-  /** #6643: the cursor's record of the window members it dropped (sync-run.ts `Cursor.dropped`). */
-  dropped?: Array<{ requestId: string; root: string | null }> | null }
+export interface SyncCursorFence { run_id: string; request_id: string | null; group: string[] | null; index: string | number | null }
 async function readSyncCursorFence(tx: BrainEngine, cursorKey: string): Promise<SyncCursorFence | undefined> {
   const [held] = await tx.executeRaw<SyncCursorFence>(
     `SELECT completed_keys->0->>'runId' AS run_id,completed_keys->0->'pending'->>'requestId' AS request_id,completed_keys->0->>'index' AS index,
       (SELECT jsonb_agg(m->>'requestId') FROM (SELECT m FROM jsonb_array_elements(COALESCE(completed_keys->0->'group','[]'::jsonb)) m
-        UNION ALL SELECT m FROM jsonb_array_elements(COALESCE(completed_keys->0->'window','[]'::jsonb)) g, jsonb_array_elements(g) m) members) AS group,
-      completed_keys->0->'dropped' AS dropped
+        UNION ALL SELECT m FROM jsonb_array_elements(COALESCE(completed_keys->0->'window','[]'::jsonb)) g, jsonb_array_elements(g) m) members) AS group
      FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 FOR KEY SHARE`, [cursorKey]);
   return held;
 }
@@ -126,9 +122,10 @@ function sharedSyncValidation(tx: BrainEngine, key: string, run: () => Promise<S
 }
 /**
  * #5984: the source-wide part of sync validation as one pipeline: coordinator switch, configured root,
- * cursor, window predecessor and owner epoch, each checked in that order. The rows stay locked FOR SHARE.
+ * cursor and owner epoch, each checked in that order. The rows stay locked FOR SHARE. #6712: a page no longer
+ * waits on its window predecessor's fate (one page, one fate).
  */
-async function sourceSyncChecks(tx: BrainEngine, row: WriteRequest, p: SyncIntent, root: string, after: string | null) {
+async function sourceSyncChecks(tx: BrainEngine, row: WriteRequest, p: SyncIntent, root: string) {
   const [, , held] = await pipelined(tx, [
     () => assertManagedSyncActive(tx, true),
     async () => {
@@ -136,10 +133,6 @@ async function sourceSyncChecks(tx: BrainEngine, row: WriteRequest, p: SyncInten
       assertConfiguredSyncRoot(root, configuredSource?.local_path ?? null);
     },
     () => readSyncCursorFence(tx, p.cursorKey),
-    async () => {
-      if (after && !await windowPredecessorAllows(tx, row)) throw withSyncRefusal(knockOnRefusal(EARLIER_PAGE_REFUSAL_MESSAGE, row,
-        `Request ${row.request_id} was admitted ahead of request ${after} of the same sync run, which did not commit, so this page must not publish after it.`), knockOnDetail('window_predecessor', after));
-    },
     async () => {
       const current = await getWorktreeBinding(tx, row.source_id);
       if (!current || String(current.owner_epoch) !== p.ownerEpoch) throw syncPublicationRefusal('owner_unavailable', 'The accepted sync owner epoch changed.', row, p,
@@ -173,15 +166,13 @@ function syncPublicationRefusal(code: RegistryCode, message: string, row: WriteR
 }
 
 /**
- * #6643: a refusal that is not a failure of its page (a knock-on, or a request whose run another run replaced). Its
- * next step is the status read, never a `--retry-failed` rerun: the next sync pass re-freezes the entry by itself.
+ * #6643: the refusal of a request whose run another run replaced: not a failure of its page. Its next step is the
+ * status read, never a `--retry-failed` rerun: the replacing run covers the page.
  */
-function knockOnRefusal(message: string, row: WriteRequest, cause: string, superseded = false): OperationError {
+function supersededRefusal(message: string, row: WriteRequest, cause: string): OperationError {
   const status = ['gbrain', 'sync', 'status', '--source', row.source_id, '--json'];
-  return opError('revision_conflict', message, superseded
-    ? `${cause} Request ${row.request_id} in ${row.source_id} published nothing; the run that replaced its cursor covers its page, and ${status.join(' ')} shows that run. Do not resubmit it.`
-    : `${cause} Request ${row.request_id} in ${row.source_id} published nothing, and the next sync pass re-freezes its page by itself; `
-    + `${status.join(' ')} names the request it waited on (root_cause). Do not resubmit it.`,
+  return opError('revision_conflict', message,
+    `${cause} Request ${row.request_id} in ${row.source_id} published nothing; the run that replaced its cursor covers its page, and ${status.join(' ')} shows that run. Do not resubmit it.`,
     { fix: readFix('Shows the sync cursor, the root cause of this refusal and the next step, read-only.', { argv: status }) });
 }
 
@@ -192,27 +183,20 @@ function withSyncRefusal(error: OperationError, detail: object): OperationError 
 }
 
 /**
- * #6643: "The accepted sync cursor changed before publication." has three causes, recorded with a fence snapshot:
+ * #6643: "The accepted sync cursor changed before publication." has two causes, recorded with a fence snapshot
+ * (#6712 retired the third, `window_dropped`, with the window cancel that produced it):
  * - `run_replaced`: another run of the source replaced the cursor; this request's run is superseded, not failed.
- * - `window_dropped`: the cursor recorded this request as a member of a window it dropped after an earlier page did
- *   not commit (a lane row the window cancel skipped because it was already claimed). A knock-on of the request whose
- *   failure dropped it, as recorded then.
- * - `outside_fence`: anything else (a duplicate admission, a request ahead of the cursor it never dropped): a
- *   coordination fault, a root.
+ * - `outside_fence`: anything else (a duplicate admission, a request ahead of the cursor): a coordination fault, a root.
  */
 export function cursorFenceRefusal(row: WriteRequest, p: SyncIntent, cursor: SyncCursorFence): OperationError {
   const cursorIndex = cursor.index == null ? null : Number(cursor.index);
-  const drop = cursor.run_id === p.runId && p.kind !== 'managed_sync_checkpoint' && Array.isArray(cursor.dropped)
-    ? cursor.dropped.find(member => member?.requestId === row.request_id) : undefined;
-  const cause = cursor.run_id !== p.runId ? 'run_replaced' : drop ? 'window_dropped' : 'outside_fence';
+  const cause = cursor.run_id !== p.runId ? 'run_replaced' : 'outside_fence';
   const fence = { run_id: cursor.run_id, expected_run_id: p.runId, request_id: cursor.request_id, members: cursor.group?.length ?? 0, index: cursorIndex, request_index: p.index };
-  const error = (cause === 'outside_fence' ? (why: string) => syncPublicationRefusal('revision_conflict', CURSOR_CHANGED_REFUSAL_MESSAGE, row, p, why)
-    : (why: string) => knockOnRefusal(CURSOR_CHANGED_REFUSAL_MESSAGE, row, why, cause === 'run_replaced'))(
-    cause === 'run_replaced' ? `Another sync run of ${row.source_id} replaced the cursor this request belongs to.`
-      : cause === 'window_dropped' ? `Request ${row.request_id} was admitted ahead of the cursor of ${row.source_id}, which dropped it after an earlier page of the same run did not commit.`
-        : `Request ${row.request_id} is not the entry the cursor of ${row.source_id} holds (cursor at index ${cursorIndex ?? 'unknown'}, request ${cursor.request_id ?? 'none'}), so it must not publish.`);
-  return withSyncRefusal(error, cause === 'window_dropped' ? { ...knockOnDetail('window_dropped', drop?.root ?? null), cause, fence }
-    : { origin: SYNC_CURSOR_FENCE_ORIGIN, cause, fence });
+  const error = cause === 'run_replaced'
+    ? supersededRefusal(CURSOR_CHANGED_REFUSAL_MESSAGE, row, `Another sync run of ${row.source_id} replaced the cursor this request belongs to.`)
+    : syncPublicationRefusal('revision_conflict', CURSOR_CHANGED_REFUSAL_MESSAGE, row, p,
+      `Request ${row.request_id} is not the entry the cursor of ${row.source_id} holds (cursor at index ${cursorIndex ?? 'unknown'}, request ${cursor.request_id ?? 'none'}), so it must not publish.`);
+  return withSyncRefusal(error, { origin: SYNC_CURSOR_FENCE_ORIGIN, cause, fence });
 }
 
 /**
@@ -377,7 +361,7 @@ async function recordSliceCursor(tx: BrainEngine, row: WriteRequest, p: { syncOp
 
 /** The code-file branch of `prepareManagedSyncMutation`: `importCodeFile` with `prepare`, text embedding deferred to `embed --stale` (the image branch is `sync-image.ts`). */
 async function prepareManagedSyncCode(engine: BrainEngine, row: WriteRequest, p: { content: string; sourcePath: string; rawHash: string | null; lineEndingOnly?: boolean; companyApproval: boolean },
-  ctx: { snapshot: Snapshot | null; validate: (tx: BrainEngine) => Promise<void>; releaseHold: (tx: BrainEngine) => Promise<void>; clock?: ClaimPhaseClock;
+  ctx: { snapshot: Snapshot | null; validate: (tx: BrainEngine) => Promise<void>; releaseHold: (tx: BrainEngine) => Promise<void>; recordProvenance: (tx: BrainEngine) => Promise<void>; clock?: ClaimPhaseClock;
     refuse: (code: RegistryCode, message: string, cause: string) => OperationError; contentRefusal: (refusal: ContentRefusal) => OperationError }): Promise<PreparedMutation> {
   const { snapshot, validate, releaseHold, clock, refuse } = ctx;
   if (p.companyApproval) throw refuse('profile_incompatible', 'Company source approval permits only committed Markdown content.',
@@ -402,9 +386,44 @@ async function prepareManagedSyncCode(engine: BrainEngine, row: WriteRequest, p:
     noop: ready.noop, deferEmbedding: true, apply: async tx => {
     await ready.apply(tx);
     await releaseHold(tx);
+    await ctx.recordProvenance(tx);
     return { status: ready.noop ? 'skipped' : snapshot ? 'updated' : 'created', slug: row.slug, source_id: row.source_id,
       chunks: result.chunks, noop: ready.noop, imported_file: true };
   } };
+}
+
+/**
+ * #6712 PR 1: the import provenance a code or image publication records in its transaction, as a Markdown import records
+ * its own: the page's revision after the write, the bytes on disk (the file: neither writes one back) and the parser.
+ */
+function syncFileProvenance(row: WriteRequest, p: SyncIntent, root: string, rawSha256: string): (tx: BrainEngine) => Promise<void> {
+  return async tx => {
+    const final = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+    if (!final || final.page.deleted_at != null) return;
+    await recordSyncImportProvenance(tx, { source_id: row.source_id, incarnation: row.source_incarnation, page_id: Number(final.page.id), origin: p.sourcePath!,
+      raw_sha256: rawSha256, ...(p.blobOid ? { blob_oid: p.blobOid } : {}), working: p.working === true, gbrain_version: VERSION, revision: final.revision,
+      parser: syncImportParserFor(p.sourcePath!, null), ...syncDiskProvenance(syncDiskBytes(root, p.path!, p.content!, p.rawHash), p.target) });
+  };
+}
+
+/**
+ * The no-op of an entry whose newer working-tree bytes are the current page (`published`): it records, as its import
+ * provenance, those working-tree bytes at the page's current revision (#6712 PR 1), so the commit that later carries
+ * them is prescreened; the pinned bytes it did not import are not recorded.
+ */
+function publishedSyncNoop(row: WriteRequest, p: SyncIntent, root: string, snapshot: Snapshot | null, schemaPack: string | null,
+  validate: (tx: BrainEngine) => Promise<void>, releaseHold: (tx: BrainEngine) => Promise<void>): SyncPreparedMutation {
+  const importProvenance: SyncImportProvenanceBase = { source_id: row.source_id, incarnation: row.source_incarnation, origin: p.sourcePath!, raw_sha256: p.rawHash!,
+    working: true, gbrain_version: VERSION, parser: syncImportParser(schemaPack) };
+  return { observedRevision: snapshot?.revision ?? null, noop: true, contentUnchanged: true, validate, importProvenance,
+    apply: async tx => {
+      await releaseHold(tx);
+      const current = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+      if (current && current.page.deleted_at == null && current.revision === snapshot?.revision) {
+        await recordSyncImportProvenance(tx, { ...importProvenance, page_id: Number(current.page.id), revision: current.revision, ...syncDiskProvenance(readSyncFile(root, p.path!), p.target) });
+      }
+      return { status: 'skipped', slug: row.slug, source_id: row.source_id, chunks: 0, noop: true, imported_file: true };
+    } };
 }
 
 /** The bytes on disk of an import that writes no file back: its frozen content when that is the file (raw hash), else the file read now (null: absent). */
@@ -426,7 +445,7 @@ async function applyManagedSyncCheckpoint(tx: BrainEngine, row: WriteRequest, p:
   const [manifest] = await tx.executeRaw<{ count: number }>("SELECT jsonb_array_length(completed_keys) AS count FROM op_checkpoints WHERE op='managed-sync-manifest' AND fingerprint=$1", [p.runId]);
   if (!manifest || Number(manifest.count) !== p.total) throw syncPublicationRefusal('storage_error', 'The immutable sync manifest is incomplete.', row, p,
     `The immutable manifest of this sync run is incomplete, so the checkpoint of ${row.source_id} did not advance.`);
-  const incomplete = await findIncompleteSyncReceipt(tx, row.worktree_id!, p.runId, p.supersededRequests ?? [], p.settled ?? null, p.total);
+  const incomplete = await findIncompleteSyncReceipt(tx, row.worktree_id!, p.runId, p.supersededRequests ?? [], p.settled ?? null);
   if (incomplete) throw opError('recovery_required', `An incomplete page receipt (request ${incomplete}) still blocks the sync checkpoint.`,
     `Page request ${incomplete} of this sync run is still open or needs recovery, so checkpoint request ${row.request_id} of ${row.source_id} did not commit. `
       + `Inspect request ${incomplete} and let it finish; do not resubmit it. Then run: ${checkpointRetryCommand({ sourceId: row.source_id, processingOptions: p.processingOptions, syncOptions: p.syncOptions, repoPath: p.repoPath })}`,
@@ -518,16 +537,10 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   };
   // #5984: validation's reads are pipelined; each check runs in the order it always did, so the first failing one is reported.
   const validate = async (tx: BrainEngine) => {
-    const after = windowPredecessor(row);
-    const shared = sharedSyncValidation(tx, `${row.source_id}\0${p.cursorKey}\0${p.ownerEpoch}\0${root}\0${after ?? ''}`, () => sourceSyncChecks(tx, row, p, root, after));
+    const shared = sharedSyncValidation(tx, `${row.source_id}\0${p.cursorKey}\0${p.ownerEpoch}\0${root}`, () => sourceSyncChecks(tx, row, p, root));
     await pipelined(tx, [
       () => shared,
       () => validateSyncAuthority(tx, p.syncAuthority, row.slug),
-      async () => {
-        const failed = await earlierGroupMemberFailed(tx, row);
-        if (failed) throw withSyncRefusal(knockOnRefusal(EARLIER_PAGE_REFUSAL_MESSAGE, row,
-          `Request ${row.request_id} follows a page of the same bulk group that did not commit, so this page must not publish after it.`), knockOnDetail('group_member', failed));
-      },
       async () => {
         const cursor = await shared;
         // #6513: a checkpoint whose cursor another run replaced is superseded, not conflicted; a page keeps `revision_conflict`.
@@ -592,10 +605,11 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   if (isImageFilePath(p.sourcePath)) {
     return prepareManagedSyncImage(engine, row, { content: p.content, sourcePath: p.sourcePath, path: p.path, rawHash: p.rawHash, lineEndingOnly: p.lineEndingOnly },
       { root, snapshot, ...(moved && moved.slug !== row.slug ? { renamedFrom: { slug: moved.slug } } : {}), noEmbed: p.processingOptions?.noEmbed === true || p.embedDeferred === true, companyApproval: !!p.companyApproval, validate, releaseHold, clock, screening: !!screening,
+        recordProvenance: syncFileProvenance(row, p, root, sha256(Buffer.from(p.content, 'base64'))),
         refuse: (code, message, cause) => syncPublicationRefusal(code, message, row, p, cause) });
   }
   if (isCodeFilePath(p.sourcePath)) return prepareManagedSyncCode(engine, row, { content: p.content, sourcePath: p.sourcePath, rawHash: p.rawHash, lineEndingOnly: p.lineEndingOnly, companyApproval: !!p.companyApproval },
-    { snapshot, validate, releaseHold, clock, refuse: (code, message, cause) => syncPublicationRefusal(code, message, row, p, cause), contentRefusal: refusal => syncContentRefusal(refusal, row, p) });
+    { snapshot, validate, releaseHold, recordProvenance: syncFileProvenance(row, p, root, sha256(p.content)), clock, refuse: (code, message, cause) => syncPublicationRefusal(code, message, row, p, cause), contentRefusal: refusal => syncContentRefusal(refusal, row, p) });
   const schema = p.companyApproval?.schema;
   if (schema && p.processingOptions?.noSchemaPack) throw syncPublicationRefusal('profile_incompatible', 'Company source approval requires its pinned schema pack.', row,
     { ...p, processingOptions: { ...p.processingOptions!, noSchemaPack: false } },
@@ -616,8 +630,7 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   const { screen, parsedInput, newerWorkingTree } = await settledSyncScreen(engine, { content: p.content, rawHash: p.rawHash, lineEndingOnly: p.lineEndingOnly === true,
     slug: row.slug, sourcePath: p.sourcePath, path: p.path, root, snapshot, base, renamed: !!renamed, activePack, companyApproval: !!p.companyApproval,
     purgedPages: await readPagePurgeTombstones(engine, row.source_id) });
-  if (screen.status === 'published') return { observedRevision: snapshot?.revision ?? null, noop: true, contentUnchanged: true, validate,
-    apply: async tx => { await releaseHold(tx); return { status: 'skipped', slug: row.slug, source_id: row.source_id, chunks: 0, noop: true, imported_file: true }; } };
+  if (screen.status === 'published') return publishedSyncNoop(row, p, root, snapshot, pack?.identity ?? null, validate, releaseHold);
   if (screen.status === 'refused') throw syncContentRefusal(screen.refusal, row, p);
   const recovery = screen.parsed?.errors?.find(error => error.code === 'YAML_PARSE' && error.recoverable)?.recovery;
   const commentValue = screen.parsed?.warnings?.some(warning => warning.code === 'FRONTMATTER_COMMENT_VALUE') === true;

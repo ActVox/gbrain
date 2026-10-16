@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 239780,
-    "stdoutSha256": "995c5f2b9c152712f85e6c630b395425ac59361ec9f5fd6e543603fe8a3ee9a6",
+    "stdoutBytes": 239889,
+    "stdoutSha256": "2fd5b555ddd787f28d3fe8853cb96162ee547d115f92094dde1d1178337f8ba0",
     "toolNames": [
       "remember",
       "entity",
@@ -648,7 +648,7 @@
         "scope": "write"
       },
       {
-        "description": "Soft-delete a page and remove its markdown file from the source working tree (the source local_path, or sync.repo_path when the source has none). File removal is skipped when sync.write_through is off; the committed receipt reports the persistence mode and write_through outcome. Read the page revision first and pass expected_revision; retain request_id for replay. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h, which re-creates the file. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed. A page whose file another live page of the source records is hidden without touching that file (receipt write_through.skipped: shared_origin): the file and the surviving page remain, nothing is erased, and the next sync imports the file's current content into the surviving page. purge: true is trusted-local CLI only and removes the row, chunks, links and raw data immediately after its recorded markdown artifact is removed. Purge uses the same revision, request_id and recovery protocol, including for existing tombstones. A removal failure preserves the prior row and never reports purge success; repair the artifact and submit a new request_id. A purge of a page whose file is shared refuses and names the soft delete. A committed purge warns that git history, synced copies, exports and derived rows may retain content; rotate exposed credentials.",
+        "description": "Soft-delete a page and remove its markdown file from the source working tree (the source local_path, or sync.repo_path when the source has none). File removal is skipped when sync.write_through is off; the committed receipt reports the persistence mode and write_through outcome. Read the page revision first and pass expected_revision; retain request_id for replay. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h, which re-creates the file. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed. A page whose file another live page of the source records is hidden without touching that file (receipt write_through.skipped: shared_origin): the file and the surviving page remain, nothing is erased, and the warning names gbrain repair file-drift --prefer file, which imports the file's current content into the surviving page (sync holds that page file_drift rather than overwrite it). purge: true is trusted-local CLI only and removes the row, chunks, links and raw data immediately after its recorded markdown artifact is removed. Purge uses the same revision, request_id and recovery protocol, including for existing tombstones. A removal failure preserves the prior row and never reports purge success; repair the artifact and submit a new request_id. A purge of a page whose file is shared refuses and names the soft delete. A committed purge warns that git history, synced copies, exports and derived rows may retain content; rotate exposed credentials.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
