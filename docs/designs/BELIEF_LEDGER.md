@@ -1504,3 +1504,59 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
     and 2000 pages on PGLite). The read now sets `force_generic_plan` for
     that one statement, transaction-local, and restores the previous value;
     the cost stays about 0.6 ms per page at every size.
+
+## 14. W2's first slice as built: page-at-time
+
+1. **Surface.** Page-at-time is a parameter, not a new op: `get_page
+   {known_as_of}` and `get_versions {known_as_of, diff, source_id}`, full
+   surface only, so the served starter schema is unchanged. `known_as_of` is
+   recorded time, an ISO 8601 instant with a zone; a bare date refuses
+   `clock_mismatch` (`date_for_instant`) instead of being read as midnight,
+   because a date is the valid-time clock (`as_of` on `get_links`). The
+   catalogue gains `clock_mismatch` and `known_as_of_unproven` (retryable);
+   `coverage_from` names `not_recorded`, `backfill_only` or
+   `backfill_incomplete`, and backfilled history never answers a
+   recorded-time read, because it has source times only. Every answer carries
+   `certified` and `uncertified_reason`.
+2. **Bodies pair by revision, in order.** Several intervals can share a
+   revision: a withdrawal's materialization is a view change at the same
+   revision. So the closed intervals of one revision pair with that
+   revision's versions in id order, newest with newest, and the open head
+   reads the live page while it is still at that revision. A body no version
+   holds is returned as `body: unavailable` with `body_reason` (`purged`,
+   `expired`, `hard_deleted`, `pruned` for a large or segmented page,
+   `version_missing`), never taken from a neighbour.
+3. **Correction to section 10, item 1: a rename also left no preimage.** The
+   page revision trigger advances the revision on a slug change, and
+   `updateSlug` (the cheap sync rename, the frontmatter slug repair, the held
+   file and import moves, managed sync's rename) wrote no version, so after a
+   rename no version held the body from before it. `updateSlug` now versions
+   the page first, in the same transaction. A publication that changes the
+   revision twice in one transaction (a rename then an edit) records the
+   pre-transaction revision as `revision_before`, and that revision now has
+   its version too. A BEHAVIOR_CHANGES row discloses the extra version.
+4. **Correction to sections 3 and 10: a soft delete keeps the lifetime.** A
+   write to a soft-deleted slug restores the same page row and appends
+   `page.restored` on the same lifetime (`ledger.ts`); only a page removed
+   outright (purge, retention cleanup) and written again starts a new
+   lifetime. W1's code and probes already behaved this way; only the text was
+   wrong.
+5. **Purged lifetimes collapse.** Section 6.5 sets `value` to NULL on every
+   event under a purged key, page events included, so a purged lifetime's
+   events no longer carry revisions. Its intervals split only where its slug
+   or deleted state changed (the event type and row still say), and every
+   body is `purged`. A local caller reading an instant before the purge gets
+   that interval with no body; a remote caller gets `page_not_found`, because
+   the page row is gone and the remote rule fails closed. A probe un-redacting
+   the revisions makes the lifetime split again, and `purge_fact` probes show
+   no historical body or diff returns the purged claim to either caller.
+6. **Proof of commit is the same lifetime, and backfill never proves.** An
+   unmarked event counts at `T` only when a later event of the same page
+   lifetime, not of origin `backfill`, was recorded by `T`. That is
+   stricter than `beliefEventVisibility`, which also accepts a later
+   backfill row, so a read can refuse `known_as_of_unproven` where the W1
+   helper says visible; it never answers where the helper says unproven.
+7. **The stalled-transaction cell runs on commit marks.** The read depends
+   only on marks and recorded times, so the cell deletes and re-adds a mark
+   (and stamps one at `recorded_at` as its forced probe) rather than holding
+   a transaction past ceiling plus grace; W1's probe 13 holds a real one.
