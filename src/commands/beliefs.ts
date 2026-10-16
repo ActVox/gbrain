@@ -15,6 +15,7 @@ import { disableBeliefLedger, enableBeliefLedger } from '../core/belief/coverage
 import { coverageIntervals, coveredSources, fillCommitMarks, orphanLifetimes, reconcileBeliefDrift, unmarkedPublications, type CoverageInterval } from '../core/belief/coverage-report.ts';
 import { backfillBeliefHistory } from '../core/belief/backfill.ts';
 import { readLedgerSource } from '../core/belief/ledger.ts';
+import { readManagedMode } from '../core/persistence/managed-mode.ts';
 
 export const BELIEFS_USAGE = [
   'Usage: gbrain beliefs <enable|disable|status|reconcile|backfill> [--source <id>] [--json]',
@@ -42,7 +43,7 @@ async function sourceStatus(engine: BrainEngine, sourceId: string) {
   const source = await readLedgerSource(engine, sourceId);
   if (!source) throw unknownSource(sourceId);
   const intervals = await coverageIntervals(engine, sourceId);
-  return { source_id: sourceId, managed: source.managed, active: source.coverage != null && source.coverage !== 'coverage.stopped', intervals,
+  return { source_id: sourceId, managed: await readManagedMode(engine), active: source.coverage != null && source.coverage !== 'coverage.stopped', intervals,
     unmarked_publications: (await unmarkedPublications(engine, sourceId)).length, orphans: await orphanLifetimes(engine, sourceId, 5) };
 }
 

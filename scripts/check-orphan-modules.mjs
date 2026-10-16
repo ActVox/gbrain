@@ -53,7 +53,6 @@ const ALLOWLIST = new Map([
 // string in a reviewer-visible edit. Modules reached from `scripts/**` carry
 // reason 'script-reachable', which the guard verifies.
 const PERMITTED_TEST_ONLY = [
-  { path: 'src/core/belief/coverage.ts', reason: 'held: W1 belief ledger (#6806) lane C wires it into `gbrain beliefs enable|disable`; remove this entry in that commit' },
   { path: 'src/core/belief/history.ts', reason: 'held: the belief ledger history reader ships in W1 with its remote privacy probe (docs/designs/BELIEF_LEDGER.md probe 14); W2 history reads are its product caller' },
   { path: 'src/core/bootstrap/template-repo.ts', reason: 'script-reachable' },
   { path: 'src/eval/longmemeval/diagnostics.ts', reason: 'script-reachable' },

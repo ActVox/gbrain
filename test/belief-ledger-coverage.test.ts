@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { __setBeliefEmitterFaultForTests, markBeliefCommits, type BeliefEventDraft } from '../src/core/belief/append.ts';
+import { __setBeliefEmitterFaultForTests, appendBeliefEvents, markBeliefCommits, type BeliefEventDraft } from '../src/core/belief/append.ts';
 import { currentStateHash, readLedgerSource, withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { deleteSourceRow } from '../src/core/source-delete.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
@@ -27,6 +27,10 @@ import { assertLegacyEngineMigration } from '../src/core/persistence/maintenance
 import { copiedEntries, copyAll, digestMismatches } from './helpers/graduation-copy-harness.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
+import type { DoctorContext } from '../src/commands/doctor/context.ts';
+import type { Check } from '../src/commands/doctor.ts';
+import { COVERAGE_KEY } from '../src/core/belief/keys.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, shape, type BeliefBrain } from './helpers/belief-ledger.ts';
 
 afterEach(() => { __setBeliefEmitterFaultForTests(null); });
@@ -37,6 +41,18 @@ const fault = (f: (drafts: BeliefEventDraft[]) => BeliefEventDraft[]) => __setBe
 /** The database clock rounded up to the next millisecond, so a JS timestamp is never below a microsecond time read before it. */
 const dbNow = async (b: BeliefBrain) => new Date(new Date((await b.engine.executeRaw<{ t: string }>(`SELECT date_trunc('milliseconds', clock_timestamp()) + interval '1 millisecond' AS t`))[0]!.t).getTime()).toISOString();
 const pause = () => new Promise(resolve => setTimeout(resolve, 20));
+
+async function doctor(b: BeliefBrain, opts: Partial<DoctorContext> = {}): Promise<Check> {
+  const [check] = await beliefLedgerEntry.run({ engine: b.engine, tier: 'standard', doFix: false, dryRun: false, orphanRatioSourceId: b.sourceId, ...opts } as DoctorContext) as Check[];
+  expect(check!.name).toBe('belief_ledger_coverage');
+  return check!;
+}
+
+async function bypassLink(b: BeliefBrain, target: string) {
+  await b.engine.executeRaw(`INSERT INTO links (from_page_id, to_page_id, link_type, link_source, context, origin_page_id)
+    SELECT a.id, p.id, 'mentions', 'markdown', 'bypass', a.id FROM pages a, pages p
+    WHERE a.source_id = $1 AND a.slug = 'companies/acme-example' AND p.source_id = $1 AND p.slug = $2`, [b.sourceId, target]);
+}
 
 async function seeded(b: BeliefBrain) {
   await b.put('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example' }));
@@ -328,6 +344,53 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         expect((await coverageIntervals(b.engine, b.sourceId)).at(-1)!.stopped_at).not.toBeNull();
       }, { managed: false });
     }, 120_000);
+
+    test('doctor belief_ledger_coverage: off is information with an ask_user enable; a drift warns, --fix reconciles it, a partial purge replay asks the user', async () => {
+      await brain(async b => {
+        await seeded(b);
+        for (const slug of ['people/bob-example', 'people/carol-example']) await b.put(slug, beliefPage({ type: 'person', title: slug }));
+        const off = await doctor(b);
+        expect(off).toMatchObject({ status: 'ok', severity: 'info', readiness_state: 'disabled_by_choice',
+          fix: { argv: ['gbrain', 'beliefs', 'enable', '--source', b.sourceId], ask_user: true } });
+        await b.enable();
+        const clean = await doctor(b, { tier: 'deep' });
+        expect(clean.status).toBe('ok');
+        expect(clean.message).toContain(`${b.sourceId}: recording since`);
+        expect(clean.details!.sources).toMatchObject([{ source_id: b.sourceId, certified: true, drift: { count: 0, exact: true } }]);
+        await bypassLink(b, 'people/bob-example');
+        const drifted = await doctor(b);
+        expect(drifted).toMatchObject({ status: 'warn', fix: { argv: ['gbrain', 'beliefs', 'reconcile', '--source', b.sourceId, '--json'], actor: 'agent' } });
+        expect(drifted.message).toContain(`${b.sourceId}: 1 drifted slug(s) (e.g. companies/acme-example)`);
+        const before = await b.lastId();
+        const fixed = await doctor(b, { doFix: true });
+        expect(fixed.status).toBe('ok');
+        expect(fixed.message).toContain('1 drift mark(s)');
+        expect(shape(await b.events(before)).sort()).toEqual(['fact:reconcile', 'fact:reconcile', 'link:reconcile', 'link:reconcile', 'page:reconcile', 'take:reconcile', 'take:reconcile']);
+        // Forced probe: an emitter that drops every reconcile event leaves the drift in place, so --fix still warns.
+        fault(drafts => drafts.filter(d => d.eventType !== 'reconcile'));
+        await bypassLink(b, 'people/carol-example');
+        const unfixed = await doctor(b, { doFix: true });
+        expect(unfixed.status).toBe('warn');
+        expect(unfixed.message).toContain(`${b.sourceId}: 1 drifted slug(s)`);
+        __setBeliefEmitterFaultForTests(null);
+        expect((await doctor(b, { doFix: true })).status).toBe('ok');
+        const source = (await readLedgerSource(b.engine, b.sourceId))!;
+        const restore = async (purgeReplay: string) => {
+          const publicationId = randomUUID();
+          await b.engine.transaction(tx => appendBeliefEvents(tx, [{ sourceId: b.sourceId, incarnation: source.incarnation, lifetime: null, slug: '', subjectKind: 'coverage',
+            subjectKey: COVERAGE_KEY, eventType: 'coverage.restored', trustTier: 'unknown', tierBasis: 'unknown', visibility: 'world', value: null, stateHash: '',
+            cause: { op: 'coverage.restored', archive_created_at: '2026-10-01T00:00:00.000Z', purge_replay: purgeReplay, purge_requests: ['purge-1'] } }],
+          { publicationId, origin: 'live', purgesPossible: false }));
+          await markBeliefCommits(b.engine, [publicationId]);
+        };
+        await restore('complete');
+        expect((await doctor(b)).status).toBe('ok');
+        await restore('partial');
+        const asked = await doctor(b);
+        expect(asked).toMatchObject({ status: 'warn', fix: { actor: 'user', ask_user: true } });
+        expect(asked.message).toContain('purge replay partial for purge-1');
+      }, { enable: false });
+    }, 180_000);
 
     test('probe 9: graduation PGLite -> ' + engineCase.name + ' carries an identical ledger: equal event_key sets, digests and replay', async () => {
       await beliefBrain(async b => {
