@@ -460,8 +460,9 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
           const base = { request_id: head?.request_id ?? 'none', state: head?.head_state ?? 'none', blocked_reason: null, head_request_id: head?.request_id ?? null,
             head_state: head?.head_state ?? null, claimable_here: !read.ok ? null : head?.claimable_here === undefined ? false : head.claimable_here, owner_is_this_host: null, in_pass: true,
             blocked_by: head?.blocked_by ?? null, consumer: head?.consumer ?? null };
-          // #6543 (B2): an intervention-required blocker on a queued head, read on two ticks in a row, stops the drain now; live blockers keep the wait below.
-          const blocker = head?.head_state === 'queued' && head.blocked_by?.intervention ? head.blocked_by : null;
+          // #6543 (B2): an intervention-required blocker on a queued head (or a recovering head stuck on the user), read on two ticks in a row, stops the
+          // drain now; live blockers keep the wait below.
+          const blocker = (head?.head_state === 'queued' || head?.head_state === 'recovering') && head.blocked_by?.intervention ? head.blocked_by : null;
           const seen = blocker ? `${head!.request_id}|${blocker.predicate}|${blocker.ids.join(',')}` : null;
           if (blocker && seen === blockedKey) { stop({ ...base, stalled_seconds: Math.round(quiet / 1000), cause: 'head_blocked' }); return; }
           blockedKey = seen;

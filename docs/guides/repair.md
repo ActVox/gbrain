@@ -546,8 +546,10 @@ bytes or finishes the write. When the file matches neither the recorded prior
 nor the published bytes (usually a hand edit made while the write was
 publishing), recovery refuses to overwrite it: the request stays `recovering`
 with `unexpected_file_bytes`, no write on that worktree is claimed, and the
-resident writer re-checks it every 30 seconds without progress. Do not delete
-the file to unblock it.
+resident writer re-checks it every 30 seconds without progress. A sync queued
+behind it stops at once with
+[`drain_stalled`, `cause: head_blocked`](write-refusals.md#head-blocked),
+naming the file and this command. Do not delete the file to unblock it.
 
 `gbrain repair stuck-recovery` is the sanctioned exit. Run it on the host that
 owns the source.
@@ -2333,7 +2335,9 @@ writer status --source <id> --json` and ask the user whether the edited file
 may be replaced by its withdrawn version; the resident writer finishes the
 effect once the file matches one of its recorded versions. The preview lists
 the effect as `refused`; naming its request with `--request-id` refuses with
-this code.
+this code. A sync queued behind such an effect stops at once with
+[`drain_stalled`, `cause: head_blocked`](write-refusals.md#head-blocked), and
+its fix names the file.
 
 ### Legacy job authority
 
