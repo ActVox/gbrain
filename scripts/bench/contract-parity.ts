@@ -27,6 +27,9 @@
  * `_meta`, and afterwards the write side effects: row counts of every table
  * and the rows of the log tables the calls write.
  *
+ * Every pass stamps the sources' created_at to a fixed date, so the one-time
+ * behavior-change disclosure (which keys off brain age) is the same on every run.
+ *
  * Normalizations, and only these: timings (keys ending `_ms`, `timings`,
  * `took`, and "<n> ms" in text), `answer_id` (replaced by its order of
  * appearance within the pass, everywhere it occurs), the `how_to_rate` cadence
@@ -533,6 +536,7 @@ async function runPassChild(): Promise<void> {
   let engine: BrainEngine | null = null;
   try {
     engine = await openEngine(m, counting?.url ?? clone.target);
+    await engine.executeRaw(`UPDATE sources SET created_at = '2026-01-01T00:00:00Z'`);
     for (const [k, v] of Object.entries(pass.config ?? {})) await engine.setConfig(k, v);
     if (flag('--perturb')) await engine.executeRaw(`DELETE FROM facts WHERE id = (SELECT min(id) FROM facts WHERE fact LIKE 'Renewals were delayed%')`);
     const counter: Counter = counting ?? pgliteCounter(engine);
