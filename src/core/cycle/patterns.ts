@@ -33,6 +33,7 @@ import { waitForCompletionRenewing, TimeoutError } from '../minions/wait-for-com
 import type { MinionJobInput, MinionJobStatus, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
+import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import type { Page, PageType } from '../types.ts';
 // #2415: allow-list + output-root resolution shared with the synthesize
 // phase — both phases must agree on the configured namespace.
@@ -768,13 +769,29 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
   return stats;
 }
 
-/** The full reflection pages a run read, grounded for quote verification. */
+/**
+ * The full reflection pages a run read, grounded for quote verification. A segmented reflection is read back
+ * through the segment reader (its body columns are NULL); one over the single-string ceiling is not a grounding
+ * source, so a quote only it holds goes to unverified_claims, and the skip is logged.
+ */
 async function loadGroundingSources<T>(engine: BrainEngine, sourceId: string, reflections: ReflectionRef[],
   groundSource: (path: string, content: string, opts: { tolerant: boolean }) => T): Promise<T[]> {
-  const sourcePages = await engine.executeRaw<{ slug: string; compiled_truth: string; timeline: string }>(
-    'SELECT slug, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL',
+  const sourcePages = await engine.executeRaw<{ id: number; slug: string; body_storage: string | null; body_bytes: number | string | null; compiled_truth: string | null; timeline: string | null }>(
+    'SELECT id, slug, body_storage, body_bytes, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL',
     [sourceId, reflections.map(r => r.slug)]);
-  return sourcePages.map(p => groundSource(p.slug, `${p.compiled_truth}\n\n${p.timeline ?? ''}`, { tolerant: true }));
+  const sources: T[] = [];
+  for (const p of sourcePages) {
+    let body = { compiled_truth: p.compiled_truth ?? '', timeline: p.timeline ?? '' };
+    if (p.body_storage === 'segmented') {
+      if (Number(p.body_bytes ?? 0) > PAGE_MAX_BYTES) {
+        process.stderr.write(`[dream] patterns quote verify: reflection ${p.slug} is a segmented page over ${PAGE_MAX_BYTES} bytes; it is not a grounding source.\n`);
+        continue;
+      }
+      body = await (await import('../page-body/ingest.ts')).materializeSegmentedBody(engine, Number(p.id), sourceId);
+    }
+    sources.push(groundSource(p.slug, `${body.compiled_truth}\n\n${body.timeline}`, { tolerant: true }));
+  }
+  return sources;
 }
 
 /** Write a grounded page back at its read revision: a managed maintenance publish (held when pending or contended), else an import. */
@@ -813,17 +830,24 @@ async function writeGroundedPage(engine: BrainEngine, maintenance: MaintenanceAu
  */
 export async function groundTimelineAppends(engine: BrainEngine, maintenance: MaintenanceAuthority | null, appends: TimelineAppend[],
   reflections: ReflectionRef[], sourceId: string, cycleDate: string, signal?: AbortSignal, heldSlugs?: Set<string>,
-  derivation?: Derivation & { declaration: DerivationDeclaration }): Promise<{ entries: number; quarantined: number; repaired: number } | null> {
+  derivation?: Derivation & { declaration: DerivationDeclaration }): Promise<{ entries: number; quarantined: number; repaired: number; segmented_skipped: number } | null> {
   const { dreamQuoteVerifyEnabled, groundSource, verifyBody } = await import('./synthesize-verify.ts');
   if (!await dreamQuoteVerifyEnabled(engine)) return null;
-  const stats = { entries: 0, quarantined: 0, repaired: 0 };
+  const stats = { entries: 0, quarantined: 0, repaired: 0, segmented_skipped: 0 };
   if (appends.length === 0) return stats;
   const sources = await loadGroundingSources(engine, sourceId, reflections, groundSource);
   const { serializePageToMarkdown } = await import('../markdown.ts');
+  const [{ materializedSnapshot }, { bodyUnread }] = await Promise.all([import('../persistence/segmented-apply.ts'), import('../page-body/page-shape.ts')]);
   for (const slug of [...new Set(appends.map(a => a.slug))]) {
     throwIfAborted(signal, '[dream] patterns timeline quote verify');
-    const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+    // A segmented page within the single-string ceiling is read back as strings; over it, its appends stay as written (counted, logged).
+    const snapshot = await materializedSnapshot(engine, await engine.readPageSnapshot(slug, { sourceId }));
     if (!snapshot) continue;
+    if (bodyUnread(snapshot.page)) {
+      stats.segmented_skipped++;
+      process.stderr.write(`[dream] patterns quote verify: ${slug} is a segmented page over the single-string ceiling; its timeline appends were not verified.\n`);
+      continue;
+    }
     let timeline = snapshot.page.timeline ?? '';
     const quarantined: Array<Record<string, unknown>> = [];
     const removed: TimelineAppend['entry'][] = [];

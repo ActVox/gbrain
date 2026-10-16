@@ -37,6 +37,13 @@ those pages as written:
   rewritten page. Everything else on the page, including quotes an earlier
   run verified against older reflections, stays as it is.
 - The page gets the dream provenance stamp and counts in `patterns_written`.
+- Segmented pages (bodies stored in segments) work too. A segmented reflection
+  is read back through the segment reader, so its quotes still ground, and a
+  segmented pattern page is read back as text, checked and rewritten. A page
+  over the single-string ceiling (24 MiB) is skipped instead: a reflection
+  that large is not checked against, and a pattern page that large keeps its
+  appended entries unchecked, counted in
+  `quote_verify.timeline_appends.segmented_skipped` and logged.
   `timeline_appends` counts the new entries, and `quote_verify.timeline_appends`
   reports how many were checked, quarantined and repaired.
 
@@ -80,9 +87,12 @@ The child's `get_page` output is budgeted at
 are counted from the job's own tool-execution ledger, so a resumed job keeps
 what it already spent. Past the budget a read returns a short summary
 (`truncated: true`, `code: read_budget_exhausted`, the slug, title, type and an
-excerpt of up to 400 characters) instead of the page. Writes still work, and
+excerpt of up to 400 bytes of the rendered page) instead of the page. Writes still work, and
 the summary tells the child to append with `add_timeline_entry` instead of
-rewriting a page it has not read in full.
+rewriting a page it has not read in full. Reads are sized by the bytes of the
+result, never by reading the body, so a segmented page is sized like any
+other read. Its summary also names the stored `body_bytes` when the result
+carries them (`get_page` with `body: 'none'`).
 
 ## Budget sizing
 

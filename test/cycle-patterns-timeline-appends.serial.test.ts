@@ -17,6 +17,7 @@ import { importFromContent } from '../src/core/import-file.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { createSegmentedPage } from './helpers/segmented-page.ts';
 
 const PATTERN = 'wiki/personal/patterns/small-pieces';
 const REPLAYED = '0b6a3f52-7d1e-4c8a-9f10-2a6b5c4d3e21';
@@ -138,5 +139,19 @@ describe('patterns timeline appends are quote-verified and counted (#6302)', () 
     expect(page.timeline).toContain('ship smaller pieces');
     expect(result.details.patterns_written).toBe(1);
     expect(result.details.quote_verify).toMatchObject({ timeline_appends: { entries: 1, quarantined: 0, repaired: 0 } });
+  });
+});
+
+describe('segmented reflections in an in-cycle patterns run (#6302 on segmented storage; direct cases on both engines in cycle-patterns-segmented.test.ts)', () => {
+  test('a segmented reflection still grounds a quote: the segment reader supplies its body', async () => {
+    await createSegmentedPage(engine, { slug: 'wiki/personal/reflections/r4', truth: 'Mondays I update my "weekly launch diary".\n',
+      meta: { type: 'note', title: 'r4', frontmatter: {} } });
+    script = [{ slug: PATTERN, date: '2026-10-11', summary: 'You keep a "weekly launch diary"', source: 'wiki/personal/reflections/r4' }];
+    const result = await runPhasePatterns(engine, { brainDir, dryRun: false, cycleDate: '2026-10-15' });
+    expect(result.status).toBe('ok');
+    const page = (await engine.getPage(PATTERN))!;
+    expect(page.timeline).toContain('weekly launch diary');
+    expect(page.frontmatter.unverified_claims).toBeUndefined();
+    expect(result.details.quote_verify).toMatchObject({ timeline_appends: { entries: 1, quarantined: 0, segmented_skipped: 0 } });
   });
 });

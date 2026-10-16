@@ -5,11 +5,18 @@
  * window. Bytes already returned are counted from the job's own
  * tool-execution ledger (so a crash replay keeps its spent budget); a read
  * that would pass the budget comes back as a short summary instead.
+ *
+ * Sizes are the bytes of the returned result, never a page body read here, so
+ * a segmented page (no body string) is sized like any other read; the summary
+ * names its stored `size.body_bytes` when the result carries it. The excerpt
+ * is a bounded prefix of the rendered `content` (or a window's `text`) the
+ * result already holds.
  */
 import type { BrainEngine } from '../../engine.ts';
+import { boundedRawPrefix } from '../../page-window/bounded-lead.ts';
 
-/** Characters of body text a summary keeps, at most (less when the budget has less left). */
-export const READ_BUDGET_EXCERPT_CHARS = 400;
+/** UTF-8 bytes of rendered text a summary keeps, at most (less when the budget has less left). */
+export const READ_BUDGET_EXCERPT_BYTES = 400;
 
 /** Bytes of `get_page` output this job has already been given. */
 async function spentReadBytes(engine: BrainEngine, jobId: number): Promise<number> {
@@ -25,16 +32,17 @@ export async function budgetedPageRead(engine: BrainEngine, jobId: number, budge
   const pageBytes = Buffer.byteLength(JSON.stringify(output) ?? '', 'utf8');
   if (used + pageBytes <= budgetBytes) return output;
   const page = (output && typeof output === 'object' ? output : {}) as Record<string, unknown>;
-  const body = typeof page.compiled_truth === 'string' ? page.compiled_truth : typeof page.content === 'string' ? page.content : '';
-  const room = Math.max(0, Math.min(READ_BUDGET_EXCERPT_CHARS, budgetBytes - used));
+  const rendered = typeof page.content === 'string' ? page.content : typeof page.text === 'string' ? page.text : '';
+  const excerpt = boundedRawPrefix(rendered, Math.max(0, Math.min(READ_BUDGET_EXCERPT_BYTES, budgetBytes - used)));
+  const bodyBytes = (page.size as { body_bytes?: unknown } | undefined)?.body_bytes;
   return {
     slug: typeof page.slug === 'string' ? page.slug : slug,
     ...(typeof page.title === 'string' ? { title: page.title } : {}),
     ...(typeof page.type === 'string' ? { type: page.type } : {}),
     truncated: true,
     code: 'read_budget_exhausted',
-    read_budget: { limit_bytes: budgetBytes, used_bytes: used, page_bytes: pageBytes },
-    ...(room > 0 && body ? { excerpt: body.slice(0, room) } : {}),
+    read_budget: { limit_bytes: budgetBytes, used_bytes: used, page_bytes: pageBytes, ...(typeof bodyBytes === 'number' ? { body_bytes: bodyBytes } : {}) },
+    ...(excerpt ? { excerpt } : {}),
     note: 'This job has used its get_page read budget, so the page is summarized. Work from the pages already read; writes still work. To update this page, append with add_timeline_entry instead of rewriting it.',
   };
 }
