@@ -1174,6 +1174,16 @@ More: [docs/guides/move-to-postgres.md#graduated-datastore](../../docs/guides/mo
 |---|---|---|---|---|---|---|
 | Fact not found. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### fact_rows_collide
+
+<a id="fact_rows_collide"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Carrying a page's identity across a rename would drop facts: a fence row of the old page has a different claim in the new file, or the new file does not hold it. | gbrain repair rename-identity merges the two pages' facts only where both say the same thing at the same fence row; anything else would lose one side, so nothing is written. | Give each old claim its own row in the new file's facts fence (or keep the same claim at its row), commit and sync, then preview again; or keep the old page with gbrain restore, or release the hold with --close. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#rename-identity](../../docs/guides/repair.md#rename-identity)
+
 ### fact_withdrawn
 
 <a id="fact_withdrawn"></a>
@@ -2053,6 +2063,16 @@ More: [docs/guides/cron-schedule.md#dream-beside-autopilot](../../docs/guides/cr
 | The managed pull was skipped. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
 More: [docs/guides/write-refusals.md#managed_pull_skipped](../../docs/guides/write-refusals.md#managed_pull_skipped)
+
+### managed_remedy_unavailable
+
+<a id="managed_remedy_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair rename-identity cannot carry a page identity on a managed source; nothing was written. | On a managed brain page tables change only through coordinated publications, and the carry is a classic-source maintenance transaction, so on a managed source the remedy can only close the pair. | Release the purge hold without carrying identity: preview gbrain repair rename-identity --source <id> --slug <new-slug> --close, then run the apply command it prints after the user agrees; or keep the old page as its own page with gbrain restore <old-slug> --source-id <id> --force. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#rename-identity](../../docs/guides/repair.md#rename-identity)
 
 ### managed_sync_flag_refused
 
