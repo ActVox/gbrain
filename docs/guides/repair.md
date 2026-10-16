@@ -2263,6 +2263,55 @@ covers the whole retry budget each grant authorizes. A resumed run replays the
 grant it already made instead of granting another cycle. A signature-mismatched
 vector is never reconciled; it is re-embedded.
 
+## Recorded-time reads
+
+`get_page {known_as_of}` and `get_versions {known_as_of}` read a page as this
+brain had recorded it at an instant, from the belief ledger
+([design, section 10](../designs/BELIEF_LEDGER.md#10-what-w2s-first-slice-needs-from-w1)).
+`known_as_of` is recorded time: an ISO 8601 instant with a zone. It is not
+`as_of` on `get_links`, which is valid time (a date). A read answers with the
+interval the instant falls in, `certified` (false with `uncertified_reason` on
+an unmanaged source, a drifted interval or a truncated walk), and a `body` of
+`live`, `version`, `segmented` (read it through `body_ref`) or `unavailable`
+with a `body_reason` (`purged`, `expired`, `hard_deleted`, `pruned`,
+`version_missing`). A body no retained version holds is disclosed, never
+borrowed from the version next to it. The refusals below change nothing; run
+`gbrain beliefs status --source <id> --json` to see the coverage a read is
+checked against.
+
+### Coverage from
+
+The ledger does not cover the instant: it is before the ledger was enabled on
+the source, or before the page's baseline cut. Earlier times are unknown, not
+empty. `reason` is `not_recorded`, or `backfill_only` / `backfill_incomplete`
+when `gbrain beliefs backfill` seeded best-effort history for the page: that
+history carries source times only, so it never answers a recorded-time read.
+Ask about an instant at or after the time the message names.
+
+### Coverage gap
+
+The ledger was not recording at the instant: coverage was stopped
+(`reason: not_covered`), or a backup restore replaced the ledger with an
+archive, and what happened between the archive's time and the restore is
+unknown (`reason: restore`). Ask about an instant outside the gap the message
+names.
+
+### Clock mismatch
+
+`known_as_of` got a calendar date (`reason: date_for_instant`). A date is
+valid time; recorded time needs an instant. Pass a full instant such as
+`2026-10-01T12:00:00Z`.
+
+### Known as of unproven
+
+A change to the page was recorded before the instant, but nothing proves it
+had committed by then: its commit mark is later, and no later write to the
+same page was recorded by the instant (section 5.3 of the design). The page at
+that instant can't be stated either way, so the read refuses rather than
+guess. The refusal is `retryable`: ask about an instant before the write's
+recorded time, or after its commit was observed (the message names the write).
+A stalled transaction stays unproven until it commits and is marked.
+
 ## Repair refusal codes
 
 Each heading below is the `docs` anchor a refusal carries.
