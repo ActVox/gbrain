@@ -10,7 +10,7 @@ import { OperationError, opError, type OpErrorOpts } from '../ops/contract.ts';
 import type { Action } from '../agent-output.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { RegistryCode } from '../error-registry.ts';
-import { ownerGateInput, ownerImportTrust } from '../trust/channel.ts';
+import { ownerGateInput, ownerImportTrust, ownerPageTrust } from '../trust/channel.ts';
 import { importFromContent, importCodeFile, verifyPageReadable } from '../import-file.ts';
 import { screenImportContent, screenNormalized, type ContentRefusal, type ImportScreenResult, type ImportSanityConfig } from '../import-screen.ts';
 import { ContentSanityBlockError } from '../content-sanity.ts';
@@ -233,6 +233,12 @@ export interface SyncImportScreenInput {
   normalize?: boolean;
   /** #5575: page purge tombstones of the source; a matching file is held as `purged_content`. */
   purgedPages?: ReadonlyMap<string, string>;
+  /**
+   * #6712 PR 2: the source's config. With it the screen applies the write gate at the tier preparation gives the file
+   * (the source default lowered by its trust markers), so a file `write_gate.external_mode=reject` refuses is held as
+   * `write_gate_rejected` instead of failing its receipt and blocking the run.
+   */
+  sourceConfig?: Record<string, unknown> | null;
 }
 
 /**
@@ -261,6 +267,7 @@ export function screenSyncImport(input: SyncImportScreenInput): { screen: Import
     slugConflictMessage: (found, expected) => frontmatterSlugConflictMessage(sourcePath, found, expected),
     ...(input.sanity ? { sanity: input.sanity } : {}),
     ...(input.purgedPages ? { purgedPages: input.purgedPages } : {}),
+    ...(input.sourceConfig !== undefined ? { writeGate: { tier: ownerPageTrust({ frontmatter: parsedInput.frontmatter, sourceConfig: input.sourceConfig, channel: 'sync' }).tier } } : {}),
     ...(newerWorkingTree ? { published: () => {
       const working = input.renamed ? null : readSyncFile(input.root, input.path);
       return !!working && sha256(working) === input.rawHash && sameCanonicalImport(base!, parseMarkdown(working.toString('utf8'), `${slug}.md`, { activePack }));

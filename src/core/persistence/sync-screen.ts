@@ -188,6 +188,18 @@ function runPurgeTombstones(engine: BrainEngine, run: SyncScreenRun, sourceId: s
   return read;
 }
 
+const sourceConfigByRun = new WeakMap<SyncScreenRun, Promise<Record<string, unknown> | null>>();
+/** #6712 PR 2: one source config read per sync run, for the write gate's tier. */
+function runSourceConfig(engine: BrainEngine, run: SyncScreenRun, sourceId: string): Promise<Record<string, unknown> | null> {
+  let read = sourceConfigByRun.get(run);
+  if (!read) {
+    read = engine.executeRaw<{ config: Record<string, unknown> | string | null }>('SELECT config FROM sources WHERE id=$1', [sourceId])
+      .then(([row]) => typeof row?.config === 'string' ? JSON.parse(row.config) as Record<string, unknown> : row?.config ?? null);
+    sourceConfigByRun.set(run, read);
+  }
+  return read;
+}
+
 export interface FrozenImportScreen {
   cursor: Pick<SyncDiscovery, 'sourceId' | 'incarnation' | 'root'>;
   entry: SyncEntry; slug: string; pageId: number | null; snapshot: Snapshot;
@@ -202,7 +214,7 @@ export interface FrozenImportScreen {
 
 /**
  * #6696 C8: the `SyncImportScreenInput` a frozen import is screened with (the rename source as its base, the run's
- * schema pack, sanity settings and purge tombstones). Shared with the slug-conflict repair, which screens a held
+ * schema pack, sanity settings, purge tombstones and the source config the write gate reads). Shared with the slug-conflict repair, which screens a held
  * file exactly as the next sync would.
  */
 export async function frozenImportScreenInput(engine: BrainEngine,
@@ -212,7 +224,7 @@ export async function frozenImportScreenInput(engine: BrainEngine,
   const base = moved ? await engine.readPageSnapshot(moved.slug, { sourceId: input.cursor.sourceId, includeDeleted: true }) : snapshot;
   return { content: input.content, rawHash: input.rawHash, lineEndingOnly: input.lineEndingOnly, slug, sourcePath: entry.sourcePath, path: entry.path,
     root: input.cursor.root, snapshot, base, renamed: !!moved, activePack: run.activePack, sanity: run.sanity,
-    purgedPages: await runPurgeTombstones(engine, run, input.cursor.sourceId) };
+    purgedPages: await runPurgeTombstones(engine, run, input.cursor.sourceId), sourceConfig: await runSourceConfig(engine, run, input.cursor.sourceId) };
 }
 
 /** The sync screen of one frozen import with the run's `fences.normalize` settled (#6188: with it false, a fence Tier 1 would rewrite is held). */
