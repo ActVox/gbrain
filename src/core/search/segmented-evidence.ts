@@ -20,11 +20,16 @@
  * drift when a hold or a tier change moves the projection); a hit whose chunk
  * has no stored span (a fenced-code or low-tier chunk) is placed by a unique
  * exact match inside its own segment, never by a search of the page.
+ *
+ * The windows are read at the revision getChunkWindows authorized the page at
+ * (`page.revision`): a page that changed since (a visibility flip, a new
+ * body, a delete) refuses the read, and the assembler falls back to the hit's
+ * chunk.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { ChunkWindowPage } from './chunk-windows.ts';
 import { DEFAULT_INLINE_BODY_BYTES, TIMELINE_SEPARATOR } from '../page-window/document.ts';
-import { openSegmentedBody, projectedLayout, readBodyRange, type SegmentedBody } from '../page-body/read-range.ts';
+import { confirmBodyPin, openSegmentedBody, projectedLayout, readBodyRange, type SegmentedBody } from '../page-body/read-range.ts';
 
 /** Bytes read past a window's ends so it can start and end on whole lines. */
 const LINE_PAD_BYTES = 4096;
@@ -47,7 +52,7 @@ interface Located extends EvidenceSpan { row: number; text: string }
 export async function readSegmentedWindows(engine: BrainEngine, page: ChunkWindowPage,
   hits: ReadonlyArray<{ chunk_id: number; chunk_index: number; text: string }>,
   opts: { unit: 'window' | 'section' | 'page'; radius: number; includeTimeline: boolean }): Promise<SegmentedWindows> {
-  const body = await openSegmentedBody(engine, { pageId: page.page_id });
+  const body = await openSegmentedBody(engine, { pageId: page.page_id, pin: { revision: page.revision } });
   const layout = await projectedLayout(engine, body);
   const region = opts.includeTimeline ? undefined : 'truth' as const;
   const bytes = region && layout.timelineByte >= 0 ? layout.timelineByte - Buffer.byteLength(TIMELINE_SEPARATOR, 'utf8') : layout.totalBytes;
@@ -116,6 +121,7 @@ export async function readSegmentedWindows(engine: BrainEngine, page: ChunkWindo
     for (const [id, span] of placedBytes) if (inside(span)) placed.set(id, { run: runs.length, start: charAt(span.start), end: charAt(span.end) });
     runs.push({ text, spans });
   }
+  await confirmBodyPin(engine, body);
   return { bytes, overInline, runs, placed };
 }
 

@@ -7,7 +7,8 @@
  *    commits with a pending chronicle decision; the unmanaged discovery never
  *    reads a segmented page as `too_short` (which would retire its events);
  *    execution judges a segmented page within the single-string ceiling and,
- *    since PR 2 (lane 2e, full-pass mode), one above it too, from its lead;
+ *    since PR 2 (lane 2e, full-pass mode), one above it too, from its lead
+ *    (segmented-real-size.slow.test.ts, at that size);
  *    backfill counts segmented pages as eligible; a remote write's `links`
  *    effect on a segmented page commits its mention edges, read block by
  *    block; the facts backstop queues for a segmented page and a facts-absorb
@@ -189,21 +190,6 @@ describe('Life Chronicle on segmented pages', () => {
       const rows = await engine.executeRaw<{ state: string; reason: string | null }>(
         'SELECT state, reason FROM chronicle_page_state WHERE content_hash=$1', [page.content_hash]);
       expect(rows).toEqual([{ state: 'extracted', reason: 'no_events' }]);
-    }
-  }, 300_000);
-
-  test('execution judges a segmented page over the single-string ceiling from its lead, without materializing it', async () => {
-    for (const engine of engines) {
-      await importFromContent(engine, 'meetings/segmented-offsite', meeting('Offsite'), { sourceId: 'default', noEmbed: true });
-      const page = await storage(engine, 'meetings/segmented-offsite');
-      await upsertChronicleRow(engine, { sourceId: 'default', pageId: page.id, contentHash: page.content_hash, slug: 'meetings/segmented-offsite',
-        state: 'pending', reason: null, trigger: 'auto', nextAttemptAt: null });
-      await engine.executeRaw('UPDATE pages SET body_bytes=$2 WHERE id=$1', [page.id, PAGE_MAX_BYTES + 1]);
-      const judged: string[] = [];
-      await runPhaseChronicle(engine, { judge: async (input) => { judged.push(input.body); return { events: [] }; } });
-      expect(judged).toHaveLength(1);
-      expect(judged[0]!.slice(0, 200)).toBe(body.slice(0, 200));
-      expect(await ledger(engine)).toEqual([{ slug: 'meetings/segmented-offsite', state: 'extracted', reason: 'no_events', scheduled: false }]);
     }
   }, 300_000);
 

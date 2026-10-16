@@ -168,7 +168,8 @@ export async function streamSegmentedGet(engine: BrainEngine, params: Record<str
   const { page, tags } = snapshot;
   const json = params.json === true;
   if (json && Number(page.body_bytes) > PAGE_MAX_BYTES) throw jsonTooLargeError(page.slug, page.source_id, Number(page.body_bytes));
-  const body = await openSegmentedBody(engine, { pageId: page.id, ledger: { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) } });
+  const body = await openSegmentedBody(engine, { pageId: page.id, ledger: { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) },
+    pin: { revision: snapshot.revision, generation: snapshot.bodyGeneration } });
   const doc = await segmentedMarkdownDocument(engine, body, markdownHead(page, tags), 'trusted');
   const parts: string[] = [];
   for await (const bytes of doc.stream()) {

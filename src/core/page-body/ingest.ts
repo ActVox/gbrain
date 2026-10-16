@@ -34,6 +34,7 @@ import { newFenceChunkBudget } from '../markdown-chunks.ts';
 import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
@@ -441,6 +442,7 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
 export async function* readSegmentedBody(engine: BrainEngine, pageId: number, sourceId: string,
   opts: { generation?: number } = {}): AsyncIterable<{ region: BodyRegion; bytes: Uint8Array }> {
   const rows = await engine.readManifest(pageId, opts.generation === undefined ? {} : { generation: opts.generation });
+  await assertGenerationTiles(engine, pageId, opts.generation, rows);
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   for (let start = 0; start < rows.length;) {
     let end = start, bytes = 0;

@@ -68,10 +68,14 @@ CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_tex
  */
 export function stagingNeedsTextSql(t: string): string {
   return `EXISTS (SELECT 1 FROM page_body_staging_texts r JOIN page_body_stagings rs ON rs.id = r.staging_id
-      WHERE r.source_id = ${t}.source_id AND r.sha256 = ${t}.sha256
-        AND (rs.state IN ('open','sealed','prepared')
+      WHERE r.source_id = ${t}.source_id AND r.sha256 = ${t}.sha256 AND ${liveStagingSql('rs')})`;
+}
+
+/** The staging `s` (an alias of page_body_stagings) is live in stagingNeedsTextSql's sense: a write that may still publish it. */
+export function liveStagingSql(s: string): string {
+  return `(${s}.state IN ('open','sealed','prepared')
           OR EXISTS (SELECT 1 FROM persistence_requests rq WHERE rq.state IN ('queued','running','recovering')
-                      AND rq.intent->'body_ref'->>'staging_id' = rs.id::text)))`;
+                      AND rq.intent->'body_ref'->>'staging_id' = ${s}.id::text))`;
 }
 
 /**

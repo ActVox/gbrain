@@ -389,6 +389,9 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('files', 'SELECT 1 FROM files WHERE page_slug=$2 AND (source_id=$1 OR source_id IS NULL)', [src, slug]);
   await keyed('write_gate_holds', 'SELECT 1 FROM write_gate_holds WHERE source_id=$1 AND slug=$2', [src, slug]);
   await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
+  // The page's own segment texts only: a text of another page holding the same words is that page's body, never a
+  // residue of this purge (an inline page referenced none, so the inventory sweep below must not probe the table).
+  if (context && !context.segmentShas.length) stores.push({ store: 'page_segment_texts', status: 'not_present', removed: removed.page_segment_texts ?? 0 });
   if (context?.segmentShas.length) await keyed('page_segment_texts', `SELECT 1 FROM page_segment_texts t WHERE t.source_id=$1
     AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
     AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')}`, [src, context.segmentShas]);

@@ -37,10 +37,13 @@ import { credentialSafeProjection } from '../credential-projection.ts';
 import { loadFenceChunkOverlay, markFenceChunk, renderFenceLowTier, type FenceChunkOverlay, type FenceLowTierRow } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { regionTrust } from './ingest.ts';
+import { assertRowsTile, generationBodyBytes } from './body-tiling.ts';
 import { readBodyLedger, overlaySegmentText, type BodyLedger } from './segment-ledger.ts';
 import { SEGMENTER_VERSION, type FactsSlot, type OutlineHeading, type StoredRegion } from './segmenter.ts';
 import { overlaidPieces, projectionStaleError, projectSegment, type ProjectedPiece, type SegmentProjection } from './segment-projection.ts';
 import type { BodyRegion, JsonObject } from './types.ts';
+import { opError } from '../ops/contract.ts';
+import { REVISION_BACKFILL_PENDING } from '../page-state/types.ts';
 
 export type BodySpace = 'stored' | 'projected';
 export type BodyAudience = 'trusted' | 'remote';
@@ -64,6 +67,18 @@ export interface BodyRow {
   hasDate: boolean;
 }
 
+/**
+ * What a caller authorized before it reads a segmented body: the page's knowledge revision and, when its snapshot says,
+ * the body generation. Every visibility, deletion, metadata or body change advances the revision, so a pinned read
+ * refuses (revision_changed) rather than read a body or a page state nobody authorized; `admit` re-runs the parts of
+ * the authorization the revision does not cover (a trust floor, a re-derivation hold) and throws to refuse.
+ */
+export interface BodyPin {
+  revision: string;
+  generation?: number;
+  admit?: () => Promise<void>;
+}
+
 /** A segmented body opened for reading: the page, the generation's rows and the ledger. Reuse it across reads of one request. */
 export interface SegmentedBody {
   pageId: number;
@@ -79,6 +94,8 @@ export interface SegmentedBody {
   /** The page was segmented by another segmenter version: every segment's regions are recomputed. */
   stale: boolean;
   layout?: ProjectedLayout;
+  /** Set when the read follows an authorization: confirmBodyPin checks it again before the text is returned. */
+  pin?: BodyPin;
 }
 
 /** Where every row of the read projection sits (`projectedLayout`). */
@@ -114,6 +131,8 @@ export interface BodyRangeRequest {
   body?: SegmentedBody;
   /** The page's ledger when the caller read a snapshot; else loaded. */
   ledger?: BodyLedger;
+  /** The authorization this read follows (openSegmentedBody). */
+  pin?: BodyPin;
 }
 
 export interface BodyRangePiece {
@@ -137,11 +156,28 @@ const toJson = (v: unknown) => typeof v === 'string' ? JSON.parse(v) as unknown 
 const bytesOf = (v: unknown): Uint8Array => { const b = v as Uint8Array; return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); };
 const newlines = (s: string) => { let n = 0; for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) n++; return n; };
 
-export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: number; generation?: number; ledger?: BodyLedger }): Promise<SegmentedBody> {
+/** The page row a pin was taken at: same revision and, when pinned, the same body generation. */
+async function checkPin(pin: BodyPin, page: Record<string, unknown> | undefined, pageId: number): Promise<void> {
+  const revision = page?.revision == null ? REVISION_BACKFILL_PENDING : String(page.revision);
+  if (!page || revision !== pin.revision || (pin.generation !== undefined && Number(page.body_generation) !== pin.generation)) {
+    const slug = page?.slug == null ? String(pageId) : String(page.slug);
+    throw opError('revision_changed', `Page ${slug} changed after this read was authorized; nothing from the read was returned.`,
+      "Read the page again: get_page body: 'none' returns its current revision, then read the window or outline you wanted.",
+      { legacy_error: 'invalid_params', detail: JSON.stringify({ page_id: pageId }) });
+  }
+  await pin.admit?.();
+}
+
+/**
+ * Open a segmented body. With `pin` the read is the authorized one: the page must still be at the pinned revision (and
+ * generation), the caller's admission is re-run, and the rows read are that generation's.
+ */
+export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: number; generation?: number; ledger?: BodyLedger; pin?: BodyPin }): Promise<SegmentedBody> {
   const [page] = await engine.executeRaw<Record<string, unknown>>(`SELECT id, source_id, slug, body_storage, body_generation, body_bytes, body_lines, truth_bytes,
-      body_flags, segmenter_version FROM pages WHERE id=$1`, [opts.pageId]);
+      body_flags, segmenter_version, knowledge_revision::text AS revision FROM pages WHERE id=$1`, [opts.pageId]);
+  if (opts.pin) await checkPin(opts.pin, page, opts.pageId);
   if (!page || page.body_storage !== 'segmented') throw new Error(`Page ${opts.pageId} is not a segmented page.`);
-  const generation = opts.generation ?? Number(page.body_generation);
+  const generation = opts.pin?.generation ?? opts.generation ?? Number(page.body_generation);
   const rows = await engine.executeRaw<Record<string, unknown>>(`SELECT m.seq, m.occurrence_id, m.region, m.sha256, m.byte_start, m.byte_len,
       m.line_start, m.line_count, m.static_proj_bytes, m.static_proj_lines, jsonb_array_length(m.outline) AS outline_count,
       jsonb_array_length(m.facts_slots) > 0 AS has_facts, m.date_min IS NOT NULL AS has_date
@@ -149,16 +185,25 @@ export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: num
     WHERE m.page_id=$1 AND m.staging_id IS NULL AND m.gen_from<=$2 AND (m.gen_to IS NULL OR m.gen_to>$2) ORDER BY m.seq`, [opts.pageId, generation]);
   const slug = String(page.slug);
   const sourceId = String(page.source_id);
+  const bodyRows = rows.map(r => ({
+    seq: Number(r.seq), occurrenceId: Number(r.occurrence_id), region: r.region as BodyRegion, sha256: bytesOf(r.sha256),
+    byteStart: Number(r.byte_start), byteLen: Number(r.byte_len), lineStart: Number(r.line_start), lineCount: Number(r.line_count), staticProjBytes: Number(r.static_proj_bytes),
+    staticProjLines: Number(r.static_proj_lines), outlineCount: Number(r.outline_count), hasFacts: r.has_facts === true, hasDate: r.has_date === true,
+  }));
+  assertRowsTile(bodyRows, { slug, sourceId, total: await generationBodyBytes(engine, { id: opts.pageId, body_generation: page.body_generation, body_bytes: page.body_bytes }, generation) });
   const ledger = opts.ledger ?? await readBodyLedger(engine, sourceId, slug);
   return {
     pageId: opts.pageId, sourceId, slug, generation, bodyBytes: Number(page.body_bytes ?? 0), bodyLines: Number(page.body_lines ?? 0), truthBytes: Number(page.truth_bytes ?? 0),
-    flags: (toJson(page.body_flags) ?? {}) as JsonObject, ledger, stale: Number(page.segmenter_version) !== SEGMENTER_VERSION,
-    rows: rows.map(r => ({
-      seq: Number(r.seq), occurrenceId: Number(r.occurrence_id), region: r.region as BodyRegion, sha256: bytesOf(r.sha256),
-      byteStart: Number(r.byte_start), byteLen: Number(r.byte_len), lineStart: Number(r.line_start), lineCount: Number(r.line_count), staticProjBytes: Number(r.static_proj_bytes),
-      staticProjLines: Number(r.static_proj_lines), outlineCount: Number(r.outline_count), hasFacts: r.has_facts === true, hasDate: r.has_date === true,
-    })),
+    flags: (toJson(page.body_flags) ?? {}) as JsonObject, ledger, stale: Number(page.segmenter_version) !== SEGMENTER_VERSION, ...(opts.pin ? { pin: opts.pin } : {}),
+    rows: bodyRows,
   };
+}
+
+/** After a pinned read, before its text is returned: the page is still at the pin and still admits the caller. */
+export async function confirmBodyPin(engine: BrainEngine, body: SegmentedBody): Promise<void> {
+  if (!body.pin) return;
+  const [page] = await engine.executeRaw<Record<string, unknown>>('SELECT slug, body_generation, knowledge_revision::text AS revision FROM pages WHERE id=$1', [body.pageId]);
+  await checkPin(body.pin, page, body.pageId);
 }
 
 interface LoadedSegment {

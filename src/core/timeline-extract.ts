@@ -16,6 +16,7 @@ import { isDatedTimelineLine, supersededInlineCitationEntries } from './timeline
 import type { BrainEngine } from './engine.ts';
 import { firstMaterializedMarkerIndex } from './timeline-marker.ts';
 import { BLOCK_MAX_BYTES, blockTooLargeError, bodyBlocks, detachedValue, segmentedPassWork } from './page-body/segment-blocks.ts';
+import { assertGenerationTiles } from './page-body/body-tiling.ts';
 
 export interface ExtractedTimelineEntry {
   slug: string;
@@ -166,9 +167,10 @@ export async function segmentedTimelineText(engine: Pick<BrainEngine, 'executeRa
  * read from the generation's manifest rows, so a page demoted inline since still yields its segmented versions.
  * Counts its bytes and units in segmentedPassWork.
  */
-async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'readManifest' | 'readSegmentTexts'>,
+async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'executeRaw' | 'readManifest' | 'readSegmentTexts'>,
   page: { id: number; slug: string; sourceId: string }, generation: number): AsyncIterable<string> {
   const rows = await engine.readManifest(page.id, { generation });
+  await assertGenerationTiles(engine, page.id, generation, rows);
   for (const [n, region] of (['truth', 'timeline'] as const).entries()) {
     if (n > 0) yield '\n';
     const own = rows.filter(row => row.region === region);

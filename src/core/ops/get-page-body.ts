@@ -45,9 +45,9 @@ import {
 import {
   markdownDigest, markdownHead, readViewLines, segmentedMarkdownDocument, segmentedOutline, segmentedReadDocument, tailDigest, type SegmentedDocument,
 } from '../page-window/segmented.ts';
-import { openSegmentedBody } from '../page-body/read-range.ts';
+import { confirmBodyPin, openSegmentedBody, type BodyPin } from '../page-body/read-range.ts';
 import { renderTrustedText, type TrustFields } from '../eligibility/labels.ts';
-import type { QuarantinedView } from './get-page-projection.ts';
+import { pageTrustForRead, type QuarantinedView } from './get-page-projection.ts';
 import { chunkGenerationProbe } from '../search/safe-chunks.ts';
 
 export const BODY_MODES = ['auto', 'full', 'none', 'outline', 'window'] as const;
@@ -220,9 +220,13 @@ export async function assertFullReadFits(ctx: OperationContext, page: Pick<Page,
  * read projection (as an inline page reports its privacy-stripped body), never the stored body_bytes, whose difference
  * would say how much text the projection hides.
  */
-export async function segmentedFullReadError(ctx: OperationContext, page: Page, req: BodyRequest): Promise<OperationError> {
-  const total = ctx.remote === false ? pageBodyBytes(page)
-    : (await segmentedReadDocument(ctx.engine, await openSegmentedBody(ctx.engine, { pageId: page.id }))).total;
+export async function segmentedFullReadError(ctx: OperationContext, page: Page, req: BodyRequest, pin: BodyPin): Promise<OperationError> {
+  let total = pageBodyBytes(page);
+  if (ctx.remote !== false) {
+    const body = await openSegmentedBody(ctx.engine, { pageId: page.id, pin });
+    total = (await segmentedReadDocument(ctx.engine, body)).total;
+    await confirmBodyPin(ctx.engine, body);
+  }
   const windows = "Read it in pieces: get_page body: 'auto' returns the outline and the first window, then body: 'window' with lines, bytes, around_chunk_id or next_cursor reads on.";
   const fix = segmentedReadFix(page.slug, page.source_id);
   if (ctx.remote === false) {
@@ -267,6 +271,13 @@ export interface PartialReadInput {
   quarantined: QuarantinedView | null;
   trust?: TrustFields;
   extras: Record<string, unknown>;
+  /** A segmented page's reads are pinned to `revision`, this body generation (from the same snapshot) and `admit` (openSegmentedBody). */
+  pin?: Omit<BodyPin, 'revision'>;
+}
+
+/** The pin of a segmented read after get_page's or fetch's authorization: the snapshot's generation, with the trust floor re-checked when the read confirms. */
+export function authorizedReadPin(ctx: OperationContext, page: Page, generation: number | undefined, minTrust: unknown, refuse: () => Error): Omit<BodyPin, 'revision'> {
+  return { generation, admit: async () => { if (!await pageTrustForRead(ctx, page, minTrust)) throw refuse(); } };
 }
 
 function envelopeText(text: string, quarantined: QuarantinedView | null, trust?: TrustFields): string {
@@ -346,7 +357,7 @@ function inlineDocument(doc: PageDocument): WindowDocument {
  */
 async function segmentedWindows(ctx: OperationContext, input: PartialReadInput, req: BodyRequest, mode: BodyMode): Promise<{ doc: WindowDocument; size: Record<string, unknown> }> {
   const { page, revision, tags } = input;
-  const body = await openSegmentedBody(ctx.engine, { pageId: page.id });
+  const body = await openSegmentedBody(ctx.engine, { pageId: page.id, pin: { ...input.pin, revision } });
   const audience = ctx.remote === false ? 'trusted' : 'remote';
   const stored = audience === 'trusted' ? { body_bytes: body.bodyBytes, body_lines: body.bodyLines } : {};
   let seg: SegmentedDocument;
@@ -419,8 +430,13 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
     doc = inlineDocument(whole);
   }
   const out: Record<string, unknown> = { ...base, body: mode, view: req.view, ...(doc.segmented ? { body_storage: 'segmented' } : {}), size };
+  // A segmented read is returned only while the page is still at the revision its caller was authorized for.
+  const confirmed = async (result: Record<string, unknown>) => {
+    if (doc.segments) await confirmBodyPin(ctx.engine, doc.segments.body);
+    return result;
+  };
 
-  if (mode === 'none') return noneResult(ctx, page, out, doc.total > 0);
+  if (mode === 'none') return confirmed(await noneResult(ctx, page, out, doc.total > 0));
 
   if (mode === 'outline') {
     const limit = Math.min(MAX_OUTLINE_LIMIT, DEFAULT_OUTLINE_LIMIT);
@@ -431,9 +447,9 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
       out.truncated = true;
       if (first.byte_end < doc.total) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: 'read', offset: first.byte_end, max_bytes: req.maxBytes ?? DEFAULT_WINDOW_BYTES }), false);
       out.auto_reason = 'over_inline_bytes';
-      return out;
+      return confirmed(out);
     }
-    return { ...out, truncated: true };
+    return confirmed({ ...out, truncated: true });
   }
 
   // window: chosen, then measured as the final encoded frame; text that escapes heavily shrinks the window until it fits.
@@ -473,14 +489,14 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
   let maxBytes = await windowBudget(ctx, req.maxBytes ?? (sel?.kind === 'cursor' ? decodeCursor(sel.raw)?.max_bytes : undefined), DEFAULT_WINDOW_BYTES);
   for (let attempt = 0; ; attempt++) {
     const win = await select(maxBytes);
-    if (!win) return { ...out, truncated: true };
+    if (!win) return confirmed({ ...out, truncated: true });
     out.window = { ...win, text: envelopeText(win.text, quarantined, trust) };
     out.truncated = win.byte_start > 0 || win.byte_end < doc.total;
     if (win.byte_end < doc.total) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax }), markdown);
     else { delete out.next_cursor; delete out.next; }
-    if (!Number.isFinite(cap) || attempt >= 6) return out;
+    if (!Number.isFinite(cap) || attempt >= 6) return confirmed(out);
     const frame = encodedFrameBytes({ content: [{ type: 'text', text: JSON.stringify(out) }] }) + ENVELOPE_RESERVE_BYTES - FRAME_RESERVE_BYTES;
-    if (frame <= cap || win.byte_end - win.byte_start <= 1) return out;
+    if (frame <= cap || win.byte_end - win.byte_start <= 1) return confirmed(out);
     maxBytes = Math.max(1, Math.floor((win.byte_end - win.byte_start) * (cap / frame) * 0.9));
   }
 }
