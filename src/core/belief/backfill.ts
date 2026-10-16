@@ -16,7 +16,11 @@
  * `purge_epoch` it read; the append runs under the page key, refuses when the
  * epoch moved (the page is prepared again from current, redacted versions),
  * and rechecks tombstones through `appendBeliefEvents`. Events of a key a
- * purge hid through derivation (`derived.hidden`) are appended hidden.
+ * purge hid through derivation (`derived.hidden`) are appended hidden, and a
+ * carrying field a purge registered from a retained version that quoted the
+ * claim (`registerVersionCarriers`) is appended as the redaction marker. A
+ * version whose own frontmatter is private publishes private events, whatever
+ * the page's visibility is now.
  * Publication ids are derived from the page lifetime and the version row; a
  * lifetime that already has its summary is skipped, so a rerun appends
  * nothing even after versions were pruned. The lifetime is resolved under the
@@ -38,7 +42,7 @@ import { coverageIntervals } from './coverage-report.ts';
 export interface BackfillPageResult { slug: string; versions: number; events: number; complete: boolean; reasons: string[] }
 export interface BackfillReport { source_id: string; since: string | null; pages: BackfillPageResult[]; events: number; retried: number }
 
-interface Body { revision: string | null; source_time: string; text: string | null }
+interface Body { revision: string | null; source_time: string; text: string | null; private: boolean }
 interface Keyed { kind: 'fact' | 'take'; key: string; value: Record<string, unknown>; vhash: string; visibility: string; claimFp: string; validFrom: string | null; validUntil: string | null }
 interface Prepared { epoch: number; incarnation: string; lifetime: string; pageId: number; versions: Body[]; drafts: BeliefEventDraft[][]; publications: string[]; summary: BeliefEventDraft; complete: boolean; reasons: string[] }
 
@@ -47,8 +51,8 @@ const toUuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.s
 const iso = (v: unknown) => v == null ? null : new Date(v as string).toISOString();
 const dateIso = (d?: string) => d ? iso(/^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00Z` : d) : null;
 
-/** Keyed fence subjects of one body: active fence facts by (page, fp, visibility) and takes by (page, claim hash, ordinal). */
-async function bodySubjects(engine: BrainEngine, lifetime: string, text: string, pageVisibility: string): Promise<{ subjects: Keyed[]; warnings: string[] }> {
+/** Keyed fence subjects of one body: active fence facts by (page, fp, visibility) and takes by (page, claim hash, ordinal). Purge registers version carriers under these keys. */
+export async function bodySubjects(engine: BrainEngine, lifetime: string, text: string, pageVisibility: string): Promise<{ subjects: Keyed[]; warnings: string[] }> {
   const facts = parseFactsFence(text);
   const takes = parseTakesFence(text);
   const active = facts.facts.filter(f => f.active);
@@ -99,8 +103,9 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
     await tx.lockPageKeys([{ sourceId, slug }]);
     return (await resolveLifetimes(tx, [{ sourceId, incarnation: source.incarnation, slug, pageId: Number(page.id) }])).get(Number(page.id))!;
   });
-  const versions = await engine.executeRaw<{ id: number; snapshot_at: string; revision: string | null; compiled_truth: string | null; timeline: string | null; segmented: boolean }>(`SELECT v.id,
-      v.snapshot_at, v.knowledge_revision::text AS revision, v.compiled_truth, v.timeline, v.body_storage = 'segmented' AS segmented
+  const versions = await engine.executeRaw<{ id: number; snapshot_at: string; revision: string | null; compiled_truth: string | null; timeline: string | null; segmented: boolean; private: boolean }>(`SELECT v.id,
+      v.snapshot_at, v.knowledge_revision::text AS revision, v.compiled_truth, v.timeline, v.body_storage = 'segmented' AS segmented,
+      (COALESCE(v.frontmatter->>'visibility', '') = 'private' OR COALESCE(v.frontmatter ? 'pinned_question', false)) AS private
     FROM page_versions v WHERE v.page_id = $1 ORDER BY v.snapshot_at, v.id`, [page.id]);
   if (new Date(page.created_at).getTime() > Date.parse(since)) return null;
   const before = versions.filter(v => new Date(v.snapshot_at).getTime() <= Date.parse(since));
@@ -108,9 +113,9 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   if (page.large || versions.some(v => v.segmented)) reasons.push('large_page_versions_pruned');
   const closing = versions.find(v => new Date(v.snapshot_at).getTime() > Date.parse(since));
   const text = (v: { segmented: boolean; compiled_truth: string | null; timeline: string | null }) => v.segmented || v.compiled_truth == null ? null : `${v.compiled_truth}\n${v.timeline ?? ''}`;
-  const bodies: Body[] = before.map((v, i) => ({ revision: v.revision, source_time: i === 0 ? iso(page.created_at)! : iso(before[i - 1]!.snapshot_at)!, text: text(v) }));
+  const bodies: Body[] = before.map((v, i) => ({ revision: v.revision, source_time: i === 0 ? iso(page.created_at)! : iso(before[i - 1]!.snapshot_at)!, text: text(v), private: v.private === true }));
   const atStart: Body = { revision: closing ? closing.revision : page.revision, source_time: before.length ? iso(before.at(-1)!.snapshot_at)! : iso(page.created_at)!,
-    text: closing ? text(closing) : page.large ? null : `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}` };
+    text: closing ? text(closing) : page.large ? null : `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`, private: closing?.private === true };
   const chain = [...bodies, atStart];
   const drafts: BeliefEventDraft[][] = [];
   const publications: string[] = [];
@@ -121,10 +126,11 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   const base = { sourceId, incarnation: source.incarnation, lifetime, slug, stream: slug, stateHash, tierBasis: 'unknown' as const, trustTier: 'unknown' };
   for (const [i, body] of chain.entries()) {
     if (body.text == null) { reasons.push('segmented_version_body'); priorRevision = body.revision; continue; }
-    const { subjects, warnings } = await bodySubjects(engine, lifetime, body.text, visibility);
+    const bodyVisibility = body.private ? 'private' : visibility;
+    const { subjects, warnings } = await bodySubjects(engine, lifetime, body.text, bodyVisibility);
     if (warnings.length) reasons.push('fence_parse_warnings');
     const cause = { op: 'backfill', version: i < bodies.length ? Number(before[i]!.id) : closing ? Number(closing.id) : null, at_coverage_start: i === bodies.length };
-    const out: BeliefEventDraft[] = [{ ...base, subjectKind: 'page', subjectKey: pageKey(lifetime), eventType: 'page.published', visibility,
+    const out: BeliefEventDraft[] = [{ ...base, subjectKind: 'page', subjectKey: pageKey(lifetime), eventType: 'page.published', visibility: bodyVisibility,
       value: { revision_before: priorRevision, revision_after: body.revision, ...(i === 0 ? { snapshot: false } : {}) }, sourceTime: body.source_time, cause }];
     const priorMap = new Map(prior.map(s => [s.key, s]));
     const nowMap = new Map(subjects.map(s => [s.key, s]));
@@ -164,7 +170,7 @@ async function appendPrepared(engine: BrainEngine, sourceId: string, slug: strin
       LEFT JOIN belief_page_lifetimes l ON l.source_incarnation = $2::uuid AND l.slug = p.slug AND l.ended_at IS NULL WHERE p.source_id = $1 AND p.slug = $3`,
     [sourceId, source.incarnation, slug]);
     if (Number(open?.id) !== prepared.pageId || open?.page_lifetime !== prepared.lifetime) {
-      throw opError('belief_preparation_stale', `The page at ${slug} in source ${sourceId} was renamed or replaced after its backfill was prepared.`,
+      throw opError('belief_stale_preparation', `The page at ${slug} in source ${sourceId} was renamed or replaced after its backfill was prepared.`,
         'The backfill prepares the page again; rerun gbrain beliefs backfill if it gave up.');
     }
     const [done] = await tx.executeRaw<{ id: number }>(`SELECT id FROM belief_events WHERE page_lifetime = $1::uuid AND event_type = 'backfill' LIMIT 1`, [prepared.lifetime]);

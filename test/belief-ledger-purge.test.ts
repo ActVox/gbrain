@@ -169,7 +169,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const agentEdit = await step(() => b.put(slug, page(`notes say ${X} and more`, '0.5')));
         const owner = await step(() => b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
           await tx.lockPageKeys([{ sourceId: b.sourceId, slug }]);
-          await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [slug], op: 'owner_edit', remote: false },
+          await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [slug], op: 'owner_edit', remote: false, ownerEdit: true },
             () => tx.executeRaw(`UPDATE facts SET context = 'owner rewrote this' WHERE source_id = $1 AND fact = 'Acme sells widgets' AND expired_at IS NULL`, [b.sourceId]));
         }, { ...TEST_WRITE_ATTRIBUTION, trust: { tier: 'operator_curated', origin: { channel: 'cli:owner_edit' } } })));
         const later = await step(() => b.put(slug, page('agent rewrote this', '0.5')));

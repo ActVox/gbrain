@@ -1,4 +1,5 @@
 import { isEmbedSkipped } from '../embed-skip.ts';
+import { appendPurgeCommitted } from '../belief/purge-mirror.ts';
 import { sizeStateField } from '../page-embedding-budget.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { boundedReads } from './bounded-reads.ts';
@@ -399,8 +400,11 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
   // #6511: the purge's journal sweep runs here, under the preparation budget, never inside the 5 s publication transaction.
   const preparedPurge: PreparedPagePurge | null = purge ? await preparePagePurge(engine, row, snapshot, clock) : null;
   const prepared: PreparedMutation = { observedRevision, noop, file, ...await pageDatabaseOnlyPublication(engine, row, file),
-    // W1: a purge bumps sources.purge_epoch, so it holds the source row exclusively from the start; the derived rows' streams are locked with the page.
-    ...(purge ? { sourceExclusive: true } : {}),
+    // W1: a purge bumps sources.purge_epoch, so it holds the source row exclusively from the start (retention bumps nothing, #26);
+    // the derived rows' and cascaded links' streams are locked with the page.
+    ...(purge && !preparedPurge?.retention ? { sourceExclusive: true } : {}),
+    // The purge mirror's `committed` line comes from the coordinator after the commit, whoever waits for the reply (#23).
+    ...(preparedPurge && !preparedPurge.retention ? { afterCommit: async () => { appendPurgeCommitted(row.id); } } : {}),
     ...(preparedPurge?.derivedSlugs.length ? { additionalPageKeys: preparedPurge.derivedSlugs.map(slug => ({ sourceId: row.source_id, slug })) } : {}),
     ...(excludedPath !== null ? { databaseOnlyReason: 'sync_excluded' as const } : {}), ...(shared ? { databaseOnlyReason: 'shared_origin' as const } : {}),
     ...(shared ? { validate: async (tx: BrainEngine) => { prepared.databaseOnlyWarning = await validateSharedOrigin(tx, row, shared); } } : {}),

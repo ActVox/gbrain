@@ -7,6 +7,7 @@ import { managedPersistenceEnabled } from './ownership.ts';
 import { submitPageMutation } from './page-mutations.ts';
 import { withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
+import { linkStreamSlugs } from './page-purge.ts';
 
 /** A tombstone that moved under a concurrent writer; the next run retries it. */
 const DEFERRAL_CODES = new Set(['revision_conflict', 'page_not_found', 'page_identity_changed']);
@@ -56,7 +57,7 @@ export async function consentedPurgeDeletedPages(engine: BrainEngine, olderThanH
 /**
  * W1 (BELIEF_LEDGER.md 6.5): on an unmanaged brain, each expired tombstone of a source the belief ledger records is
  * removed under its page key inside a belief batch, which appends `page.expired` (retention, never a purge: no
- * tombstone, nothing redacted). The bulk delete then takes the rest.
+ * tombstone, nothing redacted) and a `link.retracted` for each link the delete cascades away, in its own stream. The bulk delete then takes the rest.
  */
 async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: number): Promise<string[]> {
   const hours = String(Math.max(0, Math.floor(olderThanHours)));
@@ -68,8 +69,9 @@ async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: num
   for (const row of rows) {
     const publicationId = randomUUID(), report = { appended: 0 };
     const deleted = await engine.transaction(async tx => {
-      await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug }]);
-      return withBeliefBatch(tx, { sourceId: row.source_id, slugs: [row.slug], publicationId, op: 'purge_deleted_pages', hardDeleteEvent: 'page.expired', report },
+      const slugs = [...new Set([row.slug, ...await linkStreamSlugs(tx, row.source_id, row.id)])].sort();
+      await tx.lockPageKeys(slugs.map(slug => ({ sourceId: row.source_id, slug })));
+      return withBeliefBatch(tx, { sourceId: row.source_id, slugs, publicationId, op: 'purge_deleted_pages', hardDeleteEvent: 'page.expired', report },
         async () => (await tx.executeRaw(`DELETE FROM pages WHERE id = $1 AND deleted_at IS NOT NULL AND deleted_at < now() - ($2 || ' hours')::interval RETURNING id`,
           [row.id, hours])).length > 0);
     });

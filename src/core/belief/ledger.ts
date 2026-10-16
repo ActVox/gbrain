@@ -47,6 +47,8 @@ export interface BeliefBatchOptions {
   hardDeleteEvent?: 'page.purged' | 'page.expired';
   /** Request authority: an owner release of a redaction needs a trusted local (remote = false) write. */
   remote?: boolean;
+  /** An explicit owner edit of the batch's fields: the only write that can release a purge redaction (append.ts). */
+  ownerEdit?: boolean;
   cause?: Record<string, unknown>;
   /** Filled by the batch: how many events it appended, so the caller marks the commit only when there is one. */
   report?: { appended: number };
@@ -427,7 +429,7 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
     }
   }
   return appendBeliefEvents(tx, drafts, { publicationId: batch.publicationId, origin: opts.origin ?? (batch.managed ? 'live' : 'unmanaged'),
-    writerTier, remote: opts.remote, purgesPossible: batch.purgesPossible });
+    writerTier, remote: opts.remote, ownerEdit: opts.ownerEdit, purgesPossible: batch.purgesPossible || batch.notes.some(n => n.kind === 'purged') });
 }
 
 /** `trust.contested` on the held row's key: its tier as trust_tier, the challenger's as writer_tier (section 6.1). */

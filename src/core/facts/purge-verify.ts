@@ -26,7 +26,8 @@ import type { WriteRequest } from '../persistence/model.ts';
 import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from '../deletion-inventory.ts';
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
-import { purgeNeedles, type LedgerPurgeReport } from '../belief/purge.ts';
+import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
+import { CARRYING_FIELDS } from '../belief/keys.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -172,24 +173,61 @@ async function effectPayloadReport(engine: BrainEngine, sourceId: string, needle
  * `incomplete`; the redacted fields are named; a live row whose own context quotes the claim survives the purge and is
  * named as `fact_context` (`out_of_scope: source_prose`) so the user can edit it.
  */
+/** Every string inside a recorded value, with the field it sits under. */
+function valueStrings(value: unknown, field = ''): Array<[string, string]> {
+  if (typeof value === 'string') return [[field, value]];
+  if (Array.isArray(value)) return value.flatMap(v => valueStrings(v, field));
+  if (value && typeof value === 'object') return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => valueStrings(v, field || k));
+  return [];
+}
+
+/**
+ * W1 (BELIEF_LEDGER.md 6.5): what recorded history still says about the claims. Every value is read in keyset
+ * batches and matched in JS (case folded like the purge passes, #11). A carrying field still quoting a claim is a
+ * redaction the purge missed (`incomplete`); any other field (another subject's longer claim, #12) is history the
+ * purge does not rewrite, reported by key as `out_of_scope`.
+ */
 async function ledgerReports(engine: BrainEngine, sourceId: string, claims: readonly string[], ledger: LedgerPurgeReport | null | undefined, deadline: number): Promise<StoreReport[]> {
-  const needles = purgeNeedles(claims);
-  if (!needles.length) return [];
-  const carrying = `EXISTS (SELECT 1 FROM unnest($2::text[]) n WHERE strpos(lower(COALESCE(e.value->>'context','')), n) > 0 OR strpos(lower(COALESCE(e.value->>'resolved_source','')), n) > 0)`;
-  const left = await boundedCount(engine, `SELECT 1 FROM belief_events e WHERE e.source_id = $1 AND e.value IS NOT NULL AND e.subject_kind IN ('fact','take','link') AND ${carrying}`,
-    [sourceId, needles], deadline);
+  const forms = claimForms(claims);
+  if (!forms.length) return [];
   const redacted = ledger?.redacted_fields ?? [];
   const removed = (ledger?.purged_events ?? 0) + redacted.length;
+  const missed: string[] = [], other: string[] = [];
+  let unverified: string | null = null;
+  for (let after = 0; ;) {
+    if (performance.now() > deadline) { unverified = 'verification_deadline'; break; }
+    const rows = await engine.executeRaw<{ id: number; subject_kind: string; subject_key: string; value: unknown }>(`SELECT id, subject_kind, subject_key, value
+      FROM belief_events WHERE source_id = $1 AND id > $2 AND value IS NOT NULL ORDER BY id LIMIT 1000`, [sourceId, after]);
+    if (!rows.length) break;
+    after = Number(rows[rows.length - 1]!.id);
+    for (const row of rows) {
+      const value = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+      for (const [field, text] of valueStrings(value)) {
+        if (!quotes(text, forms)) continue;
+        ((CARRYING_FIELDS[row.subject_kind] ?? []).includes(field) ? missed : other).push(`${field}@${row.subject_key}`);
+      }
+    }
+    if (rows.length < 1000) break;
+  }
   const items = [...new Set(redacted.map(r => `${r.field}@${r.subject_key}`))].slice(0, 20);
-  const reports: StoreReport[] = ['unverified' in left ? { store: 'belief_events', status: 'unverified', reason: left.unverified, removed }
-    : left.count ? { store: 'belief_events', status: 'incomplete', remaining: left.count, removed }
-      : { store: 'belief_events', status: removed ? 'deleted' : 'not_present', removed, ...(items.length ? { items,
-        detail: 'Recorded history keeps each event\'s skeleton; the purged values and every carrying field that quoted them now read as the redaction marker.' } : {}) }];
-  const live = await engine.executeRaw<{ id: number }>(`SELECT f.id FROM facts f WHERE f.source_id = $1 AND f.expired_at IS NULL
-    AND EXISTS (SELECT 1 FROM unnest($2::text[]) n WHERE strpos(lower(COALESCE(f.context,'')), n) > 0) ORDER BY f.id LIMIT 20`, [sourceId, needles]);
+  const reports: StoreReport[] = [unverified ? { store: 'belief_events', status: 'unverified', reason: unverified, removed }
+    : missed.length ? { store: 'belief_events', status: 'incomplete', remaining: missed.length, removed, items: [...new Set(missed)].slice(0, 20) }
+      : other.length ? { store: 'belief_events', status: 'out_of_scope', reason: 'probed_reported', remaining: new Set(other).size, removed, items: [...new Set(other)].slice(0, 20),
+        detail: 'These recorded events belong to other subjects whose own value quotes the purged claim (a longer claim, say); purge redacts only the purged keys and the fields that quote them. Purge those subjects too to remove them.' }
+        : { store: 'belief_events', status: removed ? 'deleted' : 'not_present', removed, ...(items.length ? { items,
+          detail: 'Recorded history keeps each event\'s skeleton; the purged values and every carrying field that quoted them now read as the redaction marker.' } : {}) }];
+  const live: number[] = [];
+  for (let after = 0; live.length < 20 && performance.now() <= deadline; ) {
+    const rows = await engine.executeRaw<{ id: number; context: string }>(`SELECT id, context FROM facts WHERE source_id = $1 AND id > $2 AND expired_at IS NULL
+      AND COALESCE(context, '') <> '' ORDER BY id LIMIT 1000`, [sourceId, after]);
+    if (!rows.length) break;
+    after = Number(rows[rows.length - 1]!.id);
+    for (const r of rows) if (live.length < 20 && quotes(r.context, forms)) live.push(Number(r.id));
+    if (rows.length < 1000) break;
+  }
   if (live.length) {
     const keys = [...new Set([...(ledger?.live_carriers ?? []), ...redacted].filter(r => r.field === 'context').map(r => r.subject_key))].slice(0, 20);
-    reports.push({ store: 'fact_context', status: 'out_of_scope', reason: 'source_prose', remaining: live.length, items: [...live.map(r => `f${r.id}`), ...keys],
+    reports.push({ store: 'fact_context', status: 'out_of_scope', reason: 'source_prose', remaining: live.length, items: [...live.map(id => `f${id}`), ...keys],
       detail: 'These live facts quote the purged claim in their context, which purge leaves as it is; their recorded history shows the redaction marker until the owner replaces the context. Edit them.' });
   }
   return reports;

@@ -15,7 +15,7 @@ import { quarantineRestoredExecution, rebaseRestorePath, relativeBackupPath, typ
 import { quarantineSharedSkillRestore, validateSharedSkillRestoreMode, type SharedSkillRestore, type SharedSkillRestoreOptions } from '../shared-skills/restore.ts';
 import { isPhysicalRootMetadata } from '../persistence/physical-root-record.ts';
 import { protectNewBackupPath } from './private-path.ts';
-import { PURGE_MIRROR_FILE, readPurgeMirror, replayPurgesInRestore, type PurgeReplayState, type ReplayRecord } from '../belief/purge-mirror.ts';
+import { PURGE_MIRROR_FILE, readPurgeMirror, replayPurgesInRestore, type PurgeReplayResult } from '../belief/purge-mirror.ts';
 import { pgliteBackupPreflight } from './preflight.ts';
 
 interface SourceInventory { id: string; local_path: string | null; managed_relative_path: string | null }
@@ -233,7 +233,7 @@ function metadataOf(manifest: ArchiveManifest): BackupMetadata {
  * `<original_root>/.gbrain/purge-events.jsonl`); the restore replays the purges recorded there after the archive.
  */
 export async function restorePgliteBackup(options: { archive: string; into: string; purgeMirror?: string } & SharedSkillRestoreOptions): Promise<{ root: string; quarantined_jobs: number;
-  reconnect_required: string[]; shared_skills: SharedSkillRestore | null; purge_replay: { state: PurgeReplayState; replays: ReplayRecord[] } }> {
+  reconnect_required: string[]; shared_skills: SharedSkillRestore | null; purge_replay: PurgeReplayResult }> {
   const mode = validateSharedSkillRestoreMode(options);
   const root = checkedRoot(options.into);
   if (!existsSync(dirname(root))) throw new AgentInstallError('parent_missing', 'Restore parent directory must already exist.');
@@ -277,7 +277,7 @@ export async function restorePgliteBackup(options: { archive: string; into: stri
     let quarantined = 0;
     let execution: RestoreQuarantine;
     let sharedSkills: SharedSkillRestore | null = null;
-    let purgeReplay: { state: PurgeReplayState; replays: ReplayRecord[] } = { state: 'none', replays: [] };
+    let purgeReplay: PurgeReplayResult = { state: 'none', replays: [] };
     await engine.transaction(async tx => {
       sharedSkills = await quarantineSharedSkillRestore(tx, restoreId, options);
       await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");
@@ -341,7 +341,7 @@ export async function restorePgliteBackup(options: { archive: string; into: stri
       renameSync(join(restored, name), join(root, name));
     }
     const replayWarning = purgeReplay.state === 'none' || purgeReplay.state === 'complete' ? [] : [purgeReplay.state === 'unavailable'
-      ? `Purges made after the archive (${metadata.created_at}) were not replayed: no purge mirror could be read under ${metadata.original_root}. Restore again with the original brain's .gbrain/${PURGE_MIRROR_FILE} available (purgeMirror), or purge the content again.`
+      ? `Purges made after the archive (${metadata.created_at}) were not replayed: no purge mirror could be read under ${metadata.original_root}. Restore again into a new root with the original brain's .gbrain/${PURGE_MIRROR_FILE} in place, or name a copy of it with gbrain backup restore --purge-mirror <absolute path>; otherwise purge the content again.`
       : `Purge replay is ${purgeReplay.state} for request(s) ${purgeReplay.replays.filter(r => r.outcome !== 'complete').map(r => `${r.request_id} (${r.outcome})`).join(', ')}: review them and run those purges again if the content is still present.`];
     const reconnect = [...new Set([...metadata.credential_references.map(key => `Configure credential: ${key}`), ...metadata.omitted, ...detachedConfig, ...execution!.reconnect, ...replayWarning, 'Autopilot is paused; review .gbrain/restore-detached.json before explicitly resuming automation.'])];
     privateWrite(receiptPath, JSON.stringify({ format_version: 1, restore_id: restoreId, state: 'ready', original_root: metadata.original_root, shared_skills: sharedSkills, quarantined_jobs: quarantined, reconnect_required: reconnect, purge_replay: purgeReplay, launcher_ready: false, setup_required: true, native_automation_started: false }, null, 2) + '\n');
