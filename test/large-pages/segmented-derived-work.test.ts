@@ -14,6 +14,9 @@
  *    trusted put_page (auto_link on) publishes a segmented page with its derived
  *    links and temporal evidence, edit_page edits one, and a put_page that
  *    shrinks one to inline versions the segmented body before demoting it;
+ *    a segmented create is projected once at a time (#6143: the resident
+ *    drain waits for the publication's own projection instead of chunking
+ *    the same page beside it);
  *    re-linking one later (autoLinkWrittenPage, `extract --slugs`) reads its
  *    materialized body; the managed stale-links pass after a managed import
  *    links a segmented page within the ceiling and skips one over it as
@@ -52,6 +55,7 @@ import { extractManagedStaleLinks } from '../../src/core/persistence/links-maint
 import { autoLinkWrittenPage } from '../../src/core/ops/pages.ts';
 import { importManagedFile } from '../../src/core/persistence/import-mutations.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
+import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 
 const config = { engine: 'pglite' as const, embedding_disabled: true };
 const CLIENT = 'client-segmented-derived';
@@ -283,6 +287,31 @@ describe('trusted coordinated writes of segmented pages', () => {
       expect(page.body_storage).toBe('inline');
       expect(await engine.executeRaw('SELECT body_storage FROM page_versions WHERE page_id=$1 ORDER BY id', [page.id])).toEqual([{ body_storage: 'segmented' }]);
     }
+  }, 300_000);
+
+  test('a segmented create is projected once at a time: the resident drain waits for the publication\'s own projection (#6143)', async () => {
+    const slug = 'meetings/segmented-single-flight';
+    const concurrent: Record<string, number> = {}, pages: Record<string, unknown> = {};
+    for (const engine of engines) {
+      await linkTargets(engine);
+      let inside = 0, most = 0, arrivals = 0;
+      // The first projection of the page to stage its chunks holds its seal open for a while: a second projection of the
+      // same page running beside it (the resident drain picking up the queued job) reaches the same point meanwhile.
+      installFaultHook(async (point, detail) => {
+        if (point !== 'segmented:projection_staged' || detail.slug !== slug) return;
+        inside++; arrivals++; most = Math.max(most, inside);
+        if (arrivals === 1) for (const until = Date.now() + 1500; inside < 2 && Date.now() < until;) await new Promise(resolve => setTimeout(resolve, 20));
+        inside--;
+      });
+      try {
+        expect((await localCall(engine, 'put_page', { slug, content: linkedMeeting('Single flight') })).isError).toBe(false);
+      } finally { installFaultHook(undefined); }
+      concurrent[engine.kind] = most;
+      pages[engine.kind] = await engine.executeRaw(`SELECT body_storage, text_projection_revision=knowledge_revision AS sealed FROM pages
+        WHERE source_id='default' AND slug=$1`, [slug]);
+    }
+    expect(concurrent).toEqual(Object.fromEntries(engines.map(engine => [engine.kind, 1])));
+    expect(pages).toEqual(Object.fromEntries(engines.map(engine => [engine.kind, [{ body_storage: 'segmented', sealed: true }]])));
   }, 300_000);
 
   test('re-linking a segmented page later (autoLinkWrittenPage, extract --slugs) reads its materialized body', async () => {
