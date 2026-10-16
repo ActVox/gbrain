@@ -331,6 +331,28 @@ describe('verifyWorkspace — write-through disabled by config', () => {
   }, 240_000);
 });
 
+describe('verifyWorkspace — pending corpus transcripts (#6786)', () => {
+  test('a keyed report in a process that cannot serve the extraction model leaves pending transcripts pending', async () => {
+    const corpusDir = mkdtempSync(join(tmpdir(), 'gb-verify-corpus-'));
+    const spool = join(corpusDir, 'sourced');
+    mkdirSync(spool, { recursive: true });
+    const transcript = join(spool, 'sess-verify-example.src-workspace.txt');
+    writeFileSync(transcript, '[user]\nI keep a written log of every product decision.\n\n[assistant]\nNoted.\n');
+    const KEYED: CapabilityReport = { embeddings: { available: false }, extraction: { available: true, provider: 'anthropic' }, search: 'keyword-only', mode: 'keyed' };
+    await engine.setConfig('dream.synthesize.session_corpus_dir', corpusDir);
+    try {
+      // verify's engine never configures the gateway, so no extraction model is servable.
+      const res = await verifyWorkspace(engine, ws, { sourceId: 'workspace', gbrainHomeDir: home, capabilities: KEYED });
+      expect(check(res.checks, 'graph_floor')[0].ok).toBe(true);
+      expect(existsSync(`${transcript}.ingested`)).toBe(false);
+      expect(existsSync(`${transcript}.progress`)).toBe(false);
+    } finally {
+      await engine.unsetConfig('dream.synthesize.session_corpus_dir');
+      rmSync(corpusDir, { recursive: true, force: true });
+    }
+  }, 240_000);
+});
+
 describe('verifyWorkspace — probe cleanup on an early roundtrip exit (#6001)', () => {
   test('a roundtrip that fails before its cleanup step still removes both probe pages', async () => {
     // A DIRECTORY where the second probe's file must go: the entity probe lands (row + file), the

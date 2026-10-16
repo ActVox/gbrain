@@ -752,6 +752,30 @@ More: [docs/guides/core-memory.md#owner-only](../../docs/guides/core-memory.md#o
 
 More: [docs/guides/core-memory.md#remote-edits](../../docs/guides/core-memory.md#remote-edits)
 
+### corpus_chat_unavailable
+
+<a id="corpus_chat_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The sweep's corpus pass stopped because the extraction model is not servable in this process; the captured session files stay pending (no `.ingested` sidecar), so nothing was lost. | No servable model is a state of the extracting process, not of the transcript. Before #6786 it was recorded as a finished file with zero facts, and retention later deleted the text. | Configure the extraction model (gbrain models shows it) or run the sweep from a process that has its key; the next sweep extracts the pending files. Run: gbrain models --json | agent | `gbrain doctor --json` | 1 | no |
+
+### corpus_window_backoff
+
+<a id="corpus_window_backoff"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A corpus window failed after its model call and waits out its retry delay (the next sweep, then 10, 20 and 40 minutes) before the sweep pays for it again. | Without a delay a write that fails after extraction (#6785) was paid for again on every drain. | Wait briefly, then retry the same request (writes: reuse the same request_id). Run: gbrain sweep --retry-failed --json | agent | `repeat the read that failed` | 1 | yes |
+
+### corpus_window_dead_lettered
+
+<a id="corpus_window_dead_lettered"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A corpus window failed after its model call on every allowed attempt, so the sweep stopped paying for it; its file stays pending until an operator retries it. | A window that can never commit was re-extracted forever before #6785. The count is per window and source incarnation; tail growth and changing error codes do not reset it, and one extraction-config change (model, provider, key presence) retries it once. | Fix the cause the last code names (for writer_coordinator_required: gbrain sources writer status <source>), then ask the user before gbrain sweep --retry-failed --apply: the retry pays for the extraction again. Run: gbrain sweep --retry-failed --json | agent | `repeat the read that failed` | 1 | no |
+
 ### cost_cap_exceeded
 
 <a id="cost_cap_exceeded"></a>
