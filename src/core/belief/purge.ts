@@ -52,21 +52,29 @@ export async function sourceHasBeliefEvents(tx: Pick<BrainEngine, 'executeRaw'>,
   return row?.present === true;
 }
 
-/** A claim as it can appear in stored text: plain, fence-escaped, and each JSON-escaped (event values are matched as JSON text). */
-export function purgeNeedles(claims: readonly string[]): string[] {
+/**
+ * The forms a claim takes in a stored field (plain and fence-escaped), lowercased in JS. Fields are matched
+ * here, never with SQL `lower()`: both sides then fold case the same way, whatever the script (#11).
+ */
+export function claimForms(claims: readonly string[]): string[] {
   const out = new Set<string>();
   for (const claim of claims) {
     const lower = claim.trim().toLowerCase();
-    if (!lower) continue;
-    for (const form of [lower, escapeFenceCell(lower)]) { out.add(form); out.add(JSON.stringify(form).slice(1, -1)); }
+    if (lower) { out.add(lower); out.add(escapeFenceCell(lower)); }
   }
   return [...out];
 }
 
-const quotes = (text: string, claims: readonly string[]) => {
+export const quotes = (text: string, forms: readonly string[]) => {
   const lower = text.toLowerCase();
-  return claims.some(c => { const l = c.trim().toLowerCase(); return !!l && (lower.includes(l) || lower.includes(escapeFenceCell(l))); });
+  return forms.some(f => lower.includes(f));
 };
+
+async function registerRedaction(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string, key: string, field: string, request: string, hash: string): Promise<void> {
+  await tx.executeRaw(`INSERT INTO belief_redactions (source_id, subject_key, field, purge_request, field_hash)
+    SELECT $1, $2, $3, $4::uuid, $5 WHERE NOT EXISTS (SELECT 1 FROM belief_redactions WHERE source_id = $1 AND subject_key = $2 AND field = $3
+      AND purge_request = $4::uuid AND field_hash = $5)`, [sourceId, key, field, request, hash]);
+}
 
 /** Pass 1: purged keys lose their values. Returns the events marked. */
 export async function redactPurgedKeys(tx: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; claimFps: readonly string[]; lifetimes: readonly string[] }): Promise<number> {
@@ -79,38 +87,42 @@ export async function redactPurgedKeys(tx: Pick<BrainEngine, 'executeRaw'>, inpu
 
 export interface RedactedField { subject_key: string; field: string; event_id: number }
 
-/** Pass 2: carrying fields that quote a purged claim become the redaction marker and enter the redaction register. */
+/**
+ * Pass 2: carrying fields that quote a purged claim become the redaction marker and enter the redaction register.
+ * Keyset batches read only the carrying fields of the source's events (no substring scan in SQL, so the cost is
+ * one pass over the events whatever the number of claims, #6); the claims are matched in JS.
+ */
 export async function redactCarryingFields(tx: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; request: string; claims: readonly string[] }): Promise<RedactedField[]> {
-  const needles = purgeNeedles(input.claims);
-  if (!needles.length || redactionFault === 'skip_carrying_fields') return [];
+  const forms = claimForms(input.claims);
+  if (!forms.length || redactionFault === 'skip_carrying_fields') return [];
   const out: RedactedField[] = [];
   const registered = new Set<string>();
   for (let after = 0; ;) {
     await faultPoint('purge:ledger_redaction', { sourceId: input.sourceId });
-    const rows = await tx.executeRaw<{ id: number; subject_kind: string; subject_key: string; value: unknown; redacted_fields: string[] | null }>(`SELECT e.id, e.subject_kind,
-        e.subject_key, e.value, e.redacted_fields FROM belief_events e
-      WHERE e.source_id = $1 AND e.id > $2 AND e.value IS NOT NULL AND e.subject_kind IN ('fact','take','link')
-        AND EXISTS (SELECT 1 FROM unnest($3::text[]) n WHERE strpos(lower(e.value::text), n) > 0)
-      ORDER BY e.id LIMIT ${SCAN_BATCH}`, [input.sourceId, after, needles]);
+    const rows = await tx.executeRaw<{ id: number; subject_kind: string; subject_key: string; context: string | null; resolved_source: string | null }>(`SELECT e.id,
+        e.subject_kind, e.subject_key, e.value->>'context' AS context, e.value->>'resolved_source' AS resolved_source FROM belief_events e
+      WHERE e.source_id = $1 AND e.id > $2 AND e.subject_kind IN ('fact','take','link')
+        AND (COALESCE(e.value->>'context', '') <> '' OR COALESCE(e.value->>'resolved_source', '') <> '')
+      ORDER BY e.id LIMIT ${SCAN_BATCH}`, [input.sourceId, after]);
     if (!rows.length) break;
     after = Number(rows[rows.length - 1]!.id);
     for (const row of rows) {
-      const value = (typeof row.value === 'string' ? JSON.parse(row.value) : row.value) as Record<string, unknown>;
-      const fields = (CARRYING_FIELDS[row.subject_kind] ?? []).filter(f => typeof value[f] === 'string' && quotes(value[f] as string, input.claims));
+      const fields = (CARRYING_FIELDS[row.subject_kind] ?? []).filter(f => {
+        const text = (row as unknown as Record<string, string | null>)[f];
+        return typeof text === 'string' && quotes(text, forms);
+      });
       if (!fields.length) continue;
+      const [event] = await tx.executeRaw<{ value: unknown; redacted_fields: string[] | null }>('SELECT value, redacted_fields FROM belief_events WHERE id = $1', [row.id]);
+      const value = (typeof event!.value === 'string' ? JSON.parse(event!.value) : event!.value) as Record<string, unknown>;
       const next = { ...value };
       for (const field of fields) {
-        const tag = `${row.subject_key}\u0000${field}\u0000${fieldHash(value[field] as string)}`;
-        if (!registered.has(tag)) {
-          registered.add(tag);
-          await tx.executeRaw(`INSERT INTO belief_redactions (source_id, subject_key, field, purge_request, field_hash)
-            SELECT $1, $2, $3, $4::uuid, $5 WHERE NOT EXISTS (SELECT 1 FROM belief_redactions WHERE source_id = $1 AND subject_key = $2 AND field = $3
-              AND purge_request = $4::uuid AND field_hash = $5)`, [input.sourceId, row.subject_key, field, input.request, fieldHash(value[field] as string)]);
-        }
+        const hash = fieldHash(value[field] as string);
+        const tag = `${row.subject_key}\u0000${field}\u0000${hash}`;
+        if (!registered.has(tag)) { registered.add(tag); await registerRedaction(tx, input.sourceId, row.subject_key, field, input.request, hash); }
         next[field] = REDACTION_MARKER(input.request);
         out.push({ subject_key: row.subject_key, field, event_id: Number(row.id) });
       }
-      const listed = [...new Set([...(row.redacted_fields ?? []), ...fields])];
+      const listed = [...new Set([...(event!.redacted_fields ?? []), ...fields])];
       await tx.executeRaw('UPDATE belief_events SET value = $2::text::jsonb, value_hash = $3, redacted_fields = $4::text[] WHERE id = $1',
         [row.id, canonicalJson(next), valueHash(next), listed]);
     }
@@ -119,23 +131,37 @@ export async function redactCarryingFields(tx: Pick<BrainEngine, 'executeRaw'>, 
   return out;
 }
 
+/** Keyset batches of `sql` (params: source, after-id; columns id, slug, text), returning the slugs whose text quotes a form. */
+async function quotingSlugs(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string, forms: readonly string[], sql: string, into: Set<string>): Promise<void> {
+  for (let after = 0; ;) {
+    const rows = await tx.executeRaw<{ id: number; slug: string | null; text: string }>(`${sql} ORDER BY 1 LIMIT ${SCAN_BATCH}`, [sourceId, after]);
+    if (!rows.length) return;
+    after = Number(rows[rows.length - 1]!.id);
+    for (const r of rows) if (r.slug && quotes(r.text, forms)) into.add(r.slug);
+    if (rows.length < SCAN_BATCH) return;
+  }
+}
+
 /**
  * Pass 2, live half: a surviving row whose carrying field quotes a purged claim (a fence row's context, a take's
  * resolution evidence, a link's context) is left as it is by the purge, so its key enters the redaction register
  * with the field's current hash; its next event (a confidence edit, a reconcile, a backfill) then writes the marker
- * until the owner releases it. Returns the registered keys, which the receipt names.
+ * until the owner releases it. Returns the registered keys, which the receipt names. The candidate rows are read in
+ * keyset batches and matched in JS, like the events.
  */
 export async function registerLiveCarriers(tx: BrainEngine, input: { sourceId: string; request: string; claims: readonly string[] }): Promise<RedactedField[]> {
-  const needles = [...new Set(input.claims.map(c => c.trim().toLowerCase()).filter(Boolean).flatMap(c => [c, escapeFenceCell(c)]))];
+  const forms = claimForms(input.claims);
   const source = await readLedgerSource(tx, input.sourceId);
-  if (!needles.length || !source || redactionFault === 'skip_live_carriers') return [];
+  if (!forms.length || !source || redactionFault === 'skip_live_carriers') return [];
   await faultPoint('purge:ledger_redaction', { sourceId: input.sourceId });
-  const quoting = (column: string) => `EXISTS (SELECT 1 FROM unnest($2::text[]) n WHERE strpos(lower(COALESCE(${column},'')), n) > 0)`;
-  const slugs = (await tx.executeRaw<{ slug: string }>(`SELECT DISTINCT slug FROM (
-      SELECT COALESCE(f.source_markdown_slug, f.entity_slug) AS slug FROM facts f WHERE f.source_id = $1 AND f.expired_at IS NULL AND ${quoting('f.context')}
-      UNION SELECT p.slug FROM takes k JOIN pages p ON p.id = k.page_id WHERE p.source_id = $1 AND ${quoting('k.resolved_source')}
-      UNION SELECT COALESCE(o.slug, f.slug) FROM links l JOIN pages f ON f.id = l.from_page_id LEFT JOIN pages o ON o.id = l.origin_page_id
-        WHERE COALESCE(o.source_id, f.source_id) = $1 AND ${quoting('l.context')}) s WHERE slug IS NOT NULL ORDER BY slug`, [input.sourceId, needles])).map(r => r.slug);
+  const found = new Set<string>();
+  await quotingSlugs(tx, input.sourceId, forms, `SELECT f.id, COALESCE(f.source_markdown_slug, f.entity_slug) AS slug, f.context AS text FROM facts f
+    WHERE f.source_id = $1 AND f.id > $2 AND f.expired_at IS NULL AND COALESCE(f.context, '') <> ''`, found);
+  await quotingSlugs(tx, input.sourceId, forms, `SELECT k.id, p.slug, k.resolved_source AS text FROM takes k JOIN pages p ON p.id = k.page_id
+    WHERE p.source_id = $1 AND k.id > $2 AND COALESCE(k.resolved_source, '') <> ''`, found);
+  await quotingSlugs(tx, input.sourceId, forms, `SELECT l.id, COALESCE(o.slug, f.slug) AS slug, l.context AS text FROM links l JOIN pages f ON f.id = l.from_page_id
+    LEFT JOIN pages o ON o.id = l.origin_page_id WHERE COALESCE(o.source_id, f.source_id) = $1 AND l.id > $2 AND l.context <> ''`, found);
+  const slugs = [...found].sort();
   const out: RedactedField[] = [];
   for (let at = 0; at < slugs.length; at += 200) {
     const state = await readBeliefState(tx, input.sourceId, slugs.slice(at, at + 200));
@@ -144,10 +170,8 @@ export async function registerLiveCarriers(tx: BrainEngine, input: { sourceId: s
       id => state.pages.find(p => p.id === id)?.visible === false ? 'private' : 'world');
     for (const subject of subjects) for (const field of CARRYING_FIELDS[subject.kind] ?? []) {
       const text = subject.value[field];
-      if (typeof text !== 'string' || !quotes(text, input.claims)) continue;
-      await tx.executeRaw(`INSERT INTO belief_redactions (source_id, subject_key, field, purge_request, field_hash)
-        SELECT $1, $2, $3, $4::uuid, $5 WHERE NOT EXISTS (SELECT 1 FROM belief_redactions WHERE source_id = $1 AND subject_key = $2 AND field = $3
-          AND purge_request = $4::uuid AND field_hash = $5)`, [input.sourceId, subject.key, field, input.request, fieldHash(text)]);
+      if (typeof text !== 'string' || !quotes(text, forms)) continue;
+      await registerRedaction(tx, input.sourceId, subject.key, field, input.request, fieldHash(text));
       out.push({ subject_key: subject.key, field, event_id: 0 });
     }
   }

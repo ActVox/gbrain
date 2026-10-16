@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { withBeliefBatch } from '../src/core/belief/ledger.ts';
+import { redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
 import { REDACTION_MARKER } from '../src/core/belief/keys.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { submitRememberMutation } from '../src/core/persistence/memory-mutations.ts';
@@ -88,6 +89,53 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }, false));
       expect(r.status).toBe('purged');
       expect(r.leaks).toEqual([]);
+    }, 240_000);
+    test('#6: the purge passes never substring-scan in SQL; 200 claims cost one keyset pass over the carrying fields', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
+        await b.put('companies/acme-example', beliefPage({ facts: [{ claim: 'Acme sells widgets', context: `notes say ${X}` }, 'Acme has two offices'] }));
+        const claims = [X, ...Array.from({ length: 199 }, (_, i) => `needle claim number ${i} about something`)];
+        const statements: Array<{ sql: string; params: unknown[] }> = [];
+        const out = await b.engine.transaction(async tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
+          const spy = new Proxy(tx, { get: (t, k) => k === 'executeRaw' ? (sql: string, params: unknown[] = []) => { statements.push({ sql, params }); return t.executeRaw(sql, params); }
+            : (t as any)[k] });
+          const request = randomUUID();
+          return { redacted: (await redactCarryingFields(spy, { sourceId: b.sourceId, request, claims })).map(f => f.field),
+            live: (await registerLiveCarriers(spy, { sourceId: b.sourceId, request, claims })).map(f => f.field) };
+        }, TEST_WRITE_ATTRIBUTION));
+        report({ ...out, substring: statements.filter(st => /strpos\(/i.test(st.sql)).length,
+          claimParams: statements.filter(st => JSON.stringify(st.params).includes('needle claim')).length });
+      }));
+      expect(r).toEqual({ redacted: ['context'], live: ['context'], substring: 0, claimParams: 0 });
+    }, 240_000);
+
+    test('#11: a claim whose case folds differently in SQL and JS (Turkish dotted I, Greek sigma) is still redacted and registered', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        const slug = 'companies/acme-example';
+        const claims = ['İstanbul office code is 4417', 'ΟΔΟΣ ΣΟΦΙΑΣ door code 9921'];
+        for (const [i, claim] of claims.entries()) await b.put(`vault/code-${i}-example`, beliefPage({ facts: [claim] }));
+        await b.put(slug, beliefPage({ prose: 'Acme.' }));
+        await b.put(slug, beliefPage({ facts: [{ claim: 'Acme sells widgets', context: `memo: ${claims[0]}` }, { claim: 'Acme has two offices', context: `memo: ${claims[1]}` }] }));
+        for (const claim of claims) await purgeFact(b, claim);
+        report({ leaks: quoting(await b.events(), claims[0]!).concat(quoting(await b.events(), claims[1]!)),
+          register: (await b.engine.executeRaw<{ n: number }>('SELECT count(DISTINCT subject_key)::int AS n FROM belief_redactions WHERE source_id = $1', [b.sourceId]))[0]!.n });
+      }));
+      expect(r).toEqual({ leaks: [], register: 2 });
+    }, 240_000);
+
+    test('#12: the receipt reports another subject\'s recorded value that still quotes the claim, naming its key', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        const slug = 'companies/acme-example';
+        await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+        await b.put(slug, beliefPage({ facts: [`${X} for the back office`, 'Acme sells widgets'] }));
+        await b.put(slug, beliefPage({ facts: [X, 'Acme sells widgets'] }));
+        const result = await purgeFact(b, X);
+        const store = (result.stores as Array<Record<string, any>>).find(st => st.store === 'belief_events')!;
+        const carrier = (await b.events()).find(e => e.value?.fact === `${X} for the back office`)!;
+        report({ status: store.status, items: store.items, key: carrier.subject_key });
+      }));
+      expect(r.status).toBe('out_of_scope');
+      expect(r.items).toEqual([`fact@${r.key}`]);
     }, 240_000);
   });
 }
