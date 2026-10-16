@@ -6,7 +6,8 @@
  * governor tick of confirmation: a durable refresh fence no live refresh process holds, a running row ahead whose owner
  * reports `restart_required` (a zombie publication), or a withdrawal-mirror effect recovery its own last attempt refused
  * `unexpected_file_bytes` whose file still matches neither recorded version (an edit made while the mirror was publishing;
- * recovery only finishes forward and never overwrites it). Every other blocker is live and transient (a foreground publication,
+ * recovery only finishes forward and never overwrites it), or a page write's publication recovery refused the same way (#6650;
+ * `gbrain repair stuck-recovery` is its exit), whether it blocks a queued head or is the head itself. Every other blocker is live and transient (a foreground publication,
  * a refresh or recovery making progress, a lapsed lease the next consumer reclaims), so the drain keeps its progress-aware wait.
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -14,6 +15,7 @@ import { basename, dirname } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { cliRenderContext, renderAction, type Action, type RenderedAction } from '../agent-output.ts';
 import { claimStateOf } from './claim-phase.ts';
+import { isTerminal, type RequestState } from './model.ts';
 import { sha256 } from './digest.ts';
 import { claimableWriteSql, EARLIER_HEAD, foregroundPrioritySql, SYNC_KIND } from './journal.ts';
 
@@ -29,7 +31,7 @@ export interface HeadBlocker {
   owner: { kind: string | null; pid: number | null; live: boolean | null; restart_required: boolean } | null;
   /** True when only an operator clears it; the drain stops on these and keeps waiting on the rest. */
   intervention: boolean;
-  /** The canonical file an `unexpected_file_bytes` effect recovery refuses to overwrite. */
+  /** The canonical file an `unexpected_file_bytes` effect or request recovery refuses to overwrite. */
   file?: { slug: string; path: string };
 }
 /** A blocking request this caller may cancel: not publishing, no recovery record; `cancel-write-request` is scoped to its principal. */
@@ -39,22 +41,35 @@ export type HeadBlockerRead = { status: 'claimable' } | { status: 'blocked'; blo
 interface RowRef { request_id: string; state: string; claim_phase: unknown; execution_token: string | null; claim_lapsed: boolean;
   publication_started: boolean; recovery: boolean; principal_kind: string; principal_id: string }
 interface ProbeRow { id: string; worktree_id: string | null; owner_host_id: string | null; worktree_state: string | null; claimable: boolean;
-  fence: { id: string; state: string } | null; effect_recovery: EffectRecoveryRef[] | null; mirrors: string[] | null; request_recovery: string[] | null;
+  fence: { id: string; state: string } | null; effect_recovery: EffectRecoveryRef[] | null; mirrors: string[] | null; request_recovery: RequestRecoveryRef[] | null;
   earlier: RowRef[] | null; ahead: RowRef[] | null }
 interface EffectRecoveryRef { id: string; error_code: string | null; slug: string | null; path: string | null; before: string | null; after: string | null }
+interface RequestRecoveryRef { request_id: string; state: RequestState; blocked_reason: string | null; slug: string; version: string | null; path: string | null;
+  before: string | null; after: string | null }
+const REQUEST_RECOVERY = (alias: string) => `jsonb_build_object('request_id',${alias}.request_id::text,'state',${alias}.state,'blocked_reason',${alias}.blocked_reason,
+  'slug',${alias}.slug,'version',${alias}.recovery->>'version','path',${alias}.recovery->>'path','before',${alias}.recovery->>'beforeHash','after',${alias}.recovery->>'afterHash')`;
 
 /**
- * Whether an effect recovery cannot finish without the user: its last attempt refused `unexpected_file_bytes` and the file still
- * matches neither recorded hash (the check recovery itself refuses on). A file put back on a recorded version is live again before
- * the next retry clears the code; a file this process cannot read keeps the recovery's own verdict.
+ * Whether a recovery's last attempt refused `unexpected_file_bytes` and its file still matches neither recorded hash (the check
+ * recovery itself refuses on), so only the user clears it. A file put back on a recorded version is live again before the next
+ * attempt clears the code; a file this process cannot read keeps the recovery's own verdict.
  */
-function effectRecoveryStuck(effect: EffectRecoveryRef): boolean {
-  if (effect.error_code !== 'unexpected_file_bytes' || !effect.path) return false;
+function stuckOnFile(code: string | null, path: string | null, before: string | null, after: string | null): path is string {
+  if (code !== 'unexpected_file_bytes' || !path) return false;
   try {
-    const actual = existsSync(effect.path) ? sha256(readFileSync(effect.path)) : null;
-    return actual !== effect.before && actual !== effect.after;
+    const actual = existsSync(path) ? sha256(readFileSync(path)) : null;
+    return actual !== before && actual !== after;
   } catch { return true; }
 }
+const effectRecoveryStuck = (effect: EffectRecoveryRef) => stuckOnFile(effect.error_code, effect.path, effect.before, effect.after);
+/** A live page recovery (a terminal one never restores its file; a skill bundle has no stuck-recovery exit). */
+const requestRecoveryStuck = (request: RequestRecoveryRef) => request.version === '1' && !isTerminal(request)
+  && stuckOnFile(request.blocked_reason, request.path, request.before, request.after);
+const requestRecoveryBlocker = (refs: RequestRecoveryRef[]): HeadBlocker => {
+  const stuck = refs.find(requestRecoveryStuck);
+  return { predicate: 'request_recovery', ids: refs.map(ref => ref.request_id), state: stuck ? 'unexpected_file_bytes' : null, owner: null, intervention: !!stuck,
+    ...(stuck ? { file: { slug: stuck.slug, path: stuck.path! } } : {}) };
+};
 
 const REF = (alias: string) => `jsonb_build_object('request_id',${alias}.request_id::text,'state',${alias}.state,'claim_phase',${alias}.claim_phase,
   'execution_token',${alias}.execution_token::text,'claim_lapsed',COALESCE(${alias}.claim_expires_at<now(),false),'publication_started',COALESCE(${alias}.publication_started,false),
@@ -77,7 +92,7 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
         'before',e.recovery->>'beforeHash','after',e.recovery->>'afterHash') ORDER BY e.id) FROM persistence_effects e WHERE e.worktree_id=r.worktree_id AND e.recovery IS NOT NULL) AS effect_recovery,
       (SELECT array_agg(m.id::text) FROM persistence_effects m WHERE m.worktree_id=r.worktree_id AND m.kind='withdrawal-mirror' AND m.state IN ('queued','running')
         AND (NOT (m.data ? 'targets') OR m.data->'targets' @> jsonb_build_array(jsonb_build_object('slug',r.slug)))) AS mirrors,
-      (SELECT array_agg(b.request_id::text) FROM persistence_requests b WHERE b.worktree_id=r.worktree_id AND b.recovery IS NOT NULL) AS request_recovery,
+      (SELECT jsonb_agg(${REQUEST_RECOVERY('b')} ORDER BY b.sequence) FROM persistence_requests b WHERE b.worktree_id=r.worktree_id AND b.recovery IS NOT NULL) AS request_recovery,
       (SELECT jsonb_agg(${REF('e')} ORDER BY e.sequence) FROM persistence_requests e
         WHERE ((r.worktree_id IS NOT NULL AND e.worktree_id=r.worktree_id) OR (r.worktree_id IS NULL AND e.worktree_id IS NULL AND e.source_incarnation=r.source_incarnation))
         AND ${EARLIER_HEAD('e', 'r', priority, "'{}'::text[]")}) AS earlier,
@@ -106,7 +121,7 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
       continue;
     }
     if (row.mirrors?.length) { blocked({ predicate: 'withdrawal_mirror', ids: row.mirrors, state: null, owner: null, intervention: false }); continue; }
-    if (row.request_recovery?.length) { blocked({ predicate: 'request_recovery', ids: row.request_recovery, state: null, owner: null, intervention: false }); continue; }
+    if (row.request_recovery?.length) { blocked(requestRecoveryBlocker(row.request_recovery)); continue; }
     const ref = row.earlier?.[0] ?? row.ahead?.[0];
     if (!ref) { out.set(row.id, { status: 'unknown' }); continue; }
     const claim = claimStateOf({ state: ref.state, claim_phase: ref.claim_phase, execution_token: ref.execution_token, claim_lapsed: ref.claim_lapsed, publication_started: ref.publication_started });
@@ -123,6 +138,17 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
   }
   for (const id of ids) if (!out.has(id)) out.set(id, { status: 'unknown' });
   return out;
+}
+
+/**
+ * A head that is itself a recovering page write: its blocker only when its recovery is stuck on the user (see `requestRecoveryStuck`)
+ * and this host owns its worktree, so the recorded path is this host's file; null otherwise, the recovery being live work.
+ */
+async function recoveringHeadBlocker(engine: BrainEngine, id: string, hostId: string | null, opts: { timeoutMs?: number; signal?: AbortSignal }): Promise<HeadBlocker | null> {
+  const [row] = await engine.executeRaw<{ ref: RequestRecoveryRef; owner_host_id: string | null }>(`SELECT ${REQUEST_RECOVERY('r')} AS ref, w.owner_host_id::text AS owner_host_id
+    FROM persistence_requests r JOIN persistence_worktrees w ON w.id=r.worktree_id WHERE r.id=$1::uuid AND r.recovery IS NOT NULL`, [id], opts);
+  if (!row || !hostId || row.owner_host_id !== hostId || !requestRecoveryStuck(row.ref)) return null;
+  return requestRecoveryBlocker([row.ref]);
 }
 
 /** Whether a refresh process holds the worktree's refresh lock: true held, false free, null when the lock cannot be probed here. */
@@ -158,6 +184,18 @@ export function headBlockerAction(blocker: HeadBlocker, sourceId: string, resume
     return { argv: status, consent: [], actor: 'host_admin', requires_exclusive: false,
       why: `Request ${blocker.ids[0]} ahead of the head is held by ${who}, which reports restart_required; its root stays held until that process exits. Status names it, read-only.`,
       user_message: `Restart ${who} on the brain host, then run: ${resumeCommand}`, verify: { argv: status } };
+  }
+  if (blocker.predicate === 'request_recovery' && blocker.intervention && blocker.file) {
+    const { path, slug } = blocker.file;
+    const preview = ['gbrain', 'repair', 'stuck-recovery', '--source', sourceId];
+    return { argv: preview, consent: [], actor: 'agent', requires_exclusive: false,
+      why: `A write to ${path} (page ${slug}) was interrupted while publishing and the file was edited after that: it matches neither the bytes from before the write `
+        + `nor the bytes the write published, so recovery will not overwrite it, every write to source ${sourceId} waits, and waiting does not clear it. `
+        + 'The preview changes no page or canonical file (it writes only private diffs) and lists the file, its diff and the choices; which version to keep is the user\'s call.',
+      user_message: `${path} was edited while gbrain was writing page ${slug}, so gbrain will not touch the file and writes to source ${sourceId} are paused. `
+        + `Either undo the edit (put the file back as it was) and run: ${resumeCommand}. Or choose which version to keep with ${preview.join(' ')}, which shows the diff: `
+        + 'the bytes from before gbrain\'s write, or the edited bytes. Do not delete the file.',
+      verify: { argv: status } };
   }
   if (blocker.predicate === 'effect_recovery' && blocker.intervention && blocker.file) {
     const { path, slug } = blocker.file;
@@ -205,9 +243,15 @@ export async function describeHostConsumer(engine: BrainEngine, opts: { signal?:
   } catch { return 'unknown'; }
 }
 
-/** `claimable_here` and `blocked_by` for a head: a queued head is probed (a failed read is `null`, printed `unknown`); any other head is not claimable. */
+/**
+ * `claimable_here` and `blocked_by` for a head: a queued head is probed (a failed read is `null`, printed `unknown`); any other head is not
+ * claimable, and a recovering head names itself as its blocker only when its recovery is stuck on the user.
+ */
 export async function headClaimability(engine: BrainEngine, head: { id: string | null; state: string | null }, hostId: string | null,
   opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<{ claimable_here: boolean | null; blocked_by: HeadBlocker | null }> {
+  if (head.id && head.state === 'recovering') {
+    return recoveringHeadBlocker(engine, head.id, hostId, opts).then(blocker => ({ claimable_here: false, blocked_by: blocker }), () => ({ claimable_here: false, blocked_by: null }));
+  }
   if (!head.id || head.state !== 'queued') return { claimable_here: false, blocked_by: null };
   const read = await readHeadBlockers(engine, [head.id], hostId, opts).then(found => found.get(head.id!) ?? { status: 'unknown' as const }, () => ({ status: 'unknown' as const }));
   return read.status === 'claimable' ? { claimable_here: true, blocked_by: null } : read.status === 'blocked' ? { claimable_here: false, blocked_by: read.blocker } : { claimable_here: null, blocked_by: null };
@@ -236,7 +280,7 @@ export async function readQueuedHeadBlockers(engine: BrainEngine, rows: Array<{ 
       ? `gbrain cancel-write-request ${read.cancel.request_id}` : null;
     const action = headBlockerAction(read.blocker, source ?? '<source>', `gbrain sync --source ${source ?? '<source>'}`);
     out.set(id, { fields: { claimable_here: false, blocked_by: read.blocker, ...(cancel ? { cancel_command: cancel } : {}) },
-      advice: `Blocked by ${headBlockerText(read.blocker)}: ${action.user_message ?? action.why}${read.blocker.predicate === 'refresh_fence' ? ` Run: ${action.argv!.join(' ')}.` : ''}`
+      advice: `Blocked by ${headBlockerText(read.blocker)}: ${action.user_message ?? action.why}${read.blocker.predicate === 'refresh_fence' || (read.blocker.predicate === 'request_recovery' && read.blocker.intervention) ? ` Run: ${action.argv!.join(' ')}.` : ''}`
         + `${cancel ? ` Cancelling the blocking request (it has not started publishing) also frees the head; a sync rerun admits it again: ${cancel}` : ''}` });
   }
   return out;

@@ -4,6 +4,8 @@
  * classify every effect recovery as live, so a sync behind it waited the whole no-progress window (5 minutes) before stopping.
  * Such a recovery is now intervention-required: the drain stops `drain_stalled` / `cause: head_blocked` after one governor tick
  * with a fix naming the file. A recovery that can still finish forward (the file holds a recorded version) keeps the wait.
+ * A page write's own publication recovery refused the same way (#6650) stops the same way, its fix pointing at
+ * `gbrain repair stuck-recovery`.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
@@ -24,7 +26,10 @@ import { serializePageToMarkdown } from '../src/core/markdown.ts';
 import { headClaimability } from '../src/core/persistence/head-blocker.ts';
 import { drainNext, engineStallProbe, formatDrainSummary, runDrain } from '../src/core/persistence/sync-drain.ts';
 import { readWriterDiagnostics } from '../src/core/persistence/diagnostics.ts';
+import { recoverPublication } from '../src/core/persistence/coordinator.ts';
+import { getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { AFTER, EDITED, PRIOR, stuckRecoveryFixture } from './helpers/stuck-recovery-fixture.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import type { SyncResult } from '../src/commands/sync.ts';
 
@@ -149,6 +154,51 @@ describe('withdrawal-mirror effect recovery blocking a sync', () => {
       await f.settle();
       expect(readFileSync(f.file, 'utf8'), kind).toBe(f.published);
       expect(await headClaimability(engine, { id: f.head.id, state: 'queued' }, hostId), kind).toEqual({ claimable_here: true, blocked_by: null });
+    }
+  }, 120_000);
+});
+
+describe('page-write request recovery blocking a sync', () => {
+  test('a request recovery refusing unexpected_file_bytes stops the sync at once and points at gbrain repair stuck-recovery; undoing the edit clears it', async () => {
+    for (const [kind, engine] of engines) {
+      const s = await stuckRecoveryFixture(engine, roots).stuck({ prior: PRIOR, after: AFTER, disk: EDITED, follower: true });
+      const started = Date.now();
+      const result = await runDrain({ governMs: 20, noProgressMs: 10_000, publicationCeilingMs: 60_000, probe: engineStallProbe(engine, s.sourceId),
+        pass: () => new Promise<SyncResult>(() => undefined) });
+      const elapsed = Date.now() - started;
+      const blockedBy = { predicate: 'request_recovery', ids: [s.requestId], state: 'unexpected_file_bytes', intervention: true, file: { slug: 'page', path: s.path } };
+      expect(result.drain, kind).toMatchObject({ outcome: 'blocked', stop_reason: 'drain_stalled',
+        stall: { cause: 'head_blocked', in_pass: true, head_request_id: s.id, head_state: 'recovering', claimable_here: false, blocked_by: blockedBy } });
+      expect(elapsed, kind).toBeLessThan(5_000);
+      const resume = `gbrain sync --source ${s.sourceId}`, preview = ['gbrain', 'repair', 'stuck-recovery', '--source', s.sourceId];
+      const next = drainNext(result, resume, s.sourceId)!;
+      expect(next, kind).toMatchObject({ code: 'drain_stalled', cause: 'head_blocked', safe_to_loop: false, command: preview.join(' '),
+        fix: { actor: 'agent', next: 'run', argv: preview } });
+      expect(next.why, kind).toContain(s.path);
+      expect(next.fix!.user_message, kind).toContain(s.path);
+      expect(next.fix!.user_message, kind).toContain(resume);
+      expect(next.fix!.user_message, kind).toContain(preview.join(' '));
+      expect(formatDrainSummary(result, resume, s.sourceId).join('\n'), kind).toContain(`blocked_by=request_recovery(unexpected_file_bytes ${s.requestId})`);
+
+      // The queued write behind it is classified the same way, and writer status names the preview.
+      expect(await headClaimability(engine, { id: s.follower!, state: 'queued' }, hostId), kind).toMatchObject({ claimable_here: false, blocked_by: blockedBy });
+      const follower = (await getWriteRequestById(engine, s.follower!))!;
+      const status = await readWriterDiagnostics(engine);
+      const row = (status.blockers as Array<Record<string, unknown>>).find(b => b.request_id === follower.request_id)!;
+      expect(row, kind).toMatchObject({ claimable_here: false, blocked_by: { predicate: 'request_recovery', intervention: true } });
+      expect(String(row.next_action), kind).toContain(preview.join(' '));
+
+      // Undoing the edit makes the recovery live again before its next pass: the drain keeps waiting, then the pass finishes it.
+      writeFileSync(s.path, PRIOR);
+      expect(await headClaimability(engine, { id: s.follower!, state: 'queued' }, hostId), kind)
+        .toMatchObject({ claimable_here: false, blocked_by: { predicate: 'request_recovery', intervention: false } });
+      let reads = 0;
+      const probe = engineStallProbe(engine, s.sourceId), head = probe.head!;
+      const waited = await runDrain({ governMs: 10, noProgressMs: 60_000, publicationCeilingMs: 60_000, probe: { ...probe, head: async () => { reads++; return head(); } },
+        pass: () => new Promise<SyncResult>(resolve => setTimeout(() => resolve(done), 400)) });
+      expect(reads, kind).toBeGreaterThanOrEqual(3);
+      expect(waited.drain, kind).toMatchObject({ outcome: 'synced' });
+      expect(await recoverPublication(engine, s.id), kind).toMatchObject({ state: 'queued', blocked_reason: null });
     }
   }, 120_000);
 });
