@@ -228,6 +228,21 @@ async function pagesByOrigin(engine: BrainEngine, sourceId: string): Promise<Map
   return new Map(rows.map(row => [row.source_path, { ...row, id: Number(row.id) }]));
 }
 
+/**
+ * Wave B decision #10: a page stored in segments has no stored head (its body
+ * columns are NULL), so the database-side embedded-block check does not read
+ * it. The preview and the apply report how many (`skipped_segmented`).
+ */
+async function reportSkippedSegmented(engine: BrainEngine, sourceIds: string[], residuals: Record<string, number>, warnings: string[]): Promise<void> {
+  const [row] = await engine.executeRaw<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pages
+    WHERE source_id=ANY($1::text[]) AND deleted_at IS NULL AND source_path IS NOT NULL AND body_storage='segmented'`, [sourceIds]);
+  const n = Number(row?.n ?? 0);
+  if (!n) return;
+  residuals.skipped_segmented = n;
+  warnings.push(`skipped (segmented): ${n} page(s) store their body in segments, so the database-side check for a stored body that begins with its own frontmatter block `
+    + 'did not read them; their files were checked.');
+}
+
 /** #4526: a body that begins with its own frontmatter block. */
 const EMBEDDED_BLOCK = /^\s*---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?[A-Za-z_][\w-]*:[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
@@ -434,11 +449,15 @@ export const frontmatterRepair: RepairHandler = {
             why: `Finishes source ${sourceId}'s unfinished sync cursor, which would otherwise race the repair of a file it still names.` } });
       }
       const items = approved.items.map(({ selection: chosen, ...repair }, index) => item(repair, chosen, opts.expect!, index, index === approved.items.length - 1));
-      return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals: {} };
+      const residuals: Record<string, number> = {};
+      const warnings: string[] = [];
+      await reportSkippedSegmented(engine, scope.source_ids, residuals, warnings);
+      return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals, ...(warnings.length ? { warnings } : {}) };
     }
     const residuals: Record<string, number> = {};
     const warnings: string[] = [];
     const found = await scan(engine, scope, selection, residuals, warnings);
+    await reportSkippedSegmented(engine, scope.source_ids, residuals, warnings);
     for (const path of found.unknownOnly) warnings.push(`--only ${path}: no such Markdown file or hold in scope; check the source-relative path.`);
     const sources = await engine.executeRaw<{ id: string; incarnation: string }>('SELECT id, incarnation::text AS incarnation FROM sources WHERE id=ANY($1::text[]) ORDER BY id', [scope.source_ids]);
     const approvedItems = found.prepared.map(entry => entry.approved);

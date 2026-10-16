@@ -191,6 +191,19 @@ page is searchable when the restore commits, or, when its chunks were never
 built, right after it (`gbrain projections drain` builds it if that build
 dies).
 
+<a id="segmented-doctor-skips"></a>
+**What doctor does not read on a segmented page.** Some doctor checks read a
+page's whole body as one string, and a page stored in segments has none.
+Those checks say how many such pages they passed by: `oversized_pages`,
+`scraper_junk_pages`, `markdown_body_completeness`,
+`link_resolution_opportunity`, `fence_integrity`, `core_memory` and
+`extract_health` (its facts-backlog overlay) carry `skipped_segmented: N` in
+`gbrain doctor --json` and end their message with `skipped (segmented): N`.
+`gbrain repair frontmatter` reports the same count (residual
+`skipped_segmented` and a warning) for the stored bodies it does not check;
+it still checks their files. An `ok` from such a check covers only the pages
+it read. The field is absent when no page is stored in segments.
+
 While the switch is off (unset in this release, set to `off`, or held by an
 older writer), new pages are stored inline up to 24 MiB as before.
 Pages already stored in segments stay readable and exportable; a write that
