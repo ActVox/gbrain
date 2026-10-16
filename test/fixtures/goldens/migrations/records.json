@@ -9,6 +9,7 @@
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
+      "BELIEF_FACTS_STREAM_INDEX": "9e4491eb9e0b94924a58deea3feff1b315ec0efd25a77a4e6515b362beffbc92",
       "BOUNDED_TIMELINE_CHECKPOINT": "385c4da3e28732343148795d6e9a86670813a7a7cfa1e52f8a5bb494680a3c0d",
       "CHECKPOINT": "3c6ff909363c4ba1c9d730e748654ab90aa07549ddf4bf36b8f93c5f4ea3680b",
       "CONTENT_CHUNKS_OCCURRENCE_INDEX": "7b692ba777b30399ab5a3b100eb40b3b9d1b3fb2322dc4dc808ba8a4d667912c",
@@ -3799,7 +3800,17 @@
         "version": 248
       },
       {
-        "handler": "absent",
+        "handler": {
+          "form": "arrow",
+          "helpers": [
+            "BELIEF_FACTS_STREAM_INDEX",
+            "buildIndexOnline",
+            "dropInvalidConcurrentIndex",
+            "migrationNotice",
+            "quietMigrationNotices"
+          ],
+          "sha256": "48c7bc5cb1a62090ed3b9f4e3426a3314453ee34e1fbaea990e7a87c929fb923"
+        },
         "idempotent": true,
         "name": "belief_ledger",
         "sql": {

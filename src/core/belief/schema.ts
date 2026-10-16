@@ -96,3 +96,14 @@ ${RLS('belief_redactions')}
 
 /** Migration-only: purge serializes on this counter; the ledger refuses a payload prepared under an older epoch. */
 export const BELIEF_SOURCE_COLUMNS_SQL = `ALTER TABLE sources ADD COLUMN IF NOT EXISTS purge_epoch BIGINT NOT NULL DEFAULT 0;`;
+
+/**
+ * The batch state read selects a stream's active facts by `source_markdown_slug` (the fence facts and file-less
+ * facts filed on a page); without this index that is a scan of the source's facts on every write. Built online by
+ * v249's handler (Postgres CONCURRENTLY).
+ */
+export const BELIEF_FACTS_STREAM_INDEX = {
+  name: 'idx_facts_belief_stream',
+  table: 'facts',
+  sql: 'CREATE INDEX IF NOT EXISTS idx_facts_belief_stream ON facts (source_id, source_markdown_slug) WHERE expired_at IS NULL',
+};

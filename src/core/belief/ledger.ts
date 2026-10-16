@@ -356,7 +356,7 @@ function pageDrafts(d: DiffContext, stream: Stream, lifetime: string, after: Sub
 /** Appends the batch's events, last in its transaction. */
 export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promise<number> {
   const { opts, pre } = batch;
-  const post = await readBeliefState(tx, opts.sourceId, opts.slugs, pre.pages.map(p => p.id));
+  const post = await readBeliefState(tx, opts.sourceId, opts.slugs, pre.pages.map(p => p.id), pre);
   const streams = matchStreams(opts.slugs, pre, post);
   const added = streams.filter(s => s.post && !opts.slugs.includes(s.post.slug)).map(s => ({ sourceId: opts.sourceId, slug: s.post!.slug }));
   if (added.length) assertHeldPageKeys(tx, added);
