@@ -146,6 +146,9 @@ describe('gbrain repair stuck-recovery', () => {
     expect(next).toContain(`gbrain sources reconcile ${s.sourceId} page --brain host --preview`);
     expect(next).not.toContain('file-drift');
     expect(next).toContain('does not mark the page repaired');
+    // #6858: both follow-ups, in order: the additive-aware reconcile preview, then the sync that resumes the source.
+    expect(next).toContain(`--preview --auto-additive`);
+    expect(next.indexOf('--auto-additive')).toBeLessThan(next.indexOf(`gbrain sync --source ${s.sourceId} --no-pull`));
     expect(readFileSync(join(String(result.outcome_items![0]!.detail!.backup_dir), '0.prior'), 'utf8')).toBe(PRIOR);
   }));
 
