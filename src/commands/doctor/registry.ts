@@ -119,6 +119,7 @@ import {
   persistenceCapacityEntry,
   terminalFailuresEntry,
   persistenceCompactionEntry,
+  soakCountersEntry,
   schemaPackConsistencyEntry,
 } from './checks/ops-sections.ts';
 import { STOP_DOCTOR, type DoctorContext, type DoctorEntry, type DoctorTier } from './context.ts';
@@ -158,6 +159,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   terminalFailuresEntry,
   managedSyncMovementEntry,
   persistenceCompactionEntry,
+  soakCountersEntry,
   serveBuildDriftEntry,
   schemaPackConsistencyEntry,
   embeddingStateEntry,

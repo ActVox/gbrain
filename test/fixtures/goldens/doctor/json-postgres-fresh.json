@@ -620,7 +620,8 @@
             "count": 0,
             "docs": "docs/guides/troubleshooting.md#managed-sync-not-moving",
             "parked": 0,
-            "sources": []
+            "sources": [],
+            "stranded": 0
           },
           "elapsed_ms": "<volatile>",
           "message": "No managed sync is pending.",
@@ -645,6 +646,33 @@
           "elapsed_ms": "<volatile>",
           "message": "Receipt compaction last ran 0 hour(s) ago (compacted 0, freed 0 bytes).",
           "name": "persistence_compaction",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "by_day": [],
+            "content_decisions": {
+              "file_drift_apply": 0,
+              "file_drift_hold": 0,
+              "total": 0
+            },
+            "docs": "docs/guides/sync-unblock-runbook.md#soak-counters",
+            "interventions": {
+              "needs_human": 0,
+              "repair_apply": 0,
+              "retry_held": 0,
+              "sync_non_plain": 0,
+              "total": 0,
+              "unblock_apply": 0
+            },
+            "since": "<ts>",
+            "window_days": 7
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Last 7 days: 0 managed-sync intervention(s), 0 content decision(s).",
+          "name": "sync_soak_counters",
+          "severity": "info",
           "status": "ok"
         },
         {
@@ -1036,8 +1064,34 @@
         },
         {
           "category": "meta",
+          "details": {
+            "baseline": "<version>",
+            "shown": {
+              "cli": false,
+              "stdio": false
+            },
+            "since": "0.60.256.0"
+          },
           "elapsed_ms": "<volatile>",
-          "message": "Nothing to disclose: this brain is a fresh install at v<version>, after every disclosed behavior change, so the one-time behavior-change notice does not apply.",
+          "fix": {
+            "actor": "agent",
+            "argv": [
+              "gbrain",
+              "doctor",
+              "--only",
+              "behavior_changes",
+              "--json",
+              "--brain",
+              "host"
+            ],
+            "command": "gbrain doctor --only behavior_changes --json --brain host",
+            "consent": [],
+            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/chat-fallback.md",
+            "next": "run",
+            "requires_exclusive": false,
+            "why": "Shows this disclosure again; read-only."
+          },
+          "message": "gbrain v0.60.256.0 changed 4 behaviors on this brain. All stay on; this is a one-time disclosure, not a request for consent. (1) A held file now asks for a person (`needs_human`) only after its safe action failed three times and at least 24 hours have passed since it was first held (#6712). Three re-holds within an hour stay the agent's to retry. A `worktree_dirty` file whose uncommitted bytes changed in the last day, and an image held while multimodal embedding is off, never escalate this way. A failed `sync unblock --apply` (still dirty) or a repair that holds the file again counts as an attempt. (2) A managed-sync file that `write_gate.external_mode=reject` refuses is now held as `write_gate_rejected` when sync freezes it, instead of failing its receipt and stopping the rest of the source. A held file that leaves the source (excluded with `sync.exclude`, or an image while multimodal embedding is off) is released by the next sync even when nothing new was committed. (3) A `source_changed` write receipt's fix now follows its recorded reason: two-sided drift previews `gbrain repair file-drift --source <id> --slug <slug> --prefer database` (a group of them `--all-drifted --since <instant>`), a missing canonical file previews `gbrain repair ghost-pages`, an admission race is retried, and a changed binding or unsafe target names `gbrain sources writer status`. `gbrain repair file-drift` takes `--since <ISO-8601 | age>` to narrow `--all-drifted`. (4) Doctor `managed_sync_not_moving` now fails (it used to list the source as parked) when a managed source's queue holds admitted requests with no consumer and nothing has moved for longer than `persistence.preparation_ceiling_ms`; its fix is the resume sync, which consumes the queue (#6552). A managed sync now prints a line when live pages of the source have no canonical file, naming the read-only `gbrain repair ghost-pages` preview; it never deletes them. gbrain doctor --only behavior_changes shows this again.",
           "name": "behavior_changes",
           "status": "ok"
         },

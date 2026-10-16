@@ -62,7 +62,7 @@ export interface SourceMovement {
   last_commit_at: string | null;
   /** The watermark the verdict used: the newest of a commit, a head step advance and the drain's cursor advance. */
   last_progress_at: string | null;
-  cursor: (Pick<ManagedSyncBacklog, 'index' | 'total' | 'remaining' | 'held' | 'last_progress_at' | 'resume_command'>) | null;
+  cursor: (Pick<ManagedSyncBacklog, 'index' | 'total' | 'remaining' | 'held' | 'last_progress_at' | 'resume_command' | 'resume_args'>) | null;
   head: MovementHead | null;
   holds: MovementHolds;
   /** Managed requests admitted on the worktree and not yet settled (queued or running). */
@@ -156,7 +156,7 @@ export async function readSourceMovement(engine: BrainEngine, opts: { sourceIds?
     const progressAt = newest(lastCommitAt, claimLive ? head?.step_since : null, cursor?.last_progress_at);
     const sampledAt = new Date(now).toISOString();
     const base = { source_id: binding.source_id, sampled_at: sampledAt, last_commit_at: lastCommitAt, last_progress_at: progressAt,
-      cursor: cursor ? { index: cursor.index, total: cursor.total, remaining: cursor.remaining, held: cursor.held, last_progress_at: cursor.last_progress_at, resume_command: cursor.resume_command } : null,
+      cursor: cursor ? { index: cursor.index, total: cursor.total, remaining: cursor.remaining, held: cursor.held, last_progress_at: cursor.last_progress_at, resume_command: cursor.resume_command, resume_args: cursor.resume_args } : null,
       head, holds, admitted, live: { drain: !!drain || !!jobDrain, drain_pid: drain?.holder_pid ?? null, drain_job_id: jobDrain, consumer }, ceiling_ms: policy.ceilingMs, owner_is_this_host: ownerHere,
       writer_status_command: writerStatusCommand(binding.source_id) };
     out.push({ ...base, ...verdict(base, now) });
