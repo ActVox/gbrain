@@ -34,3 +34,24 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### CHANGELOG.md (wave entry, Fixed)
 
 - Pinning a question no longer makes doctor warn about an undeclared `question` page type on the default schema pack (#6742). `gbrain-base-v2` is now 1.4.0.
+
+## #6720 atom pages inherit the source page's content date
+
+### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
+
+```ts
+  { since: '<WAVE>', text: 'A page-derived atom now carries its source page\'s content date as frontmatter `date` (the source\'s stored `effective_date`, else the same precedence import uses), so its `effective_date` is the date of the conversation or note it came from instead of the extraction run (#6720); `extracted_at` stays the processing stamp and transcript-derived atoms are unchanged. Atoms extracted before this release keep their run dates until re-extracted (`gbrain dream --phase extract_atoms` with `--force` re-pays the model); a preview-first backfill repair is planned.' },
+```
+
+### CHANGELOG.md (wave entry, Fixed; credit)
+
+- Atoms extracted from a page are dated by that page's content date, not by when extraction ran, so date filters and recency ranking over atoms work (#6720). Existing atoms are not backfilled in this release. Contributed by @javieraldape (idea from #6737).
+
+### PR body
+
+- `Supersedes #6737` (reimplemented: helper peeled into `src/core/cycle/atom-source-date.ts` instead of a module-size ratchet raise; single source-page fetch before inference kept).
+- Deferred: #6720 backfill of existing atom dates, a preview-first repair, next wave.
+
+### scripts/module-size-limits.tsv
+
+- No row change: `src/core/cycle/extract-atoms.ts` is 1653 of its 1654 ceiling after this commit.
