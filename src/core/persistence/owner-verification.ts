@@ -5,9 +5,11 @@
  * still carries its marker and reservation (`assertPhysicalRoot`). A worktree whose state is still `active` can
  * fail it, for example after `.gbrain-owner.json` is deleted, so a state-only check misses it.
  *
- * A background producer verifies each source once per run (backgroundOwnerCheck in admission-origin.ts caches
- * the outcome for the surrounding background scope; outside a scope it runs per admission) and, when it fails, is
- * refused `owner_unavailable` with the owner-status fix before any receipt, so no request id is spent.
+ * A declared background producer (an explicit background origin or a withAdmissionOrigin('background') run; see
+ * declaredBackground) verifies each source once per run (backgroundOwnerCheck caches the outcome for the surrounding
+ * background scope; an explicit origin outside a scope verifies per admission) and, when it fails, is refused
+ * `owner_unavailable` with the owner-status fix before any receipt, so no request id is spent. An admission on the
+ * implicit default keeps the publication's own physical-root fences and their specific codes.
  */
 import type { Action } from '../agent-output.ts';
 import { OperationError } from '../ops/contract.ts';

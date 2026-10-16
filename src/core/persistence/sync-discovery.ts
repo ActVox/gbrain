@@ -71,6 +71,9 @@ export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot
   slice?: SyncSliceState;
   /** #6729: inexact Git renames split into a delete plus an add (origin form); recorded after the run commits. */
   identityDowngrades?: DowngradedRename[]; }
+/** #5032: the per-file refusal text for a Windows-unstorable ':' path, by the side sync skipped. */
+const COLON_REFUSAL_MESSAGES = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+  delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.` };
 export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   source: { last_commit: string | null; config: Record<string, unknown> }; }
 /** The persisted `sync.exclude` globs (plus a run's `--exclude`), as discovery matches them against a path relative to the source root. */
@@ -335,8 +338,6 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // A deletion or rename touching one is refused on both sides, so the page
   // keeps its identity until the change is synced from macOS or Linux.
   const refused = new Map<string, SyncFileRefusal>();
-  const refusalMessages = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
-    delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.` };
   const record = (path: string, message: string) => {
     if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through', message,
       suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
@@ -344,7 +345,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   };
   const refuse = (path: string, action: SyncEntry['action'] = 'import') => {
     if (!isWindowsColonTarget(path)) return false;
-    record(path, refusalMessages[action](path));
+    record(path, COLON_REFUSAL_MESSAGES[action](path));
     return true;
   };
   const storable = <T extends { source_path: string | null }>(page: T) => page.source_path === null || !isWindowsColonTarget(page.source_path);
@@ -478,7 +479,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // Freeze all logical identities in one database statement, before yielding
   // between pages. A later interactive edit must conflict with this scan.
   const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null; fm_id: string | null }>(
-    "SELECT id,slug,source_path,knowledge_revision,deleted_at,frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1", [sourceId]);
+    "SELECT q.*,f.frontmatter->>'id' AS fm_id FROM (SELECT id,slug,source_path,knowledge_revision,deleted_at FROM pages WHERE source_id=$1) q JOIN pages f ON f.id=q.id", [sourceId]);
   const bySlug = new Map(identities.map(p => [p.slug, p]));
   const byPath = new Map<string, typeof identities>();
   const storableIdentities = identities.filter(storable);
