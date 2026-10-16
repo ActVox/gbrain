@@ -675,7 +675,7 @@ async function runLockedMigrations(
   // Pre-flight: schema drift (#1530) and the DB probe (#4364); see preflightSchema.
   const { schemaBehind, dbProbe } = await preflightSchema(cli, migrateSchema);
 
-  if (!cli.list && !cli.dryRun) clearRepoPathWedge(loadCompletedMigrations());
+  if (!cli.list && !cli.dryRun) await clearRepoPathWedge(loadCompletedMigrations());
   const completed = loadCompletedMigrations();
   const idx = indexCompleted(completed);
   await setRunEngineSharing(true);

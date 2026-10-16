@@ -11,10 +11,13 @@
  * this brain. The migration completes instead of ending partial.
  *
  * The old Phase F ran the install anyway and wedged such brains after three
- * partials. `clearRepoPathWedge` writes the retry marker for a v0.11.0 wedge
- * whose partials all failed only the install with the old command line; the
- * new phase records its own failures with the repo it read, so it is cleared
- * at most once.
+ * partials. Its ledger rows cannot say why the install failed (the child's
+ * stderr is not captured; `phases[].detail` is only execSync's
+ * `Command failed: <command>`), so `clearRepoPathWedge` keys on the shape
+ * and the brain as it is now: every trailing partial failed only the install
+ * phase, and the new phase would skip because sync.repo_path is unset. Phase F
+ * now records a `reason` code on its outcomes (`no_repo_path`,
+ * `autopilot_already_installed`, `install_failed`) for later readers.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { dirname } from 'path';
@@ -33,8 +36,6 @@ import type { OrchestratorOpts, OrchestratorPhaseResult } from './types.ts';
 
 export const AUTOPILOT_INSTALL_TODO = 'autopilot-install-needs-repo';
 const REPO_INPUT = 'REPO_PATH';
-/** The old Phase F's failure detail: execSync's message for the bare install command. */
-const OLD_REFUSAL_DETAIL = /^Command failed: .*\bautopilot --install --yes$/;
 
 export interface AutopilotInstallTodo {
   type: typeof AUTOPILOT_INSTALL_TODO;
@@ -103,14 +104,14 @@ async function readRepoPaths(config: GBrainConfig | null): Promise<{ syncRepoPat
 
 function skipWithoutRepo(defaultSourcePath: string | null): OrchestratorPhaseResult {
   if (autopilotInstalledForBrain()) {
-    return { name: 'install', status: 'skipped', detail: 'sync.repo_path is unset and an autopilot is already installed for this brain; left as is' };
+    return { name: 'install', status: 'skipped', reason: 'autopilot_already_installed', detail: 'sync.repo_path is unset and an autopilot is already installed for this brain; left as is' };
   }
   recordSkippedAutopilotInstall(defaultSourcePath);
   const command = autopilotInstallCommand(defaultSourcePath);
   console.log(`No autopilot was installed: sync.repo_path is unset. Install it when you want background maintenance: ${command} `
     + `(recorded in ${pendingHostWorkPath()}; gbrain doctor shows it until an autopilot is installed)`);
   return {
-    name: 'install', status: 'skipped', detail: `sync.repo_path is unset, so the upgrade installed no autopilot. Install it: ${command}`,
+    name: 'install', status: 'skipped', reason: 'no_repo_path', detail: `sync.repo_path is unset, so the upgrade installed no autopilot. Install it: ${command}`,
     ...(defaultSourcePath ? { argv: autopilotInstallArgv(defaultSourcePath) } : {}),
   };
 }
@@ -134,28 +135,34 @@ export async function phaseFInstall(opts: OrchestratorOpts): Promise<Orchestrato
     execSync(gbrainChildCommand('gbrain autopilot --install --yes'), { stdio: cliChildStdio(), timeout: 60_000, env: process.env });
     return { name: 'install', status: 'complete' };
   } catch (e) {
-    return { name: 'install', status: 'failed', detail: `${repoNote}: ${e instanceof Error ? e.message : String(e)}` };
+    return { name: 'install', status: 'failed', reason: 'install_failed', detail: `${repoNote}: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
-function failedOnlyOnOldRefusal(entry: CompletedMigrationEntry): boolean {
+function failedOnlyInstall(entry: CompletedMigrationEntry): boolean {
   const failed = (entry.phases ?? []).filter(phase => phase.status === 'failed');
-  return failed.length === 1 && failed[0]!.name === 'install' && OLD_REFUSAL_DETAIL.test((failed[0]!.detail ?? '').trim());
+  return failed.length === 1 && failed[0]!.name === 'install';
 }
 
 /**
  * Un-wedge v0.11.0 when every partial behind the wedge failed only Phase F
- * with the old install command line: writes a `retry` marker (reason
- * `phase_f_no_repo_path`) and says so. Returns whether it wrote one. Any
- * other wedge keeps the runner's `--force-retry` advice.
+ * (whatever its detail says) and Phase F would now skip because this Postgres
+ * brain's sync.repo_path is unset: writes a `retry` marker (reason
+ * `phase_f_no_repo_path`) and says so. Returns whether it wrote one. With
+ * sync.repo_path set, an unreadable one or any other wedge, the runner's
+ * `--force-retry` advice stands.
  */
-export function clearRepoPathWedge(completed: readonly CompletedMigrationEntry[]): boolean {
+export async function clearRepoPathWedge(completed: readonly CompletedMigrationEntry[]): Promise<boolean> {
   const byVersion = indexCompletedEntries([...completed]);
   if (statusForVersion('0.11.0', byVersion) !== 'wedged') return false;
   const history = byVersion.get('0.11.0') ?? [];
-  if (!history.slice(history.length - trailingPartialCount(history)).every(failedOnlyOnOldRefusal)) return false;
+  if (!history.slice(history.length - trailingPartialCount(history)).every(failedOnlyInstall)) return false;
+  const config = loadConfig();
+  if (!config || config.engine === 'pglite') return false;
+  const repo = await readRepoPaths(config).catch(() => null);
+  if (!repo || repo.syncRepoPath) return false;
   appendCompletedMigration({ version: '0.11.0', status: 'retry', reason: 'phase_f_no_repo_path' });
-  console.error('Cleared the v0.11.0 wedge: every partial run failed only on the autopilot install that had no repo path. '
+  console.error('Cleared the v0.11.0 wedge: every partial run failed only the autopilot install, and sync.repo_path is unset. '
     + 'This version skips that install, so the migration runs again now.');
   return true;
 }
