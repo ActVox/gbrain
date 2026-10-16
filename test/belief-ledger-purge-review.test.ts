@@ -5,11 +5,14 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { purgeMirrorPath } from '../src/core/belief/purge-mirror.ts';
 import { CODES } from '../src/core/error-registry.ts';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
-import { withBeliefBatch } from '../src/core/belief/ledger.ts';
+import { __dropOwnerEditAllowlistForTests, publicationBeliefOptions, withBeliefBatch } from '../src/core/belief/ledger.ts';
+import { performSync } from '../src/commands/sync/perform.ts';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
 import { coverageAt, coverageIntervals } from '../src/core/belief/coverage-report.ts';
 import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
@@ -23,7 +26,9 @@ import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain, type BeliefEvent } from './helpers/belief-ledger.ts';
 
-afterEach(() => { __setBeliefEmitterFaultForTests(null); });
+afterEach(() => { __setBeliefEmitterFaultForTests(null); __dropOwnerEditAllowlistForTests(false); });
+
+const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 const X = 'Door code is 4417';
 const purgeOp = operations.find(o => o.name === 'purge_fact')!;
@@ -81,6 +86,49 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       const m = REDACTION_MARKER(r.request as string);
       expect(r).toEqual({ request: r.request, canonical_reconcile: [m], managed_file_import: [m], managed_file_repair: [m], trust_release: [m], trust_accept: [m],
         unchangedOwnerEdit: [m], syncSetsField: [m], ownerEdit: ['owner rewrote it'], released: 1 });
+    }, 240_000);
+
+    test('#1: only a local direct edit (put_page, edit_page, takes edits) is an owner edit; sync, import and the local agent-tier put_page never release', async () => {
+      const run = (forced: boolean) => collect<Record<string, unknown>>(report => brain(async b => {
+        const slug = 'companies/acme-example';
+        const page = (context: string) => beliefPage({ facts: [{ claim: 'Acme sells widgets', context }] });
+        const contexts = async (fn: () => Promise<unknown>) => { const mark = await b.lastId(); await fn(); return (await b.events(mark)).filter(e => e.event_type.startsWith('fact.')).map(e => e.value?.context); };
+        const released = async () => (await b.engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM belief_redactions WHERE source_id = $1 AND released_hash IS NOT NULL', [b.sourceId]))[0]!.n;
+        git(b.root, 'init', '-q');
+        mkdirSync(join(b.root, 'companies'), { recursive: true });
+        const sync = async (content: string) => {
+          writeFileSync(join(b.root, `${slug}.md`), content);
+          git(b.root, 'add', '-A'); git(b.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'edit');
+          await performSync(b.engine, { sourceId: b.sourceId, noPull: true, noEmbed: true, noExtract: true, drain: true } as never);
+        };
+        await sync(beliefPage({ facts: [X, { claim: 'Acme sells widgets', context: `notes say ${X}` }] }));
+        const request = await requestOf(b, String((await purgeFact(b, X)).request_id));
+        __dropOwnerEditAllowlistForTests(forced);
+        const out: Record<string, unknown> = { marker: REDACTION_MARKER(request) };
+        out.sync = await contexts(() => sync(page('sync rewrote it')));
+        out.afterSync = await released();
+        if (forced) { report(out); return; }
+        out.agentTierPut = await contexts(() => b.put(slug, page('agent rewrote it')));
+        const fact = `source_id = $1 AND fact = 'Acme sells widgets' AND expired_at IS NULL`;
+        const publish = (operation: string, intent: Record<string, unknown>, context: string) => contexts(() => b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
+          await tx.lockPageKeys([{ sourceId: b.sourceId, slug }]);
+          await withBeliefBatch(tx, publicationBeliefOptions({ id: randomUUID(), source_id: b.sourceId, slug, operation, authority: { remote: false }, intent }),
+            () => tx.executeRaw(`UPDATE facts SET context = '${context}' WHERE ${fact}`, [b.sourceId]));
+        }, { ...TEST_WRITE_ATTRIBUTION, trust: { tier: 'operator_curated', origin: { channel: operation } } })));
+        out.import = await publish('put_page', { kind: 'managed_file_import' }, 'import rewrote it');
+        out.syncRow = await publish('submit_job', { kind: 'managed_sync_import' }, 'sync row rewrote it');
+        out.revert = await publish('revert_version', {}, 'revert rewrote it');
+        out.beforeOwner = await released();
+        out.ownerPut = await publish('put_page', {}, 'owner rewrote it');
+        out.afterOwner = await released();
+        report(out);
+      }));
+      const r = await run(false);
+      const m = r.marker;
+      expect(r).toEqual({ marker: m, sync: [m], afterSync: 0, agentTierPut: [m], import: [m], syncRow: [m], revert: [m], beforeOwner: 0, ownerPut: ['owner rewrote it'], afterOwner: 1 });
+      // Forced probe: without the allowlist the owner-tier managed sync releases the redaction and writes the new value.
+      const forced = await run(true);
+      expect(forced).toEqual({ marker: forced.marker, sync: ['sync rewrote it'], afterSync: 1 });
     }, 240_000);
 
     test('#2: the first page purge in a source writes no purged text into the ledger', async () => {
