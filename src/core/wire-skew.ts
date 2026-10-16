@@ -47,14 +47,14 @@ export function retiredWireNotice(fields: readonly string[]): string {
 export interface ConfigRollbackWindow { key: string; floor: string; honored_until: string; named_in: string; restores: string }
 
 export const CONFIG_ROLLBACK_WINDOWS = {
-  'sync.job_drain': { key: 'sync.job_drain', floor: '0.60.263.0', honored_until: '2027-01-14', named_in: '0.60.233.0 behavior notice (#6706)',
+  'sync.job_drain': { key: 'sync.job_drain', floor: '0.60.264.0', honored_until: '2027-01-14', named_in: '0.60.233.0 behavior notice (#6706)',
     restores: 'single-pass managed `sync` jobs instead of draining to the job deadline' },
-  'sync.foreground_priority': { key: 'sync.foreground_priority', floor: '0.60.263.0', honored_until: '2027-01-14', named_in: 'docs/guides/live-sync.md (#5984)',
+  'sync.foreground_priority': { key: 'sync.foreground_priority', floor: '0.60.264.0', honored_until: '2027-01-14', named_in: 'docs/guides/live-sync.md (#5984)',
     restores: 'first-in-first-out bulk groups instead of letting foreground writes go first' },
-  'sync.federated_v2': { key: 'sync.federated_v2', floor: '0.60.263.0', honored_until: '2027-01-14', named_in: 'skills/migrations/v0.40.5.md',
+  'sync.federated_v2': { key: 'sync.federated_v2', floor: '0.60.264.0', honored_until: '2027-01-14', named_in: 'skills/migrations/v0.40.5.md',
     restores: 'the v0.39 sequential sync --all instead of the federated v2 path' },
-  'sync.waive_batch': { key: 'sync.waive_batch', floor: '0.60.263.0', honored_until: '2027-01-14', named_in: '#5984 behavior notice',
+  'sync.waive_batch': { key: 'sync.waive_batch', floor: '0.60.264.0', honored_until: '2027-01-14', named_in: '#5984 behavior notice',
     restores: 'one waived entry per transaction instead of batched waivers' },
-  'sync.bulk': { key: 'sync.bulk', floor: '0.60.263.0', honored_until: '2027-01-14', named_in: '#5984 behavior notice and docs/guides/live-sync.md',
+  'sync.bulk': { key: 'sync.bulk', floor: '0.60.264.0', honored_until: '2027-01-14', named_in: '#5984 behavior notice and docs/guides/live-sync.md',
     restores: 'one page per transaction on managed Postgres sync instead of bulk groups' },
 } as const satisfies Record<string, ConfigRollbackWindow>;

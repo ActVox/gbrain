@@ -115,7 +115,7 @@ Timing knobs the drain uses:
 | `preparation_deadlines` write switch (`persistence.preparation_deadlines`, `GBRAIN_PREPARATION_DEADLINES`) | Kill switch for the four keys above and the attempt counter. `remember`, `put_page` and `edit_page` keep their own 30 s budget either way. | on | `gbrain config set persistence.preparation_deadlines false` (or `GBRAIN_PREPARATION_DEADLINES=0`) restores the previous behaviour exactly: no deadline on sync or maintenance writes, no counter, no `preparation_stalled` holds. A running `serve` picks the change up within 5 seconds. |
 | Page write wait | One page's (or group's) publication before the drain re-checks. | 30 s inside a drain (5 s, checkpoint 8 s, for a single pass) | The drain re-enters; this is not a stop. |
 | `sync` job deadline | A managed `sync` Minions job's drain: its `timeout_ms` (autopilot stamps `max(2 × --interval, 300 s)`), or the queue's wall-clock limit for a job without one, capped at an hour, less a 60 s reserve. `sync.job_drain=false` (or job data `drain: false`) keeps the single pass. | per job | Stops as `resumable` / `deadline`; on a worker-backed brain a stop that is safe to repeat queues one follow-up job (`continuation_job_id`). |
-| `GBRAIN_SYNC_BULK_MAX_TXN_MS` (was `sync.bulk_max_txn_ms`, retired in 0.60.263.0) | Target time per bulk group; sizes the next group from the last one's time per page. | 15000 | A smaller next group. |
+| `GBRAIN_SYNC_BULK_MAX_TXN_MS` (was `sync.bulk_max_txn_ms`, retired in 0.60.264.0) | Target time per bulk group; sizes the next group from the last one's time per page. | 15000 | A smaller next group. |
 | `sync.bulk_size` / `GBRAIN_SYNC_BULK_SIZE` | Largest bulk group. | 16 | — |
 
 ### Sync config keys
@@ -128,7 +128,7 @@ Timing knobs the drain uses:
   `sync.federated_v2`, `sync.waive_batch`, `sync.bulk`. Each one set to `false` restores the earlier behavior, and
   stays honored until at least 2027-01-14 (`CONFIG_ROLLBACK_WINDOWS` in `src/core/wire-skew.ts`). They are not
   tunables: `config set` says so, and no help text or printed fix recommends them.
-- **Retired keys**, no longer read since 0.60.263.0, each with an environment variable for the process that syncs
+- **Retired keys**, no longer read since 0.60.264.0, each with an environment variable for the process that syncs
   (the serve when it runs the catch-up, the cron line or the shell):
 
 | Retired key | Replacement | Default |
