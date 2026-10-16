@@ -466,7 +466,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // Freeze all logical identities in one database statement, before yielding
   // between pages. A later interactive edit must conflict with this scan.
   const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null; fm_id: string | null }>(
-    "SELECT id,slug,source_path,knowledge_revision,deleted_at,frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1", [sourceId]);
+    "SELECT q.*,f.frontmatter->>'id' AS fm_id FROM (SELECT id,slug,source_path,knowledge_revision,deleted_at FROM pages WHERE source_id=$1) q JOIN pages f ON f.id=q.id", [sourceId]);
   const bySlug = new Map(identities.map(p => [p.slug, p]));
   const byPath = new Map<string, typeof identities>();
   const storableIdentities = identities.filter(storable);
