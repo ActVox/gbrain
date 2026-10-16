@@ -758,7 +758,7 @@ const quietly = async <T>(fn: () => Promise<T>): Promise<T> => {
   try { return await fn(); } finally { write.mockRestore(); }
 };
 
-test('#6757: a committed-outputs read past the statement timeout defers the pass; after the transcript grows and the child rows are pruned, the next pass stamps the output without a synthesis call', async () => {
+test('#6757: a committed-outputs read past the statement timeout defers the pass; after the transcript grows and the child rows are pruned, the replay itself runs zero child jobs and stamps the output verification-deferred instead of grounding it against the rewritten file', async () => {
   await fixture(async ({ engine, sourceId, root, opts, calls }) => {
     const timeout = failCommittedOutputsRead(engine);
     let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
@@ -780,7 +780,8 @@ test('#6757: a committed-outputs read past the statement timeout defers the pass
     await engine.executeRaw("DELETE FROM subagent_tool_executions WHERE job_id IN (SELECT id FROM minion_jobs WHERE data->>'source_id'=$1)", [sourceId]);
     await engine.executeRaw("DELETE FROM minion_jobs WHERE data->>'source_id'=$1", [sourceId]);
     await disposePersistenceConsumer(engine);
-    // The grown transcript now triages below the threshold, so this pass submits no child at all.
+    // A grown transcript is new input: dream may synthesize it again under its new hash. Here it triages below the
+    // threshold so that this pass submits no child of its own, and everything below is the replay of the deferred output.
     let synthesisCalls = 0;
     __setChatTransportForTests(async o => {
       const triage = (o.system ?? '').startsWith('You triage a conversation transcript');
@@ -789,16 +790,20 @@ test('#6757: a committed-outputs read past the statement timeout defers the pass
       return { text, blocks: [{ type: 'text', text }], stopReason: 'end', usage: { input_tokens: 10, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 }, model: o.model!, providerId: 'anthropic' };
     });
     const spent = calls();
-    const next = await runPhaseSynthesize(engine, opts);
+    const next = await quietly(() => runPhaseSynthesize(engine, opts));
     expect(next.status, JSON.stringify(next.error ?? next.summary)).toBe('ok');
     expect(synthesisCalls).toBe(0);
     expect(calls()).toBe(spent);
     expect(next.details.children_submitted ?? 0).toBe(0);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name = 'subagent' AND data->>'source_id'=$1", [sourceId])).toEqual([]);
     expect(next.details.postprocess_resumed).toEqual([slug]);
     expect(next.details.written_slugs).toEqual([slug]);
+    expect(next.details.verification_deferred).toEqual([slug]);
     const stamped = (await engine.readPageSnapshot(slug, { sourceId }))!.page;
     expect(stamped.frontmatter.dream_generated).toBe(true);
-    expect(stamped.compiled_truth).not.toContain('"an entirely invented');
+    expect(stamped.frontmatter.quote_verification).toBe('verification-deferred');
+    expect(stamped.frontmatter.quote_verified_at).toBeUndefined();
+    expect(stamped.compiled_truth).toContain('"an entirely invented');
     expect(readFileSync(join(root, `${slug}.md`), 'utf8')).toContain('dream_generated: true');
     expect(JSON.parse(await engine.getConfig(POSTPROCESS_PENDING_KEY) ?? '{}')[sourceId]).toBeUndefined();
   });
@@ -828,6 +833,7 @@ test('#6757: a postprocess request read past the statement timeout defers that o
     expect(calls()).toBe(spent);
     expect(next.details.written_slugs).toEqual([slug]);
     expect((await engine.readPageSnapshot(slug, { sourceId }))!.page.frontmatter.dream_generated).toBe(true);
+    expect((await engine.readPageSnapshot(slug, { sourceId }))!.page.frontmatter.quote_verification).toBeUndefined();
     expect(JSON.parse(await engine.getConfig(POSTPROCESS_PENDING_KEY) ?? '{}')[sourceId]).toBeUndefined();
   });
 }, 120_000);
