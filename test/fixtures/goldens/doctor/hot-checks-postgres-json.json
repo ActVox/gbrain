@@ -1558,6 +1558,18 @@
           {
             "category": "brain",
             "details": {
+              "checkouts": [],
+              "count": 0,
+              "docs": "docs/architecture/topologies.md#coordination-lock"
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "Every checkout's recorded coordination lock agrees with GBRAIN_COORDINATION_HOME, or the variable does not apply.",
+            "name": "coordination_lock_location",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
               "sources": [],
               "total": 0
             },
@@ -5471,6 +5483,18 @@
             "elapsed_ms": "<volatile>",
             "message": "Every ownership marker beside a source checkout belongs to this brain.",
             "name": "foreign_ownership_marker",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "checkouts": [],
+              "count": 0,
+              "docs": "docs/architecture/topologies.md#coordination-lock"
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "Every checkout's recorded coordination lock agrees with GBRAIN_COORDINATION_HOME, or the variable does not apply.",
+            "name": "coordination_lock_location",
             "status": "ok"
           },
           {

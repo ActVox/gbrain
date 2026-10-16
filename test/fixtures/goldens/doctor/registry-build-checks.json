@@ -475,6 +475,10 @@
       },
       {
         "category": "brain",
+        "name": "coordination_lock_location"
+      },
+      {
+        "category": "brain",
         "name": "unbound_source"
       },
       {

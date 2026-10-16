@@ -2190,6 +2190,18 @@ Reasons: `not_applied`, `still_behind`, `schema_unreadable`, `wedged`.
 |---|---|---|---|---|---|---|
 | A configured model is not allowed under models strict mode. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### movement_unknown
+
+<a id="movement_unknown"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain sources writer movement` could not read the managed sync backlog, so whether sync work is pending is unknown. | A failed backlog read is not an empty backlog: reading it as `nothing_pending` turned a stalled sync into an all-clear. The movement reader reports `movement_state: unknown` (`unknown.reason: backlog_read_failed`) on every surface, doctor warns, and the movement command exits 1 with this code instead of `managed_sync_not_moving`. | Rerun gbrain sources writer movement <id>; if the backlog read keeps failing, run gbrain doctor --json. Run: gbrain sources writer movement '{source_id}' --json | agent | `gbrain doctor --only managed_sync_not_moving --json` | 1 | yes |
+
+Reasons: `backlog_read_failed`.
+
+More: [docs/guides/troubleshooting.md#managed-sync-not-moving](../../docs/guides/troubleshooting.md#managed-sync-not-moving)
+
 ### no_brain
 
 <a id="no_brain"></a>
