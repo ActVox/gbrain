@@ -37,7 +37,6 @@ The remedy repair kind is not in S1: it lands in its own commit after the S1 SHA
 - [S1] `test/sync.test.ts` (3) and `test/sync-git-paths.test.ts` (3 platform cases): `buildSyncManifest` rename entries now carry Git's `similarity`.
 - [S1] Held-rename hold-lane tests whose fixture was an inexact move onto a broken file now use an exact move (R100) held by a stale `slug:` line; every hold-lane assertion is unchanged: `test/persistence-sync-holds.test.ts` (2), `test/repair-frontmatter.test.ts` (2), `test/hold-action-chain-6712.test.ts` (1), `test/sync-legacy-holds.test.ts` (3), `test/write-attribution-sync.test.ts` (1). The inexact-onto-broken fixture keeps a test per path asserting its new outcome.
 - [S1] `test/large-pages/managed-sync-segmented-rename.test.ts`: the fixture carries a frontmatter `id`, so the edited rename whose title follows the slug is still confirmed.
-- [S1] `test/persistence-managed-sync.test.ts` ("repeated slices reuse one manifest..."): its manifest-read probe matches the identity read by its SQL text, which now also selects `frontmatter->>'id' AS fm_id` for the explicit-id veto; the probe string follows the query, the count assertions are unchanged.
 
 ## #6741 (sub-lane: parts A, B, C)
 
