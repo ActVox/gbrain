@@ -865,7 +865,7 @@ Default admission limits are enforced atomically:
 | Queued intent bytes | 32 MiB | 256 MiB |
 | Lifetime request IDs | 2,000,000 | 8,000,000 |
 | Terminal receipt reservation | 16 GiB | 64 GiB |
-| Recovery bytes | — | 1 GiB, also 256 MiB per worktree |
+| Recovery bytes | — | 1 GiB, also 256 MiB per worktree (with `pages.segmented_storage on`: twice `pages.max_bytes` plus 2 MiB, at least 256 MiB) |
 
 Completion space is reserved at admission. Beforeimage/recovery bytes are
 reserved before filesystem publication. Reaching a limit refuses additional

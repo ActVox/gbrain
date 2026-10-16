@@ -168,6 +168,27 @@ export function segmentedPageCeiling(kind: BrainEngine['kind']): number {
   return kind === 'pglite' ? SEGMENTED_PAGE_CEILING_BYTES.pglite : SEGMENTED_PAGE_CEILING_BYTES.postgres;
 }
 
+/** The largest body admitted while the switch is on: a configured `pages.max_bytes`, never above the engine ceiling. */
+export function segmentedMaxBytes(kind: BrainEngine['kind'], maxRaw: string | null): number {
+  const ceiling = segmentedPageCeiling(kind);
+  return Math.min(positiveInt(maxRaw, ceiling), ceiling);
+}
+
+/** Bytes a page's file adds over its body, per staged copy, in the recovery default: frontmatter, separators, the record. */
+export const RECOVERY_FILE_HEADROOM_BYTES = 1024 ** 2;
+
+/**
+ * The default `persistence.limits.worktree_recovery_bytes` (persistence/limits.ts): never below `floor`, and room for
+ * the largest page the configured switch admits. A restore that writes a page's file back reserves the file twice
+ * (persistence/coordinator.ts `pageRecoveryRecord`: its staging file and the file), so a page near the ceiling needs
+ * twice its body plus RECOVERY_FILE_HEADROOM_BYTES per copy. It follows the configured switch, not the writer gate: a
+ * page admitted while the switch was effective stays deletable and restorable while an older writer holds it off.
+ */
+export function pageRecoveryBytes(kind: BrainEngine['kind'], switchRaw: string | null, maxRaw: string | null, floor: number): number {
+  const maxBytes = segmentedStorageRequested(parseSegmentedStorage(switchRaw)) ? segmentedMaxBytes(kind, maxRaw) : PAGE_MAX_BYTES;
+  return Math.max(floor, 2 * (maxBytes + RECOVERY_FILE_HEADROOM_BYTES));
+}
+
 /**
  * Read the segmented-storage policy once per write. The switch is effectively on when it is configured `on`
  * (or unset while SEGMENTED_STORAGE_DEFAULT is `on`) and no recent writer predates segmented pages; an
@@ -181,10 +202,9 @@ export async function readPageBodyPolicy(engine: PolicyEngine): Promise<PageBody
   ]);
   const setting = parseSegmentedStorage(switchRaw);
   const segmented = segmentedStorageRequested(setting) && (await segmentedWriterBlockers(engine).catch(() => null))?.length === 0;
-  const ceiling = segmentedPageCeiling(engine.kind);
   return {
     segmented,
-    maxBytes: segmented ? Math.min(positiveInt(maxRaw, ceiling), ceiling) : PAGE_MAX_BYTES,
+    maxBytes: segmented ? segmentedMaxBytes(engine.kind, maxRaw) : PAGE_MAX_BYTES,
     flipRetireMaxRows: positiveInt(retireRaw, DEFAULT_FLIP_RETIRE_MAX_ROWS),
     versionsMaxPerPage: positiveInt(versionsRaw, DEFAULT_SEGMENTED_VERSIONS_MAX_PER_PAGE),
     versionsMaxPinnedBytes: positiveInt(pinnedRaw, DEFAULT_SEGMENTED_VERSIONS_MAX_PINNED_BYTES),
