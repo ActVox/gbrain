@@ -70,9 +70,25 @@ export function claimForms(claims: readonly string[]): string[] {
   return [...out];
 }
 
+/** Claims shorter than this quote a field only as a word (#39); longer claims match as substrings. */
+const SHORT_CLAIM = 8;
+/** Letters and digits of scripts written with spaces between words: only there does a glued neighbour mean another word. */
+const SPACED_WORD = /[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Armenian}\p{Script=Georgian}\p{N}]/u;
+const glued = (edge: string | undefined, next: string | undefined) => !!edge && !!next && SPACED_WORD.test(edge) && SPACED_WORD.test(next);
+
+/**
+ * Whether a field quotes one of the forms. A short claim must not be glued to a letter or digit on either side
+ * (`ceo` does not quote `herbaceous`); punctuation, markup and scripts without word spaces (CJK, Thai) still match.
+ */
 export const quotes = (text: string, forms: readonly string[]) => {
   const lower = text.toLowerCase();
-  return forms.some(f => lower.includes(f));
+  return forms.some(f => {
+    if (f.length >= SHORT_CLAIM) return lower.includes(f);
+    for (let at = lower.indexOf(f); at >= 0; at = lower.indexOf(f, at + 1)) {
+      if (!glued(f[0], lower[at - 1]) && !glued(f[f.length - 1], lower[at + f.length])) return true;
+    }
+    return false;
+  });
 };
 
 async function registerRedaction(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string, key: string, field: string, request: string, hash: string): Promise<void> {

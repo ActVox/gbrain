@@ -13,7 +13,7 @@ import { withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
 import { coverageAt, coverageIntervals } from '../src/core/belief/coverage-report.ts';
 import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
-import { redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
+import { claimForms, quotes, redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
 import { REDACTION_MARKER } from '../src/core/belief/keys.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { submitRememberMutation } from '../src/core/persistence/memory-mutations.ts';
@@ -185,6 +185,23 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
           value: events.filter(e => e.value_hash && quoted.has(e.value_hash)).length });
       }));
       expect(r).toEqual({ quoted: true, prior: [], value: 0 });
+    }, 240_000);
+
+    test('#39: a short purged claim redacts the fields that quote it as a word, not every field containing its letters', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        await b.put('notes/short-example', beliefPage({ title: 'Short Example', facts: ['CEO'] }));
+        const acme = (confidence: string) => beliefPage({ facts: [{ claim: 'Acme sells widgets', context: 'herbaceous borders sell well', confidence },
+          { claim: 'Acme hired staff', context: 'the _CEO_ approved it', confidence }, { claim: 'Acme has a board', context: 'board of the CEO-office', confidence }] });
+        await b.put('companies/acme-example', acme('1.0'));
+        await b.put('companies/acme-example', acme('0.8'));
+        await purgePage(b, 'notes/short-example');
+        const contexts = Object.fromEntries((await b.events()).filter(e => e.slug === 'companies/acme-example' && e.subject_kind === 'fact')
+          .map(e => [e.value?.fact, /^\[redacted: purge [0-9a-f-]+\]$/.test(String(e.value?.context)) ? 'redacted' : e.value?.context]));
+        report(contexts);
+      }));
+      expect(r).toEqual({ 'Acme sells widgets': 'herbaceous borders sell well', 'Acme hired staff': 'redacted', 'Acme has a board': 'redacted' });
+      const cases = [['CEO', 'a CEO.'], ['CEO', 'x_ceo_y'], ['CEO', 'ceo2'], ['東京', '東京都に住む'], ['Door code is 4417', 'door code is 44170'], ['ИП', 'ИПотека']];
+      expect(cases.map(([claim, text]) => quotes(text!, claimForms([claim!])))).toEqual([true, true, false, true, true, false]);
     }, 240_000);
 
     test('#14: a hard delete (purge, managed and unmanaged retention) records every cascaded inbound link as link.retracted in its own stream', async () => {
