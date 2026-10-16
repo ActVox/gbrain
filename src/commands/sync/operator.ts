@@ -12,7 +12,7 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { cliRenderContext, renderAction } from '../../core/agent-output.ts';
 import { writeJsonDocument } from '../../core/cli-force-exit.ts';
 import { opError } from '../../core/ops/contract.ts';
-import { readSyncStatus, unblockSync } from '../../core/persistence/sync-status.ts';
+import { readSyncStatus, unblockSync, type SyncStatus } from '../../core/persistence/sync-status.ts';
 import { HOLD_ATTEMPTS_NEEDS_HUMAN } from '../../core/persistence/sync-fault-class.ts';
 import { CONTENT_REPAIR_HOLD_KINDS } from '../../core/repair/content-lane.ts';
 import { resolveSourceIdEngineFree } from '../../core/source-resolver.ts';
@@ -21,7 +21,7 @@ import { resolveSourceIdEngineFree } from '../../core/source-resolver.ts';
 const CONTENT_HOLD_CODES = Object.entries(CONTENT_REPAIR_HOLD_KINDS).filter(([, kind]) => kind).map(([code]) => code).join(', ');
 
 export function printSyncStatusHelp(): void {
-  console.log(`Usage: gbrain sync status --source <id> [--json]
+  console.log(`Usage: gbrain sync status --source <id> [--detail] [--json]
 
 Where a managed catch-up stands and what to do next, for an operator agent:
 the cursor (index/total, pinned target, last advance), pages committed in the
@@ -29,10 +29,21 @@ last 10 minutes, every held file and the last recorded failure, each with
   class         page | connection | systemic
   safe_actions  retry | retry_when_clean | repair | reconcile | upgrade | none
   needs_human   whether a person has to decide or act (human_reason says why)
-and one \`next\` action. The loop: run this every few minutes; when
-committed_last_10m is 0 and needs_human is false, run
-\`gbrain sync unblock --source <id> --apply\`, then the sync it prints; when
-needs_human is true, page a person with the slug it names.
+and one \`next\` action, plus the source's state (synced | resumable |
+blocked) and its reason, the oldest unfinished request and any recovery
+record (bounded probes that need no cursor; a probe that times out makes the
+state resumable/status_unknown, never synced).
+
+The terminal-failure summary, the checkpoint blocker list and the live cursor
+list are heavy reads: a plain status skips them (the fields keep their types,
+empty or unknown) and says so in terminal_failures_read, checkpoint_blockers_read
+and cursors_read (status not_read, with the --detail command as fix); --detail
+runs them. Never read a skipped field as "none".
+
+The loop: run this every few minutes; when committed_last_10m is 0 and
+needs_human is false, run \`gbrain sync unblock --source <id> --apply\`, then
+the sync it prints; when needs_human is true, page a person with the slug it
+names; when a *_read field is not_read and you need it, run its fix.
 
 Decision table: docs/guides/sync-unblock-runbook.md
 `);
@@ -82,25 +93,32 @@ function sourceOf(args: string[]): string {
 export async function runSyncStatus(engine: BrainEngine, args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) return printSyncStatusHelp();
   const sourceId = sourceOf(args);
-  const status = await readSyncStatus(engine, sourceId);
+  const status = await readSyncStatus(engine, sourceId, { detail: args.includes('--detail') });
   const ctx = cliRenderContext();
   // #6696 (A4): the capacity picture rides every status read (unthrottled), from the 60 s snapshot.
   const { cachedCapacitySnapshot, capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
   const { renderNotice } = await import('../../core/agent-output.ts');
   const snapshot = await cachedCapacitySnapshot(engine);
   const notices = (await capacityNotices(engine, { throttle: false })).map(notice => renderNotice(notice, ctx));
+  const read = (r: typeof status.cursors_read) => r.status === 'read' ? r : { ...r, fix: renderAction(r.fix, ctx) };
   const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null,
+    checkpoint_blockers_read: read(status.checkpoint_blockers_read), cursors_read: read(status.cursors_read), terminal_failures_read: read(status.terminal_failures_read),
     capacity: { status: snapshot.status, pause_pct: snapshot.pause_pct, low: snapshot.low, paused: snapshot.paused }, ...(notices.length ? { notices } : {}) };
   if (args.includes('--json')) return writeJsonDocument(JSON.stringify(rendered, null, 2));
   const c = status.cursor;
-  console.log(`Source ${sourceId}: ${c ? c.done ? `last run finished at ${c.index}/${c.total} (pinned ${c.pinned_target?.slice(0, 8) ?? '?'})` : `cursor ${c.index}/${c.total} at pinned target ${c.pinned_target?.slice(0, 8) ?? '?'}`
+  console.log(syncStatusHeadline(status));
+  console.log(`  ${c ? c.done ? `last run finished at ${c.index}/${c.total} (pinned ${c.pinned_target?.slice(0, 8) ?? '?'})` : `cursor ${c.index}/${c.total} at pinned target ${c.pinned_target?.slice(0, 8) ?? '?'}`
     + `${c.last_advance_at ? `, last advance ${c.last_advance_at}` : ''}` : 'no managed cursor'}`);
   console.log(`  committed in the last 10 minutes: ${status.committed_last_10m}${status.rate_pages_per_min !== null ? `, ${status.rate_pages_per_min} pages/min` : ''}`);
   console.log(`  holds: ${status.holds.length}${status.holds.length ? ` (${status.holds.filter(h => h.needs_human).length} need a person)` : ''}; last error: ${status.last_error ? `${status.last_error.code} [${status.last_error.class}]` : 'none'}`);
   for (const hold of status.holds) console.log(`    ${hold.path}${hold.slug ? ` (${hold.slug})` : ''}: ${hold.code} [${hold.class}] safe: ${hold.safe_actions.join(',')}${hold.needs_human ? ` NEEDS HUMAN: ${hold.human_reason}` : ''}${hold.attempts > 1 ? ` (held ${hold.attempts} times)` : ''}`);
   if (status.last_error) console.log(`    ${status.last_error.path ?? ''}: ${status.last_error.code} safe: ${status.last_error.safe_actions.join(',')}${status.last_error.needs_human ? ` NEEDS HUMAN: ${status.last_error.human_reason}` : ''}`);
+  const ob = status.oldest_blocker;
+  console.log(`  oldest unfinished request: ${ob.status === 'unknown' ? `unknown (${ob.reason})` : ob.request ? `${ob.request.request_id} (${ob.request.state}${ob.request.step ? `, step ${ob.request.step}` : ''}${ob.request.blocked_by ? `, blocked by ${ob.request.blocked_by.predicate}` : ''})` : 'none'}`
+    + `; recovery records: ${status.recovery.status === 'unknown' ? `unknown (${status.recovery.reason})` : status.recovery.count}`);
   const t = status.terminal_failures;
-  if (t.status === 'unknown') console.log(`  terminal write failures: unknown (${t.reason})`);
+  if (status.terminal_failures_read.status === 'not_read') console.log('  terminal write failures, checkpoint blockers and cursors: not read (run with --detail)');
+  else if (t.status === 'unknown') console.log(`  terminal write failures: unknown (${t.reason})`);
   else {
     const oldest = t.unresolved.oldest_age_seconds === null ? '' : `, oldest ${Math.round(t.unresolved.oldest_age_seconds / 3600)} h`;
     console.log(`  terminal write failures (last ${t.window_days} d): ${t.active_blockers.length} active blocker(s), ${t.unresolved.rows} unresolved (${t.unresolved.distinct_slugs} page(s), `
@@ -111,6 +129,24 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
   for (const notice of notices) console.log(`  [gbrain notice ${notice.code}] ${notice.why}`);
   if (rendered.next) console.log(`  Next: ${rendered.next.command ?? rendered.next.argv?.join(' ')}\n  Why: ${rendered.next.why}`);
   else console.log('  Next: nothing; the source is synced and holds nothing.');
+}
+
+/** #6712 PR 2 (L5): the one headline per state; the reason names why. */
+export function syncStatusHeadline(status: Pick<SyncStatus, 'source_id' | 'state' | 'reason' | 'cursor' | 'run_id' | 'holds' | 'live_job_id'>): string {
+  const c = status.cursor;
+  switch (status.reason) {
+    case 'nothing_pending': return `Source ${status.source_id} is synced${c?.done ? ` (last run ${status.run_id?.slice(0, 8) ?? '?'} finished at ${c.index}/${c.total})` : ''}.`;
+    case 'held_by_design': return `Source ${status.source_id} is synced; ${status.holds.length} file(s) stay held by design.`;
+    case 'live_job': return `Source ${status.source_id} is resumable: sync job #${status.live_job_id} is draining it.`;
+    case 'cursor_unfinished': return `Source ${status.source_id} is resumable: run ${status.run_id?.slice(0, 8) ?? '?'} stands at ${c?.index ?? '?'}/${c?.total ?? '?'}; the next sync resumes it.`;
+    case 'last_error': return `Source ${status.source_id} is resumable: the last run recorded a failure that a rerun holds or retries.`;
+    case 'holds_actionable': return `Source ${status.source_id} is resumable: held files have a safe action (sync unblock).`;
+    case 'recovery_pending': return `Source ${status.source_id} is resumable: a write's recovery record waits for an owner pass.`;
+    case 'status_unknown': return `Source ${status.source_id}: state unknown (a probe did not answer); not reported synced.`;
+    case 'needs_human': return `Source ${status.source_id} is blocked: a person has to decide (see NEEDS HUMAN below).`;
+    case 'head_blocked': return `Source ${status.source_id} is blocked: its oldest write waits on something only an operator clears.`;
+    case 'recovery_blocked': return `Source ${status.source_id} is blocked: a write's recovery record found changed bytes on disk.`;
+  }
 }
 
 export async function runSyncUnblock(engine: BrainEngine, args: string[]): Promise<void> {

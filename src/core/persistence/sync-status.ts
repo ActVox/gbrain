@@ -37,8 +37,8 @@ import { headCommittedBytes } from './sync-page-fault.ts';
 import { laneFaultInMessage } from './sync-window.ts';
 import { cursorFenceCause, syncKnockOnSql } from './sync-knock-on.ts';
 import { listIncompleteSyncReceipts, type SyncSettledIndexes } from './checkpoint-validation.ts';
-import { drainEstimate } from './sync-drain.ts';
-import { classifyRecordedFault, type TerminalCategory } from './terminal-classify.ts';
+import { drainEstimate, engineStallProbe } from './sync-drain.ts';
+import { classifyRecordedFault, classifyTerminal, type TerminalCategory } from './terminal-classify.ts';
 import type { PublicCategory } from './public-category.ts';
 import { resolveManagedSyncContext } from './sync-discovery.ts';
 
@@ -104,7 +104,34 @@ export interface SyncStatus {
   /** #6650: the source's terminal write receipts that did not commit, summarized (`terminal-failures.ts`); `unknown` when the bounded read timed out. */
   terminal_failures: SyncTerminalSummary;
   next: Action | null;
+  /**
+   * #6712 PR 2 (L5): the source's state in the sync outcome vocabulary (`synced` | `resumable` | `blocked`) and why
+   * (`SYNC_STATUS_REASONS`). Never `synced` while a probe this read relies on did not answer.
+   */
+  state: SyncStatusState;
+  reason: SyncStatusReason;
+  /** #6712 PR 2: the source's oldest unfinished request (its running one first), bounded; works without a cursor. `unknown` when the read timed out. */
+  oldest_blocker: { status: 'ok'; request: { request_id: string; state: string; phase: string | null; step: string | null; lapsed: boolean; blocked_by: { predicate: string; state: string | null; intervention: boolean } | null } | null }
+    | { status: 'unknown'; reason: string };
+  /** #6712 PR 2: requests of the source still holding a publication recovery record (they hold their root), bounded. */
+  recovery: { status: 'ok'; count: number; first: { request_id: string; slug: string; blocked: boolean } | null } | { status: 'unknown'; reason: string };
+  /**
+   * #6712 PR 2: whether each heavy read ran. A plain `sync status` skips them (the fields keep their types: arrays stay
+   * empty, `terminal_failures` reads `unknown`); `not_read` carries the `--detail` command that runs them. An agent never
+   * reads an empty skipped field as "none".
+   */
+  checkpoint_blockers_read: SyncStatusRead;
+  cursors_read: SyncStatusRead;
+  terminal_failures_read: SyncStatusRead;
 }
+export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
+/** Why the source is in its state; one closed list. */
+export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'status_unknown',
+  'needs_human', 'head_blocked', 'recovery_blocked'] as const;
+export type SyncStatusReason = typeof SYNC_STATUS_REASONS[number];
+export type SyncStatusRead = { status: 'read' } | { status: 'not_read'; fix: Action };
+/** The bound of each default probe (the oldest blocker, the recovery records). */
+export const SYNC_STATUS_PROBE_MS = 2_000;
 
 export type SyncTerminalSummary = { status: 'unknown'; reason: string } | {
   status: 'ok'; window_days: number; active_blockers: Array<{ kind: 'recovery' | 'checkpoint'; request_id: string; slug?: string; category: string }>;
@@ -180,7 +207,13 @@ function holdStatus(record: GitHoldRecord, auto?: FenceAutoRepair): SyncStatusHo
     retry_after: verdict.safe_actions[0] === 'retry' || verdict.safe_actions[0] === 'retry_when_clean' ? null : 'after the named step', fix: gitHoldFix(record, auto) };
 }
 
-export async function readSyncStatus(engine: BrainEngine, sourceId: string): Promise<SyncStatus> {
+/**
+ * `detail` (default true for library callers; the CLI's plain `sync status` passes false) runs the heavy reads: the
+ * terminal-failure summary, the checkpoint blocker list and the live-cursor join. Without it each is skipped with its
+ * `<field>_read` sibling, and the bounded oldest-blocker and recovery probes still run.
+ */
+export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts: { detail?: boolean } = {}): Promise<SyncStatus> {
+  const detail = opts.detail !== false;
   const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1 AND archived IS NOT TRUE', [sourceId]);
   if (!source) throw Object.assign(new Error(`Source ${sourceId} does not exist.`), { code: 'not_found' });
   const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
@@ -243,14 +276,72 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string): Pro
             : lastError ? `The last run recorded ${lastError.code} (${lastError.class}); this release holds or retries it, and --retry-failed converts the stopped entry in place without re-freezing the manifest.`
             : `The cursor stands at ${header!.index}/${header!.total}; the same command resumes it against the frozen manifest.` }
         : null;
-  const blockers = await checkpointBlockers(engine, header);
+  const [oldest, recovery] = await Promise.all([oldestBlocker(engine, sourceId), recoveryProbe(engine, sourceId)]);
+  const notRead = (field: string): { status: 'not_read'; fix: Action } => ({ status: 'not_read', fix: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--detail', '--json'], consent: [], actor: 'agent',
+    requires_exclusive: false, why: `This status skipped the ${field} read (a heavy read); --detail runs it. Read-only.` } });
+  const blockers = detail ? await checkpointBlockers(engine, header) : { checkpoint_blockers: [] };
   // #6650: a receipt still holding a recovery record holds its root, so a source with nothing else to do names it as `next`.
-  const { recovery_next, ...terminal } = await terminalSummary(engine, sourceId, blockers.checkpoint_blockers);
+  const { recovery_next, ...terminal } = detail ? await terminalSummary(engine, sourceId, blockers.checkpoint_blockers)
+    : { status: 'unknown' as const, reason: 'not_read: run sync status with --detail', recovery_next: recovery.status === 'ok' && recovery.first ? recoveryAction(sourceId, recovery.first) : undefined };
+  const [state, stateReason] = statusState({ human: !!human, oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0 });
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
-    resume_argv: resume, ...blockers, cursors: await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures),
-    terminal_failures: terminal, next: next ?? recovery_next ?? null };
+    resume_argv: resume, ...blockers, cursors: detail ? await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures) : [],
+    terminal_failures: terminal, next: next ?? recovery_next ?? (stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+      why: `The oldest-blocker or recovery probe did not answer within ${SYNC_STATUS_PROBE_MS / 1000} s, so this status does not know the state (it is not reported synced). Rerun it after a short wait; gbrain doctor --json checks the database if it keeps timing out.` } satisfies Action : null),
+    state, reason: stateReason,
+    oldest_blocker: oldest, recovery, checkpoint_blockers_read: detail ? { status: 'read' } : notRead('checkpoint blocker list'),
+    cursors_read: detail ? { status: 'read' } : notRead('live cursor'), terminal_failures_read: detail ? { status: 'read' } : notRead('terminal-failure summary') };
+}
+
+/** #6712 PR 2: the state and its reason, from what this read saw; a probe that did not answer never yields `synced`. */
+function statusState(s: { human: boolean; oldest: SyncStatus['oldest_blocker']; recovery: SyncStatus['recovery']; liveJob: boolean; unfinished: boolean; lastError: boolean;
+  actionable: boolean; holds: boolean }): [SyncStatusState, SyncStatusReason] {
+  if (s.human) return ['blocked', 'needs_human'];
+  if (s.recovery.status === 'ok' && s.recovery.first?.blocked) return ['blocked', 'recovery_blocked'];
+  if (s.oldest.status === 'ok' && s.oldest.request?.blocked_by?.intervention && s.oldest.request.state === 'queued') return ['blocked', 'head_blocked'];
+  if (s.liveJob) return ['resumable', 'live_job'];
+  if (s.unfinished) return ['resumable', 'cursor_unfinished'];
+  if (s.lastError) return ['resumable', 'last_error'];
+  if (s.actionable) return ['resumable', 'holds_actionable'];
+  if (s.recovery.status === 'ok' && s.recovery.count > 0) return ['resumable', 'recovery_pending'];
+  if (s.oldest.status !== 'ok' || s.recovery.status !== 'ok') return ['resumable', 'status_unknown'];
+  return ['synced', s.holds ? 'held_by_design' : 'nothing_pending'];
+}
+
+/** #6712 PR 2: the source's oldest unfinished request, read through the drain's own bounded head probe. */
+async function oldestBlocker(engine: BrainEngine, sourceId: string): Promise<SyncStatus['oldest_blocker']> {
+  const head = engineStallProbe(engine, sourceId).head!;
+  try {
+    const row = await Promise.race([head(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no answer within ${SYNC_STATUS_PROBE_MS} ms`)), SYNC_STATUS_PROBE_MS + 1_000).unref?.())]);
+    if (!row) return { status: 'ok', request: null };
+    return { status: 'ok', request: { request_id: row.request_id ?? '', state: row.head_state, phase: row.claim?.phase ?? null, step: row.claim?.step ?? null, lapsed: row.claim?.lapsed === true,
+      blocked_by: row.blocked_by ? { predicate: row.blocked_by.predicate, state: row.blocked_by.state, intervention: row.blocked_by.intervention } : null } };
+  } catch (error) {
+    return { status: 'unknown', reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** #6712 PR 2: the source's requests holding a publication recovery record, bounded; it needs no cursor. */
+async function recoveryProbe(engine: BrainEngine, sourceId: string): Promise<SyncStatus['recovery']> {
+  try {
+    const rows = await engine.executeRaw<{ n: number | string; request_id: string | null; slug: string | null; blocked: boolean | null }>(
+      `SELECT count(*) AS n, (array_agg(request_id::text ORDER BY sequence))[1] AS request_id, (array_agg(slug ORDER BY sequence))[1] AS slug,
+         (array_agg(blocked_reason IN ('unexpected_staging_bytes','unexpected_file_bytes') ORDER BY sequence))[1] AS blocked
+       FROM persistence_requests WHERE source_id=$1 AND recovery IS NOT NULL`, [sourceId], { timeoutMs: SYNC_STATUS_PROBE_MS, signal: AbortSignal.timeout(SYNC_STATUS_PROBE_MS + 500) });
+    const row = rows[0];
+    const count = Number(row?.n ?? 0);
+    return { status: 'ok', count, first: count && row?.request_id ? { request_id: row.request_id, slug: row.slug ?? '', blocked: row.blocked === true } : null };
+  } catch (error) {
+    return { status: 'unknown', reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** The recovery record's next step, as the terminal-failure summary names it (`classifyTerminal`'s recovery verdict). */
+function recoveryAction(sourceId: string, first: { request_id: string; slug: string; blocked: boolean }): Action {
+  return classifyTerminal({ request_id: first.request_id, source_id: sourceId, slug: first.slug, operation: 'submit_job', state: 'running', error_code: null, recovery: true,
+    blocked_reason: first.blocked ? 'unexpected_file_bytes' : null, compacted: false })!.action;
 }
 
 /**
