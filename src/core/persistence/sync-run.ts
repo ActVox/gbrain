@@ -1330,13 +1330,12 @@ interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boole
 /**
  * #6712 PR 3 (L7): a plain sync retries the failure an earlier invocation recorded for this run (`stopRecorded`), which
  * `--retry-failed` (now its deprecated alias) used to do on request. A stop the drain re-freezes in place (a transport fault,
- * a resumable systemic stop, a legacy knock-on) is left to the drain, with its `STOPS_PER_ENTRY` bound reset once the bound
- * is spent; a checkpoint refused only by a receipt that no longer blocks it revives in the drain. Otherwise a pending
- * request that failed on a page fault (#6340: a page that moved, a dirty file) converts in place with the frozen manifest,
- * and every other recorded failure (a content refusal whose file or gbrain version changed, a stop before admission)
- * rediscovers from HEAD. Null when nothing applies: no failure of this run is recorded, its request is still unfinished,
- * a content refusal would refuse the same bytes again, or the failure needs a person's decision (a slug-mode refusal, a
- * checkpoint whose source checkpoint moved: `gbrain repair managed-sync-orphans`).
+ * a resumable systemic stop, a legacy knock-on) is left to the drain, its `STOPS_PER_ENTRY` bound reset once spent; a
+ * checkpoint refused only by a receipt that no longer blocks it revives in the drain. Under the hold screen a page's refusal
+ * converts in place with the frozen manifest (#5988, #6340); a content refusal a newer commit may fix, and every other
+ * recorded failure, rediscovers from HEAD. Null when nothing applies: no failure of this run is recorded, its request is
+ * unfinished or committed (the drain advances past it, keeping the run's counts), a refusal would refuse the same bytes again,
+ * or it needs a person's decision (a slug-mode refusal, a moved source checkpoint: `gbrain repair managed-sync-orphans`).
  */
 async function retryRecordedFailure(engine: BrainEngine, cursor: Cursor, key: string, input: { opts: SyncOpts; context: ManagedSyncContext; authority: SyncAuthority;
   processingOptions: SyncProcessingOptions; syncOptions: SyncCursorOptions; startupConfig: BrainEngine; frozenRun: Parameters<typeof freezeEntry>[4]; runStartedAt: string;
@@ -1348,7 +1347,7 @@ async function retryRecordedFailure(engine: BrainEngine, cursor: Cursor, key: st
   const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
   assertActive();
   const terminal = !!failed && ['failed', 'conflict', 'cancelled'].includes(failed.state);
-  if (failed && !terminal && failed.state !== 'committed') return null;
+  if (failed && !terminal) return null;
   const fault = terminal ? receiptClass(failed!) : null;
   if (terminal && cursor.pending && cursor.pending.intent.kind !== 'managed_sync_checkpoint'
     && (fault === 'transport' || isSyncKnockOn(failed!) || (fault === 'systemic' && resumableStop(failed!)))) {
@@ -1365,17 +1364,17 @@ async function retryRecordedFailure(engine: BrainEngine, cursor: Cursor, key: st
   // `gbrain repair managed-sync-orphans` retires the cursor (and its slice record), and the next sync discovers again.
   if (terminal && (failed!.error_code === 'slug_root_mode_mismatch'
     || cursor.pending?.intent.kind === 'managed_sync_checkpoint' && failed!.error_code === 'revision_conflict' && failed!.error_message === CHECKPOINT_MOVED_MESSAGE)) return null;
-  if (terminal && cursor.pending!.intent.kind !== 'managed_sync_checkpoint' && replaysUnchangedRefusal(failed!, recorded,
-    { root: cursor.root, intent: cursor.pending!.intent, target: cursor.target, head: () => syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim() })) return null;
+  const page = terminal && cursor.pending!.intent.kind !== 'managed_sync_checkpoint';
+  // The screen converts with the cursor's own options; a content, fence or stalled-preparation refusal it keeps replays.
+  const head = () => syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
+  const screen = page && !(isContentRefusal(failed!.error_code, failed!.error_message) && head() !== cursor.target) ? await loadSyncScreenRun(input.startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote) : null;
+  const converted = screen ? await convertBlockedCursor(engine, cursor, key, assertActive, { ...input.frozenRun, screen, observedAt: cursor.discoveredAt ?? input.runStartedAt }) : cursor;
+  assertActive();
+  if (screen && (converted !== cursor || isContentRefusal(failed!.error_code, failed!.error_message) || fenceReceiptLocation(failed!) || preparationStalled(failed!))) return { cursor: converted };
+  if (page && replaysUnchangedRefusal(failed!, recorded, { root: cursor.root, intent: cursor.pending!.intent, target: cursor.target, head })) return null;
   const blocker = await oldRunBlocker(engine, cursor, key);
   assertActive();
   if (blocker) return { wait: blocker };
-  // Only the #6340 page faults convert here (a content refusal rediscovers; #6513: a checkpoint is never a page fault).
-  const pageFault = !!failed && !!cursor.pending && cursor.pending.intent.kind !== 'managed_sync_checkpoint' && (pinnedWorktreeConflict(failed) || failed.error_code === 'revision_conflict');
-  const screen = pageFault ? await loadSyncScreenRun(input.startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote) : null;
-  const converted = screen ? await convertBlockedCursor(engine, cursor, key, assertActive, { ...input.frozenRun, screen, observedAt: cursor.discoveredAt ?? input.runStartedAt }) : cursor;
-  assertActive();
-  if (converted !== cursor) return { cursor: converted };
   const discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
   const discovery = await discoverManagedSync(engine, opts, context);
   assertActive();
