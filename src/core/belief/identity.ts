@@ -14,35 +14,64 @@ import type { BrainEngine } from '../engine.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
 import { appendBeliefEvents } from './append.ts';
-import { pageKey } from './keys.ts';
-import { coverageActive, currentStateHash, readLedgerSource } from './ledger.ts';
-import { endLifetime, mintLifetime, readOpenLifetimes, renameLifetime } from './lifetimes.ts';
+import { lifetimeRef, pageKey } from './keys.ts';
+import { coverageActive, currentStateHash, readLedgerSource, streamSubjectDrafts } from './ledger.ts';
+import { endLifetime, renameLifetime } from './lifetimes.ts';
+import { keyedSubjects, type Subject } from './subjects.ts';
+
+/** One stream's current subjects, keyed as the ledger keys them now, with its state hash. */
+async function keyedStream(tx: BrainEngine, sourceId: string, incarnation: string, slug: string) {
+  const { hash, state, lifetimes } = await currentStateHash(tx, sourceId, incarnation, slug);
+  const page = state.pages.find(p => p.slug === slug) ?? null;
+  const subjects = keyedSubjects({ incarnation, lifetimes, pagesBySlug: new Map(page ? [[slug, page]] : []) }, state,
+    id => state.pages.find(p => p.id === id)?.visible === false ? 'private' : 'world').filter(s => s.stream === slug);
+  return { hash, page, lifetimes, subjects, writerTier: state.writerTier };
+}
 
 /**
- * Inside the fallback rename's transaction, after its row moves, with both
- * slugs' page keys held: the destination row takes the stale row's lifetime
- * (the destination's own lifetime, minted by its import, ends) and one
- * `page.renamed` is appended. Returns the publication id when it appended.
+ * The fallback rename's transaction, with both slugs' page keys held: `moves`
+ * carries the stale row's identity onto the destination row, then the
+ * destination takes the stale row's lifetime (the destination's own lifetime,
+ * minted by its import, ends). One `page.renamed` is appended, plus the
+ * subject events that make the surviving lifetime describe the destination:
+ * each destination row's belief is `*.transferred` from the ended lifetime,
+ * and a stale belief the destination does not hold is retracted. Returns the
+ * publication id when it appended.
  */
-export async function recordFallbackRename(tx: BrainEngine, input: { sourceId: string; staleSlug: string; newSlug: string; fromPageId: number; toPageId: number }): Promise<string | null> {
+export async function recordFallbackRename(tx: BrainEngine, input: { sourceId: string; staleSlug: string; newSlug: string; fromPageId: number; toPageId: number },
+  moves: () => Promise<void>): Promise<string | null> {
   const source = await readLedgerSource(tx, input.sourceId);
-  if (!source || !coverageActive(source.coverage)) return null;
+  if (!source || !coverageActive(source.coverage)) { await moves(); return null; }
   assertHeldPageKeys(tx, [{ sourceId: input.sourceId, slug: input.staleSlug }, { sourceId: input.sourceId, slug: input.newSlug }]);
-  const open = await readOpenLifetimes(tx, [{ incarnation: source.incarnation, slug: input.staleSlug }, { incarnation: source.incarnation, slug: input.newSlug }]);
-  const stale = open.get(`${source.incarnation}\u0000${input.staleSlug}`);
-  const lifetime = stale && (stale.page_id == null || stale.page_id === input.fromPageId) ? stale.page_lifetime
-    : await mintLifetime(tx, { sourceId: input.sourceId, incarnation: source.incarnation, slug: input.staleSlug, pageId: input.fromPageId });
-  const absorbed = open.get(`${source.incarnation}\u0000${input.newSlug}`)?.page_lifetime;
+  const stale = await keyedStream(tx, input.sourceId, source.incarnation, input.staleSlug);
+  const dest = await keyedStream(tx, input.sourceId, source.incarnation, input.newSlug);
+  const lifetime = stale.lifetimes.get(input.fromPageId)!;
+  const absorbed = dest.lifetimes.get(input.toPageId) ?? null;
+  await moves();
   if (absorbed && absorbed !== lifetime) await endLifetime(tx, absorbed);
   await renameLifetime(tx, lifetime, input.newSlug, input.toPageId);
-  const [page] = await tx.executeRaw<{ trust_tier: string }>('SELECT trust_tier FROM pages WHERE id = $1', [input.toPageId]);
-  const { hash, state } = await currentStateHash(tx, input.sourceId, source.incarnation, input.newSlug);
-  const visible = state.pages.find(p => p.id === input.toPageId)?.visible !== false;
+  const after = await keyedStream(tx, input.sourceId, source.incarnation, input.newSlug);
+  // Each destination belief moves onto the surviving lifetime: by its rows, else (its row merged into an equal stale row) by its key; one with neither ends.
+  const transfers = new Map<string, { from: Subject; fromLifetime: string | null }>();
+  const ended: Subject[] = [];
+  const rowsAfter = new Set(after.subjects.flatMap(a => a.rowIds.map(id => `${a.kind}:${id}`)));
+  for (const s of dest.subjects) {
+    if (s.rowIds.some(id => rowsAfter.has(`${s.kind}:${id}`))) { for (const id of s.rowIds) transfers.set(`${s.kind}:${id}`, { from: s, fromLifetime: absorbed }); continue; }
+    const target = absorbed ? after.subjects.find(a => a.kind === s.kind && a.key === s.key.split(lifetimeRef(absorbed)).join(lifetimeRef(lifetime))) : undefined;
+    if (target) for (const id of target.rowIds) { if (!transfers.has(`${target.kind}:${id}`)) transfers.set(`${target.kind}:${id}`, { from: s, fromLifetime: absorbed }); }
+    else ended.push(s);
+  }
+  const cause = { op: 'rename_fallback' };
   const publicationId = randomUUID();
   const appended = await appendBeliefEvents(tx, [{ sourceId: input.sourceId, incarnation: source.incarnation, lifetime, slug: input.newSlug, stream: input.newSlug,
-    subjectKind: 'page', subjectKey: pageKey(lifetime), eventType: 'page.renamed', trustTier: page?.trust_tier || 'unknown',
-    visibility: visible ? 'world' : 'private', value: { old_slug: input.staleSlug, new_slug: input.newSlug, ...(absorbed && absorbed !== lifetime ? { absorbed_lifetime: absorbed } : {}) },
-    stateHash: hash, cause: { op: 'rename_fallback' } }], { publicationId, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
+    subjectKind: 'page', subjectKey: pageKey(lifetime), eventType: 'page.renamed', trustTier: after.page?.tier || 'unknown',
+    visibility: after.page?.visible === false ? 'private' : 'world', value: { old_slug: input.staleSlug, new_slug: input.newSlug, ...(absorbed && absorbed !== lifetime ? { absorbed_lifetime: absorbed } : {}) },
+    stateHash: after.hash, cause },
+  ...streamSubjectDrafts({ sourceId: input.sourceId, incarnation: source.incarnation, slug: input.newSlug, lifetime, op: cause.op, writerTier: after.writerTier,
+    stateHash: after.hash, before: stale.subjects, after: after.subjects, transfers }),
+  ...streamSubjectDrafts({ sourceId: input.sourceId, incarnation: source.incarnation, slug: input.newSlug, lifetime: absorbed, op: cause.op, writerTier: after.writerTier,
+    stateHash: after.hash, before: ended, after: [], transfers: new Map() })],
+  { publicationId, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
   return appended ? publicationId : null;
 }
 

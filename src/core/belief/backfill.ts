@@ -21,8 +21,11 @@
  * claim (`registerVersionCarriers`) is appended as the redaction marker. A
  * version whose own frontmatter is private publishes private events, whatever
  * the page's visibility is now.
- * Publication ids are derived from the page lifetime and version, so a rerun
- * appends nothing twice.
+ * Publication ids are derived from the page lifetime and the version row; a
+ * lifetime that already has its summary is skipped, so a rerun appends
+ * nothing even after versions were pruned. The lifetime is resolved under the
+ * page key, and the append refuses when the page was renamed or replaced
+ * since preparation.
  */
 import type { BrainEngine } from '../engine.ts';
 import { parseFactsFence } from '../facts-fence.ts';
@@ -41,7 +44,7 @@ export interface BackfillReport { source_id: string; since: string | null; pages
 
 interface Body { revision: string | null; source_time: string; text: string | null; private: boolean }
 interface Keyed { kind: 'fact' | 'take'; key: string; value: Record<string, unknown>; vhash: string; visibility: string; claimFp: string; validFrom: string | null; validUntil: string | null }
-interface Prepared { epoch: number; incarnation: string; lifetime: string; pageId: number; versions: Body[]; drafts: BeliefEventDraft[][]; summary: BeliefEventDraft; complete: boolean; reasons: string[] }
+interface Prepared { epoch: number; incarnation: string; lifetime: string; pageId: number; versions: Body[]; drafts: BeliefEventDraft[][]; publications: string[]; summary: BeliefEventDraft; complete: boolean; reasons: string[] }
 
 const MAX_EPOCH_RETRIES = 3;
 const toUuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -96,7 +99,10 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
       p.body_storage = 'segmented' AS large, p.compiled_truth, p.timeline, (${privatePagesFilterFragment('p')}) AS visible
     FROM pages p WHERE p.source_id = $1 AND p.slug = $2`, [sourceId, slug]);
   if (!page) return null;
-  const lifetime = (await resolveLifetimes(engine, [{ sourceId, incarnation: source.incarnation, slug, pageId: Number(page.id) }])).get(Number(page.id))!;
+  const lifetime = await engine.transaction(async tx => {
+    await tx.lockPageKeys([{ sourceId, slug }]);
+    return (await resolveLifetimes(tx, [{ sourceId, incarnation: source.incarnation, slug, pageId: Number(page.id) }])).get(Number(page.id))!;
+  });
   const versions = await engine.executeRaw<{ id: number; snapshot_at: string; revision: string | null; compiled_truth: string | null; timeline: string | null; segmented: boolean; private: boolean }>(`SELECT v.id,
       v.snapshot_at, v.knowledge_revision::text AS revision, v.compiled_truth, v.timeline, v.body_storage = 'segmented' AS segmented,
       (COALESCE(v.frontmatter->>'visibility', '') = 'private' OR COALESCE(v.frontmatter ? 'pinned_question', false)) AS private
@@ -114,6 +120,7 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   const hidden = new Set((await engine.executeRaw<{ subject_key: string }>(`SELECT DISTINCT subject_key FROM belief_events WHERE source_id = $1 AND event_type = 'derived.hidden'`,
     [sourceId])).map(r => r.subject_key));
   const drafts: BeliefEventDraft[][] = [];
+  const publications: string[] = [];
   let prior: Keyed[] = [];
   let priorRevision: string | null = null;
   const stateHash = sha256Hex(`backfill:${lifetime}`);
@@ -139,6 +146,7 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
       else if (was.vhash !== s.vhash) draft(s, `${s.kind}.revised`, s.value, was.vhash);
     }
     drafts.push(out);
+    publications.push(i < bodies.length ? `version:${before[i]!.id}` : closing ? `version:${closing.id}` : 'current');
     prior = subjects;
     priorRevision = body.revision;
   }
@@ -146,7 +154,7 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   const summary: BeliefEventDraft = { ...base, subjectKind: 'page', subjectKey: pageKey(lifetime), eventType: 'backfill', visibility,
     value: { backfill_complete: complete, versions: before.length, reasons: [...new Set(reasons)].sort(), coverage_start: since }, sourceTime: bodies[0]?.source_time ?? null,
     cause: { op: 'backfill', purge_epoch: source.purgeEpoch } };
-  return { epoch: source.purgeEpoch, incarnation: source.incarnation, lifetime, pageId: Number(page.id), versions: chain, drafts, summary, complete, reasons: [...new Set(reasons)].sort() };
+  return { epoch: source.purgeEpoch, incarnation: source.incarnation, lifetime, pageId: Number(page.id), versions: chain, drafts, publications, summary, complete, reasons: [...new Set(reasons)].sort() };
 }
 
 /** Appends one prepared page under its key; refuses (`belief_preparation_stale`) when a purge moved the source's epoch since preparation. */
@@ -160,9 +168,18 @@ async function appendPrepared(engine: BrainEngine, sourceId: string, slug: strin
       throw opError('belief_preparation_stale', `A purge ran in source ${sourceId} after the backfill of ${slug} was prepared.`,
         'The backfill prepares the page again from the current, redacted versions; rerun gbrain beliefs backfill if it gave up.');
     }
+    const [open] = await tx.executeRaw<{ id: number; page_lifetime: string | null }>(`SELECT p.id, l.page_lifetime::text AS page_lifetime FROM pages p
+      LEFT JOIN belief_page_lifetimes l ON l.source_incarnation = $2::uuid AND l.slug = p.slug AND l.ended_at IS NULL WHERE p.source_id = $1 AND p.slug = $3`,
+    [sourceId, source.incarnation, slug]);
+    if (Number(open?.id) !== prepared.pageId || open?.page_lifetime !== prepared.lifetime) {
+      throw opError('belief_preparation_stale', `The page at ${slug} in source ${sourceId} was renamed or replaced after its backfill was prepared.`,
+        'The backfill prepares the page again; rerun gbrain beliefs backfill if it gave up.');
+    }
+    const [done] = await tx.executeRaw<{ id: number }>(`SELECT id FROM belief_events WHERE page_lifetime = $1::uuid AND event_type = 'backfill' LIMIT 1`, [prepared.lifetime]);
+    if (done) return 0;
     let n = 0;
     for (const [i, group] of [...prepared.drafts, [prepared.summary]].entries()) {
-      const publicationId = toUuid(sha256Hex(`backfill\u0000${prepared.lifetime}\u0000${i === prepared.drafts.length ? 'summary' : i}`));
+      const publicationId = toUuid(sha256Hex(`backfill\u0000${prepared.lifetime}\u0000${prepared.publications[i] ?? 'summary'}`));
       const appended = await appendBeliefEvents(tx, group, { publicationId, origin: 'backfill', purgesPossible: source.purgesPossible });
       if (appended) publications.push(publicationId);
       n += appended;
