@@ -214,7 +214,8 @@ async function runExtractionBacklogs(ctx: DoctorContext): Promise<Check[]> {
         const backlog = await readFactsReconcileBacklog(engine).catch(() => null);
         if (backlog) { applyFactsReconcileBacklog(check, backlog); skippedSegmented = backlog.skipped_segmented ?? 0; }
       }
-      checks.push(withSkippedSegmented(check, skippedSegmented));
+      Object.assign(check, withSkippedSegmented(check, skippedSegmented));
+      checks.push(check);
     } catch {
       // Best-effort; rollup-table missing on pre-v106 brains is normal
       // and is already handled inside computeExtractHealthCheck.
