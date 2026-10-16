@@ -43,10 +43,9 @@ src/commands/extract.ts	extractLinksFromDB	field	STREAM
 src/commands/extract.ts	extractMentionsFromDb	field	STREAM	
 src/commands/extract.ts	extractStaleFromDB	field	STREAM	
 src/commands/extract.ts	runExtractCore	field	STREAM	
-src/commands/integrity.ts	cmdAuto	field	STREAM	
-src/commands/integrity.ts	scanIntegrity	field	STREAM	
-src/commands/integrity.ts	scanIntegrityBatch	field	STREAM	
-src/commands/integrity.ts	scanIntegrityBatch	sql	STREAM	
+src/commands/integrity.ts	integrityHitsOf	field	INLINE	segmented pages read their truth region block by block (bodyLines); the string branch runs only for inline pages
+src/commands/integrity.ts	scanIntegrityBatch	field	STREAM	inline rows only: a segmented row's NULL body goes to integrityHitsOf, which reads its segments
+src/commands/integrity.ts	scanIntegrityBatch	sql	STREAM	inline rows only: a segmented row's NULL body goes to integrityHitsOf, which reads its segments
 src/commands/jobs.ts	JOBS_HELP	sql	NONE	not the page body: help text
 src/commands/lint.ts	lintContent	field	STREAM	
 src/commands/migrate-engine.ts	copyPageToTarget	call:putPage	SEGW	
@@ -56,7 +55,7 @@ src/commands/quarantine.ts	runClear	call:serializeMarkdown	SEGW
 src/commands/quarantine.ts	runClear	field	SEGW	
 src/commands/quarantine.ts	runScan	call:serializePageToMarkdown	SEGW	
 src/commands/quarantine.ts	runScan	field	SEGW	
-src/commands/reconcile-links.ts	runReconcileLinks	field	STREAM	
+src/commands/reconcile-links.ts	pageCodeRefs	field	INLINE	segmented pages read block by block (bodyLines); the string branch runs only for inline pages
 src/commands/reindex-aliases.ts	runReindexAliases	field	STREAM	
 src/commands/reindex-code.ts	estimateReindexCost	field	INLINE	
 src/commands/reindex-code.ts	fetchCodePages	sql	INLINE	
@@ -454,7 +453,7 @@ src/core/repair/slug-conflicts.ts	pageContent	call:serializePageToMarkdown	SEGW
 src/core/repair/split-facts.ts	mergeOne	call:serializePageToMarkdown	SEGW	
 src/core/repair/split-facts.ts	mergeSplitFacts	call:serializePageToMarkdown	SEGW	
 src/core/repair/split-facts.ts	mergeSplitFacts	field	SEGW	
-src/core/repair/split-facts.ts	splitFactsRepair	sql	SEGW	SQL exclusion: a segmented page's NULL body never matches the fence LIKE
+src/core/repair/split-facts.ts	splitFactsRepair	sql	SEGW	SQL exclusion: a segmented page's NULL body never matches the fence LIKE; the plan lists such pages from their manifest facts regions
 src/core/repair/stale-atoms.ts	staleAtoms	sql	META	
 src/core/repair/take-supersession.ts	readPage	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	call:serializePageToMarkdown	SEGW	

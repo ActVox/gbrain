@@ -41,7 +41,6 @@ import { tweetCitation } from '../core/output/scaffold.ts';
 import { INTEGRITY_SUBCOMMANDS, ROUTERS, subcommandHelpRequested } from '../cli/subcommands.ts';
 import { OperationError } from '../core/ops/contract.ts';
 import { isSegmentedPage } from '../core/page-body/page-shape.ts';
-import type { Page } from '../core/types.ts';
 import type { BodyStorage } from '../core/page-body/types.ts';
 import { bodyLines } from '../core/page-body/segment-lines.ts';
 import { detachedValue } from '../core/page-body/segment-blocks.ts';
@@ -169,8 +168,8 @@ export interface IntegritySkippedPage { slug: string; source_id: string; reason:
  * with fence state and line numbers carried across blocks, so it gets the
  * hits the same text held as one string gets.
  */
-async function integrityHitsOf(engine: BrainEngine,
-  page: { id: number; slug: string; source_id: string; body_storage?: BodyStorage | null; compiled_truth?: string | null }): Promise<{ bare: BareTweetHit[]; external: ExternalLinkHit[] }> {
+async function integrityHitsOf(engine: BrainEngine, page: { id: number; slug: string; body_storage?: BodyStorage | null; compiled_truth?: string | null },
+  sourceId: string): Promise<{ bare: BareTweetHit[]; external: ExternalLinkHit[] }> {
   if (!isSegmentedPage(page)) {
     const text = page.compiled_truth ?? '';
     return { bare: findBareTweetHits(text, page.slug), external: findExternalLinks(text, page.slug) };
@@ -178,7 +177,7 @@ async function integrityHitsOf(engine: BrainEngine,
   const bare: BareTweetHit[] = [];
   const external: ExternalLinkHit[] = [];
   const bareState = fenceState(), externalState = fenceState();
-  for await (const lines of bodyLines(engine, page, { regions: ['truth'] })) {
+  for await (const lines of bodyLines(engine, { id: Number(page.id), slug: page.slug, source_id: sourceId }, { regions: ['truth'] })) {
     unfencedLines(lines, bareState, (line, n) => {
       const hit = bareTweetHit(line, n, page.slug);
       if (hit) bare.push(detachedValue(hit));
@@ -190,12 +189,6 @@ async function integrityHitsOf(engine: BrainEngine,
     });
   }
   return { bare, external };
-}
-
-/** The page as `integrityHitsOf` reads it: a segmented page without its body (its body fields throw). */
-function pageRef(page: Page, sourceId: string) {
-  const segmented = isSegmentedPage(page);
-  return { id: Number(page.id), slug: page.slug, source_id: sourceId, body_storage: page.body_storage, compiled_truth: segmented ? null : page.compiled_truth };
 }
 
 /** A per-page refusal (a segmented page whose run is too long to read as one block) becomes a skipped page; anything else propagates. */
@@ -427,7 +420,7 @@ export async function scanIntegrity(
     if ((page.frontmatter as Record<string, unknown> | undefined)?.validate === false) continue;
     pagesScanned++;
     try {
-      const hits = await integrityHitsOf(engine, pageRef(page, source_id));
+      const hits = await integrityHitsOf(engine, page, source_id);
       bareHits.push(...hits.bare);
       externalHits.push(...hits.external);
     } catch (error) {
@@ -488,7 +481,7 @@ async function scanIntegrityBatch(
     const page = { id: Number(row.id), source_id: row.source_id as string, slug: row.slug as string,
       compiled_truth: row.compiled_truth as string | null, body_storage: row.body_storage as BodyStorage };
     try {
-      const hits = await integrityHitsOf(engine, page);
+      const hits = await integrityHitsOf(engine, page, page.source_id);
       bareHits.push(...hits.bare);
       externalHits.push(...hits.external);
     } catch (error) {
@@ -590,7 +583,7 @@ async function cmdAuto(args: string[]): Promise<void> {
 
       let found: Awaited<ReturnType<typeof integrityHitsOf>>;
       try {
-        found = await integrityHitsOf(engine, pageRef(page, source_id));
+        found = await integrityHitsOf(engine, page, source_id);
       } catch (error) {
         skippedPages.push(skippedPage(error, { slug, source_id }));
         continue;

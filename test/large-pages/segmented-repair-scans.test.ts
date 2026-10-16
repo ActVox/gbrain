@@ -190,7 +190,7 @@ describe('repair scans over segmented pages', () => {
       const sourceId = await source(engine, 'labels-seg');
       await bigPage(engine, sourceId, 'meetings/segmented-labels', { type: 'meeting', truth: '**Date:** 2026-01-10' });
       await engine.insertFacts([{ fact: 'Date said the launch slips', entity_slug: null, source_markdown_slug: 'meetings/segmented-labels', kind: 'fact',
-        visibility: 'private', source: 'cli:extract-conversation-facts', context: 'segment 1970-01-01', confidence: 1 }], { source_id: sourceId });
+        visibility: 'private', source: 'cli:extract-conversation-facts', context: 'segment 1970-01-01', confidence: 1, row_num: 1 }], { source_id: sourceId });
       const preview = await (await repairRunner(engine, { apply: false, logger })).run('conversation-labels', await resolveRepairScope(engine, sourceId), { explicit: true, sourceFlag: sourceId });
       expect(preview.residuals).toMatchObject({ segmented_pages: 1, segmented_facts: 1 });
       expect(preview.warnings?.join('\n')).toContain(`${sourceId}:meetings/segmented-labels`);
