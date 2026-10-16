@@ -2225,6 +2225,8 @@ export interface HybridSearchMeta {
    * only when `search.reranker.gate` is not `off`.
    */
   rerank_gate?: import('./search/hybrid/rerank-gate.ts').RerankGateMeta;
+  /** `js_fallback` when the SQL cosine re-score failed and this search computed it in JavaScript (search/cosine-rescore.ts). */
+  cosine_rescore?: 'js_fallback';
   /**
    * v0.32.x (search-lite): token budget enforcement metadata. Omitted when
    * no budget was applied (backward-compatible with pre-search-lite

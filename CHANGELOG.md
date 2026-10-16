@@ -10,6 +10,51 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.259.0] - 2026-10-16
+
+**Remote Postgres searches take about half the time, typed searches stop paying for JIT compilation, `tokenmax` `query` stops expanding by default, and a new harness proves a performance change leaves every answer the same.** This is LHF wave 2 (GBRA-107), the second low-hanging-fruit wave on search latency, retrieval and cost. Every performance item below was checked against master with the new contract-parity harness: on PGLite and Postgres, every remote response block, `_meta` field and database write is identical; only timings differ.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote MCP `search` against Postgres 30 ms away | p50 1.72 s, about 75 database round trips | p50 0.88 s, about 44 (`query`: 1.88 s to 0.97 s) |
+| A `types: ['email']` search on a 20k-page Postgres brain with JIT on (gbrain's Docker image) | 729 ms, mostly LLVM compile of the type check | 154 ms |
+| `gbrain query` on `tokenmax` | one LLM expansion call per query, p50 about 2 s | no expansion, p50 about 230 ms; retrieval within noise (298 vs 299 of 300) |
+| Search re-scores about 100 candidates by cosine | full embeddings shipped to JavaScript | computed in SQL; scores within 1e-6 of before |
+| An index migration finishes on a PGLite brain | planner statistics left stale (no autovacuum) | the table is analyzed after the build; an existing expression index without statistics gets them at the next maintenance pass |
+| A search run inside a caller's transaction | its `statement_timeout`, `jit` and `enable_seqscan` could leak back | the caller's values are restored |
+
+### Things to watch
+
+- **One disclosed behavior change:** `tokenmax` `query` no longer expands. `gbrain config set search.expansion true` restores it for a brain, `--expand` / `expand: true` per call.
+- **Migrations analyze after index builds.** On a 55k-page brain that adds about 0.3 s (PGLite) to 0.8 s (Postgres) per built index, bounded by a 60 s statement timeout and a 2 s lock timeout on Postgres; a failed ANALYZE warns with the repair and never fails the migration. On Postgres, an expression index already present without statistics is reported by doctor and repaired by `gbrain repair planner-stats --apply`.
+- **Cosine re-scoring falls back to JavaScript** if the SQL statement fails; the response then carries `retrieval.cosine_rescore: "js_fallback"` and the process logs one warning.
+- No schema change.
+
+### Itemized changes
+
+**Search latency**
+- Typed-search type check (`src/core/ops/search-type-filter.ts`): one statement of per-type `EXISTS` probes over each type's schema-expanded set, with the "Page types in this brain" list only on a miss; runs with JIT off on servers where JIT is on (the engine reads `jit` once) and unprepared, inside the caller's deadline.
+- Cosine re-score in SQL (`src/core/search/cosine-rescore.ts`, `engine-sql/chunks.ts`): JavaScript edge semantics kept (zero-norm and mismatched-dimension vectors score 0, missing rows stay unhydrated); the image space keeps the JavaScript path.
+- Remote round trips (from #6734): one whole-table config read per MCP request (`withRequestConfigSnapshot`; writes read live and drop the snapshot), one settings statement per search transaction with nested restore, concurrent response-meta reads and concurrent entity resolve. Contributed by @troyhoffman-oss.
+- Vector index walk probes chunks and pages by key per ANN row instead of letting the planner materialize the scope's join (from #6747); PGLite and Postgres plan tests. Contributed by @troyhoffman-oss.
+- `tokenmax` expansion off (`MODE_BUNDLES.tokenmax.expansion = false`), with docs, skills, init picker and troubleshooting advice updated and a phrasing guard.
+
+**Planner statistics**
+- `buildIndexOnline` prints `building <idx> on ~N rows, then analyzing <table>` and runs a best-effort ANALYZE; an invalid concurrent build names its own rebuild command. `planner-stats.ts` finds expression indexes with no `pg_stats` row; doctor reports `expression_indexes_without_statistics`.
+
+**Measurement**
+- `bun run bench:parity <base-ref>` (`scripts/bench/contract-parity.ts`): fixture brain built once from the base tree, a clone per pass, stdio-MCP dispatch, side-effect diff, interleaved latency rounds through toxiproxy (`--latency --rtt-ms`) and a pool-contention mode. The refactor-wave-1 bench digest is order-only with scores beside it.
+- Interactive scale ceilings now apply at 20k pages as well as 10k (`scripts/scale/gates.ts`).
+
+**Dropped by their own gates (filed in TODOS)**
+- Saved-facts trigram index (from #6734): 5-7x faster lookups, but every index configuration broke the insert-cost gate (batch throughput down 11-45% or 15-30 ms flush stalls).
+- Paraphrased attendance questions: the development split went from 0 to 150 of 150, but 30 independently written held-out questions fired 18 of 90 runs against the preregistered 80% floor.
+
+Supersedes #6734
+Supersedes #6747
+
 ## [0.60.258.0] - 2026-10-16
 
 **Autopilot stops re-running the same failing jobs forever: a background embedding catch-up that can't make progress backs off and stops, a connector whose login changed is skipped instead of retried every few minutes, and a connector's cycle no longer walks the whole brain.** On a large brain three loops were burning the queue around the clock. A background embedding catch-up that was blocked by pages it could not rebuild failed the same way every 10 minutes, about 96 times a day, with nothing embedded. A Google or GitHub source whose credential now belongs to a different account was refused (correctly) and then tried again at every autopilot interval. And every connector's maintenance cycle re-read every page in the brain, not just its own, so on a brain with hundreds of thousands of pages it ran past its 30-minute deadline, never recorded that it finished, and started the same full walk again.

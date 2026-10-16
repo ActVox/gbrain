@@ -1153,7 +1153,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "expand": {
         "type": "boolean",
-        "description": "Default per search mode (tokenmax on)."
+        "description": "Default off; search.expansion overrides."
       },
       "detail": {
         "type": "string",
