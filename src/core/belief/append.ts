@@ -27,6 +27,11 @@ export interface AppendContext {
   publicationId: string; origin: BeliefOrigin;
   /** Writer of this transaction: an owner release needs a trusted local write at or above OWNER_TIER_FLOOR. */
   writerTier?: string | null; remote?: boolean;
+  /**
+   * The batch is an explicit owner edit of the subjects' fields (section 6.5). Only such a write can release a
+   * redaction; sync, import, reconcile, file repair, gate release and held accept never set it, whatever their tier.
+   */
+  ownerEdit?: boolean;
   /** Skip the tombstone and register reads when the source never had a purge (begin's probe). */
   purgesPossible?: boolean;
   /**
@@ -44,7 +49,7 @@ export function orderDrafts(drafts: BeliefEventDraft[]): BeliefEventDraft[] {
     || (a.subjectKey < b.subjectKey ? -1 : a.subjectKey > b.subjectKey ? 1 : 0) || a.eventType.localeCompare(b.eventType));
 }
 
-const isOwnerWrite = (ctx: AppendContext) => ctx.remote === false && isTrustTier(ctx.writerTier)
+const isOwnerWrite = (ctx: AppendContext) => ctx.ownerEdit === true && ctx.remote === false && isTrustTier(ctx.writerTier)
   && TRUST_TIER_RANK[ctx.writerTier] >= TRUST_TIER_RANK[OWNER_TIER_FLOOR];
 
 /** Tombstoned fingerprints among the drafts' asserting events (fact_purges/take_purges match rules, subject '*' included). */
@@ -92,7 +97,7 @@ async function applyRedactions(tx: BrainEngine, sourceId: string, drafts: Belief
       }
       if (!own.length) continue;
       if (own.every(s => s.released_hash === hash)) continue;
-      if (owner) {
+      if (owner && own.every(s => s.field_hash !== hash)) {
         await tx.executeRaw('UPDATE belief_redactions SET released_by = $2::uuid, released_hash = $3 WHERE id = ANY($1::bigint[])',
           [own.map(s => Number(s.id)), ctx.publicationId, hash]);
         continue;

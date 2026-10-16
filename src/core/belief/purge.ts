@@ -284,18 +284,20 @@ async function rowSubject(engine: BrainEngine, table: 'facts' | 'takes', id: num
   return subject ? { sourceId: row.source_id, key: subject.key, value: subject.value } : null;
 }
 
-/** Carrying fields of a row still under a purge redaction its current value has not been released for. */
+/** Carrying fields of a row under a purge redaction that a confirm would release: the current value is not released yet and is not the redacted value itself. */
 export async function suppressedFields(engine: BrainEngine, table: 'facts' | 'takes', id: number): Promise<string[]> {
   const subject = await rowSubject(engine, table, id);
   if (!subject) return [];
-  const rows = await engine.executeRaw<{ field: string; released_hash: string | null }>(`SELECT field, released_hash FROM belief_redactions
+  const rows = await engine.executeRaw<{ field: string; field_hash: string; released_hash: string | null }>(`SELECT field, field_hash, released_hash FROM belief_redactions
     WHERE source_id = $1 AND subject_key = $2`, [subject.sourceId, subject.key]);
-  return [...new Set(rows.filter(r => typeof subject.value[r.field] === 'string' && r.released_hash !== fieldHash(subject.value[r.field] as string)).map(r => r.field))];
+  return [...new Set(rows.filter(r => typeof subject.value[r.field] === 'string' && r.released_hash !== fieldHash(subject.value[r.field] as string)
+    && r.field_hash !== fieldHash(subject.value[r.field] as string)).map(r => r.field))];
 }
 
 /**
  * The owner release (section 6.5): the confirm action on a key binds each suppressed field to its current value
  * (`released_hash`), so the next append that writes exactly that value records it; any later change is redacted again.
+ * A field still holding the value the purge redacted (`field_hash`) is never released.
  */
 export async function releaseSuppressedFields(engine: BrainEngine, table: 'facts' | 'takes', id: number, releasedBy: string): Promise<string[]> {
   const subject = await rowSubject(engine, table, id);
@@ -305,7 +307,7 @@ export async function releaseSuppressedFields(engine: BrainEngine, table: 'facts
     const text = subject.value[field];
     if (typeof text !== 'string') continue;
     const rows = await engine.executeRaw(`UPDATE belief_redactions SET released_by = $4::uuid, released_hash = $5 WHERE source_id = $1 AND subject_key = $2 AND field = $3
-      AND released_hash IS DISTINCT FROM $5 RETURNING id`, [subject.sourceId, subject.key, field, releasedBy, fieldHash(text)]);
+      AND released_hash IS DISTINCT FROM $5 AND field_hash <> $5 RETURNING id`, [subject.sourceId, subject.key, field, releasedBy, fieldHash(text)]);
     if (rows.length) released.push(field);
   }
   return released;
