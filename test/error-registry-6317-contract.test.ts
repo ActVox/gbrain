@@ -97,7 +97,7 @@ describe('drain_stalled: the same-host stop has a cause vocabulary and a filled 
     const entry = CODES.drain_stalled as CodeEntry;
     expect(entry.reasons).toEqual(['owner_wedged_here', 'owner_missing', 'preparation_overdue', 'publication_overdue', 'no_progress']);
     // #6712 PR 2: the in-pass governor's no-admission stop (#6423) is `no_progress` now; the retired reason keeps its tombstone.
-    expect(entry.retired_reasons).toEqual({ no_admission: '0.60.258.0' });
+    expect(entry.retired_reasons).toEqual({ no_admission: '0.60.259.0' });
     expect(entry.why).toContain('owner_wedged_here');
     expect(entry.why).toContain('retry_after_ms');
     expect(entry.why).not.toContain('nothing here can claim it');
