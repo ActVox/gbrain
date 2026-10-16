@@ -3,6 +3,15 @@
     "constraints": {
       "access_tokens.access_tokens_pkey": "p PRIMARY KEY (id)",
       "access_tokens.access_tokens_token_hash_key": "u UNIQUE (token_hash)",
+      "belief_commit_marks.belief_commit_marks_pkey": "p PRIMARY KEY (publication_id)",
+      "belief_events.belief_events_event_key_key": "u UNIQUE (event_key)",
+      "belief_events.belief_events_origin_check": "c CHECK ((origin = ANY (ARRAY['live'::text, 'unmanaged'::text, 'baseline'::text, 'backfill'::text, 'reconcile'::text])))",
+      "belief_events.belief_events_pkey": "p PRIMARY KEY (id)",
+      "belief_events.belief_events_subject_kind_check": "c CHECK ((subject_kind = ANY (ARRAY['page'::text, 'fact'::text, 'take'::text, 'link'::text, 'link_transition'::text, 'coverage'::text])))",
+      "belief_events.belief_events_tier_basis_check": "c CHECK ((tier_basis = ANY (ARRAY['row'::text, 'writer'::text, 'unknown'::text])))",
+      "belief_page_lifetimes.belief_page_lifetimes_pkey": "p PRIMARY KEY (page_lifetime)",
+      "belief_redactions.belief_redactions_pkey": "p PRIMARY KEY (id)",
+      "belief_retier_manifest.belief_retier_manifest_pkey": "p PRIMARY KEY (summary_event, subject_kind, subject_key)",
       "calibration_profiles.calibration_profiles_pkey": "p PRIMARY KEY (id)",
       "calibration_profiles.calibration_profiles_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "chat_usage_log.chat_usage_log_pkey": "p PRIMARY KEY (id)",
@@ -364,6 +373,21 @@
       "access_tokens": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
+      "belief_commit_marks": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "belief_events": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "belief_page_lifetimes": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "belief_redactions": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "belief_retier_manifest": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
       "calibration_profiles": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
@@ -698,6 +722,22 @@
     "indexes": {
       "access_tokens_pkey": "CREATE UNIQUE INDEX access_tokens_pkey ON public.access_tokens USING btree (id)",
       "access_tokens_token_hash_key": "CREATE UNIQUE INDEX access_tokens_token_hash_key ON public.access_tokens USING btree (token_hash)",
+      "belief_commit_marks_pkey": "CREATE UNIQUE INDEX belief_commit_marks_pkey ON public.belief_commit_marks USING btree (publication_id)",
+      "belief_events_claim_fp": "CREATE INDEX belief_events_claim_fp ON public.belief_events USING btree (source_id, claim_fp) WHERE (claim_fp IS NOT NULL)",
+      "belief_events_event_key_key": "CREATE UNIQUE INDEX belief_events_event_key_key ON public.belief_events USING btree (event_key)",
+      "belief_events_lifetime": "CREATE INDEX belief_events_lifetime ON public.belief_events USING btree (page_lifetime, id) WHERE (page_lifetime IS NOT NULL)",
+      "belief_events_page": "CREATE INDEX belief_events_page ON public.belief_events USING btree (source_id, slug, id)",
+      "belief_events_pkey": "CREATE UNIQUE INDEX belief_events_pkey ON public.belief_events USING btree (id)",
+      "belief_events_publication": "CREATE INDEX belief_events_publication ON public.belief_events USING btree (publication_id)",
+      "belief_events_recorded": "CREATE INDEX belief_events_recorded ON public.belief_events USING btree (recorded_at)",
+      "belief_events_subject": "CREATE INDEX belief_events_subject ON public.belief_events USING btree (source_id, subject_kind, subject_key, id)",
+      "belief_page_lifetimes_open": "CREATE UNIQUE INDEX belief_page_lifetimes_open ON public.belief_page_lifetimes USING btree (source_incarnation, slug) WHERE (ended_at IS NULL)",
+      "belief_page_lifetimes_pkey": "CREATE UNIQUE INDEX belief_page_lifetimes_pkey ON public.belief_page_lifetimes USING btree (page_lifetime)",
+      "belief_page_lifetimes_slug": "CREATE INDEX belief_page_lifetimes_slug ON public.belief_page_lifetimes USING btree (source_id, slug)",
+      "belief_redactions_field_hash": "CREATE INDEX belief_redactions_field_hash ON public.belief_redactions USING btree (source_id, field_hash)",
+      "belief_redactions_pkey": "CREATE UNIQUE INDEX belief_redactions_pkey ON public.belief_redactions USING btree (id)",
+      "belief_redactions_subject": "CREATE INDEX belief_redactions_subject ON public.belief_redactions USING btree (source_id, subject_key, field)",
+      "belief_retier_manifest_pkey": "CREATE UNIQUE INDEX belief_retier_manifest_pkey ON public.belief_retier_manifest USING btree (summary_event, subject_kind, subject_key)",
       "calibration_profiles_bias_tags_gin": "CREATE INDEX calibration_profiles_bias_tags_gin ON public.calibration_profiles USING gin (active_bias_tags)",
       "calibration_profiles_holder_recent_idx": "CREATE INDEX calibration_profiles_holder_recent_idx ON public.calibration_profiles USING btree (source_id, holder, generated_at DESC)",
       "calibration_profiles_pkey": "CREATE UNIQUE INDEX calibration_profiles_pkey ON public.calibration_profiles USING btree (id)",
@@ -997,6 +1037,8 @@
     },
     "policies": {},
     "sequences": {
+      "belief_events_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=belief_events.id",
+      "belief_redactions_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=belief_redactions.id",
       "calibration_profiles_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=calibration_profiles.id",
       "chat_usage_log_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=chat_usage_log.id",
       "chronicle_judge_reservations_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=chronicle_judge_reservations.id",
@@ -1059,6 +1101,83 @@
           "7 revoked_at timestamp with time zone/timestamptz NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
+      },
+      "belief_commit_marks": {
+        "columns": [
+          "1 publication_id uuid/uuid NOT NULL",
+          "2 observed_at timestamp with time zone/timestamptz NOT NULL"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
+      },
+      "belief_events": {
+        "columns": [
+          "1 id bigint/int8 NOT NULL DEFAULT nextval('belief_events_id_seq'::regclass)",
+          "2 event_key bytea/bytea NOT NULL",
+          "3 source_id text/text NOT NULL",
+          "4 source_incarnation uuid/uuid NOT NULL",
+          "5 page_lifetime uuid/uuid NULL",
+          "6 slug text/text NOT NULL",
+          "7 subject_kind text/text NOT NULL",
+          "8 subject_key text/text NOT NULL",
+          "9 event_type text/text NOT NULL",
+          "10 origin text/text NOT NULL DEFAULT 'live'::text",
+          "11 trust_tier text/text NOT NULL",
+          "12 writer_tier text/text NULL",
+          "13 tier_basis text/text NOT NULL DEFAULT 'row'::text",
+          "14 visibility text/text NOT NULL",
+          "15 publication_id uuid/uuid NOT NULL",
+          "16 ord integer/int4 NOT NULL",
+          "17 recorded_at timestamp with time zone/timestamptz NOT NULL DEFAULT clock_timestamp()",
+          "18 source_time timestamp with time zone/timestamptz NULL",
+          "19 valid_from timestamp with time zone/timestamptz NULL",
+          "20 valid_until timestamp with time zone/timestamptz NULL",
+          "21 value jsonb/jsonb NULL",
+          "22 value_hash text/text NULL",
+          "23 prior_hash text/text NULL",
+          "24 state_hash text/text NOT NULL",
+          "25 cause jsonb/jsonb NOT NULL",
+          "26 claim_fp text/text NULL",
+          "27 purged boolean/bool NOT NULL DEFAULT false",
+          "28 redacted_fields ARRAY/_text NULL"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
+      },
+      "belief_page_lifetimes": {
+        "columns": [
+          "1 page_lifetime uuid/uuid NOT NULL",
+          "2 source_id text/text NOT NULL",
+          "3 source_incarnation uuid/uuid NOT NULL",
+          "4 slug text/text NOT NULL",
+          "5 page_id integer/int4 NULL",
+          "6 started_at timestamp with time zone/timestamptz NOT NULL DEFAULT clock_timestamp()",
+          "7 ended_at timestamp with time zone/timestamptz NULL"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
+      },
+      "belief_redactions": {
+        "columns": [
+          "1 id bigint/int8 NOT NULL DEFAULT nextval('belief_redactions_id_seq'::regclass)",
+          "2 source_id text/text NOT NULL",
+          "3 subject_key text/text NOT NULL",
+          "4 field text/text NOT NULL",
+          "5 purge_request uuid/uuid NOT NULL",
+          "6 field_hash text/text NOT NULL",
+          "7 released_by uuid/uuid NULL",
+          "8 released_hash text/text NULL",
+          "9 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
+      },
+      "belief_retier_manifest": {
+        "columns": [
+          "1 summary_event bigint/int8 NOT NULL",
+          "2 source_id text/text NOT NULL",
+          "3 subject_kind text/text NOT NULL",
+          "4 subject_key text/text NOT NULL",
+          "5 from_tier text/text NULL",
+          "6 to_tier text/text NOT NULL"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
       },
       "calibration_profiles": {
         "columns": [

@@ -913,7 +913,7 @@
           {
             "category": "ops",
             "elapsed_ms": "<volatile>",
-            "message": "RLS enabled on 140/140 public tables",
+            "message": "RLS enabled on 145/145 public tables",
             "name": "rls",
             "status": "ok"
           },
@@ -927,7 +927,7 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1197 column(s) verified against live schema",
+            "message": "1249 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
@@ -2718,6 +2718,45 @@
             "elapsed_ms": "<volatile>",
             "message": "Every page has its revision; the page revision backfill is complete.",
             "name": "revision_backfill",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "beliefs",
+                "enable",
+                "--source",
+                "default",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain beliefs enable --source default --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/designs/BELIEF_LEDGER.md#73-the-doctor-coverage-check",
+              "next": "ask_user",
+              "requires_exclusive": false,
+              "user_message": "Do you want gbrain to keep a belief ledger (a recorded history of facts, takes and links) for this source?",
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "belief_ledger_coverage",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Enabling baselines every page of the source and records each later change; only a managed source is certified."
+            },
+            "message": "The belief ledger is off: no source records what this brain had recorded, and when.",
+            "name": "belief_ledger_coverage",
+            "readiness_state": "disabled_by_choice",
+            "severity": "info",
             "status": "ok"
           },
           {
@@ -4747,7 +4786,7 @@
           {
             "category": "ops",
             "elapsed_ms": "<volatile>",
-            "message": "RLS enabled on 140/140 public tables",
+            "message": "RLS enabled on 145/145 public tables",
             "name": "rls",
             "status": "ok"
           },
@@ -4761,7 +4800,7 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1197 column(s) verified against live schema",
+            "message": "1249 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
@@ -6552,6 +6591,45 @@
             "elapsed_ms": "<volatile>",
             "message": "Every page has its revision; the page revision backfill is complete.",
             "name": "revision_backfill",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "beliefs",
+                "enable",
+                "--source",
+                "default",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain beliefs enable --source default --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/designs/BELIEF_LEDGER.md#73-the-doctor-coverage-check",
+              "next": "ask_user",
+              "requires_exclusive": false,
+              "user_message": "Do you want gbrain to keep a belief ledger (a recorded history of facts, takes and links) for this source?",
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "belief_ledger_coverage",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Enabling baselines every page of the source and records each later change; only a managed source is certified."
+            },
+            "message": "The belief ledger is off: no source records what this brain had recorded, and when.",
+            "name": "belief_ledger_coverage",
+            "readiness_state": "disabled_by_choice",
+            "severity": "info",
             "status": "ok"
           },
           {

@@ -795,6 +795,10 @@
       },
       {
         "category": "brain",
+        "name": "belief_ledger_coverage"
+      },
+      {
+        "category": "brain",
         "name": "trust_tiers"
       },
       {
