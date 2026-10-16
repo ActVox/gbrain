@@ -2053,6 +2053,20 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No automatic embed-backfill is repeating the same failure.",
+            "name": "embed_backfill_stalled",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No connector source is waiting for its account to be repinned.",
+            "name": "connector_account_mismatch",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "active_ids": [],
               "authorizable": {},
@@ -2661,6 +2675,7 @@
                 "timeline_entries"
               ],
               "engine": "pglite",
+              "expression_indexes_without_statistics": [],
               "fix": "gbrain repair planner-stats --apply",
               "missing_search_statistics": [],
               "stale": []
@@ -5910,6 +5925,20 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No automatic embed-backfill is repeating the same failure.",
+            "name": "embed_backfill_stalled",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No connector source is waiting for its account to be repinned.",
+            "name": "connector_account_mismatch",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "active_ids": [],
               "authorizable": {},
@@ -6518,6 +6547,7 @@
                 "timeline_entries"
               ],
               "engine": "pglite",
+              "expression_indexes_without_statistics": [],
               "fix": "gbrain repair planner-stats --apply",
               "missing_search_statistics": [],
               "stale": []

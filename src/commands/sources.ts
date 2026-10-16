@@ -1190,6 +1190,8 @@ async function runFederate(engine: BrainEngine, args: string[], value: boolean):
       console.log(`  → embed-backfill skipped (24h spend cap $${sub.spendCapUsd} reached for this source).`);
     } else if (sub.status === 'no_worker_surface') {
       console.log(`  → embed-backfill not queued (${sub.engineKind} has no recognized persistent worker); run: gbrain embed --stale --source ${id}`);
+    } else if (sub.status === 'stalled') {
+      console.log(`  → embed-backfill not queued: the last ${sub.failures} runs failed on the same blocked pages with nothing embedded. See: gbrain doctor --only embed_backfill_stalled`);
     } else { sub satisfies never; }
   } catch (err) {
     // Federation flip already succeeded; embed-backfill is a follow-up nicety.

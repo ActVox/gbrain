@@ -316,6 +316,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'queue_health',
   // #4578: brain-wide maintenance jobs dying at their deadline.
   'global_maintenance_timeouts',
+  'embed_backfill_stalled',
+  'connector_account_mismatch',
   // #5157: queued jobs from before the v0.50 authority cutover block every worker.
   'legacy_job_authority',
   // F3: legacy tokens on the JSONB-only grant shape (info) and grant drift (warn).

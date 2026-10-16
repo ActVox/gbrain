@@ -660,7 +660,9 @@ More: [docs/guides/write-refusals.md#drain-connection-lost](../../docs/guides/wr
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| The connector credential resolves to a different account than the source is pinned to. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+| The connector credential resolves to a different account than the source is pinned to. | A connector source is pinned to the account it first synced, so a swapped credential can never import another account's mail, calendar or repositories into it. The refused run records the mismatch, and autopilot skips the source (unavailable-path) instead of retrying it every interval (#6803). | Restore the credential for the pinned account and run gbrain sync --source <id> (it clears the skip once the account check passes), or add a new source for the new account and archive this one with gbrain sources archive <id>. gbrain doctor --only connector_account_mismatch lists every affected source. Run: gbrain doctor --only connector_account_mismatch --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#connector-account-changed](../../docs/guides/write-refusals.md#connector-account-changed)
 
 ### connector_fence_below_timeline
 
@@ -985,6 +987,16 @@ More: [docs/operations/spend-controls.md#dream-paid-loop-breaker-dreambreakermax
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Only a failed, non-running embedding effect can be explicitly retried. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### embed_backfill_stalled
+
+<a id="embed_backfill_stalled"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A source's automatic embed-backfill failed the same way several times with nothing embedded, so automatic backfill for it backs off and then stops. | The only remaining work sits on pages whose text projection cannot be rebuilt (a rebuild_failed projection, or an image page only its importer rebuilds). Each identical run spent a worker slot and dead-lettered; after three, automatic submission stops until the blocked pages or the stale chunks change, or a run embeds something (#6803). Explicit gbrain embed --stale and gbrain jobs submit embed-backfill are not gated. | Run gbrain doctor --only embed_backfill_stalled to see the blocked pages, preview the repair with gbrain projections drain --dry-run, then run gbrain projections drain; it names each page that still fails and its next step. Run: gbrain doctor --only embed_backfill_stalled --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/repair.md#embed-backfill-stalled](../../docs/guides/repair.md#embed-backfill-stalled)
 
 ### embedding_auth_failed
 

@@ -34,6 +34,7 @@ import { LockStolenError, syncLockId, withRefreshingLock, type DbLockHandle } fr
 import { ownedGoogleReceipts, prepareGoogleReceiptPatch, type GoogleReceipts } from './connector-google-receipts.ts';
 import { connectorCheckpointKeys, connectorIdentity, connectorIdentityMatches, type ConnectorIdentity, type ConnectorKind } from './connector-identity.ts';
 import { readManagedConnectorState, recordConnectorSyncAttempt, sameConnectorAccount, writeManagedConnectorState, type ConnectorAccount, type ConnectorPendingEntry, type ConnectorRunCounts, type ConnectorState } from './connector-state.ts';
+import { connectorConfigDigest } from './connector-account-mismatch.ts';
 import { connectorAccountChanged, connectorFenceHint, docsAnchor, receiptDeliveredHint, CONNECTOR_INTENT_OUTDATED_OLD_HOST, CONNECTOR_INTENT_OUTDATED_PRE_UPGRADE } from './connector-errors.ts';
 import { inspectUnchanged, screeningRequest } from './noop-kernel.ts';
 import { conceptPreservationHold, preserveCanonicalFences } from '../cycle/concept-publication.ts';
@@ -435,12 +436,16 @@ export class ManagedConnectorSync {
   async assertAccount(resolved: ConnectorAccount | null): Promise<void> {
     if (this.blockedByCheckpoint) { this.stopped = true; throw new ConnectorWaitBudgetStop(); }
     const configured = this.identity.kind === 'google' ? (this.identity.config as GoogleSourceConfig).account : null;
-    if (resolved === null) throw connectorAccountChanged(this.sourceId, this.identity.kind, this.identity.config, this.connectorState.account ?? configured ?? 'the pinned account', null);
+    if (resolved === null) throw await this.accountRefused(connectorAccountChanged(this.sourceId, this.identity.kind, this.identity.config, this.connectorState.account ?? configured ?? 'the pinned account', null));
     if (configured !== null && resolved.kind === 'google' && resolved.email !== configured) {
-      throw connectorAccountChanged(this.sourceId, this.identity.kind, this.identity.config, this.connectorState.account ?? configured, resolved);
+      throw await this.accountRefused(connectorAccountChanged(this.sourceId, this.identity.kind, this.identity.config, this.connectorState.account ?? configured, resolved));
     }
     const pinned = this.connectorState.account;
-    if (pinned && !sameConnectorAccount(pinned, resolved)) throw connectorAccountChanged(this.sourceId, this.identity.kind, this.identity.config, pinned, resolved);
+    if (pinned && !sameConnectorAccount(pinned, resolved)) throw await this.accountRefused(connectorAccountChanged(this.sourceId, this.identity.kind, this.identity.config, pinned, resolved));
+    if (this.connectorState.account_mismatch) {
+      this.connectorState = { ...this.connectorState, account_mismatch: null };
+      if (pinned) await this.writeState();
+    }
     if (!pinned) {
       const migrated = this.connectorState.upgrade_recovery === 'resumed';
       this.connectorState = { ...this.connectorState, account: resolved, pinned_at: new Date().toISOString(), continuity_unverified: migrated };
@@ -451,6 +456,17 @@ export class ManagedConnectorSync {
       }
     }
     if (this.resetRequested) await this.resetCheckpoint();
+  }
+  /**
+   * #6803: records the refusal in the connector state so autopilot stops
+   * dispatching this source until the operator repins it or changes its
+   * connector config. Best-effort: the refusal itself is what the caller sees.
+   */
+  private async accountRefused(error: OperationError): Promise<OperationError> {
+    this.connectorState = { ...this.connectorState, account_mismatch: { at: new Date().toISOString(),
+      detail: error.detail === 'account_unresolved' ? 'account_unresolved' : 'account_changed', config_digest: connectorConfigDigest(this.identity.config) } };
+    await this.writeState().catch(() => undefined);
+    return error;
   }
   /** `--reset-checkpoint`: resolve pending writes, then start from an empty cursor. Existing pages stay; the pin is kept. */
   private async resetCheckpoint(): Promise<void> {

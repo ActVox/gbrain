@@ -651,6 +651,14 @@
       },
       {
         "category": "ops",
+        "name": "embed_backfill_stalled"
+      },
+      {
+        "category": "ops",
+        "name": "connector_account_mismatch"
+      },
+      {
+        "category": "ops",
         "name": "legacy_job_authority"
       },
       {

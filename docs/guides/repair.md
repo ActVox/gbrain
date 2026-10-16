@@ -298,7 +298,32 @@ To drain now:
 gbrain projections drain            # until every page queued at the start was tried once
 gbrain projections drain --limit 5000
 gbrain projections drain --json     # {rebuilt, superseded, failed: [{source_id, slug, reason}], remaining}
+gbrain projections drain --dry-run  # rebuild nothing: list the queued rows in the order a drain tries them
 ```
+
+`--dry-run` is the preview: it reads the queue only and prints the rows a
+drain with the same `--limit` (default 50) would try, in that order, each with
+its queue reason (`rebuild_failed` for a row whose last rebuild failed);
+`--json` gives `{pending, failed, rows}`.
+
+<a id="embed-backfill-stalled"></a>
+**An automatic embed-backfill that keeps failing the same way.** A page whose
+projection cannot be rebuilt (`rebuild_failed`) leaves its chunks
+unembeddable, so every automatic `embed-backfill` for that source ends
+`incomplete; N chunks remain and M projections are blocked` with nothing
+embedded. After the first such failure the next automatic submission waits
+twice the cooldown (20, then 40 minutes); after three identical failures
+automatic submission stops for that source, and a retry inside one job that
+finds the same blockers dead-letters instead of running again. Doctor
+`embed_backfill_stalled` names the blocked pages, their page kind and queue
+reason. Preview with `gbrain projections drain --dry-run`, then run
+`gbrain projections drain`: it retries each queued Markdown or code page in the
+foreground and prints why a page still fails and its next step. Image and media
+pages are rebuilt only by their importer (`gbrain sync --full --source <id>` or
+`gbrain embed --stale --images --source <id>`). Automatic backfill resumes by
+itself once the blocked pages or the stale chunks change, or a run embeds
+anything; `gbrain embed --stale --source <id>` and
+`gbrain jobs submit embed-backfill` are never held back.
 
 | Exit | Meaning |
 | --- | --- |

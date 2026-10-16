@@ -567,7 +567,7 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
 # runs each question as an agent's stdio MCP call would (remote, stdio, source
 # `default`), at the operation's own default limit and under the brain's resolved
 # search mode, so a receipt reproduces from a tagged gbrain. `query` expands by the
-# mode (on only in tokenmax) unless --op-expand on|off says otherwise. Each row's
+# mode (off by default in all three modes) unless --op-expand on|off says otherwise. Each row's
 # `via_operation` records the context, the `expand` sent, model calls per
 # touchpoint, latency, the CRAG grade and the expansion outcome;
 # run_config.via_operation_summary has the tree, p50/p95 latency and model calls
