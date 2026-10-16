@@ -131,6 +131,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `request-indexes` | `persistence_request_indexes` | Creates a missing managed sync request index, or drops an INVALID one (left by an interrupted concurrent build) and rebuilds it, on a brain whose schema version is already current. Postgres builds each index `CONCURRENTLY`, one at a time, so writes continue; PGLite builds inline. It changes no user data, takes no journal admission and runs brain-wide (`--source` does not narrow it). See [managed sync request indexes](#request-indexes). | `building`: an index another session is still building; it is never dropped. |
 | `connector-fences` | none (a `connector_fence_below_timeline` refusal names it) | Moves a facts or takes fence that sits below the timeline sentinel of a Google or GitHub page into the page body through a revision-bound `put_page`, so the connector's next re-render carries the fence instead of refusing. Then re-attempt the held item with `gbrain sources retry-held <source>`. | `kept_ambiguous_pages`: pages whose fences are duplicated, unbalanced or unparseable. Move the fence by hand: read the page, place the fence above the `<!-- timeline -->` line, and save it with the current `expected_revision`. |
 | `take-supersession` | none | Rebuilds `takes.superseded_by` for supersession chains written before the pointer moved onto the old fence row (#5886). Each struck take is linked to the row that replaced it only from evidence: a committed `takes_supersede` receipt, a stored `superseded_by`, or a row carrying the old `superseded by #<own row>` pointer with exactly one possible predecessor. The pointer is written onto the old row (`<source>; superseded by #N`) and stale self-pointers are dropped through a revision-bound `put_page`; a page whose fence is already right but whose stored pointers differ is reprojected without a page write. See [take supersession](#take-supersession). | `ambiguous_pages` / `ambiguous_rows`: pages where a new row has two or more possible predecessors, or where evidence conflicts. The preview lists each with its candidates and the manual edit; nothing on them changes. `unparsed_pages`: pages whose takes fence does not parse cleanly. |
+| `accepted-takes` | none | Explicit-only, preview-bound. Restores takes that accepting a held strike-through or kind change removed on v0.60.253.0 (`gbrain trust confirm tp<id>` ran a `takes_remove` instead of applying the change). It restores only what the records prove: the accepted proposal, the `takes_remove` receipt bound to it, the page version that receipt archived (the row the accept should have applied) and the reservation row still holding its number. `--apply --expect <hash>` republishes each page with that row through a revision-bound `put_page`. See [accepted takes](#accepted-takes). | `version_missing` (the archived version was pruned), `row_number_in_use` (the number holds a take again), `page_missing`, `fence_unreadable`. A grade or resolution the database alone held is not in any record and is not restored. |
 | `connector-checkpoints` | `connector_checkpoints` | Deletes managed connector checkpoint rows and retry pointers that no registered connector source can load and that are older than 7 days. They accumulate after a content setting such as `g_history_days` changes, or when a connector host older than v0.60.11.0 runs during an upgrade. Cleanup only: it never copies or re-keys a checkpoint, takes no journal admission and runs brain-wide (`--source` does not narrow it). | Rows a queued or running connector write, or a connector's recorded pending set, still references. |
 | `orphan-bindings` | `orphan_persistence_bindings` | Deletes persistence source bindings whose source was removed, or that belong to an earlier incarnation of a source re-added under the same id. `gbrain sources remove` and `gbrain sources purge` delete the binding; one an older gbrain left behind makes the re-added source read as claimed, so every `gbrain sync --source <id>` fails with `writer_coordinator_required`. Bookkeeping only: no journal admission, no page or file changes, and it runs brain-wide (`--source` does not narrow it). See [orphan bindings](#orphan-bindings). | A binding that a queued, running or recovering write request of the same source incarnation still references. |
 | `managed-sync-orphans` | `sync_failures` | Explicit-only, preview-bound. Retires managed sync bookkeeping nothing current can resume or clear: a `managed-sync-failure` row whose cursor key has no cursor, and an unfinished `managed-sync` cursor recorded by a principal that is no longer an active local writer (or a pre-options cursor a later run superseded) whose pending request is terminal. `op_checkpoints` rows only; no journal admission, no page or file changes. The preview prints a hash; `--apply --expect <hash>` retires exactly that set. See [managed sync orphans](#managed-sync-orphans). | An unfinished cursor whose pending request is still queued, running or recovering, or one the live writer can resume with its recorded options (doctor prints that sync command). |
@@ -392,6 +393,39 @@ hand: read the page (`gbrain get --source <source> -- <slug>`), append
 `; superseded by #<new row>` to the source cell of the row each new row
 replaced, save it with the current `expected_revision`, then run the repair
 again; it drops the leftover self-pointers and stores the pointers.
+
+<a id="accepted-takes"></a>
+### Accepted takes
+
+**Say to your agent:** *"I accepted held take changes on v0.60.253.0. Check whether any take was removed and restore it."*
+
+On v0.60.253.0, accepting a held change to a take you had confirmed
+(`gbrain trust confirm tp<id>`, or `gbrain trust review --accept-all`) removed
+the take when the change kept its claim: an agent struck it through
+(`~~claim~~`) or changed its kind or holder. The take left the page's takes
+fence and the takes index; the accept should have applied the change instead.
+A later sync or publish cannot bring it back, because the page no longer
+carries the row. A take with a grade in its fence was safe: the removal
+refused it.
+
+Preview, then apply after you agree:
+
+```bash
+gbrain repair accepted-takes                     # each removed take, its proposal and the page version it comes from
+gbrain repair accepted-takes --json              # listing[] and residuals
+gbrain repair accepted-takes --apply --expect <preview-hash>
+```
+
+A take is listed only when every record agrees: the accepted proposal (a strike
+or same-claim change, filed by a page publish or reconcile), the committed
+`takes_remove` receipt bound to it, the page version that removal archived
+(whose fence holds the row at that number) and the reservation row the removal
+left in the live fence. The apply puts that fence row back in place of the
+reservation through a revision-bound `put_page`, at the tier of the write you
+accepted, which is what a correct accept leaves. Not restored, because no
+record holds it: a grade or resolution stored only in the database, the take's
+id (the row gets a new one) and its embedding (re-embedded). A second preview
+lists nothing.
 
 <a id="orphan-bindings"></a>
 ### Orphan persistence bindings
