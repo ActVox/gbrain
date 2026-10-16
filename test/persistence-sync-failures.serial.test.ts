@@ -301,7 +301,9 @@ test('checkpoint, discovery, and freeze failures remain diagnosable without a fi
     const f = await fixture(engine, { 'note.md': 'A stable observation before checkpoint.\n' });
     const options = { sourceId: f.id, noPull: true };
     expect((await performManagedSync(engine, options, { maxPages: 1, maxMs: 1000 })).status).toBe('partial');
-    await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [f.id, f.head]), TEST_WRITE_ATTRIBUTION));
+    // #6834: the checkpoint moves to a commit outside the run (the fixture's empty initial commit); one moved to the run's own target is finished by the next sync.
+    const outside = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD~1'], { encoding: 'utf8' }).trim();
+    await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [f.id, outside]), TEST_WRITE_ATTRIBUTION));
     const blocked = await performManagedSync(engine, options);
     expect(blocked).toEqual(expect.objectContaining({ status: 'blocked_by_failures', failures: [expect.objectContaining({ path: '<checkpoint>', phase: 'checkpoint', code: 'revision_conflict' })] }));
     expect(await performManagedSync(engine, options)).toEqual(blocked);

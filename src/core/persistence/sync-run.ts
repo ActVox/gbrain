@@ -15,7 +15,7 @@ import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
-import { slugModeCheckpointRevivable } from './sync-slug-mode.ts';
+import { checkpointRevival } from './sync-slug-mode.ts';
 import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
@@ -799,14 +799,14 @@ const revivableCheckpointRefusal = (done: Pick<WriteRequest, 'state' | 'error_co
  * knock-on, a receipt at an index the cursor settled), a fresh checkpoint request replaces it by cursor swap, and its
  * publication validates everything again. The completed manifest and the old receipt stay as they are. Null when it
  * still blocks, or after `CHECKPOINT_REVIVAL_LIMIT` revivals in this invocation (the next invocation re-assesses).
- * #6694: a checkpoint refused for its slug-root mode is revived the same way once the source admits it (sync-slug-mode.ts).
+ * #6694/#6834: a slug-mode refusal the source now admits, or a moved checkpoint at this run's target, revives too (sync-slug-mode.ts).
  */
 async function reviveCheckpoint(engine: BrainEngine, input: SettleInput): Promise<Cursor | null> {
   const { cursor, key, pending, done } = input;
-  const refused = revivableCheckpointRefusal(done) || (pending.intent.kind === 'managed_sync_checkpoint' && await slugModeCheckpointRevivable(engine, cursor, pending.intent, done));
+  const refused = revivableCheckpointRefusal(done) || (pending.intent.kind === 'managed_sync_checkpoint' && await checkpointRevival(engine, cursor, pending.intent, done));
   const revivals = checkpointRevivalsByRun.get(input.run) ?? 0;
   if (pending.intent.kind !== 'managed_sync_checkpoint' || !refused || done.recovery || cursor.index !== cursor.entries.length || revivals >= CHECKPOINT_REVIVAL_LIMIT) return null;
-  const base = withoutPending(cursor);
+  const base: Cursor = { ...withoutPending(cursor), ...(refused === 'overtaken' ? { overtaken: true as const } : {}) };
   const fresh = await freezeEntry(engine, base, key, input.assertActive, input.run);
   if (!('requestId' in fresh)) return null;
   const blocker = await findIncompleteSyncReceipt(engine, cursor.binding.worktree_id, cursor.runId, fresh.intent.supersededRequests ?? [], fresh.intent.settled ?? null);
