@@ -17,7 +17,6 @@ export const REDACTION_MARKER = (purgeRequest: string) => `[redacted: purge ${pu
 export type SubjectRef = string;
 export const lifetimeRef = (lifetime: string): SubjectRef => `L:${lifetime}`;
 export const slugRef = (incarnation: string, slug: string): SubjectRef => `S:${incarnation}:${slug}`;
-export const isSlugRef = (ref: SubjectRef) => ref.startsWith('S:');
 
 export const pageKey = (lifetime: string) => JSON.stringify(['p', lifetimeRef(lifetime)]);
 export const factKey = (subject: SubjectRef, fingerprint: string, visibility: string) => JSON.stringify(['f', subject, FACT_FP_VERSION, fingerprint, visibility]);
@@ -27,7 +26,8 @@ export const takeKey = (lifetime: string, claimHash: string, ordinal: number) =>
 export const linkKey = (from: SubjectRef, to: SubjectRef, linkType: string, linkSource: string | null, origin: SubjectRef | null) =>
   JSON.stringify(['l', from, to, linkType, linkSource, origin]);
 export const transitionKey = (link: string, kind: string, occurredOn: string, producer: string) => JSON.stringify(['lt', JSON.parse(link), kind, occurredOn, producer]);
-export const heldKey = (kind: string, fingerprint: string) => JSON.stringify(['h', kind, fingerprint]);
+/** A held write's key: scoped to its stream (lifetime, or slug when the page has none) so two holds with one fingerprint stay two keys. */
+export const heldKey = (subject: SubjectRef, kind: string, fingerprint: string) => JSON.stringify(['h', subject, kind, fingerprint]);
 
 /** Replace the subject component of a fact key (adoption moves `S:` to `L:`). */
 export function factKeySubject(key: string): { subject: SubjectRef; rest: string } | null {
