@@ -5602,9 +5602,12 @@ policies read `app.scopes` only; the app-layer source filters stay layer 1.
 
 A write role that does not own the tables needs `SELECT, INSERT, UPDATE, DELETE`
 on all six, as on any table a migration adds, even while no page is segmented:
-purging soft-deleted pages, the maintenance sweep's facts pass, fact withdrawal
-and doctor's credential check name them. With the policies above it creates
-segmented pages and sees only its sources' rows
+purging soft-deleted pages, fact withdrawal (`forget_fact`, `purge_fact`), the
+maintenance sweep's facts pass, doctor's credential check and the segment
+storage sweep name them. Its ordinary writes (`put_page`, `remember`, sync
+imports, their embedding and the unchanged-file check) do not, while it sees no
+segmented chunk (`test/e2e/segmented-switch-off-write-role.test.ts`). With the
+policies above it creates segmented pages and sees only its sources' rows
 (`test/e2e/segmented-rls-scope.test.ts`).
 
 **In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
