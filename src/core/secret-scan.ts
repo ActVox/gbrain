@@ -1103,6 +1103,20 @@ export function scanText(text: string, opts: ScanOpts = {}): SecretFinding[] {
   return out;
 }
 
+/**
+ * `scanText` with each claim's absolute span [start, end) in `text` (UTF-16
+ * offsets of the claimed value). An allowlisted claim keeps its span with
+ * `finding: null`, so the windowed scan (secret-scan-stream.ts) can still
+ * drop a seam's partial copy of it.
+ */
+export function scanTextSpans(text: string, opts: ScanOpts = {}): Array<{ start: number; end: number; finding: SecretFinding | null }> {
+  const allowlist = opts.allowlist ?? [];
+  return scanInternal(text, opts).map((hit) => {
+    const fullHex = sha256Hex(hit.value);
+    return { start: hit.abs, end: hit.abs + hit.value.length, finding: valueAllowlisted(fullHex, allowlist) ? null : toFinding(hit, fullHex) };
+  });
+}
+
 /** Bytes to sniff for NUL when deciding content is binary. */
 export const BINARY_SNIFF_BYTES = 8192;
 

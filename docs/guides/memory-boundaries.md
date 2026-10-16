@@ -202,7 +202,7 @@ wrong with the page.
 | `put_pages` batch | 8 MiB per batch | send large pages one per `put_page`, or by file |
 | Persistence journal | 64 MiB of outstanding JSON-escaped write intent per principal (was 32 MiB), 256 MiB per brain | nothing: a second large write waits for the first |
 | Local persistence socket (IPC) | 32 MiB per frame, JSON-escaped | nothing for ordinary text; only a pathological page (mostly quotes or backslashes) reaches it below the ceiling |
-| Pre-push secret scan | 25 MiB per file; gbrain never writes a canonical file over it | — |
+| Pre-push secret scan | 512 MiB per staged file: up to 25 MiB a file is scanned whole, above it in bounded windows streamed from git; gbrain still never writes a canonical file over 25 MiB | split the file, or `git rm --cached` it |
 | GitHub | warns at 50 MB, rejects at 100 MB | — |
 | Export | streams a page stored in segments, up to the page ceiling; aborts on an inline page whose payload is over 32 MiB, which the 24 MiB ceiling makes unreachable | — |
 | Company-brain inspection | 5 MB per file | unchanged |
