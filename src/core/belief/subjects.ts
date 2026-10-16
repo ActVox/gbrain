@@ -64,7 +64,7 @@ export function keyedSubjects(ctx: KeyContext, state: RawState, pageVisibility: 
     const head = rows[0]!;
     const value = factValue(head, entity, rows.length);
     out.push({ kind: 'fact', key, stream, value, vhash: valueHash(value), tier: head.tier, visibility: head.visibility, rowIds: rows.map(r => r.id),
-      rowNum: head.row_num, dbOnly: head.sms == null, claimFp: head.fp, validFrom: head.valid_from, validUntil: head.valid_until,
+      rowNum: head.row_num, dbOnly: head.sms == null || (head.dimension != null && head.row_num == null), claimFp: head.fp, validFrom: head.valid_from, validUntil: head.valid_until,
       label: { subject_slug: stream, ...(head.entity_slug && head.entity_slug !== stream ? { entity_slug: head.entity_slug } : {}) } });
   }
   const pagesById = new Map(state.pages.map(p => [p.id, p]));

@@ -27,7 +27,7 @@ export type BeliefNote =
   | { kind: 'withdrawn'; factIds: number[] }
   | { kind: 'superseded'; oldId: number; newId: number | null }
   | { kind: 'purged'; table: 'facts' | 'takes'; ids: number[]; request: string }
-  | { kind: 'transferred'; fromLifetime: string; table: 'facts' | 'takes'; ids: number[] };
+  | { kind: 'transferred'; fromSlug: string; table: 'facts' | 'takes' | 'links'; ids: number[] };
 
 export interface BeliefBatchOptions {
   sourceId: string;
@@ -59,6 +59,12 @@ const store = new AsyncLocalStorage<Batch>();
 /** A guard or identity path reports a decision to the enclosing batch; a no-op outside one. */
 export function noteBelief(note: BeliefNote): void {
   store.getStore()?.notes.push(note);
+}
+
+/** The enclosing batch's publication, source and stream slugs, or null outside a batch. */
+export function currentBeliefBatch(): { publicationId: string; sourceId: string; slugs: readonly string[] } | null {
+  const batch = store.getStore();
+  return batch ? { publicationId: batch.publicationId, sourceId: batch.opts.sourceId, slugs: batch.opts.slugs } : null;
 }
 
 /** Coverage and purge probes for one source, in one read. */
@@ -177,6 +183,24 @@ const retractType = (kind: Subject['kind']) => kind === 'link_transition' ? 'lin
 interface DiffContext {
   opts: BeliefBatchOptions; batch: Batch; writerTier: string; lifetimeAt: (slug: string) => string | null; streamHash: (slug: string) => string;
   cause: (extra?: Record<string, unknown>) => Record<string, unknown>; postSubjects: Subject[];
+  /** `kind:rowId` of each row a transfer note moved -> the subject it left and the lifetime of the page it left. */
+  transfers: Map<string, { from: Subject; fromLifetime: string | null }>;
+}
+
+const TRANSFER_KIND: Record<string, Subject['kind']> = { facts: 'fact', takes: 'take', links: 'link' };
+
+/** The pre-transaction subject of each row a `transferred` note moved, keyed `kind:rowId`. */
+function transferSources(notes: BeliefNote[], preSubjects: Subject[], lifetimeOfPreSlug: (slug: string) => string | null): DiffContext['transfers'] {
+  const out: DiffContext['transfers'] = new Map();
+  for (const note of notes) {
+    if (note.kind !== 'transferred') continue;
+    const kind = TRANSFER_KIND[note.table]!;
+    for (const id of note.ids) {
+      const from = preSubjects.find(s => s.kind === kind && s.stream === note.fromSlug && s.rowIds.includes(id));
+      if (from) out.set(`${kind}:${id}`, { from, fromLifetime: lifetimeOfPreSlug(note.fromSlug) });
+    }
+  }
+  return out;
 }
 
 /** Subject events of one stream side: asserted/retracted/revised, adoption, replacement links, retiering. */
@@ -196,8 +220,17 @@ function subjectDrafts(d: DiffContext, slug: string, before: Subject[], after: S
       claimFp: s.claimFp, validFrom: s.validFrom, validUntil: s.validUntil,
       cause: d.cause({ ...(s.rowNum != null ? { row: s.rowNum } : {}), label: s.label, ...extra }) });
   };
-  const removed = [...preMap].filter(([id]) => !postMap.has(id)).map(([, s]) => s);
+  const transferOf = (s: Subject) => s.rowIds.map(id => d.transfers.get(`${s.kind}:${id}`)).find(t => t && t.from.key !== s.key);
+  const removed = [...preMap].filter(([id]) => !postMap.has(id)).map(([, s]) => s)
+    .filter(s => !s.rowIds.length || !s.rowIds.every(id => d.transfers.has(`${s.kind}:${id}`)));
   const fresh = [...postMap].filter(([id]) => !preMap.has(id)).map(([, s]) => s);
+  const transferred = new Set<Subject>();
+  for (const s of after) {
+    const t = transferOf(s);
+    if (!t) continue;
+    transferred.add(s);
+    draft(s, `${s.kind}.transferred`, s.value, t.from, { from_key: t.from.key, ...(t.fromLifetime ? { from_lifetime: t.fromLifetime } : {}) });
+  }
   const adoptedFrom = new Map<Subject, Subject>();
   for (const s of fresh) {
     const parts = s.kind === 'fact' ? factKeySubject(s.key) : null;
@@ -222,6 +255,7 @@ function subjectDrafts(d: DiffContext, slug: string, before: Subject[], after: S
     draft(r, type, null, r, { ...(successorKey ? { replaced_by: successorKey } : {}), ...(purgeRequest ? { purge_request: purgeRequest } : {}) });
   }
   for (const s of fresh) {
+    if (transferred.has(s)) continue;
     const from = adoptedFrom.get(s);
     if (from) { draft(s, 'fact.adopted', s.value, from, { from_key: from.key }); continue; }
     const replaced = [...replacedBy].find(([, v]) => v === s)?.[0];
@@ -229,7 +263,7 @@ function subjectDrafts(d: DiffContext, slug: string, before: Subject[], after: S
   }
   for (const [id, s] of postMap) {
     const prior = preMap.get(id);
-    if (!prior) continue;
+    if (!prior || transferred.has(s)) continue;
     const type = changeType(s.kind, prior, s);
     if (type) draft(s, type, s.value, prior);
     if (prior.tier !== s.tier && s.kind !== 'link' && s.kind !== 'link_transition') draft(s, 'trust.retiered', { from: prior.tier, to: s.tier }, prior);
@@ -260,6 +294,9 @@ function pageDrafts(d: DiffContext, stream: Stream, lifetime: string, after: Sub
   else if (p0!.deleted && !p1!.deleted) { emit('page.restored', { revision_before: p0!.revision, revision_after: p1!.revision }, p1!.tier); silenced = true; }
   else if (p0!.revision !== p1!.revision) emit(d.opts.pageEventType ?? 'page.published', { revision_before: p0!.revision, revision_after: p1!.revision }, p1!.tier);
   else if (p0!.visible !== p1!.visible) emit('page.visibility_changed', { visible: p1!.visible }, p1!.tier);
+  else if (d.opts.pageEventType === 'page.view_changed' && p0!.content_hash !== p1!.content_hash) {
+    emit('page.view_changed', { revision_before: p0!.revision, revision_after: p1!.revision, materialized: true }, p1!.tier);
+  }
   if (p0!.tier !== p1!.tier) emit('trust.retiered', { from: p0!.tier, to: p1!.tier }, p1!.tier);
   return silenced || (p0!.deleted && p1!.deleted);
 }
@@ -287,7 +324,8 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
   const postPageAt = (slug: string) => streams.find(s => s.post?.slug === slug)?.post ?? null;
   const lifetimeAt = (slug: string) => { const page = postPageAt(slug); return page ? lifetimes.get(page.id) ?? null : null; };
   const streamHash = (slug: string) => { const page = postPageAt(slug); return stateHashOf(page, page ? lifetimes.get(page.id)! : null, postSubjects.filter(s => s.stream === slug)); };
-  const d: DiffContext = { opts, batch, writerTier, lifetimeAt, streamHash, postSubjects,
+  const preLifetimeAt = (slug: string) => { const page = streams.find(s => s.pre?.slug === slug)?.pre; return page ? lifetimes.get(page.id) ?? null : null; };
+  const d: DiffContext = { opts, batch, writerTier, lifetimeAt, streamHash, postSubjects, transfers: transferSources(batch.notes, preSubjects, preLifetimeAt),
     cause: (extra = {}) => ({ op: opts.op, ...(opts.publicationId ? { request: opts.publicationId } : {}), ...opts.cause, ...extra }) };
   const drafts: BeliefEventDraft[] = [];
 

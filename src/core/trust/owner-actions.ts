@@ -39,6 +39,7 @@ import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../w
 import { withCoordinatedWrite, withTrustPromotion, withWriteAttribution, withWriteTrust } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
+import { lockedBeliefBatch } from '../belief/writers.ts';
 import {
   addTrustAllowRule, getTrustAllowRule, normalizeTrustAllowRule, parseAllowRuleRef, principalLabel, removeTrustAllowRule, type TrustAllowRule,
 } from './allow-rules.ts';
@@ -190,12 +191,14 @@ async function publishReleasedFact(tx: BrainEngine, hold: WriteGateHold): Promis
   const p = hold.payload;
   const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
   const trust = { tier: 'user_confirmed' as const, origin: { channel: 'trust_release', request_id: hold.request_id ?? undefined } };
-  const write = () => withTrustPromotion(tx, 'user_confirmed', () => withWriteTrust(tx, trust, () => tx.insertFact({ // gbrain-allow-direct-insert: owner release of a held fact (CEO-9), inside the owner's coordinated transaction
+  // W1 #6783 §5.1: the released fact is recorded in its subject's stream, under that slug's page key.
+  const write = () => withTrustPromotion(tx, 'user_confirmed', () => withWriteTrust(tx, trust, () => lockedBeliefBatch(tx, { sourceId: hold.source_id,
+    slugs: str(p.entity_slug) ? [String(p.entity_slug)] : [], op: 'trust_release', remote: false, cause: { hold: `wh${hold.id}` } }, () => tx.insertFact({ // gbrain-allow-direct-insert: owner release of a held fact (CEO-9), inside the owner's coordinated transaction
     fact: String(p.fact ?? ''), kind: (str(p.kind) ?? 'fact') as never, entity_slug: str(p.entity_slug), visibility: (p.visibility === 'world' ? 'world' : 'private'),
     source: str(p.source) ?? `trust release h${hold.id}`, context: str(p.context), source_session: str(p.source_session), confidence: 1,
     valid_from: str(p.valid_from) ? new Date(String(p.valid_from)) : new Date(), valid_until: str(p.valid_until) ? new Date(String(p.valid_until)) : null,
     embedding: null, embedding_model: null,
-  }, { source_id: hold.source_id })));
+  }, { source_id: hold.source_id }))));
   if (await managedPersistenceEnabled(tx)) await withCoordinatedWrite(tx, [hold.source_id], write, await maintenanceAttribution(tx));
   else await withWriteAttribution(tx, await maintenanceAttribution(tx), write);
 }

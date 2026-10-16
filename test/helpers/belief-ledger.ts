@@ -42,7 +42,8 @@ export interface BeliefBrain {
 export const beliefEngineCase = (name: TestBackend): { name: TestBackend; databaseUrl?: string } =>
   name === 'postgres' ? { name, databaseUrl: requirePostgresTestDatabase() } : { name };
 
-async function readEvents(engine: BrainEngine, sourceId: string, afterId = 0): Promise<BeliefEvent[]> {
+/** A source's events after `afterId`, in id order (for probes that build their own brain). */
+export async function readEvents(engine: BrainEngine, sourceId: string, afterId = 0): Promise<BeliefEvent[]> {
   const rows = await engine.executeRaw<BeliefEvent>(`SELECT id, source_id, source_incarnation::text AS source_incarnation, page_lifetime::text AS page_lifetime,
       slug, subject_kind, subject_key, event_type, origin, trust_tier, writer_tier, tier_basis, visibility, publication_id::text AS publication_id, ord,
       recorded_at, value, value_hash, prior_hash, state_hash, cause, claim_fp, purged, redacted_fields, encode(event_key, 'hex') AS event_key

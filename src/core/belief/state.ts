@@ -103,7 +103,8 @@ export async function readBeliefState(tx: BrainEngine, sourceId: string, slugs: 
     transitions: transitions.map(r => ({ id: Number(r.id), from: endpoint(r, 'f')!, to: endpoint(r, 't')!, origin: endpoint(r, 'o'),
       link_type: String(r.link_type), kind: String(r.kind), occurred_on: String(r.occurred_on), date_precision: String(r.date_precision),
       producer: String(r.producer), line_hash: String(r.line_hash) })),
-    writerTier: (pageRows[0]?.writer_tier as string | undefined) || null,
+    writerTier: ((pageRows[0] ?? (await tx.executeRaw<Record<string, unknown>>(`SELECT current_setting('gbrain.write_trust_tier', true) AS writer_tier`))[0])
+      ?.writer_tier as string | undefined) || null,
   };
 }
 
