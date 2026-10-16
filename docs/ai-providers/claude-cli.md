@@ -72,7 +72,10 @@ stdin:
   call's assistant events. When it cannot prove the rebuilt text is the whole
   answer, the call returns no text and no tool calls, finishes `length` (so
   callers retry or escalate, as for any capped answer) and reports
-  `providerMetadata['claude-cli'].code = 'continuation_unproven'`.
+  `providerMetadata['claude-cli'].code = 'continuation_unproven'` with its
+  reason. The gateway keeps that result as it is: the `chat_fallback_chain`
+  does not resend it (only refusals and thrown errors move to the next
+  model), and `toolLoop` stops `length` without dispatching a tool.
 - `--tools ''` disables every built-in tool (Bash/Read/WebSearch/…) — the
   subprocess must behave like a raw LLM, not a full agent.
 - `--strict-mcp-config` skips loading the user's MCP servers. Without it,

@@ -279,6 +279,8 @@ describe('an unprovable continuation is a length outcome with no text and no too
       const notices = stderr.split('\n').filter(line => line.includes('continuation_unproven'));
       expect(notices).toHaveLength(1);
       expect(notices[0]).toContain('events_missing');
+      expect(notices[0]).toContain('Remedy: raise that caller\'s output cap');
+      expect(notices[0]).toContain('gbrain errors continuation_unproven');
     });
   }, 30_000);
 });
@@ -313,5 +315,35 @@ describe('#6791 an unprovable continuation takes each caller family\'s length pa
     } finally {
       rmSync(auditDir, { recursive: true, force: true });
     }
+  }, 30_000);
+});
+
+describe('#6791 the gateway keeps an unprovable continuation as a length result', () => {
+  afterEach(() => resetGateway());
+
+  test('chat() with a fallback chain returns it once, unretried, with its metadata; toolLoop dispatches nothing', async () => {
+    const block = '<use_tools>\n[{"name": "put_page", "input": {"slug": "notes/tail", "content": "tail only"}}]\n</use_tools>';
+    const calls: unknown[] = [];
+    await withCli({ verbose: envelope(block), bare: envelope(block) }, async stub => {
+      configureGateway({ chat_model: 'claude-cli:claude-sonnet-5', chat_fallback_chain: ['claude-cli:claude-haiku-5'], env: {} });
+      const answer = await chat({ messages: [{ role: 'user', content: 'Write the page.' }], maxTokens: 4000 });
+      expect(stub.argv().filter(a => a === '--print')).toHaveLength(1);
+      expect(answer.stopReason).toBe('length');
+      expect(answer.text).toBe('');
+      expect(answer.fallbackFrom).toBeUndefined();
+      expect(answer.blocks.filter(b => b.type === 'tool-call')).toEqual([]);
+      expect(answer.providerMetadata?.['claude-cli']).toEqual({ code: 'continuation_unproven', reason: 'events_missing' });
+
+      const result = await toolLoop({
+        initialMessages: [{ role: 'user', content: 'Write the page.' }],
+        tools: [{ name: 'put_page', description: 'Write a page.', inputSchema: { type: 'object', properties: { slug: { type: 'string' }, content: { type: 'string' } } } }],
+        toolHandlers: new Map([['put_page', { execute: async (input: unknown) => { calls.push(input); return 'ok'; } }]]),
+        maxTurns: 3,
+        maxTokens: 4000,
+      });
+      expect(calls).toEqual([]);
+      expect(result.stopReason).toBe('length');
+      expect(stub.argv().filter(a => a === '--print')).toHaveLength(2);
+    });
   }, 30_000);
 });

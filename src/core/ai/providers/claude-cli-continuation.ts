@@ -140,7 +140,7 @@ let noticed = false;
 function unproven(reason: ContinuationUnprovenReason): ClaudeCliAnswer {
   if (!noticed) {
     noticed = true;
-    process.stderr.write(`[claude-cli] continuation_unproven (${reason}): Claude Code continued an answer past its output cap and gbrain could not prove the full text; the call finishes as length with no text, so callers retry or escalate. A larger output cap avoids the continuation.\n`);
+    process.stderr.write(`[claude-cli] continuation_unproven (${reason}): Claude Code continued an answer past its output cap and gbrain could not prove the full text, so the call finished as length with no text and no tool calls; the caller retries or escalates as for any capped answer. Remedy: raise that caller's output cap (the setting its truncation warning names) so the answer fits without a continuation; details: gbrain errors continuation_unproven.\n`);
   }
   return { kind: 'unproven', reason };
 }
