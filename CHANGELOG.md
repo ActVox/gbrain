@@ -60,6 +60,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - `LatencyProxy` moved to `test/helpers/latency-proxy.ts`.
 - Convergence harness (#6841): a write the brain accepted (exit 10) that was still unsettled when its writer stopped is settled by its receipt (`get_write_request`) after recovery, so it is never misread as a lost acknowledged write. The nightly's note-0266 failure was this harness gap; no product write was lost.
 - `sync-run.ts`'s ceiling is 1762, where L7 and L8 compose.
+- Migration note: `skills/migrations/v0.60.269.0.md`.
 
 ## [0.60.268.0] - 2026-10-16
 
