@@ -10,6 +10,129 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.271.0] - 2026-10-16
+
+**A page write no longer waits behind a sync group that an idle managed sync started in the moment it was being claimed.** While a managed sync drains with lanes, the lanes can sit idle between groups. If an agent's page write arrived just then and its own process was still claiming it, the drain skipped the write and started the next sync group, so the write waited for that group: about 730 ms instead of about 60 ms in the test traces. The FIFO claim now holds that group back, as the lane-head claim already did. The sync still gets one group after each such write commits, so a stream of writes cannot stall it. Three flaky tests on master are fixed with it.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| a page write admitted while a managed sync's lanes are idle and its own process is claiming it | the drain could start a sync group first; the write waited for that group | the write goes first |
+| a steady stream of page writes during a managed sync | sync groups kept moving | sync groups keep moving: at least one after every second write |
+| a page write stalled in another process's preparation, earlier in the queue than the sync rows | the sync behind it kept going | unchanged |
+
+### What to do
+
+Nothing. Nothing is rewritten on upgrade and there is no migration.
+
+### Itemized changes
+
+- `claimNextWrite` (`src/core/persistence/journal.ts`) applies the lane-head claim's foreground-waiting guard (now one fragment, `FOREGROUND_WAITING_ON`) to sync rows the waiting write would pass. The waiting writes are read once per claim in a materialized CTE. The consumer (`src/core/persistence/consumer.ts`) keeps a per-worktree sync-head cursor (`syncHeadSeen`), fed by FIFO and lane-head claims, so one foreground commit since the last sync head earns the sync side one head.
+- New no-op fault point `consumer:claiming` before each FIFO and lane-head claim. `test/managed-sync-foreground-priority.test.ts` parks the drain's claims there instead of parking lanes at `lane:applied`, which let each lane take one more group first (the lanes-2 flake); a forced probe covers that race.
+- `test/claim-fifo-foreground-waiting.test.ts` (PGLite, and Postgres through `test/postgres-unit-arms.txt`): a write row-locked by its own process's claim is not overtaken by a sync head, and a stream of such writes still lets the sync side claim a head after every second write.
+- `SyncOpts.governMs` test seam (the drain governor's tick). `test/belief-ledger-purge-review.test.ts` "#1 (CI stall)" sets it instead of racing the governor's 10 s confirmation against its deadline's 10 s cooperative stop (master red at v0.60.268.0): it asserts `blocked` / `drain_stalled` with the governor first and, as a forced probe, `resumable` / `deadline` with the deadline first.
+- `test/sync-managed-help-l7-6712.test.ts` "--retry-failed is a deprecated alias" failed whenever an earlier test file in the same `bun test` process had already run `sync --retry-failed`, because the coaching notice prints once per process. It now resets that flag first (`resetRetryFailedNoticeForTests`, `src/commands/sync/args.ts`); the once-per-process assertion is unchanged.
+
+## [0.60.270.0] - 2026-10-16
+
+**Security: an image page edited free of private text can no longer slip back into remote image search.** Suppose an image's OCR text carried a private section and someone later edited that section out of the page. GBrain keeps such a page out of remote search, because the picture still shows what the text no longer says. Until now, re-importing the unchanged image while OCR was off or out of budget put it back: the page became searchable again, and remote callers of image search could see its name and title ranked by the private picture. Now that re-import is skipped unless a fresh OCR pass succeeds, and the page stays exactly as it was.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| an unchanged image whose private OCR section was edited out of its page, re-imported with OCR off or out of budget (`gbrain embed --stale --images`, `gbrain sync --full`) | re-imported, sealed, and ranked in remote `search_by_image` | `skipped`: "This image had protected OCR, so indexing it requires successful fresh OCR. Enable OCR and reimport the image." Body, chunks and seal state unchanged |
+| the same re-import with OCR on and succeeding | re-imported | re-imported and attested from the fresh OCR, as before |
+| a changed image | re-imported | unchanged behaviour |
+
+### What to do
+
+Upgrade. Nothing is rewritten on upgrade and there is no migration. Affected releases are v0.48.3.0 through v0.60.269.0. Exposure needed all three: an image whose OCR held a protected (`facts`/`takes`) section, a later edit that removed it, and a re-import with OCR disabled or over `embedding_image_ocr_max_images`. If you ran with image OCR off and edited protected text out of image pages, re-import those images with OCR enabled; a page already re-sealed this way can't be told apart from one sealed legitimately.
+
+### Itemized changes
+
+- `importImageFile` (`src/core/import-file.ts`) applies its fresh-OCR requirement to an existing page whose stored row is distrusted (`chunker_version < 0`) when the image hash is unchanged, in addition to a stored body that still carries protected OCR. It never enables OCR or raises the OCR budget on its own.
+- `provenanceDistrusted` (`src/core/search/safe-chunks.ts`) reads the stored `chunker_version` for that check.
+- `test/image-distrusted-reimport.test.ts` (PGLite, and Postgres through `test/e2e/image-distrusted-reimport-postgres.test.ts`) covers OCR disabled and OCR over budget, with a remote `search_by_image` caller, plus the successful-OCR path.
+
+## [0.60.269.0] - 2026-10-16
+
+**Cheaper managed publishes, one way to retry, and three managed-sync bugs closed (#6712 PR 3).** A 336 KB page with 1,012 facts, 4,100 timeline rows and 50 code references now publishes in one transaction of 67 statements instead of 318, which takes 4.5 s instead of 19.5 s at 57 ms round trip through a transaction pooler. A plain `gbrain sync` retries the failure the previous run recorded, so `--retry-failed` becomes a deprecated alias, and `gbrain sync --help` lists the ten flags a managed brain needs first. Three managed-sync bugs are fixed: final validation timing out at the end of a long catch-up (#6735), a legacy page forked into a twin (#6727), and doctor calling a fresh cursor idle (#6763).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| a managed sync publishes a large page (336 KB, 1,012 facts, 4,100 timeline rows, 50 code refs) through PgBouncer at 57 ms RTT | 318 statements, 19.5 s p50 | 67 statements, 4.5 s p50 (676 KB: 35.4 s → 5.5 s) |
+| a page with code references | two savepointed link writes per reference | one statement per page for all its doc↔impl edges |
+| `GBRAIN_SYNC_TRACE=1 gbrain sync` | no publish timing | `[sync] publish apply <slug>: <ms>ms` and `[sync] publish effects <slug>: <ms>ms` lines |
+| a managed sync stopped on a failure, then plain `gbrain sync` | resumed into the same failure until `--retry-failed` | retries the recorded failure; a content refusal whose bytes have not changed is replayed without a new request |
+| `gbrain sync --retry-failed` on a managed source | the explicit retry | the same as a plain sync, with one `[gbrain notice sync_retry_failed_deprecated]`; accepted for two releases (connector sources still re-approve failed item receipts) |
+| a checkpoint refused `slug_root_mode_mismatch` while the source keeps the other pin | rediscovered by `--retry-failed`, adopting the new pin | left for a person: `gbrain repair managed-sync-orphans` lists it as `slug_mode_refused` (preview, then apply) |
+| `gbrain sync --help` | 33 options in one list | "Managed brains" (10 flags) first, then "Classic brains / advanced" |
+| a 59k-entry catch-up reaches its final checkpoint | `checkpoint_validation_timeout` could throw the run away at the last step | validation reads at most one committed receipt per unfinished receipt; a timeout is re-validated by the next sync instead of rediscovering |
+| a file whose page an older gbrain imported under a slug the current fold spells differently (punctuation, spaces, accents) | a second page with the same file and content hash | the file imports into the legacy page, keeping its id, links and history; several matching pages hold the file `legacy_slug_conflict` |
+| a managed sync cursor discovered minutes ago that has not advanced yet | doctor: idle "over an hour" | no warning until an hour after discovery |
+
+### Itemized changes
+
+#### Cheaper publishes (L6)
+
+- `addCodeReferenceLinks` (`src/core/engine-sql/links.ts`) writes a page's code-reference edges in one statement, keeping source-qualified locked endpoint resolution, context and origin updates, duplicate semantics and missing-endpoint isolation. `import-file.ts` and `page-body/streamed-import.ts` call it once per page.
+- `declarePublication` folds the publication idle-timeout SET into `declareDurablePersistence`, one round trip less per publication behind a transaction pooler, where pipelining is off.
+- The `facts.embedding` cast probe is cached on the root engine, so it runs once per process instead of once per publication transaction.
+- `upsertChunks` reads its three embedding config keys in one statement.
+- `publication-timing.ts` times member apply and `queuePublicationEffects` (`coordinator.ts`, `group-publish.ts`); it prints only under `GBRAIN_SYNC_TRACE`.
+- The page's publication transaction runs on the ordinary pool through the pooler; the consumer's scans run on the direct pool (documented in `docs/architecture/key-files/core-persistence-capacity.md`, "Publication cost").
+
+#### One retry path and managed help (L7)
+
+- `retryRecordedFailure` (`sync-run.ts`) replaces `retryFailedStart`: a plain sync retries a failure an earlier invocation recorded. Failure rows record `gbrain_version` (additive) so an unchanged refusal is replayed only until the file, the commit or gbrain changes. Company sources follow the same rule for content refusals.
+- `--retry-failed` prints `sync_retry_failed_deprecated` once per process; `test/error-registry-retired.test.ts` fails on any printed fix or help line that still recommends it.
+- `slug_mode_refused` joins the `managed-sync-orphans` classes; `checkpoint_moved` (#6834) keeps its repair, since rediscovering a path-sliced run would move `last_commit` backward.
+- `sync --help` sections come from `MANAGED_HELP_FLAGS`; `--all`, `--hard-deadline`, `--no-bulk` and `--no-lanes` stay accepted on managed sources.
+- `laneFaultOf` is removed. `drain-step.ts`, `sync-checkpoint-replaced.ts` and the legacy knock-on text stay, because the governor, waivers, prepare, the coordinator and old rows still use them.
+
+#### Managed-sync fixes (L8)
+
+- #6735: `INCOMPLETE_SYNC_RECEIPT_SQL`'s committed-sibling clause is a `LEFT JOIN LATERAL ... LIMIT 1`, so its cost follows the unfinished receipts under any join the planner picks; `reviveCheckpoint` revives a `checkpoint_validation_timeout` once per invocation after the stop is recorded (`probeCheckpointBlocker`).
+- #6727: the identity freeze (`sync-discovery.ts`) adopts the one live page without a recorded file and not database-only whose slug folds to the file's slug, or equals the path without its extension; a bounded lookup that issues nothing on a source with no such pages. `legacy_slug_conflict` is a page hold (fault table row, public category, runbook rows).
+- #6763: `readManagedSyncBacklog` carries the cursor's `discovered_at`; doctor `managed_sync_backlog` ages a cursor from its last advance or its discovery.
+
+### For contributors
+
+- New budget tests: `test/managed-import-statement-budget.test.ts` and its e2e twin assert the publication transaction's statement count at 0.5x, 1x and 2x of the YC-shaped fixture (bounded 500-row chunks, nothing per row); `test/sync-status-statement-budget.test.ts` pins `sync status` at 1k and 61k receipts. `test/fixtures/goldens/sql-text/chunks.json` was regenerated for the folded config read.
+- `LatencyProxy` moved to `test/helpers/latency-proxy.ts`.
+- Convergence harness (#6841): a write the brain accepted (exit 10) that was still unsettled when its writer stopped is settled by its receipt (`get_write_request`) after recovery, so it is never misread as a lost acknowledged write. The nightly's note-0266 failure was this harness gap; no product write was lost.
+- `sync-run.ts`'s ceiling is 1762, where L7 and L8 compose.
+- Migration note: `skills/migrations/v0.60.269.0.md`.
+
+## [0.60.268.0] - 2026-10-16
+
+**Security: remote entity cards and context packs no longer carry open loops.** Since v0.47.0.0, an `entity` card built for a remote caller (any MCP client, stdio or HTTP) listed the open loops whose counterparty is that entity: the loop summary, its due date and its `loop_id`. Loop rows have no visibility or source grant of their own, so the card showed them even when the loop's commitment fact was private, and since v0.60.167.0 (#5504) also when the loop lives in a source outside the caller's grant, such as a connected Google source. `context_pack` and `delta` build their threads from the same card, so they carried the same loops. Remote cards now skip loop-backed threads; their fact and timeline threads are unchanged.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote `entity`, `context_pack` or `delta` call for a person with open loops | `open_threads` listed each loop's summary, `due` and `loop_id`, whatever the loop's source | no loop-backed threads; eligible commitment facts and recent timeline events still appear |
+| A remote client needs its open loops | the card | `open_loops`, which reads only loops in sources the client is granted |
+| `gbrain entity <name>` on the brain host | loops on the card | unchanged |
+| `context_pack` / `delta` from the trusted local CLI | loops on the cards | loops only with `include_private`, the same switch that adds private facts (loop summaries come from private mail) |
+| Remote `open_loops` grouped by counterparty | groups were ranked partly by backlink counts that included pages outside the caller's grant | remote ranking leaves backlinks out; the trusted local CLI still uses them |
+
+### If you share brain access
+
+A brain without open loops (no Google source and no extracted commitments), or whose MCP clients are all your own agents, needs nothing. If you granted MCP read access to a client that should not see your mail-derived loops, run `gbrain auth clients --usage --days 60` on the brain host to see which clients called `entity`, `context_pack` or `delta` (stdio use is not logged), and revoke or rescope any you no longer trust (`gbrain auth revoke-client <client_id>`). No credentials were exposed, so no rotation is needed for this fix.
+
+### Itemized changes
+
+- `src/core/verbs/entity-card.ts`: a world-only card (`remote: true`) no longer reads `open_loops`.
+- `src/core/ops/loops.ts`: `open_loops` computes the backlink ranking boost for trusted local callers only.
+- Test: `test/entity-card-remote-loops.test.ts` drives the real `entity`, `context_pack`, `delta` and `open_loops` handlers with `remote: true` (fails on v0.60.266.0).
+- Docs: `docs/protocol/MEMORY_VERBS_v1.md` and `docs/guides/open-loops.md` say who gets loop-backed threads.
+
 ## [0.60.267.0] - 2026-10-16
 
 **You can ask the brain what a page said at an earlier moment, as the brain knew it then, and it tells you when it can't know.** With the belief ledger on, `get_page` and `get_versions` take `known_as_of`, an exact instant. The answer is the page as the brain had recorded it at that instant: which version was current, whether it was deleted, and how long it stayed that way. When the brain can't vouch for the answer, it says so. The ledger may not have been on yet at that instant, it may not have been recording, or a write may still have been in flight. In those cases you get a refusal with a reason instead of a guess. Purged content never comes back through a past read. A rename and a fact purge now keep the page as it stood before the change, so the history has no holes. A sync stuck behind a recovery only you can fix now stops at once and names the file.
