@@ -17,3 +17,20 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### Deferred list (PR body)
 
 - #6740: cleanup of stale "Discussed in" timeline bullets already written; preview-first repair, next wave.
+
+## #6742 question type in gbrain-base-v2 (pack 1.4.0)
+
+### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
+
+```ts
+  { since: '<WAVE>', text: 'The bundled `gbrain-base-v2` schema pack (the `init` default, also inherited by `company-brain`) is now version 1.4.0 and declares the `question` page type the pinned-question writer stamps, so a pinned question no longer makes doctor `schema_pack_consistency` warn `page_type_undeclared` (#6742). Existing question pages keep their type; no data changes. The active pack identity reads `gbrain-base-v2@1.4.0+<hash>`.' },
+```
+
+### Regenerate (integrator)
+
+- Doctor goldens: the `pack_upgrade_available` message changes from `gbrain-base-v2@1.3.0+a50a67b9` to `gbrain-base-v2@1.4.0+1c5ba903` in test/fixtures/goldens/doctor/{content-pglite-human,content-pglite-json,hot-checks-pglite-json,hot-checks-postgres-json,json-pglite-degraded,json-pglite-fresh,json-postgres-fresh}.json. Regenerate with the goldens script rather than hand-editing.
+- Plugin trees / template repo if they embed the pack (none found by grep for `a50a67b9` outside the doctor goldens).
+
+### CHANGELOG.md (wave entry, Fixed)
+
+- Pinning a question no longer makes doctor warn about an undeclared `question` page type on the default schema pack (#6742). `gbrain-base-v2` is now 1.4.0.
