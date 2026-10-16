@@ -119,7 +119,7 @@ test('a tail that never ran after its checkpoint committed stays owed and the ne
     expect(fired).toBe(1);
     expect(first.drain?.outcome).toBe('synced');
     expect(first.status).toBe('first_sync');
-    expect(first.tail).toMatchObject({ status: 'failed', runs: 1, notice: { code: 'sync_tail_degraded', kind: 'degraded', fix: { argv: ['gbrain', 'extract', '--stale', '--source', id] } } });
+    expect(first.tail).toMatchObject({ status: 'failed', runs: 1, notice: { code: 'sync_tail_degraded', kind: 'degraded', fix: { argv: ['gbrain', 'extract', '--stale', '--source-id', id] } } });
     expect(first.links).toBeUndefined();
     const owed = await readSyncTail(engine, id);
     expect(owed?.map(item => ({ changed: item.changed, extract: item.extract }))).toEqual([{ changed: 2, extract: true }]);
@@ -158,3 +158,50 @@ test('a --no-extract run owes statistics only, and a run past its deadline defer
   } }) as unknown as BrainEngine;
   expect(await runSyncTail(unreadable, id)).toMatchObject({ status: 'failed', runs: 0, notice: { code: 'sync_tail_degraded', kind: 'degraded' } });
 }), 120_000);
+
+test('a tail cut short reports only the imported pages it left underived, never the source\'s older stale backlog (PGLite)', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+  const id = await source();
+  await performSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true, drain: true });
+  expect(await stale(id)).toBe(2);
+  const [{ local_path: root }] = await engine.executeRaw<{ local_path: string }>('SELECT local_path FROM sources WHERE id=$1', [id]);
+  for (const name of ['n2', 'n3']) writeFileSync(join(root, 'notes', `${name}.md`), `---\ntitle: ${name}\n---\nSee [[notes/n0]].\n`);
+  git(root, 'add', '.'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'two more');
+  await performSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true, drain: true });
+  expect(await stale(id)).toBe(4);
+  const { runSyncTail } = await import('../src/core/persistence/sync-tail.ts');
+  const { recordSyncTail } = await import('../src/core/persistence/sync-tail-record.ts');
+  const [cursor] = await engine.executeRaw<{ fingerprint: string; run_id: string }>("SELECT fingerprint, completed_keys->0->>'runId' AS run_id FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [id]);
+  await engine.executeRaw("UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,processingOptions,noExtract}','false'::jsonb) WHERE op='managed-sync' AND fingerprint=$1", [cursor!.fingerprint]);
+  // The first page read of each tail outlasts its budget, so exactly one page is derived before the deadline stops it.
+  const slowFirst = (budgetMs: number) => {
+    let reads = 0;
+    return new Proxy(engine, { get(target, prop, receiver) {
+      // A transaction engine inherits from this proxy, so the read runs on whichever engine it was called on.
+      if (prop === 'readPageSnapshot') return async function (this: BrainEngine, ...args: unknown[]) {
+        if (reads++ === 0) await sleep(budgetMs + 200);
+        return (target.readPageSnapshot as (...a: unknown[]) => unknown).apply(this, args);
+      };
+      return Reflect.get(target, prop, receiver);
+    } }) as unknown as BrainEngine;
+  };
+  // Two imported pages, one derived: the notice counts the one left, not the two older stale pages behind it.
+  await recordSyncTail(engine, id, cursor!.fingerprint, cursor!.run_id);
+  const cut = await runSyncTail(slowFirst(1_000), id, { budgetMs: 1_000 });
+  expect(cut?.links).toMatchObject({ pages: 1 });
+  expect(cut).toMatchObject({ status: 'truncated', notice: { code: 'sync_tail_degraded', fix: { argv: ['gbrain', 'extract', '--stale', '--source-id', id] } } });
+  expect(cut?.notice?.why).toContain('with 1 imported page(s) not yet derived');
+  // One imported page, derived before the deadline, with the older backlog still stale: the tail is done.
+  writeFileSync(join(root, 'notes', 'n4.md'), '---\ntitle: n4\n---\nSee [[notes/n0]].\n');
+  git(root, 'add', '.'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'one more');
+  await performSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true, drain: true });
+  const [next] = await engine.executeRaw<{ fingerprint: string; run_id: string }>("SELECT fingerprint, completed_keys->0->>'runId' AS run_id FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [id]);
+  await engine.executeRaw("UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,processingOptions,noExtract}','false'::jsonb) WHERE op='managed-sync' AND fingerprint=$1", [next!.fingerprint]);
+  await recordSyncTail(engine, id, next!.fingerprint, next!.run_id);
+  const staleBefore = await stale(id);
+  expect(staleBefore).toBeGreaterThan(1);
+  const done = await runSyncTail(slowFirst(1_000), id, { budgetMs: 1_000 });
+  expect(done?.links?.remaining).toBeGreaterThan(0);
+  expect(done).toMatchObject({ status: 'done' });
+  expect(done?.notice).toBeUndefined();
+}), 120_000);
+

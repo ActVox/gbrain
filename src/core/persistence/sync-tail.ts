@@ -64,19 +64,21 @@ export async function runSyncTail(engine: BrainEngine, sourceId: string, opts: {
   }
   const ran = failure === null && (!extract || links !== undefined);
   if (ran) await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 AND completed_keys=$3::text::jsonb', [SYNC_TAIL_OP, sourceId, JSON.stringify(owed)]).catch(() => undefined);
-  // Imported pages are re-derived even when a sweep stamped them fresh, so an unvisited one is truncation whatever `remaining` says.
-  const truncated = !!links && (links.remaining > 0 || slugs.length > links.pages + links.skipped) && (Date.now() >= deadlineAt || links.pages + links.skipped >= SYNC_TAIL_MAX_PAGES);
+  // Imported pages are derived first, so the run left some underived only when it visited fewer pages than it imported;
+  // `remaining` is the source's whole stale backlog, older pages included, and is not this run's to report.
+  const underived = links ? Math.max(0, slugs.length - links.pages - links.skipped) : 0;
+  const truncated = underived > 0 && (Date.now() >= deadlineAt || links!.pages + links!.skipped >= SYNC_TAIL_MAX_PAGES);
   const status: SyncTailReport['status'] = failure !== null ? 'failed' : !ran ? 'deferred' : truncated ? 'truncated' : statistics === 'failed' ? 'degraded' : 'done';
-  return { status, runs: owed.length, statistics, ...(links ? { links } : {}), ...(status === 'done' ? {} : { notice: tailNotice(sourceId, status, { statistics, links, failure }) }) };
+  return { status, runs: owed.length, statistics, ...(links ? { links } : {}), ...(status === 'done' ? {} : { notice: tailNotice(sourceId, status, { statistics, underived, failure }) }) };
 }
 
-function tailNotice(sourceId: string, status: Exclude<SyncTailReport['status'], 'done'>, d: { statistics: SyncTailReport['statistics']; links?: ManagedLinkExtraction; failure: string | null }): Notice {
-  const extract = { argv: ['gbrain', 'extract', '--stale', '--source', sourceId], consent: [], actor: 'agent' as const, requires_exclusive: false,
+function tailNotice(sourceId: string, status: Exclude<SyncTailReport['status'], 'done'>, d: { statistics: SyncTailReport['statistics']; underived?: number; failure: string | null }): Notice {
+  const extract = { argv: ['gbrain', 'extract', '--stale', '--source-id', sourceId], consent: [], actor: 'agent' as const, requires_exclusive: false,
     why: 'Derives links for the pages this sync imported that are still stale; it changes no page content.',
     verify: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] } };
   if (status === 'truncated') {
     return { code: 'sync_tail_degraded', kind: 'degraded', fix: extract,
-      why: `The sync of source ${sourceId} is synced, but link extraction stopped at its budget with ${d.links!.remaining || 'some'} imported page(s) not yet derived; their links and backlinks are missing until they are extracted.` };
+      why: `The sync of source ${sourceId} is synced, but link extraction stopped at its budget with ${d.underived} imported page(s) not yet derived; their links and backlinks are missing until they are extracted.` };
   }
   if (status === 'degraded') {
     return { code: 'sync_tail_degraded', kind: 'degraded',
