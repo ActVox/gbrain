@@ -49,7 +49,7 @@ const OPEN_THREADS_CAP = 3;
 const OPEN_THREAD_TIMELINE_WINDOW_DAYS = 90;
 const SUGGESTION_CAP = 3;
 const FACT_FETCH_CAP = 100;
-const RECENT_FACTS_CAP = 5;
+export const RECENT_FACTS_CAP = 5;
 
 export interface EntityCardEdge {
   type: string;
@@ -172,6 +172,12 @@ export interface EntityCardResult {
   coverage?: MentionCoverage;
   /** #6723: the source of the resolved page (absent on a miss). */
   source_id?: string;
+  /**
+   * #6724: the full fact rows the card read (newest first, visibility and
+   * eligibility already applied), for context_pack's `entity_facts`. Never part
+   * of the card: the `entity` verb does not return it.
+   */
+  factRows?: FactRow[];
 }
 
 export interface EntityCardOpts {
@@ -428,7 +434,7 @@ export async function buildEntityCard(
   }
 
   const { row, runnersUp } = selected;
-  const card = await assembleCard(engine, hitSource, row, opts.remote, scope.excludePrivate, opts.eligibility ?? {});
+  const { card, facts: factRows } = await assembleCard(engine, hitSource, row, opts.remote, scope.excludePrivate, opts.eligibility ?? {});
   if (opts.includeReferences) {
     Object.assign(card, await cardReferences(engine, hitSource, row, opts, scope.excludePrivate, scope.entityTypes),
       await readCardIdentity(engine, hitSource, row, { excludePrivate: scope.excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka }));
@@ -438,6 +444,7 @@ export async function buildEntityCard(
     found: true,
     card,
     source_id: hitSource,
+    factRows,
     ...(runnersUp.length ? { suggestions: runnersUp } : {}),
   };
 }
@@ -491,7 +498,7 @@ async function assembleCard(
   remote: boolean,
   excludePrivate: boolean,
   eligibility: ReadEligibility,
-): Promise<EntityCard> {
+): Promise<{ card: EntityCard; facts: FactRow[] }> {
   const pageSlug = row.slug;
   const visibility = remote ? (['world'] as ('private' | 'world')[]) : undefined;
   // Facts saved about this entity may sit under a sibling page or the bare subject slug (siblings.ts).
@@ -674,7 +681,7 @@ async function assembleCard(
   }
 
   const pageTrust = (await loadPageTrust(engine, [{ source_id: sourceId, slug: pageSlug }]).catch(() => null))?.byKey.get(`${sourceId}\u0000${pageSlug}`);
-  return {
+  return { facts, card: {
     entity: { slug: pageSlug, title: row.title ?? pageSlug, type: row.type ?? null, source_id: sourceId },
     ...(pageTrust ?? { trust_tier: 'unknown' as const, origin: 'unrecorded' }),
     ...(isQuarantined(row.frontmatter) ? { quarantined: true as const } : {}),
@@ -696,7 +703,7 @@ async function assembleCard(
       id: String(f.id), fact: f.fact, kind: f.kind, valid_from: f.valid_from ? toIso(f.valid_from as Date | string) : null,
       ...(f.entity_slug && f.entity_slug !== pageSlug ? { entity_slug: f.entity_slug } : {}),
     })) } : {}),
-  };
+  } };
 }
 
 /** The card's `aka`: the page's normalized aliases (page_aliases reverse lookup); empty on a pre-migration brain. */

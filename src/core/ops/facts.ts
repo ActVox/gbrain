@@ -715,7 +715,7 @@ const context_pack: Operation = {
   annotations: { title: 'context_pack (boundary bundle)', readOnlyHint: true },
   handler: async (ctx, p) => {
     const { assembleContextPack, renderPack, isAfter, PACK_DEFAULT_MAX_ENTITIES, renderCardLine, renderThreadLine, renderFactLine, packHeaderCost,
-      renderNewerMentionLines } = await import('../context/turn-context.ts');
+      renderNewerMentionLines, ENTITY_FACTS_HEADER } = await import('../context/turn-context.ts');
     const { NEWER_MENTIONS_HEADER } = await import('../mentions/newer-mentions.ts');
     const sourceId = ctx.sourceId ?? 'default';
     const rawSince = typeof p.since === 'string' && p.since.trim() ? p.since : undefined;
@@ -751,7 +751,7 @@ const context_pack: Operation = {
     // push switch is not read; nothing changes for a caller that does not
     // pass it). Open loops are trusted-local only; the change arm is
     // world-only unless a trusted caller widened with include_private.
-    const pullBrief = await contextPackBrief(ctx, p, { sourceId, includePrivate, eligibility });
+    const pullBrief = await (await import('../context/pack-brief.ts')).contextPackBrief(ctx, p, { sourceId, includePrivate, eligibility });
     const res = entities.length === 0
       ? { cards: [], facts: [], text: '', pointers: [], factsCount: 0 } as unknown as Awaited<ReturnType<typeof assembleContextPack>>
       : await assembleContextPack(ctx.engine, {
@@ -807,9 +807,12 @@ const context_pack: Operation = {
       ...c, ...packRefs.bySlug.get(`${c.entity.source_id}:${c.entity.slug}`), ...statusOf(c.entity.source_id, c.entity.slug),
       ...(c.newer_mentions ? { newer_mentions: { ...c.newer_mentions, rows: c.newer_mentions.rows.map((r) => ({ ...r, ...statusOf(c.entity.source_id, r.slug) })) } } : {}),
     }));
-    const view = redactRetrievalOutput([{ cards: withRefs, facts: rawFacts }], {}).results[0];
+    // #6724: the packed cards' own facts (each read in its card's source, world-only for a remote caller).
+    const rawEntityFacts = res.entityFacts ?? [];
+    const view = redactRetrievalOutput([{ cards: withRefs, facts: rawFacts, entity_facts: rawEntityFacts }], {}).results[0];
     let cards = view.cards;
     let facts = view.facts;
+    let entityFacts = view.entity_facts;
     // The SAME since filter the assembler applied (pre-landing review: the raw
     // flatMap silently dropped the documented `since` contract from the
     // structured array whenever budget packing ran) — shared with the card
@@ -825,8 +828,15 @@ const context_pack: Operation = {
         lineCost(renderCardLine(c, walk.home)) + threadsOf(c).reduce((n, t) => n + lineCost(renderThreadLine(t)), 0);
       const cardPack = itemBudget > 0 ? packToBudget(cards, cardCost, itemBudget) : dropAll(cards);
       cards = cardPack.items;
-      const remaining = itemBudget - cardPack.meta.used;
-      const factPack = remaining > 0 ? packToBudget(facts, (f) => lineCost(renderFactLine(f)), remaining) : dropAll(facts);
+      // #6724: a dropped card's facts go with it; entity facts pack before hot memory, and a fact in both is priced once.
+      const packed = new Set(cards.map((c) => `${c.entity.source_id}:${c.entity.slug}`));
+      const ofPacked = entityFacts.filter((e) => packed.has(`${e.source_id}:${e.slug}`));
+      const entityBudget = itemBudget - cardPack.meta.used - (ofPacked.length ? lineCost('') + lineCost(ENTITY_FACTS_HEADER) : 0);
+      const entityPack = entityBudget > 0 ? packToBudget(ofPacked, (e) => lineCost(renderFactLine(e)), entityBudget) : dropAll(ofPacked);
+      entityFacts = entityPack.items;
+      const shown = new Set(entityFacts.map((e) => e.id));
+      const remaining = entityBudget - entityPack.meta.used;
+      const factPack = remaining > 0 ? packToBudget(facts, (f) => (shown.has(f.id) ? 0 : lineCost(renderFactLine(f))), remaining) : dropAll(facts);
       facts = factPack.items;
       // Newer mentions pack last, into what cards and facts left; a card whose block does not fit keeps its card line.
       const mentionBudget = remaining - factPack.meta.used - lineCost('') - lineCost(NEWER_MENTIONS_HEADER);
@@ -844,7 +854,7 @@ const context_pack: Operation = {
         : dropAll(withRecords);
       const keptRecords = new Set(recordPack.items);
       cards = cards.map((c) => (renderRecordLines(c).length && !keptRecords.has(c) ? { ...c, records: undefined, sibling_records: undefined } : c));
-      droppedCount = cardPack.meta.dropped + factPack.meta.dropped;
+      droppedCount = cardPack.meta.dropped + (view.entity_facts.length - entityFacts.length) + factPack.meta.dropped;
     }
     const open_threads = cards.flatMap(threadsOf);
     // Re-render the injectable block from the FINAL sets (adversarial review):
@@ -852,7 +862,7 @@ const context_pack: Operation = {
     // structured arrays report — the assembler's pre-budget rendering would
     // overrun the declared budget_tokens. budget_used reports that text.
     const recordLines = cards.flatMap(renderRecordLines);
-    const basePack = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts, undefined, walk.home) : res.text;
+    const basePack = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts, undefined, walk.home, entityFacts) : res.text;
     const packText = recordLines.length ? [basePack, ['', RECORDS_HEADER, ...recordLines].join('\n')].filter(Boolean).join('\n') : basePack;
     const text = [coreText, pullBrief?.text ?? '', packText].filter(Boolean).join('\n\n');
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
@@ -894,6 +904,11 @@ const context_pack: Operation = {
         provenance: f.provenance,
         ...(f.trust_tier ? { trust_tier: f.trust_tier, origin: f.origin } : {}),
       })),
+      entity_facts: entityFacts.map((f) => ({
+        source_id: f.source_id, slug: f.slug, fact_id: String(f.id), fact: f.fact, kind: f.kind, entity_slug: f.entity_slug, valid_from: f.valid_from,
+        context: f.context ?? null, confidence: f.confidence, attributed_to: f.attributed_to ?? null, provenance: f.provenance,
+        ...(f.trust_tier ? { trust_tier: f.trust_tier, origin: f.origin } : {}),
+      })),
       text,
       ...(pullBrief ? { brief: pullBrief.view } : {}),
       ...(withheld ? { suppressed: suppressionSummary(withheld) } : {}),
@@ -909,52 +924,6 @@ const context_pack: Operation = {
     };
   },
 };
-
-/**
- * context_pack's pull brief (wave 5 D5): null unless `counterparty` is given.
- * An unresolved counterparty is a labelled empty brief, not an error; an
- * invalid `intent` is invalid_params.
- */
-async function contextPackBrief(
-  ctx: OperationContext,
-  p: Record<string, unknown>,
-  opts: { sourceId: string; includePrivate: boolean; eligibility: import('../eligibility/policy.ts').ReadEligibility },
-): Promise<{ text: string; view: Record<string, unknown> } | null> {
-  if (typeof p.counterparty !== 'string' || !p.counterparty.trim()) return null;
-  if (p.intent !== undefined && !(BRIEF_INTENTS as readonly unknown[]).includes(p.intent)) {
-    throw verbError(
-      'invalid_params',
-      `context_pack: intent must be one of ${BRIEF_INTENTS.join(', ')}`,
-      `Pass ${paramUse(ctx, 'intent', 'meeting')} or omit it.`,
-    );
-  }
-  const { resolvePullCounterparty, assembleBrief, briefView } = await import('../context/proactive-brief.ts');
-  const local = ctx.remote === false;
-  const label = {
-    delivery: 'pull' as const,
-    intent: (p.intent as string | undefined) ?? null,
-    ...(local ? {} : { withheld_arms: ['loops'] }),
-  };
-  const cp = await resolvePullCounterparty(ctx.engine, opts.sourceId, p.counterparty.slice(0, 200), {
-    excludePrivate: !opts.includePrivate, eligibility: opts.eligibility,
-  });
-  if (!cp) return { text: '', view: { ...label, counterparty: null, items: [], reason: 'counterparty_unresolved' } };
-  const now = Date.now();
-  const brief = await assembleBrief(ctx.engine, {
-    trigger: 'pull',
-    counterparties: [cp],
-    local,
-    includePrivate: opts.includePrivate,
-    eligibility: opts.eligibility,
-    clock: { now, stopAt: now + CONTEXT_PACK_BRIEF_BUDGET_MS },
-  });
-  const counterparty = { slug: cp.slug, display: cp.display };
-  if (!brief) return { text: '', view: { ...label, counterparty, items: [], reason: 'no_items' } };
-  return { text: brief.text, view: { ...label, counterparty, items: briefView(brief).items } };
-}
-
-/** Wall-clock cap on the pull brief's queries. */
-const CONTEXT_PACK_BRIEF_BUDGET_MS = 1000;
 
 const delta: Operation = {
   name: 'delta',

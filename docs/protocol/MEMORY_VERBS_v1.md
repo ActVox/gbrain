@@ -902,11 +902,11 @@ synced to a cloud model). `include_private` widens ALL arms in
 lockstep, and is honored ONLY for trusted-local callers (`remote === false`); a
 remote caller never widens (fail-closed).
 
-Response: `{ protocol_version, entities, cards[], open_threads[], facts[], text,
+Response: `{ protocol_version, entities, cards[], open_threads[], facts[], entity_facts[], text,
 degraded_reason?, budget_tokens?, budget_used?, dropped_count?, core?, pinned_questions?, withheld?, brief? }`. `text` is the
 envelope-wrapped injectable block, rendered from the packed sets within `budget_tokens`.
 
-`entities` scopes cards and threads, not the hot facts (the session's recent
+`entities` scopes cards, threads and `entity_facts`, not the hot facts (the session's recent
 memory), so other facts can appear; `recall` with `entity` reads one entity
 strictly. `facts[]` here and in `delta` carry `fact_id` (what `forget` takes)
 and `provenance` (the stored source), never rendered into `text`.
@@ -924,6 +924,20 @@ its newer-mention continuation names the source. Each card's activation
 verdict, newer mentions, records and `page_status` come from its own source,
 never from a same-slug page in another source, and cards are deduplicated by
 `(source_id, slug)`.
+
+#### context_pack entity_facts (additive)
+
+`entity_facts[]` holds the packed entities' own facts: up to 5 per card, newest
+first, read in the card's own source with the card's visibility (world-only
+unless a trusted-local caller passed `include_private`) and eligibility. Each
+row is `{ source_id, slug, fact_id, fact, kind, entity_slug, valid_from?,
+context, confidence, attributed_to, provenance, trust_tier?, origin? }`, where
+`(source_id, slug)` names the card. `facts[]` is unchanged hot memory, so a
+fact can appear in both arrays. `text` renders entity facts under `## Entity
+facts (about the standing entities)` before hot memory, and a fact in both
+renders once, there. Under `budget_tokens` entity facts pack after cards and
+before hot facts, leave with a dropped card (counted in `dropped_count`), and
+a hot fact already shown as an entity fact costs nothing.
 
 #### context_pack records (additive)
 
