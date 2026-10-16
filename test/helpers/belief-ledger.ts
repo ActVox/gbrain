@@ -6,7 +6,7 @@
  * (`beliefEngineCase`), so every probe asserts the same values on both.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -52,7 +52,8 @@ export async function readEvents(engine: BrainEngine, sourceId: string, afterId 
   return rows.map(r => ({ ...r, id: Number(r.id), ord: Number(r.ord), value: json(r.value) as BeliefEvent['value'], cause: json(r.cause) as BeliefEvent['cause'] }));
 }
 
-function brainApi(engine: BrainEngine, ctx: OperationContext, root: string, sourceId: string): BeliefBrain {
+/** The probe API over an engine the caller opened (the file-backed restore probes reopen theirs). */
+export function brainApi(engine: BrainEngine, ctx: OperationContext, root: string, sourceId: string): BeliefBrain {
   const op = async (operation: string, params: Record<string, unknown>) =>
     await submitPageMutation(ctx as never, { operation: operation as never, params: { request_id: randomUUID(), ...params } as never }) as Record<string, unknown>;
   return {
@@ -102,6 +103,43 @@ export async function beliefBrain(run: (brain: BeliefBrain) => Promise<void>,
     if (engine) { await disposePersistenceConsumer(engine); if (close) await close(); else await engine.disconnect(); }
     rmSync(home, { recursive: true, force: true });
   }
+}
+
+/** A file-configured PGLite brain at `<home>/.gbrain/brain.pglite` (the backup format); `open` connects it for one step, so backups run between steps. */
+export interface FileBeliefBrain { home: string; open<T>(fn: (brain: BeliefBrain) => Promise<T>): Promise<T> }
+
+/** Connects the PGLite brain at `databasePath` (a restored one, say) as a probe brain; `close` disconnects it. */
+export async function openFileBeliefBrain(databasePath: string, sourceId: string, root: string): Promise<{ brain: BeliefBrain; close: () => Promise<void> }> {
+  const engine = new PGLiteEngine();
+  await engine.connect({ engine: 'pglite', database_path: databasePath });
+  const ctx: OperationContext = { engine, sourceId, remote: false, dryRun: false,
+    config: { engine: 'pglite', embedding_disabled: true } as never, logger: { info() {}, warn() {}, error() {} } as never };
+  return { brain: brainApi(engine, ctx, root, sourceId), close: async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); } };
+}
+
+/** Runs `run` with GBRAIN_HOME at a new file-configured PGLite brain whose source `sourceId` has coverage enabled. */
+export async function withFileBeliefBrain(sourceId: string, run: (brain: FileBeliefBrain) => Promise<void>): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'gbrain-belief-file-'));
+  const databasePath = join(home, '.gbrain', 'brain.pglite');
+  const root = join(home, 'content');
+  mkdirSync(join(home, '.gbrain'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', database_path: databasePath }), { mode: 0o600 });
+  const open = async <T>(fn: (brain: BeliefBrain) => Promise<T>): Promise<T> => {
+    const { brain, close } = await openFileBeliefBrain(databasePath, sourceId, root);
+    try { return await fn(brain); } finally { await close(); }
+  };
+  try {
+    await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+      mkdirSync(root);
+      await open(async brain => {
+        await brain.engine.initSchema();
+        await brain.engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
+        await claimWorktree(brain.engine, sourceId, root);
+        await enableBeliefLedger(brain.engine, sourceId);
+      });
+      await run({ home, open });
+    });
+  } finally { rmSync(home, { recursive: true, force: true }); }
 }
 
 /** A page body with a facts fence, a takes fence, prose and wikilinks. */

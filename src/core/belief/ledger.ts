@@ -27,7 +27,7 @@ export type BeliefNote =
   | { kind: 'held'; holdKind: string; fingerprint: string; holdId: number; slug: string; tier: string; valueHash: string }
   | { kind: 'withdrawn'; factIds: number[] }
   | { kind: 'superseded'; oldId: number; newId: number | null }
-  | { kind: 'purged'; table: 'facts' | 'takes'; ids: number[]; request: string }
+  | { kind: 'purged'; table: 'facts' | 'takes' | 'pages'; ids: number[]; request: string; derivedWalk?: 'truncated' }
   | { kind: 'transferred'; fromSlug: string; table: 'facts' | 'takes' | 'links'; ids: number[] };
 
 export interface BeliefBatchOptions {
@@ -67,6 +67,15 @@ export function currentBeliefBatch(): { publicationId: string; sourceId: string;
   const batch = store.getStore();
   return batch ? { publicationId: batch.publicationId, sourceId: batch.opts.sourceId, slugs: batch.opts.slugs } : null;
 }
+
+/** True when an enclosing batch on this async context already records these slugs (a nested writer must not append them twice). */
+export function beliefBatchCovers(sourceId: string, slugs: readonly string[]): boolean {
+  const outer = store.getStore();
+  return !!outer && outer.opts.sourceId === sourceId && slugs.every(slug => outer.opts.slugs.includes(slug));
+}
+
+/** True inside any belief batch: a nested writer's own publication commits with the enclosing transaction, not before it. */
+export const insideBeliefBatch = (): boolean => !!store.getStore();
 
 /** Coverage and purge probes for one source, in one read. */
 export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<{ incarnation: string; purgeEpoch: number; coverage: string | null; purgesPossible: boolean } | null> {
@@ -279,7 +288,10 @@ function pageDrafts(d: DiffContext, stream: Stream, lifetime: string, after: Sub
     subjectKey: pageKey(lifetime), writerTier: d.writerTier, visibility: page.visible ? 'world' : 'private', stateHash: d.streamHash(page.slug), cause: d.cause() };
   const emit = (eventType: string, value: Record<string, unknown>, tier: string) => push({ ...base, eventType, trustTier: tier, value });
   if (p0 && !p1) {
-    emit(d.opts.hardDeleteEvent ?? 'page.deleted', { revision_before: p0.revision, hard: true }, p0.tier);
+    const purge = d.batch.notes.find(n => n.kind === 'purged' && n.table === 'pages' && n.ids.includes(p0.id));
+    const type = purge ? 'page.purged' : d.opts.hardDeleteEvent ?? 'page.deleted';
+    push({ ...base, eventType: type, trustTier: p0.tier, value: type === 'page.purged' ? null : { revision_before: p0.revision, hard: true },
+      purged: type === 'page.purged', cause: purge?.kind === 'purged' ? d.cause({ purge_request: purge.request, ...(purge.derivedWalk ? { derived_walk: purge.derivedWalk } : {}) }) : base.cause });
     return true;
   }
   if (!p0 && p1) {
@@ -391,9 +403,10 @@ export async function currentStateHash(tx: BrainEngine, sourceId: string, incarn
 export { stateHashOf };
 
 /** The batch options of one journaled page publication (single or group member). */
-export function publicationBeliefOptions(row: { id: string; source_id: string; slug: string; operation: string; authority: { remote?: boolean } },
+export function publicationBeliefOptions(row: { id: string; source_id: string; slug: string; operation: string; authority: { remote?: boolean }; intent?: Record<string, unknown> | null },
   additionalKeys: readonly { sourceId: string; slug: string }[] = [], report?: { appended: number }): BeliefBatchOptions {
   return { sourceId: row.source_id, slugs: [...new Set([row.slug, ...additionalKeys.filter(k => k.sourceId === row.source_id).map(k => k.slug)])],
     publicationId: row.id, op: row.operation, remote: row.authority.remote !== false,
-    ...(row.operation === 'revert_version' ? { pageEventType: 'page.reverted' as const } : {}), ...(report ? { report } : {}) };
+    ...(row.operation === 'revert_version' ? { pageEventType: 'page.reverted' as const } : {}),
+    ...(row.operation === 'delete_page' && row.intent?.retention === true ? { hardDeleteEvent: 'page.expired' as const } : {}), ...(report ? { report } : {}) };
 }

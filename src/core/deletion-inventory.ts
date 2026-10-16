@@ -36,6 +36,10 @@ export interface InventoryEntry {
 type Row = [table: string, cls: InventoryClass, reason: string, columns: string, probe?: string];
 const ROWS: readonly Row[] = [
   ['access_tokens', 'out_of_scope', 'secret_material', 'name token_hash scopes permissions source_grant source_id federated_read allowed_operations takes_holders min_trust'],
+  ['belief_events', 'swept', 'belief_ledger', 'event_key source_id slug subject_kind subject_key event_type origin trust_tier writer_tier tier_basis visibility value value_hash prior_hash state_hash cause claim_fp redacted_fields'],
+  ['belief_page_lifetimes', 'out_of_scope', 'text_free_ledger', 'source_id slug'],
+  ['belief_redactions', 'out_of_scope', 'text_free_ledger', 'source_id subject_key field field_hash released_hash'],
+  ['belief_retier_manifest', 'out_of_scope', 'text_free_ledger', 'source_id subject_kind subject_key from_tier to_tier'],
   ['budget_ledger', 'out_of_scope', 'no_memory_text', 'scope resolver_id'],
   ['budget_reservations', 'out_of_scope', 'no_memory_text', 'reservation_id scope resolver_id status'],
   ['calibration_profiles', 'out_of_scope', 'probed_reported', 'source_id holder wave_version domain_scorecards pattern_statements active_bias_tags model_id', 'pattern_statements domain_scorecards'],

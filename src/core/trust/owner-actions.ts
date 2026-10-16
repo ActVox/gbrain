@@ -24,7 +24,7 @@ import type { OperationContext } from '../ops/contract.ts';
 import { opError } from '../ops/contract.ts';
 import type { Principal } from '../persistence/model.ts';
 import type { OwnerConfirmation } from './confirm.ts';
-import { tierRaiseFix } from './confirm.ts';
+import { pendingRedactionRelease, releaseConfirmedRedactions, tierRaiseFix } from './confirm.ts';
 import { decideTrustProposal } from './decide.ts';
 import { resolveContestedFactOnConfirm } from './supersede-handlers.ts';
 import { getTrustProposal, pendingTrustProposalsFor, trustProposalRef, type TrustDecisionResult, type TrustProposalRow } from './proposals.ts';
@@ -281,8 +281,10 @@ async function previewConfirm(engine: BrainEngine, ref: TrustRef, input: OwnerAc
     const row = ref.kind === 'fact' ? await readFactTarget(engine, ref.id) : await readTakeTarget(engine, ref.id);
     if (!row) throw notFound(label, ref.kind);
     if (!row.live) throw opError('invalid_params', `${label} is no longer active (expired, superseded or forgotten); there is nothing to confirm.`, 'Confirm the row that replaced it instead; gbrain trust explain shows its history.');
-    return { action: 'confirm', ref: label, token: label, command: trustCommand('confirm', label), raises: row.tier !== 'user_confirmed', binding: row.binding,
-      tier: row.tier, target_tier: 'user_confirmed', summary: `Raise ${ref.kind} ${label} ("${snippet(row.text)}") from "${trustLabel(row.tier)}" to "confirmed by you"` };
+    const release = await pendingRedactionRelease(engine, row.table, row.id);
+    return { action: 'confirm', ref: label, token: label, command: trustCommand('confirm', label), raises: row.tier !== 'user_confirmed' || release.length > 0, binding: row.binding,
+      tier: row.tier, target_tier: 'user_confirmed', summary: `Raise ${ref.kind} ${label} ("${snippet(row.text)}") from "${trustLabel(row.tier)}" to "confirmed by you"`
+        + (release.length ? ` and release its purge-redacted ${release.join(', ')} in recorded history` : '') };
   }
   if (ref.kind === 'page') {
     const { sourceId, slug } = await resolvePageRef(engine, ref, input.source);
@@ -444,11 +446,12 @@ export async function applyOwnerAction(engine: BrainEngine, input: OwnerActionIn
         const resolved = ref.kind === 'fact' && row.binding === opts.binding ? await resolveContestedFactOnConfirm(engine, ref.id, decision) : null;
         if (resolved?.status === 'accepted') return { action: input.action, ref: preview.ref, status: 'confirmed', tier: 'user_confirmed', prior_tier: row.tier, detail: { resolved_proposal: resolved.ref } };
         if (!preview.raises) return { action: input.action, ref: preview.ref, status: 'unchanged', tier: 'user_confirmed', prior_tier: 'user_confirmed' };
-        const ok = await setRowTier(engine, { table: row.table, id: row.id, sourceId: row.sourceId, tier: 'user_confirmed', ceiling: 'user_confirmed', by,
+        const ok = row.tier === 'user_confirmed' || await setRowTier(engine, { table: row.table, id: row.id, sourceId: row.sourceId, tier: 'user_confirmed', ceiling: 'user_confirmed', by,
           note: { via: confirmation.via, action: 'confirm', by: principalLabel(by) },
           expect: async tx => (await read(tx, ref.id))?.binding === opts.binding });
         if (!ok) throw opError('preview_changed', `${preview.ref} changed after you approved it; nothing was changed.`, 'Run the command again.');
-        return { action: input.action, ref: preview.ref, status: 'confirmed', tier: 'user_confirmed', prior_tier: row.tier };
+        const released = await releaseConfirmedRedactions(engine, row.table, row.id);
+        return { action: input.action, ref: preview.ref, status: 'confirmed', tier: 'user_confirmed', prior_tier: row.tier, ...(released.length ? { detail: { released_redactions: released } } : {}) };
       }
       if (ref?.kind === 'page') {
         const { sourceId, slug } = await resolvePageRef(engine, ref, input.source);

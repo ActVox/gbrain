@@ -7,6 +7,9 @@
  *   - the stream page's current lifetime is visible now (a page made private
  *     later hides its earlier events; an ended lifetime hides them too);
  *   - for links, every page-backed endpoint and the origin are visible now.
+ * For every caller, a key with a `derived.hidden` (a purge hid the row it
+ * describes, section 6.5) hides its events below that marker and its backfill
+ * events at any id; the marker itself stays visible as the disclosure.
  */
 import type { BrainEngine } from '../engine.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
@@ -36,6 +39,8 @@ export async function readBeliefHistory(engine: BrainEngine, q: BeliefHistoryQue
         WHERE l.page_lifetime = e.page_lifetime AND l.ended_at IS NULL) AS stream_visible
     FROM belief_events e
     WHERE e.source_id = $1 AND ($2::text IS NULL OR e.slug = $2) AND ($3::text IS NULL OR e.subject_key = $3) AND e.id > $4
+      AND NOT EXISTS (SELECT 1 FROM belief_events h WHERE h.source_id = e.source_id AND h.subject_kind = e.subject_kind AND h.subject_key = e.subject_key
+        AND h.event_type = 'derived.hidden' AND h.id <> e.id AND (h.id > e.id OR e.origin = 'backfill'))
     ORDER BY e.id LIMIT $5`, [q.sourceId, q.slug ?? null, q.subjectKey ?? null, q.afterId ?? 0, Math.min(Math.max(q.limit ?? 1000, 1), 10_000)]);
   const json = (v: unknown) => typeof v === 'string' ? JSON.parse(v) : v;
   const out = rows.map(r => ({ ...r, id: Number(r.id), value: json(r.value) as BeliefHistoryRow['value'], cause: json(r.cause) as BeliefHistoryRow['cause'] }));
