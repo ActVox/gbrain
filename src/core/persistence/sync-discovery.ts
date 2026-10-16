@@ -647,9 +647,9 @@ export function readSyncContent(discovery: SyncDiscovery, entry: SyncEntry): str
       `${entry.path} left the working tree of ${discovery.sourceId} between discovery and import, so nothing was imported from it. Run gbrain sync --no-pull --source ${discovery.sourceId} to rediscover the tree.`,
       { fix: managedSyncFix(discovery.sourceId, 'A new discovery reads the working tree as it is now.') });
     if (entry.identityHead && identityHeadDigest(bytes) !== entry.identityHead) throw opError('source_changed', 'A renamed working-tree file changed after its page identity was confirmed.',
-      `${entry.path} changed in the working tree of ${discovery.sourceId} after sync confirmed it keeps the page of its rename, so nothing was imported from it and no identity moved. Run gbrain sync --no-pull --retry-failed --working-tree --source ${discovery.sourceId} to re-check it.`,
+      `${entry.path} changed in the working tree of ${discovery.sourceId} after sync confirmed it keeps the page of its rename, so nothing was imported from it and no identity moved. Run gbrain sync --no-pull --working-tree --source ${discovery.sourceId} to re-check it.`,
       { fix: { ...managedSyncFix(discovery.sourceId, 'A retry rediscovers the tree and re-checks the rename against the file as it is now.'),
-        argv: ['gbrain', 'sync', '--no-pull', '--retry-failed', '--working-tree', '--source', discovery.sourceId] } });
+        argv: ['gbrain', 'sync', '--no-pull', '--working-tree', '--source', discovery.sourceId] } });
     return bytes.toString('utf8');
   }
   return syncGit(discovery.gitRoot, ['show', `${discovery.target}:${syncGitPath(discovery, entry.path)}`]);
