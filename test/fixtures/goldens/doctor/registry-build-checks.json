@@ -830,12 +830,12 @@
         "name": "missing_recorded_files"
       },
       {
-        "category": "brain",
-        "name": "fence_integrity"
-      },
-      {
         "category": "meta",
         "name": "sync_config_keys"
+      },
+      {
+        "category": "brain",
+        "name": "fence_integrity"
       },
       {
         "category": "ops",

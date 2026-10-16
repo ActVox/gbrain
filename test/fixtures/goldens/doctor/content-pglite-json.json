@@ -2809,6 +2809,17 @@
           "status": "ok"
         },
         {
+          "category": "meta",
+          "details": {
+            "rollback": [],
+            "unapplied": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No retired sync config key is stored on this brain.",
+          "name": "sync_config_keys",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "docs": "docs/guides/write-refusals.md#invalid_fence",
@@ -2935,17 +2946,6 @@
           "elapsed_ms": "<volatile>",
           "message": "No malformed facts or takes fence is held, stored or waiting in a checkout (2 source(s) scanned).",
           "name": "fence_integrity",
-          "status": "ok"
-        },
-        {
-          "category": "meta",
-          "details": {
-            "rollback": [],
-            "unapplied": []
-          },
-          "elapsed_ms": "<volatile>",
-          "message": "No retired sync config key is stored on this brain.",
-          "name": "sync_config_keys",
           "status": "ok"
         },
         {
