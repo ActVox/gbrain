@@ -1227,8 +1227,7 @@ export async function runPhaseExtractAtoms(
           const md = serializeMarkdown(
             {
               atom_type: atom.atom_type,
-              ...originFrontmatter,
-              ...(contentDate ? { date: contentDate } : {}),
+              ...originFrontmatter, ...(contentDate ? { date: contentDate } : {}),
               // Provisional until the whole item's atoms persist (see above).
               source_hash: `pending:${hash16}`,
               visibility, ...(origin ? { managed_extraction: true } : {}),
