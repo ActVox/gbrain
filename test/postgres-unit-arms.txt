@@ -133,6 +133,8 @@ test/large-pages/segmented-remember-refusal.test.ts
 test/large-pages/segmented-repair-scans.test.ts
 test/large-pages/segmented-retained-blocks.test.ts
 test/large-pages/segmented-search-dedup.test.ts
+test/large-pages/segmented-semantic-writes-near-ceiling.slow.test.ts
+test/large-pages/segmented-semantic-writes.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
 test/large-pages/segmented-sweep-budget.test.ts

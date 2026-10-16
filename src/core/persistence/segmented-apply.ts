@@ -37,6 +37,7 @@ import { faultPoint } from './fault-points.ts';
 import { bodyStagingGoneError, LIVE_STAGING_STATES } from '../engine-sql/page-body.ts';
 import { segmentedPageSearchable } from './searchable.ts';
 import { stableJson } from './digest.ts';
+import { pageBodyOverCeilingError } from '../page-body/page-shape.ts';
 
 const BODY_KEYS = new Set(['compiled_truth', 'timeline', 'content']);
 
@@ -99,6 +100,16 @@ export async function materializedSnapshot(engine: BrainEngine, snapshot: PageSn
   Object.assign(page, await overlayCanonicalBodies(engine.executeRaw.bind(engine), page.compiled_truth, page.timeline ?? '', snapshot.withdrawals,
     { sourceId: page.source_id, marker: snapshot.globalPurges }));
   return { ...snapshot, page };
+}
+
+/**
+ * The snapshot a whole-body write (a fence or timeline edit through the put path) reads and merges into: a segmented
+ * page within PAGE_MAX_BYTES read back as strings, as `materializedSnapshot` gives it; one over it refuses with
+ * `page_body_segmented` (`site` names the write) before anything is read or staged.
+ */
+export async function wholeBodySnapshot(engine: BrainEngine, snapshot: PageSnapshot | null, site: string): Promise<PageSnapshot | null> {
+  if (snapshot && segmentedOverCeiling(snapshot.page)) throw pageBodyOverCeilingError(snapshot.page, site);
+  return materializedSnapshot(engine, snapshot);
 }
 
 /**

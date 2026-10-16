@@ -144,6 +144,16 @@ it refuses with this code (wire `error: invalid_params`, not retryable) and a
 fix that saves the claim without an entity (`infer_entity: false`), whether
 the entity was named or inferred from the fact.
 
+Semantic writes work on such a page. `add_tag` and `remove_tag` change the
+tag at any size without rewriting the body: the tag rows, `content_hash` and
+a version change, and a page backed by a file gets the new frontmatter in that
+file with its body bytes unchanged. `add_timeline_entry`, the `takes_*`
+writes, the facts fence write of `extract_facts`, `gbrain core add` /
+`remove` / `diff` and `gbrain sources reconcile` read a page up to 24 MiB
+back whole and write it as a normal put, with the result an inline page with
+the same body gets; over 24 MiB they refuse with this code, and the message
+names the 24 MiB limit.
+
 ## page_body_rows_unreadable
 
 A read of a segmented page found manifest rows that do not cover the page's

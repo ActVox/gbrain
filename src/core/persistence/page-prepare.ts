@@ -50,7 +50,8 @@ import { fileBodyDigests, overlaidFileBodyDigests, storedBodyDigests, type ByteS
 import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
 import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
-import { occurrencesWithoutChunks } from '../page-body/ingest.ts';
+import { occurrencesWithoutChunks, readSegmentedBody } from '../page-body/ingest.ts';
+import { ContentHashStream } from '../page-body/content-hash-stream.ts';
 import { buildSegmentedProjection, hasStaleChunks } from '../page-body/projection.ts';
 import { segmentedExportMarkdown } from '../export-snapshot.ts';
 import { loadImportSanityConfig } from '../import-screen.ts';
@@ -538,6 +539,62 @@ async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Prom
   const head = serializePageToMarkdown({ ...withoutBody(snapshot.page), compiled_truth: '', timeline: '' }, snapshot.tags).slice(0, -1);
   const ledger = snapshotLedger(snapshot);
   return StreamedFileContent.measure(engine, exec => segmentedExportMarkdown(exec, snapshot.page, ledger, head));
+}
+
+/** Work counters of segmented tag flips: `flips` applied, `hashStreams` content hashes recomputed over the segments. */
+export const segmentedTagWork = { flips: 0, hashStreams: 0 };
+
+/**
+ * Wave B (spec 6.4): add_tag / remove_tag on a segmented page, at any size, as a metadata flip that reuses the live
+ * manifest: the body generation, segment texts and chunks stay as they are. As the inline tag write does, it versions
+ * the page (a segmented version references the live generation, O(1)), changes the tag rows, stores the new
+ * content_hash and reseals a sealed page at its new revision; the canonical file is serializePageToMarkdown's bytes
+ * with the new tags, streamed from the segments (unreadPageFile). The hash resumes from the last live row's midstate
+ * (content-hash-stream.ts); a midstate that does not reproduce the stored hash is replaced by one pass over the segments.
+ * Null when the write gate would scan the whole body (an external_untrusted writer): that write takes the put path.
+ */
+export async function prepareSegmentedTagMutation(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot, tags: string[]): Promise<PreparedMutation | null> {
+  const source = { sourceId: row.source_id };
+  const [, pack, storedTier] = await Promise.all([assertKnowledgePublicationAllowed(engine, row),
+    loadActivePackForEngine(engine, { remote: row.authority.remote, sourceId: row.source_id }).catch(() => null), storedPageTier(engine, row.source_id, row.slug)]);
+  const noop = tags.length === snapshot.tags.length && tags.every(tag => snapshot.tags.includes(tag));
+  const trust = pageWriteTrust(row, snapshot.page.frontmatter);
+  const gateTrust = pageGateTrust(row, trust, storedTier);
+  if (!noop && gateTrust && writeGateApplies(gateTrust.tier, (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG)
+    && gateTrust.tier === 'external_untrusted') return null;
+  const pageId = Number(snapshot.page.id);
+  const hash = noop ? snapshot.page.content_hash : await segmentedContentHash(engine, snapshot, tags);
+  const file = row.worktree_id ? await prepareFileTarget(engine, row, snapshot, await unreadPageFile(engine, { ...snapshot, tags }), undefined,
+    { activePack: pack?.manifest, remote: row.authority.remote }) : undefined;
+  const sealed = snapshot.page.text_projection_revision === snapshot.revision;
+  return { observedRevision: snapshot.revision, noop, file, ...await pageDatabaseOnlyPublication(engine, row, file), ...(trust ? { trust } : {}),
+    apply: async tx => {
+      if (noop) return { ...pageNoopAdvisories(row), status: 'skipped', slug: row.slug, source_id: row.source_id, noop: true, chunks: 0, chunk_skip_reason: 'write_skipped' };
+      await tx.createVersion(row.slug, source);
+      for (const tag of snapshot.tags) if (!tags.includes(tag)) await tx.removeTag(row.slug, tag, source);
+      for (const tag of tags) if (!snapshot.tags.includes(tag)) await tx.addTag(row.slug, tag, source);
+      await tx.executeRaw('UPDATE pages SET content_hash=$2, updated_at=now() WHERE id=$1', [pageId, hash]);
+      if (sealed) await sealSegmentedPage(tx, pageId);
+      segmentedTagWork.flips++;
+      return { ...remoteLinkHint(row), status: 'created_or_updated', slug: row.slug, source_id: row.source_id, chunks: 0, noop: false,
+        searchable: isQuarantined(snapshot.page.frontmatter) ? false : sealed ? true : 'pending', ...await sizeStateField(tx, row.source_id, row.slug, snapshot.page) };
+    } };
+}
+
+/** The content_hash of a segmented page with `tags`: its stored body and frontmatter, resumed from the last live manifest row's midstate. */
+async function segmentedContentHash(engine: BrainEngine, snapshot: PageSnapshot, tags: string[]): Promise<string> {
+  const pageId = Number(snapshot.page.id);
+  const meta = { frontmatter: snapshot.page.frontmatter, tags };
+  const last = (await engine.readManifest(pageId)).at(-1);
+  const resumed = last ? (() => { try { return ContentHashStream.fromState(last.hashState); } catch { return null; } })() : null;
+  if (resumed && resumed.finish({ frontmatter: snapshot.page.frontmatter, tags: snapshot.tags }) === snapshot.page.content_hash) return resumed.finish(meta);
+  segmentedTagWork.hashStreams++;
+  const stream = ContentHashStream.begin(snapshot.page);
+  const decoder = new TextDecoder();
+  for await (const part of readSegmentedBody(engine, pageId, snapshot.page.source_id)) {
+    if (part.region === 'truth') stream.pushTruth(decoder.decode(part.bytes)); else stream.pushTimeline(decoder.decode(part.bytes));
+  }
+  return stream.finish(meta);
 }
 
 /**
