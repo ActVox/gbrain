@@ -241,19 +241,24 @@ test('a legacy stored-row receipt holds the same bytes from the receipt; a compa
   await engine.unsetConfig('sync.holds');
   expect(await t.sync()).toMatchObject({ status: 'first_sync', held_count: 1, converted_from_failed: [compacted!.request_id] });
 
-  // ...but an arbitrary invalid_params receipt, compacted or not, is never a fence hold: the cursor stays blocked.
-  await engine.setConfig('sync.holds', 'fail');
-  const u = await source(engine, { 'notes/ok.md': note('Ok') });
-  u.write('notes/draft.md', MALFORMED);
-  expect((await u.sync({ workingTree: true })).status).toBe('blocked_by_failures');
-  const [arbitrary] = await u.failedRequests();
-  await engine.executeRaw("UPDATE persistence_requests SET error_message='The value is invalid.',error_detail=NULL WHERE request_id=$1::uuid", [arbitrary!.request_id]);
-  await engine.unsetConfig('sync.holds');
-  u.write('notes/draft.md', note('Now clean'));
-  expect((await u.sync({ workingTree: true })).status).toBe('blocked_by_failures');
-  await engine.executeRaw('UPDATE persistence_requests SET error_message=NULL,compacted=true WHERE request_id=$1::uuid', [arbitrary!.request_id]);
-  expect((await u.sync({ workingTree: true })).status).toBe('blocked_by_failures');
-  expect(await u.holds()).toEqual([]);
+  // ...but an arbitrary invalid_params receipt, compacted or not, is never a fence hold: once the file is clean, the next
+  // plain sync retries it (#6712 PR 3, L7: no --retry-failed) and nothing is held or converted.
+  for (const compacted of [false, true]) {
+    await engine.setConfig('sync.holds', 'fail');
+    const u = await source(engine, { 'notes/ok.md': note('Ok') });
+    u.write('notes/draft.md', MALFORMED);
+    expect((await u.sync({ workingTree: true })).status).toBe('blocked_by_failures');
+    const [arbitrary] = await u.failedRequests();
+    await engine.executeRaw(compacted ? 'UPDATE persistence_requests SET error_message=NULL,error_detail=NULL,compacted=true WHERE request_id=$1::uuid'
+      : "UPDATE persistence_requests SET error_message='The value is invalid.',error_detail=NULL WHERE request_id=$1::uuid", [arbitrary!.request_id]);
+    await engine.unsetConfig('sync.holds');
+    u.write('notes/draft.md', note('Now clean'));
+    const retried = await u.sync({ workingTree: true });
+    expect(retried.status).toBe('first_sync');
+    expect(retried.held ?? []).toEqual([]);
+    expect(retried.converted_from_failed ?? []).not.toContain(arbitrary!.request_id);
+    expect(await u.holds()).toEqual([]);
+  }
 }), 240_000);
 
 test('dry run lists the fence hold a real run would write and writes nothing', () => each(async engine => {
