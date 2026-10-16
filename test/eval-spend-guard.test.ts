@@ -22,6 +22,7 @@ import {
   appendFileSync,
   chmodSync,
   existsSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -702,4 +703,93 @@ describe('eval-spend-guard.sh process groups (#6776)', () => {
       proc?.kill('SIGKILL');
     }
   }, 15_000);
+});
+
+
+// ---------------------------------------------------------------------------
+// Stale run leases (r3-d1): a guard records its run's lease while the command
+// runs; a later start REPORTS a run whose guard is gone but whose group may
+// still run (inspect/stop commands, an unknown ledger row) and kills nothing.
+// ---------------------------------------------------------------------------
+
+const leaseDir = () => ledger + '.leases';
+const leaseFiles = () => (existsSync(leaseDir()) ? readdirSync(leaseDir()) : []);
+const unknownRows = () => ledgerRows().filter((r) => r.status === 'unknown');
+function writeLease(name: string, fields: Record<string, string | number>): string {
+  mkdirSync(leaseDir(), { recursive: true });
+  const file = join(leaseDir(), name + '.lease');
+  writeFileSync(file, Object.entries(fields).map(([k, v]) => k + '=' + v).join('\n') + '\n');
+  return file;
+}
+
+describe('eval-spend-guard.sh stale run leases (r3-d1)', () => {
+  test('a run records its lease (pgid, host, boot id) while it runs and removes it once reconciled', async () => {
+    const g = start(['10', '1', '--', 'sleep', '30']);
+    try {
+      await waitFor(() => leaseFiles().some((f) => f.endsWith('.lease')), 'the lease file');
+      const body = readFileSync(join(leaseDir(), leaseFiles()[0]!), 'utf-8');
+      expect(body).toContain('run_id=' + String(runningRows()[0]!.run_id));
+      expect(body).toMatch(/\nguard_pid=\d+\n/);
+      expect(body).toMatch(/\npgid=\d+\n/);
+      expect(body).toMatch(/\nhost=.+\n/);
+      expect(body).toMatch(/\nboot_id=.+\n/);
+    } finally {
+      g.child.kill('SIGTERM');
+      await g.exit;
+    }
+    expect(leaseFiles()).toEqual([]);
+    expect(run(['10', '1', '--', 'true']).status).toBe(0);
+    expect(leaseFiles()).toEqual([]);
+  }, 20_000);
+
+  test("a SIGKILLed guard's still-running group is reported with inspect and stop commands and recorded as unknown; nothing is killed and the reservation stays counted", async () => {
+    const leaderFile = join(dir, 'leader.pid');
+    const kidFile = join(dir, 'kid.pid');
+    const g = start(['10', '4', '--', ...groupCommand(leaderFile, kidFile)]);
+    let kid = 0;
+    let leader = 0;
+    try {
+      await waitFor(() => existsSync(kidFile) && existsSync(leaderFile) && leaseFiles().length === 1, 'the command pids and lease');
+      kid = readPid(kidFile);
+      leader = readPid(leaderFile);
+      const runId = String(runningRows()[0]!.run_id);
+      const lease = join(leaseDir(), runId + '.lease');
+      g.child.kill('SIGKILL');
+      await g.exit;
+      expect(alive(leader)).toBe(true);
+
+      const next = run(['10', '1', '--', 'true']);
+      expect(next.status).toBe(0);
+      expect(next.stderr).toContain('STALE RUN ' + runId);
+      expect(next.stderr).toContain('Lease: ' + lease);
+      expect(next.stderr).toContain('ps -o pid,pgid,cmd -g ' + leader);
+      expect(next.stderr).toContain('kill -TERM -- -' + leader);
+      expect(next.stderr).toContain('nothing was stopped');
+      expect(unknownRows()).toEqual([expect.objectContaining({ stale_run_id: runId, pgid: leader, lease, cost_usd: 0, reason: 'guard_gone_group_may_run' })]);
+      expect(unknownRows()[0]).not.toHaveProperty('run_id');
+      expect(alive(leader)).toBe(true);
+      expect(alive(kid)).toBe(true);
+      expect(leaseFiles()).toEqual([runId + '.lease.reported']);
+      // The stale reservation (estimate 4) is still counted: 4 + the next run's 1 + 1 = 6 > cap 5 refuses.
+      const capped = run(['5', '1', '--', 'true']);
+      expect(capped.status).toBe(3);
+      expect(capped.stderr).not.toContain('STALE RUN');
+      expect(unknownRows()).toHaveLength(1);
+    } finally {
+      killQuietly(kid, leader);
+    }
+  }, 30_000);
+
+  test("a lease whose group is gone is removed silently; another host's lease is left alone", () => {
+    const deadGuard = spawnSync('true').pid;
+    const deadGroup = spawnSync('true').pid;
+    const gone = writeLease('gone-run', { run_id: 'gone-run', guard_pid: deadGuard, pgid: deadGroup, host: spawnSync('hostname', { encoding: 'utf-8' }).stdout.trim(), boot_id: 'unknown' });
+    const foreign = writeLease('foreign-run', { run_id: 'foreign-run', guard_pid: deadGuard, pgid: process.pid, host: 'host-b.example', boot_id: 'unknown' });
+    const r = run(['10', '1', '--', 'true']);
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain('STALE RUN');
+    expect(existsSync(gone)).toBe(false);
+    expect(existsSync(foreign)).toBe(true);
+    expect(unknownRows()).toEqual([]);
+  });
 });

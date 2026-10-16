@@ -51,22 +51,21 @@ Then bun run build:error-codes and bun run build:llms.
 
 ## Watch
 
-docs/architecture/key-files/tooling-and-tests.md is 59990 bytes after #6776,
-10 under the 60000-byte doc-history cap: the next edit there needs a split.
+docs/architecture/key-files/tooling-and-tests.md is 59986 bytes after the
+stale-lease entry, 14 under the 60000-byte doc-history cap: the next edit
+there needs a split.
 
 ## Doctor goldens
 
 The #6758/#6759/#6781 details changes are warn-path only; the only golden
 change is the new coordination_lock_location row (INTEGRATOR-ROW item 6).
 
-## Process groups: the cross-run reap is a separate, droppable commit
+## Process groups: stale guard runs are reported, never reaped
 
-The last commit of the branch, "fix(eval): reap a SIGKILLed guard's group
-only with verified ownership (#6776, scope: owner decision)", is the
-cross-run auto-reap (lease files, ownership-verified reap under flock,
-status unknown ledger rows). Garry decides its scope; drop that commit to
-ship only the in-run group signalling. Its BEHAVIOR row (marked below) ships
-only with it.
+The cross-run auto-reap commit was dropped (r3-d1). The last commit of the
+branch, "fix(eval): report a SIGKILLed guard's stale run without killing it
+(#6776)", only writes a run lease and reports a stale run on the next start;
+nothing is signalled across runs.
 
 ## src/core/behavior-change-notice.ts: BEHAVIOR_CHANGES rows (append, since '<v>')
 
@@ -80,8 +79,7 @@ only with it.
     { since: '<v>', text: 'A graduation intent marker that recorded a boot id or PID namespace this process cannot read now reads unknown, not alive, so a marker from another host or container is never taken as a live run because a local process shares its pid (#6774).' },
 
     { since: '<v>', text: '`scripts/eval-spend-guard.sh` runs the guarded command in its own process group and stops the whole group (helpers and grandchildren included) on an interrupt, after the kill grace, and when the command exits leaving processes behind. A terminal stdin is now EOF (the command cannot read the terminal from its own group); pipe or redirect input if it needs any (#6776).' },
-    // only with the cross-run reap commit:
-    { since: '<v>', text: 'A SIGKILLed `scripts/eval-spend-guard.sh` leaves `<ledger>.leases/<run_id>.lease`: the next guard stops that run\'s process group only when it can prove the group is the one that guard launched, never signals it otherwise, and records it as a cost-0 `status: "unknown"` ledger row while the run\'s reservation stays counted at the estimate (#6776).' },
+    { since: '<v>', text: 'While its command runs, `scripts/eval-spend-guard.sh` keeps a run lease in `<ledger>.leases/<run_id>.lease` (run id, guard pid, process group id, host, boot id) and removes it once the run is reconciled. When a guard was SIGKILLed and its process group may still be running, the next guard on that host prints a STALE RUN report on stderr with the lease path, the pgid and the commands to inspect it (ps -o pid,pgid,cmd -g <pgid>) and stop it (kill -TERM -- -<pgid>), appends a cost-0 status "unknown" ledger row (stale_run_id, pgid, lease) and renames the lease to .reported. Nothing is killed automatically, and the stale run\'s reservation stays counted at its estimate (#6776).' },
     { since: '<v>', text: '`gbrain claw-test` runs each phase in its own process group: a phase timeout, SIGINT and SIGTERM stop everything the phase started, and SIGINT stops the running phase even when it was not sent from the terminal (a second SIGINT kills it) (#6775).' },
 
 #6719's "checkpoint receipts become historical" row from plan-v2 is not
