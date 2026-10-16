@@ -34,11 +34,13 @@ describe('nonInteractiveDefaultBudget', () => {
   });
 
   test('the default starts with the check run, not before the connect', () => {
-    const deadline = startDoctorDeadline(['--json'], 1_000);
+    const connectAt = 1_000;
+    const checksAt = 60_000;
+    const deadline = startDoctorDeadline(['--json'], connectAt);
     deadline.deferredBudgetMs = 5_000;
     expect(deadline.deadlineAt).toBeNull();
     expect(doctorRunSummary(['--json'], deadline)).toBeUndefined();
-    startDeferredDeadline(deadline, 60_000);
+    startDeferredDeadline(deadline, checksAt);
     expect(deadline).toMatchObject({ startedAt: 60_000, budgetMs: 5_000, deadlineAt: 65_000, nonInteractiveDefault: true });
     expect(doctorRunSummary(['--json'], deadline)).toMatchObject({ tier: 'standard', budgetMs: 5_000 });
   });

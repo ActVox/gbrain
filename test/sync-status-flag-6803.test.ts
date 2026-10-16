@@ -25,11 +25,6 @@ describe('gbrain sync --status (real CLI)', () => {
   let home: string;
   let notes: string;
   const dbPath = () => join(home, '.gbrain', 'brain.pglite');
-  const pageCount = async () => {
-    const engine = new PGLiteEngine();
-    await engine.connect({ database_path: dbPath() });
-    try { return (await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM pages'))[0]!.n; } finally { await engine.disconnect(); }
-  };
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), 'gbrain-6803-sync-status-'));
@@ -42,6 +37,11 @@ describe('gbrain sync --status (real CLI)', () => {
     expect(add.exitCode, add.stderr).toBe(0);
   }, 200_000);
   afterAll(() => rmSync(home, { recursive: true, force: true }));
+  const pageCount = async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({ database_path: dbPath() });
+    try { return (await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM pages'))[0]!.n; } finally { await engine.disconnect(); }
+  };
 
   test('prints the sync status envelope and syncs nothing', async () => {
     const run = await runCli(['sync', '--status', '--source', 'notes', '--json'], { home, timeoutMs: 60_000 });

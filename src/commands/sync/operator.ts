@@ -98,7 +98,7 @@ export function syncOperatorVerb(args: readonly string[]): 'status' | 'unblock' 
   if (unread) {
     const flag = unread.split('=')[0];
     throw opError('invalid_params', `gbrain sync does not read ${flag}; it would have run a full sync.`,
-      'Preview a sync with --dry-run, or read where a source stands with gbrain sync status --source <id>.',
+      'Preview a sync with --dry-run, or read where the source stands with gbrain sync status.',
       { fix: { argv: ['gbrain', 'sync', ...args.filter(a => a !== unread && a !== '--dry-run'), '--dry-run'], consent: [], actor: 'agent', requires_exclusive: false,
         why: 'The same sync with --dry-run reports what it would import and writes nothing.' } });
   }
