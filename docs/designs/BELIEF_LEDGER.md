@@ -1105,10 +1105,39 @@ machine, median of 2 runs, after section 13 item 16:
 | `beliefs enable` baseline | 1.2 s (1.2 ms/page) | 1.8 s (1.8 ms/page) |
 | `beliefs backfill`, 2 prior versions per page | 9.7 s (25,040 events) | 7.3 s |
 
-Cheaper options, none in W1: skip the post-read of tables a publication did
-not write (projections would report what they touched), keep each stream's
-subject snapshot on its lifetime row so the pre read is a key lookup, or
-force generic plans for the state read on Postgres (about 0.8 ms).
+**After the write-overhead pass** (section 13, items 17 to 20). Measured on
+the 4-core bench machine with the same `submitPageMutation` bench, master
+(v0.60.265.0) against the branch, interleaved, 3 rounds of 15 runs per cell
+(median of the round medians):
+
+| Cell | `put_page` ms | Ledger ms in the transaction | Ledger share |
+|---|---|---|---|
+| PGLite typical edit | 62 → 57 | 3.8–3.9 → 3.7–3.8 | 6.1% → 6.4–6.6% |
+| PGLite large edit | 380–385 → 206–210 | 14.6 → 14.0 | 3.8% → 6.7–6.8% |
+| Postgres typical edit | 47.5 → 44.4 | 4.5–4.6 → 3.8–3.9 | 9.7% → 8.6–8.7% |
+| Postgres large edit | 229–231 → 208–223 | 25.5–28.2 → 23.4–23.6 | 12.2–12.3% → 10.4–11.3% |
+
+The large PGLite share rose because `put_page` lost 45% of its time (the
+projections no longer rewrite 225 identical rows), not because the ledger
+grew. A typical Postgres edit now spends about 1.25 ms on the pre read,
+0.9 ms on the post read, 0.35 ms on lifetimes, 0.3 ms keying, 0.2 ms
+diffing, 0.4 ms on the append and 0.4 ms on the commit mark. Large-edit
+Postgres medians move by ±3 ms between identical rounds.
+
+Managed sync, create, 1000 typical pages plus 20 people, 5 interleaved reps
+per arm on Postgres: off 17.18 s median (16.66–18.99), on 19.37 s median
+(18.47–21.76), +12.7%, 7.2 ms per page in the transaction. On PGLite, 2 reps
+per arm: 39.4 → 43.6 s, +10.8%. Creates gain nothing from items 17 and 19: a
+create writes every table and reads every claim for the first time. The
+earlier +24% (lane 32) and +35% (one noisy rep of two) came from too few
+reps to quote.
+
+**Targets for turning recording on by default:** typical edit ≤5%, large
+edit ≤10% and managed-sync create ≤10% of the write's time, ledger on
+against off. After this pass W1 meets none of them on Postgres (typical
+8.6–8.7%, large 10.4–11.3%, create +12.7%) and only the large-edit one on
+PGLite (typical 6.4–6.6%, large 6.7–6.8%, create +10.8%), so recording stays
+opt-in per source (`gbrain beliefs enable`).
 
 **Storage** (section 12, question 7, decided). A second free bench inserted
 the creation events of 2,000 typical pages into a PGLite table with the full
@@ -1502,3 +1531,39 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
     and 2000 pages on PGLite). The read now sets `force_generic_plan` for
     that one statement, transaction-local, and restores the previous value;
     the cost stays about 0.6 ms per page at every size.
+17. **Projections skip identical rewrites; the post read reuses untouched
+    tables.** The fence fact-field update, the take upsert and the take
+    resolution update write only rows whose values change, so a prose edit
+    rewrites no fact or take row and `takes.updated_at` moves only when the
+    take changes. Nothing reads a rewrite that changes no value: write
+    attribution and the trust tier already move only on a value change, and
+    every `updated_at` cursor and freshness reader is on `pages`. The post
+    read compares the transaction's `pg_stat_get_xact_tuples_*` counters for
+    facts, takes, links and link transitions with the pre read's and reuses
+    the pre read's rows for every table the transaction did not write, while
+    the stream pages are the same pages at the same slugs (fact entity pages
+    and link endpoints are read fresh). With `track_counts` off it reads
+    everything. A missed write would surface as drift in doctor
+    `belief_ledger_coverage`, which a forced probe shows.
+18. **Fewer statements per batch.** The source read that opens a batch also
+    reads the managed mode and switches to generic plans for the pre read;
+    each state read restores the plan mode inside its own statement. When
+    the post read reused a table's rows, the post side reuses the pre side's
+    fact and take subjects (take visibility from the post side) instead of
+    keying them again.
+19. **Process-local fingerprint cache.** Each stream read hashes claim texts
+    (SHA-256, in SQL) and fingerprints only those whose hash the process has
+    not fingerprinted before; `gbrain_fact_fingerprint` costs about 27 µs per
+    claim on Postgres, the SHA-256 under 1 µs. The cache maps text hash to
+    fingerprint only, never claim text, and is bounded (20,000 fingerprints,
+    2,000 streams, oldest out first). A forced probe compares cached and SQL
+    fingerprints for random claims with case, Unicode, punctuation and
+    whitespace edge cases on both engines, because a divergence would break
+    purge matching. One-shot CLI processes start cold and pay the full read.
+20. **Declined: a subject snapshot cache on the lifetime row** (the "cheaper
+    option" section 9 listed). After items 17 to 19 a typical Postgres edit
+    costs about 3.8 ms of a 44–50 ms write. Removing the pre read entirely
+    would leave about 2.6–2.8 ms (5.5–6%); a real cache also needs a
+    validity check and a write per batch, so about 6–7%, still above the 5%
+    target, for a migration plus invalidation on purge, redaction and
+    unmanaged writers. Not built.

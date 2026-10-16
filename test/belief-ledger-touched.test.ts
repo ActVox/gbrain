@@ -7,7 +7,8 @@
  * touched signal and shows the drift check catches the event it loses.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { __suppressBeliefTouchedSignalForTests, readBeliefState, type RawState } from '../src/core/belief/state.ts';
+import { createHash } from 'node:crypto';
+import { FINGERPRINT_CACHE_MAX, __fingerprintCacheForTests, __suppressBeliefTouchedSignalForTests, readBeliefState, type RawState } from '../src/core/belief/state.ts';
 import { withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { keyedSubjects } from '../src/core/belief/subjects.ts';
 import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
@@ -36,8 +37,68 @@ async function doctor(b: BeliefBrain): Promise<Check> {
   return check!;
 }
 
+/** Claims that stress the fingerprint's normalization: case, Unicode, punctuation, dots and every kind of whitespace. */
+const EDGE_PIECES = ['Acme', 'ACME', 'acme', 'İstanbul', 'ß', 'Straße', 'é', 'e\u0301', 'naïve', '日本語', '😀', '\u00a0', '\u2003', '\t', '\n', '  ', ' ',
+  '.', '...', '…', '. .', 'U.S.', 'v2.0', ',', '!', '"', "'", '‘’', '“”', '«»', '–', '—', '·', '•', '¡', '¿', '(x)', '[y]', '{z}', '|', '\\', '/', '$5', '%', '&', '@', '#1', '_', '~', '^'];
+function edgeClaims(count: number): string[] {
+  let seed = 0x5eed;
+  const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const out = ['Acme raised a seed round', ' acme raised a seed round. ', 'ACME  RAISED\tA SEED\nROUND...', 'Acme raised a seed round…', '\u00a0Acme\u2003raised a seed round'];
+  while (out.length < count) out.push(Array.from({ length: 2 + Math.floor(next() * 8) }, () => EDGE_PIECES[Math.floor(next() * EDGE_PIECES.length)]).join(next() < 0.5 ? ' ' : ''));
+  return [...new Set(out.filter(c => c.trim().length))];
+}
+
 for (const engineCase of testBackends().map(beliefEngineCase)) {
   describe(`belief ledger write overhead (${engineCase.name})`, () => {
+    test('the fingerprint cache returns exactly gbrain_fact_fingerprint for edge-case claims (forced probe: a poisoned entry is caught)', async () => {
+      await beliefBrain(async b => {
+        await b.put(SLUG, beliefPage({ prose: 'Edge cases.' }));
+        const [{ id: pageId }] = await b.engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id = $1 AND slug = $2', [b.sourceId, SLUG]);
+        const claims = edgeClaims(160);
+        await b.engine.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, kind, source, visibility, confidence)
+          SELECT $1, $2, c, 'fact', 'probe', 'world', 1 FROM unnest($3::text[]) AS c`, [b.sourceId, SLUG, claims]);
+        await b.engine.executeRaw(`INSERT INTO takes (page_id, row_num, claim, kind, holder, weight)
+          SELECT $1, n::int, c, 'take', 'brain', 0.5 FROM unnest($2::text[]) WITH ORDINALITY AS t(c, n)`, [pageId, claims.slice(0, 60)]);
+        const truth = new Map((await b.engine.executeRaw<{ fact: string; fp: string; th: string }>(`SELECT c AS fact, gbrain_fact_fingerprint(c) AS fp,
+            encode(sha256(convert_to(c, 'UTF8')), 'hex') AS th FROM unnest($1::text[]) AS c`, [claims])).map(r => [r.fact, r]));
+        for (const claim of claims) expect(truth.get(claim)!.th).toBe(createHash('sha256').update(claim, 'utf8').digest('hex'));
+        const mismatches = (state: RawState) => [...state.facts.map(f => [f.fact, f.fp] as const), ...state.takes.map(k => [k.claim, k.claim_fp] as const)]
+          .filter(([text, fp]) => truth.get(text)!.fp !== fp).map(([text]) => text);
+        const cache = __fingerprintCacheForTests();
+        cache.fingerprints.clear(); cache.streams.clear();
+        const cold = await readBeliefState(b.engine, b.sourceId, [SLUG]);
+        expect(cold.facts).toHaveLength(claims.length);
+        expect(cold.takes).toHaveLength(60);
+        expect(mismatches(cold)).toEqual([]);
+        for (const claim of claims) expect(cache.fingerprints.get(truth.get(claim)!.th)).toBe(truth.get(claim)!.fp);
+        const warm = await readBeliefState(b.engine, b.sourceId, [SLUG]);
+        expect(mismatches(warm)).toEqual([]);
+        const victim = claims[1]!;
+        cache.fingerprints.set(truth.get(victim)!.th, 'poisoned');
+        expect(mismatches(await readBeliefState(b.engine, b.sourceId, [SLUG]))).toEqual([victim, ...(claims.slice(0, 60).includes(victim) ? [victim] : [])]);
+        cache.fingerprints.clear(); cache.streams.clear();
+      }, { managed: false, enable: false, databaseUrl: engineCase.databaseUrl });
+    }, 120_000);
+
+    test('the fingerprint cache stays within its bounds and holds no claim text', async () => {
+      const cache = __fingerprintCacheForTests();
+      await beliefBrain(async b => {
+        await b.put(SLUG, beliefPage({ facts: ['Acme raised a seed round', 'Acme has ten staff'], takes: ['Acme will win its market'] }));
+        await readBeliefState(b.engine, b.sourceId, [SLUG]);
+        const texts = ['Acme raised a seed round', 'Acme has ten staff', 'Acme will win its market'];
+        for (const [key, value] of cache.fingerprints) expect([key, value].some(v => texts.some(t => v.includes(t)))).toBe(false);
+        for (const [key, hashes] of cache.streams) expect([key, ...hashes].some(v => texts.some(t => v.includes(t.toLowerCase()) || v.includes(t)))).toBe(false);
+      }, { managed: false, enable: false, databaseUrl: engineCase.databaseUrl });
+      for (let i = 0; i < FINGERPRINT_CACHE_MAX + 50; i++) cache.fingerprints.set(`h${i}`, 'f');
+      await beliefBrain(async b => {
+        await b.put(SLUG, beliefPage({ facts: ['Acme raised a seed round'] }));
+        await readBeliefState(b.engine, b.sourceId, [SLUG]);
+        expect(cache.fingerprints.size).toBe(FINGERPRINT_CACHE_MAX);
+        expect(cache.fingerprints.has('h0')).toBe(false);
+      }, { managed: false, enable: false, databaseUrl: engineCase.databaseUrl });
+      cache.fingerprints.clear(); cache.streams.clear();
+    }, 120_000);
+
     const brain = (run: (b: BeliefBrain) => Promise<void>, managed = true) => beliefBrain(run, { managed, databaseUrl: engineCase.databaseUrl });
     const seeded = async (b: BeliefBrain) => {
       await b.put('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example' }));
