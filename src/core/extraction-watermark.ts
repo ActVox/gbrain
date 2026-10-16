@@ -47,6 +47,13 @@ export interface InputTruncated {
   total_bytes?: number;
   cap_bytes?: number;
   origin?: 'page' | 'sidecar';
+  /**
+   * conversation_facts on a page over the window cap: `no_prior_facts` (the newest window was extracted; the page had
+   * no conversation facts a clear could lose) or `prior_facts_kept` (skipped: the page's `prior_facts` conversation
+   * facts may lie outside the window, so nothing was cleared).
+   */
+  window_rule?: 'no_prior_facts' | 'prior_facts_kept';
+  prior_facts?: number;
 }
 
 export interface StoredWatermark { pipelineVersion: number; bytes: number; sha256: string }
