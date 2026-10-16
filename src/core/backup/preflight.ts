@@ -7,11 +7,12 @@
  * Both refusals name the same recovery: the quiesced physical-copy runbook.
  * Doctor's `pglite_data_dir` uses the same size estimate to warn early.
  */
-import { lstatSync, readdirSync } from 'node:fs';
+import { lstatSync, readdirSync, type Stats } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Action } from '../agent-output.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
 import { BACKUP_ARCHIVE_MAX_BYTES } from './archive.ts';
+import { UNREADABLE_CODES } from './runtime-artefacts.ts';
 
 export const PHYSICAL_COPY_RUNBOOK = 'docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy';
 /** Doctor warns once the data dir's estimated archive size passes this share of the cap. */
@@ -22,12 +23,21 @@ const TAR_BLOCK = 512;
 /**
  * Bytes `dumpDataDir` would write for `dir`: every regular file's apparent
  * size rounded up to a 512-byte tar block plus its header block, a header per
- * directory, and the two closing blocks. Symlinks are not followed.
+ * directory, and the two closing blocks. Symlinks are not followed. An entry
+ * that vanished or that the runtime cannot lstat (a Windows AF_UNIX socket
+ * reads as EACCES) adds nothing: it is not a regular file, and the runtime
+ * artefact sweep decides what happens to it.
  */
 export function estimatedTarBytes(dir: string): number {
   let total = 2 * TAR_BLOCK;
   const walk = (path: string): void => {
-    const stat = lstatSync(path);
+    let stat: Stats;
+    try { stat = lstatSync(path); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (path !== dir && code && (code === 'ENOENT' || UNREADABLE_CODES.has(code))) return;
+      throw error;
+    }
     if (stat.isDirectory()) {
       total += TAR_BLOCK;
       for (const name of readdirSync(path)) walk(join(path, name));

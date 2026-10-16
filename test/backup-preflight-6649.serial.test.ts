@@ -17,7 +17,7 @@
  * no disk use), so no test writes gigabytes.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { privateWrite } from '../src/core/agent-install/state.ts';
@@ -110,6 +110,19 @@ describe('size preflight', () => {
     writeFileSync(join(dir, 'sub', 'b'), Buffer.alloc(513));
     // closing blocks + 2 directories + (header + 1 block) + (header + 2 blocks)
     expect(estimatedTarBytes(dir)).toBe(512 * (2 + 2 + 2 + 3));
+  });
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('an entry the runtime cannot lstat adds nothing to the estimate instead of failing it', () => {
+    const dir = mkdtempSync(join(temporary, 'unreadable-'));
+    const locked = join(dir, 'locked');
+    mkdirSync(locked);
+    writeFileSync(join(locked, 'entry'), 'x');
+    chmodSync(locked, 0o600);
+    try {
+      expect(estimatedTarBytes(dir)).toBe(512 * (2 + 2));
+    } finally {
+      chmodSync(locked, 0o700);
+    }
   });
 
   test('a data dir over the 8 GiB cap is refused as backup_too_large before the lock, the dump or any output', async () => {
