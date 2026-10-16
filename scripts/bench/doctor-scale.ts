@@ -78,7 +78,7 @@ async function fixtureUrl(): Promise<string> {
 async function seed(brainUrl: string): Promise<void> {
   const { createEngine } = await import('../../src/core/engine-factory.ts');
   const engine = await createEngine({ engine: engineKind });
-  await engine.connect(engineKind === 'pglite' ? { database_path: join(home, '.gbrain', 'brain.pglite') } : { database_url: brainUrl, poolSize: 2 });
+  await engine.connect(engineKind === 'pglite' ? { database_path: join(home, '.gbrain', 'brain.pglite') } : { database_url: brainUrl });
   try {
     await engine.initSchema();
     for (let from = 1; from <= pages; from += 10_000) {

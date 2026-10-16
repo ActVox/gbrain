@@ -135,7 +135,7 @@ for (const kind of testBackends()) {
       await withEntryBudget(200, async () => {
         const capped = byName(await buildChecks(slow, ['--json', '--scope=brain', '--only', 'persistence_capacity']), 'persistence_capacity')!;
         expect(capped.details).toMatchObject({ health: 'unknown', reason: 'budget', limit: 'entry', budget_ms: 200 });
-        const argv = capped.fix!.argv;
+        const argv = capped.fix!.argv!;
         const n = Number(argv[argv.indexOf('--budget-ms') + 1]);
         expect(argv.slice(0, 4)).toEqual(['gbrain', 'doctor', '--only', 'persistence_capacity']);
         expect(n).toBeGreaterThan(capped.elapsed_ms!);
