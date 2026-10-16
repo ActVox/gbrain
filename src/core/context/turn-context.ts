@@ -240,6 +240,13 @@ export interface AssembleTurnContextOpts {
   /** pack — cap on entity-card fan-out (default 8; push path passes smaller). */
   maxEntities?: number;
   /**
+   * #6723 pack — the sources an unqualified entity name resolves in, home
+   * first (verbs/entity-source.ts). Absent: `sourceId` alone.
+   */
+  sources?: readonly string[];
+  /** #6723 pack — source-qualified entities, each resolved in its own source only (after `entities`, inside the same cap). */
+  entityRefs?: ReadonlyArray<{ name: string; sourceId: string }>;
+  /**
    * Wall-clock budget (ms). When set, arms race the deadline and whatever has
    * resolved is returned as a PARTIAL pack (degradedReason 'deadline'); the
    * push path passes ~TURN_CONTEXT_SERVER_BUDGET_MS so it never overruns.
@@ -571,11 +578,15 @@ async function assemblePack(
 ): Promise<TurnContextResult> {
   const remote = opts.includePrivate !== true; // fail-closed: only explicit true widens
   const maxEntities = clampPositive(opts.maxEntities, PACK_DEFAULT_MAX_ENTITIES);
-  const entities = (opts.entities ?? [])
-    .filter((e) => typeof e === 'string' && e.trim())
-    .slice(0, maxEntities);
+  const sources = opts.sources?.length ? opts.sources : [opts.sourceId];
+  const entities = [
+    ...(opts.entities ?? []).filter((e) => typeof e === 'string' && e.trim()).map((name) => ({ name, sources })),
+    ...(opts.entityRefs ?? []).map((ref) => ({ name: ref.name, sources: [ref.sourceId] })),
+  ].slice(0, maxEntities);
 
+  // Cards and their newer mentions are keyed by (source_id, slug): two pages sharing a slug in two sources are two entities.
   const acc: { cards: EntityCard[]; facts: TurnContextFact[]; withheld: number; mentions: Map<string, NewerMentions> } = { cards: [], facts: [], withheld: 0, mentions: new Map() };
+  const keyOf = (c: EntityCard) => pageKey({ source_id: c.entity.source_id, slug: c.entity.slug });
   // #5575 (CEO-20): context_pack is a proactive surface.
   const policy: ReadEligibility = opts.eligibility ?? await proactiveEligibility({ engine }, 'context_pack').catch(() => ({ suppressFlagged: true }));
   // Cooperative deadline (perf review): raceDeadline abandons but cannot stop
@@ -585,13 +596,14 @@ async function assemblePack(
   const deadlineAt =
     typeof opts.deadlineMs === 'number' && opts.deadlineMs > 0 ? Date.now() + opts.deadlineMs : null;
   const build = (async () => {
-    for (const name of entities) {
+    for (const { name, sources: nameSources } of entities) {
       if (deadlineAt !== null && Date.now() >= deadlineAt) return;
       try {
-        const res = await buildEntityCard(engine, opts.sourceId, name, { remote, eligibility: policy, omitQuarantined: opts.includeQuarantined !== true });
-        if (res.found && res.card) {
-          const verdict = (await pageActivationVerdicts(engine, [{ source_id: opts.sourceId, slug: res.card.entity.slug }], policy))
-            .get(pageKey({ source_id: opts.sourceId, slug: res.card.entity.slug }));
+        const res = await buildEntityCard(engine, nameSources[0]!, name, { remote, eligibility: policy, omitQuarantined: opts.includeQuarantined !== true, sources: nameSources });
+        if (res.found && res.card && !acc.cards.some((c) => keyOf(c) === keyOf(res.card!))) {
+          // The card's OWN source decides activation: a same-slug page in another source never gates or admits it.
+          const ref = { source_id: res.card.entity.source_id, slug: res.card.entity.slug };
+          const verdict = (await pageActivationVerdicts(engine, [ref], policy)).get(pageKey(ref));
           if (verdict?.suppressed) acc.withheld++;
           // Under trust.agent_activation=allow (the default) a flagged entity page stays, labeled unconfirmed.
           else if (verdict && !verdict.belowFloor) acc.cards.push(verdict.unconfirmed ? { ...res.card, unconfirmed: true as const } : res.card);
@@ -611,11 +623,11 @@ async function assemblePack(
     let left = NEWER_MENTIONS_PACK_CHARS;
     for (const card of acc.cards) {
       if (left <= 0 || (deadlineAt !== null && Date.now() >= deadlineAt)) return;
-      const m = await readNewerMentions(engine, opts.sourceId, card.entity.slug,
+      const m = await readNewerMentions(engine, card.entity.source_id, card.entity.slug,
         { excludePrivate, keepVisibility: remote ? ['world'] : ['private', 'world'], charBudget: left, eligibility: policy, includeQuarantined: opts.includeQuarantined === true });
       if (!m) continue;
-      acc.mentions.set(card.entity.slug, m);
-      left -= renderNewerMentionLines({ ...card, newer_mentions: m }).join('\n').length + 1;
+      acc.mentions.set(keyOf(card), m);
+      left -= renderNewerMentionLines({ ...card, newer_mentions: m }, sources[0]).join('\n').length + 1;
     }
   })();
 
@@ -625,7 +637,7 @@ async function assemblePack(
   // response could diverge from the rendered text after the first await
   // downstream. Copies freeze the delivered view.
   const mentions = new Map(acc.mentions);
-  const cards = acc.cards.map((c) => (mentions.has(c.entity.slug) ? { ...c, newer_mentions: mentions.get(c.entity.slug) } : c));
+  const cards = acc.cards.map((c) => (mentions.has(keyOf(c)) ? { ...c, newer_mentions: mentions.get(keyOf(c)) } : c));
   const facts = [...acc.facts];
   // `since` filter (adversarial review: was documented but dead) — open-thread
   // events are cut to those after the cursor, matching the verb contract.
@@ -633,7 +645,7 @@ async function assemblePack(
   const openThreads = cards
     .flatMap((c) => c.open_threads ?? [])
     .filter((t) => !since || (t.date !== null && isAfter(t.date, since)));
-  const text = renderPack(cards, openThreads, facts, opts.checkpointLinks);
+  const text = renderPack(cards, openThreads, facts, opts.checkpointLinks, sources[0]);
   return {
     text,
     pointers: [],
@@ -867,8 +879,11 @@ const labeled = (item: { trust_tier?: TrustTier; origin?: string }, text: string
   item.trust_tier ? renderTrustedInline(text, labelOf(item)) : text;
 const cardSummary = (c: EntityCard, text: string): string =>
   c.quarantined ? renderTrustedInline(text, { trust_tier: 'external_untrusted', origin: 'quarantined' }) : labeled(c, text);
-export const renderCardLine = (c: EntityCard): string =>
-  `- **${c.entity.title}** → \`${c.entity.slug}\`${c.summary ? ` — ${cardSummary(c, c.summary)}` : c.trust_tier ? ` — ${cardSummary(c, '')}` : ''}${c.relationship_note ? ` [${c.relationship_note}]` : ''} (use get_page/entity before relying on details)`;
+/** #6723: a card from outside the pack's home source names its source, so a follow-up reads the right page. */
+const sourceNote = (c: EntityCard, home?: string): string =>
+  home !== undefined && c.entity.source_id !== undefined && c.entity.source_id !== home ? ` (source ${c.entity.source_id})` : '';
+export const renderCardLine = (c: EntityCard, home?: string): string =>
+  `- **${c.entity.title}** → \`${c.entity.slug}\`${sourceNote(c, home)}${c.summary ? ` — ${cardSummary(c, c.summary)}` : c.trust_tier ? ` — ${cardSummary(c, '')}` : ''}${c.relationship_note ? ` [${c.relationship_note}]` : ''} (use get_page/entity before relying on details)`;
 export const renderThreadLine = (t: EntityOpenThread): string =>
   `- [${t.kind}] ${labeled(t, t.text)}${t.date ? ` (${t.date})` : ''}`;
 export const renderFactLine = (f: TurnContextFact): string =>
@@ -876,13 +891,13 @@ export const renderFactLine = (f: TurnContextFact): string =>
 export const renderPageLine = (p: DeltaPage): string => `- **${labeled(p, p.title)}** → \`${p.slug}\` (${p.updated_at})`;
 
 /** One card's newer-mentions block: a line naming the entity and its page date, then one line per page. [] when there are none. */
-export const renderNewerMentionLines = (c: EntityCard): string[] => {
+export const renderNewerMentionLines = (c: EntityCard, home?: string): string[] => {
   const m = c.newer_mentions;
   if (!m?.rows.length) return [];
   return [
-    `- **${c.entity.title}** (\`${c.entity.slug}\`, page dated ${m.since.slice(0, 10)}):`,
+    `- **${c.entity.title}** (\`${c.entity.slug}\`${sourceNote(c, home)}, page dated ${m.since.slice(0, 10)}):`,
     ...m.rows.map(renderNewerMentionRow),
-    ...(m.more ? [`  - more pages dated after ${m.since.slice(0, 10)} mention it: entity("${c.entity.slug}") lists them all`] : []),
+    ...(m.more ? [`  - more pages dated after ${m.since.slice(0, 10)} mention it: entity("${c.entity.slug}"${sourceNote(c, home) ? `, source_id "${c.entity.source_id}"` : ''}) lists them all`] : []),
   ];
 };
 
@@ -905,6 +920,7 @@ export function renderPack(
   openThreads: EntityOpenThread[],
   facts: TurnContextFact[],
   checkpointLinks?: TurnContextResult['checkpointLinks'],
+  home?: string,
 ): string {
   const links = checkpointLinks ?? [];
   if (!cards.length && !openThreads.length && !facts.length && !links.length) return '';
@@ -919,10 +935,10 @@ export function renderPack(
       're-pull with get_page. Trust these links over the compaction summary.',
     );
   }
-  if (cards.length) lines.push('', PACK_HEADERS[0], ...cards.map(renderCardLine));
+  if (cards.length) lines.push('', PACK_HEADERS[0], ...cards.map((c) => renderCardLine(c, home)));
   if (openThreads.length) lines.push('', PACK_HEADERS[1], ...openThreads.map(renderThreadLine));
   if (facts.length) lines.push('', PACK_HEADERS[2], ...facts.map(renderFactLine));
-  const mentionLines = cards.flatMap(renderNewerMentionLines);
+  const mentionLines = cards.flatMap((c) => renderNewerMentionLines(c, home));
   if (mentionLines.length) lines.push('', NEWER_MENTIONS_HEADER, ...mentionLines);
   return lines.join('\n');
 }

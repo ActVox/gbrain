@@ -704,6 +704,10 @@ const context_pack: Operation = {
     include_quarantined: { type: 'boolean', description: 'Admin or memory_confirm: quarantined cards.', fullSurfaceOnly: true },
     counterparty: { type: 'string', description: 'Person or company (name or slug): adds a pulled brief of dated items about them.', fullSurfaceOnly: true },
     intent: { type: 'string', enum: [...BRIEF_INTENTS], description: 'With counterparty: the task the brief is for.', fullSurfaceOnly: true },
+    source_id: { type: 'string', description: 'Resolve entities in this source only. Default: your source first, then every source you can read.' },
+    entity_refs: { type: 'array', items: { type: 'object', properties: { source_id: { type: 'string' }, slug: { type: 'string' } } },
+      description: 'Source-qualified entities: [{"source_id":"wiki","slug":"people/alice-example"}].' },
+    prefer_source_id: { type: 'string', description: 'Source to try first (thin clients send .gbrain-source here); never narrows.', fullSurfaceOnly: true },
   },
   scope: 'read',
   verb: true,
@@ -727,7 +731,12 @@ const context_pack: Operation = {
     // Echo the CAPPED list (pre-landing review): the assembler bundles at most
     // PACK_DEFAULT_MAX_ENTITIES, so echoing more would claim entities were
     // bundled that produced no cards.
-    const entities = parseEntityList(p.entities).slice(0, PACK_DEFAULT_MAX_ENTITIES);
+    const names = parseEntityList(p.entities).slice(0, PACK_DEFAULT_MAX_ENTITIES);
+    // #6723: names resolve across the readable sources (home first) unless source_id pins one; entity_refs name their source.
+    const { ambientMissNotice, entityRefs, entitySources } = await import('../verbs/entity-source.ts');
+    const walk = await entitySources(ctx, p, 'context_pack');
+    const refs = (await entityRefs(ctx, p.entity_refs, PACK_DEFAULT_MAX_ENTITIES)).slice(0, PACK_DEFAULT_MAX_ENTITIES - names.length);
+    const entities = [...names, ...refs.map((r) => r.name)];
     // Fail-closed: private only when EXPLICITLY requested AND the caller is
     // trusted-local (ctx.remote === false). A remote caller never widens.
     const includePrivate = p.include_private === true && ctx.remote === false;
@@ -747,8 +756,10 @@ const context_pack: Operation = {
       ? { cards: [], facts: [], text: '', pointers: [], factsCount: 0 } as unknown as Awaited<ReturnType<typeof assembleContextPack>>
       : await assembleContextPack(ctx.engine, {
         sourceId,
-        entities,
         since,
+        entities: names,
+        sources: walk.sources,
+        entityRefs: refs,
         sessionId: typeof p.session_id === 'string' ? p.session_id : undefined,
         includePrivate,
         maxEntities: PACK_DEFAULT_MAX_ENTITIES,
@@ -778,19 +789,23 @@ const context_pack: Operation = {
       emitNotice: (n) => ctx.emitNotice?.(n) })
       .catch((): PackRefs => ({ bySlug: new Map(), notice: null }));
     if (packRefs.notice) ctx.emitNotice?.(packRefs.notice);
+    const ambientNotice = ambientMissNotice('context_pack', walk, (res.cards ?? []).filter((c) => c.entity.source_id !== walk.ambient?.sourceId && !refs.some((r) => r.sourceId === c.entity.source_id && r.name === c.entity.slug))
+      .map((c) => ({ name: c.entity.title, foundIn: c.entity.source_id })));
+    if (ambientNotice) ctx.emitNotice?.(ambientNotice);
     // F3 (`entity.row_page_status`, default on): each card and newer-mentions row carries its page's frontmatter `status` (pull verb only).
     const { readRowPageStatus } = await import('../entity-references-config.ts');
     const { readPageStatusByRef } = await import('../mentions/referrers.ts');
-    const statusRefs = (res.cards ?? []).flatMap((c) => [c.entity.slug, ...(c.newer_mentions?.rows ?? []).map((r) => r.slug)]).map((slug) => ({ source_id: sourceId, slug }));
+    // #6723: every card, and its newer-mention rows, reads its own source.
+    const statusRefs = (res.cards ?? []).flatMap((c) => [c.entity.slug, ...(c.newer_mentions?.rows ?? []).map((r) => r.slug)].map((slug) => ({ source_id: c.entity.source_id, slug })));
     const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
     const pageStatus = statusRefs.length && await readRowPageStatus(ctx.engine)
       ? await readPageStatusByRef(ctx.engine, statusRefs, { excludePrivate: await resolveExcludePrivatePages(ctx.engine, includePrivate ? false : undefined), includeQuarantined })
         .catch(() => new Map<string, string>())
       : new Map<string, string>();
-    const statusOf = (slug: string) => { const value = pageStatus.get(`${sourceId}:${slug}`); return value ? { page_status: value } : {}; };
+    const statusOf = (src: string, slug: string) => { const value = pageStatus.get(`${src}:${slug}`); return value ? { page_status: value } : {}; };
     const withRefs = (res.cards ?? []).map((c) => ({
-      ...c, ...packRefs.bySlug.get(c.entity.slug), ...statusOf(c.entity.slug),
-      ...(c.newer_mentions ? { newer_mentions: { ...c.newer_mentions, rows: c.newer_mentions.rows.map((r) => ({ ...r, ...statusOf(r.slug) })) } } : {}),
+      ...c, ...packRefs.bySlug.get(`${c.entity.source_id}:${c.entity.slug}`), ...statusOf(c.entity.source_id, c.entity.slug),
+      ...(c.newer_mentions ? { newer_mentions: { ...c.newer_mentions, rows: c.newer_mentions.rows.map((r) => ({ ...r, ...statusOf(c.entity.source_id, r.slug) })) } } : {}),
     }));
     const view = redactRetrievalOutput([{ cards: withRefs, facts: rawFacts }], {}).results[0];
     let cards = view.cards;
@@ -807,7 +822,7 @@ const context_pack: Operation = {
       // rendered line plus its rendered (since-filtered) thread lines.
       const itemBudget = budgetTokens - packHeaderCost() - coreTokens - (pullBrief?.text ? estimateTokens(pullBrief.text) : 0);
       const cardCost = (c: (typeof cards)[number]) =>
-        lineCost(renderCardLine(c)) + threadsOf(c).reduce((n, t) => n + lineCost(renderThreadLine(t)), 0);
+        lineCost(renderCardLine(c, walk.home)) + threadsOf(c).reduce((n, t) => n + lineCost(renderThreadLine(t)), 0);
       const cardPack = itemBudget > 0 ? packToBudget(cards, cardCost, itemBudget) : dropAll(cards);
       cards = cardPack.items;
       const remaining = itemBudget - cardPack.meta.used;
@@ -817,7 +832,7 @@ const context_pack: Operation = {
       const mentionBudget = remaining - factPack.meta.used - lineCost('') - lineCost(NEWER_MENTIONS_HEADER);
       const withMentions = cards.filter((c) => c.newer_mentions);
       const mentionPack = mentionBudget > 0
-        ? packToBudget(withMentions, (c) => renderNewerMentionLines(c).reduce((n, l) => n + lineCost(l), 0), mentionBudget)
+        ? packToBudget(withMentions, (c) => renderNewerMentionLines(c, walk.home).reduce((n, l) => n + lineCost(l), 0), mentionBudget)
         : dropAll(withMentions);
       const keptMentions = new Set(mentionPack.items);
       cards = cards.map((c) => (c.newer_mentions && !keptMentions.has(c) ? { ...c, newer_mentions: undefined } : c));
@@ -837,7 +852,7 @@ const context_pack: Operation = {
     // structured arrays report — the assembler's pre-budget rendering would
     // overrun the declared budget_tokens. budget_used reports that text.
     const recordLines = cards.flatMap(renderRecordLines);
-    const basePack = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts) : res.text;
+    const basePack = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts, undefined, walk.home) : res.text;
     const packText = recordLines.length ? [basePack, ['', RECORDS_HEADER, ...recordLines].join('\n')].filter(Boolean).join('\n') : basePack;
     const text = [coreText, pullBrief?.text ?? '', packText].filter(Boolean).join('\n\n');
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
@@ -847,6 +862,7 @@ const context_pack: Operation = {
       entities,
       cards: cards.map((c) => ({
         slug: c.entity.slug,
+        source_id: c.entity.source_id,
         title: c.entity.title,
         type: c.entity.type,
         ...(c.page_status ? { page_status: c.page_status } : {}),

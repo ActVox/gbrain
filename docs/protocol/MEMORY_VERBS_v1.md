@@ -537,6 +537,29 @@ verbatim name-like lines from the remote-sanitized body, 600 characters per
 page and 1,200 per card, `identity_excerpt_omitted[]`); `alias_guidance`
 (`{ text, requires_surface? }`). `recent_facts[]` (`{ id, fact, kind, valid_from, entity_slug? }`, the 5 newest active saved facts, also those saved under an identity sibling or the bare subject slug, which carry that `entity_slug`); `active_fact_count` and `recall {entity}` cover the same slugs.
 
+#### entity source resolution and `source_id` (additive)
+
+Without `source_id`, `name` and each of `names` resolve across every source
+the caller can read: the home source first (the connection's source, or the
+ambient GBRAIN_SOURCE / .gbrain-source binding), then the other readable
+sources sorted by id, so one brain always resolves a name the same way. The
+first source with a hit owns the card, and every read behind it (aliases,
+facts, edges, references, identity) uses that source; sources outside the
+caller's grant are never read and look like a miss. A remote `__all__` names
+no source and still resolves nothing.
+
+`source_id` (one readable source) pins the lookup. A pin outside the grant,
+for a removed source or with a malformed id is refused with recall's selector
+errors: `scope_denied`, `not_found`, `invalid_params`. `prefer_source_id`
+reorders the walk without narrowing it (thin clients send their
+.gbrain-source there). When the ambient binding's source has no match, a
+`source_binding_narrowed` notice names where each name resolved.
+
+Every card carries `card.entity.source_id`, every `names` row `source_id`,
+and each suggestion its `source_id`: `(source_id, slug)` is the entity's
+identity, and two pages sharing a slug in two sources are two entities. A
+row's `next` names `source_id` when the page is outside the home source.
+
 #### entity open_threads loop backing (additive)
 
 On brains running the open-loop engine, `open_threads` entries may
@@ -884,6 +907,20 @@ envelope-wrapped injectable block, rendered from the packed sets within `budget_
 memory), so other facts can appear; `recall` with `entity` reads one entity
 strictly. `facts[]` here and in `delta` carry `fact_id` (what `forget` takes)
 and `provenance` (the stored source), never rendered into `text`.
+
+#### context_pack sources: `source_id`, `entity_refs` (additive)
+
+`entities` resolve like `entity` names: across the caller's readable sources,
+home first then by id, unless `source_id` pins one (same selector errors;
+`prefer_source_id` reorders only). `entity_refs`
+(`[{"source_id": "wiki", "slug": "people/alice-example"}]`, inside the same cap
+of 8 after `entities`) packs source-qualified entities, each read only in its
+own source and checked like a pin. Every card carries `source_id`; a card
+from outside the home source renders as `slug` (source <id>) in `text`, and
+its newer-mention continuation names the source. Each card's activation
+verdict, newer mentions, records and `page_status` come from its own source,
+never from a same-slug page in another source, and cards are deduplicated by
+`(source_id, slug)`.
 
 #### context_pack records (additive)
 

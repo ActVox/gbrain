@@ -130,6 +130,15 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "type": "string"
         },
         "description": "Or up to 50 names/codes at once: compact rows."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Read only this source. Default: your source first, then every source you can read."
+      },
+      "prefer_source_id": {
+        "type": "string",
+        "description": "Source to try first (thin clients send .gbrain-source here); never narrows.",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",
@@ -5176,6 +5185,30 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "reply"
         ],
         "description": "With counterparty: the task the brief is for.",
+        "fullSurfaceOnly": true
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Resolve entities in this source only. Default: your source first, then every source you can read."
+      },
+      "entity_refs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "source_id": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Source-qualified entities: [{\"source_id\":\"wiki\",\"slug\":\"people/alice-example\"}]."
+      },
+      "prefer_source_id": {
+        "type": "string",
+        "description": "Source to try first (thin clients send .gbrain-source here); never narrows.",
         "fullSurfaceOnly": true
       }
     },
