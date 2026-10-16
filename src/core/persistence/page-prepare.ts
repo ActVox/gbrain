@@ -3,7 +3,7 @@ import { sizeStateField } from '../page-embedding-budget.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { boundedReads } from './bounded-reads.ts';
 import { isQuarantined, quarantineOutcome } from '../quarantine.ts';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { matchesAnyGlob } from '../sync.ts';
 import { syncExcludePatterns } from './sync-discovery.ts';
@@ -46,7 +46,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
 import { bodyUnread, isSegmentedPage, pageBodySegmentedError, withoutBody } from '../page-body/page-shape.ts';
-import { fileBodyDigests, overlaidFileBodyDigests, storedBodyDigests, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
+import { fileBodyDigests, overlaidFileBodyDigests, storedBodyDigests, type ByteSource, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
 import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
 import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
@@ -81,6 +81,7 @@ import { isFenceEditWrite, pageGateTrust, pageWriteTrust, recordAgentPageLowerin
 import { suppliedTrustMarkerView } from '../trust/channel.ts';
 import { gateField, gateInput } from '../trust/gate-outcomes.ts';
 import { PUSH_SCAN_MAX_FILE_BYTES } from '../page-size-policy.ts';
+import { fileContentHash, FileBytes, isStreamedContent, LARGE_FILE_MIN_BYTES, StreamedFileContent } from './large-file.ts';
 
 
 const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sourceId}'s canonical owner with its pending, failed and recovering requests, read-only.`,
@@ -211,7 +212,7 @@ function snapshotLedger(snapshot: PageSnapshot): BodyLedger {
  * The withdrawal overlay leaves a body without a facts fence unchanged; a file whose body has one under a ledger
  * that applies cannot be overlaid streamed, so it refuses (`page_body_segmented`) instead of reading as drift.
  */
-async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: Buffer, snapshot: PageSnapshot,
+async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: ByteSource, snapshot: PageSnapshot,
   sourcePath: () => Promise<string>, activePack?: ParseOpts['activePack']): Promise<boolean> {
   const ledger = snapshotLedger(snapshot);
   let stored: RegionDigests | undefined;
@@ -234,19 +235,22 @@ async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: Bu
   const raw = await matches({ prefix: new Uint8Array(0), skip: 0 }, false);
   if (raw === true) return true;
   if (raw === 'invalid_utf8') return false;
-  const skip = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+  const bom = bytes.subarray(0, 3);
+  const skip = bom[0] === 0xef && bom[1] === 0xbb && bom[2] === 0xbf ? 3 : 0;
   const prefix = await inferredHeadPrefix(bytes.subarray(skip, skip + FRONTMATTER_HEAD_MAX_BYTES), await sourcePath());
   return !!prefix?.length && await matches({ prefix, skip }, true) === true;
 }
 export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'> & { operation?: string }, snapshot: PageSnapshot | null,
-  content: string | Uint8Array | null, hostId?: string, options: { allowMissing?: boolean; deleting?: boolean; capture?: { path: string; hash: string }; activePack?: ParseOpts['activePack']; remote?: boolean;
+  content: string | Uint8Array | StreamedFileContent | null, hostId?: string, options: { allowMissing?: boolean; deleting?: boolean; capture?: { path: string; hash: string }; activePack?: ParseOpts['activePack']; remote?: boolean;
     /** #6368: a tombstone purge whose file matches these sync.exclude globs (relative to the source root) owns no file. */
     excludeTombstone?: { patterns: string[]; onExcluded: (path: string) => void };
     /** #6517: a delete whose file another live page of the source records owns no file; the census target and claimants are reported. */
     sharedOrigin?: { onShared: (shared: SharedOrigin) => void } } = {}): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
-  // A canonical file over the pre-push secret-scan cap would block every later push of the brain repo.
-  if (content !== null && Buffer.byteLength(content, 'utf-8') > PUSH_SCAN_MAX_FILE_BYTES) throw opError('request_too_large', 'The canonical file would exceed the pre-push secret-scan cap.',
+  // An in-memory canonical file over the 25 MiB push-scan cap is refused (only a page over the 24 MiB single-string
+  // ceiling renders one). That page's file is streamed instead (restore_page of a page whose body was not read back,
+  // large-file.ts), and the push gate scans a staged file over the cap in bounded windows (workspace-push.ts).
+  if (content !== null && !isStreamedContent(content) && Buffer.byteLength(content, 'utf-8') > PUSH_SCAN_MAX_FILE_BYTES) throw opError('request_too_large', 'The canonical file would exceed the pre-push secret-scan cap.',
     `Nothing was written. The rendered file of ${row.slug} is over ${PUSH_SCAN_MAX_FILE_BYTES} bytes, which the pre-push secret scan cannot scan, so it would block every push of source ${row.source_id}. Keep the page under the 24 MiB page ceiling (docs/guides/memory-boundaries.md#large-pages).`);
   // #6212: a legacy slug (admitted only to delete or restore its existing row) never owns a file: its recorded
   // source_uri or source_path may name the file of another page, such as the one sync now slugs it to.
@@ -280,7 +284,19 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     const rel = relative(root, path).split(sep).join('/');
     if (matchesAnyGlob(rel, options.excludeTombstone.patterns)) { options.excludeTombstone.onExcluded(rel); return undefined; }
   }
-  const before = existsSync(path) ? readFileSync(path) : null;
+  // A prior file over the single-string ceiling is read on demand in pieces (large-file.ts), never whole.
+  const before: Buffer | FileBytes | null = !existsSync(path) ? null : statSync(path).size > LARGE_FILE_MIN_BYTES ? FileBytes.open(path) : readFileSync(path);
+  try {
+    return await compareFileTarget(engine, row, snapshot, content, options, { root, path, mode, capturedPath, before });
+  } finally { if (before instanceof FileBytes) before.close(); }
+}
+
+/** prepareFileTarget's comparison of the file at `path` (`before`, its bytes or a piecewise reading) with the snapshot. */
+async function compareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'>, snapshot: PageSnapshot | null,
+  content: string | Uint8Array | StreamedFileContent | null, options: Parameters<typeof prepareFileTarget>[5] & object,
+  target: { root: string; path: string; mode: Awaited<ReturnType<typeof scannerSlugRootMode>> | undefined; capturedPath: string | null | undefined; before: Buffer | FileBytes | null }): Promise<PreparedMutation['file']> {
+  const { root, path, mode, capturedPath, before } = target;
+  const beforeHash = () => before instanceof FileBytes ? before.hash() : sha256(before!);
   if (options.deleting === true && options.sharedOrigin && snapshot && before) {
     const target: FileClaimTarget = { sourceId: row.source_id, slug: row.slug, pageId: snapshot.page.id, root, path, canonicalPath: realpathSync(path),
       mode: mode ?? await scannerSlugRootMode(engine, row.source_id, root), recordedUri: capturedPath ? snapshot.page.source_uri ?? null : null };
@@ -305,8 +321,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   // Unknown local edits require explicit import/recovery, even for force writes.
   if (before && snapshot) {
     const importPath = async () => scannerSourcePath(root, path, mode ?? await scannerSlugRootMode(engine, row.source_id, root));
+    // An inline page's file over the push-scan cap cannot hold its body (at most 24 MiB): drift, never read whole.
     const matches = bodyUnread(snapshot.page) ? await segmentedFileMatches(engine, row.slug, before, snapshot, importPath, options.activePack)
-      : await fileMatchesSnapshot(engine, row.slug, before.toString('utf8'), snapshot, importPath, options.activePack);
+      : before.length <= PUSH_SCAN_MAX_FILE_BYTES && await fileMatchesSnapshot(engine, row.slug, (before instanceof FileBytes ? Buffer.from(before.subarray()) : before).toString('utf8'), snapshot, importPath, options.activePack);
     if (!matches) {
       const held = await heldFileRefusal(engine, row, root, path, 'drift', options.remote === true);
       if (held) throw held;
@@ -319,12 +336,12 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
         { detail: 'file_database_drift', fix: readFix(`Previews how page ${row.slug}'s canonical file and database copy reconcile; a preview never changes canonical content.`,
           { argv: ['gbrain', 'sources', 'reconcile', row.source_id, row.slug, '--brain', 'host', '--preview', ...adopt] }) });
     }
-  } else if (before && !snapshot && content !== null && sha256(before) !== sha256(content)
-    && !(options.capture && sha256(before) === options.capture.hash)) {
+  } else if (before && !snapshot && content !== null && beforeHash() !== fileContentHash(content)
+    && !(options.capture && beforeHash() === options.capture.hash)) {
     throw await heldFileRefusal(engine, row, root, path, 'occupied', options.remote === true)
       ?? new OperationError('source_changed', 'An unindexed file already occupies the canonical page path.', 'Import the file before replacing it.');
   }
-  return { path, root, content, expectedBeforeHash: before ? sha256(before) : null };
+  return { path, root, content, expectedBeforeHash: before ? beforeHash() : null };
 }
 
 /**
@@ -508,12 +525,14 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
     afterCommit: async target => { if (!complete) await buildSegmentedProjection(target, { sourceId: row.source_id, slug: row.slug }).catch(() => undefined); } };
   return prepared;
 }
-/** serializePageToMarkdown's bytes for a page whose body was not read back, streamed from its segments into one buffer. */
-async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<Buffer> {
+/**
+ * serializePageToMarkdown's bytes for a page whose body was not read back, streamed from its segments by export's
+ * serializer: measured here, produced again into the publication's staging file (large-file.ts), never concatenated.
+ */
+async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<StreamedFileContent> {
   const head = serializePageToMarkdown({ ...withoutBody(snapshot.page), compiled_truth: '', timeline: '' }, snapshot.tags).slice(0, -1);
-  const parts: Uint8Array[] = [];
-  for await (const piece of segmentedExportMarkdown(engine, snapshot.page, snapshotLedger(snapshot), head)) parts.push(typeof piece === 'string' ? Buffer.from(piece, 'utf8') : piece);
-  return Buffer.concat(parts);
+  const ledger = snapshotLedger(snapshot);
+  return StreamedFileContent.measure(engine, exec => segmentedExportMarkdown(exec, snapshot.page, ledger, head));
 }
 
 /**

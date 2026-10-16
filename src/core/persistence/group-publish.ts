@@ -58,6 +58,7 @@ import { authorizePageVisibility } from './page-visibility.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
+import { isStreamedContent } from './large-file.ts';
 import { decoratePublicationOutcome, finishPreparationStalled, finishUnpublishedFailure, pageRecoveryRecord, persistenceFileHash, preparationAbortReason, publicationPostimage, publishMutation,
   publishPersistenceFile, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { pipelined } from '../page-state/transactions.ts';
@@ -90,6 +91,8 @@ export function singleWrite(row: Pick<WriteRequest, 'operation' | 'intent'>): bo
 export function groupable(row: WriteRequest, prepared: PreparedMutation): boolean {
   if ((row.target_kind ?? 'page') !== 'page' || prepared.target === 'skill_bundle' || prepared.sourceExclusive || prepared.exclusiveSources?.length) return false;
   if (syncMember(row)) return !prepared.file && typeof prepared.validate === 'function';
+  // A streamed file (large-file.ts) is staged before its publication transaction, which only publishMutation does.
+  if (isStreamedContent(prepared.file?.content)) return false;
   return independentGroup(publicationGroupKey(row)) || singleWrite(row);
 }
 
@@ -255,6 +258,8 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
       if (!file || prepared[i]!.noop) continue;
       if (!isWriteTargetContained(file.path, file.root)) return none;
       const member = { row: rows[i]!, ...pageRecoveryRecord(rows[i]!, file, binding) };
+      // A large prior file is copied to its before stage ahead of the transaction: the single path does that.
+      if (member.record.staging?.before) return none;
       // A file that moved since preparation takes the single path, which decides between reprepare and refusal.
       if (file.expectedBeforeHash !== undefined && member.record.beforeHash !== file.expectedBeforeHash) return none;
       files.set(i, member);
