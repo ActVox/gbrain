@@ -14,6 +14,7 @@ import { COVERAGE_KEY, pageKey } from './keys.ts';
 import { appendBeliefEvents, markBeliefCommits, type BeliefEventDraft } from './append.ts';
 import { coverageActive, currentStateHash, readLedgerSource } from './ledger.ts';
 import { keyedSubjects, type Subject } from './subjects.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
 
 export interface CoverageRun { runId: string; resumed: boolean; pages: number; dbOnlySubjects: number; complete: boolean; certified: boolean }
 const BASELINE_BATCH = 200;
@@ -88,8 +89,7 @@ export async function enableBeliefLedger(engine: BrainEngine, sourceId: string):
   const resumed = latest?.type === 'coverage.started' && !!latest.run;
   const runId = resumed ? latest!.run! : randomUUID();
   if (latest?.type === 'coverage.complete' || latest?.type === 'coverage.restored') {
-    const source = await readLedgerSource(engine, sourceId);
-    return { runId: latest.run ?? '', resumed: true, pages: 0, dbOnlySubjects: 0, complete: true, certified: !!source?.managed };
+    return { runId: latest.run ?? '', resumed: true, pages: 0, dbOnlySubjects: 0, complete: true, certified: await readManagedMode(engine) };
   }
   if (!resumed) await appendCoverage(engine, sourceId, 'coverage.started', { run: runId });
   let pages = 0;
@@ -100,9 +100,9 @@ export async function enableBeliefLedger(engine: BrainEngine, sourceId: string):
     for (const slug of slugs) if (await baselinePage(engine, sourceId, slug, runId)) pages++;
     after = slugs[slugs.length - 1]!;
   }
-  const source = await readLedgerSource(engine, sourceId);
-  await appendCoverage(engine, sourceId, 'coverage.complete', { run: runId, certified: !!source?.managed });
-  return { runId, resumed, pages, dbOnlySubjects: 0, complete: true, certified: !!source?.managed };
+  const certified = await readManagedMode(engine);
+  await appendCoverage(engine, sourceId, 'coverage.complete', { run: runId, certified });
+  return { runId, resumed, pages, dbOnlySubjects: 0, complete: true, certified };
 }
 
 export async function disableBeliefLedger(engine: BrainEngine, sourceId: string): Promise<boolean> {
