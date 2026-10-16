@@ -9,8 +9,8 @@
  * page_links, chunk_relations via existing FKs.
  */
 import type { BrainEngine } from '../core/engine.ts';
-import { purgeConsentRequest, purgeDeletedPagesCoordinated } from '../core/persistence/purge-deleted.ts';
-import { PURGE_PARK_LIMIT, readPurgeParks } from '../core/persistence/purge-parks.ts';
+import { purgeConsentRequest, purgeDeletedPagesCoordinated, selectPurgeCandidates } from '../core/persistence/purge-deleted.ts';
+import { PURGE_PARK_LIMIT } from '../core/persistence/purge-parks.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { consentGate } from '../core/consent-cli.ts';
 import { strictArgsRefusal } from '../cli/strict-args.ts';
@@ -44,37 +44,38 @@ export function parsePurgeArgs(args: readonly string[]): PurgeArgs {
 
 async function runPurgeDeleted(engine: BrainEngine, args: string[]): Promise<void> {
   const { olderThanHours, dryRun, json, retryParked } = parsePurgeArgs(args);
+  // #6741: one selector for the preview, the consent and the run (selectPurgeCandidates): the same cutoff, rename
+  // holds, writer state and parks; --retry-parked puts the parked pages the cutoff selects back among the candidates.
+  const selection = await selectPurgeCandidates(engine, olderThanHours, { retryParked });
+  const retried = selection.parked.filter(park => park.retried).length;
+  const notes = { ...(selection.parked.length ? { parked: selection.parked, retry_parked: retryParked } : {}), ...(selection.blocked.length ? { blocked: selection.blocked } : {}) };
 
   if (dryRun) {
-    // #6741: the tombstones a managed purge has parked; the real run skips them unless --retry-parked.
-    const parked = [...(await readPurgeParks(engine)).values()].filter(park => park.failures >= PURGE_PARK_LIMIT)
-      .map(park => ({ source_id: park.source_id, slug: park.slug, failures: park.failures, code: park.code }));
-    // Same engine method, same WHERE predicate, same DB now() clock as the
-    // real purge — only the verb differs (SELECT, stays read-only). The old
-    // listPages enumeration capped at 10000 rows (live pages included), so
-    // brains past the cap under-reported the purge set.
-    const preview = await engine.purgeDeletedPages(olderThanHours, { dryRun: true });
+    // Read-only: the same predicate and DB now() clock as the real purge; only the verb differs.
     if (json) {
-      console.log(JSON.stringify({ dry_run: true, older_than_hours: olderThanHours, count: preview.count, slugs: preview.slugs,
-        ...(parked.length ? { parked, retry_parked: retryParked } : {}) }, null, 2));
+      console.log(JSON.stringify({ dry_run: true, older_than_hours: olderThanHours, count: selection.count, slugs: selection.slugs, ...notes }, null, 2));
       return;
     }
-    console.log(`(dry-run) Would purge ${preview.count} page(s) soft-deleted more than ${olderThanHours}h ago.`);
-    for (const p of preview.pages ?? []) console.log(`  ${p.slug}  deleted_at=${p.deleted_at.toISOString()}`);
-    for (const p of parked) console.log(`  parked: ${p.source_id}/${p.slug} after ${p.failures} failures (${p.code ?? 'error'})${retryParked ? '; --retry-parked tries it once more' : '; skipped unless --retry-parked'}`);
+    console.log(`(dry-run) Would purge ${selection.count} page(s) soft-deleted more than ${olderThanHours}h ago.`);
+    for (const p of selection.pages ?? []) console.log(`  ${p.slug}  deleted_at=${p.deleted_at.toISOString()}`);
+    for (const c of selection.candidates) console.log(`  ${c.source_id}/${c.slug}${c.park ? ' (parked; retried once more)' : ''}`);
+    for (const p of selection.parked.filter(park => !park.retried)) console.log(`  parked: ${p.source_id}/${p.slug} after ${p.failures} failures (${p.code ?? 'error'}); skipped unless --retry-parked`);
+    for (const b of selection.blocked.filter(entry => entry.code === 'writer_not_active')) console.log(`  waiting: ${b.source_id}/${b.slug}: ${b.reason}`);
     return;
   }
 
   // D6: a hard purge is irreversible and brain-wide, so the CLI asks first
   // (a TTY prompt, `--yes`, or exit 3 with the consent payload). The
   // autopilot purge phase calls the library directly and is unaffected.
-  const preview = await engine.purgeDeletedPages(olderThanHours, { dryRun: true });
-  if (preview.count === 0) {
-    if (json) console.log(JSON.stringify({ older_than_hours: olderThanHours, count: 0, slugs: [] }, null, 2));
-    else console.log(`No pages to purge (older than ${olderThanHours}h).`);
+  if (selection.count === 0) {
+    if (json) console.log(JSON.stringify({ older_than_hours: olderThanHours, count: 0, slugs: [], ...notes }, null, 2));
+    else {
+      console.log(`No pages to purge (older than ${olderThanHours}h).`);
+      for (const b of selection.blocked) console.error(`Not purged: ${b.source_id}/${b.slug}: ${b.reason}`);
+    }
     return;
   }
-  const authorized = await consentGate(purgeConsentRequest(preview.count, olderThanHours, json, args, retryParked), { json });
+  const authorized = await consentGate(purgeConsentRequest(selection.count, olderThanHours, json, args, retryParked, retried), { json });
   if (!authorized) return;
 
   const result = await purgeDeletedPagesCoordinated(engine, olderThanHours, { retryParked });
