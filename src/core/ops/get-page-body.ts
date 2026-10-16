@@ -216,10 +216,13 @@ export async function assertFullReadFits(ctx: OperationContext, page: Pick<Page,
  * A segmented page is never built whole (spec 7.2). Every caller gets page_body_segmented with a fix that reads it in
  * pieces (body: 'auto' gives the outline and the first window), and a trusted local `gbrain get` answers it by
  * streaming the page. The thin client's whole-page read keeps page_too_large_for_inline: that is its paging signal
- * (it pages view: 'markdown' to the end), refused from body_bytes before any body is read.
+ * (it pages view: 'markdown' to the end), refused before any window is read. A remote caller is told the size of the
+ * read projection (as an inline page reports its privacy-stripped body), never the stored body_bytes, whose difference
+ * would say how much text the projection hides.
  */
-export function segmentedFullReadError(ctx: OperationContext, page: Page, req: BodyRequest): OperationError {
-  const total = pageBodyBytes(page);
+export async function segmentedFullReadError(ctx: OperationContext, page: Page, req: BodyRequest): Promise<OperationError> {
+  const total = ctx.remote === false ? pageBodyBytes(page)
+    : (await segmentedReadDocument(ctx.engine, await openSegmentedBody(ctx.engine, { pageId: page.id }))).total;
   const windows = "Read it in pieces: get_page body: 'auto' returns the outline and the first window, then body: 'window' with lines, bytes, around_chunk_id or next_cursor reads on.";
   const fix = segmentedReadFix(page.slug, page.source_id);
   if (ctx.remote === false) {
@@ -338,13 +341,14 @@ function inlineDocument(doc: PageDocument): WindowDocument {
 
 /**
  * A segmented page's document and size (spec 7.2): read-view totals from the stored sums (the line count cached
- * per revision), the stored body size, and for `none` the tail digest; a markdown view's size is its cached digest.
+ * per revision), for a trusted caller the stored body size, and for `none` the tail digest; a markdown view's size
+ * is its cached digest. A remote caller gets projected totals only, as for an inline page.
  */
 async function segmentedWindows(ctx: OperationContext, input: PartialReadInput, req: BodyRequest, mode: BodyMode): Promise<{ doc: WindowDocument; size: Record<string, unknown> }> {
   const { page, revision, tags } = input;
   const body = await openSegmentedBody(ctx.engine, { pageId: page.id });
   const audience = ctx.remote === false ? 'trusted' : 'remote';
-  const stored = { body_bytes: body.bodyBytes, body_lines: body.bodyLines };
+  const stored = audience === 'trusted' ? { body_bytes: body.bodyBytes, body_lines: body.bodyLines } : {};
   let seg: SegmentedDocument;
   let size: Record<string, unknown>;
   if (req.view === 'markdown') {

@@ -10,7 +10,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { PAGE_INLINE_MAX_BYTES, PAGE_MAX_BYTES } from '../page-size-policy.ts';
-import type { RecentWriterVersion } from '../persistence/writer-versions.ts';
+import type { SegmentedGateWriter } from '../persistence/writer-versions.ts';
 
 export { PAGE_INLINE_MAX_BYTES };
 
@@ -130,20 +130,24 @@ export function parseSegmentedStorage(raw: string | null): 'on' | 'off' | 'unset
   return /^(off|false|0|no)$/i.test(value) ? 'off' : 'invalid';
 }
 
-let writerGate = new WeakMap<object, { at: number; blockers: RecentWriterVersion[] }>();
+let writerGate = new WeakMap<object, { at: number; blockers: SegmentedGateWriter[] }>();
+/** Work counter: reads of the writer-version gate (the TTL cache answers the rest). */
+export const segmentedWriterGateWork = { reads: 0 };
 
 /**
- * Writers that committed a request in the last `SEGMENTED_WRITER_WINDOW_DAYS` days with a version below
- * `SEGMENTED_WRITER_FLOOR` or no stamp. Any one keeps segmented storage off. Cached per engine for
+ * Writers seen in the last `SEGMENTED_WRITER_WINDOW_DAYS` days that do not read segmented pages
+ * (`segmentedGateWriters`: evidence without the segment-reader mark, or a managed write stamped below
+ * `SEGMENTED_WRITER_FLOOR`). Any one keeps segmented storage off. Cached per engine for
  * `SEGMENTED_WRITER_GATE_TTL_MS`; `fresh` (doctor) reads through.
  */
-export async function segmentedWriterBlockers(engine: Pick<BrainEngine, 'executeRaw'>, opts: { fresh?: boolean } = {}): Promise<RecentWriterVersion[]> {
+export async function segmentedWriterBlockers(engine: Pick<BrainEngine, 'executeRaw'>, opts: { fresh?: boolean } = {}): Promise<SegmentedGateWriter[]> {
   let root: object = engine;
   for (let proto = Object.getPrototypeOf(root); proto && !Object.hasOwn(proto, 'constructor'); proto = Object.getPrototypeOf(proto)) root = proto;
   const cached = writerGate.get(root);
   if (!opts.fresh && cached && Date.now() - cached.at < SEGMENTED_WRITER_GATE_TTL_MS) return cached.blockers;
-  const { recentWriterVersions, SEGMENTED_WRITER_FLOOR, writerVersionBelowFloor } = await import('../persistence/writer-versions.ts');
-  const blockers = (await recentWriterVersions(engine, SEGMENTED_WRITER_WINDOW_DAYS)).filter(row => writerVersionBelowFloor(row.version, SEGMENTED_WRITER_FLOOR));
+  const { segmentedGateWriters } = await import('../persistence/writer-versions.ts');
+  segmentedWriterGateWork.reads++;
+  const blockers = await segmentedGateWriters(engine, SEGMENTED_WRITER_WINDOW_DAYS);
   writerGate.set(root, { at: Date.now(), blockers });
   return blockers;
 }

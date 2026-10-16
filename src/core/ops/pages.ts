@@ -230,7 +230,7 @@ const get_page: Operation = {
           ...(resolved_slug ? { resolved_slug } : {}), ...(content_flag ? { content_flag } : {}) } }, bodyRequest);
       return lineGrammar ? { ...partial, line_grammar: lineGrammar } : partial;
     }
-    if (segmented) throw segmentedFullReadError(ctx, page, bodyRequest);
+    if (segmented) throw await segmentedFullReadError(ctx, page, bodyRequest);
     const projected = projectGetPage(visibleBody, {
       revision: snapshot!.revision, tags, includeContent, contentOnly, resolved_slug, content_flag, quarantined, trust: readable.trust,
       ...(timelineEntries ? { timeline_entries: timelineEntries } : {}),

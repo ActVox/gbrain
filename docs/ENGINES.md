@@ -249,6 +249,67 @@ run under the role default and are not backstopped per caller. This is layer 2;
 the app-layer source filters remain layer 1 and stay mandatory. Behavioral pins
 live in `test/postgres-engine-rls-scope.test.ts`.
 
+**Segmented page tables.** A page over 1 MiB stored in segments (`pages.segmented_storage`)
+keeps its text in `page_segment_texts`, its layout and headings in
+`page_body_manifest`, uploads in progress in `page_body_stagings` /
+`page_body_staging_parts`, and view sizes in `page_view_digests`. gbrain
+enables RLS on all five on every schema replay, as it does on `pages` and
+`content_chunks`, so with no policy a role that does not bypass RLS reads no row
+of them. Title search, the source-scoped vector scan, the chunk windows search
+reads around its hits and get_page check chunks against `page_body_manifest`
+(inline pages included), so a restricted read role needs `SELECT` on it; without
+it those reads fail with `permission_denied` (42501). Grant it together with
+these policies, never with an open one, or the role reads every source's segment
+text. A scoped role then sees exactly the segment rows of its sources:
+
+<!-- gbrain:segmented-rls-recipe:begin (applied verbatim by test/e2e/segmented-rls-scope.test.ts) -->
+```sql
+-- The pages_scope_filter predicate, on each table's own source_id.
+CREATE POLICY page_segment_texts_scope_filter ON page_segment_texts
+  USING (current_setting('app.scopes', true) = '*'
+         OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+CREATE POLICY page_body_manifest_scope_filter ON page_body_manifest
+  USING (current_setting('app.scopes', true) = '*'
+         OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+CREATE POLICY page_body_stagings_scope_filter ON page_body_stagings
+  USING (current_setting('app.scopes', true) = '*'
+         OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+-- Search joins sources; a scoped role sees its own.
+CREATE POLICY sources_scope_filter ON sources
+  USING (current_setting('app.scopes', true) = '*'
+         OR id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+-- No source_id of their own: visible exactly when their staging or page is
+-- (the pages policy filters the subquery). content_chunks holds every page's
+-- chunk text, segmented or not.
+CREATE POLICY page_body_staging_parts_scope_filter ON page_body_staging_parts
+  USING (current_setting('app.scopes', true) = '*'
+         OR EXISTS (SELECT 1 FROM page_body_stagings s WHERE s.id = staging_id));
+CREATE POLICY page_view_digests_scope_filter ON page_view_digests
+  USING (current_setting('app.scopes', true) = '*'
+         OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
+CREATE POLICY content_chunks_scope_filter ON content_chunks
+  USING (current_setting('app.scopes', true) = '*'
+         OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
+
+-- A read role that searches and reads pages. The other tables it reads
+-- (config, timeline_entries, facts, ...) need policies of their own.
+GRANT SELECT ON pages, content_chunks, page_body_manifest, page_segment_texts,
+  page_view_digests, sources TO <reader-role>;
+
+-- If the runtime role OWNS these tables, as for pages:
+ALTER TABLE page_segment_texts FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_body_manifest FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_body_stagings FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_body_staging_parts FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_view_digests FORCE ROW LEVEL SECURITY;
+ALTER TABLE content_chunks FORCE ROW LEVEL SECURITY;
+```
+<!-- gbrain:segmented-rls-recipe:end -->
+
+A role whose reads do not run through the scoped helper is scoped by its own
+default (`ALTER ROLE <reader-role> SET app.scopes = 'source-a,source-b'`). The
+policies read `app.scopes` only; the app-layer source filters stay layer 1.
+
 **In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
 runs through this helper and a `LegacyUnscopedRead` when it runs on the pool
 (`src/core/engine-sql/brands.ts`); the engine obtains the branded executor, so

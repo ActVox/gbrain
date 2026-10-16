@@ -1,6 +1,6 @@
 /** Writer-version stamps on persistence_requests (migration 178): observation of older writers, not prevention. */
 import { VERSION } from '../../version.ts';
-import { localHostId } from './identity.ts';
+import { existingLocalHostId, localHostId } from './identity.ts';
 import type { SqlEngine } from './model.ts';
 
 /** Writers older than this may still delete database-only timeline rows during publication. */
@@ -12,7 +12,10 @@ export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
  * without its segment texts. A recent one keeps `pages.segmented_storage` effectively off (`page-body/limits.ts`).
  * A placeholder equal to the branch's VERSION until the merge-slot stamp, which sets it to the release that turns the
  * switch on (the `since` of its BEHAVIOR_CHANGES row, pinned by test/large-pages/segmented-switch.test.ts). That
- * release must be above v0.60.252.0, the release that added segmented storage with the switch off.
+ * release must be above v0.60.252.0, the release that added segmented storage with the switch off. A version alone
+ * cannot tell a build with segment readers from a release of the same version without them (every release from
+ * v0.60.252.0 until the stamp has none), so the gate also requires the segment-reader mark (migration v251) on
+ * every write it sees: an unmarked writer blocks whatever its version, the floor included (`segmentedGateWriters`).
  */
 export const SEGMENTED_WRITER_FLOOR = '0.60.252.0';
 
@@ -35,10 +38,16 @@ export function writerVersionBelowFloor(version: string | null, floor = WRITER_V
   return order === null || order < 0;
 }
 
-/** This binary's stamp. An unavailable host identity stamps no host rather than failing the write. */
-export function writerStamp(): { version: string; hostId: string | null } {
+/**
+ * This binary's stamp. An unavailable host identity stamps no host rather than failing the write; `mint: false` (the
+ * ingest log, written by commands that never register a writer) reads an existing identity and never creates one.
+ * Every write path that stamps it also sets the segment-reader mark (migration v251), which only binaries that read
+ * segmented pages write: a version string cannot tell a build with segment readers from a release of the same
+ * version without them.
+ */
+export function writerStamp(opts: { mint?: boolean } = {}): { version: string; hostId: string | null } {
   let hostId: string | null = null;
-  try { hostId = localHostId(); } catch { /* unwritable or invalid identity: stamp the version only */ }
+  try { hostId = opts.mint === false ? existingLocalHostId() : localHostId(); } catch { /* unwritable or invalid identity: stamp the version only */ }
   return { version: VERSION, hostId };
 }
 
@@ -87,4 +96,50 @@ export async function recentWriterVersions(engine: SqlEngine, days = 7): Promise
     ORDER BY last_seen DESC`, [days]);
   return rows.map(row => ({ role: row.role, host_id: row.host_id, principal: row.principal, version: row.version,
     version_label: writerVersionLabel(row.version), last_seen: iso(row.last_seen), requests: Number(row.requests) }));
+}
+
+/** A writer the segmented-storage gate saw in its window, by the evidence it left. */
+export interface SegmentedGateWriter {
+  /**
+   * admitter / consumer: a managed write's admitting and publishing binary (persistence_requests); importer: a run
+   * logged in ingest_log (gbrain import, sync, connectors, facts); resident: a live persistence consumer
+   * (serve, sync, jobs, autopilot, mcp; Postgres only).
+   */
+  role: 'admitter' | 'consumer' | 'importer' | 'resident';
+  host_id: string | null; principal: string; version: string | null; version_label: string;
+  /** The rows carried the segment-reader mark (migration v251), which only binaries that read segmented pages write. */
+  segment_reader: boolean;
+  last_seen: string | null; requests: number;
+}
+
+/**
+ * Writers seen in the last `days` that keep segmented storage off: evidence without the segment-reader mark (an
+ * older binary inserts NULL into a column it does not know; rows from before v251 count too), or a managed write
+ * stamped below `floor` (an unparsable or missing stamp counts as below). Admitters count in any state, so a
+ * failed or still-queued request of an older binary is seen as well; ingest-log and consumer rows are read only
+ * when unmarked (ingest_log_unmarked_idx). Not seen: an older binary that writes neither a request nor an
+ * ingest-log row (a single-page put on a brain without managed persistence, a run that dies before logging), and
+ * one-shot readers and exporters, which write nothing.
+ */
+export async function segmentedGateWriters(engine: SqlEngine, days: number, floor = SEGMENTED_WRITER_FLOOR): Promise<SegmentedGateWriter[]> {
+  const rows = await engine.executeRaw<Omit<SegmentedGateWriter, 'version_label' | 'last_seen' | 'requests'> & { last_seen: unknown; requests: number }>(
+    `WITH win AS (SELECT now()-($1::double precision*interval '1 day') AS since)
+    SELECT 'admitter' AS role,r.admitter_host_id::text AS host_id,r.principal_kind||':'||r.principal_id AS principal,r.admitter_version AS version,
+      COALESCE(r.admitter_segment_reader,false) AS segment_reader,MAX(r.created_at) AS last_seen,COUNT(*)::integer AS requests
+    FROM persistence_requests r CROSS JOIN win WHERE r.created_at>=win.since GROUP BY 2,3,4,5
+    UNION ALL
+    SELECT 'consumer',COALESCE(r.consumer_host_id,w.owner_host_id)::text,r.principal_kind||':'||r.principal_id,r.consumer_version,
+      COALESCE(r.consumer_segment_reader,false),MAX(COALESCE(r.published_at,r.completed_at)),COUNT(*)::integer
+    FROM persistence_requests r LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id CROSS JOIN win
+    WHERE r.state='committed' AND COALESCE(r.published_at,r.completed_at)>=win.since GROUP BY 2,3,4,5
+    UNION ALL
+    SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,false,MAX(l.created_at),COUNT(*)::integer
+    FROM ingest_log l CROSS JOIN win WHERE l.writer_segment_reader IS NOT TRUE AND l.created_at>=win.since GROUP BY 2,3,4
+    UNION ALL
+    SELECT 'resident',c.host_id::text,'process:'||c.kind,c.version,false,MAX(c.renewed_at),COUNT(*)::integer
+    FROM persistence_consumers c CROSS JOIN win WHERE c.segment_reader IS NOT TRUE AND c.renewed_at>=win.since GROUP BY 2,3,4
+    ORDER BY last_seen DESC`, [days]);
+  return rows.map(row => ({ role: row.role, host_id: row.host_id, principal: row.principal, version: row.version, version_label: writerVersionLabel(row.version),
+    segment_reader: row.segment_reader === true, last_seen: iso(row.last_seen), requests: Number(row.requests) }))
+    .filter(row => !row.segment_reader || writerVersionBelowFloor(row.version, floor));
 }

@@ -134,3 +134,28 @@ CREATE TABLE IF NOT EXISTS page_body_staging_parts (
   body       BYTEA   NOT NULL,
   PRIMARY KEY (staging_id, part_no)
 );`;
+
+/**
+ * The segment tables hold page text (`page_segment_texts`, `page_body_staging_parts`) or a page's shape and
+ * headings (`page_body_manifest`, `page_body_stagings`, `page_view_digests`), so they get the posture of `pages`
+ * and `content_chunks`: RLS on, re-asserted on every schema replay like the core list in src/schema.sql, so a brain
+ * the auto-RLS event trigger (v35) missed, or one where it was dropped or disabled, never serves segment text to a
+ * role `pages` returns no rows to. Only under a role that bypasses RLS (else the runtime role would lock itself out),
+ * and only for a table still without it (ENABLE takes an ACCESS EXCLUSIVE lock even when RLS is on, #5227).
+ * `page_view_digests` is absent while migration v248 runs. Postgres only: PGLite has no role system, and its
+ * bootstrap enables RLS on no core table either. Source-scoped policies are operator SQL (docs/ENGINES.md).
+ */
+export const PAGE_BODY_RLS_TABLES = ['page_segment_texts', 'page_body_manifest', 'page_body_stagings', 'page_body_staging_parts', 'page_view_digests'] as const;
+export const PAGE_BODY_RLS_SQL = `DO $rls$
+DECLARE target TEXT;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    FOREACH target IN ARRAY ARRAY[${PAGE_BODY_RLS_TABLES.map(t => `'${t}'`).join(',')}] LOOP
+      IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = current_schema() AND c.relname = target AND c.relkind = 'r' AND NOT c.relrowsecurity) THEN
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', target);
+      END IF;
+    END LOOP;
+  END IF;
+END $rls$;`;
+

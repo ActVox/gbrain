@@ -492,7 +492,7 @@ export async function completeGroup(tx: BrainEngine, rows: WriteRequest[], outco
       ), done AS (
         UPDATE persistence_requests r SET state='committed',outcome=m.outcome::jsonb,error_code=NULL,error_message=NULL,
           completed_at=now(),updated_at=now(),claim_expires_at=NULL,blocked_reason=NULL,
-          consumer_version=$6,consumer_host_id=$7::uuid,published_at=now(),preparation_attempts=0,
+          consumer_version=$6,consumer_host_id=$7::uuid,consumer_segment_reader=true,published_at=now(),preparation_attempts=0,
           terminal_reservation=CASE WHEN COALESCE(e.unfinished,false) THEN r.terminal_reservation
             ELSE LEAST(r.terminal_reservation,m.retained+COALESCE(e.bytes,0)) END
         FROM m LEFT JOIN e ON e.request_id=m.id
