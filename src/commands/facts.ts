@@ -140,7 +140,7 @@ export function formatConversationRelinkReport(r: ConversationRelinkReport, args
   if (r.dry_run && r.linked) lines.push(`Apply with:\n  gbrain facts relink ${args.filter(a => a !== '--dry-run').join(' ')}`);
   if (r.reextract_slugs.length) {
     const base = `gbrain extract-conversation-facts --source-id ${r.source_id} --slugs ${r.reextract_slugs.join(',')} --force`;
-    lines.push(`No entity could be proven for ${r.unresolved} fact(s). Re-extraction calls the fact model again (paid); preview, then run with a cap:\n  ${base} --dry-run\n  ${base} --max-cost-usd 1`);
+    lines.push(`No entity could be proven for ${r.unresolved} fact(s). Re-extraction calls the fact model again (paid); preview, then run with the amount the user approves:\n  ${base} --dry-run\n  ${base} --max-cost-usd <N>`);
   }
   return lines.join('\n');
 }

@@ -82,12 +82,12 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
 ```ts
-  { since: '<WAVE>', text: '`gbrain extract-conversation-facts` (and the `conversation_facts_backfill` cycle phase) now runs the free write-time subject inference on facts the extractor returns without an entity, so a fact naming exactly one entity page in full is stored on that entity (context note `entity inferred from mention`; off with `facts.entity_inference false`) (#6764). Doctor `unlinked_facts` counts the conversation extractor\'s unlinked rows on their own (origin `conversation`, no longer inside fence-owned) and, because `gbrain facts relink` never examines them, its fix is a bounded, source-qualified re-extraction of the pages with the most (`--slugs`, up to 50, `--force --max-cost-usd 1`, preview `--dry-run`; paid, asks the user first). A `replaces` naming a conversation-derived fact now says to re-extract its page instead of hinting at a fence edit.' },
+  { since: '<WAVE>', text: '`gbrain extract-conversation-facts` (and the `conversation_facts_backfill` cycle phase) now runs the free write-time subject inference on facts the extractor returns without an entity, so a fact naming exactly one entity page in full is stored on that entity (context note `entity inferred from mention`; off with `facts.entity_inference false`) (#6764). Doctor `unlinked_facts` counts the conversation extractor\'s unlinked rows on their own (origin `conversation`, no longer inside fence-owned) and, because `gbrain facts relink` never examines them, its fix is a bounded, source-qualified re-extraction of the pages with the most (`--slugs`, up to 50, `--force --max-cost-usd <N>` with the approved amount as the input `N`, preview `--dry-run`; paid, asks the user first). A `replaces` naming a conversation-derived fact now says to re-extract its page instead of hinting at a fence edit.' },
 ```
 
 ### CHANGELOG.md (wave entry, Fixed)
 
-- Facts extracted from conversations now link to the person or company they name when only one entity page matches, and doctor's `unlinked_facts` gives conversation facts a fix that can act on them (a capped re-extraction of the named pages, previewed first) instead of `gbrain facts relink`, which never touched them (#6764).
+- Facts extracted from conversations now link to the person or company they name when only one entity page matches, and doctor's `unlinked_facts` gives conversation facts a fix that can act on them (a re-extraction of the named pages capped at the amount the user approves, previewed first) instead of `gbrain facts relink`, which never touched them (#6764).
 
 ### scripts/module-size-limits.tsv
 
@@ -97,7 +97,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - New exported symbols (no registry rows needed): `CONVERSATION_FIX_SLUGS` (doctor/checks/unlinked-facts.ts), `inferConversationSubjects` (core/facts/conversation-subject-infer.ts). The `replaces_cross_page_derived` suggestion lives in core/persistence/verb-errors.ts beside the existing `replaces_cross_page` text; no error-registry code was added.
 
-## #6764 (d1b, own commit: drop it if Garry picks d1a) free conversation relink as the doctor's primary fix
+## #6764 free conversation relink as the doctor's primary fix (decision d1b)
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -113,10 +113,23 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - New maintenance intent kind `managed_maintenance_conversation_relink`, dispatched in `src/core/persistence/prepared-maintenance.ts` (one line, not a listed registry). New canonical-writer census row for `src/core/facts/conversation-relink.ts` in `docs/architecture/canonical-writers.tsv` (ceiling 1, boundary coordinator).
 - Module sizes: `src/commands/facts.ts` 201 lines, `src/core/facts/conversation-relink.ts` 187 (new), `src/core/persistence/prepared-maintenance.ts` 590; none is listed in the TSV and all are under the new-file cap. No TSV change.
-- Dropping this commit (d1a) restores the commit before it exactly: doctor prescribes the paid re-extraction for every unlinked conversation row. The commit also edits that commit's own tests (seeding a `conversation_unresolved` memo so they still exercise the paid envelope).
 
 ## Gate follow-ups (all items)
 
 - `src/core/cli-flag-registry.generated.ts`: regenerated with `bun run build:flag-registry` in the separate final commit "INTEGRATOR-ROW: regenerate cli-flag-registry for lane 3" (tests docs-cli-commands, remediation-command-resolution, cli-flag-validation and conversation-facts-type-allowlist-drift need it). Additive only: facts +`--conversation --force --slugs --source-id`, doctor +`--conversation --entity --retry-model`, lint +`--max-cost-usd --slugs`, maintain and sync +`--conversation`. Drop it and rerun the generator after the lanes merge.
 - New exemption in `scripts/check-core-guard-coverage.mjs` (conversation-relink.ts: database-only fact rows, page text unchanged) and a write-attribution row in `docs/architecture/system-of-record.md`.
 - gstack pregate `literals` reports ~643 test locations "still carrying" MENTION_EXTRACTOR_VERSION 5. Every hit except test/mentions-pass.test.ts (fixed to use the symbol) is an unrelated literal 5 (array indexes, model names, counts); no test pins the mention version as a number. The `lanes` check flags this fragment file, which the integrator deletes.
+
+
+## #6764 follow-up (v3 review r2-d1)
+
+- The free path is `gbrain facts relink --conversation` (a flag on the existing verb). It stays a receipted, database-only linkage of the derived row: `entity_slug` plus the `entity relinked from mention` note on the row itself, one maintenance transaction per page (a `managed_maintenance_conversation_relink` request on a managed brain). Conversation ownership, fact id, provenance and trust are kept and no Markdown is edited, so the doctor envelope asks no consent (`[]`, actor agent; `host_admin` on the remote path). Conversation pages have no `## Facts` fence (canonical projection and the extract_facts reconcile skip extractor rows, #1928), so `FACTS_FENCE_COLUMNS` having no entity column does not matter here.
+- `extract-conversation-facts --force` keeps the link: `clearConversationFacts` expires relinked rows instead of deleting them and the replacement row of the same claim inherits the entity (new module `src/core/facts/conversation-relink-carry.ts`). Tested unmanaged and managed with write-time inference off, plus the extract_facts reconcile.
+- Every derived row the free pass examines is memoized in `fact_relink_attempts` (`linked` or `conversation_unresolved`), so doctor sequences free relink while untried rows exist, then the paid fallback scoped to the memoized pages (at most 50) with `--max-cost-usd <N>` and `inputs: [{ name: 'N' }]`.
+- 25% rule: memoized `conversation_unresolved` rows are excluded from the new-fact share like `no_subject` (`details.new_7d.conversation_unresolved`).
+- `RELINK_REASONS.fence_owned` text names `gbrain facts relink --conversation` (the guide table in docs/guides/facts-relink.md matches).
+
+### src/core/behavior-change-notice.ts (replace the #6764 rows' paid-fallback wording)
+
+- In both #6764 rows, the paid fallback is "capped at the amount the user approves (`--max-cost-usd <N>`)", not "`--max-cost-usd 1`", and the second row should add: "A re-extraction of the page keeps a relinked fact's entity on the claim's new row. Rows the free pass could not resolve no longer count toward doctor's 25% new-fact warning."
+

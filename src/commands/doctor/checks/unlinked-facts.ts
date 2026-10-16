@@ -17,7 +17,10 @@
  * 7-day links by tier from write-time inference and from relink.
  *
  * Warns when more than 25% of at least 20 new facts (facts judged
- * no_subject excluded) are unlinked. Every query is bounded by created_at
+ * no_subject excluded, and conversation rows the free conversation relink
+ * judged unresolvable, `conversation_unresolved`: only the paid fallback can
+ * still link them, so they are named in the conversation fix instead) are
+ * unlinked. Every query is bounded by created_at
  * through idx_facts_since (source_id, created_at DESC WHERE expired_at IS
  * NULL) or by primary key; without fact_relink_attempts (a brain before
  * v187) the relink figures are omitted and nothing is excluded.
@@ -46,7 +49,7 @@ export interface UnlinkedFactsStats {
    * not tried (`fix: 'relink'`), else the most it tried and could not resolve (`fix: 'reextract'`), with those rows' pages, most rows first.
    */
   conversation: { source_id: string; fix: 'relink' | 'reextract'; pages: number; slugs: string[] } | null;
-  new_7d: { facts: number; unlinked: number; no_subject: number };
+  new_7d: { facts: number; unlinked: number; no_subject: number; conversation_unresolved: number };
   no_subject: number | null;
   origins: Array<{ origin: string; unlinked: number }>;
   inferred_7d: { page: number; mention: number };
@@ -100,6 +103,7 @@ export async function unlinkedFactsStats(engine: BrainEngine, sourceIds?: readon
   const [recent] = await engine.executeRaw<Record<string, unknown>>(
     `SELECT COUNT(*)::int AS facts, COUNT(*) FILTER (WHERE f.entity_slug IS NULL)::int AS unlinked,
             COUNT(*) FILTER (WHERE f.entity_slug IS NULL AND ${judged})::int AS no_subject,
+            COUNT(*) FILTER (WHERE f.entity_slug IS NULL AND ${tried})::int AS conversation_unresolved,
             COUNT(*) FILTER (WHERE ${INFERRED} AND ${INFERRED_TIER} = 'page')::int AS inferred_page,
             COUNT(*) FILTER (WHERE ${INFERRED} AND ${INFERRED_TIER} = 'mention')::int AS inferred_mention
        FROM facts f WHERE f.source_id = ANY($1::text[]) AND f.created_at >= now() - interval '7 days' AND ${ACTIVE}`,
@@ -142,7 +146,7 @@ export async function unlinkedFactsStats(engine: BrainEngine, sourceIds?: readon
       conversation: windowRows.reduce((sum, r) => sum + n(r.conversation), 0),
       capped: [...perSource.values()].some((c) => c >= UNLINKED_WINDOW_PER_SOURCE),
     },
-    new_7d: { facts: n(recent?.facts), unlinked: n(recent?.unlinked), no_subject: n(recent?.no_subject) },
+    new_7d: { facts: n(recent?.facts), unlinked: n(recent?.unlinked), no_subject: n(recent?.no_subject), conversation_unresolved: n(recent?.conversation_unresolved) },
     no_subject: noSubject,
     origins: [...byOrigin].map(([origin, unlinked]) => ({ origin, unlinked })).sort((a, b) => b.unlinked - a.unlinked || a.origin.localeCompare(b.origin)),
     inferred_7d: { page: n(recent?.inferred_page), mention: n(recent?.inferred_mention) },
@@ -159,8 +163,9 @@ const pct = (part: number, whole: number) => whole > 0 ? `${(100 * part / whole)
 export function unlinkedFactsVerdict(stats: UnlinkedFactsStats | null, opts: { thinClient?: boolean } = {}): Omit<Check, 'name'> {
   if (!stats) return { status: 'ok', message: 'No facts table yet; nothing to link.' };
   const { window: w, new_7d: recent } = stats;
-  const eligible = recent.facts - recent.no_subject;
-  const unlinkedNew = recent.unlinked - recent.no_subject;
+  const judged = recent.no_subject + recent.conversation_unresolved;
+  const eligible = recent.facts - judged;
+  const unlinkedNew = recent.unlinked - judged;
   const warn = eligible >= UNLINKED_NEW_MIN_FACTS && unlinkedNew / eligible > UNLINKED_NEW_SHARE_WARN;
   const hint = opts.thinClient
     ? 'ask the brain host operator to run: gbrain facts relink --dry-run'
@@ -188,7 +193,7 @@ export function unlinkedFactsVerdict(stats: UnlinkedFactsStats | null, opts: { t
 
 /**
  * #6764: the conversation share's free fix, `gbrain facts relink --conversation` over the pages holding the most
- * unlinked derived rows it has not tried in one source: write-mode subject inference, no model call, one write per page.
+ * unlinked derived rows it has not tried in one source: write-mode subject inference, no model call, one receipted database-only write per page (no Markdown edit, so no consent).
  */
 function relinkFix(c: NonNullable<UnlinkedFactsStats['conversation']>, thinClient: boolean): Action {
   const argv = ['gbrain', 'facts', 'relink', '--conversation', '--source', c.source_id, '--slugs', c.slugs.join(',')];
@@ -201,17 +206,18 @@ function relinkFix(c: NonNullable<UnlinkedFactsStats['conversation']>, thinClien
 
 /**
  * #6764: the conversation share's paid fallback, for rows free relink already tried: a bounded re-extraction of the pages
- * holding the most such rows in one source, capped at $1, with a
+ * holding the most such rows in one source (at most 50), capped at the USD amount the user approves (`<N>`), with a
  * free dry run as the preview. Re-extraction reruns the extractor with the
  * page's entity hints and write-time subject inference.
  */
 function reextractFix(c: NonNullable<UnlinkedFactsStats['conversation']>, thinClient: boolean): Action {
   const base = ['gbrain', 'extract-conversation-facts', '--source-id', c.source_id, '--slugs', c.slugs.join(','), '--force'];
   return {
-    argv: [...base, '--max-cost-usd', '1'], preview_argv: [...base, '--dry-run'], consent: ['paid', 'egress'],
+    argv: [...base, '--max-cost-usd', '<N>'], preview_argv: [...base, '--dry-run'], consent: ['paid', 'egress'],
+    inputs: [{ name: 'N', how: 'The most the user approves for this re-extraction in USD, after seeing the plan from preview_argv (for example 1).' }],
     actor: thinClient ? 'host_admin' : 'agent', ask_user: true, requires_exclusive: false, verify: doctorVerify('unlinked_facts'),
     why: `${c.pages} conversation page(s) in source ${c.source_id} hold extracted facts with no entity that free relink could not resolve${c.pages > c.slugs.length ? ` (the ${c.slugs.length} with the most are named)` : ''}. `
-      + 'Re-extraction calls the fact-extraction model again (up to $1) with the page\'s entity hints and write-time subject inference; the dry run shows the plan and makes no model call.',
+      + 'Re-extraction calls the fact-extraction model again (up to the approved <N> USD) with the page\'s entity hints and write-time subject inference; the dry run shows the plan and makes no model call.',
   };
 }
 

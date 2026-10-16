@@ -137,7 +137,8 @@ describe('#6764 unlinked_facts names conversation rows and their real fix', () =
     expect(verdict.details).toMatchObject({ conversation: { source_id: 'default', fix: 'reextract', pages: 2, slugs: ['meetings/a', 'meetings/b'] } });
     const fix = verdict.fix!;
     expect(fix).toMatchObject({ consent: ['paid', 'egress'], actor: 'agent', ask_user: true, verify: { argv: ['gbrain', 'doctor', '--only', 'unlinked_facts', '--json'] } });
-    expect(fix.argv).toEqual(['gbrain', 'extract-conversation-facts', '--source-id', 'default', '--slugs', 'meetings/a,meetings/b', '--force', '--max-cost-usd', '1']);
+    expect(fix.argv).toEqual(['gbrain', 'extract-conversation-facts', '--source-id', 'default', '--slugs', 'meetings/a,meetings/b', '--force', '--max-cost-usd', '<N>']);
+    expect(fix.inputs).toEqual([{ name: 'N', how: expect.stringContaining('USD') }]);
     expect(fix.preview_argv).toEqual(['gbrain', 'extract-conversation-facts', '--source-id', 'default', '--slugs', 'meetings/a,meetings/b', '--force', '--dry-run']);
     expect(renderAction(fix as never, cliRenderContext()).next).toBe('ask_user');
     expect(renderAction(fix as never, dispatchRenderContext({ remote: true, transport: 'http' } as never)).next).toBe('ask_user');
@@ -192,7 +193,7 @@ describe('#6764 fixture: the conversation fix envelope clears the finding', () =
     try {
       await runExtractConversationFacts(engine, fix.preview_argv!.slice(2));
       expect((await unlinkedFactsStats(engine, ['default']))!.window.conversation).toBe(1);
-      const parsed = parseArgs(fix.argv!.slice(2));
+      const parsed = parseArgs(fix.argv!.slice(2).map(a => a === '<N>' ? '1' : a)); // the agent fills the approved amount
       expect(parsed).toMatchObject({ sourceId: 'default', slugs: [MEETING], force: true, maxCostUsd: 1 });
       await runExtractConversationFactsCore(engine, { sourceId: parsed.sourceId!, slugs: parsed.slugs, force: parsed.force, maxCostUsd: parsed.maxCostUsd,
         sleepMs: 0, overrideDisabled: true, extractor: async () => [{ fact: 'Alice Example signed the lease renewal', kind: 'event', confidence: 0.9,
