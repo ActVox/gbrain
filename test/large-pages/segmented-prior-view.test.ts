@@ -11,7 +11,10 @@
  *    keeps every entry of the prior body (key, summary, detail and slug copies: 12.8x the body for a 6 MiB page).
  * Seams: segmentedPassWork.bytes (segment-blocks.ts) counts bytes read; the heap is sampled after a full collection
  * when classification first reads the new body, with the prior view built and alive, against a baseline taken after a
- * warm-up call on another snapshot (so driver buffers a segment read leaves allocated count in both).
+ * warm-up call on another snapshot (so driver buffers a segment read leaves allocated count in both). The warm-up's
+ * new body is small: an in-flight concurrent JIT compilation keeps the values its profiles saw alive as a GC root
+ * outside the heap graph, so a sliced line of the warm-up's text could pin that whole text at the sample and not at
+ * the baseline (with the 6 MiB new body, its sanitized copy: 8.4 MiB held in about one run in ten).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -85,7 +88,8 @@ for (const kind of testBackends()) {
     test('while the prior view is alive the heap holds no copy of the prior timeline', async () => {
       const parsed = parseMarkdown(page(DROPPED, BULLETS - DROPPED), SLUG);
       const warm = (await engine.readPageSnapshot(SLUG, { sourceId: 'default' }))!;
-      expect((await timelineRowsToRemove(engine, parsed, warm, SLUG, 'editing'))?.count).toBe(DROPPED);
+      const small = parseMarkdown(page(DROPPED, KEPT_ROWS - DROPPED), SLUG);
+      expect((await timelineRowsToRemove(engine, small, warm, SLUG, 'editing'))?.count).toBe(DROPPED);
       const snapshot = (await engine.readPageSnapshot(SLUG, { sourceId: 'default' }))!;
       let peak = 0;
       const body = { compiled_truth: parsed.compiled_truth, get timeline() {
