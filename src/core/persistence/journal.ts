@@ -643,8 +643,10 @@ const LEASE_HELD = `EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE ${SYNC_KIND
  * and this process takes it), and not waiting on an earlier sync row that names its page. A non-sync request committed on
  * the worktree after sequence `seen` (the newest sequence when this process last claimed a sync head there) earns the sync
  * side one head, so a stream of writes cannot starve it. Uncorrelated with the candidate row, so a claim reads it once.
+ * The FIFO claim holds back only sync rows the write would pass (sequence below it): an earlier unfinished write is the
+ * head-of-root rules' business, and one stalled in another process must not stop the sync behind it.
  */
-const FOREGROUND_WAITING_ON = (nonce: string, seen: string, worktree = 'TRUE') => `SELECT f.worktree_id FROM persistence_requests f
+const FOREGROUND_WAITING_ON = (nonce: string, seen: string, worktree = 'TRUE') => `SELECT f.worktree_id, f.sequence FROM persistence_requests f
     WHERE ${worktree} AND f.state IN ('queued','running','recovering') AND (f.state<>'running' OR (NOT f.publication_started
       AND f.claim_phase->'owner'->>'nonce' IS DISTINCT FROM ${nonce}))
     AND f.recovery IS NULL AND NOT ${SYNC_KIND('f')}
@@ -667,12 +669,14 @@ export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseM
     // The protocol declaration and the FIFO head read are sent together.
     const [, [row]] = await pipelined(tx, [
       () => declarePersistenceProtocol(tx),
-      () => tx.executeRaw<WriteRequest>(`SELECT r.* FROM persistence_requests r
+      () => tx.executeRaw<WriteRequest>(`WITH waiting AS MATERIALIZED (SELECT f.worktree_id, max(f.sequence) AS last
+        FROM (${FOREGROUND_WAITING_ON('$5::text', "($6::text::jsonb->>f.worktree_id::text)::bigint")}) f GROUP BY f.worktree_id)
+      SELECT r.* FROM persistence_requests r
       LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id
       WHERE ${claimableWriteSql(`(${first})`, '$4::text[]')}
         -- On a root whose lane groups run in this process only a foreground write is claimed (beside them).
         AND NOT (r.worktree_id::text=ANY($4::text[]) AND (${SYNC_KIND('r')} OR NOT (${first})))
-        AND NOT (${SYNC_KIND('r')} AND ${first} AND r.worktree_id IN (${FOREGROUND_WAITING_ON('$5::text', "($6::text::jsonb->>f.worktree_id::text)::bigint")}))
+        AND NOT (${SYNC_KIND('r')} AND ${first} AND EXISTS (SELECT 1 FROM waiting g WHERE g.worktree_id=r.worktree_id AND g.last>r.sequence))
       ORDER BY ${holderOnly ? `${LEASE_HELD}, ` : ''}${CLAIM_ORDER(`(${first})`)} LIMIT 1 FOR UPDATE OF r SKIP LOCKED`,
       [hostId, excludeRoots, fifoRoots, laneRoots, consumerIdentity().nonce, JSON.stringify(syncSeen), ...(holderOnly ? [syncLockId(''), process.pid, hostname()] : [])]),
     ]) as [unknown, WriteRequest[]];
@@ -725,7 +729,7 @@ export async function claimNextLaneHead(engine: BrainEngine, hostId: string, wor
           AND (earlier.state IN ('queued','recovering') OR (earlier.state='running' AND COALESCE(earlier.intent->>'lane','')<>$3)))
         -- #5984 Phase 4.5: no new lane head while a foreground write that may go first waits (a claimed one publishes
         -- beside the lanes), except one head after each foreground commit since this run's last head claim.
-        AND NOT ((${foregroundPrioritySql()}) AND r.worktree_id IN (${FOREGROUND_WAITING_ON('$5::text', '$4::bigint', 'f.worktree_id=$2::uuid')}))
+        AND NOT ((${foregroundPrioritySql()}) AND r.worktree_id IN (SELECT f.worktree_id FROM (${FOREGROUND_WAITING_ON('$5::text', '$4::bigint', 'f.worktree_id=$2::uuid')}) f))
       ORDER BY r.sequence LIMIT 1 FOR UPDATE OF r SKIP LOCKED`, [hostId, worktreeId, run, seenSequence, consumerIdentity().nonce]);
     if (!row) return null;
     const token = randomUUID();
