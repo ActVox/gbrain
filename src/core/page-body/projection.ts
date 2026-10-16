@@ -14,7 +14,8 @@
  * chunk the whole body; a claim left by a dead process lapses after
  * SEGMENTED_PROJECTION_LEASE_SECONDS, and a build that throws releases it
  * at once (the resident's queue route then marks its own failures
- * `rebuild_failed`).
+ * `rebuild_failed`). Within a process, calls for one page also run one after
+ * another, and a page an earlier call sealed returns at once (#6143).
  *
  * Retirement runs in bounded statements and deletes, as the flip does: rows of
  * occurrences outside the live generation, inline rows a promotion deferred,
@@ -93,11 +94,34 @@ async function claimProjection(engine: Pick<BrainEngine, 'executeRaw'>, ref: { s
   return !job || job.claimed;
 }
 
+/** The projections of each engine's pages running in this process, by source and slug: the newest call of each page. */
+const projecting = new WeakMap<BrainEngine, Map<string, Promise<unknown>>>();
+
+/**
+ * #6143: one projection of a page at a time in this process. A segmented
+ * create's publication projects the page after commit while the resident
+ * drain picks up the job its unsealed commit queued; run side by side, both
+ * chunk the whole body and pin a pooled connection each, one waiting on the
+ * other's page guard, for every batch. A call for a page another call is
+ * projecting waits for it, and a page that call sealed has nothing left to project.
+ */
 export async function buildSegmentedProjection(engine: BrainEngine, ref: { sourceId: string; slug: string },
   opts: { expectedRevision?: string } = {}): Promise<SegmentedProjectionResult> {
+  let pages = projecting.get(engine);
+  if (!pages) projecting.set(engine, pages = new Map());
+  const key = JSON.stringify([ref.sourceId, ref.slug]);
+  const run = (pages.get(key) ?? Promise.resolve()).catch(() => undefined).then(() => projectSegmentedPage(engine, ref, opts));
+  pages.set(key, run);
+  try { return await run; }
+  finally { if (pages.get(key) === run) pages.delete(key); }
+}
+
+async function projectSegmentedPage(engine: BrainEngine, ref: { sourceId: string; slug: string },
+  opts: { expectedRevision?: string }): Promise<SegmentedProjectionResult> {
   const page = await readProjectionPage(engine, ref);
   if (!page || (opts.expectedRevision !== undefined && page.knowledge_revision !== opts.expectedRevision)) return { chunks: 0, retired: 0, sealed: false };
-  if (page.text_projection_revision !== page.knowledge_revision && !await claimProjection(engine, ref)) return { chunks: 0, retired: 0, sealed: false };
+  if (page.text_projection_revision === page.knowledge_revision) return { chunks: 0, retired: 0, sealed: true };
+  if (!await claimProjection(engine, ref)) return { chunks: 0, retired: 0, sealed: false };
   try {
     return await buildClaimedProjection(engine, ref, page);
   } catch (error) {
@@ -119,7 +143,7 @@ async function buildClaimedProjection(engine: BrainEngine, ref: { sourceId: stri
   const staged = await stageOccurrenceChunks(engine, { pageId, sourceId: ref.sourceId, slug: ref.slug, generation, occurrences: unchunked, title: page.title,
     frontmatter, flags: page.body_flags ?? {}, chunking: { quarantined, corpusGeneration: null, tier: 'none' }, retiredOccurrences: [], guarded: true,
     renew: tx => tx.executeRaw(`UPDATE page_projection_jobs SET updated_at=now() WHERE ${JOB_OF_PAGE} AND reason='${SEGMENTED_PROJECTION_CLAIM}'`, [ref.sourceId, ref.slug]) });
-  await faultPoint('segmented:projection_staged', { sourceId: ref.sourceId });
+  await faultPoint('segmented:projection_staged', { sourceId: ref.sourceId, slug: ref.slug });
   const sealed = await engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: ref.sourceId, slug: ref.slug }]);
     const current = await readProjectionPage(tx, ref);

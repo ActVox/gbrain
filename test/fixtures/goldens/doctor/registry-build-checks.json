@@ -234,6 +234,10 @@
         "name": "pglite_scratch_probe"
       },
       {
+        "category": "ops",
+        "name": "ipc_socket_path"
+      },
+      {
         "category": "brain",
         "name": "text_projection_readiness"
       },
@@ -360,6 +364,10 @@
       {
         "category": "brain",
         "name": "embedding_migration_state"
+      },
+      {
+        "category": "brain",
+        "name": "embedding_identity_unqualified"
       },
       {
         "category": "brain",
@@ -492,6 +500,10 @@
       {
         "category": "ops",
         "name": "google_file_modes"
+      },
+      {
+        "category": "ops",
+        "name": "google_calendar_readable"
       },
       {
         "category": "brain",
@@ -640,6 +652,14 @@
       {
         "category": "ops",
         "name": "global_maintenance_timeouts"
+      },
+      {
+        "category": "ops",
+        "name": "embed_backfill_stalled"
+      },
+      {
+        "category": "ops",
+        "name": "connector_account_mismatch"
       },
       {
         "category": "ops",

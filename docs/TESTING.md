@@ -186,7 +186,7 @@ forced-HNSW controls, server cancellation of exact fallback),
 `test/e2e/projection-statistics-postgres.test.ts` (owner, restricted-reader and
 FORCE-RLS roles) and `test/e2e/vector-plan-real-column-postgres.test.ts`, which
 needs CREATEDB and `CREATE EXTENSION vector` for its dedicated 64-dim database
-and so runs under `bun run ci:local`. Their PGLite and SQL-shape counterparts
+so runs under `bun run ci:local`. Their PGLite and SQL-shape counterparts
 are `test/search/vector-freshness.test.ts` and
 `test/search/vector-statement.test.ts`; `scripts/bench/vector-plan-5824.ts` is
 the opt-in reporter-scale bench. `test/e2e/projection-recovery-parity.test.ts`
@@ -196,6 +196,10 @@ evidence. `test/pglite-in-memory-create-retry.serial.test.ts` mocks the PGLite
 module (own process) to pin one cold retry before an in-memory database opens.
 OAuth transport contracts live in `test/e2e/serve-http-oauth.test.ts` and
 `test/oauth-scope-hint.test.ts`; each file's header lists its cases.
+
+### Performance-change parity
+
+`bun run bench:parity <base-ref>`; see `scripts/bench/contract-parity.ts`.
 
 ### Coverage responsibilities before consolidation
 

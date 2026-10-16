@@ -17,6 +17,7 @@ import { authorizePageVisibility } from './page-visibility.ts';
 import { authorizeFactsBackstop } from './effect-facts.ts';
 import { getWriteRequestById } from './journal.ts';
 import { preparePageMutation } from './page-prepare.ts';
+import { FACTS_BATCH_INCOMPLETE_MESSAGE } from './verb-errors.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import type { ManagedFactIntent, FrozenExtractedFact } from './facts-maintenance.ts';
@@ -121,7 +122,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
     const children = p.children ?? [];
     const done = await tx.executeRaw<{ outcome: { inserted?: number; duplicate?: number; fact_ids?: number[]; withdrawn_skipped?: number; would_dedup_same_page?: number } }>(`SELECT outcome FROM persistence_requests WHERE id=ANY($1::uuid[]) AND source_incarnation=$2::uuid
       AND state='committed' AND COALESCE(intent->>'batchKey',outcome->>'batch_key')=$3 AND operation='extract_facts'`, [children, row.source_incarnation, p.batchKey]);
-    if (done.length !== children.length) throw factsRefusal('revision_conflict', 'Some extracted facts have not committed.', row,
+    if (done.length !== children.length) throw factsRefusal('revision_conflict', FACTS_BATCH_INCOMPLETE_MESSAGE, row,
       `${children.length - done.length} of the batch's ${children.length} per-entity fact requests have not committed, so the extraction cannot be recorded as complete.`,
       'once the entity requests are final, run extract_facts again for the same turn with a new request_id only if facts are still missing.');
     const withdrawnSkipped = done.reduce((sum, item) => sum + Number(item.outcome.withdrawn_skipped ?? 0), 0);

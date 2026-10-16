@@ -1012,6 +1012,13 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
+          "message": "The brain records its embedding model with its provider (voyage:voyage-4).",
+          "name": "embedding_identity_unqualified",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
           "message": "Embeddings are off on this brain, so facts are only deduplicated by exact text; no supersession threshold applies.",
           "name": "supersession_calibration",
           "readiness_state": "not_applicable",
@@ -1455,6 +1462,12 @@
           "details": {
             "canary_timeout_ms": "<volatile>",
             "docs": "docs/guides/troubleshooting.md#keyword-search-times-out-on-a-large-postgres-brain",
+            "negative_cache": {
+              "last_timeout_at": null,
+              "skips": 0,
+              "timeouts": 0,
+              "ttl_seconds": 600
+            },
             "outcome": "skipped",
             "reason": "small_brain",
             "timeout_ms": "<volatile>"
@@ -1494,6 +1507,18 @@
           "elapsed_ms": "<volatile>",
           "message": "No group- or world-readable gbrain files under Google source directories outside ~/.gbrain.",
           "name": "google_file_modes",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/google-connect.md#unreadable-calendar",
+            "sources": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No Google source recorded an unreadable calendar at its last sync.",
+          "name": "google_calendar_readable",
           "status": "ok"
         },
         {
@@ -1829,6 +1854,20 @@
           "elapsed_ms": "<volatile>",
           "message": "Brain-wide maintenance jobs are finishing within their deadline.",
           "name": "global_maintenance_timeouts",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "No automatic embed-backfill is repeating the same failure.",
+          "name": "embed_backfill_stalled",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "No connector source is waiting for its account to be repinned.",
+          "name": "connector_account_mismatch",
           "status": "ok"
         },
         {
@@ -2373,6 +2412,7 @@
               "timeline_entries"
             ],
             "engine": "postgres",
+            "expression_indexes_without_statistics": [],
             "fix": "gbrain repair planner-stats --apply",
             "missing_search_statistics": [],
             "stale": []

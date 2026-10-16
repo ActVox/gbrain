@@ -1066,6 +1066,13 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
+            "message": "The brain records its embedding model with its provider (voyage:voyage-4).",
+            "name": "embedding_identity_unqualified",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
             "message": "Embeddings are off on this brain, so facts are only deduplicated by exact text; no supersession threshold applies.",
             "name": "supersession_calibration",
             "readiness_state": "not_applicable",
@@ -1679,6 +1686,18 @@
             "status": "ok"
           },
           {
+            "category": "ops",
+            "details": {
+              "count": 0,
+              "docs": "docs/guides/google-connect.md#unreadable-calendar",
+              "sources": []
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No Google source recorded an unreadable calendar at its last sync.",
+            "name": "google_calendar_readable",
+            "status": "ok"
+          },
+          {
             "category": "brain",
             "details": {
               "ambiguous": 0,
@@ -2082,6 +2101,20 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No automatic embed-backfill is repeating the same failure.",
+            "name": "embed_backfill_stalled",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No connector source is waiting for its account to be repinned.",
+            "name": "connector_account_mismatch",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "active_ids": [],
               "authorizable": {},
@@ -2184,14 +2217,77 @@
           {
             "category": "brain",
             "details": {
+              "code": "sync_no_successful_sync",
+              "no_successful_sync": [
+                {
+                  "code": "sync_no_successful_sync",
+                  "fix": {
+                    "actor": "agent",
+                    "argv": [
+                      "gbrain",
+                      "sync",
+                      "--source",
+                      "plain",
+                      "--no-pull"
+                    ],
+                    "consent": [],
+                    "docs": "docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+                    "requires_exclusive": false,
+                    "verify": {
+                      "argv": [
+                        "gbrain",
+                        "doctor",
+                        "--only",
+                        "sync_freshness",
+                        "--json"
+                      ]
+                    },
+                    "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+                  },
+                  "held": 0,
+                  "job_id": null,
+                  "last_attempt_at": null,
+                  "reason": "no_attempt",
+                  "result": null,
+                  "source_id": "plain"
+                }
+              ],
               "stale_count": 1,
               "synced_recently_count": 1,
               "unchanged_count": 0,
               "writer_owned_count": 1
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "message": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail"
           },
@@ -2627,6 +2723,7 @@
                 "timeline_entries"
               ],
               "engine": "pglite",
+              "expression_indexes_without_statistics": [],
               "fix": "gbrain repair planner-stats --apply",
               "missing_search_statistics": [],
               "stale": []
@@ -3522,7 +3619,36 @@
         "status": "unhealthy",
         "top_issues": [
           {
-            "fix": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "fix": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail",
             "tier": "root"
@@ -4821,6 +4947,13 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
+            "message": "The brain records its embedding model with its provider (voyage:voyage-4).",
+            "name": "embedding_identity_unqualified",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
             "message": "Embeddings are off on this brain, so facts are only deduplicated by exact text; no supersession threshold applies.",
             "name": "supersession_calibration",
             "readiness_state": "not_applicable",
@@ -5434,6 +5567,18 @@
             "status": "ok"
           },
           {
+            "category": "ops",
+            "details": {
+              "count": 0,
+              "docs": "docs/guides/google-connect.md#unreadable-calendar",
+              "sources": []
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No Google source recorded an unreadable calendar at its last sync.",
+            "name": "google_calendar_readable",
+            "status": "ok"
+          },
+          {
             "category": "brain",
             "details": {
               "ambiguous": 0,
@@ -5837,6 +5982,20 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No automatic embed-backfill is repeating the same failure.",
+            "name": "embed_backfill_stalled",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No connector source is waiting for its account to be repinned.",
+            "name": "connector_account_mismatch",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "active_ids": [],
               "authorizable": {},
@@ -5939,14 +6098,77 @@
           {
             "category": "brain",
             "details": {
+              "code": "sync_no_successful_sync",
+              "no_successful_sync": [
+                {
+                  "code": "sync_no_successful_sync",
+                  "fix": {
+                    "actor": "agent",
+                    "argv": [
+                      "gbrain",
+                      "sync",
+                      "--source",
+                      "plain",
+                      "--no-pull"
+                    ],
+                    "consent": [],
+                    "docs": "docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+                    "requires_exclusive": false,
+                    "verify": {
+                      "argv": [
+                        "gbrain",
+                        "doctor",
+                        "--only",
+                        "sync_freshness",
+                        "--json"
+                      ]
+                    },
+                    "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+                  },
+                  "held": 0,
+                  "job_id": null,
+                  "last_attempt_at": null,
+                  "reason": "no_attempt",
+                  "result": null,
+                  "source_id": "plain"
+                }
+              ],
               "stale_count": 1,
               "synced_recently_count": 1,
               "unchanged_count": 0,
               "writer_owned_count": 1
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "message": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail"
           },
@@ -6382,6 +6604,7 @@
                 "timeline_entries"
               ],
               "engine": "pglite",
+              "expression_indexes_without_statistics": [],
               "fix": "gbrain repair planner-stats --apply",
               "missing_search_statistics": [],
               "stale": []
@@ -7277,7 +7500,36 @@
         "status": "unhealthy",
         "top_issues": [
           {
-            "fix": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "fix": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail",
             "tier": "root"

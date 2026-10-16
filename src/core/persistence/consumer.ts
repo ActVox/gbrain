@@ -1,6 +1,6 @@
 import type { BrainEngine, ReservedConnection } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
-import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, independentGroup, publicationGroupKey, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, sweepSegmentStorage, vacuumPersistenceQueues } from './journal.ts';
+import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, publicationGroupKey, syncGroup, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues, independentGroup, sweepSegmentStorage } from './journal.ts';
 import { finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { executeClaimedGroup, PAGE_BATCH_GROUP_MAX, publishSingleWrite, singleWrite } from './group-publish.ts';
@@ -1035,18 +1035,15 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   }
   /** #5984: a claimed bulk sync head takes its directly following group members along; one row runs the single path. */
   private async executeOrGroup(row: WriteRequest, root: RootHold): Promise<boolean> {
-    // #5984 admit-ahead: a window group whose predecessor did not commit is cancelled, never published after it.
-    // A lane group may be claimed while its predecessor still publishes; its commit wait decides instead.
-    // A bulk-sync group member released mid-group follows the member before it, not only the previous group (#6153 class).
+    // #6712: a page publishes whatever its predecessor's fate; a lane group member released mid-group only waits while the
+    // member before it is still unfinished (#6153 class).
     const lane = laneOf(row);
-    const order = await claimedHeadOrder(this.engine, row, lane !== null);
-    if (order === 'wait') { await releaseUnpublishedClaim(this.statements, row, 'group_member_waiting'); return false; }
-    if (order) { for (const done of order) this.settled(done); return true; }
+    if (await claimedHeadOrder(this.engine, row, lane !== null) === 'wait') { await releaseUnpublishedClaim(this.statements, row, 'group_member_waiting'); return false; }
     const group = publicationGroupKey(row);
     // A managed import batch also groups on PGLite: its members share one transaction's guards there too.
     if (!group || this.engine.kind !== 'postgres' && !group.startsWith('import:')) return this.execute(row, root);
     // #6007: a put_pages or import batch publishes in groups of at most PAGE_BATCH_GROUP_MAX pages.
-    const followers = await claimGroupFollowers(this.engine, row, group, independentGroup(group) ? PAGE_BATCH_GROUP_MAX - 1 : 63);
+    const followers = await claimGroupFollowers(this.engine, row, group, syncGroup(group) ? 63 : PAGE_BATCH_GROUP_MAX - 1);
     if (!followers.length && !lane) return this.execute(row, root);
     const rows = [row, ...followers];
     for (const member of rows) this.executing.add(member.id);
