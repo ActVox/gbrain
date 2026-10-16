@@ -171,13 +171,14 @@ interface LoadedSegment {
 }
 
 /** The rows' texts and JSON metadata, one text at a time (metadata in batches). */
-async function* loadSegments(engine: BrainEngine, body: SegmentedBody, rows: readonly BodyRow[]): AsyncIterable<LoadedSegment> {
+async function* loadSegments(engine: BrainEngine, body: SegmentedBody, rows: readonly BodyRow[], stop?: () => void): AsyncIterable<LoadedSegment> {
   for (let at = 0; at < rows.length; at += HEAVY_BATCH) {
     const batch = rows.slice(at, at + HEAVY_BATCH);
     const meta = new Map((await engine.executeRaw<Record<string, unknown>>(`SELECT occurrence_id, entry_state, protected_regions
       FROM page_body_manifest WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[]) AND staging_id IS NULL AND gen_from<=$3 AND (gen_to IS NULL OR gen_to>$3)`,
     [body.pageId, batch.map(r => r.occurrenceId), body.generation])).map(m => [Number(m.occurrence_id), m]));
     for (const row of batch) {
+      stop?.();
       const m = meta.get(row.occurrenceId);
       const bytes = (await engine.readSegmentTexts(body.sourceId, [row.sha256])).get(Buffer.from(row.sha256).toString('hex'));
       if (!m || bytes === undefined) throw projectionStaleError(row.byteStart, 'its manifest row or text is missing');
@@ -327,9 +328,12 @@ export interface TrustedSegment {
   pieces: ProjectedPiece[];
 }
 
-/** The trusted body of `rows` (rows of `body`, in order), one segment at a time: what readBodyRange's trusted stored read cuts. */
-export async function* trustedSegments(engine: BrainEngine, body: SegmentedBody, rows: readonly BodyRow[]): AsyncIterable<TrustedSegment> {
-  for await (const seg of loadSegments(engine, body, rows)) {
+/**
+ * The trusted body of `rows` (rows of `body`, in order), one segment at a time: what readBodyRange's trusted stored read
+ * cuts. `stop` is called before each segment text is read; it throws to end the read there.
+ */
+export async function* trustedSegments(engine: BrainEngine, body: SegmentedBody, rows: readonly BodyRow[], stop?: () => void): AsyncIterable<TrustedSegment> {
+  for await (const seg of loadSegments(engine, body, rows, stop)) {
     const raw = utf8.decode(seg.bytes);
     yield { row: seg.row, raw: seg.bytes, entryState: seg.entryState, pieces: overlaidPieces(raw, await overlaidText(engine, body, seg, raw, 'trusted')) };
   }

@@ -112,10 +112,11 @@ export async function segmentedRoleText(engine: BrainEngine, page: { id: number;
 /**
  * extractPageLinks(slug, `${compiled_truth}\n${timeline}`, ...) of a segmented page, streamed; `regions` narrows the
  * body (the remote mention effect reads the compiled truth only). With `temporal`, also collects the body's temporal
- * inputs (dated lines, narrative references, ranged relation lines) for publication.
+ * inputs (dated lines, narrative references, ranged relation lines) for publication. `onBlock` sees each block once,
+ * in order, so a caller can parse the same read for something else.
  */
 export async function extractSegmentedPageLinks(engine: BrainEngine, page: SegmentedLinkPage, resolver: SlugResolver,
-  opts: ExtractPageLinksOptions & BodyBlockOptions & { temporal?: boolean } = {}): Promise<PageLinksResult & { temporalBody?: TemporalBody }> {
+  opts: ExtractPageLinksOptions & BodyBlockOptions & { temporal?: boolean; onBlock?: (block: BodyBlock) => void } = {}): Promise<PageLinksResult & { temporalBody?: TemporalBody }> {
   const roleText = opts.roleText ?? await segmentedRoleText(engine, page, opts);
   const regexBudget = opts.regexBudget ?? new PageRegexBudget();
   const kept = new Map<string, BodyLinkCandidate & { seq: number }>();
@@ -126,6 +127,7 @@ export async function extractSegmentedPageLinks(engine: BrainEngine, page: Segme
     const body = await extractBodyLinks(page.slug, w.text, page.type, resolver,
       { ...opts, roleText, regexBudget, window: { start: w.start, end: w.end, offset: w.offset } });
     attendanceComplete &&= body.attendanceComplete;
+    opts.onBlock?.(w.block);
     for (const link of body.links) {
       const key = candidateKey(link.candidate);
       const prior = kept.get(key);

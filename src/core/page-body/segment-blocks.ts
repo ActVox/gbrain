@@ -77,6 +77,16 @@ export interface BodyBlockOptions {
    * read. A block after a skipped run has `at` NaN.
    */
   want?: (run: { seqs: readonly number[]; first: boolean }) => boolean;
+  /** Asked before each segment is read: true ends the read with BodyReadStopped (a caller's time budget ran out). */
+  stop?: () => boolean;
+}
+
+/** bodyBlocks ended before a segment read because `stop` said so; nothing after the blocks already yielded was read. */
+export class BodyReadStopped extends Error {
+  constructor(readonly slug: string) {
+    super(`Reading page ${slug} stopped: the caller's budget ran out.`);
+    this.name = 'BodyReadStopped';
+  }
 }
 
 /** `page_body_segmented`: a run a derived pass must read whole is over BLOCK_MAX_BYTES. */
@@ -139,7 +149,8 @@ export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug:
         start = end;
         return block;
       };
-      for await (const seg of trustedSegments(engine, body, rows.slice(i, j + 1))) {
+      const stop = opts.stop;
+      for await (const seg of trustedSegments(engine, body, rows.slice(i, j + 1), stop && (() => { if (stop()) throw new BodyReadStopped(page.slug); }))) {
         bodyRowWork.visits++;
         if (previous && freshAfterForcedCut(previous, seg, body.stale)) yield flush(seg.row.byteStart);
         const end = seg.row.byteStart + seg.row.byteLen;

@@ -250,6 +250,7 @@ export async function runMaintenanceSweep(
           overBudget,
           report,
           skip,
+          log,
         });
       }
     } catch (e) {
@@ -304,6 +305,18 @@ interface PassCtx {
 }
 
 /**
+ * Segmented pages whose links/timeline pass did not fit a sweep's budget, `source\0slug` to the page's updated_at then:
+ * later sweeps in this process skip them until the page changes, so one page too large for any budget cannot take
+ * every sweep's budget. `gbrain extract --stale` extracts them.
+ */
+const deferredSegmentedPages = new Map<string, string>();
+
+/** Test seam: forget deferred segmented pages. */
+export function _resetDeferredSegmentedPagesForTests(): void {
+  deferredSegmentedPages.clear();
+}
+
+/**
  * Pass 2 body. Calls the SAME per-page cores as `gbrain extract
  * links|timeline --source db` (extract.ts:extractLinksFromDB /
  * extractTimelineFromDB): extractPageLinks + parseTimelineEntries, with
@@ -313,9 +326,9 @@ interface PassCtx {
  */
 async function runLinksTimelinePass(
   engine: BrainEngine,
-  ctx: PassCtx & { cutoffIso: string },
+  ctx: PassCtx & { cutoffIso: string; log: (msg: string) => void },
 ): Promise<void> {
-  const { sourceId, batchLimit, cutoffIso, overBudget, report, skip } = ctx;
+  const { sourceId, batchLimit, cutoffIso, overBudget, report, skip, log } = ctx;
 
   const {
     extractPageLinks,
@@ -344,9 +357,10 @@ async function runLinksTimelinePass(
   // job; the sweep is a recency back-stop). The µs to_char projection is the
   // #1768 stamp discipline: stamp the row's READ updated_at, not now(), so an
   // edit between SELECT and stamp stays stale and re-sweeps.
-  const recent = await engine.executeRaw<{ slug: string; updated_at_iso: string }>(
+  const recent = await engine.executeRaw<{ slug: string; updated_at_iso: string; body_storage: string | null; body_bytes: number | null }>(
     `SELECT slug,
-            to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
+            to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso,
+            body_storage, body_bytes
        FROM pages
       WHERE source_id = $1
         AND deleted_at IS NULL
@@ -373,219 +387,262 @@ async function runLinksTimelinePass(
 
   type Extracted = Awaited<ReturnType<typeof extractPageLinks>>;
   type Snapshot = NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>;
-  // A segmented body is read block by block (page-body/segment-links.ts), never as one string.
-  const { extractSegmentedPageLinks } = await import('./page-body/segment-links.ts');
-  const { bodyBlocks } = await import('./page-body/segment-blocks.ts');
-  const linksOf = (snapshot: Snapshot, opts: Parameters<typeof extractPageLinks>[5] & { temporal?: boolean }): ReturnType<typeof extractSegmentedPageLinks> => {
-    const { page } = snapshot;
-    return isSegmentedPage(page)
-      ? extractSegmentedPageLinks(engine, { id: Number(page.id), slug: page.slug, source_id: sourceId, type: page.type, frontmatter: page.frontmatter }, resolver, opts)
-      : extractPageLinks(page.slug, `${page.compiled_truth}\n${page.timeline}`, page.frontmatter, page.type, resolver, opts);
-  };
-  const temporalBodies = new Map<string, NonNullable<Awaited<ReturnType<typeof extractSegmentedPageLinks>>['temporalBody']>>();
+  const { extractSegmentedPageLinks, segmentedRoleText } = await import('./page-body/segment-links.ts');
+  const { bodyBlocks, BodyReadStopped, detachedValue } = await import('./page-body/segment-blocks.ts');
 
-  const tlBatch: TimelineBatchInput[] = [];
-  const processedRefs: Array<{ slug: string; source_id: string; extractedAt: string }> = [];
-  const pageCandidates: Array<{ slug: string; candidates: Extracted['candidates'] }> = [];
-  const snapshots = new Map<string, Snapshot>();
+  /**
+   * One batch through every phase. A segmented page's reads ask `stop` before each segment, so one that does not fit
+   * the budget throws BodyReadStopped between segments.
+   */
+  const runBatch = async (recent: Array<{ slug: string; updated_at_iso: string }>, stop?: () => boolean): Promise<void> => {
+    // A segmented body is read block by block (page-body/segment-links.ts), never as one string: its role phrases once
+    // for both extractions, and its timeline entries from the first extraction's blocks.
+    const roleTexts = new Map<string, string>();
+    const linksOf = async (snapshot: Snapshot, opts: Parameters<typeof extractPageLinks>[5] & { temporal?: boolean; onBlock?: (block: { text: string }) => void }): ReturnType<typeof extractSegmentedPageLinks> => {
+      const { page } = snapshot;
+      if (!isSegmentedPage(page)) return extractPageLinks(page.slug, `${page.compiled_truth}\n${page.timeline}`, page.frontmatter, page.type, resolver, opts);
+      const ref = { id: Number(page.id), slug: page.slug, source_id: sourceId, type: page.type, frontmatter: page.frontmatter };
+      const roleText = roleTexts.get(page.slug) ?? await segmentedRoleText(engine, ref, { stop });
+      roleTexts.set(page.slug, roleText);
+      return extractSegmentedPageLinks(engine, ref, resolver, { ...opts, roleText, stop });
+    };
+    const temporalBodies = new Map<string, NonNullable<Awaited<ReturnType<typeof extractSegmentedPageLinks>>['temporalBody']>>();
 
-  // Phase 1: per-page extraction. The per-slug getPage loop stays a loop —
-  // BrainEngine has no batch read-by-slug-list primitive (resolveSlugsByPaths
-  // is path→slug only), and the loop is bounded by batchLimit (default 20).
-  for (let i = 0; i < recent.length; i++) {
-    if (overBudget()) {
-      skip('budget_exhausted:links_timeline', recent.length - i);
-      break;
+    const tlBatch: TimelineBatchInput[] = [];
+    const processedRefs: Array<{ slug: string; source_id: string; extractedAt: string }> = [];
+    const pageCandidates: Array<{ slug: string; candidates: Extracted['candidates'] }> = [];
+    const snapshots = new Map<string, Snapshot>();
+
+    // Phase 1: per-page extraction. The per-slug getPage loop stays a loop —
+    // BrainEngine has no batch read-by-slug-list primitive (resolveSlugsByPaths
+    // is path→slug only), and the loop is bounded by batchLimit (default 20).
+    for (let i = 0; i < recent.length; i++) {
+      if (overBudget()) {
+        skip('budget_exhausted:links_timeline', recent.length - i);
+        break;
+      }
+      const slug = recent[i].slug;
+      const page = await engine.getPage(slug, { sourceId });
+      if (!page) continue;
+      const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+      const segmented = isSegmentedPage(page);
+      if (!snapshot || segmented !== isSegmentedPage(snapshot.page)
+        || (!segmented && (snapshot.page.compiled_truth !== page.compiled_truth || snapshot.page.timeline !== page.timeline))
+        || snapshot.page.type !== page.type || JSON.stringify(snapshot.page.frontmatter) !== JSON.stringify(page.frontmatter)) continue;
+      snapshots.set(slug, snapshot);
+
+      // A segmented page's entries are copied off their block (detachedValue), or each would keep its whole block alive.
+      const entries: ReturnType<typeof parseTimelineEntries> = [];
+      const timelineOf = (block: { text: string }) => { for (const entry of parseTimelineEntries(block.text)) entries.push(detachedValue(entry)); };
+      if (linksEnabled) {
+        // skipFrontmatter matches user-invoked `gbrain extract links`
+        // (frontmatter backfill stays a migration-orchestrator concern).
+        const extracted = await linksOf(snapshot, { skipFrontmatter: true, globalBasename, pack, temporal: segmented,
+          ...(segmented && timelineEnabled ? { onBlock: timelineOf } : {}) });
+        if (extracted.temporalBody) temporalBodies.set(slug, extracted.temporalBody);
+        if (extracted.candidates.length > 0) {
+          pageCandidates.push({ slug, candidates: extracted.candidates });
+        }
+      }
+
+      if (timelineEnabled) {
+        if (!segmented) entries.push(...parseTimelineEntries(page.compiled_truth + '\n' + page.timeline));
+        else if (!linksEnabled) for await (const block of bodyBlocks(engine, snapshot.page, { stop })) timelineOf(block);
+        for (const entry of entries) {
+          // Same row shape as extractTimelineFromDB's batch push (extract.ts):
+          // #3957 — parsed source label threaded so FS- and DB-extracted rows
+          // share one dedup shape; detail '' when empty.
+          tlBatch.push({
+            slug,
+            date: entry.date,
+            source: entry.source,
+            summary: entry.summary,
+            detail: entry.detail || '',
+            source_id: sourceId,
+          });
+        }
+      }
+
+      processedRefs.push({ slug, source_id: sourceId, extractedAt: recent[i].updated_at_iso });
     }
-    const slug = recent[i].slug;
-    const page = await engine.getPage(slug, { sourceId });
-    if (!page) continue;
-    const snapshot = await engine.readPageSnapshot(slug, { sourceId });
-    const segmented = isSegmentedPage(page);
-    if (!snapshot || segmented !== isSegmentedPage(snapshot.page)
-      || (!segmented && (snapshot.page.compiled_truth !== page.compiled_truth || snapshot.page.timeline !== page.timeline))
-      || snapshot.page.type !== page.type || JSON.stringify(snapshot.page.frontmatter) !== JSON.stringify(page.frontmatter)) continue;
-    snapshots.set(slug, snapshot);
 
-    if (linksEnabled) {
-      // skipFrontmatter matches user-invoked `gbrain extract links`
-      // (frontmatter backfill stays a migration-orchestrator concern).
-      const extracted = await linksOf(snapshot, { skipFrontmatter: true, globalBasename, pack, temporal: segmented });
-      if (extracted.temporalBody) temporalBodies.set(slug, extracted.temporalBody);
-      if (extracted.candidates.length > 0) {
-        pageCandidates.push({ slug, candidates: extracted.candidates });
+    // Phase 2: endpoint validation is scoped to the slugs the candidates
+    // actually name — NOT engine.listAllPageRefs() (the full (slug, source_id)
+    // map, O(all pages) per sweep; the extract command amortizes that cost over
+    // a whole-brain run, a recurring bounded sweep must not). The targeted
+    // lookup keeps listAllPageRefs' visibility semantics (deleted_at IS NULL),
+    // so resolveCandidateSources' F10 resolution is unchanged — it just sees
+    // only the rows it can possibly use. Zero candidates ⇒ zero queries.
+    const linkBatch: LinkBatchInput[] = [];
+    const endpointMetadata = new Map<string, { slug: string; source_id: string; type: string; knowledge_revision: string }>();
+    const incomplete = new Set<string>();
+    const wantedBySlug = new Map<string, WantedLinkInput[]>();
+    const wantedEnabled = await isWantedPagesEnabled(engine);
+    // One settings snapshot per sweep; publication refuses a page if the settings move meanwhile (it stays unstamped).
+    const grammar = await readLineGrammarSettings(engine);
+    const lineGrammar = { enabled: grammar.enabled, allowUndeclaredTypes: grammar.allowUndeclaredTypes };
+    if (pageCandidates.length > 0) {
+      const needed = new Set<string>();
+      for (const { slug, candidates } of pageCandidates) {
+        needed.add(slug);
+        for (const c of candidates) {
+          needed.add(c.targetSlug);
+          if (c.fromSlug) needed.add(c.fromSlug);
+        }
       }
-    }
-
-    if (timelineEnabled) {
-      const entries = segmented ? [] : parseTimelineEntries(page.compiled_truth + '\n' + page.timeline);
-      if (segmented) for await (const block of bodyBlocks(engine, snapshot.page)) entries.push(...parseTimelineEntries(block.text));
-      for (const entry of entries) {
-        // Same row shape as extractTimelineFromDB's batch push (extract.ts):
-        // #3957 — parsed source label threaded so FS- and DB-extracted rows
-        // share one dedup shape; detail '' when empty.
-        tlBatch.push({
-          slug,
-          date: entry.date,
-          source: entry.source,
-          summary: entry.summary,
-          detail: entry.detail || '',
-          source_id: sourceId,
-        });
-      }
-    }
-
-    processedRefs.push({ slug, source_id: sourceId, extractedAt: recent[i].updated_at_iso });
-  }
-
-  // Phase 2: endpoint validation is scoped to the slugs the candidates
-  // actually name — NOT engine.listAllPageRefs() (the full (slug, source_id)
-  // map, O(all pages) per sweep; the extract command amortizes that cost over
-  // a whole-brain run, a recurring bounded sweep must not). The targeted
-  // lookup keeps listAllPageRefs' visibility semantics (deleted_at IS NULL),
-  // so resolveCandidateSources' F10 resolution is unchanged — it just sees
-  // only the rows it can possibly use. Zero candidates ⇒ zero queries.
-  const linkBatch: LinkBatchInput[] = [];
-  const endpointMetadata = new Map<string, { slug: string; source_id: string; type: string; knowledge_revision: string }>();
-  const incomplete = new Set<string>();
-  const wantedBySlug = new Map<string, WantedLinkInput[]>();
-  const wantedEnabled = await isWantedPagesEnabled(engine);
-  // One settings snapshot per sweep; publication refuses a page if the settings move meanwhile (it stays unstamped).
-  const grammar = await readLineGrammarSettings(engine);
-  const lineGrammar = { enabled: grammar.enabled, allowUndeclaredTypes: grammar.allowUndeclaredTypes };
-  if (pageCandidates.length > 0) {
-    const needed = new Set<string>();
-    for (const { slug, candidates } of pageCandidates) {
-      needed.add(slug);
-      for (const c of candidates) {
-        needed.add(c.targetSlug);
-        if (c.fromSlug) needed.add(c.fromSlug);
-      }
-    }
-    const { allSlugs, slugToSources, metadata } = await lookupRefsForSlugs(engine, [...needed]);
-    for (const row of metadata) endpointMetadata.set(`${row.source_id}\0${row.slug}`, row);
-    // #3478: the 'default' fallback is a federation feature — a sweep over an
-    // isolated source must not push cross-source edges. Single-row fetchSource
-    // (not loadAllSources) keeps the sweep's bounded-cost discipline; a missing
-    // sources row fails closed to isolated.
-    const { fetchSource, isSourceFederated } = await import('./sources-load.ts');
-    const sourceRow = await fetchSource(engine, sourceId);
-    const allowCrossSource = sourceRow !== null && isSourceFederated(sourceRow.config);
-    // #3757: thread the same `link_resolution.cross_source` opt-in (#2589) and
-    // configured default source (#4611) the CLI extract lanes pass. Without
-    // them the sweep dropped every edge into a non-default source AND its
-    // reconcile below deleted the ones `extract links --source db` created.
-    const [crossSource, linkDefaultSourceId] = await Promise.all([
-      isCrossSourceLinksEnabled(engine),
-      resolveLinkFallbackDefault(engine),
-    ]);
-    let crossSourceDrops = 0;
-    for (const { slug } of pageCandidates) {
-      const { candidates, attendanceComplete } = await linksOf(snapshots.get(slug)!,
-        { skipFrontmatter: true, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
-          const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
-            sourceId, allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId });
-          return resolved.ok ? endpointMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
-        } });
-      if (!attendanceComplete) {
-        incomplete.add(slug);
-        skip('attendance_resolution_incomplete');
-        continue;
-      }
-      if (wantedEnabled) {
-        wantedBySlug.set(slug, collectWantedLinks({ candidates, originSourceId: sourceId,
-          crossSourceAllowed: allowCrossSource || crossSource, resolve: c => resolveCandidateSources(c, slug, sourceId,
-            allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId }) }));
-      }
-      for (const c of candidates) {
-        // #2589: a cross_source drop here means the target exists only in
-        // other sources and cross-source links are off — counted in the
-        // skip ledger exactly like the extract paths count it.
-        const resolved = resolveCandidateSources(
-          c, slug, sourceId, allSlugs, slugToSources, allowCrossSource,
-          { crossSource, defaultSourceId: linkDefaultSourceId },
-        );
-        if (!resolved.ok) {
-          if (resolved.reason === 'cross_source') crossSourceDrops++;
+      const { allSlugs, slugToSources, metadata } = await lookupRefsForSlugs(engine, [...needed]);
+      for (const row of metadata) endpointMetadata.set(`${row.source_id}\0${row.slug}`, row);
+      // #3478: the 'default' fallback is a federation feature — a sweep over an
+      // isolated source must not push cross-source edges. Single-row fetchSource
+      // (not loadAllSources) keeps the sweep's bounded-cost discipline; a missing
+      // sources row fails closed to isolated.
+      const { fetchSource, isSourceFederated } = await import('./sources-load.ts');
+      const sourceRow = await fetchSource(engine, sourceId);
+      const allowCrossSource = sourceRow !== null && isSourceFederated(sourceRow.config);
+      // #3757: thread the same `link_resolution.cross_source` opt-in (#2589) and
+      // configured default source (#4611) the CLI extract lanes pass. Without
+      // them the sweep dropped every edge into a non-default source AND its
+      // reconcile below deleted the ones `extract links --source db` created.
+      const [crossSource, linkDefaultSourceId] = await Promise.all([
+        isCrossSourceLinksEnabled(engine),
+        resolveLinkFallbackDefault(engine),
+      ]);
+      let crossSourceDrops = 0;
+      for (const { slug } of pageCandidates) {
+        const { candidates, attendanceComplete } = await linksOf(snapshots.get(slug)!,
+          { skipFrontmatter: true, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
+            const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
+              sourceId, allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId });
+            return resolved.ok ? endpointMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
+          } });
+        if (!attendanceComplete) {
+          incomplete.add(slug);
+          skip('attendance_resolution_incomplete');
           continue;
         }
-        linkBatch.push(resolvedLinkCandidate(c, slug, sourceId, resolved));
+        if (wantedEnabled) {
+          wantedBySlug.set(slug, collectWantedLinks({ candidates, originSourceId: sourceId,
+            crossSourceAllowed: allowCrossSource || crossSource, resolve: c => resolveCandidateSources(c, slug, sourceId,
+              allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId }) }));
+        }
+        for (const c of candidates) {
+          // #2589: a cross_source drop here means the target exists only in
+          // other sources and cross-source links are off — counted in the
+          // skip ledger exactly like the extract paths count it.
+          const resolved = resolveCandidateSources(
+            c, slug, sourceId, allSlugs, slugToSources, allowCrossSource,
+            { crossSource, defaultSourceId: linkDefaultSourceId },
+          );
+          if (!resolved.ok) {
+            if (resolved.reason === 'cross_source') crossSourceDrops++;
+            continue;
+          }
+          linkBatch.push(resolvedLinkCandidate(c, slug, sourceId, resolved));
+        }
       }
+      if (crossSourceDrops > 0) skip('cross_source_link', crossSourceDrops);
     }
-    if (crossSourceDrops > 0) skip('cross_source_link', crossSourceDrops);
-  }
 
-  // Engine batch primitives self-retry; default auditSite labels apply
-  // (BATCH_AUDIT_SITES is a closed enum owned by retry.ts).
-  // A managed brain refuses raw timeline inserts (managed_writer_guard): each page publishes through the coordinator.
-  const timelineUnsettled = new Set<string>();
-  if (tlBatch.length > 0 && await managedPersistenceEnabled(engine)) {
-    const { publishManagedPageTimeline } = await import('../commands/extract-timeline-db.ts');
-    for (const slug of new Set(tlBatch.map(row => row.slug))) {
-      if (overBudget()) { skip('budget_exhausted:timeline'); timelineUnsettled.add(slug); continue; }
-      try {
-        const added = await publishManagedPageTimeline(engine, slug, sourceId);
-        if (added === 'unsettled') timelineUnsettled.add(slug);
-        else report.timelineExtracted += added;
-      } catch {
-        skip('timeline_publish_failed');
-        timelineUnsettled.add(slug);
+    // Engine batch primitives self-retry; default auditSite labels apply
+    // (BATCH_AUDIT_SITES is a closed enum owned by retry.ts).
+    // A managed brain refuses raw timeline inserts (managed_writer_guard): each page publishes through the coordinator.
+    const timelineUnsettled = new Set<string>();
+    if (tlBatch.length > 0 && await managedPersistenceEnabled(engine)) {
+      const { publishManagedPageTimeline } = await import('../commands/extract-timeline-db.ts');
+      for (const slug of new Set(tlBatch.map(row => row.slug))) {
+        if (overBudget()) { skip('budget_exhausted:timeline'); timelineUnsettled.add(slug); continue; }
+        try {
+          const added = await publishManagedPageTimeline(engine, slug, sourceId);
+          if (added === 'unsettled') timelineUnsettled.add(slug);
+          else report.timelineExtracted += added;
+        } catch {
+          skip('timeline_publish_failed');
+          timelineUnsettled.add(slug);
+        }
       }
+    } else if (tlBatch.length > 0) {
+      report.timelineExtracted += await maintenanceTransaction(engine, tx => tx.addTimelineEntriesBatch(tlBatch)); // gbrain-allow-direct-insert: same extract-path rationale as addLinksBatch above [CX-P0.3]
     }
-  } else if (tlBatch.length > 0) {
-    report.timelineExtracted += await maintenanceTransaction(engine, tx => tx.addTimelineEntriesBatch(tlBatch)); // gbrain-allow-direct-insert: same extract-path rationale as addLinksBatch above [CX-P0.3]
-  }
 
-  // #4196: reconcile removals. The sweep is the ONLY link extraction remote
-  // put_page pages ever get (runAutoLink is skipped by design), so add-only
-  // inserts leave a phantom edge forever once a page drops a reference.
-  // Mirror runAutoLink's provenance-scoped removal (ops/pages.ts) — markdown /
-  // NULL-legacy / wikilink-resolved only — minus its own-frontmatter clause:
-  // the sweep extracts with skipFrontmatter, so its desired set can never
-  // contain frontmatter candidates and deleting them would clobber valid
-  // edges. 'manual' and 'mentions' are never touched. A page whose reconcile
-  // fails (or is cut by budget) is left unstamped so the next sweep retries.
-  const stampable = new Set(processedRefs.map(r => r.slug).filter(slug => !timelineUnsettled.has(slug)));
-  if (linksEnabled) {
-    const desiredBySlug = new Map<string, LinkBatchInput[]>(
-      processedRefs.map(r => [r.slug, []]),
-    );
-    for (const b of linkBatch) {
-      desiredBySlug.get(b.origin_slug ?? b.from_slug)?.push(b);
-    }
-    for (const ref of processedRefs) {
-      if (incomplete.has(ref.slug) || overBudget()) {
-        if (!incomplete.has(ref.slug)) skip('budget_exhausted:link_reconcile');
-        stampable.delete(ref.slug);
-        continue;
+    // #4196: reconcile removals. The sweep is the ONLY link extraction remote
+    // put_page pages ever get (runAutoLink is skipped by design), so add-only
+    // inserts leave a phantom edge forever once a page drops a reference.
+    // Mirror runAutoLink's provenance-scoped removal (ops/pages.ts) — markdown /
+    // NULL-legacy / wikilink-resolved only — minus its own-frontmatter clause:
+    // the sweep extracts with skipFrontmatter, so its desired set can never
+    // contain frontmatter candidates and deleting them would clobber valid
+    // edges. 'manual' and 'mentions' are never touched. A page whose reconcile
+    // fails (or is cut by budget) is left unstamped so the next sweep retries.
+    const stampable = new Set(processedRefs.map(r => r.slug).filter(slug => !timelineUnsettled.has(slug)));
+    if (linksEnabled) {
+      const desiredBySlug = new Map<string, LinkBatchInput[]>(
+        processedRefs.map(r => [r.slug, []]),
+      );
+      for (const b of linkBatch) {
+        desiredBySlug.get(b.origin_slug ?? b.from_slug)?.push(b);
       }
-      const desired = desiredBySlug.get(ref.slug)!;
-      try {
-        const snapshot = snapshots.get(ref.slug)!;
-        const result = await engine.replaceDerivedLinks({ slug: ref.slug, sourceId,
-          expectedRevision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation }, desired,
-        { includeFrontmatter: false, preserveExisting: true, lineGrammar: grammar,
-          wanted: { producers: ['body'], rows: wantedBySlug.get(ref.slug) ?? [] }, temporalBody: temporalBodies.get(ref.slug), expectedEndpoints: [...new Set(desired.flatMap(row =>
-          [`${row.from_source_id}\0${row.from_slug}`, `${row.to_source_id}\0${row.to_slug}`]))].map(key => {
-          const endpoint = endpointMetadata.get(key)!;
-          return { slug: endpoint.slug, sourceId: endpoint.source_id, revision: endpoint.knowledge_revision };
-        }) });
-        report.linksRemoved += result.removed;
-        report.linksExtracted += result.created;
-      } catch {
-        skip('link_reconcile_failed');
-        stampable.delete(ref.slug);
+      for (const ref of processedRefs) {
+        if (incomplete.has(ref.slug) || overBudget()) {
+          if (!incomplete.has(ref.slug)) skip('budget_exhausted:link_reconcile');
+          stampable.delete(ref.slug);
+          continue;
+        }
+        const desired = desiredBySlug.get(ref.slug)!;
+        try {
+          const snapshot = snapshots.get(ref.slug)!;
+          const result = await engine.replaceDerivedLinks({ slug: ref.slug, sourceId,
+            expectedRevision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation }, desired,
+          { includeFrontmatter: false, preserveExisting: true, lineGrammar: grammar,
+            wanted: { producers: ['body'], rows: wantedBySlug.get(ref.slug) ?? [] }, temporalBody: temporalBodies.get(ref.slug), expectedEndpoints: [...new Set(desired.flatMap(row =>
+            [`${row.from_source_id}\0${row.from_slug}`, `${row.to_source_id}\0${row.to_slug}`]))].map(key => {
+            const endpoint = endpointMetadata.get(key)!;
+            return { slug: endpoint.slug, sourceId: endpoint.source_id, revision: endpoint.knowledge_revision };
+          }) });
+          report.linksRemoved += result.removed;
+          report.linksExtracted += result.created;
+        } catch {
+          skip('link_reconcile_failed');
+          stampable.delete(ref.slug);
+        }
       }
     }
-  }
 
-  // Stamp only when BOTH kinds ran for these pages (extract.ts C3/D6:
-  // links_extracted_at covers links AND timeline). Per-ref extractedAt is the
-  // page's read updated_at (#1768 µs discipline; D4 — an edit between SELECT
-  // and stamp stays stale).
-  if (linksEnabled && timelineEnabled) {
-    const toStamp = processedRefs.filter(r => stampable.has(r.slug));
-    if (toStamp.length > 0) await stampExtracted(engine, toStamp);
+    // Stamp only when BOTH kinds ran for these pages (extract.ts C3/D6:
+    // links_extracted_at covers links AND timeline). Per-ref extractedAt is the
+    // page's read updated_at (#1768 µs discipline; D4 — an edit between SELECT
+    // and stamp stays stale).
+    if (linksEnabled && timelineEnabled) {
+      const toStamp = processedRefs.filter(r => stampable.has(r.slug));
+      if (toStamp.length > 0) await stampExtracted(engine, toStamp);
+    }
+  };
+
+  // #C5: a segmented page is read several times per pass and can outlast any budget, so it never shares a batch: the
+  // inline pages run first as one batch, then each segmented page alone, smallest first, while budget remains. One
+  // that does not fit stops at a segment bound and is deferred (left unstamped) until its page changes, so it cannot
+  // take the budget of the rest of this sweep, or of later sweeps in this process.
+  const pending = recent.filter(row => {
+    if (deferredSegmentedPages.get(`${sourceId}\0${row.slug}`) !== row.updated_at_iso) return true;
+    skip('segmented_page_deferred');
+    return false;
+  });
+  const inline = pending.filter(row => row.body_storage !== 'segmented');
+  const segmented = pending.filter(row => row.body_storage === 'segmented').sort((a, b) => Number(a.body_bytes ?? 0) - Number(b.body_bytes ?? 0));
+  if (inline.length > 0) await runBatch(inline);
+  for (let i = 0; i < segmented.length; i++) {
+    if (overBudget()) {
+      skip('budget_exhausted:links_timeline', segmented.length - i);
+      break;
+    }
+    const row = segmented[i]!;
+    try {
+      await runBatch([row], overBudget);
+    } catch (e) {
+      if (!(e instanceof BodyReadStopped)) throw e;
+      deferredSegmentedPages.set(`${sourceId}\0${row.slug}`, row.updated_at_iso);
+      skip('budget_deferred:segmented_page');
+      log(`[sweep] links/timeline: ${row.slug} (${row.body_bytes ?? '?'} bytes, segmented) does not fit the sweep budget; deferred until it changes. \`gbrain extract --stale --source-id ${sourceId}\` extracts it.`);
+    }
   }
 }
 
