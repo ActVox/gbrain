@@ -33,6 +33,7 @@ import { importFromContent } from '../import-file.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { unchangedPutPage } from '../persistence/put-page-screen.ts';
 import { canonicalJson } from '../remediation-step.ts';
 import type { FileDiagnostics, TranscriptAdapter, TranscriptFormat } from './types.ts';
 import { detectAdapter } from './detect.ts';
@@ -478,7 +479,9 @@ export async function runTranscriptsIngest(
  * submitted as a `put_page` write request: the same importer runs behind the
  * coordinator, naming the current revision so a replacement is never a blind
  * overwrite (no revision means create-only). Embedding is deferred there, as
- * for every coordinated page write.
+ * for every coordinated page write. #6741 B: a part whose publication would
+ * change nothing takes no admission (put-page-screen.ts), so an unchanged
+ * re-ingest burns no permanent request id.
  */
 async function submitTranscriptPart(
   ctx: OperationContext,
@@ -488,11 +491,10 @@ async function submitTranscriptPart(
   provenance: { source_kind: string; source_uri: string; ingested_via: string },
 ): Promise<{ slug: string; status: 'imported' | 'skipped' | 'error' }> {
   const snapshot = await engine.readPageSnapshot(part.slug, { sourceId, includeDeleted: true });
-  const receipt = await submitPageMutation(ctx, {
-    operation: 'put_page',
-    params: { slug: part.slug, content: part.content, source_id: sourceId, ...provenance,
-      ...(snapshot?.revision ? { expected_revision: snapshot.revision } : {}) },
-  });
+  const params = { slug: part.slug, content: part.content, source_id: sourceId, ...provenance,
+    ...(snapshot?.revision ? { expected_revision: snapshot.revision } : {}) };
+  if (await unchangedPutPage(ctx, params, snapshot)) return { slug: part.slug, status: 'skipped' };
+  const receipt = await submitPageMutation(ctx, { operation: 'put_page', params });
   const slug = typeof receipt.slug === 'string' && receipt.slug ? receipt.slug : part.slug;
   if (receipt.state !== 'committed') return { slug, status: 'error' };
   return { slug, status: receipt.noop === true || receipt.status === 'skipped' ? 'skipped' : 'imported' };
