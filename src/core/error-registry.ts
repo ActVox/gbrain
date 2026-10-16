@@ -23,6 +23,11 @@ export interface CodeEntry {
   why?: string;
   /** Closed vocabulary for `reason` when one code covers several causes. */
   reasons?: readonly string[];
+  /**
+   * Tombstones of reasons nothing emits any more (reason → the release that retired it); a receipt an older build wrote may
+   * still carry one, so it stays explained here, and it never returns to `reasons`.
+   */
+  retired_reasons?: Readonly<Record<string, string>>;
   /** Repo-relative anchor; default `docs/guides/error-codes.md#<code>`. */
   docs?: string;
   /** Default prose suggestion when a site supplies none. */
@@ -173,7 +178,9 @@ export const CODES = {
   drain_stalled: { class: 'server', retryable: false, actor: 'host_admin',
     summary: "A managed sync drain stopped `blocked` because its head write made no progress (no committed receipt and no step advance) for the whole stall window.",
     why: "A renewed lease is not progress: the detector keys on the head claim's phase and step. With a live owner on this host the drain prints `stalled <N>s on <step>` from the allowance (budget plus 30 s) and keeps going; it stops only when `persistence.preparation_ceiling_ms` passes without the root being released, or when that owner's heartbeat row reads wedged (`cause: owner_wedged_here`, with the owner's kind, pid and nonce and `retry_after_ms` to the ceiling, after which the owner frees the root and the next pass holds the entry). A lapsed claim (`owner_missing`) stops at once unless this host owns the checkout and a live full consumer can reclaim it, which gets one more window. `drain.stall.cause` names which.",
-    reasons: ['owner_wedged_here', 'owner_missing', 'preparation_overdue', 'publication_overdue', 'no_progress', 'no_admission'],
+    reasons: ['owner_wedged_here', 'owner_missing', 'preparation_overdue', 'publication_overdue', 'no_progress'],
+    // #6712 PR 2: a pass that admits nothing with no unfinished request stops `no_progress`; an older build wrote `no_admission` for it.
+    retired_reasons: { no_admission: '0.60.256.0' },
     docs: 'docs/guides/write-refusals.md#drain-stalled',
     suggestion: 'Inspect the writer with gbrain sources writer status --source <id> --json (read-only: the owner process, its step and what it waits on, and the next action). Before the ceiling (`next.safe_to_loop` true) rerun next.command after retry_after_ms; past it, or with a wedged owner, restart the named owner process on the brain host and rerun the same sync.',
     fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', '{source_id}', '--json'], consent: [], actor: 'agent', why: "Read-only: names the owner process holding the head write (kind, pid), its step and wait cause, and ends in a next_action.", requires_exclusive: false,
@@ -609,6 +616,7 @@ export const NOTICE_CODES = {
   first_run_decisions: { kind: 'ask', summary: 'init finished (or a stdio MCP session started on a brain with open decisions); the first-run decisions (search mode, writeback, harness wiring, skills) carry defaults the user may change. The one muteable ask.' },
   first_run_decisions_muted: { kind: 'info', summary: 'First-run decisions are still open, but the user muted them; the fix shows them again (`gbrain notices unmute first_run_decisions`).' },
   migrations_pending: { kind: 'safety', summary: 'Schema migrations are pending or failed to apply on this brain.' },
+  sync_tail_degraded: { kind: 'degraded', summary: 'A managed sync ended synced, but its post-checkpoint tail (planner statistics, link extraction for the imported pages) failed, was cut off at its budget or did not start before the run\'s deadline; the step stays scheduled for the next sync, and the fix runs it now (`gbrain extract --stale --source <id>`, or doctor for the statistics).' },
   no_worker: { kind: 'degraded', summary: 'A job was queued but no worker is running to execute it; it waits until a worker runs.' },
   unknown_param: { kind: 'info', summary: 'The call passed a parameter the tool does not declare; it was ignored.' },
   record_types_undeclared: { kind: 'info', summary: 'entity.record_types names a page type that neither the schema pack declares nor any page uses, so no record of that type is listed.' },

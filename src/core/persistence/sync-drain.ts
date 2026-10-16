@@ -23,7 +23,7 @@ import { ERROR_CATALOGUE, type CatalogueName } from '../error-catalogue.ts';
 import { cliRenderContext, renderAction, type Action, type RenderedAction } from '../agent-output.ts';
 import { managedSyncResumeArgs, syncResumeCommand } from '../sync-reconcile.ts';
 import { isWriteCapacityWait, outstandingCapacityOf } from './admission-retry.ts';
-import { clearDrainStep, DrainPassAbandoned, FINISH_BUDGET_MS, markPassAbandoned, readDrainStep } from './drain-step.ts';
+import { clearDrainStep, DrainPassAbandoned, markPassAbandoned, readDrainStep } from './drain-step.ts';
 import { PUBLICATION_CEILING_DEFAULT_MS, readPublicationCeilingMs } from './publication-deadline.ts';
 import { isOwnerThisProcess, stampLastSql, WAITING_ON, type ClaimLastSql, type WaitingOn } from './claim-phase.ts';
 import { describeHostConsumer, headBlockedNext, headBlockerText, headClaimability, type HeadBlocker } from './head-blocker.ts';
@@ -106,9 +106,9 @@ export interface DrainStall {
    * #6278: why the drain called it a stall: no renewal (`owner_missing`), a preparation or publication past its allowance, or no change at all.
    * #6317: `owner_wedged_here` is a live same-host owner whose preparation passed the ceiling, or whose own heartbeat row says it is wedged
    * (`restart_required`, a root barrier past the ceiling); `preparation_overdue` is kept for an owner on another host.
-   * #6423: `no_admission` is a pass that admitted nothing and left no unfinished request for the whole no-progress window.
+   * #6712 PR 2: a pass that admitted nothing and left no unfinished request is `no_progress` too (`no_admission` is retired).
    */
-  cause?: 'owner_missing' | 'preparation_overdue' | 'publication_overdue' | 'no_progress' | 'owner_wedged_here' | 'no_admission' | 'head_blocked';
+  cause?: 'owner_missing' | 'preparation_overdue' | 'publication_overdue' | 'no_progress' | 'owner_wedged_here' | 'head_blocked';
   /** #6405/#6423: the in-pass governor ended a pass that never returned (the pass was aborted and its late result is ignored). */
   in_pass?: boolean;
   /** #6317: the head owner as the stamp names it, so the stop can say which process to restart. */
@@ -330,8 +330,6 @@ export interface DrainInput {
   stallMs?: number;
   /** #6405/#6423 test seams: the in-pass no-progress window, the publication ceiling and how often the in-pass governor looks. */
   noProgressMs?: number;
-  /** #6696 C4: how long the tail after a committed checkpoint (drain step `finish`) may run before the governor stops it `no_progress`. */
-  finishMs?: number;
   publicationCeilingMs?: number;
   governMs?: number;
   /** Test seam: the drain's clock for commit times, stall windows and the governor's quiet time (its timers still tick on real time). */
@@ -434,7 +432,6 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
   // the abandoned pass: its signal is aborted (the pass's step boundaries throw, so it admits and writes nothing more) and its
   // late result or rejection is dropped.
   const noProgressMs = input.noProgressMs ?? IN_PASS_NO_PROGRESS_MS, ceilingMs = input.publicationCeilingMs ?? PUBLICATION_CEILING_DEFAULT_MS;
-  const finishMs = input.finishMs ?? FINISH_BUDGET_MS + STALL_GRACE_MS;
   const governedPass = (): Promise<{ result: SyncResult } | { stall: DrainStall } | { deadline: true }> => {
     const controller = new AbortController(), passStartedAt = clock();
     const passSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -478,11 +475,10 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
           const print = read.ok ? head ? `${head.head_state}|${claim?.phase ?? ''}|${claim?.step ?? ''}|${claim?.lapsed ?? ''}` : 'none' : 'unreadable';
           if (print !== key) { key = print; keySince = now; }
           const elapsed = now - Math.max(keySince, lastCommitAt, passStartedAt);
-          const finishing = step?.step === 'finish', windowMs = finishing ? finishMs : noProgressMs;
-          if (quiet < windowMs || elapsed < windowMs && key !== 'none') return;
+          if (quiet < noProgressMs || elapsed < noProgressMs && key !== 'none') return;
           const sql = step?.last_sql ? { label: step.last_sql.label, age_ms: now - step.last_sql.at } : claim?.last_sql ?? null;
           stop({ ...base, stalled_seconds: Math.round(quiet / 1000), phase: claim?.phase ?? null, step: head ? claim?.step ?? null : step?.step ?? null,
-            waiting_on: claim?.waiting_on ?? null, cause: read.ok && !head && !finishing ? 'no_admission' : claim?.lapsed ? 'owner_missing' : 'no_progress',
+            waiting_on: claim?.waiting_on ?? null, cause: claim?.lapsed ? 'owner_missing' : 'no_progress',
             owner_pid: claim?.owner_pid ?? null, owner_kind: claim?.owner_kind ?? null, owner_nonce: claim?.owner_nonce ?? null, last_sql: sql });
         }).finally(() => { probing = false; });
       }, governEvery);
@@ -790,12 +786,6 @@ export async function drainManagedSync(engine: BrainEngine, opts: SyncOpts, anno
   const laneRun = bulk.enabled && (bulk.lanes ?? 1) > 1 ? randomUUID() : undefined;
   const { closeLaneRun } = await import('./sync-lanes.ts');
   const publicationCeilingMs = await readPublicationCeilingMs(engine);
-  // #6423: the sync's own waiver runs and admissions use the ordinary pool even where the consumer has a direct route.
-  if (announce) {
-    const { consumerConnectionRoute } = await import('./consumer-lane.ts');
-    if (consumerConnectionRoute(engine).pooler_mode === 'transaction') serr('[sync] this sync admits its writes through a transaction-mode pooler (prepare=false, port 6543); '
-      + `a round trip it never answers stops the drain no_admission after ${formatDuration(IN_PASS_NO_PROGRESS_MS / 1000)}. A session-mode (5432) or direct database URL avoids it.`);
-  }
   let result: SyncResult | undefined;
   // #6696 (A7): the first pass checks the run's estimated receipts against the capacity left before any admission.
   let preflighted = false;
@@ -1027,15 +1017,6 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
         + `Run the sync from a process that can write the source's lock directory (the owner's gbrain serve, or this command outside the sandbox), then rerun: ${resumeCommand}`,
       ...(docs ? { docs } : {}) };
   }
-  // #6423: the pass admitted nothing for the whole window; the step and statement name where it waited.
-  if (d?.stop_reason === 'drain_stalled' && d.stall?.cause === 'no_admission') {
-    const stall = d.stall;
-    return { command: resumeCommand, safe_to_loop: false, retry_after_ms: 0, ...estimate, code: 'drain_stalled', cause: 'no_admission',
-      why: `The sync admitted no write for ${stall.stalled_seconds}s${stall.step ? ` while at step ${stall.step}` : ''}${stall.last_sql ? ` (last statement ${stall.last_sql.label})` : ''}, and no request for this source was unfinished, `
-        + 'so it stopped instead of waiting forever. A transaction-mode pooler (port 6543) that never answers a round trip does this. The cursor and its frozen manifest are intact. '
-        + `Point the brain's database URL at the session-mode (port 5432) or direct URL of the same database (GBRAIN_DIRECT_DATABASE_URL routes only the consumer, not the sync's own admissions), check it with gbrain doctor --json, then rerun: ${resumeCommand}`,
-      ...(docs ? { docs } : {}) };
-  }
   const writerBlocked = d?.stop_reason && d.stop_reason !== 'blocked_by_failures' && d.stop_reason !== 'deadline';
   if (writerBlocked) {
     return { command: `gbrain sources writer status ${sourceId}`, safe_to_loop: false, retry_after_ms: 0, ...estimate,
@@ -1082,8 +1063,8 @@ export function formatDrainSummary(result: SyncResult, resumeCommand: string, so
   if (d.capacity) lines.push(`  Waited ${d.capacity.waited_seconds}s for write capacity: ${d.capacity.outstanding ?? '?'} of ${d.capacity.limit ?? '?'} ${d.capacity.scope ?? 'principal'} outstanding-request slots in use.`);
   if (d.connection) lines.push(`  Database connection dropped ${d.connection.drops} times in a row (${d.connection.last_error}); the cursor and its frozen manifest are intact.`);
   // #6317 (C3): the summary line carries the same step / waiting_on / last_sql triple as the log lines, and the owner process.
-  if (d.stall?.cause === 'no_admission') lines.push(`  Nothing admitted for ${d.stall.stalled_seconds}s${d.stall.step ? `, step=${d.stall.step}` : ''}${d.stall.last_sql ? `, last_sql=${d.stall.last_sql.label}` : ''}, cause=no_admission.`);
-  else if (d.stall) lines.push(`  Oldest unfinished request ${d.stall.head_request_id ?? d.stall.request_id} (${d.stall.head_state ?? d.stall.state})`
+  // #6712 PR 2: a pass that admitted nothing with no unfinished request (the retired no_admission) reads as such, with its step and statement.
+  if (d.stall) lines.push(`${d.stall.head_request_id === null && d.stall.request_id === 'none' ? '  No request of this source was unfinished' : `  Oldest unfinished request ${d.stall.head_request_id ?? d.stall.request_id} (${d.stall.head_state ?? d.stall.state})`}`
     + `${d.stall.blocked_reason ? `, blocked_reason=${d.stall.blocked_reason}` : ''}${d.stall.step ? `, step=${d.stall.step}` : ''}${d.stall.waiting_on ? `, waiting_on=${d.stall.waiting_on}` : ''}`
     + `${d.stall.last_sql ? `, last_sql=${d.stall.last_sql.label}${d.stall.last_sql.age_ms === null ? '' : ` (${Math.round(d.stall.last_sql.age_ms / 1000)}s ago)`}` : ''}`
     + `${d.stall.cause ? `, cause=${d.stall.cause}` : ''}${d.stall.owner_pid ? `, owner=${d.stall.owner_kind ?? 'process'} pid ${d.stall.owner_pid}` : ''}; claimable here: ${d.stall.claimable_here === null ? 'unknown' : d.stall.claimable_here ? 'yes' : 'no'}`

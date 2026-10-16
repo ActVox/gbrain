@@ -143,8 +143,9 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
   };
   // A dry run reads and previews only; it never waits for, or keeps out, a drainer.
   if (outer.dryRun) return work(undefined);
+  const { withSyncTail } = await import('../../core/persistence/sync-tail.ts');
   try {
-    return await withDrainLease(engine, sourceId, {
+    return await withSyncTail(engine, sourceId, await withDrainLease(engine, sourceId, {
       holder: outer.drainHolder ?? { kind: 'cli', id: null }, remote: currentSubmissionAuthority()?.kind === 'remote_generic',
       ...(outer.followDrainLease ? { follow: { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs } } : {}),
       tty: process.stderr.isTTY === true,
@@ -155,7 +156,7 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
           ? `[sync] source ${sourceId} is being drained by ${who}; following it until it finishes or this run's budget ends (one drainer per source; it resumes the same cursor). Ctrl-C stops following and leaves it running.`
           : `[sync] following ${who}: ${done}.`);
       },
-    }, work);
+    }, work), { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs });
   } catch (err) {
     if (err instanceof LockUnavailableError && err.lockId === lockKey) throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
     throw err;

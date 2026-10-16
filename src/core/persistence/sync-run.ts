@@ -23,17 +23,15 @@ import { assertManagedSyncActive, assertSyncDispatchActive, managedSyncAuthority
 import { prepareManagedSyncMutation, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { startClaimPhase } from './claim-phase.ts';
 import { screeningRequest } from './noop-kernel.ts';
-import { FINISH_BUDGET_MS, stampDrainStep } from './drain-step.ts';
 import { noopWaiversEnabled, prescreenedHead, raceSyncBudget, screenWaiver, syncPreparationBudgetMs, unfinishedPageRequestParams, UNFINISHED_PAGE_REQUEST_SQL, waiveNoopEntry, waiveNoopRun, waivePrescreenedRun, waiverBatchEnabled, type NoopWaiver, type WaiverRunEntry } from './sync-waivers.ts';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { currentCompanyBrainSync, getCompanyBrainProfile, readCompanyBrainPlan } from '../company-brain/profile.ts';
 import { readCommittedBlob } from '../company-brain/revision.ts';
-import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
 import { importAnalyzeEveryPages, maybeRefreshPlannerStats } from '../planner-stats.ts';
 import { recordManagedSyncFailure, clearManagedSyncFailureAfterSuccess, formatManagedSyncFailure, managedSyncRetryCommand, type ManagedSyncFailure, type ManagedSyncRootCause } from './sync-failures.ts';
 import { writeFailureDiagnostic } from './verb-errors.ts';
-import { extractManagedStaleLinks } from './links-maintenance.ts';
+import { stampDrainStep } from './drain-step.ts';
 import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import { principalKey, type WriteRequest } from './model.ts';
@@ -66,6 +64,7 @@ import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
 import { receiptClass, resumableStop, stopRecorded } from './sync-stop-class.ts';
 import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
+import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
 import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
@@ -1297,8 +1296,6 @@ async function cursorMovedAdmission(engine: BrainEngine, key: string, admitting:
  */
 async function finishCheckpoint(engine: BrainEngine, key: string, cursor: Cursor, company: boolean, assertActive: () => void): Promise<SyncResult> {
   await clearManagedSyncFailureAfterSuccess(engine, key);
-  const changed = cursor.counts.added + cursor.counts.modified + cursor.counts.deleted;
-  if (changed > 0) await refreshProjectionStatistics(engine, changed);
   assertActive();
   const scheduled = company ? [] : await readGitHoldRetryPaths(engine, cursor.sourceId, cursor.incarnation);
   assertActive();
@@ -1395,6 +1392,7 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
   const remote = currentSubmissionAuthority()?.kind === 'remote_generic';
   return withDrainLease(engine, sourceId, { holder: opts.drainHolder ?? { kind: slice ? 'owner_slice' : 'cli', id: null }, remote },
     signal => performManagedPass(engine, signal ? { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, signal]) : signal } : opts, slice))
+    .then(result => withSyncTail(engine, sourceId, result, { signal: opts.signal, deadlineAtMs: opts.deadlineAtMs }))
     .catch(async error => {
       if (!(error instanceof LockUnavailableError) || error.lockId !== syncLockId(sourceId)) throw error;
       return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null), { remote });
@@ -1473,19 +1471,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     throwIfAborted(signal);
     assertPersistenceAccepting(engine);
   };
-  // Links derive from committed pages once the checkpoint lands, in this owner
-  // process, so forward references inside one run resolve and PGLite-delegated
-  // syncs match Postgres. Content is already committed: a failure here leaves
-  // the pages stale for `gbrain extract --stale` instead of failing the sync.
-  // #6696 C4: the checkpoint committed, so the tail admits nothing; step `finish` and its progress event keep the drain's
-  // governor from reading it as `no_admission`, and link extraction stops at the tail's own budget.
-  const finishing = (done: Cursor) => { stampDrainStep('finish', signal); opts.onProgress?.({ phase: 'managed_sync.finish', bankedFiles: done.index, total: done.entries.length }); };
-  const withLinks = async (done: Cursor, synced: SyncResult): Promise<SyncResult> => {
-    if (company || (done.processingOptions ?? processingOptions).noExtract) return synced;
-    try { return { ...synced, links: await extractManagedStaleLinks(engine, { sourceId: done.sourceId, maxPages: 1000, timeBudgetMs: FINISH_BUDGET_MS, signal, mentions: false,
-      slugs: done.entries.flatMap(entry => entry.action === 'import' && entry.slug ? [entry.slug] : []) }) }; }
-    catch { return synced; }
-  };
+  // #6696 C4: the checkpoint commit is the run's last commit. #6712 PR 2 (L5): its tail (statistics, links) is owed from that
+  // commit (sync-tail.ts) and runs after the lease is released, outside this governed pass.
+  const finishing = (done: Cursor) => { opts.onProgress?.({ phase: 'managed_sync.finish', bankedFiles: done.index, total: done.entries.length }); };
   try {
     assertActive();
     const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
@@ -1694,7 +1682,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         if (!cursor?.done) throw syncRunRefusal('storage_error', 'Committed sync checkpoint lost its cursor.',
           { sourceId: context.sourceId, processingOptions: pending.intent.processingOptions, syncOptions: pending.intent.syncOptions ?? syncOptions, repoPath: pending.intent.repoPath ?? frozenRun.repoPath },
           `The final checkpoint request ${pending.requestId} of this sync committed, but its cursor could not be read back to finish the run.`);
-        finishing(cursor); return withLinks(cursor, await finishCheckpoint(engine, key, cursor, !!company, assertActive));
+        finishing(cursor); return finishCheckpoint(engine, key, cursor, !!company, assertActive);
       }
       // The frozen manifest is shared; only the cursor header changes per page.
       const next: Cursor = committedPast({ ...cursor, ...committedBreaker(cursor), counts: { ...cursor.counts }, progress: stampProgress(cursor.progress, cursor.index, cursor.index + 1, drainStartedAt) }, pending);
@@ -1713,7 +1701,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         batchPages = 0; batchStart = performance.now();
       }
     }
-    finishing(cursor); return withLinks(cursor, result(cursor, cursor.from === null ? 'first_sync' : 'synced'));
+    finishing(cursor); return result(cursor, cursor.from === null ? 'first_sync' : 'synced');
   } catch (error) {
     assertSyncDispatchActive();
     if (signal?.aborted && error instanceof Error && error.name === 'AbortError') {

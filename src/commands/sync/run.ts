@@ -60,10 +60,11 @@ type PerSourceResult = {
  * #6696 (A4): a sync receipt carries the capacity notices (60 s snapshot, at most once an hour per process per
  * scope): under `--json` as rendered `notices`, otherwise as stderr lines.
  */
-async function syncCapacityNotices(engine: BrainEngine, json: boolean): Promise<{ notices?: unknown[] }> {
+async function syncCapacityNotices(engine: BrainEngine, json: boolean, result?: SyncResult): Promise<{ notices?: unknown[] }> {
   const { capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
   const { cliRenderContext, renderNotice } = await import('../../core/agent-output.ts');
-  const notices = (await capacityNotices(engine).catch(() => [])).map(notice => renderNotice(notice, cliRenderContext()));
+  // #6712 PR 2 (L5): a degraded post-checkpoint tail rides the same notices.
+  const notices = [...(result?.tail?.notice ? [result.tail.notice] : []), ...await capacityNotices(engine).catch(() => [])].map(notice => renderNotice(notice, cliRenderContext()));
   if (!json) for (const notice of notices) process.stderr.write(`[gbrain notice ${notice.code}] ${notice.why}\n`);
   return notices.length ? { notices } : {};
 }
@@ -942,7 +943,7 @@ async function runSingleSourceSync(
         process.stderr.write(`  → embed-backfill submission failed: ${e instanceof Error ? e.message : String(e)}\n`);
       }
     }
-    const capacity = await syncCapacityNotices(engine, jsonOut);
+    const capacity = await syncCapacityNotices(engine, jsonOut, result);
     if (jsonOut) {
       emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate),
         ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId), ...capacity }));
