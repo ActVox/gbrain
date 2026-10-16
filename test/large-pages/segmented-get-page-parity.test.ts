@@ -108,7 +108,9 @@ for (const kind of testBackends()) {
 
       test(`${who}: body none, auto and every outline page agree`, async () => {
         const none = await expectSame(remote, { body: 'none' });
-        expect(none.segmented.size.body_bytes).toBeGreaterThan(1_900_000);
+        // The stored size is a trusted read's only: a remote caller sees projected totals, as for an inline page.
+        if (remote) expect(none.segmented.size.body_bytes).toBeUndefined();
+        else expect(none.segmented.size.body_bytes).toBeGreaterThan(1_900_000);
         if (remote) await expectSame(remote, {});
         let from = 0;
         let pages = 0;

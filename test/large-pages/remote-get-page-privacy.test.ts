@@ -8,10 +8,12 @@
  *    facts rows, private keys, ledger rows and a takes block left open to EOF.
  *    The paged markdown view must hash to the advertised size.sha256, and the
  *    remote tail digest is withheld when the tail rows hold a protected region.
+ *    A remote caller's sizes (body none, the full-read refusal) are projected
+ *    totals; only a trusted read reports the stored body_bytes.
  * 2. Fails when: a segmented window, outline or markdown page is cut from the
  *    stored body instead of the read projection, the markdown digest hashes
- *    trusted text, or tail_sha256 hashes hidden text. PUBLIC tokens must still
- *    appear.
+ *    trusted text, tail_sha256 hashes hidden text, or a remote response
+ *    carries the stored body size. PUBLIC tokens must still appear.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
@@ -95,7 +97,20 @@ for (const kind of testBackends()) {
       const slug = 'notes/get-windows';
       await importSegmented(engine, slug, pageContent(privacyText(r, 1_600_000) + crossingFacts(), privacyText(r, 300_000)));
       const none = await expectNoLeak(slug);
-      expect(none.size.body_bytes).toBeGreaterThan(1_900_000);
+      // A remote caller sees projected totals only, as for an inline page: the stored size would say how much the
+      // projection hides. The trusted read keeps it.
+      expect(none.size.body_bytes).toBeUndefined();
+      expect(none.size.body_lines).toBeUndefined();
+      const local = await get({ slug, body: 'none' }, false);
+      expect(local.size.body_bytes).toBeGreaterThan(1_900_000);
+      expect(none.size.total_bytes).toBeLessThan(local.size.body_bytes);
+      const refusal = await get({ slug, body: 'full' }).then(() => null, (e: { code?: string; message: string; detail?: string }) => e);
+      expect(refusal?.code).toBe('page_body_segmented');
+      expect(JSON.parse(refusal!.detail!).total_bytes).toBe(none.size.total_bytes);
+      expect(refusal!.message).toContain(`its ${none.size.total_bytes}-byte body`);
+      expect(refusal!.message).not.toContain(String(local.size.body_bytes));
+      const localRefusal = await get({ slug, body: 'full' }, false).then(() => null, (e: { message: string }) => e);
+      expect(localRefusal!.message).toContain(`its ${local.size.body_bytes}-byte body`);
     }, 300_000);
 
     test('withdrawn, purged and held rows stay hidden once the ledger records them', async () => {
