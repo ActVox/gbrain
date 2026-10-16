@@ -603,3 +603,103 @@ describe('eval-spend-guard.sh', () => {
     expect(ledgerRows().length).toBe(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Process groups (#6776). The guarded command runs in its own process group:
+// a signal, the kill grace or a normal exit stops every process in it.
+// ---------------------------------------------------------------------------
+
+/** Alive and not a zombie (an orphan's zombie is reaped by init shortly after). */
+function alive(pid: number): boolean {
+  if (!pid) return false;
+  const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf-8' }).stdout.trim();
+  return state !== '' && !state.startsWith('Z');
+}
+async function waitDead(pid: number, ms = 5000): Promise<boolean> {
+  const t0 = Date.now();
+  while (alive(pid)) {
+    if (Date.now() - t0 > ms) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return true;
+}
+function readPid(file: string): number {
+  return Number(readFileSync(file, 'utf-8').trim());
+}
+function killQuietly(...pids: number[]): void {
+  for (const pid of pids) {
+    if (!pid) continue;
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* not a group or gone */ }
+    try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+  }
+}
+/** A TERM-ignoring grandchild that writes its pid, under a leader that writes its own. */
+function groupCommand(leaderPid: string, kidPid: string, leaderSeconds = 30): string[] {
+  return ['sh', '-c', 'echo $$ > "' + leaderPid + '"; sh -c \'trap "" TERM; echo $$ > "' + kidPid + '"; exec sleep 30\' & exec sleep ' + leaderSeconds];
+}
+describe('eval-spend-guard.sh process groups (#6776)', () => {
+  test('a SIGTERMed guard stops the whole process group, including a grandchild that ignores SIGTERM (exit 143)', async () => {
+    const leaderFile = join(dir, 'leader.pid');
+    const kidFile = join(dir, 'kid.pid');
+    const g = start(['10', '4', '--', ...groupCommand(leaderFile, kidFile)], { GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS: '1' });
+    let kid = 0;
+    let leader = 0;
+    try {
+      await waitFor(() => existsSync(kidFile) && existsSync(leaderFile), 'the command pids');
+      await new Promise((r) => setTimeout(r, 200));
+      kid = readPid(kidFile);
+      leader = readPid(leaderFile);
+      g.child.kill('SIGTERM');
+      const { code } = await g.exit;
+      expect(code).toBe(143);
+      expect(await waitDead(leader)).toBe(true);
+      expect(await waitDead(kid)).toBe(true);
+      expect(doneRows()[0]?.exit_code).toBe(143);
+    } finally {
+      killQuietly(kid, leader);
+    }
+  }, 20_000);
+
+  test('a command that exits normally but leaves a helper in its group: the helper is stopped when the guard settles', async () => {
+    const helperFile = join(dir, 'helper.pid');
+    // Async: the leftover helper holds the guard's stdout/stderr open, so a
+    // spawnSync would wait for the pipes rather than the guard.
+    const g = start(['10', '1', '--', 'sh', '-c', 'sleep 30 & echo $! > "' + helperFile + '"; exit 0'], { GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS: '1' });
+    const { code } = await g.exit;
+    const helper = existsSync(helperFile) ? readPid(helperFile) : 0;
+    try {
+      expect(code).toBe(0);
+      expect(helper).toBeGreaterThan(0);
+      expect(await waitDead(helper)).toBe(true);
+      expect(doneRows()[0]?.exit_code).toBe(0);
+    } finally {
+      killQuietly(helper);
+    }
+  }, 20_000);
+
+  test('piped stdin still reaches the command', () => {
+    const r = spawnSync('bash', [SCRIPT, '5', '1', '--', 'sh', '-c', 'read value; printf "received:%s" "$value"'], {
+      cwd: ROOT, env: guardEnv(), input: 'example-input\n', encoding: 'utf-8', timeout: 15_000,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('received:example-input');
+  });
+
+  test.skipIf(process.platform === 'win32')('terminal stdin becomes EOF with a notice instead of a command stuck reading the terminal', async () => {
+    let screen = '';
+    let proc: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      proc = Bun.spawn(['bash', SCRIPT, '5', '1', '--', 'sh', '-c', 'if read value; then echo READ-LINE; else echo READ-EOF; fi'], {
+        cwd: ROOT,
+        env: guardEnv(),
+        terminal: { cols: 200, rows: 20, data(_t: unknown, d: Uint8Array) { screen += new TextDecoder().decode(d); } },
+      } as unknown as Parameters<typeof Bun.spawn>[1]);
+      const exit = await Promise.race([proc.exited, new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 8000))]);
+      expect(exit).toBe(0);
+      expect(screen).toContain('READ-EOF');
+      expect(screen).toContain('stdin is a terminal');
+    } finally {
+      proc?.kill('SIGKILL');
+    }
+  }, 15_000);
+});

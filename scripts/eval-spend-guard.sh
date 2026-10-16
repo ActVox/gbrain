@@ -53,6 +53,17 @@
 # reservation stays on the books. Where `flock` exists, audit → cap check →
 # reservation is serialized across concurrent guards via <ledger>.lock.
 #
+# Process groups (#6776): the command runs as a monitor-mode job (`set -m`),
+# so it gets its own process group and every stop (a trapped signal, the kill
+# grace, a normal exit that left helpers behind) signals the whole group, not
+# just its leader; a grandchild that ignores SIGTERM is SIGKILLed with the rest.
+# A background group cannot read the controlling terminal (SIGTTIN would stop
+# it with the reservation open), so a TERMINAL stdin is replaced with EOF
+# (/dev/null) and the guard says so; piped or file stdin is passed through
+# unchanged. Interactive commands are not supported: pipe or redirect their
+# input. (A terminal set to `stty tostop` also stops a background group that
+# writes to it; redirect the command's output there.)
+#
 # The audit itself is fail-closed: a ledger that exists but cannot be read, an
 # awk that exits non-zero, or an audit line that is not `<int> <int> <decimal>
 # <int> …` refuses the launch (exit 3) — an empty audit must never read as $0.
@@ -252,26 +263,35 @@ reconcile() {  # <cost> <exit_code>; returns 1 when the ledger append fails
   echo "eval-spend-guard: recorded cost \$${1} (exit $2); ledger now ${AFTER}" >&2
 }
 
-# Stop the command: SIGTERM, then up to KILL_GRACE seconds (10 by default;
-# GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS overrides) before SIGKILL, so a
-# command that ignores SIGTERM cannot keep the guard — and its reservation —
-# hanging forever. Polled in 0.1 s steps; `wait` reaps it either way.
+# Stop the command's process group: SIGTERM, then up to KILL_GRACE seconds (10
+# by default; GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS overrides) before
+# SIGKILL, so a command (or a grandchild) that ignores SIGTERM cannot keep the
+# guard — and its reservation — hanging forever, nor outlive it. Polled in
+# 0.1 s steps; `wait` reaps the leader either way.
 KILL_GRACE="${GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS:-10}"
 case "$KILL_GRACE" in ''|*[!0-9]*) KILL_GRACE=10 ;; esac
+group_alive() {  # <pgid>; falls back to kill -0 where ps cannot list processes
+  local all
+  all="$(ps -A -o pid=,pgid=,stat= 2>/dev/null)" || { kill -0 -- "-$1" 2>/dev/null; return; }
+  printf '%s\n' "$all" | awk -v g="$1" '$2 == g && $3 !~ /^Z/ { f = 1 } END { exit !f }'
+}
 CHILD=""
 stop_child() {
+  local i=0
   [ -n "$CHILD" ] || return 0
-  kill -TERM "$CHILD" 2>/dev/null
-  i=0
-  while [ "$i" -lt "$((KILL_GRACE * 10))" ] && kill -0 "$CHILD" 2>/dev/null; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if kill -0 "$CHILD" 2>/dev/null; then
-    echo "eval-spend-guard: command did not exit within ${KILL_GRACE}s of SIGTERM — sending SIGKILL" >&2
-    kill -KILL "$CHILD" 2>/dev/null
+  if group_alive "$CHILD"; then
+    kill -TERM -- "-$CHILD" 2>/dev/null || kill -TERM "$CHILD" 2>/dev/null
+    while [ "$i" -lt "$((KILL_GRACE * 10))" ] && group_alive "$CHILD"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if group_alive "$CHILD"; then
+      echo "eval-spend-guard: command did not exit within ${KILL_GRACE}s of SIGTERM — sending SIGKILL" >&2
+      kill -KILL -- "-$CHILD" 2>/dev/null || kill -KILL "$CHILD" 2>/dev/null
+    fi
   fi
   wait "$CHILD" 2>/dev/null
+  CHILD=""
 }
 on_signal() {  # <signal number>
   trap - INT TERM HUP
@@ -282,6 +302,7 @@ on_signal() {  # <signal number>
 }
 on_exit() {  # <exit status>
   [ "$RESERVED" = "1" ] || return 0
+  stop_child
   reconcile "$EST" "$1" || exit 3
 }
 # Traps BEFORE the reservation: a signal in the append→launch window must
@@ -305,12 +326,30 @@ fi
 exec 9>&-   # release the lock (if held) before the command starts
 echo "eval-spend-guard: reserved \$${EST} (run $RUN_ID)" >&2
 
+# A background process group cannot read the controlling terminal (SIGTTIN
+# would stop it with the reservation open), so a terminal stdin becomes EOF.
+# Piped and file stdin pass through.
+if [ -t 0 ]; then
+  echo "eval-spend-guard: stdin is a terminal, which the command's own process group cannot read; its stdin is EOF (/dev/null). Pipe or redirect input if it needs any." >&2
+  exec </dev/null
+fi
+
 # Run the command as a job so a trapped signal interrupts `wait` (a foreground
 # child would defer the trap until it exited). `<&0` keeps the child's stdin.
+# Monitor mode gives the job its own process group (pgid = its pid) without an
+# external setsid, which macOS does not ship.
+set -m
 "$@" <&0 &
 CHILD=$!
+set +m
 wait "$CHILD"
 CODE=$?
+# Settle: anything the command left running in its group is stopped too.
+if group_alive "$CHILD"; then
+  echo "eval-spend-guard: the command exited but left processes in its process group; stopping them" >&2
+  stop_child
+fi
+CHILD=""
 trap - INT TERM HUP
 
 # Actual cost: bare unsigned number or JSON with unsigned cost_usd, and it

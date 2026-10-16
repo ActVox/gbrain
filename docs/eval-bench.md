@@ -765,7 +765,15 @@ reader pins and the judge pins all land on one receipt.
   `--yes` (exit 2); at run time the lane soft-stops at the cap and stamps the
   remaining rows `judge_skipped: "budget"`. An unpriced judge model requires
   `--max-usd off`. Reader spend is not metered here — wrap a paid receipt in
-  `scripts/eval-spend-guard.sh`.
+  `scripts/eval-spend-guard.sh`. The guard runs the command in its own
+  process group and stops the whole group (helpers and grandchildren
+  included) on interruption, after the kill grace, and when the command
+  exits leaving processes behind. A process group cannot read the terminal,
+  so a terminal stdin is replaced with EOF and the guard prints a notice;
+  pipe or redirect input if the command needs any (piped and file stdin pass
+  through). No eval entrypoint reads stdin; a TTY-only Ctrl-C grace window
+  (such as `eval suspected-contradictions`' cost notice) proceeds as it does
+  off a terminal, and Ctrl-C reaches the guard, which stops the run.
 
 Row fields with `--judge`: exactly one of `judge_correct` / `judge_error`
 (+ `judge_error_detail`) / `judge_skipped`, plus `judge_model`,
