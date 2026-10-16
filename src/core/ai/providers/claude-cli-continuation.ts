@@ -25,7 +25,20 @@
 /** CLAUDE_CODE_MAX_OUTPUT_TOKENS' default when the CLI's model table names none (Claude Code 2.1.x). */
 export const CLAUDE_CLI_DEFAULT_OUTPUT_CAP = 32_000;
 
-export type ContinuationUnprovenReason = 'events_missing' | 'segments_unmatched';
+/**
+ * Why a continued answer could not be proven, read from stdout only (no transcript is read):
+ * `events_missing`: stdout was the bare result envelope, so the CLI ignored `--verbose`;
+ * `no_assistant_events`: the event array carried no assistant message to rebuild from;
+ * `segments_unmatched`: the assistant segments do not provably make up this answer.
+ */
+export type ContinuationUnprovenReason = 'events_missing' | 'no_assistant_events' | 'segments_unmatched';
+
+/** The remedy each reason's stderr notice names. */
+export const CONTINUATION_UNPROVEN_REMEDY: Record<ContinuationUnprovenReason, string> = {
+  events_missing: 'upgrade the claude CLI: this one printed only the result envelope under --output-format json --verbose, without the session event array',
+  no_assistant_events: 'upgrade the claude CLI: its --verbose event array carried no assistant messages to rebuild the answer from',
+  segments_unmatched: "raise that caller's output cap (the setting its truncation warning names) so the answer fits without a continuation",
+};
 
 export type ClaudeCliAnswer =
   | { kind: 'answer'; text: string }
@@ -130,17 +143,18 @@ export function resolveClaudeCliAnswer(run: ClaudeCliRunView, requestedCap: numb
   }
   const segments = readSegments(run.events);
   if (segments === null) return unproven('segments_unmatched');
+  if (segments.length === 0) return overCap || (run.num_turns ?? 1) > 1 ? unproven('no_assistant_events') : answer;
   if (segments.length <= 1) return overCap && forwardedCap !== undefined ? unproven('segments_unmatched') : answer;
   const text = rebuild(segments, run.result);
   return text === null ? unproven('segments_unmatched') : { kind: 'answer', text };
 }
 
-let noticed = false;
+const noticed = new Set<ContinuationUnprovenReason>();
 
 function unproven(reason: ContinuationUnprovenReason): ClaudeCliAnswer {
-  if (!noticed) {
-    noticed = true;
-    process.stderr.write(`[claude-cli] continuation_unproven (${reason}): Claude Code continued an answer past its output cap and gbrain could not prove the full text, so the call finished as length with no text and no tool calls; the caller retries or escalates as for any capped answer. Remedy: raise that caller's output cap (the setting its truncation warning names) so the answer fits without a continuation; details: gbrain errors continuation_unproven.\n`);
+  if (!noticed.has(reason)) {
+    noticed.add(reason);
+    process.stderr.write(`[claude-cli] continuation_unproven (${reason}): Claude Code continued an answer past its output cap and gbrain could not prove the full text, so the call finished as length with no text and no tool calls; the caller retries or escalates as for any capped answer. Remedy: ${CONTINUATION_UNPROVEN_REMEDY[reason]}. Details: gbrain errors continuation_unproven.\n`);
   }
   return { kind: 'unproven', reason };
 }

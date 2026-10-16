@@ -222,6 +222,8 @@ describe('an unprovable continuation is a length outcome with no text and no too
     ['a segment was retracted',
       [init, assistant('a', [{ type: 'text', text: PREFIX }]), { type: 'tombstone', message: { uuid: 'uuid-a-1' } }, assistant('b', [{ type: 'text', text: CONTINUATION }]), envelope(CONTINUATION)],
       undefined, 'segments_unmatched'],
+    ['the event array carries no assistant message while usage exceeds the requested cap',
+      [init, envelope(CONTINUATION)], undefined, 'no_assistant_events'],
     ['one segment but usage exceeds the requested cap',
       [init, assistant('a', [{ type: 'text', text: CONTINUATION }], 'end_turn'), envelope(CONTINUATION)],
       undefined, 'segments_unmatched'],
@@ -279,6 +281,28 @@ describe('an unprovable continuation is a length outcome with no text and no too
       const notices = stderr.split('\n').filter(line => line.includes('continuation_unproven'));
       expect(notices).toHaveLength(1);
       expect(notices[0]).toContain('events_missing');
+      expect(notices[0]).toContain('Remedy: upgrade the claude CLI');
+      expect(notices[0]).toContain('gbrain errors continuation_unproven');
+    });
+  }, 30_000);
+
+  test('one stderr notice per reason per process, naming that reason\'s remedy (segments_unmatched)', async () => {
+    const modulePath = join(import.meta.dir, '..', 'src', 'core', 'ai', 'providers', 'claude-cli-language-model.ts');
+    const script = [
+      `const { ClaudeCliLanguageModel } = await import(${JSON.stringify(modulePath)});`,
+      'const opts = { prompt: [{ role: "user", content: [{ type: "text", text: "x" }] }], maxOutputTokens: 4000 };',
+      'for (let i = 0; i < 2; i++) {',
+      '  const out = await new ClaudeCliLanguageModel("claude-sonnet-5").doGenerate(opts);',
+      '  if (out.finishReason !== "length") throw new Error("expected length");',
+      '}',
+    ].join('\n');
+    await withCli({ verbose: [init, assistant('a', [{ type: 'text', text: PREFIX }], 'max_tokens'), assistant('b', [{ type: 'text', text: 'other text' }], 'end_turn'), envelope(CONTINUATION)], bare: envelope(CONTINUATION) }, async () => {
+      const child = Bun.spawnSync([process.execPath, '-e', script], { env: { ...process.env }, stderr: 'pipe', stdout: 'pipe' });
+      const stderr = child.stderr.toString();
+      expect(child.exitCode, stderr).toBe(0);
+      const notices = stderr.split('\n').filter(line => line.includes('continuation_unproven'));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('segments_unmatched');
       expect(notices[0]).toContain('Remedy: raise that caller\'s output cap');
       expect(notices[0]).toContain('gbrain errors continuation_unproven');
     });
