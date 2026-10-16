@@ -27,6 +27,7 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, openFileBeliefBrain, withFileBeliefBrain, type BeliefBrain, type FileBeliefBrain } from './helpers/belief-ledger.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 afterEach(() => { __setPurgeReplayFaultForTests(null); __setBeliefEmitterFaultForTests(null); __setPurgeRedactionFaultForTests(null); });
 
@@ -400,19 +401,19 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         try {
           await purgeFact(b, X);
           url.pathname = `/${db}`;
-          process.env[env] = url.toString();
+          const preRestoreUrl = url.toString();
           for (const [i, clone] of clones.entries()) { url.pathname = `/${clone}`; await engines[i]!.connect({ database_url: url.toString(), poolSize: 2 }); }
           const [fromDb, fromMirror] = engines.map(e => ({ ...b, engine: e }));
           const dbArgs = ['replay-purges', '--archived-at', archivedAt, '--from-url-env', env];
-          const dry = await replayPurgesCli(fromDb!.engine, dbArgs);
+          const viaDb = (args: string[]) => withEnv({ [env]: preRestoreUrl }, () => replayPurgesCli(fromDb!.engine, args));
+          const dry = await viaDb(dbArgs);
           const afterDry = (await carriers(fromDb!, X)).length;
-          const applied = await replayPurgesCli(fromDb!.engine, [...dbArgs, '--apply']);
+          const applied = await viaDb([...dbArgs, '--apply']);
           const mirror = await replayPurgesCli(fromMirror!.engine, ['replay-purges', '--archived-at', archivedAt, '--purge-mirror', purgeMirrorPath(), '--apply']);
           resolve({ dry: [dry.value.applied, dry.value.replays.length, dry.value.apply_argv?.at(-1)], afterDry: afterDry > 0,
             applied: [applied.value.applied, applied.value.state], leftDb: await carriers(fromDb!, X),
             mirror: [mirror.value.from, mirror.value.state], leftMirror: await carriers(fromMirror!, X) });
         } finally {
-          delete process.env[env];
           for (const e of engines) await e.disconnect().catch(() => undefined);
           for (const clone of clones) await admin.unsafe(`DROP DATABASE IF EXISTS ${clone} WITH (FORCE)`);
           await admin.end();
