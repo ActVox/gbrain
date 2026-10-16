@@ -111,6 +111,7 @@ import {
   mergeSaveTimeResolutionCounts,
   resolveExtractedEntitiesForSave,
 } from '../core/entities/resolve-on-save.ts';
+import { CONVERSATION_ENTITY_HINTS_CAP, conversationEntityHints } from '../core/facts/conversation-entity-hints.ts';
 
 // Re-exported verbatim so existing importers (this file's own helpers below
 // and this file's tests) keep working unchanged; doctor.ts, jobs.ts,
@@ -1023,6 +1024,7 @@ async function processPage(
   let pageInsertedTotal = 0;
   const managedRows: Array<NewFact & { row_num: number; source_markdown_slug: string }> = [];
   const pageResolution = emptySaveTimeResolutionCounts();
+  const entityHints = await conversationEntityHints(state.engine, state.sourceId, page.slug, state.factVisibility); // #6731
 
   for (const seg of segments) {
     if (state.segmentLimit > 0 && segmentsThisPage >= state.segmentLimit) break;
@@ -1037,23 +1039,12 @@ async function processPage(
     // per-segment extraction failure aborts the page rather than silently
     // dropping facts.
     let extracted: ExtractedFact[];
+    const input: ExtractInput = { turnText: text, sessionId, source: PER_SEGMENT_SOURCE_PREFIX, engine: state.engine, abortSignal: state.signal,
+      entityHints, entityHintsCap: CONVERSATION_ENTITY_HINTS_CAP };
     if (state.extractor) {
-      extracted = await state.extractor({
-        turnText: text,
-        sessionId,
-        source: PER_SEGMENT_SOURCE_PREFIX,
-        engine: state.engine,
-        abortSignal: state.signal,
-      });
+      extracted = await state.extractor(input);
     } else {
-      const extraction = await extractFactsFromTurnWithOutcome({
-        turnText: text,
-        sessionId,
-        source: PER_SEGMENT_SOURCE_PREFIX,
-        engine: state.engine,
-        abortSignal: state.signal,
-        observationDate: segmentObservationDate(page, seg.startIso),
-      });
+      const extraction = await extractFactsFromTurnWithOutcome({ ...input, observationDate: segmentObservationDate(page, seg.startIso) });
       if (!extraction.ok) {
         // #3669 — rethrow BudgetExhausted UNWRAPPED. Wrapping it in a plain
         // Error strips the BUDGET_EXHAUSTED tag, so the worker pool's D13

@@ -55,3 +55,23 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### scripts/module-size-limits.tsv
 
 - No row change: `src/core/cycle/extract-atoms.ts` is 1653 of its 1654 ceiling after this commit.
+
+## #6731 conversation extractor entity hints
+
+### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
+
+```ts
+  { since: '<WAVE>', text: '`gbrain extract-conversation-facts` (and the `conversation_facts_backfill` cycle phase) now tells the extractor which entities the conversation page itself links (its frontmatter attendees and the entity pages its body links, same source, up to 40 slugs), so facts about those people and companies are stored on their pages instead of a guess from a first name (#6731). A private entity is hinted only when the run writes private facts. The `extract_facts` operation\'s prompt and 5-hint cap are unchanged.' },
+```
+
+### CHANGELOG.md (wave entry, Fixed; credit)
+
+- Conversation fact extraction passes the page's own linked entities to the extractor as hints, so more meeting facts link to the right person or company page (#6731). Contributed by @troyhoffman-oss (design from #6736; reimplemented with slug-only hints, a visibility filter and the op prompt left unchanged).
+
+### PR body
+
+- `Supersedes #6736`.
+
+### scripts/module-size-limits.tsv
+
+- `src/commands/extract-conversation-facts.ts` shrinks from 2087 to 2078 in this commit (the two extractor call sites share one input object). Lower its ceiling when the integrator settles the TSV after the later lane 3 commits (the #6764 commit adds a few lines back; see that section).
