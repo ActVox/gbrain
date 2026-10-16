@@ -312,10 +312,11 @@ async function abandonWrite(engine: BrainEngine, row: WriteRequest, previewHash:
 const sameIdentity = (row: WriteRequest | null, item: StuckRecovery) => !!row?.recovery && row.recovery.version === 1
   && digest(identityOf(recoveryFiles(row.recovery), row.recovery)) === digest(item.identity);
 
-function nextStep(item: StuckRecovery, keep: KeepChoice, state: string): string {
+function nextStep(item: StuckRecovery, keep: KeepChoice, request: WriteRequest): string {
+  const state = request.state;
   const sync = `gbrain sync --source ${item.source_id} --no-pull`;
   // #6858: a managed sync import is the next sync's to finish: it retries the page after the manifest end (sync-page-fault.ts fileChangedAfterAdmission).
-  if (keep === 'disk' && item.operation === 'submit_job') return `The bytes on disk are kept and the sync import's publication was abandoned (request ${state}). This command does not mark the page repaired. `
+  if (keep === 'disk' && request.intent?.kind === 'managed_sync_import') return `The bytes on disk are kept and the sync import's publication was abandoned (request ${state}). This command does not mark the page repaired. `
     + `Next: ${sync}. That sync retries ${item.slug} after the rest of its run and imports the kept file when it is committed at the run's target; an uncommitted edit is held (worktree_dirty) and the rest of the source syncs. `
     + `If a hold remains, gbrain sync status --source ${item.source_id} --json names it and its exit (commit the file, or gbrain sources reconcile ${item.source_id} ${item.slug} --brain host --preview).`;
   if (keep === 'disk') return `The bytes on disk are kept and the write's publication was abandoned (request ${state}); the database page still holds the content before the write, `
@@ -400,7 +401,7 @@ Promise<ResolutionResult & { replayed: boolean }> {
     const result: ResolutionResult = { outcome: blocked ? 'still_blocked' : 'resolved', keep: opts.keep, request_state: recovered.state,
       blocked_reason: blocked ? recovered.blocked_reason ?? null : null, finished_by: ours ? 'this_run' : 'another_pass', backup_dir: journal.backup_dir,
       next: blocked ? `The recovery is still blocked (${recovered.blocked_reason ?? 'recovering'}); rerun the same apply, or inspect it with gbrain sources writer status --source ${item.source_id} --json.`
-        : nextStep(item, opts.keep, recovered.state) };
+        : nextStep(item, opts.keep, recovered) };
     if (!blocked) await writeJournal(engine, key, { ...journal, phase: 'done', result });
     return { ...result, replayed: false };
   } finally { await lock.release(); }

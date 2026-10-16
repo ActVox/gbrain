@@ -110,6 +110,16 @@ test('#6858: a freshness sync job whose managed run is blocked ends dead with th
     expect(failed!.message).toContain(`${s.id} (source_changed, blocked 1`);
     const stale = await readBrainHealthBands(engine, { sourceIds: [s.id] }, Date.now() + 2_000_000 + nth);
     expect(stale).toMatchObject({ status: 'attention', sync_blocked: { band: '1-9' } });
+
+    // A resumed run saves its cursor after the recorded stop while the failure row stays until the run finishes: it is
+    // draining, not blocked. A stop recorded again after that save is blocked again.
+    const [{ key }] = await engine.executeRaw<{ key: string }>("SELECT fingerprint AS key FROM op_checkpoints WHERE op='managed-sync-failure' AND completed_keys->0->>'source_id'=$1", [s.id]);
+    await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()+interval '1 minute' WHERE op='managed-sync' AND fingerprint=$1", [key]);
+    expect(await readBlockedManagedSyncs(engine, [s.id])).toEqual([]);
+    expect(await check()).toEqual([expect.objectContaining({ name: 'managed_sync_blocked', status: 'ok' })]);
+    expect((await readBrainHealthBands(engine, { sourceIds: [s.id] }, Date.now() + 3_000_000 + nth)).sync_blocked.band).toBe('none');
+    await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()+interval '2 minutes' WHERE op='managed-sync-failure' AND fingerprint=$1", [key]);
+    expect(await readBlockedManagedSyncs(engine, [s.id])).toEqual([expect.objectContaining({ source_id: s.id, code: 'source_changed' })]);
     nth++;
     await disposePersistenceConsumer(engine);
   }

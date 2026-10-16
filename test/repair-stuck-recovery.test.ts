@@ -152,6 +152,18 @@ describe('gbrain repair stuck-recovery', () => {
     expect(readFileSync(join(String(result.outcome_items![0]!.detail!.backup_dir), '0.prior'), 'utf8')).toBe(PRIOR);
   }));
 
+  test('#6858: --keep disk on a maintenance submit_job (not a sync import) still hands off to reconcile first', () => run(async () => {
+    const s = await stuck({ prior: PRIOR, after: AFTER, disk: EDITED });
+    await engine.executeRaw(`UPDATE persistence_requests SET operation='submit_job', intent=intent || '{"kind":"managed_maintenance_page"}'::jsonb WHERE id=$1`, [s.id]);
+    const preview = await repair(s.sourceId);
+    const result = await repair(s.sourceId, { apply: true, expect: preview.preview_hash, keep: 'disk' });
+    expect(result.outcomes).toEqual({ resolved: 1 });
+    const next = String(result.outcome_items![0]!.detail!.next);
+    expect(next).not.toContain("sync import's publication");
+    expect(next).toContain(`gbrain sources reconcile ${s.sourceId} page --brain host --preview --auto-additive`);
+    expect(next.indexOf('--auto-additive')).toBeLessThan(next.indexOf(`gbrain sync --source ${s.sourceId} --no-pull`));
+  }));
+
   test('absent prior (the write was a create): the preview says so, and --keep prior unlinks the edited file after backing it up', () => run(async () => {
     const s = await stuck({ prior: null, after: AFTER, disk: EDITED });
     const out = await cli(['stuck-recovery', '--source', s.sourceId]);
