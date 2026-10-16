@@ -32,7 +32,7 @@ import { importAnalyzeEveryPages, maybeRefreshPlannerStats } from '../planner-st
 import { recordManagedSyncFailure, clearManagedSyncFailureAfterSuccess, formatManagedSyncFailure, managedSyncRetryCommand, type ManagedSyncFailure, type ManagedSyncRootCause } from './sync-failures.ts';
 import { writeFailureDiagnostic } from './verb-errors.ts';
 import { stampDrainStep } from './drain-step.ts';
-import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
+import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, probeCheckpointBlocker, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import { principalKey, type WriteRequest } from './model.ts';
 import { readJournalLimits } from './limits.ts';
@@ -349,6 +349,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     // #6340: page faults (the database page moved under the manifest) hold the entry, imports and deletes alike, when holds
     // are on; `sync.holds=fail` and company-brain cursors keep the refusals.
     const holdsOn = !!run.screen && !cursor.companyPlan;
+    if (entry.legacySlugs?.length && !holdsOn) throw syncRunRefusal('page_identity_changed', 'Legacy pages sync cannot import into match the imported file.', retry, `${entry.path} imports as page ${entry.slug}, but pages ${entry.legacySlugs.join(', ')} of source ${cursor.sourceId}, imported from a file of that name, record no file (sync.holds=fail); keep the file's page, remove the others, then sync again.`);
     const [occupant, snapshot] = await Promise.all([alreadyImportedAtOrigin(engine, cursor, entry, originScope).catch(error => {
       if (!holdsOn || !(error instanceof OperationError) || error.code !== 'page_identity_changed') throw error;
       return { originFault: error };
@@ -795,23 +796,28 @@ async function refreezeInPlace(engine: BrainEngine, input: SettleInput): Promise
 /** #6643: checkpoint revivals per sync invocation (keyed by its run options object), so a refusal loop ends the invocation, never the cursor. */
 const checkpointRevivalsByRun = new WeakMap<object, number>();
 /** A same-run index lag ("The sync cursor is not fully committed.") stays a recorded failure (managed-sync-checkpoint-replaced.test.ts pins it). */
-const revivableCheckpointRefusal = (done: Pick<WriteRequest, 'state' | 'error_code' | 'recovery'>) => !done.recovery && done.state === 'failed' && done.error_code === 'recovery_required';
+const revivableCheckpointRefusal = (done: Pick<WriteRequest, 'state' | 'error_code' | 'recovery'>) => !done.recovery && done.state === 'failed'
+  && (done.error_code === 'recovery_required' || done.error_code === CHECKPOINT_VALIDATION_TIMEOUT);
 /**
  * #6643: a checkpoint refused because a receipt blocked it (`recovery_required`) is re-assessed whenever the run resumes: when nothing blocks it any more (a
  * knock-on, a receipt at an index the cursor settled), a fresh checkpoint request replaces it by cursor swap, and its
  * publication validates everything again. The completed manifest and the old receipt stay as they are. Null when it
  * still blocks, or after `CHECKPOINT_REVIVAL_LIMIT` revivals in this invocation (the next invocation re-assesses).
  * #6694/#6834: a slug-mode refusal the source now admits, or a moved checkpoint at this run's target, revives too (sync-slug-mode.ts).
+ * #6735: so does a validation timeout, once per invocation and only once an earlier invocation recorded the stop, so a resume
+ * re-validates the pinned checkpoint instead of rediscovering the manifest.
  */
 async function reviveCheckpoint(engine: BrainEngine, input: SettleInput): Promise<Cursor | null> {
   const { cursor, key, pending, done } = input;
   const refused = revivableCheckpointRefusal(done) || (pending.intent.kind === 'managed_sync_checkpoint' && await checkpointRevival(engine, cursor, pending.intent, done));
   const revivals = checkpointRevivalsByRun.get(input.run) ?? 0;
-  if (pending.intent.kind !== 'managed_sync_checkpoint' || !refused || done.recovery || cursor.index !== cursor.entries.length || revivals >= CHECKPOINT_REVIVAL_LIMIT) return null;
+  const timedOut = done.error_code === CHECKPOINT_VALIDATION_TIMEOUT;
+  if (pending.intent.kind !== 'managed_sync_checkpoint' || !refused || done.recovery || cursor.index !== cursor.entries.length || revivals >= (timedOut ? 1 : CHECKPOINT_REVIVAL_LIMIT)
+    || (timedOut && !await stopRecorded(engine, key, cursor.runId))) return null;
   const base: Cursor = { ...withoutPending(cursor), ...(refused === 'overtaken' ? { overtaken: true as const } : {}) };
   const fresh = await freezeEntry(engine, base, key, input.assertActive, input.run);
   if (!('requestId' in fresh)) return null;
-  const blocker = await findIncompleteSyncReceipt(engine, cursor.binding.worktree_id, cursor.runId, fresh.intent.supersededRequests ?? [], fresh.intent.settled ?? null);
+  const blocker = await probeCheckpointBlocker(engine, cursor.binding.worktree_id, cursor.runId, fresh.intent.supersededRequests ?? [], fresh.intent.settled ?? null);
   input.assertActive();
   if (blocker) return null;
   checkpointRevivalsByRun.set(input.run, revivals + 1);
@@ -1348,7 +1354,7 @@ async function retryFailedStart(engine: BrainEngine, cursor: Cursor, key: string
   // receipt still blocks (since #6712 a legacy knock-on the cursor never settled is one) rediscovers, as --retry-failed says.
   if (failed && cursor.pending && isSyncKnockOn(failed)) return null;
   if (failed && cursor.pending?.intent.kind === 'managed_sync_checkpoint' && cursor.index === cursor.entries.length && revivableCheckpointRefusal(failed)
-    && !await findIncompleteSyncReceipt(engine, cursor.binding.worktree_id, cursor.runId, cursor.convertedFromFailed ?? [], cursor.settled ?? null)) return null;
+    && !await probeCheckpointBlocker(engine, cursor.binding.worktree_id, cursor.runId, cursor.convertedFromFailed ?? [], cursor.settled ?? null)) return null;
   const recorded = await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'run_id'=$2", [key, cursor.runId]);
   assertActive();
   if (!((failed && ['failed', 'conflict', 'cancelled'].includes(failed.state)) || (recorded.length && (failed?.state === 'committed' || !failed)))) return null;

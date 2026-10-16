@@ -71,6 +71,9 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
     human_reason: 'The file carries content the owner purged; delete or edit the file and commit, or (only if the purge was a mistake) the owner clears it with gbrain pages unpurge <slug> --source <source> on the brain host.' },
   { code: 'write_gate_rejected', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: write_gate.external_mode=reject is the user\'s setting',
     human_reason: 'The write gate refuses the file\'s external instruction-like content under write_gate.external_mode=reject; the user decides whether to edit the file or switch the setting back to quarantine.' },
+  // #6727: pages an older gbrain imported without recording their file fold to the file's slug, several or one sync cannot write; a person decides.
+  { code: 'legacy_slug_conflict', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a person decides which legacy page the file takes over',
+    human_reason: 'Pages an older gbrain imported without recording their file match this file and sync cannot pick one to import into; a person keeps the one that is its page and removes the others (gbrain delete --source <source> -- <slug>), or renames the file, then syncs.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
