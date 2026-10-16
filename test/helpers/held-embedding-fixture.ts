@@ -31,7 +31,7 @@ export function startFakeEmbeddings(opts: { dense?: boolean; dims?: number } = {
       const tokens = opts.dense ? chars : Math.ceil(chars / 4);
       fake.calls++;
       fake.tokens += tokens;
-      const dims = body.dimensions ?? opts.dims ?? 1536;
+      const dims = body.dimensions ?? opts.dims ?? 1024;
       return Response.json({ object: 'list', model: 'fixture-embedder', usage: { prompt_tokens: tokens, total_tokens: tokens },
         data: inputs.map((_, index) => ({ object: 'embedding', index, embedding: new Array(dims).fill(0.01) })) });
     },
@@ -50,7 +50,7 @@ export function gbrain(brain: HeldBrain, args: string[], env: Record<string, str
   return runCli(args, { home: brain.home, env: { ...brain.env, ...env }, timeoutMs: 120_000 });
 }
 
-/** A PGLite brain made by `gbrain init` (keyless), then pointed at `model` with 1536 dimensions. */
+/** A PGLite brain made by `gbrain init` (keyless), then pointed at `model` at the keyless column's 1024 dimensions, writer management off. */
 export async function makeHeldBrain(model: string, env: Record<string, string | undefined>): Promise<HeldBrain> {
   const home = mkdtempSync(join(tmpdir(), 'gb-held-'));
   const brain: HeldBrain = { home, env: { ...Object.fromEntries(SCRUB.map(k => [k, undefined])), ...env }, cleanup: () => rmSync(home, { recursive: true, force: true }) };
@@ -59,7 +59,9 @@ export async function makeHeldBrain(model: string, env: Record<string, string | 
   const path = join(home, '.gbrain', 'config.json');
   const cfg = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
   delete cfg.embedding_disabled;
-  writeFileSync(path, JSON.stringify({ ...cfg, embedding_model: model, embedding_dimensions: 1536 }));
+  writeFileSync(path, JSON.stringify({ ...cfg, embedding_model: model, embedding_dimensions: 1024 }));
+  // Direct writes (seeding sources, pages and holds in-process) need an unmanaged brain; the embed paths under test are the same.
+  await withBrain(brain, engine => engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'));
   return brain;
 }
 
