@@ -10,6 +10,57 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.268.0] - 2026-10-16
+
+**Cheaper managed publishes, one way to retry, and three managed-sync bugs closed (#6712 PR 3).** A 336 KB page with 1,012 facts, 4,100 timeline rows and 50 code references now publishes in one transaction of 67 statements instead of 318, which takes 4.5 s instead of 19.5 s at 57 ms round trip through a transaction pooler. A plain `gbrain sync` retries the failure the previous run recorded, so `--retry-failed` becomes a deprecated alias, and `gbrain sync --help` lists the ten flags a managed brain needs first. Three managed-sync bugs are fixed: final validation timing out at the end of a long catch-up (#6735), a legacy page forked into a twin (#6727), and doctor calling a fresh cursor idle (#6763).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| a managed sync publishes a large page (336 KB, 1,012 facts, 4,100 timeline rows, 50 code refs) through PgBouncer at 57 ms RTT | 318 statements, 19.5 s p50 | 67 statements, 4.5 s p50 (676 KB: 35.4 s → 5.5 s) |
+| a page with code references | two savepointed link writes per reference | one statement per page for all its doc↔impl edges |
+| `GBRAIN_SYNC_TRACE=1 gbrain sync` | no publish timing | `[sync] publish apply <slug>: <ms>ms` and `[sync] publish effects <slug>: <ms>ms` lines |
+| a managed sync stopped on a failure, then plain `gbrain sync` | resumed into the same failure until `--retry-failed` | retries the recorded failure; a content refusal whose bytes have not changed is replayed without a new request |
+| `gbrain sync --retry-failed` on a managed source | the explicit retry | the same as a plain sync, with one `[gbrain notice sync_retry_failed_deprecated]`; accepted for two releases (connector sources still re-approve failed item receipts) |
+| a checkpoint refused `slug_root_mode_mismatch` while the source keeps the other pin | rediscovered by `--retry-failed`, adopting the new pin | left for a person: `gbrain repair managed-sync-orphans` lists it as `slug_mode_refused` (preview, then apply) |
+| `gbrain sync --help` | 33 options in one list | "Managed brains" (10 flags) first, then "Classic brains / advanced" |
+| a 59k-entry catch-up reaches its final checkpoint | `checkpoint_validation_timeout` could throw the run away at the last step | validation reads at most one committed receipt per unfinished receipt; a timeout is re-validated by the next sync instead of rediscovering |
+| a file whose page an older gbrain imported under a slug the current fold spells differently (punctuation, spaces, accents) | a second page with the same file and content hash | the file imports into the legacy page, keeping its id, links and history; several matching pages hold the file `legacy_slug_conflict` |
+| a managed sync cursor discovered minutes ago that has not advanced yet | doctor: idle "over an hour" | no warning until an hour after discovery |
+
+### Itemized changes
+
+#### Cheaper publishes (L6)
+
+- `addCodeReferenceLinks` (`src/core/engine-sql/links.ts`) writes a page's code-reference edges in one statement, keeping source-qualified locked endpoint resolution, context and origin updates, duplicate semantics and missing-endpoint isolation. `import-file.ts` and `page-body/streamed-import.ts` call it once per page.
+- `declarePublication` folds the publication idle-timeout SET into `declareDurablePersistence`, one round trip less per publication behind a transaction pooler, where pipelining is off.
+- The `facts.embedding` cast probe is cached on the root engine, so it runs once per process instead of once per publication transaction.
+- `upsertChunks` reads its three embedding config keys in one statement.
+- `publication-timing.ts` times member apply and `queuePublicationEffects` (`coordinator.ts`, `group-publish.ts`); it prints only under `GBRAIN_SYNC_TRACE`.
+- The page's publication transaction runs on the ordinary pool through the pooler; the consumer's scans run on the direct pool (documented in `docs/architecture/key-files/core-persistence-capacity.md`, "Publication cost").
+
+#### One retry path and managed help (L7)
+
+- `retryRecordedFailure` (`sync-run.ts`) replaces `retryFailedStart`: a plain sync retries a failure an earlier invocation recorded. Failure rows record `gbrain_version` (additive) so an unchanged refusal is replayed only until the file, the commit or gbrain changes. Company sources follow the same rule for content refusals.
+- `--retry-failed` prints `sync_retry_failed_deprecated` once per process; `test/error-registry-retired.test.ts` fails on any printed fix or help line that still recommends it.
+- `slug_mode_refused` joins the `managed-sync-orphans` classes; `checkpoint_moved` (#6834) keeps its repair, since rediscovering a path-sliced run would move `last_commit` backward.
+- `sync --help` sections come from `MANAGED_HELP_FLAGS`; `--all`, `--hard-deadline`, `--no-bulk` and `--no-lanes` stay accepted on managed sources.
+- `laneFaultOf` is removed. `drain-step.ts`, `sync-checkpoint-replaced.ts` and the legacy knock-on text stay, because the governor, waivers, prepare, the coordinator and old rows still use them.
+
+#### Managed-sync fixes (L8)
+
+- #6735: `INCOMPLETE_SYNC_RECEIPT_SQL`'s committed-sibling clause is a `LEFT JOIN LATERAL ... LIMIT 1`, so its cost follows the unfinished receipts under any join the planner picks; `reviveCheckpoint` revives a `checkpoint_validation_timeout` once per invocation after the stop is recorded (`probeCheckpointBlocker`).
+- #6727: the identity freeze (`sync-discovery.ts`) adopts the one live page without a recorded file and not database-only whose slug folds to the file's slug, or equals the path without its extension; a bounded lookup that issues nothing on a source with no such pages. `legacy_slug_conflict` is a page hold (fault table row, public category, runbook rows).
+- #6763: `readManagedSyncBacklog` carries the cursor's `discovered_at`; doctor `managed_sync_backlog` ages a cursor from its last advance or its discovery.
+
+### For contributors
+
+- New budget tests: `test/managed-import-statement-budget.test.ts` and its e2e twin assert the publication transaction's statement count at 0.5x, 1x and 2x of the YC-shaped fixture (bounded 500-row chunks, nothing per row); `test/sync-status-statement-budget.test.ts` pins `sync status` at 1k and 61k receipts. `test/fixtures/goldens/sql-text/chunks.json` was regenerated for the folded config read.
+- `LatencyProxy` moved to `test/helpers/latency-proxy.ts`.
+- Convergence harness (#6841): a write the brain accepted (exit 10) that was still unsettled when its writer stopped is settled by its receipt (`get_write_request`) after recovery, so it is never misread as a lost acknowledged write. The nightly's note-0266 failure was this harness gap; no product write was lost.
+- `sync-run.ts`'s ceiling is 1762, where L7 and L8 compose.
+
 ## [0.60.267.0] - 2026-10-16
 
 **You can ask the brain what a page said at an earlier moment, as the brain knew it then, and it tells you when it can't know.** With the belief ledger on, `get_page` and `get_versions` take `known_as_of`, an exact instant. The answer is the page as the brain had recorded it at that instant: which version was current, whether it was deleted, and how long it stayed that way. When the brain can't vouch for the answer, it says so. The ledger may not have been on yet at that instant, it may not have been recording, or a write may still have been in flight. In those cases you get a refusal with a reason instead of a guess. Purged content never comes back through a past read. A rename and a fact purge now keep the page as it stood before the change, so the history has no holes. A sync stuck behind a recovery only you can fix now stops at once and names the file.
