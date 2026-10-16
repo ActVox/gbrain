@@ -11,6 +11,8 @@ import { isFactWithdrawn, recordFactWithdrawal, type WithdrawalCommit } from '..
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { inferFactSubject, isEntityInferenceEnabled, type InferredVia } from '../facts/subject-infer.ts';
 import { parseFactsFence } from '../facts-fence.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { segmentedRememberRefusal } from './verb-errors.ts';
 import { excludesPrivateWrites } from './page-visibility.ts';
 import { emitFenceNotice, initializeLocalPersistence, requestPrincipalForContext } from './page-mutations.ts';
 import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
@@ -86,6 +88,8 @@ async function planRememberTarget(ctx: OperationContext, sourceId: string, sourc
       `Entity page ${slug} in source ${sourceId} is deleted or not visible to this caller, so nothing was saved. Remember the fact against a visible entity, or without an entity (it is then filed under memory/unattributed).`);
   }
   if (inferred && !snapshot) throw new InferredTargetRejected('NO_ENTITY');
+  // Wave B: a segmented entity page cannot take a fence row yet; named or inferred, the save refuses before admission instead of misfiling it.
+  if (entitySlug !== null && snapshot && isSegmentedPage(snapshot.page)) throw segmentedRememberRefusal(slug, sourceId, inferred !== null);
   if (inferred && (await isFactWithdrawn(ctx.engine, sourceId, inferred.visibility, inferred.fact, slug)
     || parseFactsFence(snapshot!.page.compiled_truth).warnings.length)) throw new InferredTargetRejected('ENTITY_LINK_FAILED');
   // Preserve the stub guard: a fallback name remains DB-only until a real
@@ -142,6 +146,7 @@ async function inferRememberTarget(ctx: OperationContext, sourceId: string, sour
     return { target, via: inferred.via };
   } catch (error) {
     if (error instanceof InferredTargetRejected) return { warning: error.warning };
+    if (error instanceof OperationError && error.canonicalCode === 'page_body_segmented') throw error;
     if (error instanceof OperationError) return null;
     throw error;
   }

@@ -218,7 +218,9 @@ const get_page: Operation = {
     const timelineEntries = includeTimelineEntries
       ? await stampRowTrust(ctx.engine, 'timeline_entries', await ctx.engine.getTimeline(page.slug, { ...await readPolicyOpts(ctx, { sourceId: page.source_id }), eligibility: readable.eligibility }), e => e.id) : undefined;
     // Read-only, over the same visibility-filtered body the reader gets.
-    const lineGrammar = p.grammar_diagnostics === true ? await (await import('../line-grammar-report.ts')).lineGrammarReport(ctx.engine, { slug: page.slug, sourceId: page.source_id, body: visibleBody.compiled_truth }) : undefined;
+    const grammar = p.grammar_diagnostics === true ? await import('../line-grammar-report.ts') : undefined;
+    const lineGrammar = !grammar ? undefined : isSegmentedPage(page) ? grammar.segmentedGrammarSkip(page.slug, page.source_id)
+      : await grammar.lineGrammarReport(ctx.engine, { slug: page.slug, sourceId: page.source_id, body: visibleBody.compiled_truth });
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true); // #6259
     const fileHeld = held ? { file_held: fileHeldField(held, isUntrustedReader) } : {};
     const segmented = isSegmentedPage(page);

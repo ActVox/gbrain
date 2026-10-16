@@ -69,6 +69,17 @@ function canonicalLine(d: GrammarDiagnostic): string | undefined {
   return m ? `${m[1]}${m[2]}${m[3]}` : undefined;
 }
 
+/** get_page grammar_diagnostics on a page stored in segments: the grammar parses one whole body string, so the report is skipped, never thrown. */
+export interface LineGrammarSkip { state: 'skipped'; reason: 'page_body_segmented'; message: string; fix: Action }
+export function segmentedGrammarSkip(slug: string, sourceId: string): LineGrammarSkip {
+  return {
+    state: 'skipped', reason: 'page_body_segmented',
+    message: `Line-grammar diagnostics parse the whole body as one string, and page ${slug} stores its body in segments, so they were skipped; nothing about this page's typed lines is known. The rest of this response is complete.`,
+    fix: readFix("Returns the page's outline and its first window, to read its typed lines directly.",
+      { argv: ['gbrain', 'get', '--source', sourceId, '--body', 'auto', '--', slug], mcp: { tool: 'get_page', arguments: { slug, source_id: sourceId, body: 'auto' } } }),
+  };
+}
+
 export async function lineGrammarReport(engine: BrainEngine, opts: {
   slug: string; sourceId: string; body: string; limit?: number;
 }): Promise<LineGrammarReport> {
