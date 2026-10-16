@@ -322,13 +322,7 @@ export class Segmenter {
 
   private blocked(text: string): boolean {
     segmenterWork.chars += text.length;
-    const st = this.st;
-    if (st.trusted.walk.fence || st.trusted.open || st.untrusted.open || st.withdrawal.open) return true;
-    if (st.pemMargin.trusted !== null || st.pemMargin.untrusted !== null) return true;
-    if (timelineConsumes(st.timeline, text)) return true;
-    if (st.marker === 'after_marker' || (st.marker === 'details' && MATERIALIZED_DETAIL.test(text) && !BULLET.test(text))) return true;
-    return PROTECTED_MARKERS.some(m => text.includes(m)) || text.includes(PEM_FENCE_TAIL) || isMaterializedMarkerLine(text)
-      || pemBodyLike(text) || PEM_HEADER_LINE.test(text);
+    return cutBlocked(this.st, text);
   }
 
   private line(text: string, term: string, byteStart: number): void {
@@ -642,6 +636,20 @@ function keptRanges(whole: string, textLen: number, out: ScanOut, markers: Array
 }
 
 /** parseTimelineEntries' rule: would it read `line` as part of the open entry (a detail, or a blank before any)? */
+/**
+ * Whether no cut may go before the whole line `text` at parser state `st` (a segment's entry state is the state at its
+ * cut): inside a code fence, a protected region, a withdrawal fence block, a timeline entry's detail run, after a
+ * materialized marker, within a private key's context, or before a line holding a marker token or key text.
+ */
+export function cutBlocked(st: EntryState, text: string): boolean {
+  if (st.trusted.walk.fence || st.trusted.open || st.untrusted.open || st.withdrawal.open) return true;
+  if (st.pemMargin.trusted !== null || st.pemMargin.untrusted !== null) return true;
+  if (timelineConsumes(st.timeline, text)) return true;
+  if (st.marker === 'after_marker' || (st.marker === 'details' && MATERIALIZED_DETAIL.test(text) && !BULLET.test(text))) return true;
+  return PROTECTED_MARKERS.some(m => text.includes(m)) || text.includes(PEM_FENCE_TAIL) || isMaterializedMarkerLine(text)
+    || pemBodyLike(text) || PEM_HEADER_LINE.test(text);
+}
+
 function timelineConsumes(state: EntryState['timeline'], line: string): boolean {
   if (state.entry === 'none') return false;
   if (TIMELINE_LINE_RE.test(line) || TIMELINE_HEADING_RE.test(line)) return false;

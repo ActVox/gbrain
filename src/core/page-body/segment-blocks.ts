@@ -5,19 +5,26 @@
  *
  * The text is the joined body `${compiled_truth}\n${timeline}` (or the regions
  * and separator a pass names) after the withdrawal overlay, read with
- * `readBodyRange` (stored space, trusted audience): what readPageSnapshot gives
- * a trusted reader of an inline page. A block is one segment, or a run of
- * segments joined across forced cuts, so every block starts where the
- * segmenter's parsers start fresh: outside code fences, protected regions,
- * fence blocks, timeline detail runs and conversation messages. A run of
- * forced cuts longer than BLOCK_MAX_BYTES (a line or fence many segments long)
- * refuses with `page_body_segmented`; a facts fence crossing a forced cut while
- * the source has withdrawals refuses with `page_projection_stale` (read-range.ts).
+ * `trustedSegments` (read-range.ts, the trusted stored read): what readPageSnapshot
+ * gives a trusted reader of an inline page. The manifest is walked once per
+ * region. A block is one segment, or a run of segments joined across forced
+ * cuts that fell where the segmenter's parsers do not start fresh, so every
+ * block starts outside code fences, protected regions, fence blocks, timeline
+ * detail runs and long lines. A forced cut after a `\n` before a line the
+ * segmenter's no-cut rules allow (`cutBlocked` on the next segment's entry
+ * state and first line, as a structural cut is judged) is a block boundary:
+ * ordinary short lines or dated bullets with no structural candidate are cut
+ * only by force. A joined run longer than BLOCK_MAX_BYTES (a line or fence many
+ * segments long) refuses with `page_body_segmented`; a facts fence crossing a
+ * forced cut while the source has withdrawals refuses with
+ * `page_projection_stale` (read-range.ts).
  */
 import type { BrainEngine } from '../engine.ts';
 import { opError } from '../ops/contract.ts';
 import { SEGMENT_MAX_BYTES } from './limits.ts';
-import { openSegmentedBody, readBodyRange } from './read-range.ts';
+import { bodyRowWork, openSegmentedBody, readBodyRange, trustedSegments, type TrustedSegment } from './read-range.ts';
+import { cutBlocked } from './segmenter.ts';
+import { readEntryState } from './entry-state.ts';
 import type { BodyRegion } from './types.ts';
 
 /** Bytes a pass reads between two full collections (ingest.ts collectBatchGarbage: one per 4 MiB staging batch). */
@@ -41,10 +48,12 @@ export function readGarbageCollector(): (bytes: number) => void {
 /**
  * @internal Work the derived passes do over a segmented body, for the linearity test: bytes read (`bytes`), UTF-16
  * units of the blocks yielded (`blocks`) and of the link-extraction windows built around them (`windows`), and units a
- * pass copies past its block (`carry`: a takes fence joined across blocks, the watermark planner's tail window).
- * Counts, not time, so a busy machine cannot move them.
+ * pass copies past its block (`carry`: a takes fence joined across blocks, the watermark planner's tail window),
+ * and bytes scanned for the first line after a forced cut (`lines`). Counts, not time, so a busy machine cannot move them.
  */
-export const segmentedPassWork = { bytes: 0, blocks: 0, windows: 0, carry: 0 };
+export const segmentedPassWork = { bytes: 0, blocks: 0, windows: 0, carry: 0, lines: 0 };
+
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** The longest run of segments joined across forced cuts that a pass holds as one string. */
 export const BLOCK_MAX_BYTES = 8 * SEGMENT_MAX_BYTES;
@@ -63,8 +72,9 @@ export interface BodyBlockOptions {
   /** Text between two regions (default '\n', as in `${compiled_truth}\n${timeline}`). */
   separator?: string;
   /**
-   * Read only the runs this accepts (the manifest seqs of a block, and whether it is its region's first); it is asked
-   * as each run is reached, so it may depend on the blocks already read. A block after a skipped run has `at` NaN.
+   * Read only the runs this accepts (the manifest seqs of a run of segments joined by forced cuts, one block or more,
+   * and whether it is its region's first); it is asked as each run is reached, so it may depend on the blocks already
+   * read. A block after a skipped run has `at` NaN.
    */
   want?: (run: { seqs: readonly number[]; first: boolean }) => boolean;
 }
@@ -74,6 +84,21 @@ export function blockTooLargeError(slug: string, sourceId: string, bytes: number
   return opError('page_body_segmented',
     `Page ${slug} (source ${sourceId}) has a ${bytes}-byte run a derived pass must read whole (a line or fence longer than a segment), over its ${BLOCK_MAX_BYTES}-byte bound. Nothing was derived from it.`,
     'Break the long line or fence into shorter lines and write the page again.');
+}
+
+/**
+ * Whether the segment after a forced cut starts a block: the cut fell after a `\n` (not inside a line longer than a
+ * segment, not after a bare `\r`) and a structural cut before the segment's first line would have been allowed
+ * (`cutBlocked` on its stored entry state, the parser state at the cut). Pages of another segmenter version never do.
+ */
+function freshAfterForcedCut(previous: Uint8Array, seg: TrustedSegment, stale: boolean): boolean {
+  if (stale || previous[previous.length - 1] !== 0x0a) return false;
+  const entry = readEntryState(seg.entryState);
+  if (!entry) return false;
+  let end = 0;
+  while (end < seg.raw.length && seg.raw[end] !== 0x0a && seg.raw[end] !== 0x0d) end++;
+  segmentedPassWork.lines += end;
+  return !cutBlocked(entry, utf8.decode(seg.raw.subarray(0, end)));
 }
 
 export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug: string; source_id?: string },
@@ -89,26 +114,40 @@ export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug:
       yield { region: null, text: separator, at };
       at += separator.length;
     }
+    bodyRowWork.visits += body.rows.length;
     const rows = body.rows.filter(row => row.region === region);
     for (let i = 0; i < rows.length;) {
       let j = i;
       while (j + 1 < rows.length && forced.has(rows[j]!.seq)) j++;
-      const start = rows[i]!.byteStart;
-      const end = rows[j]!.byteStart + rows[j]!.byteLen;
+      bodyRowWork.visits += j - i + 1;
       if (opts.want && !opts.want({ seqs: rows.slice(i, j + 1).map(row => row.seq), first: i === 0 })) {
         at = NaN;
         i = j + 1;
         continue;
       }
-      if (end - start > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, body.sourceId, end - start);
-      const parts: Buffer[] = [];
-      for await (const piece of readBodyRange(engine, { pageId: body.pageId, space: 'stored', start, end, audience: 'trusted', region, body })) parts.push(piece.bytes);
-      const text = Buffer.concat(parts).toString('utf8');
-      collect(end - start);
-      segmentedPassWork.bytes += end - start;
-      segmentedPassWork.blocks += text.length;
-      yield { region, text, at };
-      at += text.length;
+      let parts: Buffer[] = [];
+      let start = rows[i]!.byteStart;
+      let previous: Uint8Array | null = null;
+      const flush = (end: number): BodyBlock => {
+        const text = Buffer.concat(parts).toString('utf8');
+        collect(end - start);
+        segmentedPassWork.bytes += end - start;
+        segmentedPassWork.blocks += text.length;
+        const block = { region, text, at };
+        at += text.length;
+        parts = [];
+        start = end;
+        return block;
+      };
+      for await (const seg of trustedSegments(engine, body, rows.slice(i, j + 1))) {
+        bodyRowWork.visits++;
+        if (previous && freshAfterForcedCut(previous, seg, body.stale)) yield flush(seg.row.byteStart);
+        const end = seg.row.byteStart + seg.row.byteLen;
+        if (end - start > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, body.sourceId, end - start);
+        for (const piece of seg.pieces) parts.push(Buffer.from(piece.text, 'utf8'));
+        previous = seg.raw;
+      }
+      yield flush(rows[j]!.byteStart + rows[j]!.byteLen);
       i = j + 1;
     }
   }

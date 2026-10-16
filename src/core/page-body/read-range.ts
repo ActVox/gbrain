@@ -126,6 +126,13 @@ export interface BodyRangePiece {
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const HEAVY_BATCH = 64;
+
+/**
+ * @internal Manifest rows a read visits (`visits`): each row a range read, a block walk or a layout pass looks at, for
+ * the linearity test. A pass that filters the whole manifest per block visits rows x blocks; one walk visits each row
+ * a bounded number of times. Counts, not time.
+ */
+export const bodyRowWork = { visits: 0 };
 const toJson = (v: unknown) => typeof v === 'string' ? JSON.parse(v) as unknown : v;
 const bytesOf = (v: unknown): Uint8Array => { const b = v as Uint8Array; return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); };
 const newlines = (s: string) => { let n = 0; for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) n++; return n; };
@@ -312,6 +319,22 @@ export function projectedUnits(body: SegmentedBody, layout: ProjectedLayout): Un
 
 const unitBytes = (u: Unit, layout: ProjectedLayout) => u.kind === 'row' ? layout.rowBytes[u.index]! : Buffer.byteLength(u.text, 'utf8');
 
+/** One segment of the trusted body: its row, its stored bytes and entry state, and its text after the withdrawal overlay in pieces. */
+export interface TrustedSegment {
+  row: BodyRow;
+  raw: Uint8Array;
+  entryState: unknown;
+  pieces: ProjectedPiece[];
+}
+
+/** The trusted body of `rows` (rows of `body`, in order), one segment at a time: what readBodyRange's trusted stored read cuts. */
+export async function* trustedSegments(engine: BrainEngine, body: SegmentedBody, rows: readonly BodyRow[]): AsyncIterable<TrustedSegment> {
+  for await (const seg of loadSegments(engine, body, rows)) {
+    const raw = utf8.decode(seg.bytes);
+    yield { row: seg.row, raw: seg.bytes, entryState: seg.entryState, pieces: overlaidPieces(raw, await overlaidText(engine, body, seg, raw, 'trusted')) };
+  }
+}
+
 export async function* readBodyRange(engine: BrainEngine, req: BodyRangeRequest): AsyncIterable<BodyRangePiece> {
   if (!(req.start >= 0) || !(req.end >= req.start) || !Number.isInteger(req.start) || (!Number.isInteger(req.end) && req.end !== Infinity)) {
     throw new Error(`readBodyRange: [${req.start}, ${req.end}) is not a byte range.`);
@@ -319,11 +342,12 @@ export async function* readBodyRange(engine: BrainEngine, req: BodyRangeRequest)
   if (req.end === req.start) return;
   const body = req.body ?? await openSegmentedBody(engine, req);
   if (req.space === 'projected') return yield* projectedRange(engine, body, req);
-  const rows = body.rows.filter(r => (!req.region || r.region === req.region) && r.byteStart < req.end && r.byteStart + r.byteLen > req.start);
+  bodyRowWork.visits += body.rows.length;
+  const indices = body.rows.flatMap((r, i) => (!req.region || r.region === req.region) && r.byteStart < req.end && r.byteStart + r.byteLen > req.start ? [i] : []);
+  const rows = indices.map(i => body.rows[i]!);
   if (req.audience === 'trusted') {
-    for await (const seg of loadSegments(engine, body, rows)) {
-      const raw = utf8.decode(seg.bytes);
-      for (const piece of overlaidPieces(raw, await overlaidText(engine, body, seg, raw, 'trusted'))) {
+    for await (const seg of trustedSegments(engine, body, rows)) {
+      for (const piece of seg.pieces) {
         const cut = cutStored(piece, seg.row.byteStart, req.start, req.end);
         if (cut) yield { bytes: cut.bytes, storedStart: cut.storedStart, projectedStart: cut.storedStart };
       }
@@ -331,8 +355,9 @@ export async function* readBodyRange(engine: BrainEngine, req: BodyRangeRequest)
     return;
   }
   const layout = await projectedLayout(engine, body);
+  let k = 0;
   for await (const seg of loadSegments(engine, body, rows)) {
-    let doc = layout.rowStart[body.rows.indexOf(seg.row)]!;
+    let doc = layout.rowStart[indices[k++]!]!;
     if (doc < 0) continue;
     for (const piece of (await projectLoaded(engine, body, seg, layout.overlay)).pieces) {
       const cut = cutStored(piece, seg.row.byteStart, req.start, req.end);
@@ -355,7 +380,9 @@ function cutStored(piece: ProjectedPiece, base: number, start: number, end: numb
 
 async function* projectedRange(engine: BrainEngine, body: SegmentedBody, req: BodyRangeRequest): AsyncIterable<BodyRangePiece> {
   const layout = await projectedLayout(engine, body);
-  const wanted = projectedUnits(body, layout).filter(u => {
+  const units = projectedUnits(body, layout);
+  bodyRowWork.visits += units.length;
+  const wanted = units.filter(u => {
     const region = u.kind === 'row' ? body.rows[u.index]!.region : u.region;
     return (!req.region || region === req.region) && u.start < req.end && u.start + unitBytes(u, layout) > req.start;
   });
