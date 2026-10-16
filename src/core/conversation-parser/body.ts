@@ -5,7 +5,7 @@ import type { Page } from '../types.ts';
 import { loadSourceRow } from '../contextual-retrieval-service.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
-import { readSegmentedConversationInput, type SegmentedConversationInput } from '../page-body/segment-conversation.ts';
+import { CONVERSATION_WINDOW_BYTES, readSegmentedConversationInput, type SegmentedConversationInput } from '../page-body/segment-conversation.ts';
 
 /**
  * The largest conversation parser input (UTF-8 bytes): the page ceiling plus
@@ -132,11 +132,14 @@ export async function readConversationBodyForParsing(
 
 /**
  * readConversationBodyForParsing with the window it read: a segmented page's summary body is read through ranged
- * reads, and one over CONVERSATION_WINDOW_BYTES is its newest window (page-body/segment-conversation.ts).
+ * reads, and one over CONVERSATION_WINDOW_BYTES is its newest window (page-body/segment-conversation.ts). With
+ * `priorFacts`, a page over the window that has conversation facts is not read at all: its input is empty and the
+ * window carries the count (the run keeps those facts and skips the page).
  */
 export async function readConversationInput(
   engine: BrainEngine,
   page: Page,
+  opts: { priorFacts?: () => Promise<number> } = {},
 ): Promise<SegmentedConversationInput> {
   const rawTranscript = extractRawTranscriptPath(page);
   if (rawTranscript) {
@@ -155,5 +158,9 @@ export async function readConversationInput(
       );
     }
   }
-  return isSegmentedPage(page) ? readSegmentedConversationInput(engine, page) : { body: readSummaryBody(page) };
+  if (!isSegmentedPage(page)) return { body: readSummaryBody(page) };
+  const totalBytes = Number(page.body_bytes);
+  const priorFacts = totalBytes > CONVERSATION_WINDOW_BYTES ? await opts.priorFacts?.() ?? 0 : 0;
+  if (priorFacts > 0) return { body: '', window: { totalBytes, fallbackDate: null, priorFacts } };
+  return readSegmentedConversationInput(engine, page);
 }

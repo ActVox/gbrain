@@ -16,13 +16,14 @@
  *      the window's bytes;
  *    - one that already has conversation facts is skipped as in Wave A
  *      (`skipped_too_large`, `window_rule: prior_facts_kept`): no extraction,
- *      and every fact, including those outside the window, is kept.
+ *      every fact, including those outside the window, is kept, and the
+ *      window is never read (no segment text fetched, 0 segment bytes).
  * 2. Fails when: a segmented page reads its throwing body getters, the window
  *    is not the body's suffix or starts inside a forced run, its date context
- *    is lost, a read exceeds the window, or a window run clears facts it
- *    cannot see.
+ *    is lost, a read exceeds the window, a window run clears facts it
+ *    cannot see, or a skipped page reads its window first.
  * 3. Why existing coverage misses it: conversation-facts tests use inline pages.
- * Seams: `segmentedPassWork.bytes` counts bytes read.
+ * Seams: `segmentedPassWork.bytes` counts bytes read; a readSegmentTexts spy wraps the engine method.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -196,7 +197,7 @@ describe('conversation facts over a segmented page (full-pass mode)', () => {
     }
   }, 1_800_000);
 
-  test('a page over the window that already has conversation facts keeps every one: skipped_too_large naming the rule, no extraction, nothing cleared', async () => {
+  test('a page over the window that already has conversation facts keeps every one: skipped_too_large naming the rule, no extraction, nothing cleared, the window never read', async () => {
     const outcomes: unknown[] = [];
     const expected: unknown[] = [];
     for (const [index, engine] of engines.entries()) {
@@ -212,14 +213,26 @@ describe('conversation facts over a segmented page (full-pass mode)', () => {
       const before = await facts();
       expect(before.filter(row => row.source === 'cli:extract-conversation-facts')).toHaveLength(2);
       let calls = 0;
-      const result = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: ['conversations/huge'], sleepMs: 0, segmentLimit: 2, force: true,
-        extractor: async () => { calls++; return [{ fact: 'Carol Example ships the forecast', kind: 'fact', entity_slug: null, source: 'cli:extract-conversation-facts' }]; } });
+      // The window is never read: no segment text is fetched and no segment byte counted.
+      const original = engine.readSegmentTexts.bind(engine);
+      let segmentReads = 0;
+      engine.readSegmentTexts = (async (sourceId: string, shas: Uint8Array[]) => { segmentReads += shas.length; return original(sourceId, shas); }) as BrainEngine['readSegmentTexts'];
+      const bytesBefore = segmentedPassWork.bytes;
+      let result: Awaited<ReturnType<typeof runExtractConversationFactsCore>>;
+      try {
+        result = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: ['conversations/huge'], sleepMs: 0, segmentLimit: 2, force: true,
+          extractor: async () => { calls++; return [{ fact: 'Carol Example ships the forecast', kind: 'fact', entity_slug: null, source: 'cli:extract-conversation-facts' }]; } });
+      } finally {
+        // The spy is an own property; deleting it restores the prototype method.
+        delete (engine as { readSegmentTexts?: unknown }).readSegmentTexts;
+      }
+      const bytesRead = segmentedPassWork.bytes - bytesBefore;
       const receipt = await receiptOf(engine, huge.id);
-      outcomes.push({ engine: index, calls, skipped: result.pages_skipped_too_large, processed: result.pages_processed,
+      outcomes.push({ engine: index, calls, segmentReads, bytesRead, skipped: result.pages_skipped_too_large, processed: result.pages_processed,
         factsKept: Bun.deepEquals(await facts(), before),
         receipt: { kind: receipt?.kind, processed_chars: receipt?.processed_chars, total_bytes: receipt?.total_bytes, cap_bytes: receipt?.cap_bytes,
           window_rule: receipt?.window_rule, prior_facts: receipt?.prior_facts } });
-      expected.push({ engine: index, calls: 0, skipped: 1, processed: 0, factsKept: true,
+      expected.push({ engine: index, calls: 0, segmentReads: 0, bytesRead: 0, skipped: 1, processed: 0, factsKept: true,
         receipt: { kind: 'skipped_too_large', processed_chars: 0, total_bytes: Number(huge.body_bytes), cap_bytes: CONVERSATION_WINDOW_BYTES,
           window_rule: 'prior_facts_kept', prior_facts: 2 } });
     }

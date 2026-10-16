@@ -30,6 +30,8 @@ export interface ConversationWindow {
   totalBytes: number;
   /** The day-header date in force where the window starts, or null. */
   fallbackDate: string | null;
+  /** The window was not read: the page has this many conversation facts, which a window run would clear (conversation-parser/body.ts). */
+  priorFacts?: number;
 }
 
 export interface SegmentedConversationInput { body: string; window?: ConversationWindow }
