@@ -10,6 +10,15 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.263.0] - 2026-10-16
+
+**A write right after creating a very large page no longer has to wait out a doubled re-index (switch-on behavior only; no change with `pages.segmented_storage` off, the default).** With segmented storage on, creating a page over 1 MiB indexed it twice at once: once right after the write and once from the background job the write queued. Each pass held a database connection for every batch, and on a small connection pool the next write could miss its 5-second wait and come back `write_pending`. Now only one pass per page runs at a time in a process, and a page that's already indexed is skipped. No data was ever at risk: the shrink path versions the old body and demotes the page in one transaction.
+
+### Itemized changes
+
+- **One projection per page per process** (`page-body/projection.ts`): a second call for the same page waits for the first, and a sealed page returns at once.
+- **Forced probe** in `test/large-pages/segmented-derived-work.test.ts`: holding the first projection open shows 2 concurrent projections of one page on master and 1 with the fix, on PGLite and Postgres. Fixes the nightly race-hunt failure #6143.
+
 ## [0.60.262.0] - 2026-10-16
 
 **One purged item no longer stops a whole Google sync, a source whose syncs keep dying now says so, and Claude refusals through `claude-cli` stop being retried forever.** If you purged a page that a connector keeps listing (a recurring calendar event whose future occurrences you deleted with `--purge`, while the series stays on the calendar), the next sync that reached it ended there. Every sync after it died the same way, so nothing more from that account was imported: no new mail, contacts or events. And every status surface said the source was fine. Now the purged item is skipped and recorded, as the purge intends, and the rest of the sync goes through. Separately, when Claude refused a prompt under its usage policy through the `claude-cli` model provider, atom extraction counted it as an ordinary error and sent the same page back to the model on every run; it now takes the same bounded give-up path as other providers' refusals.
