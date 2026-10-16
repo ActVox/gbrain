@@ -2155,14 +2155,77 @@
           {
             "category": "brain",
             "details": {
+              "code": "sync_no_successful_sync",
+              "no_successful_sync": [
+                {
+                  "code": "sync_no_successful_sync",
+                  "fix": {
+                    "actor": "agent",
+                    "argv": [
+                      "gbrain",
+                      "sync",
+                      "--source",
+                      "plain",
+                      "--no-pull"
+                    ],
+                    "consent": [],
+                    "docs": "docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+                    "requires_exclusive": false,
+                    "verify": {
+                      "argv": [
+                        "gbrain",
+                        "doctor",
+                        "--only",
+                        "sync_freshness",
+                        "--json"
+                      ]
+                    },
+                    "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+                  },
+                  "held": 0,
+                  "job_id": null,
+                  "last_attempt_at": null,
+                  "reason": "no_attempt",
+                  "result": null,
+                  "source_id": "plain"
+                }
+              ],
               "stale_count": 1,
               "synced_recently_count": 1,
               "unchanged_count": 0,
               "writer_owned_count": 1
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "message": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail"
           },
@@ -3493,7 +3556,36 @@
         "status": "unhealthy",
         "top_issues": [
           {
-            "fix": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "fix": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail",
             "tier": "root"
@@ -5881,14 +5973,77 @@
           {
             "category": "brain",
             "details": {
+              "code": "sync_no_successful_sync",
+              "no_successful_sync": [
+                {
+                  "code": "sync_no_successful_sync",
+                  "fix": {
+                    "actor": "agent",
+                    "argv": [
+                      "gbrain",
+                      "sync",
+                      "--source",
+                      "plain",
+                      "--no-pull"
+                    ],
+                    "consent": [],
+                    "docs": "docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+                    "requires_exclusive": false,
+                    "verify": {
+                      "argv": [
+                        "gbrain",
+                        "doctor",
+                        "--only",
+                        "sync_freshness",
+                        "--json"
+                      ]
+                    },
+                    "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+                  },
+                  "held": 0,
+                  "job_id": null,
+                  "last_attempt_at": null,
+                  "reason": "no_attempt",
+                  "result": null,
+                  "source_id": "plain"
+                }
+              ],
               "stale_count": 1,
               "synced_recently_count": 1,
               "unchanged_count": 0,
               "writer_owned_count": 1
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "message": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail"
           },
@@ -7219,7 +7374,36 @@
         "status": "unhealthy",
         "top_issues": [
           {
-            "fix": "Source 'plain' has never been synced. Run `gbrain sync --source <id> --no-pull` for each stale source. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "plain",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source plain --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#sync-freshness-no-successful-sync",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "sync_freshness",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "No successful sync of plain is recorded; this runs one and stamps last_sync_at when it succeeds."
+            },
+            "fix": "Source 'plain': no successful sync recorded; no attempt recorded; run `gbrain sync --source plain --no-pull`. 1 writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status",
             "name": "sync_freshness",
             "status": "fail",
             "tier": "root"
