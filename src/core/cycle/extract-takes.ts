@@ -25,6 +25,8 @@
  * v0.22.12 classifier path (extension follow-up — not blocking v0.28).
  */
 
+import { unmanagedBeliefPoint } from '../belief/projection-point.ts';
+import { coveredSources } from '../belief/coverage-report.ts';
 import { isQuarantined, QUARANTINE_KEY } from '../quarantine.ts';
 import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -326,6 +328,7 @@ export async function extractTakesFromDb(
   const refs = (await engine.listAllPageRefs()).filter(ref => (!slugFilter || slugFilter.has(ref.slug)) && (!opts.sourceId || ref.source_id === opts.sourceId));
   const buffer: TakeBatchInput[] = [];
   const coordinated = !dryRun && await managedPersistenceEnabled(engine);
+  const covered = dryRun || coordinated ? new Set<string>() : new Set(await coveredSources(engine));
   const authorities = new Map<string, Promise<MaintenanceAuthority>>();
   const authorityFor = (sourceId: string) => {
     if (!authorities.has(sourceId)) authorities.set(sourceId, maintenancePreflight(engine, sourceId).then(a => a!));
@@ -344,6 +347,15 @@ export async function extractTakesFromDb(
       if (`${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.includes('gbrain:takes:')) {
         await reextractCoordinated(engine, authorityFor, slug, source_id, rebuild, result);
       }
+      continue;
+    }
+    if (covered.has(source_id)) {
+      const beliefs = unmanagedBeliefPoint(source_id, [slug], 'takes_reextract');
+      await maintenanceTransaction(engine, tx => beliefs.run(tx, async () => {
+        const takes = await reconcilePageTakes(tx, page, slug, rebuild, false, result);
+        result.takesUpserted += await upsertProjectedTakes(engine, takes.map(t => parsedTakeToBatchInput(page.id, t)), result, tx);
+      }));
+      await beliefs.commit(engine);
       continue;
     }
     const takes = await reconcilePageTakes(engine, page, slug, rebuild, dryRun, result);

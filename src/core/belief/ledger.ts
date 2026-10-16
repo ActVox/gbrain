@@ -68,6 +68,9 @@ export function beliefBatchCovers(sourceId: string, slugs: readonly string[]): b
   return !!outer && outer.opts.sourceId === sourceId && slugs.every(slug => outer.opts.slugs.includes(slug));
 }
 
+/** True inside any belief batch: a nested writer's own publication commits with the enclosing transaction, not before it. */
+export const insideBeliefBatch = (): boolean => !!store.getStore();
+
 /** Coverage and purge probes for one source, in one read. */
 export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<{ incarnation: string; purgeEpoch: number; coverage: string | null; purgesPossible: boolean } | null> {
   const [row] = await tx.executeRaw<Record<string, unknown>>(`SELECT s.incarnation::text AS incarnation, s.purge_epoch,

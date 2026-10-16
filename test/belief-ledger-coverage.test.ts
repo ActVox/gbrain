@@ -27,6 +27,11 @@ import { assertLegacyEngineMigration } from '../src/core/persistence/maintenance
 import { copiedEntries, copyAll, digestMismatches } from './helpers/graduation-copy-harness.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { importFromContent } from '../src/core/import-file.ts';
+import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
+import { extractTakes } from '../src/core/cycle/extract-takes.ts';
+import { extractStaleFromDB } from '../src/commands/extract.ts';
+import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
 import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
@@ -389,6 +394,78 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const asked = await doctor(b);
         expect(asked).toMatchObject({ status: 'warn', fix: { actor: 'user', ask_user: true } });
         expect(asked.message).toContain('purge replay partial for purge-1');
+      }, { enable: false });
+    }, 180_000);
+
+    test('unmanaged projection points: legacy import, extract_facts, takes reextract and derived links each append one marked unmanaged publication; a dropped point shows as drift', async () => {
+      await brain(async b => {
+        const marked = async (publicationId: string) => (await b.engine.executeRaw('SELECT 1 FROM belief_commit_marks WHERE publication_id = $1::uuid', [publicationId])).length === 1;
+        const projectedDrift = async () => (await scanBeliefDrift(b.engine, b.sourceId, { deep: true })).drifted.map(d => d.slug).filter(slug => !slug.startsWith('extracts/'));
+        const step = async (run: () => Promise<unknown>) => {
+          const before = await b.lastId();
+          await run();
+          const events = await b.events(before);
+          expect(new Set(events.map(e => e.publication_id)).size).toBe(1);
+          expect(await marked(events[0]!.publication_id)).toBe(true);
+          return events.map(e => [e.slug, `${e.subject_kind}:${e.event_type}`, e.origin, e.cause.op]);
+        };
+        const importPage = (slug: string, body: string) => importFromContent(b.engine, slug, body, { sourceId: b.sourceId, noEmbed: true });
+        await importPage('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example' }));
+        const acme = beliefPage({ facts: ['Acme raised a seed round'], takes: ['Acme will win its market'], links: ['people/alice-example'] });
+        expect(await step(() => importPage('companies/acme-example', acme))).toEqual([['companies/acme-example', 'page:page.published', 'unmanaged', 'import']]);
+        expect(await step(() => runExtractFacts(b.engine, { sourceId: b.sourceId, slugs: ['companies/acme-example'] })))
+          .toEqual([['companies/acme-example', 'fact:fact.asserted', 'unmanaged', 'extract_facts']]);
+        expect(await step(() => extractTakes(b.engine, { source: 'db', sourceId: b.sourceId, slugs: ['companies/acme-example'] })))
+          .toEqual([['companies/acme-example', 'take:take.asserted', 'unmanaged', 'takes_reextract']]);
+        expect(await step(() => extractStaleFromDB(b.engine, { dryRun: false, jsonMode: false, quiet: true, sourceIdFilter: b.sourceId, catchUp: false })))
+          .toEqual([['companies/acme-example', 'link:link.asserted', 'unmanaged', 'derived_links']]);
+        expect(await projectedDrift()).toEqual([]);
+        // Forced probe: a takes reextract whose events are dropped leaves its slug drifted.
+        await importPage('companies/beta-example', beliefPage({ title: 'Beta Example', takes: ['Beta will ship late'] }));
+        fault(drafts => drafts.filter(d => d.cause.op !== 'takes_reextract'));
+        await extractTakes(b.engine, { source: 'db', sourceId: b.sourceId, slugs: ['companies/beta-example'] });
+        __setBeliefEmitterFaultForTests(null);
+        expect(await projectedDrift()).toEqual(['companies/beta-example']);
+      }, { managed: false });
+    }, 180_000);
+
+    test('backfill from page_versions: one marked backfill publication per version, historical time in source_time only, idempotent, and a purge mid-run re-prepares', async () => {
+      await brain(async b => {
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme raised a seed round'], takes: ['Acme will win its market'] }));
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme raised a seed round', 'Acme has ten staff'], takes: ['Acme will win its market'] }));
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme has ten staff'], takes: [{ claim: 'Acme will win its market', weight: '0.4' }] }));
+        await expect(backfillBeliefHistory(b.engine, b.sourceId)).rejects.toMatchObject({ code: 'belief_coverage_required' });
+        await b.enable();
+        const since = (await coverageIntervals(b.engine, b.sourceId))[0]!.started_at;
+        const before = await b.lastId();
+        let bumped = 0;
+        const report = await backfillBeliefHistory(b.engine, b.sourceId, { prepareHook: async (_slug, attempt) => {
+          if (attempt === 0) { bumped++; await b.engine.executeRaw('UPDATE sources SET purge_epoch = purge_epoch + 1 WHERE id = $1', [b.sourceId]); }
+        } });
+        expect(bumped).toBe(1);
+        expect(report).toMatchObject({ since, events: 9, retried: 1, pages: [{ slug: 'companies/acme-example', versions: 3, events: 9, complete: true, reasons: [] }] });
+        const events = await b.events(before);
+        expect(events.map(e => [`${e.subject_kind}:${e.event_type}`, e.cause.version === null ? 'start' : 'version', e.value?.fact ?? e.value?.weight ?? null])).toEqual([
+          ['page:page.published', 'version', null], ['fact:fact.asserted', 'version', 'Acme raised a seed round'], ['take:take.asserted', 'version', 0.5],
+          ['page:page.published', 'version', null], ['fact:fact.asserted', 'version', 'Acme has ten staff'],
+          ['page:page.published', 'start', null], ['fact:fact.retracted', 'start', null], ['take:take.revised', 'start', 0.4],
+          ['page:backfill', 'version', null]]);
+        expect(events.every(e => e.origin === 'backfill')).toBe(true);
+        expect(events.at(-1)!.value).toEqual({ backfill_complete: true, versions: 2, reasons: [], coverage_start: since });
+        expect(events.at(-1)!.cause).toEqual({ op: 'backfill', purge_epoch: 1 });
+        const times = await b.engine.executeRaw<{ source_time: string | null; recorded_at: string; marked: boolean }>(`SELECT e.source_time, e.recorded_at,
+            EXISTS (SELECT 1 FROM belief_commit_marks m WHERE m.publication_id = e.publication_id) AS marked FROM belief_events e WHERE e.source_id = $1 AND e.id > $2 ORDER BY e.id`, [b.sourceId, before]);
+        const ms = (v: unknown) => new Date(v as string).getTime();
+        expect(times.every(t => t.marked && t.source_time !== null && ms(t.source_time) <= ms(since) && ms(t.recorded_at) >= ms(since))).toBe(true);
+        expect(new Set(events.map(e => e.publication_id)).size).toBe(4);
+        expect((await backfillBeliefHistory(b.engine, b.sourceId)).events).toBe(0);
+        expect(await b.lastId()).toBe(events.at(-1)!.id);
+        // Forced probe: a purge on every attempt exhausts the retries and refuses with belief_preparation_stale.
+        await b.put('companies/beta-example', beliefPage({ title: 'Beta Example', facts: ['Beta ships late'] }));
+        await b.engine.executeRaw(`UPDATE pages SET created_at = $2::timestamptz - interval '1 hour' WHERE source_id = $1 AND slug = 'companies/beta-example'`, [b.sourceId, since]);
+        await expect(backfillBeliefHistory(b.engine, b.sourceId, { slugs: ['companies/beta-example'], prepareHook: async () => {
+          await b.engine.executeRaw('UPDATE sources SET purge_epoch = purge_epoch + 1 WHERE id = $1', [b.sourceId]);
+        } })).rejects.toMatchObject({ code: 'belief_preparation_stale' });
       }, { enable: false });
     }, 180_000);
 

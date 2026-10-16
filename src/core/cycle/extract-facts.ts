@@ -48,6 +48,7 @@
  * structurally unfenceable and never gate.
  */
 
+import { unmanagedBeliefPoint } from '../belief/projection-point.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { existsSync, readFileSync } from 'node:fs';
 
@@ -1076,7 +1077,8 @@ export async function runExtractFacts(
       const authority = await managedAuthority();
       if (authority) return publishFenceReconcile(engine, authority, page, slug, toInsert);
       try {
-        return await maintenanceTransaction(engine, async tx => {
+        const beliefs = unmanagedBeliefPoint(sourceId, [slug], 'extract_facts');
+        const written = await maintenanceTransaction(engine, tx => beliefs.run(tx, async () => {
           opts.signal?.throwIfAborted();
           if (watermark && !await lockReconcileRevision(tx, sourceId, slug, page.knowledge_revision ?? null)) return null;
           const current = await tx.getPage(slug, { sourceId });
@@ -1084,7 +1086,9 @@ export async function runExtractFacts(
           const written = await writeFenceReconcile(tx, sourceId, slug, plan, writes, opts.signal);
           if (watermark && !deferInserts) await settleFactsReconcile(tx, sourceId, slug, 'complete', page.knowledge_revision ?? null);
           return written;
-        });
+        }));
+        await beliefs.commit(engine);
+        return written;
       } catch (error) {
         if (!isAborted(opts.signal)) throw error;
         result.warnings.push(`${slug}: fact reconciliation cancelled; transaction rolled back`);
