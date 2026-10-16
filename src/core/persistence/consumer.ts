@@ -193,6 +193,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private foregroundCounts = new Map<string, number>();
   /** #5984 Phase 4.5: the newest sequence when this process last claimed a head of each lane run (one head per foreground commit). */
   private laneHeadSeen = new Map<string, string>();
+  /** The newest sequence when this process last claimed a sync head on each worktree, FIFO or lane (one FIFO sync head per foreground commit). */
+  private syncHeadSeen = new Map<string, string>();
   /** #5984 Phase 4.5: roots where a foreground write this consumer claimed ahead of queued sync rows committed since it last claimed a sync row there. */
   private owesSyncTurn = new Set<string>();
   /** Requests this consumer claimed ahead of a queued sync row of their root. */
@@ -616,10 +618,12 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     while (!this.stopping && this.active.size - this.laneTaskCount() < concurrency) {
       const claimed = laneClaim();
       try {
+        await faultPoint('consumer:claiming');
         // A root where lanes run here owes the sync side no FIFO turn: the write publishes beside its groups.
         const row = await this.phase('claim', () => claimNextWrite(this.engine, this.hostId, this.opts.claimLeaseMs ?? 30_000, [...attemptedRoots],
-          [...this.owesSyncTurn].filter(key => !laneRootKeys.includes(key)), laneRootKeys.filter(key => !attemptedRoots.has(key))));
+          [...this.owesSyncTurn].filter(key => !laneRootKeys.includes(key)), laneRootKeys.filter(key => !attemptedRoots.has(key)), Object.fromEntries(this.syncHeadSeen)));
         if (!row) break;
+        if (row.worktree_id && row.seen_sequence) this.syncHeadSeen.set(row.worktree_id, row.seen_sequence);
         if (String(row.intent?.kind ?? '').startsWith('managed_sync_')) this.owesSyncTurn.delete(row.worktree_id ?? `db:${row.source_incarnation}`);
         else if (row.passed_sync) this.passedSync.add(row.id);
         if (this.stopping) { await releaseUnpublishedClaim(this.statements, row, 'consumer_stopping'); break; }
@@ -667,9 +671,11 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       while (!this.stopping && (this.laneTasks.get(worktreeId) ?? 0) < capacity) {
         const claimed = laneClaim();
         try {
+          await faultPoint('consumer:claiming');
           const row = await this.phase('claim', () => claimNextLaneHead(this.engine, this.hostId, worktreeId, run, undefined, this.laneHeadSeen.get(run) ?? null));
           if (!row) break;
           this.laneHeadSeen.set(run, row.seen_sequence);
+          this.syncHeadSeen.set(worktreeId, row.seen_sequence);
           this.owesSyncTurn.delete(worktreeId);
           this.startLaneTask(row, worktreeId);
         } finally { claimed(); }
