@@ -147,6 +147,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 - Doctor `details.conversation.fix` gains `manual`: no envelope `fix` and no paid argv; the message names the hand route (forget it and remember it again with --entity) until the page's content changes, which re-arms `reextract`.
 - Free outcomes: only `RELINK_REASONS` memoized:true misses (`ambiguous`, `unverified_match`) stay tried for good; `no_page`, `no_mention` and `withdrawn` misses are re-armed for the free relink by any page created in the source after the attempt.
 - `extract-conversation-facts.ts` is 2081 of its 2087 ceiling (one import line). No TSV change.
+- `src/core/cli-flag-registry.generated.ts` regenerated again in a separate INTEGRATOR-ROW commit (doctor drops `--retry-model`; maintain and sync gain `--entity`, from the doctor's hand-route text). Drop it and rerun `bun run build:flag-registry` after the lanes merge.
 - Doctor golden drift: none new from this follow-up (`details.conversation.fix` gains the value `manual`; no new field).
 - Test: test/conversation-memo-6764.test.ts (free, paid at zero price with N=1, then manual and no paid argv; a new entity page re-arms a `no_page` row; a content edit re-arms the paid fallback). Fails 3/3 on 6be0e3410, passes 3/3 after. test/conversation-facts-managed.test.ts gains the managed memo test (pglite here; postgres in the e2e tier).
 
