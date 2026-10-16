@@ -129,7 +129,7 @@ export function printSyncResult(result: SyncResult, sink: NodeJS.WriteStream = p
         const retries = [...new Set((result.failures ?? []).map(failure => managedSyncRetryCommand(failure)))];
         write(retries.length
           ? `  Fix the cause, then run: ${retries.join(' ; ')} (this admits a fresh run after active work drains).`
-          : '  Fix the cause, then run gbrain sync --no-pull --retry-failed with the same source and options; this admits a fresh run after active work drains.');
+          : '  Fix the cause, then run gbrain sync --no-pull with the same source and options; it retries the recorded failure and admits a fresh run after active work drains.');
         break;
       }
       write(`Sync BLOCKED at ${result.toCommit.slice(0, 8)}: ${result.failedFiles ?? 0} file(s) failed.`);

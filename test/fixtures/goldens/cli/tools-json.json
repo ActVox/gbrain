@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 239891,
-    "stdoutSha256": "80152879f4c0d0b757cb9e8d2c1bc1a5029744a8c9610ce9e55969fd9828b833",
+    "stdoutBytes": 240805,
+    "stdoutSha256": "b74f9cac75ff138b0397cd21bef71fb9d86fb1562cdf1303fd53596fc5c41ac9",
     "toolNames": [
       "remember",
       "entity",
@@ -412,6 +412,7 @@
           "include_deleted": "boolean?",
           "include_quarantined": "boolean?",
           "include_timeline_entries": "boolean?",
+          "known_as_of": "string?",
           "lines": "object?",
           "max_bytes": "number?",
           "min_trust": "string?",
@@ -490,6 +491,10 @@
             "include_timeline_entries": {
               "description": "Timeline rows too.",
               "type": "boolean"
+            },
+            "known_as_of": {
+              "description": "Recorded time: the page as this brain had recorded it at this ISO 8601 instant (2026-10-01T12:00:00Z), from the belief ledger. Not as_of, which is valid time (a date).",
+              "type": "string"
             },
             "lines": {
               "additionalProperties": false,
@@ -2491,16 +2496,27 @@
         "mutating": false,
         "name": "get_versions",
         "parameters": {
+          "diff": "boolean?",
           "include_body": "boolean?",
+          "known_as_of": "string?",
           "limit": "number?",
-          "slug": "string"
+          "slug": "string",
+          "source_id": "string?"
         },
         "required_scopes": [],
         "schema": {
           "properties": {
+            "diff": {
+              "description": "With known_as_of: each version also carries a unified diff from the version before it.",
+              "type": "boolean"
+            },
             "include_body": {
               "description": "true adds compiled_truth and timeline to every version. Default false (metadata only).",
               "type": "boolean"
+            },
+            "known_as_of": {
+              "description": "Recorded time: the validity intervals this brain had recorded by this ISO 8601 instant, from the belief ledger. Not as_of, which is valid time (a date).",
+              "type": "string"
             },
             "limit": {
               "description": "Return only the newest N versions (a positive integer). Default 20; MCP callers are capped at 100.",
@@ -2508,6 +2524,10 @@
             },
             "slug": {
               "description": "Slug of the page whose version history to list.",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "With known_as_of: the source.",
               "type": "string"
             }
           },

@@ -302,15 +302,12 @@ test('quote-recovered frontmatter imports and is counted with the generator pref
 }), 120_000);
 
 test('escalation fires past the configured hold count', () => eachEngine(async () => {
-  await engine.setConfig('sync.hold_escalate_count', '0');
-  try {
+  await withEnv({ GBRAIN_SYNC_HOLD_ESCALATE_COUNT: '0' }, async () => {
     const { id, root } = await source({ 'notes/a.md': good('Alpha'), 'notes/broken.md': BROKEN });
     const result = await sync(id, root);
     expect(result).toMatchObject({ holds_escalated: true, held_count: 1 });
     expect(printed(result)).toContain('HOLDS ESCALATED');
-  } finally {
-    await engine.setConfig('sync.hold_escalate_count', '50');
-  }
+  });
 }), 120_000);
 
 test('#6188 (T5): legacy sync imports a page with a malformed fence as before and never holds it', async () => eachEngine(async () => {

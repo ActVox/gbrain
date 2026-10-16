@@ -277,15 +277,15 @@ async function worktreeRecoveryPending(engine: BrainEngine, binding: WorktreeBin
 }
 /** Never wait on a sync: an unexhausted cursor names its own resume command. */
 async function assertNoUnfinishedSync(engine: BrainEngine, members: string[]): Promise<void> {
-  const [cursor] = await engine.executeRaw<{ source_id: string; header: Record<string, unknown>; failed: boolean }>(`SELECT c.completed_keys->0->>'sourceId' AS source_id,
-    c.completed_keys->0 AS header,EXISTS (SELECT 1 FROM op_checkpoints f WHERE f.op='managed-sync-failure' AND f.fingerprint=c.fingerprint) AS failed
+  const [cursor] = await engine.executeRaw<{ source_id: string; header: Record<string, unknown> }>(`SELECT c.completed_keys->0->>'sourceId' AS source_id,
+    c.completed_keys->0 AS header
     FROM op_checkpoints c WHERE c.op='managed-sync' AND COALESCE(c.completed_keys->0->>'done','false')<>'true'
     AND c.completed_keys->0->>'sourceId'=ANY($1::text[]) ORDER BY c.updated_at LIMIT 1`, [members]);
   if (!cursor) return;
   const header = cursor.header as { processingOptions?: Record<string, boolean>; syncOptions?: Parameters<typeof checkpointRetryCommand>[0]['syncOptions'] };
   const resume = checkpointRetryCommand({ sourceId: cursor.source_id, processingOptions: header.processingOptions, syncOptions: header.syncOptions ?? null });
   throw refusal('sync_in_progress', `Source ${cursor.source_id} has an unfinished managed sync cursor; moving the checkout now would strand it.`,
-    `${cursor.failed ? resume : resume.replace(' --retry-failed', '')}, then retry the refresh.`);
+    `${resume}, then retry the refresh.`);
 }
 
 async function drainCounts(engine: BrainEngine, worktreeId: string): Promise<{ requests: number; effects: number; recovery: number }> {
@@ -326,15 +326,15 @@ async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRo
       try { result = await performManagedSync(engine, { sourceId, noPull: true }); }
       catch (error) {
         const failure = error instanceof OperationError ? error : opError('storage_error', error instanceof Error ? error.message : String(error),
-          `The managed sync of source ${sourceId} failed during refresh ${row.id}. Check its writer status, fix the cause, then resume with gbrain sync --source ${sourceId} --no-pull --retry-failed.`);
-        blocked.push({ source_id: sourceId, code: failure.code, message: failure.message, resume: `gbrain sync --source ${sourceId} --no-pull --retry-failed` });
+          `The managed sync of source ${sourceId} failed during refresh ${row.id}. Check its writer status, fix the cause, then resume with gbrain sync --source ${sourceId} --no-pull.`);
+        blocked.push({ source_id: sourceId, code: failure.code, message: failure.message, resume: `gbrain sync --source ${sourceId} --no-pull` });
         status = 'blocked';
         break;
       }
       status = result.status;
       if (result.status === 'blocked_by_failures') {
         blocked.push({ source_id: sourceId, code: result.managedWrite?.write_error ?? result.failureCodes?.[0]?.code ?? 'sync_blocked',
-          message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.', resume: `gbrain sync --source ${sourceId} --no-pull --retry-failed` });
+          message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.', resume: `gbrain sync --source ${sourceId} --no-pull` });
         break;
       }
       if (result.status === 'partial') await new Promise(resolve => setTimeout(resolve, DRAIN_POLL_MS));
@@ -383,10 +383,10 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
         try {
           const result = await performManagedSync(engine, { sourceId: member, noPull: true });
           if (result.status === 'blocked_by_failures') blocked.push({ source_id: member, code: result.managedWrite?.write_error ?? 'sync_blocked',
-            message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.', resume: `gbrain sync --source ${member} --no-pull --retry-failed` });
+            message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.', resume: `gbrain sync --source ${member} --no-pull` });
           synced.push({ source_id: member, status: result.status, last_commit: await lastCommit(engine, member) });
         } catch (error) {
-          blocked.push({ source_id: member, code: (error as OperationError).code ?? 'storage_error', message: (error as Error).message, resume: `gbrain sync --source ${member} --no-pull --retry-failed` });
+          blocked.push({ source_id: member, code: (error as OperationError).code ?? 'storage_error', message: (error as Error).message, resume: `gbrain sync --source ${member} --no-pull` });
         }
       }
       return { ...base, status: blocked.length ? 'sync_blocked' : 'already_current', synced, ...(blocked.length ? { sync_blocked: blocked, next: blocked.map(b => b.resume).join(' ; ') } : {}) };

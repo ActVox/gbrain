@@ -350,6 +350,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ],
         "description": "Lowest trust tier to return (the connection floor still applies).",
         "fullSurfaceOnly": true
+      },
+      "known_as_of": {
+        "type": "string",
+        "fullSurfaceOnly": true,
+        "description": "Recorded time: the page as this brain had recorded it at this ISO 8601 instant (2026-10-01T12:00:00Z), from the belief ledger. Not as_of, which is valid time (a date)."
       }
     },
     "scope": "read",
@@ -2080,6 +2085,21 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "include_body": {
         "type": "boolean",
         "description": "true adds compiled_truth and timeline to every version. Default false (metadata only)."
+      },
+      "known_as_of": {
+        "type": "string",
+        "fullSurfaceOnly": true,
+        "description": "Recorded time: the validity intervals this brain had recorded by this ISO 8601 instant, from the belief ledger. Not as_of, which is valid time (a date)."
+      },
+      "diff": {
+        "type": "boolean",
+        "fullSurfaceOnly": true,
+        "description": "With known_as_of: each version also carries a unified diff from the version before it."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "With known_as_of: the source.",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",

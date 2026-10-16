@@ -1,7 +1,7 @@
 import type { BrainEngine, ReservedConnection } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, publicationGroupKey, syncGroup, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues, independentGroup, sweepSegmentStorage } from './journal.ts';
-import { finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, type PreparedMutation } from './coordinator.ts';
+import { finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, transientDatabaseFailure, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { executeClaimedGroup, PAGE_BATCH_GROUP_MAX, publishSingleWrite, singleWrite } from './group-publish.ts';
 import { preparationConfigView } from './config-snapshot.ts';
@@ -54,6 +54,8 @@ const DRAIN_NOTICE_AFTER_MS = 5_000;
 const DRAIN_NOTICE_EVERY_MS = 10_000;
 /** #6696 C7: at most one storage.keep_db policy pass (KEEP_DB_BATCH requests) per this interval. */
 const KEEP_DB_POLICY_INTERVAL_MS = 10 * 60_000;
+/** #6712 (convergence mode f): how long a pass whose connection died keeps trying to release its unpublished claims. */
+const CONNECTION_LOSS_RELEASE_MS = 30_000;
 /** #6650: how often a consumer looks for claims held by an owner it can prove dead. */
 export const DEAD_OWNER_SCAN_MS = 5_000;
 const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -191,6 +193,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private foregroundCounts = new Map<string, number>();
   /** #5984 Phase 4.5: the newest sequence when this process last claimed a head of each lane run (one head per foreground commit). */
   private laneHeadSeen = new Map<string, string>();
+  /** The newest sequence when this process last claimed a sync head on each worktree, FIFO or lane (one FIFO sync head per foreground commit). */
+  private syncHeadSeen = new Map<string, string>();
   /** #5984 Phase 4.5: roots where a foreground write this consumer claimed ahead of queued sync rows committed since it last claimed a sync row there. */
   private owesSyncTurn = new Set<string>();
   /** Requests this consumer claimed ahead of a queued sync row of their root. */
@@ -614,10 +618,12 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     while (!this.stopping && this.active.size - this.laneTaskCount() < concurrency) {
       const claimed = laneClaim();
       try {
+        await faultPoint('consumer:claiming');
         // A root where lanes run here owes the sync side no FIFO turn: the write publishes beside its groups.
         const row = await this.phase('claim', () => claimNextWrite(this.engine, this.hostId, this.opts.claimLeaseMs ?? 30_000, [...attemptedRoots],
-          [...this.owesSyncTurn].filter(key => !laneRootKeys.includes(key)), laneRootKeys.filter(key => !attemptedRoots.has(key))));
+          [...this.owesSyncTurn].filter(key => !laneRootKeys.includes(key)), laneRootKeys.filter(key => !attemptedRoots.has(key)), Object.fromEntries(this.syncHeadSeen)));
         if (!row) break;
+        if (row.worktree_id && row.seen_sequence) this.syncHeadSeen.set(row.worktree_id, row.seen_sequence);
         if (String(row.intent?.kind ?? '').startsWith('managed_sync_')) this.owesSyncTurn.delete(row.worktree_id ?? `db:${row.source_incarnation}`);
         else if (row.passed_sync) this.passedSync.add(row.id);
         if (this.stopping) { await releaseUnpublishedClaim(this.statements, row, 'consumer_stopping'); break; }
@@ -665,9 +671,11 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       while (!this.stopping && (this.laneTasks.get(worktreeId) ?? 0) < capacity) {
         const claimed = laneClaim();
         try {
+          await faultPoint('consumer:claiming');
           const row = await this.phase('claim', () => claimNextLaneHead(this.engine, this.hostId, worktreeId, run, undefined, this.laneHeadSeen.get(run) ?? null));
           if (!row) break;
           this.laneHeadSeen.set(run, row.seen_sequence);
+          this.syncHeadSeen.set(worktreeId, row.seen_sequence);
           this.owesSyncTurn.delete(worktreeId);
           this.startLaneTask(row, worktreeId);
         } finally { claimed(); }
@@ -949,7 +957,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     }
     const prep = startPreparation(async signal => {
       signal.addEventListener('abort', () => cancel.abort(signal.reason), { once: true });
-      await faultPoint('consumer:preparing', { requestId: row.request_id, sourceId: row.source_id, operation: row.operation, signal });
+      await faultPoint('consumer:preparing', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation, signal });
       // Phase 4.3: a single page write prepares against one config read instead of one per key.
       return this.prepare(this.engine.kind === 'postgres' && singleWrite(row)
         && await writeSwitchOn(this.engine, 'single_write_group').catch(() => true) ? await preparationConfigView(this.engine) : this.engine,
@@ -994,7 +1002,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       this.preparing.delete(row.id);
       preparationActive = false;
       enterClaimPhase(clock, 'publishing');
-      await faultPoint('consumer:prepared', { requestId: row.request_id, sourceId: row.source_id, operation: row.operation });
+      await faultPoint('consumer:prepared', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
       const ceilingMs = await readPublicationCeilingMs(this.engine);
       await holdClaimForPublication(lease, () => renewWriteClaim({ executeRaw: this.engine.executeRawDirect.bind(this.engine) }, row.id, row.execution_token!,
         publicationLeaseMs(ceilingMs), undefined, claimPhaseStamp(clock, row.execution_token)));
@@ -1035,38 +1043,65 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   }
   /** #5984: a claimed bulk sync head takes its directly following group members along; one row runs the single path. */
   private async executeOrGroup(row: WriteRequest, root: RootHold): Promise<boolean> {
-    // #6712: a page publishes whatever its predecessor's fate; a lane group member released mid-group only waits while the
-    // member before it is still unfinished (#6153 class).
-    const lane = laneOf(row);
-    if (await claimedHeadOrder(this.engine, row, lane !== null) === 'wait') { await releaseUnpublishedClaim(this.statements, row, 'group_member_waiting'); return false; }
-    const group = publicationGroupKey(row);
-    // A managed import batch also groups on PGLite: its members share one transaction's guards there too.
-    if (!group || this.engine.kind !== 'postgres' && !group.startsWith('import:')) return this.execute(row, root);
-    // #6007: a put_pages or import batch publishes in groups of at most PAGE_BATCH_GROUP_MAX pages.
-    const followers = await claimGroupFollowers(this.engine, row, group, syncGroup(group) ? 63 : PAGE_BATCH_GROUP_MAX - 1);
-    if (!followers.length && !lane) return this.execute(row, root);
-    const rows = [row, ...followers];
-    for (const member of rows) this.executing.add(member.id);
+    const claimed = [row];
     try {
-      return await executeClaimedGroup(this.engine, rows, { hostId: this.hostId, lane,
-        prepare: (member, engine, signal, clock) => this.prepare(engine, member, this.config, signal, clock),
-        lease: this.leaseTiming(), policy: this.policy, foregroundMs: this.opts.preparationMs ?? 30_000,
-        publication: this.publicationBound(row, await readPublicationCeilingMs(this.engine)),
-        leftRunning: (work, blocksRoot, abandoned) => {
-          if (!blocksRoot) { this.keepUntilSettled(work); return; }
-          // #6278: an abandoned member blocks its root until it settles or the ceiling passes; several abandoned members all hold it.
-          const settled = this.keepAbandoned(work, abandoned?.clock.claimedAt);
-          const block = abandoned ? this.abandonedRootBlock(abandoned.row, abandoned.clock, settled) : settled;
-          root.until = root.until ? Promise.all([root.until, block]).then(() => undefined) : block;
-        },
-        settled: done => {
-          this.executing.delete(done.id);
-          if (done.state === 'committed' && done.worktree_id && !String(done.intent?.kind).startsWith('managed_sync_')) {
-            this.foregroundCounts.set(done.worktree_id, this.foregroundCompletions(done.worktree_id) + 1);
-          }
-          this.settled(done);
-        } });
-    } finally { for (const member of rows) this.executing.delete(member.id); }
+      // #6712: a page publishes whatever its predecessor's fate; a lane group member released mid-group only waits while the
+      // member before it is still unfinished (#6153 class).
+      const lane = laneOf(row);
+      if (await claimedHeadOrder(this.engine, row, lane !== null) === 'wait') { await releaseUnpublishedClaim(this.statements, row, 'group_member_waiting'); return false; }
+      const group = publicationGroupKey(row);
+      // A managed import batch also groups on PGLite: its members share one transaction's guards there too.
+      if (!group || this.engine.kind !== 'postgres' && !group.startsWith('import:')) return this.execute(row, root);
+      // #6007: a put_pages or import batch publishes in groups of at most PAGE_BATCH_GROUP_MAX pages.
+      const followers = await claimGroupFollowers(this.engine, row, group, syncGroup(group) ? 63 : PAGE_BATCH_GROUP_MAX - 1);
+      if (!followers.length && !lane) return this.execute(row, root);
+      claimed.push(...followers);
+      const rows = [row, ...followers];
+      for (const member of rows) this.executing.add(member.id);
+      try {
+        return await executeClaimedGroup(this.engine, rows, { hostId: this.hostId, lane,
+          prepare: (member, engine, signal, clock) => this.prepare(engine, member, this.config, signal, clock),
+          lease: this.leaseTiming(), policy: this.policy, foregroundMs: this.opts.preparationMs ?? 30_000,
+          publication: this.publicationBound(row, await readPublicationCeilingMs(this.engine)),
+          leftRunning: (work, blocksRoot, abandoned) => {
+            if (!blocksRoot) { this.keepUntilSettled(work); return; }
+            // #6278: an abandoned member blocks its root until it settles or the ceiling passes; several abandoned members all hold it.
+            const settled = this.keepAbandoned(work, abandoned?.clock.claimedAt);
+            const block = abandoned ? this.abandonedRootBlock(abandoned.row, abandoned.clock, settled) : settled;
+            root.until = root.until ? Promise.all([root.until, block]).then(() => undefined) : block;
+          },
+          settled: done => {
+            this.executing.delete(done.id);
+            if (done.state === 'committed' && done.worktree_id && !String(done.intent?.kind).startsWith('managed_sync_')) {
+              this.foregroundCounts.set(done.worktree_id, this.foregroundCompletions(done.worktree_id) + 1);
+            }
+            this.settled(done);
+          } });
+      } finally { for (const member of rows) this.executing.delete(member.id); }
+    } catch (error) {
+      if (transientDatabaseFailure(error)) await this.releaseAfterConnectionLoss(claimed);
+      throw error;
+    }
+  }
+  /**
+   * #6712 (convergence mode f): a pass whose database connection died (a pooler restart, a dropped connection) gives
+   * back every claim it took that did not commit, as soon as the database answers again, so the drain claims them anew
+   * at once. Left alone they stay `running` under the publication lease this live process holds, and nothing frees
+   * them until it lapses (about six minutes). The release is fenced on the claim's token, no recovery record and
+   * publication not started, so a committed member, a member another consumer took over and one whose files need
+   * recovery are untouched. Gives up after `CONNECTION_LOSS_RELEASE_MS`, leaving the lease to lapse as before.
+   */
+  private async releaseAfterConnectionLoss(rows: WriteRequest[]): Promise<void> {
+    const deadline = Date.now() + CONNECTION_LOSS_RELEASE_MS;
+    for (let attempt = 0; !this.stopping; attempt++) {
+      try {
+        for (const row of rows) await releaseUnpublishedClaim(this.statements, row, 'database_contention');
+        return;
+      } catch (error) {
+        if (!transientDatabaseFailure(error) || Date.now() >= deadline) return;
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(2000, 250 * 2 ** attempt)));
+    }
   }
   /** Mandatory barrier: engine.close must be sequenced AFTER this promise. */
   async stop(): Promise<void> {

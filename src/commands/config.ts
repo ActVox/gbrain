@@ -882,6 +882,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const key = positionals[1];
   const value = positionals[2];
   if ((action === 'get' || action === 'set') && key) (await import('../core/questions/auto-think-migration.ts')).noteAutoThinkReplacement(key);
+  if ((action === 'get' || action === 'set') && key && await (await import('../core/sync-config-keys.ts')).handleSyncKeyConfig(engine, action, key)) return; // #6712 PR 2
 
   if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack')) {
     const effective = key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);

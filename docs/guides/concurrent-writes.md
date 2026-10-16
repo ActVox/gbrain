@@ -531,11 +531,11 @@ If its recorded file bytes no longer match, preserve the file and receipt and
 resolve the conflict on the owner; do not delete recovery records.
 
 If a sync cursor was already invalidated, keep its failure visible until the
-owner has checked the canonical content. Then explicitly re-enumerate with the
-same source and processing options:
+owner has checked the canonical content. Then rerun the plain sync with the
+same source and processing options; it retries what the previous run recorded:
 
 ```bash
-gbrain sync --source example-source --no-pull --no-embed --no-extract --retry-failed
+gbrain sync --source example-source --no-pull --no-embed --no-extract
 ```
 
 Use `--no-embed` and `--no-extract` here only if they were the original sync
