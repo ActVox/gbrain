@@ -35,7 +35,7 @@ import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
 
-const utf8 = new TextDecoder('utf-8', { fatal: true });
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** The live page a segmented write replaces (null: create). */
 export interface SegmentedLivePage { id: number; generation: number; storage: BodyStorage; title: string; type: string; flags: JsonObject | null }

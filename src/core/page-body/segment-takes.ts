@@ -21,39 +21,63 @@ export interface StreamedTakes {
   hasMarker: boolean;
 }
 
-export async function parseTakesFenceBlocks(blocks: AsyncIterable<BodyBlock>, page: { slug: string; source_id: string }): Promise<StreamedTakes> {
-  let fence: string[] | null = null;
-  let fenceChars = 0;
-  let endOnly = false;
-  let nearMiss = false;
-  let hasBegin = false;
-  let hasMarker = false;
-  for await (const { text, at } of blocks) {
-    hasBegin ||= text.includes(TAKES_FENCE_BEGIN);
-    hasMarker ||= text.includes('gbrain:takes:');
-    if (!hasMarker) continue;
+/** parseTakesFenceBlocks as a push scan: feed one region's blocks in order (`at` from the region start), then `result`. */
+export class TakesFenceScan {
+  private fence: string[] | null = null;
+  private fenceChars = 0;
+  private endOnly = false;
+  private nearMiss = false;
+  private hasBegin = false;
+  private hasMarker = false;
+  private done: StreamedTakes | null = null;
+
+  constructor(private readonly page: { slug: string; source_id: string }) {}
+
+  push({ text, at }: Pick<BodyBlock, 'text' | 'at'>): void {
+    if (this.done) return;
+    this.hasBegin ||= text.includes(TAKES_FENCE_BEGIN);
+    this.hasMarker ||= text.includes('gbrain:takes:');
+    if (!this.hasMarker) return;
     let from = 0;
     let search = 0;
-    if (!fence) {
+    if (!this.fence) {
       const begin = indexOfOutsideCode(text, TAKES_FENCE_BEGIN);
       if (begin === -1) {
         // parseTakesFence's end search with no begin starts at TAKES_FENCE_BEGIN.length - 1.
-        endOnly ||= indexOfOutsideCode(text, TAKES_FENCE_END, Math.max(0, TAKES_FENCE_BEGIN.length - 1 - at)) !== -1;
-        nearMiss ||= indexOfOutsideCode(text, 'gbrain:takes:begin') !== -1;
-        continue;
+        this.endOnly ||= indexOfOutsideCode(text, TAKES_FENCE_END, Math.max(0, TAKES_FENCE_BEGIN.length - 1 - at)) !== -1;
+        this.nearMiss ||= indexOfOutsideCode(text, 'gbrain:takes:begin') !== -1;
+        return;
       }
-      fence = [];
+      this.fence = [];
       from = begin;
       search = begin + TAKES_FENCE_BEGIN.length;
     }
     const end = indexOfOutsideCode(text, TAKES_FENCE_END, search);
     const piece = text.slice(from, end === -1 ? text.length : end + TAKES_FENCE_END.length);
-    fenceChars += piece.length;
+    this.fenceChars += piece.length;
     segmentedPassWork.carry += piece.length;
-    if (fenceChars > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, page.source_id, fenceChars);
-    fence.push(piece);
-    if (end !== -1) return { parsed: parseTakesFence(fence.join('')), hasBegin, hasMarker };
+    if (this.fenceChars > BLOCK_MAX_BYTES) throw blockTooLargeError(this.page.slug, this.page.source_id, this.fenceChars);
+    this.fence.push(piece);
+    if (end !== -1) this.done = { parsed: parseTakesFence(this.fence.join('')), hasBegin: this.hasBegin, hasMarker: this.hasMarker };
   }
-  const reduced = fence ? TAKES_FENCE_BEGIN : endOnly ? `${'\n'.repeat(TAKES_FENCE_BEGIN.length)}${TAKES_FENCE_END}` : nearMiss ? 'gbrain:takes:begin' : '';
-  return { parsed: parseTakesFence(reduced), hasBegin, hasMarker };
+
+  /** The scan is complete: later blocks cannot change the result. */
+  get finished(): boolean {
+    return this.done !== null;
+  }
+
+  result(): StreamedTakes {
+    if (this.done) return this.done;
+    const reduced = this.fence ? TAKES_FENCE_BEGIN : this.endOnly ? `${'\n'.repeat(TAKES_FENCE_BEGIN.length)}${TAKES_FENCE_END}` : this.nearMiss ? 'gbrain:takes:begin' : '';
+    return { parsed: parseTakesFence(reduced), hasBegin: this.hasBegin, hasMarker: this.hasMarker };
+  }
+}
+
+export async function parseTakesFenceBlocks(blocks: AsyncIterable<BodyBlock>, page: { slug: string; source_id: string }): Promise<StreamedTakes> {
+  const scan = new TakesFenceScan(page);
+  for await (const block of blocks) {
+    scan.push(block);
+    if (scan.finished) break;
+  }
+  return scan.result();
 }

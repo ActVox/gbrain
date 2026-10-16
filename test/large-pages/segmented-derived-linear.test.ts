@@ -25,6 +25,10 @@
  * reads only its marker segments), blocks 5.95 x1.99, windows 2.00 x2.00 (a
  * window holds the whole block before its own), carry 0.52 x1.99.
  * Prefix-re-reading driver (n = 1 MiB): bytes and blocks x2.68.
+ * Manifest row visits (`bodyRowWork.visits`, read-range.ts; fix lane C1, finding C2): the passes visit each manifest
+ * row a bounded number of times (measured 33.1 per row at both sizes), so visits per row stay under VISITS_PER_ROW. Row counts stay below
+ * MIN_RATIO_COUNT, so the bound is per row, not a doubling ratio: a pass that filters the whole manifest for every
+ * block visits rows x blocks, and its visits per row grow with the page (8 segments 80 visits, 16 segments 288).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
@@ -49,10 +53,13 @@ import { EXTRACTION_PIPELINE_VERSION, planSegmentedExtraction } from '../../src/
 import type { Page } from '../../src/core/types.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
 import { countWorkAsync, describeWork, linearityViolations, MAX_DOUBLING_RATIO, type Sample } from '../helpers/work-counts.ts';
+import { bodyRowWork } from '../../src/core/page-body/read-range.ts';
 
 const MB = 1024 * 1024;
 /** Per input byte, about 2x the measured value or more. */
 const PER_BYTE = { 'pass.bytes': 22, 'pass.blocks': 12, 'pass.windows': 4, 'pass.carry': 1.2 };
+/** Manifest row visits per live row over every pass, about 2x the measured value. */
+const VISITS_PER_ROW = 66;
 
 let engine: PGLiteEngine;
 let dir: string;
@@ -115,7 +122,13 @@ async function prefixRereading(slug: string): Promise<void> {
 }
 
 const sample = async (bytes: number, slug: string, run: (slug: string) => Promise<void>): Promise<Sample> =>
-  ({ bytes, work: await countWorkAsync({ pass: segmentedPassWork }, () => run(slug)) });
+  ({ bytes, work: await countWorkAsync({ pass: segmentedPassWork, read: bodyRowWork }, () => run(slug)) });
+
+async function liveRows(slug: string): Promise<number> {
+  const [row] = await engine.executeRaw<{ n: unknown }>(`SELECT count(*) AS n FROM page_body_manifest m JOIN pages p ON p.id=m.page_id
+    WHERE p.slug=$1 AND m.gen_to IS NULL AND m.staging_id IS NULL`, [slug]);
+  return Number(row!.n);
+}
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'segmented-linear-'));
@@ -138,6 +151,10 @@ describe('derived pass work over a segmented page', () => {
     const b = await sample(8 * MB, 'notes/linear-8', passes);
     console.log(`[segmented-derived-linear] passes: ${describeWork(a, b)}`);
     expect(linearityViolations(a, b, PER_BYTE)).toEqual([]);
+    const rows = [await liveRows('notes/linear-4'), await liveRows('notes/linear-8')];
+    console.log(`[segmented-derived-linear] manifest visits per row: ${(a.work['read.visits']! / rows[0]!).toFixed(1)} (${rows[0]} rows), ${(b.work['read.visits']! / rows[1]!).toFixed(1)} (${rows[1]} rows)`);
+    expect(a.work['read.visits']! / rows[0]!).toBeLessThanOrEqual(VISITS_PER_ROW);
+    expect(b.work['read.visits']! / rows[1]!).toBeLessThanOrEqual(VISITS_PER_ROW);
   }, 300_000);
 
   test('forced probe: the same bounds fail a driver that re-reads the prefix before each block', async () => {

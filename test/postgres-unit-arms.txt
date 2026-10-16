@@ -81,6 +81,7 @@ test/large-pages/sealed-segmented-search.test.ts
 test/large-pages/segment-vector-reuse.test.ts
 test/large-pages/segmented-append-reembed.test.ts
 test/large-pages/segmented-body-unreachable.test.ts
+test/large-pages/segmented-bom.test.ts
 test/large-pages/segmented-conversation-facts.test.ts
 test/large-pages/segmented-create-searchable.test.ts
 test/large-pages/segmented-derived-parity.test.ts
@@ -92,16 +93,19 @@ test/large-pages/segmented-evidence-read-cost.test.ts
 test/large-pages/segmented-evidence.test.ts
 test/large-pages/segmented-facts-reconcile.test.ts
 test/large-pages/segmented-file-drift.test.ts
+test/large-pages/segmented-forced-cuts.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
 test/large-pages/segmented-leads.test.ts
 test/large-pages/segmented-maintenance-commands.test.ts
+test/large-pages/segmented-prior-view.test.ts
 test/large-pages/segmented-read-refusals.test.ts
 test/large-pages/segmented-remember-refusal.test.ts
 test/large-pages/segmented-repair-scans.test.ts
 test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
+test/large-pages/segmented-sweep-budget.test.ts
 test/large-pages/segmented-switch.test.ts
 test/large-pages/segmented-versions.test.ts
 test/link-cross-source.test.ts

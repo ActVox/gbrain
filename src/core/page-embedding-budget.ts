@@ -89,7 +89,7 @@ type BudgetPage = { id: number; body_storage?: BodyStorage | null; body_bytes?: 
 async function segmentedSampleWindows(engine: BrainEngine, pageId: number): Promise<string[]> {
   const manifest = await engine.readManifest(pageId);
   if (manifest.length === 0) return [''];
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
   const read = async (row: ManifestRow) => {
     const texts = await engine.readSegmentTexts(row.sourceId, [row.sha256]);
     return decoder.decode(texts.get(Buffer.from(row.sha256).toString('hex')) ?? new Uint8Array());

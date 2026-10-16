@@ -13,7 +13,9 @@ import { sanitizeRemoteBody } from '../remote-body.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
 import { bodyUnread } from '../page-body/page-shape.ts';
 import { bodyBlocks, detachedValue } from '../page-body/segment-blocks.ts';
-import { parseTakesFenceBlocks } from '../page-body/segment-takes.ts';
+import { TakesFenceScan } from '../page-body/segment-takes.ts';
+import type { BodyRegion } from '../page-body/types.ts';
+import { createHash } from 'node:crypto';
 import { materializedMarker, materializedMarkerHash, timelineKey, timelineKeyHash } from '../timeline-marker.ts';
 import type { OperationError } from '../ops/contract.ts';
 import { protectedRegions } from '../fence-scan.ts';
@@ -150,40 +152,85 @@ function timelineView(body: CanonicalBody, slug: string): TimelineView {
   return { entries: extractTimeline(safe, slug), marked: markedTimeline(safe, slug), superseded: new Set(supersededCitationTimeline(safe).map(t => timelineKey(t))) };
 }
 
+/**
+ * What a prior body says about the stored rows a write classifies, by the row's index in the rows read and its key:
+ * a bullet (`entry`), a bullet a marker still matches (`marked`), a superseded citation reading (`superseded`).
+ */
+interface PriorRows { entry(i: number, key: string): boolean; marked(i: number, key: string): boolean; superseded(i: number, key: string): boolean }
+
 /** The views a prior snapshot contributes, plus its takes rows per field and whether either field's takes fence warns. */
-interface PriorView extends TimelineView { takeRows: Set<number>; takesWarn: boolean }
+interface PriorView { rows: PriorRows; takeRows: Set<number>; takesWarn: boolean }
+
+function viewRows(view: TimelineView): PriorRows {
+  return { entry: (_, key) => view.entries.has(key), marked: (_, key) => view.marked.has(key), superseded: (_, key) => view.superseded.has(key) };
+}
+
+const PRIOR_ENTRY = 1, PRIOR_MARKED = 2, PRIOR_SUPERSEDED = 4;
 
 /**
- * timelineView of a stored segmented page whose body is unread, block by block (page-body/segment-blocks.ts): each
- * block is sanitized alone, as the segmenter scans it, and extractTimeline's two passes are merged in its order
- * (every bullet and heading entry, then parseTimelineEntries' readings over them). A `###` dated entry's detail ends
- * at its block. The takes rows are parsed per field, as canonicalTakeRows does (page-body/segment-takes.ts).
+ * The segmented prior view per snapshot page object, for the stored rows it was asked about (their keys' SHA-256): a
+ * write asks for it at preparation, materialization and removal reporting, and each call reads the same revision.
  */
-async function segmentedPriorView(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, slug: string): Promise<PriorView> {
+const segmentedPriors = new WeakMap<object, { digest: string; view: PriorView }>();
+
+/**
+ * The prior view of a stored segmented page whose body is unread, in one pass block by block (page-body/segment-blocks.ts)
+ * and cached for the snapshot (segmentedPriors). Each block is sanitized alone, as the segmenter scans it; every bullet
+ * and heading entry and parseTimelineEntries' readings of it count as the body's entries. Only the stored rows asked
+ * about are kept, one flag byte each, never the body's entries. A `###` dated entry's detail ends at its block. The
+ * takes rows are parsed per field, as canonicalTakeRows does (page-body/segment-takes.ts), in the same pass.
+ */
+async function segmentedPriorView(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, slug: string, keys: readonly string[]): Promise<PriorView> {
+  const digest = createHash('sha256').update(keys.join('\0')).digest('hex');
+  const cached = segmentedPriors.get(page);
+  if (cached?.digest === digest) return cached.view;
+  const index = new Map<string, number[]>();
+  keys.forEach((key, i) => { const at = index.get(key); if (at) at.push(i); else index.set(key, [i]); });
+  const flags = new Uint8Array(keys.length);
+  const mark = (key: string, bit: number) => { for (const i of index.get(key) ?? []) flags[i]! |= bit; };
+  const takes = new Map<BodyRegion, TakesFenceScan>((['truth', 'timeline'] as const).map(region => [region, new TakesFenceScan(page)]));
+  let region: BodyRegion | null = null;
+  let regionAt = 0;
+  for await (const block of bodyBlocks(engine, page)) {
+    if (block.region && block.region !== region) { region = block.region; regionAt = block.at; }
+    if (block.region) takes.get(block.region)!.push({ text: block.text, at: block.at - regionAt });
+    const safe = sanitizeRemoteBody(block.text, { keepMaterializedMarkers: true });
+    for (const t of extractTimelineFromContent(safe, slug)) mark(timelineKey(t), PRIOR_ENTRY);
+    for (const t of parseTimelineEntries(safe)) mark(timelineKey({ ...t, source: t.source ?? 'markdown' }), PRIOR_ENTRY);
+    for (const key of markedTimeline(safe, slug)) mark(key, PRIOR_MARKED);
+    for (const t of supersededCitationTimeline(safe)) mark(timelineKey(t), PRIOR_SUPERSEDED);
+  }
+  const fields = [...takes.values()].map(scan => scan.result());
+  const view: PriorView = {
+    rows: { entry: i => (flags[i]! & PRIOR_ENTRY) !== 0, marked: i => (flags[i]! & PRIOR_MARKED) !== 0, superseded: i => (flags[i]! & PRIOR_SUPERSEDED) !== 0 },
+    takeRows: new Set(fields.flatMap(field => field.parsed.takes.map(t => t.rowNum))), takesWarn: fields.some(field => field.parsed.warnings.length > 0),
+  };
+  segmentedPriors.set(page, { digest, view });
+  return view;
+}
+
+/** The prior snapshot's view of `rows` (its stored timeline rows): from its strings, or streamed when its segmented body is unread. */
+async function priorView(engine: BrainEngine, page: PageSnapshot['page'], slug: string, rows: readonly StoredTimelineRow[]): Promise<PriorView> {
+  if (bodyUnread(page)) return segmentedPriorView(engine, page, slug, rows.map(row => timelineKey(row)));
+  const fields = [page.compiled_truth, page.timeline ?? ''].map(field => parseTakesFence(field));
+  return { rows: viewRows(timelineView(page, slug)),
+    takeRows: new Set(fields.flatMap(field => field.takes.map(t => t.rowNum))), takesWarn: fields.some(field => field.warnings.length > 0) };
+}
+
+/**
+ * The canonical timeline of a stored segmented page whose body is unread, block by block, extractTimeline's two passes
+ * merged in its order (every bullet and heading entry, then parseTimelineEntries' readings over them).
+ */
+async function segmentedCanonicalTimeline(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, slug: string): Promise<Map<string, ExtractedTimelineEntry>> {
   const extracted = new Map<string, ExtractedTimelineEntry>();
   const parsed = new Map<string, ExtractedTimelineEntry>();
-  const marked = new Set<string>();
-  const superseded = new Set<string>();
   for await (const block of bodyBlocks(engine, page)) {
     const safe = sanitizeRemoteBody(block.text, { keepMaterializedMarkers: true });
     for (const t of extractTimelineFromContent(safe, slug)) extracted.set(timelineKey(t), detachedValue(t));
     for (const t of parseTimelineEntries(safe)) parsed.set(timelineKey({ ...t, source: t.source ?? 'markdown' }), detachedValue({ ...t, source: t.source ?? 'markdown', slug }));
-    markedTimeline(safe, slug, marked);
-    for (const t of supersededCitationTimeline(safe)) superseded.add(timelineKey(t));
   }
-  const entries = new Map(extracted);
-  for (const [key, entry] of parsed) entries.set(key, entry);
-  const fields = await Promise.all((['truth', 'timeline'] as const).map(region => parseTakesFenceBlocks(bodyBlocks(engine, page, { regions: [region] }), page)));
-  return { entries, marked, superseded, takeRows: new Set(fields.flatMap(field => field.parsed.takes.map(t => t.rowNum))),
-    takesWarn: fields.some(field => field.parsed.warnings.length > 0) };
-}
-
-/** The prior snapshot's view: from its strings, or streamed when its segmented body is unread. */
-async function priorView(engine: BrainEngine, page: PageSnapshot['page'], slug: string): Promise<PriorView> {
-  if (bodyUnread(page)) return segmentedPriorView(engine, page, slug);
-  const fields = [page.compiled_truth, page.timeline ?? ''].map(field => parseTakesFence(field));
-  return { ...timelineView(page, slug), takeRows: new Set(fields.flatMap(field => field.takes.map(t => t.rowNum))),
-    takesWarn: fields.some(field => field.warnings.length > 0) };
+  for (const [key, entry] of parsed) extracted.set(key, entry);
+  return extracted;
 }
 
 /**
@@ -191,7 +238,7 @@ async function priorView(engine: BrainEngine, page: PageSnapshot['page'], slug: 
  * before a transaction; unrecordedCanonicalTimeline filters it inside one.
  */
 export async function storedCanonicalTimeline(engine: BrainEngine, page: PageSnapshot['page'], slug: string): Promise<Map<string, ExtractedTimelineEntry>> {
-  return bodyUnread(page) ? (await segmentedPriorView(engine, page, slug)).entries : canonicalTimeline(page, slug);
+  return bodyUnread(page) ? segmentedCanonicalTimeline(engine, page, slug) : canonicalTimeline(page, slug);
 }
 
 /**
@@ -238,19 +285,16 @@ export async function unrecordedCanonicalTimeline(engine: BrainEngine, pageId: n
 }
 
 /** Classify stored rows against a new body and the writer's prior snapshot's view. */
-function classifyTimeline(rows: StoredTimelineRow[], body: CanonicalBody, prior: TimelineView | null, slug: string, writer: ProjectionWriter,
+function classifyTimeline(rows: StoredTimelineRow[], body: CanonicalBody, prior: PriorRows | null, slug: string, writer: ProjectionWriter,
   policy?: TimelineWritePolicy) {
   const incoming = timelineView(body, slug);
   const timeline = incoming.entries;
   const exactIncoming = new Map([...timeline.values()].map(t => [exactTimelineKey(t), sanitizeForJsonb(t.detail ?? '')]));
-  const priorTimeline = new Set(prior?.entries.keys() ?? []);
-  const priorMarked = prior?.marked ?? new Set<string>();
-  const superseded = new Set([...incoming.superseded, ...(prior?.superseded ?? [])]);
-  const pinned = rows.map(row => {
+  const pinned = rows.map((row, i) => {
     const key = timelineKey(row);
     const state: TimelineRowState = exactIncoming.has(exactTimelineKey(row)) ? 'in_body' : timeline.has(key) ? 'drifted'
-      : priorMarked.has(key) ? 'removed_marked' : priorTimeline.has(key) ? 'removed'
-      : superseded.has(key) ? (hasExtractorDetail(row) ? 'superseded' : 'superseded_annotated') : 'database_only';
+      : prior?.marked(i, key) ? 'removed_marked' : prior?.entry(i, key) ? 'removed'
+      : incoming.superseded.has(key) || prior?.superseded(i, key) ? (hasExtractorDetail(row) ? 'superseded' : 'superseded_annotated') : 'database_only';
     return { ...row, key, state, action: timelineRowAction(writer, state, policy) };
   });
   return { timeline, exactIncoming, pinned };
@@ -273,7 +317,8 @@ function removedSummary(dates: string[]): TimelineRowsRemoved | null {
 /** The stored rows this writer would delete because the new body dropped their bullets, judged now. */
 export async function timelineRowsToRemove(engine: BrainEngine, body: CanonicalBody, prior: PageSnapshot, slug: string,
   writer: ProjectionWriter, policy?: TimelineWritePolicy): Promise<TimelineRowsRemoved | null> {
-  const { pinned } = classifyTimeline(await storedTimeline(engine, prior.page.id), body, await priorView(engine, prior.page, slug), slug, writer, policy);
+  const rows = await storedTimeline(engine, prior.page.id);
+  const { pinned } = classifyTimeline(rows, body, (await priorView(engine, prior.page, slug, rows)).rows, slug, writer, policy);
   return removedSummary(pinned.filter(row => row.action === 'delete' && (row.state === 'removed' || row.state === 'removed_marked')).map(row => row.date));
 }
 
@@ -314,7 +359,8 @@ export async function materializeTimeline(engine: BrainEngine, body: CanonicalBo
   prior: PageSnapshot | null, writer: ProjectionWriter, policy?: TimelineWritePolicy): Promise<TimelineMaterialization> {
   const timelineText = body.timeline ?? '';
   if (!prior) return { timeline: timelineText, materialized: 0, unrenderable: 0 };
-  const { pinned } = classifyTimeline(await storedTimeline(engine, prior.page.id), body, await priorView(engine, prior.page, slug), slug, writer, policy);
+  const rows = await storedTimeline(engine, prior.page.id);
+  const { pinned } = classifyTimeline(rows, body, (await priorView(engine, prior.page, slug, rows)).rows, slug, writer, policy);
   const blocks: string[] = [];
   const seen = new Set<string>();
   let unrenderable = 0;
@@ -332,7 +378,7 @@ export async function materializeTimeline(engine: BrainEngine, body: CanonicalBo
 
 /** Database-only timeline rows on one page, split by whether they can be materialized. */
 export async function pendingTimelineRows(engine: BrainEngine, page: { id: number; slug: string } & CanonicalBody, exclude: ReadonlySet<number> = new Set()) {
-  const { pinned } = classifyTimeline(await storedTimeline(engine, page.id), page, timelineView(page, page.slug), page.slug, 'editing');
+  const { pinned } = classifyTimeline(await storedTimeline(engine, page.id), page, viewRows(timelineView(page, page.slug)), page.slug, 'editing');
   const renderable = new Set<string>();
   let unrenderable = 0;
   for (const row of pinned) {
@@ -424,9 +470,9 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
   // #6259: a page the content-quality gate hid as junk projects no facts or takes. Rows projected before it
   // was quarantined are left as they are (hiding them would need a new row state); only new projection stops.
   const projectFences = !isQuarantined(page.frontmatter);
-  const prior_ = prior ? await priorView(engine, prior.page, slug) : null;
-  const { timeline, exactIncoming, pinned } = classifyTimeline(prior ? await storedTimeline(engine, prior.page.id) : [],
-    page, prior_, slug, writer, policy);
+  const storedRows = prior ? await storedTimeline(engine, prior.page.id) : [];
+  const prior_ = prior ? await priorView(engine, prior.page, slug, storedRows) : null;
+  const { timeline, exactIncoming, pinned } = classifyTimeline(storedRows, page, prior_?.rows ?? null, slug, writer, policy);
   const deletions = JSON.stringify(pinned.filter(row => row.action === 'delete')
     .map(({ id, date, source, summary, detail, state }) => ({ id, date, source, summary, detail, removed: state === 'removed' || state === 'removed_marked' })));
   const refreshes = JSON.stringify(pinned.filter(row => row.action === 'refresh_detail')
