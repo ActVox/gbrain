@@ -1029,9 +1029,8 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
         : `The source's writer needs intervention (${d!.stop_reason}) before more pages can publish. Inspect it, fix what it names, then rerun: ${resumeCommand}`,
       ...(d!.stop_reason === 'drain_stalled' ? { code: 'drain_stalled', cause: d!.stall?.cause } : {}), ...(docs ? { docs } : {}) };
   }
-  const retry = resumeCommand.includes(' --retry-failed') ? resumeCommand : `${resumeCommand} --retry-failed`;
-  return { command: retry, safe_to_loop: false, retry_after_ms: 0, ...estimate,
-    why: 'A page failed to publish. Fix the cause named in managed_write / failures first; rerunning without a fix returns the same failure. Ask the user before skipping content.',
+  return { command: resumeCommand.replace(' --retry-failed', ''), safe_to_loop: false, retry_after_ms: 0, ...estimate,
+    why: 'A page failed to publish. Fix the cause named in managed_write / failures first; the same sync then retries it, and rerunning without a fix returns the same failure. Ask the user before skipping content.',
     ...(docs ? { docs } : {}) };
 }
 
@@ -1086,6 +1085,8 @@ export interface ManagedSyncBacklog {
   rate_pages_per_min: number | null;
   eta_seconds: number | null;
   last_progress_at: string | null;
+  /** #6763: when the cursor's discovery ran (frozen with the manifest); the no-progress age origin until `last_progress_at` exists. */
+  discovered_at: string | null;
   /** #6317: entries this cursor advanced past as holds (no page committed for them). */
   held: number;
   resume_command: string;
@@ -1098,7 +1099,7 @@ export interface ManagedSyncBacklog {
  * their latest drain window (CEO-A18), readable from any process.
  */
 export async function readManagedSyncBacklog(engine: BrainEngine, sourceIds?: string[]): Promise<ManagedSyncBacklog[]> {
-  const rows = await engine.executeRaw<{ header: { sourceId: string; index: number; total: number; done?: boolean; progress?: { startedAt: number; startIndex: number; lastAt: number; lastIndex: number };
+  const rows = await engine.executeRaw<{ header: { sourceId: string; index: number; total: number; done?: boolean; discoveredAt?: string; progress?: { startedAt: number; startIndex: number; lastAt: number; lastIndex: number };
     counts?: { held?: number }; processingOptions?: { noEmbed?: boolean; noExtract?: boolean; noSchemaPack?: boolean }; syncOptions?: Parameters<typeof managedSyncResumeArgs>[0]['syncOptions'] } }>(
     `SELECT completed_keys->0 AS header FROM op_checkpoints WHERE op='managed-sync' AND COALESCE(completed_keys->0->>'done','false')<>'true'`);
   return rows.map(({ header }) => header).filter(h => h?.sourceId && (!sourceIds || sourceIds.includes(h.sourceId))).map(h => {
@@ -1107,7 +1108,7 @@ export async function readManagedSyncBacklog(engine: BrainEngine, sourceIds?: st
     const estimate = p ? drainEstimate(remaining, p.lastIndex - p.startIndex, p.lastAt - p.startedAt) : { rate_pages_per_min: null, eta_seconds: null };
     const args = managedSyncResumeArgs({ sourceId: h.sourceId, processingOptions: h.processingOptions, syncOptions: h.syncOptions });
     return { source_id: h.sourceId, index: Number(h.index), total: Number(h.total), remaining, ...estimate,
-      last_progress_at: p ? new Date(p.lastAt).toISOString() : null, held: Number(h.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args };
+      last_progress_at: p ? new Date(p.lastAt).toISOString() : null, discovered_at: h.discoveredAt ?? null, held: Number(h.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args };
   });
 }
 

@@ -76,7 +76,7 @@ export async function checkSyncFailures(engine: BrainEngine | null, opts: { sour
   const resumable = managed.filter(row => !orphanKeys.has(row.cursor_key));
   const retries = [...new Set(resumable.map(row => managedSyncRetryCommand(row)))];
   const recovery = requiresManagedRetry
-    ? `${resumable.length || !orphans.length ? `Fix the cause, then run ${retries.length ? retries.join(' ; ') : 'gbrain sync --no-pull --retry-failed with the same source and options'}. Completed full runs do not resolve a different unfinished cursor.` : ''}${orphanNote}${unreadNote}`.trim()
+    ? `${resumable.length || !orphans.length ? `Fix the cause, then run ${retries.length ? retries.join(' ; ') : 'gbrain sync --no-pull with the same source and options (it retries the recorded failure)'}. Completed full runs do not resolve a different unfinished cursor.` : ''}${orphanNote}${unreadNote}`.trim()
     : `Fix the file(s) and re-run 'gbrain sync', or use 'gbrain sync --skip-failed' to acknowledge legacy file failures.${orphanNote}${unreadNote}`;
   const legacyNote = managedBrain ? legacyLedgerNote(unresolvedLegacy) : '';
   // #6712 PR 2 (L5): each managed failure with the classifier's category and the public category beside it.
