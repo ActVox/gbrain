@@ -51,7 +51,7 @@ import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
 import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
 import { occurrencesWithoutChunks } from '../page-body/ingest.ts';
-import { buildSegmentedProjection } from '../page-body/projection.ts';
+import { buildSegmentedProjection, hasStaleChunks } from '../page-body/projection.ts';
 import { segmentedExportMarkdown } from '../export-snapshot.ts';
 import { loadImportSanityConfig } from '../import-screen.ts';
 import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
@@ -460,7 +460,8 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
 /**
  * Wave B: `restore_page` of a segmented page whose body was not read back (over the single-string ceiling). Soft
  * delete only set `deleted_at` (its body, chunks, links and projections stay), so the restore clears it without
- * re-serializing or re-importing the body: version, clear, reseal (or queue the projection when chunks are missing).
+ * re-serializing or re-importing the body: version, clear, reseal (or queue the projection when chunks are missing or a
+ * deferred retirement left rows of retired occurrences).
  * The canonical file is serializePageToMarkdown's bytes streamed from the segments by export's serializer into one
  * buffer, never one string. The restore adds no text, so an agent-tier writer's advisory gate scan (flag only) is not
  * re-run over the stored body; a step that needs the whole body refuses (`page_body_segmented`): a core page's budget
@@ -492,7 +493,10 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
       await tx.restorePage(row.slug, source);
       const lowered = storedTier ? await recordAgentPageLowering(tx, row, { tier: storedTier, revision: snapshot.revision }) : null;
       const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1', [pageId]);
-      complete = !(await occurrencesWithoutChunks(tx, pageId, Number(page!.body_generation), await tx.readManifest(pageId))).length;
+      const generation = Number(page!.body_generation), live = await tx.readManifest(pageId);
+      // Unsealed while an occurrence lacks chunks or a deferred retirement left rows of retired occurrences: the projection retires them first.
+      complete = !(await occurrencesWithoutChunks(tx, pageId, generation, live)).length
+        && !await hasStaleChunks(tx, pageId, generation, live.map(row => Number(row.occurrenceId)));
       if (complete) await sealSegmentedPage(tx, pageId);
       if (core) await core.record(tx, (await tx.readPageSnapshot(row.slug, source))?.revision ?? null);
       return { ...pageNoopAdvisories(row), status: 'restored', slug: row.slug, source_id: row.source_id, chunks: 0, noop: false,

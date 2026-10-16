@@ -42,6 +42,7 @@ import { derivedRowsFrom, hideDerivedRows } from '../facts/derivation-inputs.ts'
 import { contentHash } from '../utils.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { rewrittenContentHash } from '../page-body/segment-rewrite.ts';
+import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import type { PagePurgeContext } from '../facts/purge-verify.ts';
 
 export const PURGE_RESIDUALS = 'Removed from live stores: the page row with its chunks, versions, takes, timeline, links and raw data, the facts filed on it (tombstoned), '
@@ -207,8 +208,10 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
   removed.page_body_manifest = (await tx.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM page_body_manifest WHERE page_id=$1', [page.id]))[0]?.n ?? 0;
   removed.page_body_stagings = await count('DELETE FROM page_body_stagings WHERE source_id=$1 AND (slug=$2 OR page_id=$3) RETURNING 1', [sourceId, slug, page.id]);
   await tx.deletePage(slug, { sourceId });
+  // A text another page still references stays, and so does one an unpublished write of another page staged or deduped
+  // onto (a create holds its manifest rows in memory until it publishes): that write's copy, not this page's.
   removed.page_segment_texts = shas.length ? await count(`DELETE FROM page_segment_texts t WHERE t.source_id=$1 AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
-    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) RETURNING 1`, [sourceId, shas]) : 0;
+    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')} RETURNING 1`, [sourceId, shas]) : 0;
   const key = `${sourceId}:${row.request_id}`;
   purgeContext.delete(key);
   purgeContext.set(key, { needles, factIds, pageId: page.id, paths, segmentShas: shas.slice(0, 4096) });

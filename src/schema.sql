@@ -344,8 +344,9 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- span in its source's read projection) are added the same way.
   -- v248: occurrence_id, local_ordinal, raw_byte_start/end and body_generation
   -- (segmented-page chunks; NULL for inline pages) and
-  -- content_chunks_occurrence_idx are added the same way (v248's
-  -- retired_generation is dropped by v249, which adds content_chunks_generation_idx).
+  -- content_chunks_occurrence_idx are added the same way, and so is v248's
+  -- retired_generation, which nothing writes or reads but released chunk readers
+  -- still select (v249 keeps it and adds content_chunks_generation_idx).
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
   embedded_text_hash    TEXT,
@@ -2100,6 +2101,13 @@ CREATE TABLE IF NOT EXISTS page_body_staging_parts (
   body       BYTEA   NOT NULL,
   PRIMARY KEY (staging_id, part_no)
 );
+CREATE TABLE IF NOT EXISTS page_body_staging_texts (
+  staging_id UUID  NOT NULL REFERENCES page_body_stagings(id) ON DELETE CASCADE,
+  source_id  TEXT  NOT NULL,
+  sha256     BYTEA NOT NULL,
+  PRIMARY KEY (staging_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_BODY_SCHEMA_SQL)
 
 -- Durable concurrent persistence (migration 151).

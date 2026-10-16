@@ -9,14 +9,15 @@
  *    until publication references it; a page-scoped sweep collects only the
  *    texts its page released; chunks of a shifted occurrence keep stored
  *    spans that hold their text in the new body; segment GC's staged-chunk
- *    delete reads an index, not the whole chunk table; v249 drops
- *    content_chunks.retired_generation, which no reader still names.
+ *    delete reads an index, not the whole chunk table; v249 keeps
+ *    content_chunks.retired_generation for released readers, and no reader at
+ *    this version names it.
  * 2. Fails when: visibility trusts body_generation alone, stageSegmentChunks
  *    skips the page's current generation and storage, text staging leaves a
  *    deduped text unlocked and its grace unrefreshed, the text sweep ignores
  *    live stagings, a page sweep scans its source's texts, raw spans are
  *    absolute body offsets, content_chunks_generation_idx is missing, or
- *    v249 leaves retired_generation behind or a chunk reader still names it.
+ *    v249 drops retired_generation or a chunk reader at this version names it.
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -275,23 +276,28 @@ for (const kind of testBackends()) {
       }
     }, 180_000);
 
-    test('v249 drops retired_generation from a v248 brain and builds the GC index; no chunk reader names the column', async () => {
+    test('v249 keeps retired_generation on a v248 brain and builds the GC index; no chunk reader names the column', async () => {
       const columns = async () => (await engine.executeRaw<{ attname: string }>(
         "SELECT attname FROM pg_attribute WHERE attrelid = 'content_chunks'::regclass AND attnum > 0 AND NOT attisdropped")).map(r => r.attname);
-      expect(await columns()).not.toContain('retired_generation');
+      expect(await columns()).toContain('retired_generation');
       await importFromContent(engine, 'notes/upgraded', page(sections('u')), { sourceId: 'default', noEmbed: true });
-      await engine.executeRaw('ALTER TABLE content_chunks ADD COLUMN retired_generation BIGINT');
       await engine.executeRaw('DROP INDEX content_chunks_generation_idx');
-      await engine.executeRaw(v249.sql);
+      if (v249.sql) await engine.executeRaw(v249.sql);
       await v249.handler!(engine);
-      expect(await columns()).not.toContain('retired_generation');
+      expect(await columns()).toContain('retired_generation');
       const [index] = await engine.executeRaw<{ indexdef: string }>("SELECT indexdef FROM pg_indexes WHERE indexname = 'content_chunks_generation_idx'");
       expect(index?.indexdef).toContain('WHERE (body_generation IS NOT NULL)');
-      for (const excludePrivate of [false, true]) {
-        expect((await engine.searchKeyword('widgets', { limit: 5, excludePrivate, requireSafeChunks: false })).length).toBeGreaterThan(0);
-        expect((await engine.getChunks('notes/upgraded', { sourceId: 'default', excludePrivate, requireSafeChunks: false })).length).toBeGreaterThan(0);
+      // The column stays for released readers (v249-master-reader-compat.test.ts); head's readers must not name it.
+      await engine.executeRaw('ALTER TABLE content_chunks RENAME COLUMN retired_generation TO retired_generation_hidden');
+      try {
+        for (const excludePrivate of [false, true]) {
+          expect((await engine.searchKeyword('widgets', { limit: 5, excludePrivate, requireSafeChunks: false })).length).toBeGreaterThan(0);
+          expect((await engine.getChunks('notes/upgraded', { sourceId: 'default', excludePrivate, requireSafeChunks: false })).length).toBeGreaterThan(0);
+        }
+        expect((await generationReaderTexts('notes/upgraded')).length).toBeGreaterThan(0);
+      } finally {
+        await engine.executeRaw('ALTER TABLE content_chunks RENAME COLUMN retired_generation_hidden TO retired_generation');
       }
-      expect((await generationReaderTexts('notes/upgraded')).length).toBeGreaterThan(0);
     }, 120_000);
 
     test('the unscoped staged-chunk GC reads content_chunks through an index, never a full scan', async () => {

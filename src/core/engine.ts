@@ -2376,8 +2376,8 @@ export interface BrainEngine {
   // Segmented page storage (Wave B; SQL in engine-sql/page-body.ts). Called only when pages.segmented_storage is on.
   /** `count` fresh manifest occurrence ids from one sequence; never reused. */
   allocateBodyOccurrenceIds(count: number): Promise<number[]>;
-  /** Insert segment texts for one source, `ON CONFLICT DO NOTHING`, in statements bounded by STAGE_BATCH_BYTES. */
-  stageSegmentTexts(sourceId: string, texts: readonly SegmentTextInput[]): Promise<{ inserted: number }>;
+  /** Insert segment texts for one source, `ON CONFLICT DO NOTHING`, in statements bounded by STAGE_BATCH_BYTES; with `stagingId`, record them as that staging's (a page purge keeps them while it is live). */
+  stageSegmentTexts(sourceId: string, texts: readonly SegmentTextInput[], opts?: { stagingId?: string }): Promise<{ inserted: number }>;
   /** Segment texts by sha256 for one source, keyed by lowercase hex; missing shas are absent. */
   readSegmentTexts(sourceId: string, sha256s: readonly Uint8Array[]): Promise<Map<string, Uint8Array>>;
   /** Insert manifest rows (staged rows carry `stagingId`), in bounded statements. */

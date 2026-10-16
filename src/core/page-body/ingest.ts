@@ -237,7 +237,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   const flushTexts = async () => {
     if (!pending.length) return;
     const batch = pending.splice(0);
-    await writes(exec => exec.stageSegmentTexts(input.sourceId, batch));
+    await writes(exec => exec.stageSegmentTexts(input.sourceId, batch, { stagingId }));
     collectBatchGarbage();
     pendingBytes = 0;
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));

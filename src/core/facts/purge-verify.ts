@@ -27,6 +27,7 @@ import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from 
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
+import { stagingNeedsTextSql } from '../page-body/schema.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -390,7 +391,7 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
   if (context?.segmentShas.length) await keyed('page_segment_texts', `SELECT 1 FROM page_segment_texts t WHERE t.source_id=$1
     AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
-    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256)`, [src, context.segmentShas]);
+    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')}`, [src, context.segmentShas]);
   if (context) {
     const refs = context.factIds.map(String);
     for (const table of ['decide_review_queue', 'decide_review_proposals']) await keyed(table, `SELECT 1 FROM ${table} WHERE source_id=$1 AND (a_ref=ANY($2::text[]) OR b_ref=ANY($2::text[]))`, [src, refs]);

@@ -47,6 +47,34 @@ END;
 $func$ LANGUAGE plpgsql;`;
 
 /**
+ * The segment texts each staging staged or deduped onto (migration v252). A create keeps its manifest rows in memory
+ * until it publishes and a replace stages its texts before its manifest rows, so this is the only durable record of
+ * which texts a live staging still needs: a page purge keeps exactly those of the texts no manifest row references.
+ * Rows go with their staging; they hold hashes, never text.
+ */
+export const PAGE_BODY_STAGING_TEXTS_SQL = `CREATE TABLE IF NOT EXISTS page_body_staging_texts (
+  staging_id UUID  NOT NULL REFERENCES page_body_stagings(id) ON DELETE CASCADE,
+  source_id  TEXT  NOT NULL,
+  sha256     BYTEA NOT NULL,
+  PRIMARY KEY (staging_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);`;
+
+/**
+ * A live staging (open, sealed or prepared, or named by a non-terminal persistence request's body_ref, the segment
+ * GC's roots) recorded the text `t` (a caller alias exposing source_id and sha256) in page_body_staging_texts: a write
+ * that has not published still needs it. Constant SQL over the alias, no values, for the purge statements that keep
+ * exactly those texts.
+ */
+export function stagingNeedsTextSql(t: string): string {
+  return `EXISTS (SELECT 1 FROM page_body_staging_texts r JOIN page_body_stagings rs ON rs.id = r.staging_id
+      WHERE r.source_id = ${t}.source_id AND r.sha256 = ${t}.sha256
+        AND (rs.state IN ('open','sealed','prepared')
+          OR EXISTS (SELECT 1 FROM persistence_requests rq WHERE rq.state IN ('queued','running','recovering')
+                      AND rq.intent->'body_ref'->>'staging_id' = rs.id::text)))`;
+}
+
+/**
  * Segment texts (stored once per source and sha256), the generation-ranged
  * manifest, body stagings and their raw upload parts, and the occurrence id
  * sequence. The manifest's text FK is NO ACTION: a referenced text can't be
@@ -133,4 +161,5 @@ CREATE TABLE IF NOT EXISTS page_body_staging_parts (
   sha256     BYTEA   NOT NULL,
   body       BYTEA   NOT NULL,
   PRIMARY KEY (staging_id, part_no)
-);`;
+);
+${PAGE_BODY_STAGING_TEXTS_SQL}`;

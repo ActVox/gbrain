@@ -73,11 +73,15 @@ test/large-pages/managed-sync-segmented-rename.test.ts
 test/large-pages/managed-sync-streamed.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
+test/large-pages/projection-demotion-race.test.ts
 test/large-pages/projection-parity.test.ts
+test/large-pages/purge-inflight-create.test.ts
 test/large-pages/purge-segments.test.ts
 test/large-pages/remote-get-page-privacy.test.ts
 test/large-pages/remote-window-privacy.test.ts
+test/large-pages/restore-deferred-retire.test.ts
 test/large-pages/sealed-segmented-search.test.ts
+test/large-pages/segment-rewrite-cr-tier.test.ts
 test/large-pages/segment-vector-reuse.test.ts
 test/large-pages/segmented-append-reembed.test.ts
 test/large-pages/segmented-body-unreachable.test.ts
@@ -95,6 +99,7 @@ test/large-pages/segmented-file-drift.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
 test/large-pages/segmented-leads.test.ts
+test/large-pages/segmented-loser-chunks.test.ts
 test/large-pages/segmented-maintenance-commands.test.ts
 test/large-pages/segmented-read-refusals.test.ts
 test/large-pages/segmented-remember-refusal.test.ts
@@ -104,6 +109,7 @@ test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
 test/large-pages/segmented-switch.test.ts
 test/large-pages/segmented-versions.test.ts
+test/large-pages/v249-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
 test/links-attendance-blocked.test.ts

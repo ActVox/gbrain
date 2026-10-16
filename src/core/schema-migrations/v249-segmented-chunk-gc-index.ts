@@ -5,10 +5,14 @@ import { buildIndexOnline, migrationNotice } from './helpers.ts';
 // ("Canonical schema sources") for when schema.sql or a TS fragment also changes.
 //
 // Segmented page storage (v248), follow-up:
-// - content_chunks.retired_generation is dropped. Nothing writes it: the flip
-//   and the projection delete the rows they retire, and a row awaiting a
-//   deferred retirement is hidden by its occurrence's closed manifest range
-//   (chunkGenerationFilter), so the predicates that read it were always true.
+// - content_chunks.retired_generation (v248) stays. Nothing at this version
+//   writes or reads it: the flip and the projection delete the rows they
+//   retire, and a row awaiting a deferred retirement is hidden by its
+//   occurrence's closed manifest range (chunkGenerationFilter). The released
+//   binary's chunk readers still select it, so it is dropped only once the
+//   writer floor excludes every binary that reads it
+//   (test/large-pages/v249-master-reader-compat.test.ts). An earlier build of
+//   this migration dropped it; v252 re-adds it on those (test) brains.
 // - content_chunks_generation_idx serves segment GC's staged-chunk delete
 //   (`c.body_generation IS NOT NULL AND c.body_generation > p.body_generation`,
 //   engine-sql/page-body.ts sweepSegments), which the resident maintenance
@@ -26,7 +30,7 @@ export const v249: Migration = {
   name: 'segmented_chunk_gc_index',
   idempotent: true,
   transaction: false,
-  sql: 'ALTER TABLE content_chunks DROP COLUMN IF EXISTS retired_generation;',
+  sql: '',
   handler: async engine => {
     await buildIndexOnline(engine, 249, CONTENT_CHUNKS_GENERATION_INDEX, { notice: migrationNotice });
   },
