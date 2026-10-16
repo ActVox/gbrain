@@ -20,6 +20,7 @@
  * `purge_lookup_timeout`, never a partial one. Nothing runs when the source has
  * no ledger events.
  */
+import { readManagedMode } from '../persistence/managed-mode.ts';
 import type { BrainEngine } from '../engine.ts';
 import { escapeFenceCell } from '../fence-shared.ts';
 import { parseFactsFence } from '../facts-fence.ts';
@@ -255,7 +256,7 @@ export async function appendDerivedHidden(tx: BrainEngine, input: { sourceId: st
     drafts.push({ ...t.draft, eventType: 'derived.hidden', value: null, cause: { op: input.op, purge_request: input.request, row: t.ref,
       ...(input.truncated ? { derived_walk: 'truncated' } : {}), ...input.cause } });
   }
-  return appendBeliefEvents(tx, drafts, { publicationId: input.publicationId, origin: source.managed ? 'live' : 'unmanaged', purgesPossible: true });
+  return appendBeliefEvents(tx, drafts, { publicationId: input.publicationId, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: true });
 }
 
 export interface LedgerPurgeReport { purged_events: number; redacted_fields: RedactedField[]; live_carriers: RedactedField[]; derived_hidden: number; derived_walk: 'complete' | 'truncated' }

@@ -94,7 +94,7 @@ async function applyRedactions(tx: BrainEngine, sourceId: string, drafts: Belief
       if (own.every(s => s.released_hash === hash)) continue;
       if (owner) {
         await tx.executeRaw('UPDATE belief_redactions SET released_by = $2::uuid, released_hash = $3 WHERE id = ANY($1::bigint[])',
-          [own.map(s => s.id), ctx.publicationId, hash]);
+          [own.map(s => Number(s.id)), ctx.publicationId, hash]);
         continue;
       }
       draft.value = { ...draft.value!, [field]: REDACTION_MARKER(own[0]!.purge_request) };

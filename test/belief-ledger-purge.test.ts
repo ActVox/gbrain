@@ -54,6 +54,13 @@ async function purgeRequest(b: BeliefBrain, clientRequestId: string): Promise<st
 
 const history = (b: BeliefBrain, q: { slug?: string; subjectKey?: string } = {}) => readBeliefHistory(b.engine, { sourceId: b.sourceId, remote: false, ...q });
 
+/** Runs a brain scenario to completion (teardown included, so withEnv scopes never overlap) and returns what it reported. */
+async function collect<T>(run: (report: (value: T) => void) => Promise<void>): Promise<T> {
+  let out: T | undefined;
+  await run(value => { out = value; });
+  return out as T;
+}
+
 /** Runs `scenario` once for real and once under `fault`; the real run must pass `check` and the faulty one must fail it. */
 async function forced<T>(scenario: () => Promise<T>, check: (value: T) => void, fault: () => void): Promise<void> {
   check(await scenario());
@@ -72,7 +79,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     const brain = (run: (b: BeliefBrain) => Promise<void>, managed = true) => beliefBrain(run, { managed, databaseUrl: engineCase.databaseUrl });
 
     test('probe 10: purge redacts the key\'s whole history to skeletons and appends one fact.purged; nothing re-asserts it', async () => {
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         const slug = `companies/acme-${randomUUID().slice(0, 6)}`;
         const stale = beliefPage({ facts: [X, 'Acme sells widgets'] });
         await b.put(slug, stale);
@@ -101,7 +108,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const stalePrepared = await b.engine.transaction(tx => appendBeliefEvents(tx, [{ ...prepared, subjectKey: `${prepared.subjectKey}#stale` }],
           { publicationId: randomUUID(), origin: 'backfill', preparedEpoch: Number(epoch!.e) })).then(() => 'appended', (e: { code?: string }) => e.code ?? 'error');
         resolve({ request, after, revised, keyHistory, insert, inserted: afterInsert - beforeInsert, reimport, backfilled, stalePrepared, fp: await fp(b, X) });
-      }).catch(reject));
+      }));
       await forced(scenario, (r: any) => {
         expect(shape(r.after)).toEqual(['page:page.published', 'fact:fact.purged']);
         const purged = r.after[1] as BeliefEvent;
@@ -120,7 +127,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     }, 240_000);
 
     test('probe 22: a claim quoted only in another fact\'s context, a take\'s resolution evidence or a link\'s context is redacted', async () => {
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         await b.put('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example' }));
         await b.put('companies/acme-example', beliefPage({ facts: ['Acme sells widgets'], takes: ['Acme will win its market'] }));
         await b.put('companies/acme-example', beliefPage({ facts: [{ claim: 'Acme sells widgets', context: `notes say ${X}` }], takes: ['Acme will win its market'],
@@ -134,7 +141,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const register = await b.engine.executeRaw<{ field: string; purge_request: string }>(`SELECT DISTINCT field, purge_request::text AS purge_request
           FROM belief_redactions WHERE source_id = $1 ORDER BY field`, [b.sourceId]);
         resolve({ request, carriers, leaks, register });
-      }).catch(reject));
+      }));
       await forced(scenario, (r: any) => {
         const byKind = Object.fromEntries((r.carriers as BeliefEvent[]).map(e => [`${e.subject_kind}:${e.event_type}`, e]));
         expect(Object.keys(byKind).sort()).toEqual(['fact:fact.revised', 'link:link.asserted', 'take:take.resolved']);
@@ -151,7 +158,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
 
     test('probe 37: a context that quotes a purged claim stays the marker until an owner replaces it, and again after an agent change', async () => {
       const page = (context: string, confidence = '1.0') => beliefPage({ facts: [X, { claim: 'Acme sells widgets', context, confidence }] });
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         const slug = 'companies/acme-example';
         await b.put(slug, page(`notes say ${X}`));
         const result = await purgeFact(b, X);
@@ -171,7 +178,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         await applyOwnerAction(b.engine, { action: 'confirm', ref: `f${fact!.id}` }, { binding: preview.binding, confirmation: { via: 'tty' } });
         const confirmed = await step(() => b.put(slug, page('agent rewrote this', '0.25')));
         resolve({ request, receiptKeys, confidence, agentEdit, owner, later, confirmed, raises: preview.raises });
-      }).catch(reject));
+      }));
       await forced(scenario, (r: any) => {
         const ctx = (events: BeliefEvent[]) => events.map(e => [e.event_type, e.value?.context, e.redacted_fields]);
         expect(r.receiptKeys.length).toBe(2);
@@ -186,7 +193,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     }, 240_000);
 
     test('probe 38: the suppression follows replacement, adoption, transfer and a verbatim copy into an unlinked fact', async () => {
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         const slug = 'companies/acme-example', quote = `notes say ${X}`;
         await b.put(slug, beliefPage({ facts: [{ claim: 'Acme sells widgets', context: quote }, X] }));
         await b.engine.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, context, source) VALUES ($1, 'people/bob-example', 'Bob runs ops', 'fact', 'world', $2, 'test')`,
@@ -210,7 +217,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         await b.put('notes/copy-example', beliefPage({ facts: [{ claim: 'Gadget orders doubled', context: quote }] }));
         const copied = (await b.events(mark)).filter(e => e.subject_kind === 'fact');
         resolve({ request, replaced, adopted, transferred, copied });
-      }, false).catch(reject));
+      }, false));
       await forced(scenario, (r: any) => {
         const ctx = (events: BeliefEvent[]) => events.map(e => [e.event_type, e.value?.context ?? null, e.redacted_fields]);
         expect(ctx(r.replaced)).toEqual([['fact.retracted', null, null], ['fact.asserted', marker(r.request), ['context']]]);
@@ -221,7 +228,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }, redactionFault('skip_live_carriers'));
     }, 240_000);
     test('probe 27: purge-verify names the link, timeline and raw-data rows that still carry the claim', async () => {
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         await b.put('companies/acme-example', beliefPage({ facts: [X] }));
         await b.put('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example' }));
         const ids = await b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
@@ -236,7 +243,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const stores = Object.fromEntries((result.stores as Array<{ store: string; status: string; items?: string[] }>)
           .filter(s => ['links', 'timeline_entries', 'raw_data'].includes(s.store)).map(s => [s.store, { status: s.status, items: s.items ?? null }]));
         resolve({ ids, stores });
-      }).catch(reject));
+      }));
       await forced(scenario, (r: any) => expect(r.stores).toEqual({
         links: { status: 'out_of_scope', items: [`link:${r.ids.link} people/alice-example -> companies/acme-example`] },
         timeline_entries: { status: 'out_of_scope', items: [`timeline:${r.ids.line} people/alice-example 2026-01-02`] },
@@ -247,10 +254,12 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     test('probe 30: a page purge redacts quotes of its 40th claim, a short claim and a claim left only in historical take events', async () => {
       const many = Array.from({ length: 40 }, (_, i) => `Vault fact ${i + 1} is sealed`);
       const short = 'Code Z9', gone = 'Vault will reopen in May';
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         const slug = 'vault/codes-example';
+        await b.put(slug, beliefPage({ prose: 'Vault index.' }));
         await b.put(slug, beliefPage({ facts: [...many, short], takes: [gone] }));
         await b.put(slug, beliefPage({ facts: [...many, short] }));
+        await b.put('notes/quotes-example', beliefPage({ prose: 'Quotes.' }));
         await b.put('notes/quotes-example', beliefPage({ facts: [
           { claim: 'Quote one', context: `as noted, ${many[39]}` }, { claim: 'Quote two', context: `badge: ${short}` }, { claim: 'Quote three', context: `plan: ${gone}` }] }));
         const result = await purgePage(b, slug);
@@ -259,7 +268,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const quotes = all.filter(e => e.slug === 'notes/quotes-example' && e.subject_kind === 'fact').map(e => [e.value?.fact, e.value?.context, e.redacted_fields]);
         const leaks = all.filter(e => [many[39]!, short, gone].some(c => JSON.stringify(e.value ?? {}).toLowerCase().includes(c.toLowerCase()))).map(e => e.id);
         resolve({ request, quotes, leaks });
-      }).catch(reject));
+      }));
       await forced(scenario, (r: any) => {
         expect(r.quotes).toEqual([['Quote one', marker(r.request), ['context']], ['Quote two', marker(r.request), ['context']], ['Quote three', marker(r.request), ['context']]]);
         expect(r.leaks).toEqual([]);
@@ -268,9 +277,10 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
 
     test('probes 31 and 35: after purge, re-derivation and a backfill of the pre-purge derived page, history shows no pre-purge derived event', async () => {
       const Y = 'Acme had a strong quarter';
-      const scenario = () => new Promise<Record<string, unknown>>((resolve, reject) => brain(async b => {
+      const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         const derivedSlug = 'notes/summary-example';
         await b.put('companies/acme-example', beliefPage({ facts: [X] }));
+        await b.put(derivedSlug, beliefPage({ prose: 'Summary.' }));
         await b.put(derivedSlug, beliefPage({ facts: [Y] }));
         const [x] = await b.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id = $1 AND fact = $2', [b.sourceId, X]);
         const [y] = await b.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id = $1 AND fact = $2', [b.sourceId, Y]);
@@ -290,7 +300,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
           visibility: 'world', value: before[0]!.value, stateHash: '', claimFp: before[0]!.claim_fp, cause: { op: 'backfill' } }], { publicationId: backfillId, origin: 'backfill' }));
         const read = (await history(b, { slug: derivedSlug })).filter(e => e.subject_kind === 'fact').map(e => [e.id, e.event_type, e.origin]);
         resolve({ request, key, before: before.map(e => e.id), hidden, rederived: rederived.map(e => [e.id, e.event_type, e.subject_key]), read });
-      }).catch(reject));
+      }));
       await forced(scenario, (r: any) => {
         expect(r.hidden.map((e: BeliefEvent) => [e.subject_key, e.value, e.cause.purge_request])).toEqual([[r.key, null, r.request]]);
         expect(r.rederived.map((e: unknown[]) => e.slice(1))).toEqual([['fact.asserted', r.key]]);

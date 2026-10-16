@@ -51,7 +51,8 @@ async function readEvents(engine: BrainEngine, sourceId: string, afterId = 0): P
   return rows.map(r => ({ ...r, id: Number(r.id), ord: Number(r.ord), value: json(r.value) as BeliefEvent['value'], cause: json(r.cause) as BeliefEvent['cause'] }));
 }
 
-function brainApi(engine: BrainEngine, ctx: OperationContext, root: string, sourceId: string): BeliefBrain {
+/** The probe API over an engine the caller opened (the file-backed restore probes reopen theirs). */
+export function brainApi(engine: BrainEngine, ctx: OperationContext, root: string, sourceId: string): BeliefBrain {
   const op = async (operation: string, params: Record<string, unknown>) =>
     await submitPageMutation(ctx as never, { operation: operation as never, params: { request_id: randomUUID(), ...params } as never }) as Record<string, unknown>;
   return {

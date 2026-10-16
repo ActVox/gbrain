@@ -32,6 +32,11 @@ import { bumpPurgeEpoch, pagePurgeClaims, redactCarryingFields, redactPurgedKeys
 
 export const PURGE_MIRROR_FILE = 'purge-events.jsonl';
 
+export type PurgeReplayFault = 'skip_replay' | 'replay_uncommitted' | 'always_complete';
+let replayFault: PurgeReplayFault | null = null;
+/** Forced-probe seam (section 11): a deliberately broken replay the restore probes must catch. Null restores it. */
+export function __setPurgeReplayFaultForTests(fault: PurgeReplayFault | null): void { replayFault = fault; }
+
 export interface PurgeMirrorFact { fact_hash: string; visibility: string; subject: string }
 export interface PurgeMirrorIntent {
   kind: 'intent'; request: string; request_id: string; source_id: string; source_incarnation: string; scope: 'fact' | 'page';
@@ -129,7 +134,7 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent): Promise<Re
     await redactCarryingFields(tx, { sourceId: src, request: intent.request, claims });
     await registerLiveCarriers(tx, { sourceId: src, request: intent.request, claims });
   }
-  const outcome: ReplayOutcome = claims.length ? 'complete' : 'partial';
+  const outcome: ReplayOutcome = claims.length || replayFault === 'always_complete' ? 'complete' : 'partial';
   await appendBeliefEvents(tx, [await replayDraft(tx, intent, lifetimes, outcome)], { publicationId: randomUUID(), origin: 'live', purgesPossible: true });
   return outcome;
 }
@@ -167,7 +172,8 @@ export async function replayPurgesInRestore(tx: BrainEngine, input: { lines: Pur
     for (const intent of newer) {
       if (seen.has(intent.request)) continue;
       seen.add(intent.request);
-      const outcome = committed.has(intent.request) ? await replayOne(tx, intent) : 'unverified';
+      if (replayFault === 'skip_replay') continue;
+      const outcome = committed.has(intent.request) || replayFault === 'replay_uncommitted' ? await replayOne(tx, intent) : 'unverified';
       replays.push({ request: intent.request, request_id: intent.request_id, scope: intent.scope, outcome });
     }
   }
