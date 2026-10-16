@@ -47,7 +47,7 @@ import { carriesClaimSql, claimNeedles, purgeCompletion, verifyFactPurge, type P
 import { noteBelief, withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
 import { appendPurgeCommitted, appendPurgeIntent } from '../belief/purge-mirror.ts';
-import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, redactCarryingFields, redactPurgedKeys, registerLiveCarriers, sourceHasBeliefEvents,
+import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, redactCarryingFields, redactPurgedKeys, registerLiveCarriers, registerVersionCarriers, sourceHasBeliefEvents,
   type LedgerPurgeReport } from '../belief/purge.ts';
 
 export const PURGE_OPERATION = 'purge_fact';
@@ -393,6 +393,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
         purged_events: await redactPurgedKeys(tx, { sourceId: p.sourceId, claimFps: [current.fact_hash], lifetimes: [] }),
         redacted_fields: await redactCarryingFields(tx, { sourceId: p.sourceId, request: admitted.id, claims: [current.fact] }),
         live_carriers: await registerLiveCarriers(tx, { sourceId: p.sourceId, request: admitted.id, claims: [current.fact] }),
+        version_carriers: await registerVersionCarriers(tx, { sourceId: p.sourceId, request: admitted.id, claims: [current.fact], versionIds: prose.map(v => v.version_id) }),
         derived_hidden: await appendDerivedHidden(tx, { sourceId: p.sourceId, request: admitted.id, publicationId: admitted.id, op: PURGE_OPERATION,
           targets: derivedTargets, truncated: walk === 'truncated' }),
         derived_walk: walk }), current.id, p.sourceId) : null;
@@ -401,7 +402,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
         purge_epoch: epoch, facts: [{ fact_hash: current.fact_hash, visibility: current.visibility, subject: plan.subject }], takes: [], lifetimes: [] });
       return completeWrite(tx, admitted, 'committed', { purge: { fact_id: p.id, hash8: token, fact_hash: current.fact_hash, subject: plan.subject,
         visibility: current.visibility, removed: counts, derived: { ...derivedHidden, truncated: plan.derived.truncated }, pages: rewritten.length,
-        ...(ledger ? { ledger: { purged_events: ledger.purged_events, redacted_fields: ledger.redacted_fields.length, live_carriers: ledger.live_carriers.length, derived_hidden: ledger.derived_hidden, derived_walk: ledger.derived_walk } } : {}) },
+        ...(ledger ? { ledger: { purged_events: ledger.purged_events, redacted_fields: ledger.redacted_fields.length, live_carriers: ledger.live_carriers.length, version_carriers: ledger.version_carriers?.length ?? 0, derived_hidden: ledger.derived_hidden, derived_walk: ledger.derived_walk } } : {}) },
         persistence: { mode: 'database' } });
     }, requestAttribution(admitted));
   }), 30_000);

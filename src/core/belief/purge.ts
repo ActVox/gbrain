@@ -33,6 +33,8 @@ import { keyedSubjects, pageNeeds } from './subjects.ts';
 import { resolveLifetimes } from './lifetimes.ts';
 import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
 import { coverageActive, readLedgerSource } from './ledger.ts';
+import { bodySubjects } from './backfill.ts';
+import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 
 const SCAN_BATCH = 1000;
 
@@ -178,6 +180,37 @@ export async function registerLiveCarriers(tx: BrainEngine, input: { sourceId: s
   return out;
 }
 
+/**
+ * Retained versions that still quote a claim (purge-verify reports them `out_of_scope: source_prose`): each carrying
+ * field quoting it is registered under the key the backfill gives that version's subject, so a later backfill writes
+ * the marker instead of copying the quote (#13).
+ */
+export async function registerVersionCarriers(tx: BrainEngine, input: { sourceId: string; request: string; claims: readonly string[]; versionIds: readonly number[] }): Promise<RedactedField[]> {
+  const forms = claimForms(input.claims);
+  const source = await readLedgerSource(tx, input.sourceId);
+  const ids = [...new Set(input.versionIds)].sort((a, b) => a - b);
+  if (!forms.length || !source || !ids.length || redactionFault === 'skip_live_carriers') return [];
+  const out: RedactedField[] = [];
+  for (let at = 0; at < ids.length; at += SCAN_BATCH) {
+    await faultPoint('purge:ledger_redaction', { sourceId: input.sourceId });
+    const versions = await tx.executeRaw<{ page_id: number; slug: string; visible: boolean; compiled_truth: string | null; timeline: string | null }>(`SELECT p.id AS page_id, p.slug,
+        (${privatePagesFilterFragment('p')}) AS visible, v.compiled_truth, v.timeline
+      FROM page_versions v JOIN pages p ON p.id = v.page_id WHERE p.source_id = $1 AND v.id = ANY($2::bigint[]) ORDER BY v.id`, [input.sourceId, ids.slice(at, at + SCAN_BATCH)]);
+    const pages = new Map(versions.map(v => [Number(v.page_id), v.slug]));
+    const lifetimes = await resolveLifetimes(tx, [...pages].map(([pageId, slug]) => ({ sourceId: input.sourceId, incarnation: source.incarnation, slug, pageId })));
+    for (const v of versions) {
+      const { subjects } = await bodySubjects(tx, lifetimes.get(Number(v.page_id))!, `${v.compiled_truth ?? ''}\n${v.timeline ?? ''}`, v.visible === true ? 'world' : 'private');
+      for (const subject of subjects) for (const field of CARRYING_FIELDS[subject.kind] ?? []) {
+        const text = subject.value[field];
+        if (typeof text !== 'string' || !quotes(text, forms)) continue;
+        await registerRedaction(tx, input.sourceId, subject.key, field, input.request, fieldHash(text));
+        out.push({ subject_key: subject.key, field, event_id: 0 });
+      }
+    }
+  }
+  return out;
+}
+
 /** The lifetimes of one page: its open lifetime at the slug and every lifetime whose page hint is the page (renames keep it). */
 export async function pageLifetimesOf(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slug: string, pageId: number): Promise<string[]> {
   const rows = await tx.executeRaw<{ page_lifetime: string }>(`SELECT page_lifetime::text AS page_lifetime FROM belief_page_lifetimes
@@ -283,7 +316,7 @@ export async function appendDerivedHidden(tx: BrainEngine, input: { sourceId: st
   return appendBeliefEvents(tx, drafts, { publicationId: input.publicationId, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: true });
 }
 
-export interface LedgerPurgeReport { purged_events: number; redacted_fields: RedactedField[]; live_carriers: RedactedField[]; derived_hidden: number; derived_walk: 'complete' | 'truncated' }
+export interface LedgerPurgeReport { purged_events: number; redacted_fields: RedactedField[]; live_carriers: RedactedField[]; version_carriers?: RedactedField[]; derived_hidden: number; derived_walk: 'complete' | 'truncated' }
 
 /** Purge requests whose derivation walk was truncated: the coverage check withholds certification of their source until a complete walk runs. */
 export async function truncatedPurgeWalks(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<string[]> {

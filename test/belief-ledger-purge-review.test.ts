@@ -10,6 +10,7 @@ import { purgeMirrorPath } from '../src/core/belief/purge-mirror.ts';
 import { CODES } from '../src/core/error-registry.ts';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { withBeliefBatch } from '../src/core/belief/ledger.ts';
+import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
 import { redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
 import { REDACTION_MARKER } from '../src/core/belief/keys.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
@@ -141,6 +142,35 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(r.status).toBe('out_of_scope');
       expect(r.items).toEqual([`fact@${r.key}`]);
     }, 240_000);
+    test('#13: a backfill after a fact purge does not copy a pre-coverage context that quoted the purged claim', async () => {
+      const r = await collect<Record<string, unknown>>(report => beliefBrain(async b => {
+        const slug = 'companies/acme-example';
+        await b.put(slug, beliefPage({ facts: [X, { claim: 'Acme sells widgets', context: `notes say ${X}` }] }));
+        await b.put(slug, beliefPage({ facts: [X, { claim: 'Acme sells widgets', context: 'rewritten context' }] }));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await b.enable();
+        const result = await purgeFact(b, X);
+        const backfill = await backfillBeliefHistory(b.engine, b.sourceId);
+        const events = await b.events();
+        report({ store: (result.stores as Array<Record<string, any>>).find(st => st.store === 'belief_events')!.status, backfilled: backfill.events > 0,
+          leaks: quoting(events, X), redacted: events.filter(e => e.origin === 'backfill' && /^\[redacted: purge [0-9a-f-]+\]$/.test(String(e.value?.context))).length > 0 });
+      }, { managed: true, enable: false, databaseUrl: engineCase.databaseUrl }));
+      expect(r).toEqual({ store: 'deleted', backfilled: true, leaks: [], redacted: true });
+    }, 240_000);
+
+    test('#13: a backfill tags a version that was private as private, whatever the page is now', async () => {
+      const r = await collect<string[][]>(report => beliefBrain(async b => {
+        const slug = 'companies/acme-example';
+        await b.put(slug, beliefPage({ frontmatter: { visibility: 'private' }, takes: ['Acme will raise in Q3'] }));
+        await b.put(slug, beliefPage({ takes: ['Acme will raise in Q3', 'Acme hires a CFO'] }));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await b.enable();
+        await backfillBeliefHistory(b.engine, b.sourceId);
+        report((await b.events()).filter(e => e.origin === 'backfill' && e.event_type !== 'backfill').map(e => [e.event_type, e.visibility]));
+      }, { managed: true, enable: false, databaseUrl: engineCase.databaseUrl }));
+      expect(r).toEqual([['page.published', 'private'], ['take.asserted', 'private'], ['page.published', 'world'], ['take.asserted', 'world']]);
+    }, 240_000);
+
     test('#14: a hard delete (purge, managed and unmanaged retention) records every cascaded inbound link as link.retracted in its own stream', async () => {
       const run = (managed: boolean, remove: (b: BeliefBrain, slug: string) => Promise<unknown>) => collect<string[]>(report => brain(async b => {
         await b.put('people/target-example', beliefPage({ type: 'person', title: 'Target Example' }));
