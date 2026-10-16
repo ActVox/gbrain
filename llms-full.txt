@@ -10042,9 +10042,15 @@ ledger starts after `since` (earlier changes are unknown, not absent), and
 `not_recorded` when the source has no ledger coverage. `entities` narrows the
 list to changes on or about the named slugs. A caller without
 `include_private` (every remote caller) gets the world view: events that were
-world-visible when recorded, on pages visible now. Under `budget_tokens` the
-belief lines pack into what pages, facts and threads leave, and `truncated`
-reports a cut; `text` gains a `## Belief changes since <since>` section. The
+world-visible when recorded, on pages visible now, and takes of the holders
+the caller may read (the takes surfaces' allow-list, `world` by default).
+Under `budget_tokens` the belief lines pack into what pages, facts and threads
+leave, and `truncated` reports a cut; `text` gains a
+`## Belief changes since <since>` section. The diff is a read of the window,
+not a cursor arm: it does not set `has_more` or hold a `session_id` cursor,
+so lines a cut dropped are not delivered on the next wake; read them with an
+explicit `since` (or `gbrain beliefs changes`). `min_trust` does not filter
+it; each change carries its `trust_tier`. The
 CLI twin is `gbrain beliefs changes [<entity>...] [--since 7d]`. Design:
 [BELIEF_LEDGER.md section 15](../designs/BELIEF_LEDGER.md#15-w4-as-built-the-weekly-change-diff).
 
