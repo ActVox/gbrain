@@ -699,7 +699,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop, ...(projectionPending ? { projection: 'pending' } : {}),
       ...sizeState,
-      ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'
+      ...(ready.result.chunks === 0 && !projectionPending ? {chunk_skip_reason: noop ? 'write_skipped'
         : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),
       // #6259: say the gate hid the page, not only why it has no chunks.
       ...(!noop && quarantineOutcome(ready.parsedPage.frontmatter) ? { quarantined: quarantineOutcome(ready.parsedPage.frontmatter) } : {}),

@@ -8,11 +8,11 @@ import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { ALL_SOURCES, assertValidSourceId } from '../core/source-id.ts';
 import { resolveRestoreTarget, restoreFilePath } from '../core/restore-target.ts';
-import { ExportStage, EXPORT_SNAPSHOT_MS, EXPORT_STREAM_BYTES_PER_MS, exportPathKey, exportPayloadLimit } from '../core/export-stage.ts';
+import { ExportStage, EXPORT_PAYLOAD_LIMIT, EXPORT_SNAPSHOT_MS, EXPORT_STREAM_BYTES_PER_MS, exportPathKey, exportPayloadLimit } from '../core/export-stage.ts';
 import { publishExport } from '../core/export-publish.ts';
 import { nativeFileTarget } from '../core/persistence/native-file-target.ts';
 import { readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../core/export-snapshot.ts';
-import { readPageBodyPolicy } from '../core/page-body/limits.ts';
+import { segmentedPageCeiling } from '../core/page-body/limits.ts';
 import { isSegmentedPage } from '../core/page-body/page-shape.ts';
 
 function option(args: string[], name: string): string | undefined {
@@ -68,12 +68,12 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
       if (restoreOnly) ({ source, repo } = await resolveRestoreTarget(tx, source, repo));
       const storage = restoreOnly && repo ? loadStorageConfig(repo) : null;
       if (restoreOnly && !storage) throw new Error('--restore-only requires a storage tiering config (gbrain.yml with a storage section).');
-      const payloadLimit = exportPayloadLimit((await readPageBodyPolicy(tx)).maxBytes);
+      const segmentedLimit = exportPayloadLimit(segmentedPageCeiling(tx.kind));
       let cursor = '0';
       for (;;) {
         checkDeadline();
-        const batch = await tx.executeRaw<{ id: string; slug: string; source_id: string; source_path: string | null; source_path_bytes: number; raw_count: number; bytes: number }>(
-          `SELECT p.id::text, left(p.slug,4097) AS slug, p.source_id, left(p.source_path,4097) AS source_path, octet_length(p.source_path) AS source_path_bytes,
+        const batch = await tx.executeRaw<{ id: string; segmented: boolean; slug: string; source_id: string; source_path: string | null; source_path_bytes: number; raw_count: number; bytes: number }>(
+          `SELECT p.id::text, p.body_storage='segmented' AS segmented, left(p.slug,4097) AS slug, p.source_id, left(p.source_path,4097) AS source_path, octet_length(p.source_path) AS source_path_bytes,
             (SELECT count(*) FROM raw_data r WHERE r.page_id=p.id) AS raw_count,
             CASE WHEN p.body_storage='segmented' THEN p.body_bytes ELSE octet_length(p.compiled_truth)::bigint + octet_length(p.timeline) END
               + octet_length(p.frontmatter::text)
@@ -96,7 +96,7 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
               if (!isDbOnly(key.slug, storage)) continue;
               if (existsSync(nativeFileTarget(repo, restoreFilePath(repo, key.slug, key.source_path, Number(key.source_path_bytes), await scannerSlugRootMode(tx, batchSource, repo))))) continue;
             }
-            if (Number(key.bytes) > payloadLimit) throw new Error('Export page payload limit exceeded. No destination output was published.');
+            if (Number(key.bytes) > (key.segmented ? segmentedLimit : EXPORT_PAYLOAD_LIMIT)) throw new Error('Export page payload limit exceeded. No destination output was published.');
             const snapshot = await readExportPage(tx, key, withdrawals);
             const page = snapshot.page;
             // #5966: the slug stamp rule lives in slugStampedFrontmatter (markdown.ts), shared with every render.
@@ -105,7 +105,7 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
             if (isSegmentedPage(page)) {
               streamedBytes += Number(key.bytes);
               const head = serializeMarkdown(frontmatter, '', '', meta).slice(0, -1);
-              await staged.addStream(page.slug + '.md', Number(key.bytes), payloadLimit, segmentedExportMarkdown(tx, page, withdrawals, head));
+              await staged.addStream(page.slug + '.md', Number(key.bytes), segmentedLimit, segmentedExportMarkdown(tx, page, withdrawals, head));
             } else staged.add(page.slug + '.md', 'file', serializeMarkdown(frontmatter, page.compiled_truth, page.timeline, meta));
             const raw = Number(key.raw_count) ? await tx.getRawData(page.slug, undefined, { sourceId: page.source_id, includeDeleted: true }) : [];
             if (raw.length) {

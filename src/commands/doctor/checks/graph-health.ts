@@ -337,6 +337,7 @@ export const timelineHistoryEntry: DoctorEntry = {
     'foreign_ownership_marker',
     'unbound_source',
     'writer_version',
+    'segmented_storage',
     'self_capture',
     'vector_plan',
     'keyword_plan',

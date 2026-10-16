@@ -292,6 +292,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'vector_plan',
   'keyword_plan',
   'writer_version',
+  'segmented_storage',
   'pgbouncer_prepare',
   'pglite_data_dir',
   // db-availability loop: engine-fit + repair-recurrence signals.
