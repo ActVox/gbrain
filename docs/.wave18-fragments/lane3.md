@@ -29,6 +29,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### Regenerate (integrator)
 
 - Doctor goldens: the `pack_upgrade_available` message changes from `gbrain-base-v2@1.3.0+a50a67b9` to `gbrain-base-v2@1.4.0+1c5ba903` in test/fixtures/goldens/doctor/{content-pglite-human,content-pglite-json,hot-checks-pglite-json,hot-checks-postgres-json,json-pglite-degraded,json-pglite-fresh,json-postgres-fresh}.json. Regenerate with the goldens script rather than hand-editing.
+- Verified locally on the lane head (9d22a479b): test/doctor-content-golden.test.ts, test/doctor-hot-checks-golden.test.ts and test/doctor-json-golden.test.ts fail (3 tests) and pass on master cadaf5cd7. Bisected: at d2bae380a (#6740 alone) the content golden matches; from 9cc84754c (#6742) on it drifts. The whole drift is (a) #6742: the pack identity `gbrain-base-v2@1.4.0+1c5ba903`, "pack gbrain-base-v2 declares 21" (was 20), and the journal byte counters (`used`, `per_day_7d`, `max_day_7d`, `reclaimable_bytes`) that grow with the bigger pack; (b) #6764: `unlinked_facts` details gain `conversation: null` and `window.conversation: 0`. Regenerate after the merge with `GBRAIN_TEST_UPDATE_GOLDENS=1 bun test <file>` for each of those three files (plus the Postgres captures in the E2E tier), review the fixture diff against this list and name it in the PR body.
 - Plugin trees / template repo if they embed the pack (none found by grep for `a50a67b9` outside the doctor goldens).
 
 ### CHANGELOG.md (wave entry, Fixed)
