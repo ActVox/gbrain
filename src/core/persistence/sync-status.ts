@@ -104,6 +104,11 @@ export interface SyncStatus {
   cursors: SyncStatusCursor[];
   /** #6650: the source's terminal write receipts that did not commit, summarized (`terminal-failures.ts`); `unknown` when the bounded read timed out. */
   terminal_failures: SyncTerminalSummary;
+  /**
+   * #6831: for a Google or GitHub connector source, the error its connector runs keep ending on (null once a run
+   * finishes). Connector runs keep no managed-sync cursor, so this never sets `last_error`, the cursor's `next` or `needs_human`.
+   */
+  connector_last_error: import('./connector-status.ts').ConnectorLastError | null;
   next: Action | null;
   /**
    * #6712 PR 2 (L5): the source's state in the sync outcome vocabulary (`synced` | `resumable` | `blocked`) and why
@@ -288,12 +293,13 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   // #6650: a receipt still holding a recovery record holds its root, so a source with nothing else to do names it as `next`.
   const { recovery_next, ...terminal } = detail ? await terminalSummary(engine, sourceId, blockers.checkpoint_blockers)
     : { status: 'unknown' as const, reason: 'not_read: run sync status with --detail', recovery_next: recovery.status === 'ok' && recovery.first ? recoveryAction(sourceId, recovery.first) : undefined };
+  const connectorLastError = await (await import('./connector-status.ts')).readConnectorLastError(engine, sourceId);
   const [state, stateReason] = statusState({ human: !!human, oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0 });
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     resume_argv: resume, ...blockers, cursors: detail ? await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures) : [],
-    terminal_failures: terminal, next: next ?? recovery_next ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
+    terminal_failures: terminal, connector_last_error: connectorLastError, next: next ?? recovery_next ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `Write request ${oldest.request.request_id} of this source is still ${oldest.request.state}${oldest.request.step ? ` (step ${oldest.request.step})` : ''}; a running owner finishes it on its own, and the next sync of this source drains it.` } satisfies Action
       : stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `The oldest-blocker or recovery probe did not answer within ${SYNC_STATUS_PROBE_MS / 1000} s, so this status does not know the state (it is not reported synced). Rerun it after a short wait; gbrain doctor --json checks the database if it keeps timing out.` } satisfies Action : null),
