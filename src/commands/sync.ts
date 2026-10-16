@@ -19,7 +19,7 @@ export interface SyncResult {
   failures?: ManagedSyncFailure[];
   runId?: string;
   managedWrite?: import('../core/persistence/sync-run.ts').ManagedSyncWriteDiagnostic;
-  /** #6643: the request a `--retry-failed` rediscovery waits for (its producer and slug), instead of a silent no-op. */
+  /** #6643: the request a rediscovery that retries a recorded failure waits for (its producer and slug), instead of a silent no-op. */
   retryWait?: import('../core/persistence/sync-run.ts').RetryWait;
   /** #6712 PR 1: another drainer holds (or took) the source's drain lease; `resumable`, nothing admitted by this run. */
   leaseHeld?: import('../core/persistence/sync-lease.ts').DrainLeaseHeld;
@@ -180,7 +180,7 @@ export interface SyncOpts {
   logNoop?: boolean;
   /** Bug 9 — acknowledge + skip past current failure set (CLI --skip-failed). */
   skipFailed?: boolean;
-  /** Bug 9 — re-attempt unacknowledged failures explicitly (CLI --retry-failed). */
+  /** CLI --retry-failed: a deprecated alias (#6712 PR 3); a plain sync retries a recorded failure. Connector syncs still read it. */
   retryFailed?: boolean;
   /** Managed connector sources: discard the connector checkpoint and re-walk the window once (CLI --reset-checkpoint). */
   resetCheckpoint?: boolean;

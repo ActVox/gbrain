@@ -7055,14 +7055,17 @@ vars — incident-time escape hatches, not everyday knobs.
    sync only, `gbrain sync --skip-failed` acknowledges a known-bad set.
    **Managed sync never acknowledges or auto-skips failed cursors.** Its
    durable failed receipt remains immutable on ordinary replay. Correct the
-   cause, inspect local `gbrain doctor`, then explicitly retry an idle
-   ordinary-source cursor with the same full/working-tree/filter options:
+   cause, inspect local `gbrain doctor`, then rerun the plain
+   sync for that source with the same full/working-tree/filter options; it
+   retries what the previous invocation recorded:
 
    ```bash
-   gbrain sync --source <source-id> --no-pull --retry-failed
+   gbrain sync --source <source-id> --no-pull
    ```
 
-   This retries with fresh admission; do not add `--skip-failed`. A successful
+   This retries with fresh admission; do not add `--skip-failed`
+   (`--retry-failed` is a deprecated alias of the plain sync on a managed
+   brain). A successful
    full run does not clear a separate failed incremental cursor. Doctor reports
    the remaining run; CLI blocked results exit nonzero and local diagnostics
    include source/path/code/request/run/target. Counts are cumulative for the
@@ -7296,7 +7299,7 @@ moving again; ask me only about the ones gbrain will not decide by itself."*
    refuses every repair-class hold instead, as releases before #6377 did.
 3. Run that sync. It re-screens the scheduled files, imports each one that now
    passes and holds again what still fails; the rest of the source is never
-   blocked. With `--retry-failed` a cursor an older release left blocked on a
+   blocked. A cursor an older release left blocked on a
    page fault converts in place (same run, no rediscovery).
 4. If `needs_human` is true, stop looping and page a person with the slug and
    `human_reason` from `status` (`next.user_message` is written for relay).
@@ -7361,6 +7364,7 @@ Every hold and error has three fields, from one table
 | `managed_image_sync_unsupported` | page | none | no | never: images stay held while multimodal embedding is off |
 | `purged_content` | page | none | yes | always: only the owner clears a purge tombstone |
 | `write_gate_rejected` | page | none | yes | always: write_gate.external_mode=reject is the user's setting |
+| `legacy_slug_conflict` | page | none | yes | always: only a person decides which legacy page the file takes over |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |
@@ -7416,7 +7420,8 @@ earlier one is held. A file that changed after its request was admitted
 (`source_changed`) is retried after the manifest's last entry, at most three
 times, then held `worktree_dirty`. A transport fault re-freezes the entry in
 place; a systemic stop is re-frozen in place by the next plain sync, at most
-three times in a row before the failure stays recorded for `--retry-failed`.
+three times in a row, and once that bound is spent the next plain sync
+resets it and tries again.
 
 A `knock_on` or `knock_on_exhausted` error was written by an older gbrain
 (a page cancelled only because another page of its sync did not commit, or
@@ -7429,7 +7434,7 @@ the extra drain and reports it); an older build's `window_dropped` reads as
 a knock-on. A checkpoint refused by a receipt at an index the cursor passed
 without a commit is re-assessed on every resume and commits without
 rediscovering the manifest; one a receipt still blocks is rediscovered by
-`--retry-failed`.
+the next plain sync.
 
 An unknown code is systemic and human: `gbrain errors <code>` explains it
 offline, `gbrain doctor --json` says what the brain thinks.
@@ -7465,7 +7470,7 @@ it and kept going; the receipt lists the hold (`held`, `held_count`) and
   run ([held files](write-refusals.md#held-files-and-content-refusals)).
 - `revision_conflict`, `page_identity_changed`, `pinned_git_worktree_conflict`
   as a `last_error` come from a run on an older release; this release holds
-  them. Rerun with `--retry-failed`: the stopped entry converts in place, the
+  them. Rerun the plain sync: the stopped entry converts in place, the
   manifest is not re-frozen. A `revision_conflict` or `cancelled` error with
   `detail: knock_on` needs no flag: the next plain sync re-freezes the entry
   (act on `root_cause` instead).
@@ -7492,8 +7497,11 @@ repair: a source in a subdirectory of its repository pins one
 Ask the user which mode the source keeps. Restoring the pin to the run's mode
 lets the next plain `gbrain sync --no-pull --source <id>` finish (the refused
 checkpoint is retried by itself); keeping the new pin takes
-`gbrain sync --no-pull --source <id> --retry-failed`, and the pages the refused
-run wrote keep their old slugs beside the new ones. A source rooted at its
+`gbrain repair managed-sync-orphans --source <id>` (it lists the cursor as
+`slug_mode_refused`; preview, then `--apply --expect <hash>`), after which the
+next sync discovers the source again under the kept pin. No sync retries that
+checkpoint by itself. The pages the refused run wrote keep their old slugs
+beside the new ones. A source rooted at its
 repository root never gets this code: both modes give it the same slugs, and
 a checkpoint an older release refused there as `revision_conflict` finishes on
 the next plain sync.
@@ -7502,10 +7510,10 @@ the next plain sync.
 
 The frozen manifest always lived in the cursor (`op_checkpoints`, op
 `managed-sync`). What threw it away was the failure ledger: every run death
-wrote a row, and `--retry-failed` read the row and rediscovered from index 0
+wrote a row, and the retry read the row and rediscovered from index 0
 (eight to twelve minutes of silence on a 14k-entry source). Page faults are
-now holds and connection faults are not recorded, so a relaunch, with or
-without `--retry-failed`, finds the cursor and resumes it. Only a systemic
+now holds and connection faults are not recorded, so a relaunch finds
+the cursor and resumes it. Only a systemic
 failure still writes a ledger row.
 
 When HEAD moved past the pinned target while the run drained, the drain takes
@@ -7533,7 +7541,7 @@ how often a person or an agent had to step in, per UTC day for the last seven
 days, so a soak can show that sync keeps moving on its own.
 
 - `interventions`: `sync_non_plain` (a `gbrain sync` with a recovery flag such
-  as `--retry-failed`, `--full`, `--break-lock` or `--skip-failed`; the plain
+  as the deprecated `--retry-failed`, `--full`, `--break-lock` or `--skip-failed`; the plain
   scheduler flags `--all`, `--no-pull`, `--hard-deadline`, `--no-embed`,
   `--no-lanes`, `--no-bulk` and `--json` do not count), `repair_apply` (a
   `gbrain repair … --apply` of any kind but file-drift), `unblock_apply`,
@@ -10598,9 +10606,9 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/tro
 | `gbrain waiting` lists bank, payment or shipping alerts as people waiting on you | upgrade (#5012: mail with `Precedence: bulk/list/junk`, a `List-Id` or a no-reply `Reply-To` opens no reply-owed loop); for loops opened before the upgrade, `gbrain waiting` prints `gbrain loops drop sender <email> --source <id> --dry-run` per sender; preview, then run it without `--dry-run` (cannot be undone), or `gbrain loops mute sender <email>` for a reversible stop ([open loops](open-loops.md#the-surfaces)) | agent, after the user agrees | none to preview | `gbrain waiting --json` no longer lists the sender |
 | [`gbrain migrate --to` refused with `writer_coordinator_required`](../ENGINES.md#engine-migration-refused) | follow the refusal's `fix`: relay its `user_message` (stay on PGLite and share with `gbrain mcp expose`, or leave the brain as it is) | agent, after the user agrees | `persistent_install`, `egress` (for `gbrain mcp expose`) | `gbrain doctor --no-migrate --json` |
 | [A write was refused with a named reason](#write-refused) | the reason's recovery in [write refusal reasons](write-refusals.md) | as the refusal's `fix` | as the refusal's `fix` | the refusal's `verify` |
-| [`gbrain sync` refused `managed_sync_flag_refused`](write-refusals.md#managed_sync_flag_refused) | rerun the same command without the flag `detail` names (`--skip-failed` or `--include-gitignored`); fix a failed file and use `--retry-failed`, or commit an ignored file | agent | none | `gbrain sources status --json` |
-| [`--retry-failed` says failures "belong to a run with different sync options"](#retry-other-options) | run the command printed on each line: `resumable (replay …)` or `resumable (fresh discovery …)` reruns under the failed run's options, `safely orphaned` previews `gbrain repair managed-sync-orphans --source <id>` (apply with its hash), `unresolved` names what has to finish first | agent; the repair apply after the user agrees | the repair retires bookkeeping rows only | `gbrain sync status --source <id> --json` |
-| [Managed sync blocked with `checkpoint_validation_timeout`](#checkpoint-validation-timeout) | `gbrain repair request-indexes --apply` when an index is missing or INVALID, then the printed `gbrain sync --source <id> --no-pull --retry-failed …` | brain host | none | `gbrain doctor --only persistence_request_indexes --json` |
+| [`gbrain sync` refused `managed_sync_flag_refused`](write-refusals.md#managed_sync_flag_refused) | rerun the same command without the flag `detail` names (`--skip-failed` or `--include-gitignored`); fix a failed file and rerun the plain sync (`--retry-failed` is a deprecated alias), or commit an ignored file | agent | none | `gbrain sources status --json` |
+| [Sync with the deprecated `--retry-failed` alias says failures "belong to a run with different sync options"](#retry-other-options) | run the command printed on each line: `resumable (replay …)` or `resumable (fresh discovery …)` reruns under the failed run's options, `safely orphaned` previews `gbrain repair managed-sync-orphans --source <id>` (apply with its hash), `unresolved` names what has to finish first | agent; the repair apply after the user agrees | the repair retires bookkeeping rows only | `gbrain sync status --source <id> --json` |
+| [Managed sync blocked with `checkpoint_validation_timeout`](#checkpoint-validation-timeout) | `gbrain repair request-indexes --apply` when an index is missing or INVALID, then the printed `gbrain sync --source <id> --no-pull …` | brain host | none | `gbrain doctor --only persistence_request_indexes --json` |
 | [Doctor warns `persistence_session_timeouts` (`session_timeouts_not_applied`)](#session-timeouts-not-applied) | `ALTER ROLE <gbrain role> SET statement_timeout = '5min'` on the database, or accept it: preparation reads carry their own bound | brain host | none (a role default; `destructive` only in that it changes a server setting) | `gbrain doctor --only persistence_session_timeouts --json` |
 | `gbrain init` or `gbrain upgrade` stops with `schema_lock_blocked` naming a pid (or, before #5227, sat in `wait_event_type=Lock` with no output) | let the named session finish, or with the user's agreement end it on the database host: `SELECT pg_terminate_backend(<pid>)`; then rerun the same command ([ENGINES.md](../ENGINES.md#schema-lock-blocked)) | brain host, after the user agrees | `destructive` when it ends another session | the rerun completes; `gbrain doctor --json` shows the schema at head |
 | [`queue_capacity`, `persistence_capacity` or `persistence_request_growth`](#write-capacity) | run the printed `gbrain config set persistence.limits.<limit> <value>` | brain host | none | `gbrain doctor --only persistence_capacity,persistence_request_growth --json` |
@@ -10648,9 +10656,9 @@ Turning the `preparation_deadlines` switch off (`gbrain config set persistence.p
 
 <a id="held-connector-items"></a>**A Google or GitHub item is held after repeated failures (doctor `connector_held_items`, `gbrain waiting` says coverage is partial)?** Run `gbrain sources status <id>`, fix the cause, then after the user agrees run `gbrain sources retry-held <id>` and `gbrain sync --source <id>`. See [held items](google-connect.md#held-items).
 
-<a id="retry-other-options"></a>**`--retry-failed` lists failures that "belong to a run with different sync options"?** A managed retry resumes only the cursor its own options select; each other failure gets one line with its class and the command that settles it. `resumable (replay …)`: an unfinished run holds it, and the command resumes that run under its recorded options. `resumable (fresh discovery, not a replay …)`: no run holds it any more; the command starts a new run from HEAD under the failed run's options, which clears the failure when it completes. For a failure recorded before runs kept their options, the options are recovered only when an option set reproduces its cursor key exactly. `safely orphaned`: nothing current can resume it; preview `gbrain repair managed-sync-orphans --source <id>` and apply with the hash it prints. `unresolved`: its options were never recorded and nothing selects it; the line says what has to finish first (a request still in flight, or a current run whose completion lets the orphan repair retire it).
+<a id="retry-other-options"></a>**A sync (or the deprecated `--retry-failed` alias) lists failures that "belong to a run with different sync options"?** A managed retry resumes only the cursor its own options select; each other failure gets one line with its class and the command that settles it. `resumable (replay …)`: an unfinished run holds it, and the command resumes that run under its recorded options. `resumable (fresh discovery, not a replay …)`: no run holds it any more; the command starts a new run from HEAD under the failed run's options, which clears the failure when it completes. For a failure recorded before runs kept their options, the options are recovered only when an option set reproduces its cursor key exactly. `safely orphaned`: nothing current can resume it; preview `gbrain repair managed-sync-orphans --source <id>` and apply with the hash it prints. `unresolved`: its options were never recorded and nothing selects it; the line says what has to finish first (a request still in flight, or a current run whose completion lets the orphan repair retire it).
 
-<a id="checkpoint-validation-timeout"></a>**A managed sync is blocked with `checkpoint_validation_timeout`?** Run the printed commands on the brain host: `gbrain repair request-indexes --apply` when an index is missing or INVALID, then the printed `gbrain sync --source <id> --no-pull --retry-failed …`. Doctor's `persistence_request_growth` warns before lifetime request IDs run out.
+<a id="checkpoint-validation-timeout"></a>**A managed sync is blocked with `checkpoint_validation_timeout`?** Run the printed commands on the brain host: `gbrain repair request-indexes --apply` when an index is missing or INVALID, then the printed `gbrain sync --source <id> --no-pull …`. Doctor's `persistence_request_growth` warns before lifetime request IDs run out.
 
 <a id="pglite-aborted"></a>**PGLite crashes at startup with `RuntimeError: Aborted()` (often right after a macOS upgrade)?** Not a macOS incompatibility — the OS-upgrade reboot killed gbrain mid-write and tore the data dir's WAL. gbrain repairs this automatically on the next command (data preserved, backup kept); if auto-repair is disabled or skipped, run `gbrain pglite-repair --dry-run` to diagnose and `gbrain pglite-repair --yes` to repair in place. Full recovery ladder (repair → rebuild → engine switch) in [`docs/ENGINES.md` — Troubleshooting: startup abort](../ENGINES.md#troubleshooting-startup-abort-runtimeerror-aborted) and [`docs/INSTALL.md`](../INSTALL.md#pglite-crashes-at-startup-runtimeerror-aborted).
 

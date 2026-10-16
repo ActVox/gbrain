@@ -249,6 +249,12 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
   if (entry.renameHeld) {
     return heldEntry(entry, slug, pageId, { code: 'rename_held', reason: 'rename_source_changed', message: `${entry.path} is a rename of page ${entry.renameHeld.slug}, which changed after the rename was recorded, so the page was not moved.` }, content, blob);
   }
+  if (entry.legacySlugs?.length) {
+    const [only, several] = [entry.legacySlugs[0], entry.legacySlugs.length > 1];
+    const held = heldEntry(entry, slug, pageId, { code: 'legacy_slug_conflict', message: `${entry.path} imports as page ${slug}, but ${several ? `pages ${entry.legacySlugs.join(', ')}` : `page ${only}`}, which an older gbrain imported from a file of that name, `
+      + `record${several ? '' : 's'} no file${several ? ' and sync cannot tell which is its page' : ' and has a slug sync cannot write as it stands'}, so sync held the file instead of creating another page.` }, content, blob);
+    return { ...held, meta: { ...held.meta, legacy_slugs: entry.legacySlugs } };
+  }
   // #6188: a fence Tier 1 rewrites is admitted (publication writes the normalized file back); with fences.normalize=false it is held.
   const screen = await screenFrozenContent(await frozenImportScreenInput(engine, { ...input, content }, run), run);
   if (screen.status === 'importable' && screen.fences?.fixes.length) input.onNormalized?.(screen.fences.fixes);
