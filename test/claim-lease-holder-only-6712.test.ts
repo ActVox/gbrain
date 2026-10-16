@@ -67,10 +67,13 @@ async function claimed(engine: BrainEngine): Promise<WriteRequest | null> {
   return row;
 }
 
-test('a short-lived consumer never claims a sync row while another process holds the source\'s drain lease; the holder and resident consumers still do', async () => {
+test('a short-lived consumer never claims a sync row while another live process holds the source\'s drain lease; the holder, resident consumers and a dead holder\'s rows still drain', async () => {
   for (const engine of engines) {
     const id = await syncRow(engine);
-    const otherPid = process.pid + 100_000;
+    // A live process of this host holds the lease; a killed one's lease (TTL not lapsed) does not count.
+    const holder = Bun.spawn(['sleep', '120'], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+    const otherPid = holder.pid;
+    const dead = Bun.spawn(['true']); await dead.exited;
     try {
       as('put');
       expect((await claimed(engine))?.id).toBe(id);
@@ -84,12 +87,15 @@ test('a short-lived consumer never claims a sync row while another process holds
       expect((await claimed(engine))?.id).toBe(id);
       await lease(engine, otherPid, '-1 second');
       expect((await claimed(engine))?.id).toBe(id);
+      await lease(engine, dead.pid, '2 minutes');
+      expect((await claimed(engine))?.id).toBe(id);
       // A foreground write of the same source is claimed beside a live lease.
       await lease(engine, otherPid, '2 minutes');
       await engine.executeRaw('DELETE FROM persistence_requests WHERE id=$1::uuid', [id]);
       const own = await admitWrite(engine, await admission(engine, 'notes/foreground'));
       expect((await claimed(engine))?.id).toBe(own.id);
     } finally {
+      holder.kill('SIGKILL'); await holder.exited;
       setClaimOwnerForTest(undefined);
       await engine.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id=$1', [syncLockId(sourceId)]);
       await engine.executeRaw('DELETE FROM persistence_requests WHERE source_id=$1', [sourceId]);

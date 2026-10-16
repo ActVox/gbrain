@@ -20,7 +20,7 @@ import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMN
 import { hostname } from 'node:os';
 import { claimOwner, claimOwnerKind, claimPhaseStamp, startClaimPhase } from './claim-phase.ts';
 import { consumerIdentity, RESIDENT_CONSUMER_KINDS } from './consumer-heartbeat.ts';
-import { syncLockId } from '../db-lock.ts';
+import { classifyHolderLiveness, syncLockId } from '../db-lock.ts';
 import { publicFailureDetail } from './publication-failure.ts';
 import { catalogueError } from '../error-catalogue.ts';
 import { ACTIVE_REFRESH_STATES_SQL, refreshFenceClear } from './worktree-refresh-schema.ts';
@@ -629,17 +629,21 @@ export async function hasClaimableWrite(engine: SqlEngine, hostId: string, exclu
 /**
  * #6712 PR 2 (Garry, 2026-10-16, via GBRA-40): while a source's drain lease is live, only the lease holder publishes that
  * source's managed-sync requests. A non-resident consumer (a short-lived command such as `put` or `remember`, waiting on its
- * own write) skips a sync row whose source's lease another process holds, so it never publishes a drainer's pages or breaks
- * up its lane groups. With no live lease nothing changes: a crashed drainer's rows still drain through any consumer.
- * $5 pid, $6 host, $7 the sync lock id prefix.
+ * own write) skips the sync rows of every source whose lease another live process holds, so it never publishes a drainer's
+ * pages or breaks up its lane groups. A lease whose same-host holder is provably dead (a killed sync whose TTL has not
+ * lapsed yet) does not count, and with no live lease nothing changes: a crashed drainer's rows still drain through any consumer.
  */
-const LEASE_HOLDER_ONLY = `NOT (${SYNC_KIND('r')} AND EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE l.id=$7::text||r.source_id
-  AND l.ttl_expires_at>now() AND NOT (l.holder_pid=$5::integer AND l.holder_host IS NOT DISTINCT FROM $6::text)))`;
+async function leasedSourcesHeldElsewhere(engine: BrainEngine): Promise<string[]> {
+  const prefix = syncLockId('');
+  const rows = await engine.executeRaw<{ id: string; holder_pid: number; holder_host: string | null }>(`SELECT id, holder_pid, holder_host FROM gbrain_cycle_locks
+    WHERE starts_with(id, $1::text) AND ttl_expires_at>now() AND NOT (holder_pid=$2::integer AND holder_host IS NOT DISTINCT FROM $3::text)`, [prefix, process.pid, hostname()]);
+  return rows.filter(row => classifyHolderLiveness(row.holder_pid, row.holder_host ?? '', 0, { graceMs: 0 }) !== 'dead_eligible').map(row => row.id.slice(prefix.length));
+}
 
 export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseMs = 30_000, excludeRoots: string[] = [], fifoRoots: string[] = [],
   laneRoots: string[] = []): Promise<(WriteRequest & { passed_sync?: boolean }) | null> {
   const first = `(${foregroundPrioritySql()}) AND NOT (COALESCE(r.worktree_id::text,'db:'||r.source_incarnation::text)=ANY($3::text[]))`;
-  const holderOnly = !RESIDENT_CONSUMER_KINDS.includes(claimOwnerKind());
+  const leased = RESIDENT_CONSUMER_KINDS.includes(claimOwnerKind()) ? [] : await leasedSourcesHeldElsewhere(engine);
   return engine.transactionDirect(async tx => {
     // The protocol declaration and the FIFO head read are sent together.
     const [, [row]] = await pipelined(tx, [
@@ -648,9 +652,9 @@ export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseM
       LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id
       WHERE ${claimableWriteSql(`(${first})`, '$4::text[]')}
         -- On a root whose lane groups run in this process only a foreground write is claimed (beside them).
-        AND NOT (r.worktree_id::text=ANY($4::text[]) AND (${SYNC_KIND('r')} OR NOT (${first})))${holderOnly ? `
-        AND ${LEASE_HOLDER_ONLY}` : ''}
-      ORDER BY ${CLAIM_ORDER(`(${first})`)} LIMIT 1 FOR UPDATE OF r SKIP LOCKED`, [hostId, excludeRoots, fifoRoots, laneRoots, ...(holderOnly ? [process.pid, hostname(), syncLockId('')] : [])]),
+        AND NOT (r.worktree_id::text=ANY($4::text[]) AND (${SYNC_KIND('r')} OR NOT (${first})))${leased.length ? `
+        AND NOT (${SYNC_KIND('r')} AND r.source_id=ANY($5::text[]))` : ''}
+      ORDER BY ${CLAIM_ORDER(`(${first})`)} LIMIT 1 FOR UPDATE OF r SKIP LOCKED`, [hostId, excludeRoots, fifoRoots, laneRoots, ...(leased.length ? [leased] : [])]),
     ]) as [unknown, WriteRequest[]];
     if (!row) return null;
     // `passed_sync`: the claimed row went ahead of a queued sync row of its root.
