@@ -26,6 +26,8 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { purgeConsentRequest, purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
 import { IDENTITY_DOWNGRADE_OP } from '../src/core/sync-identity-downgrades.ts';
+import { purgeStaleCheckpoints } from '../src/core/op-checkpoint.ts';
+import { PURGE_PARK_OP, readPurgeParks } from '../src/core/persistence/purge-parks.ts';
 import { runPages } from '../src/commands/pages.ts';
 import { STRICT_SUBCOMMANDS } from '../src/cli/strict-args.ts';
 import { checkPurgeParkedPages } from '../src/commands/doctor/checks/purge-parks.ts';
@@ -215,6 +217,25 @@ describe('#6741 C v3: the cycle purge phase warns instead of failing', () => {
     expect(phase.status).toBe('warn');
     expect(phase.details.purged_pages_blocked).toEqual([expect.objectContaining({ slug: PARKED, code: 'purge_parked' })]);
     expect(await lifetimeIds()).toBe(before);
+  }, 120_000);
+});
+
+describe('#6741 C v3: the op_checkpoints GC keeps parks', () => {
+  test('a park untouched for 8 days survives purgeStaleCheckpoints and the cycle purge phase; an ordinary stale row does not', async () => {
+    await expired(PARKED);
+    await park(PARKED);
+    await engine.executeRaw("INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES('purge-v3-control','stale','[]'::jsonb)");
+    const backdate = () => engine.executeRaw("UPDATE op_checkpoints SET updated_at=now() - interval '8 days' WHERE op IN ($1,'purge-v3-control')", [PURGE_PARK_OP]);
+    await backdate();
+    expect(await purgeStaleCheckpoints(engine, 7)).toBeGreaterThanOrEqual(1);
+    expect((await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='purge-v3-control'")).length).toBe(0);
+    expect([...(await readPurgeParks(engine)).values()]).toEqual([expect.objectContaining({ slug: PARKED, failures: 5 })]);
+    // The cycle purge phase runs the same GC (7-day TTL) after the purge.
+    await backdate();
+    const phase = (await cycle()).phases.find(p => p.phase === 'purge')!;
+    expect(phase.status).toBe('warn');
+    expect([...(await readPurgeParks(engine)).values()]).toEqual([expect.objectContaining({ slug: PARKED, failures: 5 })]);
+    expect(await purge()).toMatchObject({ parked: 1 });
   }, 120_000);
 });
 
