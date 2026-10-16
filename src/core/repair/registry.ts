@@ -90,6 +90,12 @@ export interface RepairKindSpec {
   consentText?: { what: string; why: string; risk: string; user_message: string };
   /** `llm`: the kind may call a paid chat model; its spend is metered by the daily USD ledger and reported in `cost.llm_usd`. */
   spends?: 'llm';
+  /**
+   * `unbound`: the remediation approval (`--expect <plan_hash>`) leaves this kind out. Its plan follows live server
+   * statistics that autovacuum changes between preview and run, and its apply changes no stored record; the run
+   * still applies what is pending then.
+   */
+  approval?: 'unbound';
 }
 
 const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
@@ -271,7 +277,7 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'Preview-bound: --apply --expect <hash> applies exactly the previewed set. gbrain repair content runs fences, then this kind.',
   },
   'planner-stats': {
-    handler: plannerStatsRepair, embeds: 'none', checks: ['planner_stats_stale'],
+    handler: plannerStatsRepair, embeds: 'none', checks: ['planner_stats_stale'], approval: 'unbound',
     summary: 'ANALYZE the hot tables (pages, links, facts, takes, content_chunks, timeline_entries) whose planner statistics are stale (F4b), '
       + 'so search and graph reads stop planning as slow nested loops. PGLite also resets each table\'s pending row count; Postgres runs each '
       + 'ANALYZE with a 60 s statement and 2 s lock timeout. No journal admission and no user data changes. Brain-wide.',
