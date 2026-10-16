@@ -540,10 +540,10 @@ gbrain sync --source example-source --no-pull --no-embed --no-extract --retry-fa
 
 Use `--no-embed` and `--no-extract` here only if they were the original sync
 options; retain the original `--no-schema-pack` choice as well. An unfinished
-cursor keeps its processing options: a run that omits these flags (including
-autopilot and `sync` jobs) adopts them, and an explicit conflicting flag refuses
-with `cursor_processing_options_conflict`, naming the stored options and the
-exact resume command. Explicit retry
+cursor keeps its processing opt-outs: every run that resumes it (including
+autopilot and `sync` jobs) inherits them, a flag that asks for more processing
+than the cursor stored is reported as inherited instead of refused, and the
+result names it in `inherited_options` (since 0.60.255.0, #6712). Explicit retry
 retains old terminal receipts, refuses while work is still active and creates
 fresh guarded requests. It does not ignore revision conflicts. Inspect the
 result and the original withdrawal receipt, then verify that the fact is inactive

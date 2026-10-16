@@ -1184,6 +1184,16 @@ More: [docs/guides/write-refusals.md#fence_unrenderable](../../docs/guides/write
 
 More: [docs/guides/write-refusals.md#fetch_failed](../../docs/guides/write-refusals.md#fetch_failed)
 
+### file_drift
+
+<a id="file_drift"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync import would have overwritten a database version of the page that sync never saw (the page changed since its file was last imported), so the file is held and the page keeps the database version. | Sync imports a file only when the page is still at the revision its last recorded import wrote, or when the import changes nothing. Here the page moved (a database-only write, or no import record to compare on an upgraded brain) and the file's content differs, so importing would silently replace the newer database copy. Pages under storage.keep_db prefixes are never held: the keep_db worker reconciles them from the database. | Preview with gbrain repair file-drift --source <source> --slug <slug> --prefer database (keep the database copy and rewrite the file) or --prefer file (import the file), decide with the user, then apply it with the plan hash; the next gbrain sync --source <source> --no-pull re-screens the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#file_drift](../../docs/guides/write-refusals.md#file_drift)
+
 ### file_removed_during_scan
 
 <a id="file_removed_during_scan"></a>
@@ -1834,7 +1844,7 @@ More: [docs/guides/multi-language-fts.md#cjk-keyword-budget](../../docs/guides/m
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A managed sync kept re-freezing a page that only waited on another page of the same sync, and stopped at its limit because that earlier page still did not commit. | A page cancelled or refused only because an earlier page of its sync did not commit published nothing, so the sync re-freezes it under a fresh request by itself; the limit stops a loop when the earlier page keeps failing. | Read gbrain sync status --source <id> --json: last_error.root_cause names the request that keeps failing. Fix that request, or raise sync.knock_on_refreeze_limit / sync.knock_on_run_limit, then rerun the same sync. Run: gbrain sync status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
+| Retired: an older gbrain stopped a managed sync that kept re-freezing a page cancelled only because another page of the same sync did not commit. This build never cancels a page for another page's failure, so the stop is superseded. | Since #6712 each page of a sync has its own fate: a page that does not commit is held or stops the run on its own, and the pages after it still publish. A ledger row or receipt with this code was written by an older build. | Rerun the same plain gbrain sync --source <id> --no-pull; it resumes the stopped entry under a fresh request. gbrain sync status --source <id> --json shows what remains. Run: gbrain sync status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
 
 More: [docs/guides/sync-unblock-runbook.md#decision-table](../../docs/guides/sync-unblock-runbook.md#decision-table)
 
@@ -3183,6 +3193,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Another sync run of the source replaced the managed-sync cursor before this checkpoint published, so the checkpoint had nothing left to publish. | The replacing run (a --retry-failed rediscovery or a newer sync of the source) covers the source from its own discovery; the superseded checkpoint's receipt is a conflict, no managed-sync failure is recorded for it, and the run that awaited it goes on with the winning cursor. A same-run index lag still reports revision_conflict. | Nothing to repair: let the current sync finish. gbrain sync status --source <id> --json shows the cursor that now covers the source. | agent | `repeat the read that failed` | 1 | no |
+
+### sync_drain_lease_held
+
+<a id="sync_drain_lease_held"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Another process holds the source's drain lease and is still committing pages; this run followed it until its own budget ended, or lost the lease mid-pass, and stopped `resumable`. | One managed drainer per source: two drainers on one cursor raced each other's checkpoints. A follower counts the holder's commits as its own progress, takes the lease when the holder releases it, and stops `drain_stalled` (cause `no_progress`) instead when the holder commits nothing for 5 minutes, so a wedged holder never reads as a clean exit. | Rerun next.command after next.retry_after_ms (safe_to_loop), or let the holder finish; Ctrl-C while following leaves the holder running. | provider | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/write-refusals.md#sync_drain_lease_held](../../docs/guides/write-refusals.md#sync_drain_lease_held)
 
 ### sync_in_progress
 
