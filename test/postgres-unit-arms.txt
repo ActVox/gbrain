@@ -65,6 +65,7 @@ test/import-revision-concurrency.test.ts
 test/keyword-statement-timeout-knob-6495.test.ts
 test/keyword-timeout-negative-cache-6495.test.ts
 test/lane-apply-pipelining.test.ts
+test/large-pages/chunk-retirement-plan.test.ts
 test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
