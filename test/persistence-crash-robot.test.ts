@@ -366,6 +366,7 @@ const counted = seamCounter(); const counts: Record<string, number> = {};
 installFaultHook((point, detail) => { if (counted(point, detail)) counts[point] = (counts[point] ?? 0) + 1; });
 for (const requestId of ['a', 'a', 'b', 'b', 'b']) await faultPoint('consumer:preparing', { requestId });
 for (const requestId of ['a', 'a']) await faultPoint('publication:after_commit', { requestId });
+for (const writeId of ['w1', 'w1', 'w2']) await faultPoint('consumer:prepared', { requestId: 'shared', writeId });
 process.stdout.write(JSON.stringify({ event: 'counts', counts }) + '\\n');
 installFaultHook(robotFaultHook({ point: 'consumer:preparing', nth: 2 }));
 await faultPoint('consumer:preparing', { requestId: 'a' });
@@ -388,7 +389,7 @@ process.stdout.write('{"event":"continued"}\\n');
       }
       reader.releaseLock();
       expect(lines).toEqual([
-        { event: 'counts', counts: { 'consumer:preparing': 2, 'publication:after_commit': 2 } },
+        { event: 'counts', counts: { 'consumer:preparing': 2, 'publication:after_commit': 2, 'consumer:prepared': 2 } },
         { event: 'fault', point: 'consumer:preparing', nth: 2, detail: { requestId: 'b' } },
       ]);
     } finally { child.kill('SIGKILL'); await child.exited; rmSync(dir, { recursive: true, force: true }); }
