@@ -99,6 +99,8 @@ test('a retired wire field is never in the table and is accepted, dropped and na
   const lines: string[] = [];
   const write = process.stderr.write.bind(process.stderr);
   process.stderr.write = ((chunk: string) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  // A runServe shutdown earlier in this process (another file) leaves the runner shutting down: start from a fresh runner.
+  __resetDelegatedSyncForTests();
   try {
     const started = await startDelegatedSync(engine, { sourceId: 'missing-source', dryRun: true, explicitProcessing: ['noEmbed'], timeoutSeconds: 5 }, randomUUID());
     expect(started.ok).toBe(true);
