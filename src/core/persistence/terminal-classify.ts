@@ -249,13 +249,15 @@ function route(input: TerminalInput): Partial_ {
     return fromTable('sync_fault', code, origin ?? known, syncRetry(source, `The file changed under the write (${known}); a sync imports the current bytes.`), known === 'pinned_git_worktree_conflict' ? known : 'source_changed');
   }
   // #6834: a checkpoint or fact-batch completion receipt names a bookkeeping slug, never a page; reading it finds nothing.
-  if (code === 'revision_conflict' && input.slug === '__managed_sync_checkpoint__') {
+  // A compacted receipt keeps no intent kind; its operation and slug still identify the bookkeeping request.
+  const bookkeeping = (kind: string, operation: string, slug: string) => input.slug === slug && (input.intent_kind ? input.intent_kind === kind : input.operation === operation);
+  if (code === 'revision_conflict' && bookkeeping('managed_sync_checkpoint', 'submit_job', '__managed_sync_checkpoint__')) {
     return { category: 'caller_conflict', code, origin, class: 'systemic', safe_actions: ['retry'], needs_human: false, escalate: escalateOf(code),
       action: { argv: ['gbrain', 'sync', 'status', '--source', source, '--json'], consent: [], actor: 'agent', requires_exclusive: false,
         why: 'A sync checkpoint was refused (__managed_sync_checkpoint__ is bookkeeping, not a page). Sync status names the step that finishes or retires its run, read-only; a later checkpoint of the source supersedes this receipt.',
         verify: { argv: failuresArgv(source) }, docs: 'docs/guides/repair.md#managed-sync-orphans' } };
   }
-  if (code === 'revision_conflict' && input.slug === '__managed_facts_complete__') {
+  if (code === 'revision_conflict' && bookkeeping('managed_facts_complete', 'extract_facts', '__managed_facts_complete__')) {
     return { category: 'caller_conflict', code, origin, class: 'systemic', safe_actions: ['none'], needs_human: false, escalate: 'never: the batch\'s committed facts stay',
       action: { argv: terminalInspectArgv(input.request_id ?? '<request_id>'), consent: [], actor: 'agent', requires_exclusive: false,
         why: 'A fact-extraction batch was not recorded complete because some of its per-entity requests did not commit (__managed_facts_complete__ is bookkeeping, not a page). The receipt is read-only history; run the extraction again only if facts are still missing.',
@@ -324,7 +326,8 @@ export function supersessionSql(r: string, c: string): string {
   return `(${c}.source_id=${r}.source_id AND ${c}.slug=${r}.slug AND ${c}.sequence>${r}.sequence AND (
     (${c}.digest=${r}.digest AND ${c}.state IN ('committed','failed','queued','running','recovering'))
     OR (${c}.state IN ('committed','queued','running','recovering') AND (${c}.operation IN (${removals}) OR ${r}.operation='put_page'))
-    OR (${r}.slug='__managed_sync_checkpoint__' AND ${c}.state='committed')
+    OR (${r}.slug='__managed_sync_checkpoint__' AND ${r}.operation='submit_job' AND ${c}.state='committed' AND ${c}.operation='submit_job'
+      AND COALESCE(${c}.intent->>'kind','managed_sync_checkpoint')='managed_sync_checkpoint')
     OR (${r}.operation='put_page' AND ${c}.state='failed' AND ${c}.operation='put_page' AND COALESCE(NOT (${c}.intent ? 'kind'), false))))`;
 }
 

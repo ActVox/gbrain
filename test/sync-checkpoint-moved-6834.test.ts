@@ -29,6 +29,9 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { drainManagedSync } from '../src/core/persistence/sync-drain.ts';
+import { _setCursorBoundForTest } from '../src/core/persistence/sync-discovery.ts';
+import { SYNC_SLICE_OP } from '../src/core/persistence/sync-slices.ts';
 import { __setManagedCursorKeyForTests } from '../src/core/persistence/sync-cursor-key.ts';
 import { readManagedSyncFailures } from '../src/core/persistence/sync-failures.ts';
 import { classifyManagedSyncOrphans } from '../src/core/persistence/managed-sync-orphans.ts';
@@ -226,6 +229,69 @@ describe('#6834 a managed-sync checkpoint whose source checkpoint moved', () => 
     expect(await unfinished(engine, f)).toBe(0);
   }), 180_000);
 
+  test.each([['the run\'s own target'], ['a newer commit']] as const)('a path slice short of its target whose checkpoint moved to %s is listed, and retiring it clears its slice record', moved => each(async engine => {
+    _setCursorBoundForTest();
+    await disposePersistenceConsumer(engine);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    const id = `sliced-${randomUUID().slice(0, 12)}`, root = join(home, id);
+    mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q');
+    const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    for (const name of names) writeFileSync(join(root, 'notes', `${name}.md`), note(name));
+    const target = commit(root, 'seven at once');
+    await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,$3::text::jsonb)', [id, root, '{}']);
+    await claimWorktree(engine, id, root);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    const f = { id, repo: root, root, seed: target, side: target, target, opts: { sourceId: id, noPull: true, noEmbed: true, noExtract: true } };
+    const slices = async () => Number((await engine.executeRaw<{ n: string }>("SELECT COUNT(*)::text AS n FROM op_checkpoints WHERE op=$1 AND fingerprint LIKE $2", [SYNC_SLICE_OP, `${id}:%`]))[0]!.n);
+    try {
+      _setCursorBoundForTest({ entries: 3, bytes: 1024 ** 2 });
+      expect((await drainManagedSync(engine, f.opts, false)).staged?.slice).toMatchObject({ phase: 'import', after: 'notes/c.md' });
+      expect(await slices()).toBe(1);
+      // The second slice commits its pages and stops before its checkpoint.
+      const abort = new AbortController();
+      expect((await outcome(performManagedSync(engine, { ...f.opts, signal: abort.signal, onProgress: p => { if (p.total && p.bankedFiles === p.total) abort.abort(); } }))).status).toBe('partial');
+      writeFileSync(join(root, 'notes', 'x.md'), note('x'));
+      const newer = commit(root, 'one more');
+      await moveCheckpoint(engine, f, moved === 'a newer commit' ? newer : target);
+      expect((await outcome(performManagedSync(engine, f.opts))).status).toBe('blocked_by_failures');
+      expect((await classifyManagedSyncOrphans(engine, [id])).orphans.map(orphan => orphan.reason)).toEqual(['checkpoint_moved']);
+      const preview = await repair(engine, f);
+      expect((await repair(engine, f, preview.preview_hash)).applied).toBe(1);
+      expect(await slices()).toBe(0);
+      _setCursorBoundForTest();
+      const next = await outcome(performManagedSync(engine, f.opts));
+      expect(next.status).not.toBe('blocked_by_failures');
+      expect(next.deleted ?? 0).toBe(0);
+      // The source never moves back to the slice's target, and nothing the newer commit has is deleted.
+      expect(await lastCommit(engine, f)).toBe(newer);
+    } finally { _setCursorBoundForTest(); }
+  }), 180_000);
+
+  test('an apply keeps a cursor whose run replaced the previewed one under the same key', () => each(async engine => {
+    const f = await fixture(engine, 'entries');
+    await beforeCheckpoint(engine, f, 'entries');
+    await moveCheckpoint(engine, f, f.side);
+    expect((await outcome(performManagedSync(engine, f.opts))).status).toBe('blocked_by_failures');
+    const preview = await repair(engine, f);
+    const previewed = (await classifyManagedSyncOrphans(engine, [f.id])).orphans[0]!;
+    // --retry-failed replaces the run under the same key; the replacement stops before its checkpoint, which moves too.
+    writeFileSync(join(f.root, 'notes', 'beta.md'), note('beta', 'A revised observation'));
+    const head = commit(f.repo, 'beta');
+    const abort = new AbortController();
+    expect((await outcome(performManagedSync(engine, { ...f.opts, retryFailed: true, signal: abort.signal, onProgress: p => { if (p.total && p.bankedFiles === p.total) abort.abort(); } }))).status).toBe('partial');
+    await moveCheckpoint(engine, f, f.seed);
+    expect((await outcome(performManagedSync(engine, f.opts))).status).toBe('blocked_by_failures');
+    const current = (await classifyManagedSyncOrphans(engine, [f.id])).orphans[0]!;
+    expect(current.run_id).not.toBe(previewed.run_id);
+    expect((await repair(engine, f, preview.preview_hash)).applied).toBe(0);
+    expect(await unfinished(engine, f)).toBe(1);
+    // A fresh preview binds to the replacement run and retires it.
+    const again = await repair(engine, f);
+    expect((await repair(engine, f, again.preview_hash)).applied).toBe(1);
+    expect((await outcome(performManagedSync(engine, f.opts))).status).toBe('synced');
+    expect(await lastCommit(engine, f)).toBe(head);
+  }), 180_000);
+
   test('ordinary page revision conflicts keep their diagnosis and action', () => each(async engine => {
     const page = writeFailureDiagnostic('revision_conflict', 'The page changed during sync preparation.');
     expect(page).toMatchObject({ reason: 'revision_conflict', suggestion: 'Read the current page and review the intended change before submitting a corrected write.' });
@@ -234,6 +300,21 @@ describe('#6834 a managed-sync checkpoint whose source checkpoint moved', () => 
     const base = { source_id: 'example-source', operation: 'submit_job', state: 'conflict', error_code: 'revision_conflict', recovery: null, blocked_reason: null, compacted: false, request_id: randomUUID() };
     expect(classifyTerminal({ ...base, slug: 'notes/alpha' })).toMatchObject({ category: 'caller_conflict', class: 'page',
       action: { argv: ['gbrain', 'get', '--source', 'example-source', '--', 'notes/alpha'] } });
+    // A user page may carry a bookkeeping-like slug; only the bookkeeping request's own kind (or, compacted, its operation) is reclassified.
+    for (const page of [{ operation: 'put_page', intent_kind: null }, { operation: 'submit_job', intent_kind: 'managed_sync_import' }]) {
+      expect(classifyTerminal({ ...base, ...page, slug: '__managed_sync_checkpoint__' })).toMatchObject({ class: 'page',
+        action: { argv: ['gbrain', 'get', '--source', 'example-source', '--', '__managed_sync_checkpoint__'] } });
+    }
+    const later = async (r: { operation: string }, c: { operation: string; kind: string | null }) => (await engine.executeRaw<{ hit: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM (VALUES ('example-source','__managed_sync_checkpoint__',1::bigint,'d1',$1::text,'conflict'))
+          r(source_id,slug,sequence,digest,operation,state),
+        (VALUES ('example-source','__managed_sync_checkpoint__',2::bigint,'d2',$2::text,$3::text::jsonb,'committed')) c(source_id,slug,sequence,digest,operation,intent,state)
+        WHERE ${supersessionSql('r', 'c')}) AS hit`,
+      [r.operation, c.operation, c.kind ? JSON.stringify({ kind: c.kind }) : null]))[0]!.hit;
+    expect(await later({ operation: 'submit_job' }, { operation: 'submit_job', kind: 'managed_sync_checkpoint' })).toBe(true);
+    expect(await later({ operation: 'submit_job' }, { operation: 'submit_job', kind: null })).toBe(true);
+    expect(await later({ operation: 'remember' }, { operation: 'submit_job', kind: 'managed_sync_checkpoint' })).toBe(false);
+    expect(await later({ operation: 'submit_job' }, { operation: 'submit_job', kind: 'managed_sync_import' })).toBe(false);
     expect(classifyTerminal({ ...base, slug: '__managed_facts_complete__', operation: 'extract_facts' })).toMatchObject({ class: 'systemic', safe_actions: ['none'],
       action: { argv: ['gbrain', 'write-request', base.request_id, '--json'] } });
     // An unfinished run whose checkpoint has not published is the run's to finish, never an orphan.
