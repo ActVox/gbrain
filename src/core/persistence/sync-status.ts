@@ -245,7 +245,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string): Pro
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     resume_argv: resume, ...blockers, cursors: await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures),
-    terminal_failures: terminal, connector_last_error: connectorLastError, next: next ?? recovery_next ?? connectorLastError?.fix ?? null };
+    terminal_failures: terminal, connector_last_error: connectorLastError, next: next ?? recovery_next ?? null };
 }
 
 /**

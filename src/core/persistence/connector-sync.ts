@@ -47,7 +47,6 @@ import { readConnectorV2Cutoff } from './connector-checkpoint-migration.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
 import { intentCarriesPurgedContent } from './purged-intent.ts';
 import { PERSISTENCE_IPC_MAX_BYTES } from './ipc.ts';
-import { isCredentialError, type CredentialError } from '../creds/errors.ts';
 import type { GoogleSourceConfig } from '../google/types.ts';
 
 interface ConnectorLease { handle: DbLockHandle; signal: AbortSignal; }
@@ -314,7 +313,9 @@ export async function withConnectorSync<T>(engine: BrainEngine, sourceId: string
       result = await work(session, options);
     } catch (error) {
       if (!(error instanceof ConnectorWaitBudgetStop)) {
-        if (error instanceof OperationError || isCredentialError(error)) await session.finish(error).catch(() => {});
+        // #6831: a run cut short by its caller's deadline or cancel is not a failure of the source.
+        const failure = combined.aborted ? undefined : error;
+        if (error instanceof OperationError || (failure && !(error instanceof LockStolenError))) await session.finish(failure).catch(() => {});
         throw error;
       }
       await session.finish();
@@ -328,7 +329,7 @@ export async function withConnectorSync<T>(engine: BrainEngine, sourceId: string
   });
 }
 
-interface PendingWrite { entry: ConnectorPendingEntry; row: WriteRequest; bytes: number }
+interface PendingWrite { entry: ConnectorPendingEntry; row: WriteRequest; bytes: number; counted?: 'created' | 'updated' | 'deleted' }
 
 /** A connector sweep that ended with accepted writes pending, or stopped on its wait budget, reports `partial` / `writer_pending`. */
 export function pendingConnectorResult(result: SyncResult | null, session: ManagedConnectorSync): SyncResult {
@@ -688,7 +689,11 @@ export class ManagedConnectorSync {
       if (!row || row.state === 'committed') { this.pendingRows.delete(id); continue; }
       if (isTerminal(row)) {
         this.pendingRows.delete(id);
-        if (purgedRefusal(row)) this.skipPurged(pending.entry.itemRef, row); else this.failedPending.push(pending.entry);
+        if (!purgedRefusal(row)) this.failedPending.push(pending.entry);
+        else {
+          if (pending.counted) this.counts[pending.counted]--;
+          this.skipPurged(pending.entry.itemRef, row);
+        }
         continue;
       }
       pending.row = row;
@@ -746,10 +751,10 @@ export class ManagedConnectorSync {
   }
   /**
    * Records the run's pending set, counts and upgrade state; written only while the lease is held. `failure` is the
-   * error the run ended on (#6831): it is recorded with a count of runs in a row that ended that way, and a run that
-   * ends without one clears it.
+   * error the run ended on (#6831): it is recorded with a count of runs in a row that ended that way. Only a complete
+   * run (its cursor saved, nothing pending or failed) clears it; a partial or wait-budget stop leaves it as it was.
    */
-  async finish(failure?: OperationError | CredentialError): Promise<void> {
+  async finish(failure?: unknown): Promise<void> {
     await this.refreshPending().catch(() => {});
     const now = new Date().toISOString();
     const outstanding = [...this.pendingRows.values()].map(pending => pending.entry);
@@ -771,8 +776,10 @@ export class ManagedConnectorSync {
       .filter(entry => !listed.has(entry.slug) && !!listed.add(entry.slug)).slice(0, CONNECTOR_PURGED_LIMIT);
     const receipt = failure instanceof OperationError ? failure.writeRequest : undefined;
     const item = receipt && receipt.request_id === this.lastFailedItem?.requestId ? this.lastFailedItem : null;
-    const lastFailure = failure ? { code: (failure instanceof OperationError ? failure.writeError : undefined) ?? failure.code, message: failure.message, slug: item?.slug ?? null, request_id: item?.requestId ?? null,
-      at: now, consecutive: (this.connectorState.last_failure?.consecutive ?? 0) + 1 } : null;
+    const named = failure as { code?: unknown; message?: unknown } | undefined;
+    const lastFailure = failure ? { code: (failure instanceof OperationError ? failure.writeError : undefined) ?? (typeof named?.code === 'string' && named.code ? named.code : 'connector_error'),
+      message: typeof named?.message === 'string' ? named.message : String(failure), slug: item?.slug ?? null, request_id: item?.requestId ?? null,
+      at: now, consecutive: (this.connectorState.last_failure?.consecutive ?? 0) + 1 } : complete ? null : this.connectorState.last_failure ?? null;
     this.connectorState = { ...this.connectorState, pending, upgrade_recovery: recovery, purged_items: purgedItems, last_failure: lastFailure, last_run: {
       page_admissions: this.counts.page_admissions, skipped_unchanged: this.counts.skipped_unchanged, pending: pending.length,
       checkpoint_admissions: this.counts.checkpoint_admissions, stopped_on_wait_budget: this.stopped, dropped_upstream: this.counts.dropped_upstream,
@@ -799,7 +806,11 @@ export class ManagedConnectorSync {
    * guard's refusal, which `submit` and the pending-set paths skip the same way.
    */
   private async carriesPurgedPage(slug: string, content: string | undefined): Promise<boolean> {
-    if (!this.hasPagePurges || !content) return false;
+    return this.hasPagePurges && this.purgedNow(slug, content);
+  }
+  /** Whether a page tombstone of the source matches this content now, read without the per-run presence shortcut. */
+  private async purgedNow(slug: string, content: string | undefined): Promise<boolean> {
+    if (!content) return false;
     return intentCarriesPurgedContent(this.engine, { source_id: this.sourceId, slug, intent: { content } }, { facts: false, pages: true });
   }
   /**
@@ -931,11 +942,17 @@ export class ManagedConnectorSync {
         { fix: ownerStatusFix(this.sourceId, 'Shows the source\'s receipts and any retained recovery before a retry is approved again.') });
       return { retry, input, row };
     };
+    const prior = await selected(this.engine);
+    let row = prior.row;
+    // #6831: a replayed purged refusal stays skipped (even under --retry-failed) while its tombstone stands; once the
+    // owner cleared it, the item gets one automatic retry through the guarded retry path below.
+    if (kind === 'connector_v2_import' && row && purgedRefusal(row) && row.request_id === (this.retryApprovals.get(baseRequestId) ?? baseRequestId)) {
+      if (await this.purgedNow(slug, extra.content)) { this.skipPurged(slug, row); return { row: null, pending: false, created: false }; }
+      this.autoRetry.add(baseRequestId);
+    }
     const automatic = this.autoRetry.has(baseRequestId);
     const mayRetry = (row: WriteRequest | null) => (this.retryFailed || automatic) && row && ['failed', 'conflict'].includes(row.state) &&
       row.request_id === (this.retryApprovals.get(baseRequestId) ?? baseRequestId);
-    const prior = await selected(this.engine);
-    let row = prior.row;
     let admitted = false;
     if (mayRetry(row)) {
       const failedRow = row!;
@@ -1036,9 +1053,10 @@ export class ManagedConnectorSync {
       return { row, pending: false, created: row.outcome?.status === 'created' };
     }
     this.receipts.push(row.id);
-    this.pendingRows.set(row.id, { row, bytes: Buffer.byteLength(JSON.stringify(intent)),
+    const counted = !snapshot ? 'created' : kind === 'connector_v2_delete' ? 'deleted' : 'updated';
+    this.pendingRows.set(row.id, { row, bytes: Buffer.byteLength(JSON.stringify(intent)), counted,
       entry: { itemRef: slug, requestId: row.request_id, baseRequestId, admittedAt: new Date(row.created_at).toISOString() } });
-    if (!snapshot) this.counts.created++; else if (kind === 'connector_v2_delete') this.counts.deleted++; else this.counts.updated++;
+    this.counts[counted]++;
     await this.makeRoom();
     return { row, pending: true, created: !snapshot };
   }

@@ -16,17 +16,18 @@ import { calendarRelPath } from '../src/core/google/google-render.ts';
 import { slugifyPath } from '../src/core/sync.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
-import { withConnectorSync } from '../src/core/persistence/connector-sync.ts';
+import { unpurgePage } from '../src/core/persistence/page-purge.ts';
+import { CONNECTOR_WAIT_BUDGET_MS, connectorWaitBudget, withConnectorSync } from '../src/core/persistence/connector-sync.ts';
 import { CONNECTOR_STOPPED_RUNS, readManagedConnectorState } from '../src/core/persistence/connector-state.ts';
 import { connectorStatusLines, readConnectorSourceStatuses } from '../src/core/persistence/connector-status.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { checkSyncFreshness } from '../src/commands/doctor/checks/extraction-sync.ts';
 import { opError } from '../src/core/ops/contract.ts';
 import { CredentialError } from '../src/core/creds/errors.ts';
-import { contact, createConnectorFixture, json, options, settleConnectorWrites, withGoogleAccount } from './helpers/connector-fixture.ts';
+import { contact, createConnectorFixture, json, options, settleConnectorWrites, withGoogleAccount, withPausedOwnerBudget } from './helpers/connector-fixture.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-const { engines, env, source, setup, teardown } = createConnectorFixture();
+const { engines, env, source, boundSource, setup, teardown } = createConnectorFixture();
 beforeAll(setup, 120_000);
 afterAll(teardown);
 
@@ -150,6 +151,61 @@ test('#6831: a purge that lands after the run started is refused by the pages gu
     expect(refused).toEqual({ state: 'failed', error_code: 'purged_content' });
     expect(state.pending).toEqual([]);
     await disposePersistenceConsumer(engine);
+
+    // The refusing run saved no cursor, so the next runs replay the same refused receipt. While the tombstone stands it
+    // stays skipped, under --retry-failed too, and nothing is admitted again.
+    const admissions = async () => (await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND slug=$2', [f.id, 'notes/item-1']))[0].n;
+    const before = await admissions();
+    const replay = (opts: typeof options & { retryFailed?: boolean }) => withConnectorSync(engine, f.id, 'google', cfg, opts, async managed => managed!.importMarkdown('notes/item-1.md', page(1)));
+    const quiet = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect((await replay({ ...options, retryFailed: true })).status).toBe('skipped');
+      expect(await admissions()).toBe(before);
+      // Once the owner clears the tombstone, the replayed refusal is retried and the item comes back.
+      await unpurgePage(ctx(engine, f.id), { slug: 'notes/item-1', source_id: f.id });
+      expect((await replay(options)).status).toBe('imported');
+    } finally { quiet.mockRestore(); }
+    await settleConnectorWrites(engine, f.id).catch(() => {});
+    expect(await liveSlugs(engine, f.id)).toEqual(['notes/item-1', 'notes/item-2']);
+    await disposePersistenceConsumer(engine);
+  }
+}), 120_000);
+
+test('#6831: an item that was pending when the run counted it and is then refused as purged content is counted as skipped, not imported', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const f = await boundSource(engine, config);
+    const cfg = parseGoogleSourceConfig(config, f.dir);
+    const page = (body: string) => `---\ntype: note\ntitle: Synthetic pending item\n---\n# Synthetic pending item\n\n${body}\n`;
+    await withConnectorSync(engine, f.id, 'google', cfg, options, async managed => { await managed!.importMarkdown('notes/item-1.md', page('First.')); await managed!.saveState({ first: true }); });
+    await settleConnectorWrites(engine, f.id);
+    await disposePersistenceConsumer(engine);
+    const binding = f.binding;
+    await engine.executeRaw("UPDATE persistence_worktrees SET state='draining' WHERE id=$1::uuid", [binding.worktree_id]);
+    const quiet = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let counts;
+    try {
+      counts = await withPausedOwnerBudget(() => withConnectorSync(engine, f.id, 'google', cfg, options, async managed => {
+        const imported = await managed!.importMarkdown('notes/item-1.md', page('Second.'));
+        expect(imported.status).toBe('imported');
+        expect(managed!.counts.updated).toBe(1);
+        // The owner refuses the pending update at publication: the page was purged meanwhile.
+        await engine.executeRaw("UPDATE persistence_requests SET state='failed', error_code='purged_content', error_message='this page content was purged from this source and cannot be saved again' WHERE source_id=$1 AND state NOT IN ('committed','failed')", [f.id]);
+        // The owner resumes, so the cursor can commit on the production budget.
+        await engine.executeRaw("UPDATE persistence_worktrees SET state='active' WHERE id=$1::uuid", [binding.worktree_id]);
+        connectorWaitBudget.ms = CONNECTOR_WAIT_BUDGET_MS;
+        await managed!.saveState({ second: true });
+        return { ...managed!.counts };
+      }));
+    } finally {
+      quiet.mockRestore();
+      await engine.executeRaw("UPDATE persistence_worktrees SET state='active' WHERE id=$1::uuid", [binding.worktree_id]);
+    }
+    expect(counts).toMatchObject({ created: 0, updated: 0, purged_skipped: 1 });
+    const state = await connectorState(engine, f.id);
+    expect(state.last_run).toMatchObject({ purged_skipped: 1 });
+    expect(state.purged_items?.map(item => item.slug)).toEqual(['notes/item-1']);
+    expect(state.pending).toEqual([]);
+    await disposePersistenceConsumer(engine);
   }
 }), 120_000);
 
@@ -171,7 +227,8 @@ test('#6831: a connector source whose runs keep ending on an error reads as stop
     const sync = await readSyncStatus(engine, f.id);
     expect(sync.connector_last_error).toMatchObject({ code: 'invalid_fence', consecutive: CONNECTOR_STOPPED_RUNS, stopped: true });
     expect(sync.last_error).toBeNull();
-    expect(sync.next?.argv).toEqual(['gbrain', 'sources', 'status', f.id, '--json']);
+    expect(sync.connector_last_error?.fix.argv).toEqual(['gbrain', 'sources', 'status', f.id, '--json']);
+    expect(sync.next?.argv).not.toEqual(['gbrain', 'sources', 'status', f.id, '--json']);
     // A recent last_sync_at no longer hides the stop.
     await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     await engine.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1', [f.id]);
@@ -185,8 +242,20 @@ test('#6831: a connector source whose runs keep ending on an error reads as stop
       .rejects.toMatchObject({ code: 'scope_missing' });
     expect((await connectorState(engine, f.id)).last_failure).toMatchObject({ code: 'scope_missing', consecutive: CONNECTOR_STOPPED_RUNS + 1 });
 
-    // A run that finishes clears the record.
+    // Any other error that ends the run counts too (a missing token is a plain Error).
+    await expect(withConnectorSync(engine, f.id, 'google', cfg, options, async () => { throw new Error('No token in CONNECTOR_TEST_TOKEN'); }))
+      .rejects.toThrow('No token');
+    expect((await connectorState(engine, f.id)).last_failure).toMatchObject({ code: 'connector_error', message: 'No token in CONNECTOR_TEST_TOKEN', consecutive: CONNECTOR_STOPPED_RUNS + 2 });
+    // A run its caller cancelled is not a failure of the source, and a partial run (no cursor saved) proves no recovery.
+    const cancel = new AbortController();
+    await expect(withConnectorSync(engine, f.id, 'google', cfg, { ...options, signal: cancel.signal }, async () => { cancel.abort(); throw new Error('cancelled by caller'); }))
+      .rejects.toThrow('cancelled by caller');
     await withConnectorSync(engine, f.id, 'google', cfg, options, async () => undefined);
+    expect((await connectorState(engine, f.id)).last_failure).toMatchObject({ code: 'connector_error', consecutive: CONNECTOR_STOPPED_RUNS + 2 });
+    expect((await readSyncStatus(engine, f.id)).connector_last_error).toMatchObject({ stopped: true });
+
+    // A run that completes (its cursor saved) clears the record.
+    await withConnectorSync(engine, f.id, 'google', cfg, options, async managed => { await managed!.saveState({ recovered: true }); });
     expect((await connectorState(engine, f.id)).last_failure).toBeNull();
     expect((await readSyncStatus(engine, f.id)).connector_last_error).toBeNull();
     expect((await checkSyncFreshness(engine)).message).not.toContain(`Source '${f.id}' is STOPPED`);
