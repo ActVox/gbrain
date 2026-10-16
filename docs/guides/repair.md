@@ -2332,7 +2332,9 @@ writer status --source <id> --json` and ask the user whether the edited file
 may be replaced by its withdrawn version; the resident writer finishes the
 effect once the file matches one of its recorded versions. The preview lists
 the effect as `refused`; naming its request with `--request-id` refuses with
-this code.
+this code. A sync queued behind such an effect stops at once with
+[`drain_stalled`, `cause: head_blocked`](write-refusals.md#head-blocked), and
+its fix names the file.
 
 ### Legacy job authority
 
