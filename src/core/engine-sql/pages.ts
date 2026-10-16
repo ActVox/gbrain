@@ -756,13 +756,13 @@ export async function listStalePagesForExtraction(exec: ScopedRead, opts: {
     // #1768: project a deterministic full-µs UTC string alongside updated_at.
     // to_char (not ::text — DateStyle-fragile) so extractStaleFromDB can stamp
     // links_extracted_at = the exact updated_at and the staleness predicate clears.
-    // A segmented page is not listed (its body columns are NULL: extracting ''
-    // would delete its derived links) but stays counted as stale until the
-    // per-segment extraction reads it.
+    // A segmented page is listed like an inline one (count and list share
+    // stalePagesWhere): its body columns are NULL, so every extractor reads
+    // its snapshot and, for a segmented page, the body block by block.
     const { text, params } = renderFragment(sqlFragment`SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at,
                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
            FROM pages
-           WHERE ${stalePagesWhere(opts)} AND body_storage = 'inline'${afterClause}
+           WHERE ${stalePagesWhere(opts)}${afterClause}
            ORDER BY id
            LIMIT ${opts.batchSize}`);
     const { rows } = await exec.unsafe(text, params);

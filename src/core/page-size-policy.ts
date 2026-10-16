@@ -38,3 +38,18 @@ export const PAGE_INLINE_MAX_BYTES = 1024 ** 2;
 export function isLargePageBytes(bytes: number): boolean {
   return bytes > PAGE_INLINE_MAX_BYTES;
 }
+
+/** SQL twin of isLargePageBytes(pageBodyBytes(page)) over a `pages` row aliased `alias`: `body_bytes` of a segmented page, else its body columns' bytes. */
+export function largePageBodyFilter(alias: string): string {
+  return `(CASE WHEN ${alias}.body_storage = 'segmented' THEN ${alias}.body_bytes ELSE octet_length(${alias}.compiled_truth) + octet_length(COALESCE(${alias}.timeline, '')) END) > ${PAGE_INLINE_MAX_BYTES}`;
+}
+
+/**
+ * SQL over a `pages` row aliased `alias`: the page has a held or capped
+ * `page_embedding_budget` row (page-embedding-budget.ts) that still applies.
+ * The budget meters large pages only, so a row left on a page edited down to
+ * the inline threshold or under no longer keeps it out of the embedding queue.
+ */
+export function pageBudgetLimitedFilter(alias: string): string {
+  return `EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = ${alias}.id AND peb.state <> 'open' AND ${largePageBodyFilter(alias)})`;
+}

@@ -1392,9 +1392,9 @@ export interface BrainEngine {
   /**
    * List a keyset page (ordered by `id`, `id > afterPageId`) of stale pages
    * WITH their content so the caller extracts without an N+1 `getPage`. Same
-   * stale predicate as countStalePagesForExtraction. Caller passes a SMALL
-   * batchSize (page bodies are unbounded — 25MB transcript pages exist) and
-   * applies its own per-batch byte budget.
+   * stale predicate as countStalePagesForExtraction (segmented rows carry no body:
+   * read it block by block). The caller passes a SMALL batchSize (25MB transcript
+   * pages exist) and applies its own per-batch byte budget.
    */
   listStalePagesForExtraction(opts: {
     batchSize: number;

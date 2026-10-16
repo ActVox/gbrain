@@ -65,6 +65,7 @@ const VETTED_BUILDERS: Record<string, string> = {
   quoteIdentifier: 'src/core/search/embedding-column.ts: double-quoted identifier (embedded quotes doubled); callers pass registry-resolved or COLUMN_NAME_REGEX-checked embedding column names',
   vectorCastSuffix: 'src/core/search/embedding-column.ts: constant ::vector / ::halfvec cast suffix from the resolved column type',
   safeChunksFilter: 'src/core/search/safe-chunks.ts: constant safe-chunk predicate over a caller alias',
+  pageBudgetLimitedFilter: 'src/core/page-size-policy.ts: constant held-or-capped budget predicate over a caller page alias; no values',
   movableChunkSql: 'src/core/search/safe-chunks.ts: constant vector-matches-its-text predicate over a caller-quoted embedding column; no values',
   bodyWriteChunkVersion: 'src/core/search/safe-chunks.ts: constant chunker-version CASE over caller column expressions (or master\'s literal $1/$2 bind reuse); no values',
   privateLinkOriginFilterFragment: 'src/core/search/private-visibility.ts: constant link-origin visibility predicate over a caller alias',
