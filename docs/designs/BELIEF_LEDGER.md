@@ -1614,8 +1614,9 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    Subjects net on hashes (the first event's prior hash against the last
    one's value hash). Page events net per lifetime: a delete and its restore,
    or a rename and its revert, report nothing, and so does a page created and
-   gone again inside the window, together with its beliefs; a page created and
-   renamed inside the window is reported under its final slug. A purge,
+   gone again inside the window, together with its beliefs. A page renamed
+   inside the window is reported under its final slug, and so are the beliefs
+   it moved (their evidence keeps the slug each event was recorded on). A purge,
    expiry, merge or hard delete is one `removed` page entry.
 3. **A subject with no earlier event.** Section 4 records a page's creation
    as one snapshot event, so a fact or take first edited inside the window may

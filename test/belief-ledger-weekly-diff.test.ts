@@ -181,17 +181,29 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(sorted(brief((await changes(b, t0, t2)).changes))).toEqual([['page', 'deleted', slug]]);
     }), 120_000);
 
-    test('the event cap counts what the caller may read: events it may not read never set truncated', () => brain(async b => {
-      const t0 = await at(b);
-      for (let i = 0; i < 3; i++) await b.put('people/secret-example', beliefPage({ title: 'Secret', type: 'person', facts: [`Secret fact ${i}`], frontmatter: { visibility: 'private' } }));
-      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
-      const t1 = await at(b);
-      try {
-        __setBeliefChangesPageSizeForTests(2, 4);
-        const remote = await changes(b, t0, t1, { remote: true });
-        expect([remote.truncated, sorted(brief(remote.changes))]).toEqual([false, sorted([['page', 'added', slug], ['fact', 'added', 'Acme sells widgets']])]);
-        expect((await changes(b, t0, t1)).truncated).toBe(true);
-      } finally { __setBeliefChangesPageSizeForTests(); }
+    test('the event cap counts what the caller may read: events it may not read never change the answer', () => brain(async b => {
+      const run = async (hidden: number) => {
+        await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+        const t0 = await at(b);
+        for (let i = 0; i < hidden; i++) await b.put('people/secret-example', beliefPage({ title: 'Secret', type: 'person', facts: [`Secret fact ${i}`], frontmatter: { visibility: 'private' } }));
+        await b.put(slug, beliefPage({ facts: ['Acme sells gadgets'] }));
+        await b.put(slug, beliefPage({ facts: ['Acme sells gadgets', 'Acme opened an office in Berlin'] }));
+        const t1 = await at(b);
+        const out: unknown[] = [];
+        try {
+          for (const [size, cap] of [[2, 2], [2, 3], [3, 2], [1, 2], [10, 3]] as const) {
+            __setBeliefChangesPageSizeForTests(size, cap);
+            const r = await changes(b, t0, t1, { remote: true });
+            out.push([size, cap, r.truncated, sorted(brief(r.changes))]);
+          }
+        } finally { __setBeliefChangesPageSizeForTests(); }
+        return out;
+      };
+      // The same public history with and without private events interleaved gives the same answers at every page size and cap.
+      const plain = await run(0);
+      expect(await run(1)).toEqual(plain);
+      expect(await run(3)).toEqual(plain);
+      expect(plain.some(r => (r as unknown[])[2] === true)).toBe(true);
     }), 120_000);
 
     test('beliefs of a page created in the window: an edit and its revert still list them as added; a page gone again lists nothing', () => brain(async b => {
@@ -243,13 +255,16 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(quiet[1]!.text).toBe(quiet[0]!.text);
     }), 120_000);
 
-    test('a page created and renamed inside the window is reported under its final slug', () => beliefBrain(async b => {
+    test('a page created and renamed inside the window is reported under its final slug, with the beliefs it moved', () => beliefBrain(async b => {
       const t0 = await at(b);
-      await b.put('notes/old-example', beliefPage({ type: 'note', title: 'Old', facts: ['Old example has a roof'] }));
+      await b.put('notes/old-example', beliefPage({ type: 'note', title: 'Old', facts: ['Old example has a roof', { claim: 'Old example has 3 rooms', confidence: '0.5' }] }));
+      await b.put('notes/old-example', beliefPage({ type: 'note', title: 'Old', facts: ['Old example has a roof', { claim: 'Old example has 3 rooms', confidence: '0.9' }] }));
       await renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'notes/old-example', newSlug: 'notes/new-example', to: 'notes/new-example.md' });
       const t1 = await at(b);
       const diff = await changes(b, t0, t1);
-      expect(sorted(diff.changes.map(c => [c.kind, c.change, c.slug]))).toEqual(sorted([['page', 'added', 'notes/new-example'], ['fact', 'added', 'notes/new-example']]));
+      expect(sorted(diff.changes.map(c => [c.kind, c.change, c.slug, c.subject.claim ?? null]))).toEqual(sorted([['page', 'added', 'notes/new-example', null],
+        ['fact', 'added', 'notes/new-example', 'Old example has a roof'], ['fact', 'added', 'notes/new-example', 'Old example has 3 rooms']]));
+      expect(diff.changes.find(c => c.subject.claim === 'Old example has 3 rooms')!.evidence.slug).toBe('notes/old-example');
       expect((await changes(b, t0, t1, { entities: ['notes/new-example'] })).changes).toEqual(diff.changes);
     }, { databaseUrl: engineCase.databaseUrl }), 120_000);
 

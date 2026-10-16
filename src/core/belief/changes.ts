@@ -91,9 +91,11 @@ async function readAll(engine: BrainEngine, q: BeliefHistoryQuery): Promise<{ ro
   let afterId = 0;
   for (;;) {
     const page = await readBeliefHistoryPage(engine, { ...q, afterId, limit: pageSize });
-    rows.push(...page.rows);
+    for (const row of page.rows) {
+      if (rows.length === maxEvents) return { rows, truncated: true };
+      rows.push(row);
+    }
     if (page.lastScannedId == null || page.scanned < pageSize) return { rows, truncated: false };
-    if (rows.length >= maxEvents) return { rows, truncated: true };
     afterId = page.lastScannedId;
   }
 }
@@ -109,13 +111,13 @@ async function readPrior(engine: BrainEngine, q: BeliefChangesQuery, wanted: Rea
     const page = await readBeliefHistoryPage(engine, { sourceId: q.sourceId, remote: q.remote, takesHolders: q.takesHolders, subjectKeys, recordedUntil: until,
       beforeId, descending: true, limit: pageSize });
     for (const e of page.rows) {
+      if (prior.size === wanted.size) return { prior, truncated: false };
+      if (readable++ === maxEvents) return { prior, truncated: true };
       if (e.origin === 'backfill' || !SUBJECT_EVENTS.has(e.event_type) && e.event_type !== 'fact.adopted' && e.event_type !== 'link.adopted') continue;
       const id = `${e.subject_kind}\u0000${e.subject_key}`;
       if (wanted.has(id) && !prior.has(id)) prior.set(id, e);
     }
-    readable += page.rows.length;
-    if (page.lastScannedId == null || page.scanned < pageSize || prior.size === wanted.size) return { prior, truncated: false };
-    if (readable >= maxEvents) return { prior, truncated: true };
+    if (page.lastScannedId == null || page.scanned < pageSize) return { prior, truncated: false };
     beforeId = page.lastScannedId;
   }
 }
@@ -194,11 +196,14 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
     if (!list) pageEvents.set(e.page_lifetime, list = []);
     list.push(e);
   }
-  // Lifetimes created inside the window, and those of them gone again by its end (their beliefs went with them).
+  // Lifetimes created inside the window, those of them gone again by its end (their beliefs went with them), and each
+  // lifetime's slug at the end of the window (a rename moves its beliefs; their evidence keeps the slug they were recorded on).
   const created = new Set<string>();
   const gone = new Set<string>();
+  const finalSlug = new Map<string, string>();
   for (const [lifetime, evs] of pageEvents) {
     const net = netPage(evs, q.remote);
+    finalSlug.set(lifetime, net.slug);
     if (evs.some(isCreation)) created.add(lifetime);
     if (evs.some(isCreation) && !net.creation) gone.add(lifetime);
     for (const entry of net.entries.filter(c => touches(c.slug, c.subject))) items.push({ id: entry.evidence.event_id, run: async () => [entry] });
@@ -222,6 +227,7 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
     if (!list) byKey.set(id, list = []);
     list.push(e);
   }
+  const streamSlug = (e: BeliefHistoryRow) => (e.page_lifetime ? finalSlug.get(e.page_lifetime) : undefined) ?? e.slug;
   const subjectFor = (id: string, rows: BeliefHistoryRow[]) => {
     const first = rows[0]!, last = rows.at(-1)!;
     return subjectOf(first.subject_kind as BeliefChangeKind, last.subject_key, (last.cause.label ?? first.cause.label ?? {}) as Record<string, unknown>,
@@ -235,7 +241,7 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
     const finalHash = REMOVALS.has(last.event_type) ? null
       : last.subject_kind === 'link' && last.value ? valueHash(Object.fromEntries(Object.entries(last.value).filter(([k]) => k !== 'context'))) : last.value_hash;
     if (first.prior_hash != null && first.prior_hash === finalHash && !(first.page_lifetime && created.has(first.page_lifetime))) return false;
-    return touches(last.slug, subjectFor(id, rows));
+    return touches(streamSlug(last), subjectFor(id, rows));
   });
   const prior = await readPrior(engine, q, new Map(keys.map(([id, rows]) => [id, rows[0]!.subject_key])), out.since);
   out.truncated ||= prior.truncated;
@@ -267,7 +273,7 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
       }
       if (canonicalJson(before) === canonicalJson(after) && beforeKnown) return [];
       const subject = subjectOf(kind, last.subject_key, (last.cause.label ?? first.cause.label ?? {}) as Record<string, unknown>, [after, before, ...rows.map(r => r.value)]);
-      return [{ kind, slug: last.slug, change: before == null && beforeKnown ? 'added' : after == null ? 'removed' : 'changed', subject, before, after,
+      return [{ kind, slug: streamSlug(last), change: before == null && beforeKnown ? 'added' : after == null ? 'removed' : 'changed', subject, before, after,
         before_known: beforeKnown, ...(kind === 'link_transition' && subject.transition === 'end' && subject.producer === 'dream' ? { upper_bound: true as const } : {}),
         cause: causeOf(last), evidence: evidenceOf(last), trust_tier: last.trust_tier }];
     } });
