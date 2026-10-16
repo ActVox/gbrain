@@ -201,9 +201,12 @@ export interface PurgeReplayResult { state: PurgeReplayState; replays: ReplayRec
  * Replays the purges newer than `archivedAt` for the restored database's sources (matching incarnation), in
  * recorded order, then appends `coverage.restored` naming the archive time and the outcome on every source with
  * coverage. `lines` null means no mirror could be read: `purge_replay: 'unavailable'`. An archive older than the
- * ledger (no `belief_events`) replays tombstones and row removal only and reports `ledger: 'absent'`.
+ * ledger (no `belief_events`) replays tombstones and row removal only and reports `ledger: 'absent'`. A purge whose
+ * tombstones the restored database already holds (same request) is in the archive and is skipped. `allTimes` drops
+ * the archive-time filter: the Postgres path reads a complete pre-restore database, where a purge that started
+ * before the dump and committed after it has a `purged_at` below the archive time (review #10).
  */
-export async function replayPurgesInRestore(tx: BrainEngine, input: { lines: PurgeMirrorLine[] | null; archivedAt: string; restoreId: string }):
+export async function replayPurgesInRestore(tx: BrainEngine, input: { lines: PurgeMirrorLine[] | null; archivedAt: string; restoreId: string; allTimes?: boolean }):
   Promise<PurgeReplayResult> {
   const ledger = (await tx.executeRaw<{ present: boolean }>("SELECT to_regclass('belief_events') IS NOT NULL AS present"))[0]?.present === true;
   const sources = await tx.executeRaw<{ id: string; incarnation: string }>('SELECT id, incarnation::text AS incarnation FROM sources ORDER BY id');
@@ -211,11 +214,14 @@ export async function replayPurgesInRestore(tx: BrainEngine, input: { lines: Pur
   if (input.lines) {
     const committed = new Set(input.lines.filter(l => l.kind === 'committed').map(l => l.request));
     const seen = new Set<string>();
-    const newer = input.lines.filter((l): l is PurgeMirrorIntent => l.kind === 'intent' && l.recorded_at > input.archivedAt
+    const newer = input.lines.filter((l): l is PurgeMirrorIntent => l.kind === 'intent' && (input.allTimes || l.recorded_at > input.archivedAt)
       && sources.some(s => s.id === l.source_id && s.incarnation === l.source_incarnation));
     for (const intent of newer) {
       if (seen.has(intent.request)) continue;
       seen.add(intent.request);
+      const [archived] = await tx.executeRaw<{ present: boolean }>(`SELECT (EXISTS (SELECT 1 FROM fact_purges WHERE request_id = $1::uuid)
+        OR EXISTS (SELECT 1 FROM take_purges WHERE request_id = $1::uuid) OR EXISTS (SELECT 1 FROM page_purges WHERE request_id = $1::uuid)) AS present`, [intent.request]);
+      if (archived?.present === true) continue;
       if (replayFault === 'skip_replay') continue;
       const outcome = committed.has(intent.request) || replayFault === 'replay_uncommitted' ? await replayOne(tx, intent, ledger) : 'unverified';
       replays.push({ request: intent.request, request_id: intent.request_id, scope: intent.scope, outcome });
@@ -251,18 +257,17 @@ export async function readRestorePurgeReplay(engine: Pick<BrainEngine, 'executeR
 }
 
 /**
- * Postgres restores happen outside gbrain: `gbrain beliefs replay-purges --from <pre-restore database url> --since <archive time>`
- * runs this against the restored database. The pre-restore database is complete by construction: its tombstones
- * (fact_purges, take_purges, page_purges) newer than the archive, grouped by request, are the purges to replay.
+ * Postgres restores happen outside gbrain: `gbrain beliefs replay-purges --from-url-env <VAR> --archived-at <time>` runs this against the
+ * restored database. The pre-restore database is complete by construction: every purge its tombstones (fact_purges, take_purges,
+ * page_purges) record, grouped by request, that the restored database does not already hold is replayed, whatever its `purged_at`.
  */
-export async function replayPurgesFromDatabase(restored: BrainEngine, preRestore: Pick<BrainEngine, 'executeRaw'>, archivedAt: string):
-  Promise<{ state: PurgeReplayState; replays: ReplayRecord[] }> {
+export async function replayPurgesFromDatabase(restored: BrainEngine, preRestore: Pick<BrainEngine, 'executeRaw'>, archivedAt: string): Promise<PurgeReplayResult> {
   const facts = await preRestore.executeRaw<{ request: string; source_id: string; visibility: string; subject: string; fact_hash: string; at: string }>(`SELECT
-      request_id::text AS request, source_id, visibility, subject, fact_hash, purged_at::text AS at FROM fact_purges WHERE purged_at > $1::timestamptz AND request_id IS NOT NULL`, [archivedAt]);
+      request_id::text AS request, source_id, visibility, subject, fact_hash, purged_at::text AS at FROM fact_purges WHERE request_id IS NOT NULL`);
   const takes = await preRestore.executeRaw<{ request: string; source_id: string; claim_hash: string; at: string }>(`SELECT request_id::text AS request, source_id, claim_hash,
-      purged_at::text AS at FROM take_purges WHERE purged_at > $1::timestamptz AND request_id IS NOT NULL`, [archivedAt]);
+      purged_at::text AS at FROM take_purges WHERE request_id IS NOT NULL`);
   const pages = await preRestore.executeRaw<{ request: string; source_id: string; slug: string; content_hash: string; at: string }>(`SELECT request_id::text AS request,
-      source_id, slug, content_hash, purged_at::text AS at FROM page_purges WHERE purged_at > $1::timestamptz AND request_id IS NOT NULL`, [archivedAt]);
+      source_id, slug, content_hash, purged_at::text AS at FROM page_purges WHERE request_id IS NOT NULL`);
   const incarnations = new Map((await preRestore.executeRaw<{ id: string; incarnation: string }>('SELECT id, incarnation::text AS incarnation FROM sources'))
     .map(s => [s.id, s.incarnation]));
   const intents = new Map<string, PurgeMirrorIntent>();
@@ -279,5 +284,5 @@ export async function replayPurgesFromDatabase(restored: BrainEngine, preRestore
   for (const t of takes) intentFor(t.request, t.source_id, t.at).takes.push(t.claim_hash);
   const lines: PurgeMirrorLine[] = [...intents.values()].sort((a, b) => a.recorded_at < b.recorded_at ? -1 : 1)
     .flatMap(i => [i, { kind: 'committed' as const, request: i.request, recorded_at: i.recorded_at }]);
-  return restored.transaction(tx => replayPurgesInRestore(tx, { lines, archivedAt: new Date(archivedAt).toISOString(), restoreId: randomUUID() }));
+  return restored.transaction(tx => replayPurgesInRestore(tx, { lines, archivedAt: new Date(archivedAt).toISOString(), restoreId: randomUUID(), allTimes: true }));
 }

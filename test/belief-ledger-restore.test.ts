@@ -14,6 +14,7 @@ import postgres from '#postgres';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { __setPurgeReplayFaultForTests, PURGE_MIRROR_FILE, readRestorePurgeReplay, replayPurgesFromDatabase, type PurgeReplayFault } from '../src/core/belief/purge-mirror.ts';
 import { createPgliteBackup, restorePgliteBackup } from '../src/core/backup/snapshot.ts';
+import { runBackupCli } from '../src/commands/backup.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { operations } from '../src/core/operations.ts';
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
@@ -229,6 +230,31 @@ describe('belief ledger restore (pglite archive)', () => {
       cleanup: { events: [['page', 'page.expired', false, null]], tombstones: 0, redacted: 0, mirror: false }, state: 'none', restoredRedacted: 0 }),
     () => __setBeliefEmitterFaultForTests(drafts => drafts.map(d => d.eventType === 'page.expired' ? { ...d, eventType: 'page.purged', purged: true } : d)));
   }, 300_000);
+  test('#9: gbrain backup restore --purge-mirror replays from a named copy of the mirror, and the warning names that flag', async () => {
+    const r = await collect<Record<string, unknown>>(resolve => withFileBeliefBrain(SOURCE, async fb => {
+      await fb.open(async b => {
+        await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
+        await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme sells widgets'] }));
+      });
+      const archive = join(fb.home, 'cli.gbrain-backup');
+      await createPgliteBackup({ root: fb.home, output: archive });
+      await fb.open(async b => { await purgeFact(b, X); });
+      const copy = join(fb.home, 'mirror-copy.jsonl');
+      renameSync(join(fb.home, '.gbrain', PURGE_MIRROR_FILE), copy);
+      const cli = async (args: string[]) => {
+        const logged: string[] = [];
+        const original = console.log;
+        console.log = (...a: unknown[]) => { logged.push(a.map(String).join(' ')); };
+        try { const { exitCode } = await runBackupCli(args, async () => { throw new Error('restore opens no brain'); }); return { exitCode, out: JSON.parse(logged.at(-1)!) }; }
+        finally { console.log = original; }
+      };
+      const named = await cli(['restore', archive, '--into', join(fb.home, 'restored-named'), '--purge-mirror', copy, '--json']);
+      const lost = await restorePgliteBackup({ archive, into: join(fb.home, 'restored-lost'), purgeMirror: join(fb.home, 'missing', '.gbrain', PURGE_MIRROR_FILE) });
+      resolve({ exitCode: named.exitCode, state: named.out.purge_replay.state, warning: lost.reconnect_required.find(l => l.includes('were not replayed'))?.includes('--purge-mirror') });
+    }));
+    expect(r).toEqual({ exitCode: 0, state: 'complete', warning: true });
+  }, 300_000);
+
   test('#3: a replayed purge hides its derived rows again and appends derived.hidden', async () => {
     const scenario = () => collect<Record<string, unknown>>(resolve => withFileBeliefBrain(SOURCE, async fb => {
       await fb.open(seedDerived);
@@ -313,6 +339,39 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     }, 240_000);
 
     if (engineCase.name !== 'postgres') return;
+    test('#10 (postgres): a purge that started before the dump and committed after it is replayed; one already in the archive is not', async () => {
+      const r = await collect<Record<string, unknown>>(resolve => beliefBrain(async b => {
+        await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
+        await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme has two offices'] }));
+        await b.put('companies/widgets-example', beliefPage({ prose: 'Widgets.' }));
+        await b.put('companies/widgets-example', beliefPage({ facts: ['Acme sells widgets'] }));
+        await purgeFact(b, 'Acme sells widgets');
+        const url = new URL(engineCase.databaseUrl!);
+        const [{ db }] = await b.engine.executeRaw<{ db: string }>('SELECT current_database() AS db');
+        const clone = `gbrain_test_restore_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+        const admin = postgres(engineCase.databaseUrl!, { max: 1, prepare: false });
+        await disposePersistenceConsumer(b.engine);
+        await admin.unsafe(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${db}' AND pid <> pg_backend_pid()`);
+        await admin.unsafe(`CREATE DATABASE ${clone} TEMPLATE ${db}`);
+        const archivedAt = new Date().toISOString();
+        const restored = new PostgresEngine();
+        try {
+          const result = await purgeFact(b, X);
+          const request = (await b.engine.executeRaw<{ id: string }>('SELECT id::text AS id FROM persistence_requests WHERE request_id = $1::uuid', [result.request_id]))[0]!.id;
+          for (const table of ['fact_purges', 'take_purges'])
+            await b.engine.executeRaw(`UPDATE ${table} SET purged_at = $2::timestamptz - interval '1 second' WHERE request_id = $1::uuid`, [request, archivedAt]);
+          url.pathname = `/${clone}`;
+          await restored.connect({ database_url: url.toString(), poolSize: 2 });
+          const replay = await replayPurgesFromDatabase(restored, b.engine, archivedAt);
+          resolve({ replays: replay.replays.map(x => [x.request === request, x.outcome]), left: await carriers({ ...b, engine: restored }, X) });
+        } finally {
+          await restored.disconnect();
+          await admin.unsafe(`DROP DATABASE IF EXISTS ${clone} WITH (FORCE)`);
+          await admin.end();
+        }
+      }, { databaseUrl: engineCase.databaseUrl }));
+      expect(r).toEqual({ replays: [[true, 'complete']], left: [] });
+    }, 300_000);
     test('#3 (postgres): replayPurgesFromDatabase hides the purge\'s derived rows again and appends derived.hidden', async () => {
       const scenario = () => collect<Record<string, unknown>>(resolve => beliefBrain(async b => {
         await seedDerived(b);
