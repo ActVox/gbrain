@@ -19,13 +19,15 @@
  *     Conflicting ids veto;
  *   - an added file whose id uniquely matches a file deleted in the same
  *     range is a rename (a move and an edit in separate commits, or a pair
- *     Git crossed);
+ *     Git crossed) when the two also show continuity (same file name, same
+ *     title or same bytes), as decideImportIdentity asks of a move;
  *   - every other inexact pair becomes a delete plus an add and is listed in
  *     downgradedRenames.
  *
  * Both sides are read through one git cat-file --batch stream (frontmatter
  * only: at most the first 64 KiB of each blob is kept).
  */
+import { createHash } from 'node:crypto';
 import { lstatSync, openSync, readSync, closeSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { JSON_SCHEMA, load as yamlLoad } from 'js-yaml';
@@ -38,8 +40,9 @@ import { computeSyncDelta, type SyncDeltaResult } from './sync-delta.ts';
 
 const HEAD_BYTES = 64 * 1024;
 
-export interface FrontmatterIdentity { id: string | null; slug: string | null; title: string | null }
-const NO_IDENTITY: FrontmatterIdentity = { id: null, slug: null, title: null };
+/** `digest`: sha256 of the whole file when it fit in the head read (null for a longer file), the content-continuity signal. */
+export interface FrontmatterIdentity { id: string | null; slug: string | null; title: string | null; digest: string | null }
+const NO_IDENTITY: FrontmatterIdentity = { id: null, slug: null, title: null, digest: null };
 
 /**
  * The identity fields of a file: `id` and `slug` from its leading frontmatter block (unparseable or absent frontmatter
@@ -51,17 +54,18 @@ export function frontmatterIdentity(head: Buffer | string | null): FrontmatterId
   const text = (typeof head === 'string' ? head : head.toString('utf8')).replace(/^\uFEFF/, '');
   let title: string | null;
   try { title = explicitMarkdownTitle(text) || null; } catch { title = null; }
+  const digest = Buffer.byteLength(head) < HEAD_BYTES ? createHash('sha256').update(head).digest('hex') : null;
   const block = /^---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(text);
-  if (!block) return { ...NO_IDENTITY, title };
+  if (!block) return { ...NO_IDENTITY, title, digest };
   let data: unknown;
-  try { data = yamlLoad(block[1]!, { schema: JSON_SCHEMA }); } catch { return { ...NO_IDENTITY, title }; }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ...NO_IDENTITY, title };
+  try { data = yamlLoad(block[1]!, { schema: JSON_SCHEMA }); } catch { return { ...NO_IDENTITY, title, digest }; }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ...NO_IDENTITY, title, digest };
   const field = (key: string, numeric = false): string | null => {
     const value = (data as Record<string, unknown>)[key];
     const text = typeof value === 'string' ? value.trim() : numeric && typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
     return text === '' ? null : text;
   };
-  return { id: field('id', true), slug: field('slug'), title };
+  return { id: field('id', true), slug: field('slug'), title, digest };
 }
 
 /** The first 64 KiB of each `<rev>:<path>` object through one `git cat-file --batch` stream; null for a missing object or a non-blob. */
@@ -203,7 +207,13 @@ export function decideRenameIdentities(manifest: SyncManifest, inputs: RenameIde
     downgrade(before.slug && before.slug === after.slug ? 'slug_not_unique' : 'no_identity_signal');
   }
 
-  // Rule (c): an added file whose id uniquely matches a file this range deletes keeps that page's identity.
+  // Rule (c): an added file whose id uniquely matches a file this range deletes keeps that page's identity when the two
+  // also show continuity, as decideImportIdentity asks of a move whose origin is gone: the same file name, the same
+  // title, or the same bytes. A template id reused by an unrelated new note is not a rename.
+  const continuous = (from: string, to: string) => {
+    const before = inputs.base(from), after = inputs.target(to);
+    return from.split('/').pop() === to.split('/').pop() || (!!before.title && before.title === after.title) || (!!before.digest && before.digest === after.digest);
+  };
   const added = [...manifest.added, ...downgraded.map(pair => pair.to)];
   const deleted = [...manifest.deleted, ...downgraded.map(pair => pair.from)];
   const deletedById = new Map<string, string[]>();
@@ -215,7 +225,7 @@ export function decideRenameIdentities(manifest: SyncManifest, inputs: RenameIde
   for (const path of added) {
     const id = isMarkdownFilePath(path) ? inputs.target(path).id : null;
     const from = id ? deletedById.get(id) : undefined;
-    if (!id || from?.length !== 1 || !uniqueId(id)) continue;
+    if (!id || from?.length !== 1 || !uniqueId(id) || !continuous(from[0]!, path)) continue;
     promoted.push({ from: from[0]!, to: path });
   }
   const promotedFrom = new Set(promoted.map(pair => pair.from)), promotedTo = new Set(promoted.map(pair => pair.to));

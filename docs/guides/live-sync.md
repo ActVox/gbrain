@@ -366,9 +366,14 @@ title: Roadmap
 ---
 ```
 
-The reverse also holds: a new file whose `frontmatter.id` uniquely
-matches a file deleted in the same range is treated as its rename, even when
-Git did not pair them. A managed sync refuses `page_identity_changed`
+Two rules decide by `frontmatter.id`. A pair Git reports as a rename (`R<n>`)
+whose two files carry the same id, held by no other file in the range and no
+other live page, is a rename. A new file and a deleted file that Git did not
+pair are a rename only when they share such an id and also show continuity:
+the same file name, the same title, or the same bytes. So a note moved to
+another folder and rewritten keeps its page, while a new note that reuses a
+deleted note's template id starts a fresh page, even when no live page holds
+that id. A managed sync refuses `page_identity_changed`
 (`rename_identity_conflict`) when a file would take over a page whose
 `frontmatter.id` differs from the file's own.
 

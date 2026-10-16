@@ -164,12 +164,12 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'notes/roadmap', fact: 'Roadmap ships in Q3' }]);
   }), 180_000);
 
-  test('classic: an id-bearing move and edit in two commits before one sync keeps its identity; a no-signal move and edit does not', () => withEnv(env, async () => {
+  test('classic: an id-bearing move and edit in two commits before one sync keeps its identity (same id and title); a no-signal move and edit does not', () => withEnv(env, async () => {
     const s = await classic({ 'notes/x.md': doc('id: note-6729-x\ntitle: First title'), 'notes/plain.md': doc('type: note') });
     const x = (await pageRow(s.id, 'notes/x'))!, plain = (await pageRow(s.id, 'notes/plain'))!;
     await engine.insertFact({ fact: 'X has a fact', entity_slug: 'notes/x', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
     git(s.root, 'mv', 'notes/x.md', 'notes/y.md'); commit(s.root, 'move');
-    write(s.root, 'notes/y.md', `---\nid: note-6729-x\ntitle: A new title\n---\n\nRewritten from scratch, nothing like before.\n`); commit(s.root, 'rewrite');
+    write(s.root, 'notes/y.md', `---\nid: note-6729-x\ntitle: First title\n---\n\nRewritten from scratch, nothing like before.\n`); commit(s.root, 'rewrite');
     git(s.root, 'mv', 'notes/plain.md', 'notes/plain-2.md'); write(s.root, 'notes/plain-2.md', doc('type: note', 'An edit.\n')); commit(s.root, 'move and edit plain');
     const result = await s.sync();
     expect(result.status).toBe('synced');
@@ -190,6 +190,23 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     await s.sync();
     expect((await pageRow(s.id, 'notes/standup-2'))!.id).not.toBe(one.id);
     expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'notes/standup-1', fact: 'Standup one decided X' }]);
+  }), 180_000);
+
+  test('classic: an unpaired add and delete sharing an id no live page holds need continuity: a template id reused by a new note stays a delete plus an add, the same file name in a new folder is a rename', () => withEnv(env, async () => {
+    const s = await classic({ 'notes/standup-1.md': doc('id: tmpl-6729-free\ntitle: Standup one'), 'notes/retro.md': doc('id: retro-6729\ntitle: Retro') });
+    const one = (await pageRow(s.id, 'notes/standup-1'))!, retro = (await pageRow(s.id, 'notes/retro'))!;
+    await engine.insertFact({ fact: 'Standup one decided X', entity_slug: 'notes/standup-1', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
+    git(s.root, 'rm', '-q', 'notes/standup-1.md');
+    write(s.root, 'notes/standup-2.md', `---\nid: tmpl-6729-free\ntitle: Standup two\n---\n\nA different meeting entirely.\n`);
+    git(s.root, 'rm', '-q', 'notes/retro.md');
+    write(s.root, 'archive/retro.md', `---\nid: retro-6729\ntitle: Retro, archived\n---\n\nRewritten summary.\n`);
+    commit(s.root, 'replace one note from the template, archive another');
+    expect(diffStatus(s.root)).toEqual(['A\tarchive/retro.md', 'A\tnotes/standup-2.md', 'D\tnotes/retro.md', 'D\tnotes/standup-1.md']);
+    const result = await s.sync();
+    expect(result.status).toBe('synced');
+    expect((await pageRow(s.id, 'notes/standup-2'))!.id).not.toBe(one.id);
+    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'notes/standup-1', fact: 'Standup one decided X' }]);
+    expect((await pageRow(s.id, 'archive/retro'))!.id).toBe(retro.id);
   }), 180_000);
 
   test('dirty tree: an uncommitted move plus edit with no signal is a delete plus an add; one with a unique title keeps its identity', () => withEnv(env, async () => {
@@ -250,14 +267,14 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect(result.identityDowngrades?.map(entry => entry.reason)).toEqual(['title_not_unique']);
   }), 180_000);
 
-  test('2,000 moved and edited id-bearing files (Git pairs most inexactly, the rest as delete plus add) all become renames through one cat-file stream within 20 s', async () => {
+  test('2,000 id-bearing files moved to a new folder and edited (Git pairs most inexactly, the rest as delete plus add) all become renames through one cat-file stream within 20 s', async () => {
     const { confirmRenameIdentities } = await import('../src/core/sync-rename-identity.ts');
     const { buildSyncManifest } = await import('../src/core/sync.ts');
     const root = join(home, 'bulk'); mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q', '-b', 'main');
     const N = 2000;
     for (let i = 0; i < N; i++) writeFileSync(join(root, `notes/n${i}.md`), doc(`id: bulk-${i}\ntitle: Bulk note ${i}`));
     const base = commit(root, 'bulk');
-    for (let i = 0; i < N; i++) { rmSync(join(root, `notes/n${i}.md`)); writeFileSync(join(root, `notes/m${i}.md`), doc(`id: bulk-${i}\ntitle: Bulk note ${i} moved`, 'Edited.\n')); }
+    for (let i = 0; i < N; i++) { rmSync(join(root, `notes/n${i}.md`)); mkdirSync(join(root, 'moved'), { recursive: true }); writeFileSync(join(root, `moved/n${i}.md`), doc(`id: bulk-${i}\ntitle: Bulk note ${i} moved`, 'Edited.\n')); }
     const target = commit(root, 'bulk move and edit');
     const manifest = buildSyncManifest(git(root, '-c', 'diff.renameLimit=5000', 'diff', '--name-status', '-M', base, target));
     expect(manifest.renamed.length).toBeGreaterThan(N / 2);
@@ -267,7 +284,7 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     const confirmed = await confirmRenameIdentities(engine0, root, base, target, manifest, { sourceId: 'bulk' });
     const elapsed = performance.now() - started;
     expect(confirmed.renamed.length).toBe(N);
-    expect(confirmed.renamed.every(rename => rename.from.replace('notes/n', '') === rename.to.replace('notes/m', ''))).toBe(true);
+    expect(confirmed.renamed.every(rename => rename.from.replace('notes/', '') === rename.to.replace('moved/', ''))).toBe(true);
     expect(confirmed.added).toEqual([]);
     expect(confirmed.deleted).toEqual([]);
     // Stated budget: 4,000 frontmatter heads (both sides) through one cat-file stream plus the pure decision in under 20 s on a
