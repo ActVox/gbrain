@@ -90,8 +90,10 @@ test/large-pages/segmented-evidence.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
 test/large-pages/segmented-leads.test.ts
+test/large-pages/segmented-maintenance-commands.test.ts
 test/large-pages/segmented-read-refusals.test.ts
 test/large-pages/segmented-remember-refusal.test.ts
+test/large-pages/segmented-repair-scans.test.ts
 test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
