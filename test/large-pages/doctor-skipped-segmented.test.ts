@@ -126,8 +126,12 @@ describe('doctor reports the segmented pages its whole-body checks skipped', () 
   test('one segmented page and one inline page: every affected check reports skipped_segmented: 1 in JSON and text', async () => withEnv(env, async () => {
     for (const brain of brains) {
       const checks = await affectedChecks(brain.mixed);
-      expect(checks.map(c => [brain.kind, c.name, c.skipped_segmented])).toEqual(AFFECTED.map(name => [brain.kind, name, 1]));
-      for (const check of checks) expect(check.message).toContain('skipped (segmented): 1 page(s) store their body in segments');
+      // Fix lane P: core memory reads a core page stored in segments whole up to 24 MiB, so core_memory checks this 1.2 MB
+      // page and reports nothing; its count of the core pages over 24 MiB is segmented-core-list.test.ts.
+      const skipping = AFFECTED.filter(name => name !== 'core_memory');
+      expect(checks.map(c => [brain.kind, c.name, c.skipped_segmented])).toEqual(AFFECTED.map(name => [brain.kind, name, skipping.includes(name) ? 1 : undefined]));
+      for (const check of checks.filter(c => skipping.includes(c.name))) expect(check.message).toContain('skipped (segmented): 1 page(s) store their body in segments');
+      expect(checks.find(c => c.name === 'core_memory')!.message).not.toContain('skipped (segmented)');
     }
   }), 600_000);
 

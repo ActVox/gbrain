@@ -17,6 +17,7 @@ import {
 import { PRESSURE_CONFIG_KEYS, validatePressureConfigValue } from '../../../core/context/pressure.ts';
 import { readHeartbeatTail } from '../../../core/context/hook-heartbeat.ts';
 import { compiledCoreRevision, readCompiledCoreRecords } from '../../../core/context/compiled-core.ts';
+import { PAGE_MAX_BYTES } from '../../../core/page-size-policy.ts';
 import { existsSync, readFileSync } from 'node:fs';
 
 const DELIVERY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -24,9 +25,9 @@ const DELIVERY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export async function coreMemoryCheck(engine: BrainEngine): Promise<Omit<Check, 'name'>> {
   const settings = await readCoreSettings(engine);
   const usage = await coreUsage(engine);
-  // Decision #10: core usage reads each page's compiled_truth, which is NULL on a page stored in segments.
+  // Decision #10: listCorePages reads a page stored in segments back whole up to PAGE_MAX_BYTES (24 MiB) and leaves a larger one out.
   const [segmented] = await engine.executeRaw<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pages p
-    WHERE p.deleted_at IS NULL AND p.frontmatter @> '{"always_load": true}'::jsonb AND p.body_storage = 'segmented'`).catch(() => []);
+    WHERE p.deleted_at IS NULL AND p.frontmatter @> '{"always_load": true}'::jsonb AND p.body_storage = 'segmented' AND p.body_bytes > $1`, [PAGE_MAX_BYTES]).catch(() => []);
   const skipped = Number(segmented?.n ?? 0);
   const problems: string[] = [];
   const badConfig: string[] = [];

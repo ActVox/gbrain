@@ -203,6 +203,12 @@ Those checks say how many such pages they passed by: `oversized_pages`,
 `skipped_segmented` and a warning) for the stored bodies it does not check;
 it still checks their files. An `ok` from such a check covers only the pages
 it read. The field is absent when no page is stored in segments.
+Core memory reads a core page stored in segments back whole up to 24 MiB,
+as it reads an inline page, so `core_memory` counts only the core pages over
+24 MiB, which core leaves out of every session and of its budget. A
+frontmatter re-import of a page stored in segments works the same way up to
+24 MiB; over it the file is listed `needs_review` with `page_body_segmented`
+and nothing is written.
 
 While the switch is off (unset in this release, set to `off`, or held by an
 older writer), new pages are stored inline up to 24 MiB as before.
