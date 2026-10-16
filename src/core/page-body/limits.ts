@@ -3,8 +3,9 @@
  * number and config key in one place. The product numbers (ceilings, version
  * retention) are open product calls; change them here and nowhere else.
  *
- * `pages.segmented_storage` defaults to `on`, and is effectively on only while
- * no recent writer predates segmented pages (`segmentedWriterBlockers`). While
+ * `pages.segmented_storage` defaults to `off` (SEGMENTED_STORAGE_DEFAULT); set
+ * `on`, it is effectively on only while no recent writer predates segmented
+ * pages (`segmentedWriterBlockers`). While
  * it is off no page is newly segmented, every page stays inline up to
  * `PAGE_MAX_BYTES` (Wave A) and no code path below the inline threshold changes.
  */

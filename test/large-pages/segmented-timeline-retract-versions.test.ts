@@ -6,8 +6,10 @@
  *    current body no longer holds is retracted (its row was produced by a
  *    version of the page). A segmented page_versions row has NULL body
  *    columns and references a body generation, so the reconciliation streams
- *    that generation's stored text block by block (each block once: the work
- *    counter equals the live body's bytes plus the retained generation's).
+ *    that generation's stored text block by block (each run once, and a run
+ *    the live body read with the same key not at all: the work counter equals
+ *    the live body's bytes plus the retained runs read, fewer than the
+ *    retained generation's bytes).
  * 2. Fails when: the retraction reads the segmented version's NULL columns
  *    (the text `null\n`), finds no version producing the row, and keeps the
  *    removed bullet's row forever.
@@ -21,7 +23,7 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { extractTimelineFromDB } from '../../src/commands/extract-timeline-db.ts';
 import { pruneTimelineOrphans } from '../../src/core/timeline-extract.ts';
-import { segmentedPassWork } from '../../src/core/page-body/segment-blocks.ts';
+import { retainedGenerationWork, segmentedPassWork } from '../../src/core/page-body/segment-blocks.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 
@@ -65,9 +67,14 @@ describe('timeline retraction over segmented versions', () => {
       expect(versions.every(v => v.body_storage === 'segmented' && v.compiled_truth === null)).toBe(true);
       expect([...retained.keys()].every(g => g < Number(live!.body_generation))).toBe(true);
       const before = segmentedPassWork.bytes;
+      retainedGenerationWork.bytes = 0;
+      retainedGenerationWork.skipped = 0;
       const pruned = await pruneTimelineOrphans(engine, { sourceId: 'default', dryRun: false });
-      expect({ removed: pruned.removed, rows: await rows(), bytes: segmentedPassWork.bytes - before })
-        .toEqual({ removed: 1, rows: ['Kickoff with the design team'], bytes: Number(live!.body_bytes) + [...retained.values()].reduce((a, b) => a + b, 0) });
+      const retainedBytes = [...retained.values()].reduce((a, b) => a + b, 0);
+      // Each run of the retained generation is read once, or skipped when the live body read a run with its key.
+      expect({ removed: pruned.removed, rows: await rows(), bytes: segmentedPassWork.bytes - before, retained: retainedGenerationWork.bytes + retainedGenerationWork.skipped })
+        .toEqual({ removed: 1, rows: ['Kickoff with the design team'], bytes: Number(live!.body_bytes) + retainedGenerationWork.bytes, retained: retainedBytes });
+      expect(retainedGenerationWork.bytes).toBeLessThan(retainedBytes);
     }
   }, 600_000);
 });

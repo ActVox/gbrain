@@ -71,6 +71,7 @@ test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
 test/large-pages/forget-reason-segmented.test.ts
 test/large-pages/forget-scope.test.ts
+test/large-pages/held-budget-shrink.test.ts
 test/large-pages/managed-import-outside-root.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
@@ -107,6 +108,8 @@ test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-evidence-read-cost.test.ts
 test/large-pages/segmented-evidence.test.ts
+test/large-pages/segmented-extraction-stale.test.ts
+test/large-pages/segmented-facts-forced-lines.test.ts
 test/large-pages/segmented-facts-reconcile.test.ts
 test/large-pages/segmented-file-drift-ledger.test.ts
 test/large-pages/segmented-file-drift.test.ts
@@ -121,15 +124,19 @@ test/large-pages/segmented-read-refusals.test.ts
 test/large-pages/segmented-real-size.slow.test.ts
 test/large-pages/segmented-remember-refusal.test.ts
 test/large-pages/segmented-repair-scans.test.ts
+test/large-pages/segmented-retained-blocks.test.ts
 test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
 test/large-pages/segmented-sweep-budget.test.ts
+test/large-pages/segmented-sweep-deferral.test.ts
 test/large-pages/segmented-switch.test.ts
 test/large-pages/segmented-think-compile-leads.serial.test.ts
+test/large-pages/segmented-timeline-heap.test.ts
 test/large-pages/segmented-timeline-retract-versions.test.ts
 test/large-pages/segmented-versions.test.ts
 test/large-pages/segmented-withdrawn-fence-delete.test.ts
+test/large-pages/streamed-import-drift.test.ts
 test/large-pages/v249-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts

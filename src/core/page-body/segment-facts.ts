@@ -8,9 +8,10 @@
  * timeline line outside fenced code is the begin marker. Only runs holding a
  * fence marker can change any of those, so only they are read: the live
  * manifest rows that carry facts slots or whose segment text holds a marker
- * (found in SQL, nothing transferred), plus every run with a forced cut (a
- * marker may straddle one), and every run after an open fence until it
- * closes. A block starts outside code (segment-blocks.ts), so each marker is
+ * (found in SQL, nothing transferred), plus every run with a forced cut
+ * inside a line (a marker may straddle one; no marker holds a newline, so a
+ * forced cut after one cannot split it), and every run after an open fence
+ * until it closes. A block starts outside code (segment-blocks.ts), so each marker is
  * located in its block exactly as in the joined section. The segmenter never
  * cuts inside a fence, so a fence lies in one block: a fence longer than a
  * segment is a run of forced cuts, which bodyBlocks joins up to
@@ -42,7 +43,8 @@ async function markerSeqs(engine: BrainEngine, pageId: number): Promise<Set<numb
   const rows = await engine.executeRaw<{ seq: number }>(`SELECT m.seq FROM page_body_manifest m
       JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256
      WHERE m.page_id=$1 AND m.gen_to IS NULL AND m.staging_id IS NULL
-       AND (m.facts_slots<>'[]'::jsonb OR m.cut_kind='forced' OR position($2::bytea in t.body)>0 OR position($3::bytea in t.body)>0)`,
+       AND (m.facts_slots<>'[]'::jsonb OR (m.cut_kind='forced' AND get_byte(t.body, length(t.body)-1)<>10)
+         OR position($2::bytea in t.body)>0 OR position($3::bytea in t.body)>0)`,
   [pageId, Buffer.from(FACTS_FENCE_BEGIN, 'utf8'), Buffer.from(FACTS_FENCE_END, 'utf8')]);
   return new Set(rows.map(row => Number(row.seq)));
 }
