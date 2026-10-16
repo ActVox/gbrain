@@ -47,7 +47,7 @@ import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
 import { bodyUnread, isSegmentedPage, pageBodySegmentedError, withoutBody } from '../page-body/page-shape.ts';
 import { fileBodyDigests, storedBodyDigests, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
-import { ledgerApplies } from '../page-body/segment-ledger.ts';
+import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
 import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
 import { occurrencesWithoutChunks } from '../page-body/ingest.ts';
@@ -200,6 +200,10 @@ function importedFileType(parsed: ParsedMarkdown, page: Pick<Page, 'type' | 'fro
   // type is not one the file declared (#6605): inference only applies to a file with no frontmatter.
   return parsed.typeExplicit && !inferred ? parsed.type : page.type;
 }
+/** The withdrawal ledger readPageSnapshot overlaid the snapshot's body with, for a segmented body read under it. */
+function snapshotLedger(snapshot: PageSnapshot): BodyLedger {
+  return { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) };
+}
 /**
  * Wave B: `fileMatchesSnapshot` for a segmented page whose body was not read back (over the single-string ceiling).
  * The same comparison with each body region replaced by its SHA-256 on both sides: the file's regions as the streamed
@@ -209,7 +213,7 @@ function importedFileType(parsed: ParsedMarkdown, page: Pick<Page, 'type' | 'fro
  */
 async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: Buffer, snapshot: PageSnapshot,
   sourcePath: () => Promise<string>, activePack?: ParseOpts['activePack']): Promise<boolean> {
-  const ledger = { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) };
+  const ledger = snapshotLedger(snapshot);
   let stored: RegionDigests | undefined;
   const matches = async (reading: FileReading, inferred: boolean) => {
     const file = fileBodyDigests(bytes, reading, slug, { activePack });
@@ -458,8 +462,9 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
  * delete only set `deleted_at` (its body, chunks, links and projections stay), so the restore clears it without
  * re-serializing or re-importing the body: version, clear, reseal (or queue the projection when chunks are missing).
  * The canonical file is serializePageToMarkdown's bytes streamed from the segments by export's serializer into one
- * buffer, never one string. A step that needs the whole body refuses (`page_body_segmented`): a core page's budget
- * render, and a write gate that applies to the restoring writer's tier.
+ * buffer, never one string. The restore adds no text, so an agent-tier writer's advisory gate scan (flag only) is not
+ * re-run over the stored body; a step that needs the whole body refuses (`page_body_segmented`): a core page's budget
+ * render, and an external_untrusted writer, whose gate may quarantine or reject.
  */
 async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot,
   options: { activePack?: ParseOpts['activePack']; clock?: ClaimPhaseClock; allowMissingFile?: boolean }): Promise<PreparedMutation> {
@@ -468,8 +473,8 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
   const storedTier = await storedPageTier(engine, row.source_id, row.slug);
   const trust = pageWriteTrust(row, snapshot.page.frontmatter);
   const gateTrust = pageGateTrust(row, trust, storedTier);
-  if (!noop && gateTrust && writeGateApplies(gateTrust.tier, (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) {
-    throw pageBodySegmentedError(snapshot.page, `restore_page (the write gate scans the whole body of a ${gateTrust.tier} write)`);
+  if (!noop && gateTrust?.tier === 'external_untrusted' && writeGateApplies(gateTrust.tier, (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) {
+    throw pageBodySegmentedError(snapshot.page, 'restore_page (the write gate scans the whole body of an external_untrusted write)');
   }
   enterClaimStep(options.clock, 'core_guard', undefined, 'db');
   const core = noop ? null : await prepareCoreGuard(engine, { row, snapshot, incoming: snapshot.page });
@@ -494,15 +499,14 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
         ...(complete ? {} : { projection: 'pending' }), ...await sizeStateField(tx, row.source_id, row.slug, snapshot.page),
         ...(lowered ? { trust_lowered: lowered } : {}) };
     },
-    afterCommit: async target => { if (!complete) await buildSegmentedProjection(target, source).catch(() => undefined); } };
+    afterCommit: async target => { if (!complete) await buildSegmentedProjection(target, { sourceId: row.source_id, slug: row.slug }).catch(() => undefined); } };
   return prepared;
 }
 /** serializePageToMarkdown's bytes for a page whose body was not read back, streamed from its segments into one buffer. */
 async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<Buffer> {
   const head = serializePageToMarkdown({ ...withoutBody(snapshot.page), compiled_truth: '', timeline: '' }, snapshot.tags).slice(0, -1);
-  const ledger = { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) };
   const parts: Uint8Array[] = [];
-  for await (const piece of segmentedExportMarkdown(engine, snapshot.page, ledger, head)) parts.push(typeof piece === 'string' ? Buffer.from(piece, 'utf8') : piece);
+  for await (const piece of segmentedExportMarkdown(engine, snapshot.page, snapshotLedger(snapshot), head)) parts.push(typeof piece === 'string' ? Buffer.from(piece, 'utf8') : piece);
   return Buffer.concat(parts);
 }
 

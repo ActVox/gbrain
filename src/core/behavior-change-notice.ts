@@ -653,6 +653,7 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText }
   { since: 'TBD', text: 'A page over 24 MiB imported or synced from its file is no longer stamped `embed_skip` and `content_flag: oversized` for its size: while `content_sanity.bytes_block` is unset, a segmented page is judged against its page ceiling, and the markup check samples its head, middle and tail as it does for any large page. A `content_sanity.bytes_block` set above 24 MiB no longer holds such a file; one set below the page still stops its embedding.' },
   { since: 'TBD', text: 'Forget and purge on a page stored in segments now rewrite and re-index only the segments that hold the struck or purged row.' },
   { since: 'TBD', text: 'Export accepts a page stored in segments up to the page ceiling (was 32 MiB per page), streams it to disk, and still aborts rather than produce a partial export.' },
+  { since: 'TBD', text: '`delete_page` (soft and `purge: true`), `restore_page`, `gbrain delete` and `gbrain restore` now work on a page over 24 MiB on a source backed by files: the file is compared with the page by digest, streamed, and a file edited on disk still refuses as before. Restoring such a page clears its deletion without re-importing it and writes its file back from the database; the 25 MiB pre-push scan cap on written files still applies, and a core page or an external_untrusted writer still refuses.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */

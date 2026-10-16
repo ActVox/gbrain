@@ -309,6 +309,7 @@ src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	field	INLINE
 src/core/oversized-backfill.ts	PAGE_BYTES_SQL	sql	SEGW	
 src/core/oversized-backfill.ts	reindexPage	call:serializeMarkdown	SEGW	
 src/core/oversized-backfill.ts	reindexPage	field	SEGW	
+src/core/page-body/body-digests.ts	fileBodyDigests	field	NONE	scan.timeline is the scanned file's timeline byte ranges and digests.timeline a SHA-256, not a page body; each region is hashed piece by piece
 src/core/page-body/body-scan.ts	scanMarkdownString	field	NONE	not a stored body: scans an incoming markdown string for the segmenter
 src/core/page-body/content-hash-stream.ts	ContentHashStream.fromState	field	NONE	not a stored body: resumes the streaming content hash over incoming text
 src/core/page-body/content-hash-stream.ts	streamingContentHash	field	NONE	not a stored body: hashes an incoming page streamed region by region
@@ -394,6 +395,8 @@ src/core/persistence/page-prepare.ts	canonical	field	SEGW	lane 1d file; segmente
 src/core/persistence/page-prepare.ts	fileMatchesSnapshot	field	SEGW	lane 1d file; segmented page: getter throws page_body_segmented
 src/core/persistence/page-prepare.ts	preparePageMutation	call:serializePageToMarkdown	SEGW	lane 1d file
 src/core/persistence/page-prepare.ts	preparePageMutation	field	SEGW	lane 1d file: preserveProtectedTakes reads the snapshot body; segmented page: getter throws page_body_segmented
+src/core/persistence/page-prepare.ts	segmentedFileMatches	field	NONE	the body fields hold region digests (body-digests.ts) for the canonical comparison; no page body is read
+src/core/persistence/page-prepare.ts	unreadPageFile	call:serializePageToMarkdown	NONE	serializes the frontmatter head with an empty body; the body streams from the segments through segmentedExportMarkdown
 src/core/persistence/page-purge.ts	purgePageInTransaction	call:contentHash	META	
 src/core/persistence/page-purge.ts	purgePageInTransaction	field	STREAM	
 src/core/persistence/page-purge.ts	purgePageInTransaction	sql	STREAM	
