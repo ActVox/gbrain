@@ -213,6 +213,7 @@ test/graduation-serve-guard.serial.test.ts	global-state	global-state: spawns rea
 test/graph-query-thin-client-source-flag.serial.test.ts	R2	R2: mock.module(../src/core/config.ts, ../src/core/mcp-client.ts) replaces modules for every file in the process
 test/guarded-http-tls.serial.test.ts	global-state	global-state: binds local servers/ports
 test/harness-delivery-recovery.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; R4: PGLiteEngine without an afterAll disconnect
+test/held-embedding-printed-commands.serial.test.ts	global-state	global-state: installs the process-wide CLI fix routing (installCliRouting) that every renderAction in the process reads
 test/hook-backup-notice.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK)
 test/hook-command.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_HOOKS, GBRAIN_HOOK_LANE, GBRAIN_SOURCE (+3 more))
 test/hook-push-banner-superseded.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK)

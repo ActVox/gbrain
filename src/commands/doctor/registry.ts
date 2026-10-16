@@ -73,7 +73,7 @@ import {
   crossModalEntry,
   markdownBodyEntry,
 } from './checks/data-integrity.ts';
-import { contentSanityEntry, quarantineEntry, frontmatterEntry } from './checks/content-quality.ts';
+import { contentSanityEntry, partialEmbeddingEntry, quarantineEntry, frontmatterEntry } from './checks/content-quality.ts';
 import {
   evalCaptureEntry,
   contradictionsEntry,
@@ -196,6 +196,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   crossModalEntry,
   markdownBodyEntry,
   contentSanityEntry,
+  partialEmbeddingEntry,
   quarantineEntry,
   frontmatterEntry,
   evalCaptureEntry,
