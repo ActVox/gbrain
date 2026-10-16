@@ -23,6 +23,7 @@ identifiers and attribution are available in the pre-removal Git revision
 | An autopilot (or any) `sync` job whose managed run is blocked, stalled or capped | `completed`, with the parked result | `dead`; the error names the stop and the run's `next` command, and `jobs get` keeps `outcome`, `drain` and `next` in the job's progress |
 | A managed sync run blocked on a page | `sync_failures` warned and failed only after 72 h | new doctor check `managed_sync_blocked`: warns at once and fails after an hour, with `gbrain sync status --source <id> --json` as its fix |
 | get_brain_health with a source blocked over an hour | `ok` | `attention`, with a `sync_blocked` count band (no source names) |
+| A managed incremental `gbrain sync` on a large repository whose chunker stamp predates the current chunker | read and token-counted every file before the first write (131 s and 1.4 GB on a 308k-file, 2.7 GB test repo), priced a `chunker_drift` ceiling and could auto-defer cheap embeds | prices only the changed files, as the run embeds them (first write on a blocked 52-page retry went from 58 s to 5 s in the same test); `--full` and classic sources are unchanged |
 | A managed sync import of an oversized, quarantined or flagged page | rewrote the canonical file with the gate's marker (a file publication with a recovery record, every time the body changed) | stores the marker in the database only and leaves the file as committed; a file whose marker is missing or stale is not file/database drift |
 
 ### What you need to do
@@ -31,7 +32,7 @@ Nothing. Markers already written into files stay where they are (nothing rewrite
 
 ### Still open on #6858
 
-Preparation cost that scales with the repository instead of the diff (ask 5) and a supported low-latency mode (ask 6) are tracked separately.
+A supported low-latency mode (ask 6) is a separate proposal. The repository-scaling preparation cost of ask 5 came from the embed cost estimate above; the remaining per-run work that grows with the repository (git discovery, the identity freeze) measured about 3 s at 308k pages.
 
 ## [0.60.269.0] - 2026-10-16
 
