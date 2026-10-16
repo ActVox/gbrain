@@ -2257,6 +2257,19 @@ put those bytes in place by hand, and let the resident writer finish the
 recovery. Pass `--request-id` to resolve the page recoveries on the same
 source.
 
+### Recovery large file unsupported
+
+`recovery_large_file_unsupported`: `gbrain repair stuck-recovery` found a page
+recovery whose prior file is over the 24 MiB single-string ceiling. Its prior
+bytes are kept as a staged copy beside the file (named in the record, with its
+SHA-256) instead of inside the record, and the preview's diff would read both
+files whole, so nothing was changed. Inspect the request read-only with
+`gbrain sources writer status --source <id> --json`, ask the user which version
+to keep, put those bytes at the canonical path by hand (the staged copy holds
+the prior bytes; never delete it), and let the resident writer finish the
+recovery: it renames the copy back when the file holds the published bytes, and
+removes it when the file holds the prior ones.
+
 ### Recovery choice refused
 
 `recovery_choice_refused`: `gbrain repair stuck-recovery` will not apply that

@@ -173,6 +173,8 @@ function writeArtifacts(dir: string, item: { files: RecoveryFileView[] }, record
 async function readItem(engine: BrainEngine, row: WriteRequest, binding: WorktreeBinding): Promise<{ item: StuckRecovery; records: FileRecoveryRecord[]; disks: Array<Buffer | null> }> {
   if (row.recovery?.version === 2) throw catalogueError('recovery_bundle_unsupported', `Request ${row.request_id} in source ${row.source_id} is a shared-skill bundle recovery, which gbrain repair stuck-recovery does not resolve.`,
     `Nothing was changed. Inspect it read-only with gbrain sources writer status --source ${row.source_id} --json and ask the user which version of each skill file to keep; resolve the bundle by hand, then let the resident writer finish its recovery.`);
+  if (row.recovery?.version === 1 && row.recovery.staging?.before) throw catalogueError('recovery_large_file_unsupported', `Request ${row.request_id} in source ${row.source_id} holds a page recovery whose prior file is over the single-string ceiling, which gbrain repair stuck-recovery does not resolve.`,
+    `Nothing was changed. Inspect it read-only with gbrain sources writer status --source ${row.source_id} --json and ask the user which version of the file to keep; its prior bytes are the staged copy the record names. Put the chosen bytes in place by hand, then let the resident writer finish its recovery.`);
   const records = recoveryFiles(row.recovery!);
   const [page] = await engine.executeRaw<{ revision: string | null }>('SELECT knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND slug=$2', [row.source_id, row.slug]);
   const disks: Array<Buffer | null> = [];

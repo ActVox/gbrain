@@ -33,7 +33,7 @@ import { persistenceFileHash } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { belowSafeChunkFence, chunkGenerationFilter } from '../search/safe-chunks.ts';
-import { sha256 } from './digest.ts';
+import { contentHash } from './large-file.ts';
 
 export interface NoopKernelResult {
   contentUnchanged: boolean;
@@ -91,7 +91,7 @@ export async function inspectUnchanged(engine: Pick<BrainEngine, 'executeRaw'>, 
   if (!input.databaseOnly) {
     const file = prepared.file;
     const onDisk = file && file.content !== null ? persistenceFileHash(file.path) : null;
-    if (!file || file.content === null || onDisk !== sha256(file.content)) {
+    if (!file || file.content === null || onDisk !== contentHash(file.content)) {
       if (onDisk === null || !input.waive?.includes('canonical_file_differs')) return result('canonical_file_differs');
       waived.push('canonical_file_differs');
     }

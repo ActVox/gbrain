@@ -83,6 +83,8 @@ test/large-pages/segmented-append-reembed.test.ts
 test/large-pages/segmented-body-unreachable.test.ts
 test/large-pages/segmented-conversation-facts.test.ts
 test/large-pages/segmented-create-searchable.test.ts
+test/large-pages/segmented-delete-crash.serial.test.ts
+test/large-pages/segmented-delete-restore-file.slow.test.ts
 test/large-pages/segmented-derived-parity.test.ts
 test/large-pages/segmented-derived-passes.test.ts
 test/large-pages/segmented-derived-work.test.ts

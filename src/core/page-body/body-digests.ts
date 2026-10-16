@@ -30,6 +30,9 @@ export const bodyDigestWork = { fileBytes: 0, segmentBytes: 0, largestPiece: 0 }
 /** SHA-256 (hex) of each region's UTF-8 bytes. */
 export type RegionDigests = Record<BodyRegion, string>;
 
+/** File bytes a digest reads views of: a Buffer, or a file read on demand (persistence/large-file.ts `FileBytes`). */
+export type ByteSource = Pick<Uint8Array, 'length' | 'subarray'>;
+
 /** A reading of file bytes: `prefix` (inferred frontmatter, empty when none), then the bytes from `skip` on (past a BOM). */
 export interface FileReading { prefix: Uint8Array; skip: number }
 
@@ -44,7 +47,7 @@ function count(piece: Uint8Array, field: 'fileBytes' | 'segmentBytes'): Uint8Arr
 }
 
 /** Bytes `[start, end)` of the virtual stream, as views (no copies). */
-function* virtualSlice(bytes: Uint8Array, reading: FileReading, start: number, end: number): Iterable<Uint8Array> {
+function* virtualSlice(bytes: ByteSource, reading: FileReading, start: number, end: number): Iterable<Uint8Array> {
   const { prefix, skip } = reading;
   if (start < prefix.length) yield prefix.subarray(start, Math.min(end, prefix.length));
   for (let at = Math.max(start, prefix.length); at < end; at += SEGMENT_MAX_BYTES) {
@@ -53,7 +56,7 @@ function* virtualSlice(bytes: Uint8Array, reading: FileReading, start: number, e
 }
 
 /** The scan of one reading of the file and the digest of each region; `factsFence` when a region holds a facts fence marker. */
-export function fileBodyDigests(bytes: Uint8Array, reading: FileReading, filePath: string, opts: ParseOpts): FileDigests {
+export function fileBodyDigests(bytes: ByteSource, reading: FileReading, filePath: string, opts: ParseOpts): FileDigests {
   const scanner = new BodyScanner(filePath, opts);
   for (const piece of virtualSlice(bytes, reading, 0, reading.prefix.length + bytes.length - reading.skip)) scanner.push(count(piece, 'fileBytes'));
   const scan = scanner.finish();
