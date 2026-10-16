@@ -370,10 +370,8 @@ export interface SyncOpts {
   /** #6712 PR 1: who takes the source's drain lease (kind and id shown to a follower), and whether a busy lease is followed instead of refused. */
   drainHolder?: import('../core/persistence/sync-lease.ts').DrainHolderRef; followDrainLease?: boolean;
   /** #6706: absolute epoch ms a managed drain stops before (`resumable / deadline`). */ deadlineAtMs?: number;
-  /** #5984: wall-clock ms the current drain started; managed cursors measure their rate from it. */
-  drainStartedAt?: number;
-  /** Test seam: how often the drain's governor looks and how long it confirms a blocker (`DrainInput.governMs`). */
-  governMs?: number;
+  /** #5984: wall-clock ms the current drain started; managed cursors measure their rate from it. */ drainStartedAt?: number;
+  /** Test seam: how often the drain's governor looks and how long it confirms a blocker (`DrainInput.governMs`). */ governMs?: number;
   /** #5984: `--no-bulk`; and the drain's resolved bulk settings (internal; absent = one request per pass step). */ noBulk?: boolean; bulk?: import('../core/persistence/sync-group.ts').BulkSettings;
   /** #5984 lanes: `--lanes N` (1..16) or `--no-lanes` (1). */ lanes?: number;
 }
