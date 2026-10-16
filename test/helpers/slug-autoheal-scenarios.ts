@@ -38,6 +38,7 @@ const ALIASES = 'aliases: ["Fund A", "Fund A Capital"]';
 const STRAY_BYTES = `---\ntitle: "Fund A"\ntype: company\nslug: fund-a\n${ALIASES}\n---\nFund A invests in example companies.\n`;
 const DB_ONLY_HELD = 'companies/fund-b-partners.md';
 const FILE_HELD = 'people/alice-example.md';
+const OTHER_TYPE = 'media/quarterly-talk.md';
 
 /** A git checkout with the fixture committed, before the managed brain claims it; `dbOnly` adds a database-only page `fund-b`. */
 function plant(files: Record<string, string>, dbOnly = false) {
@@ -117,18 +118,22 @@ export async function existingPageStopsAndAsks(databaseUrl?: string) {
     [DB_ONLY_HELD]: '---\ntitle: Fund B Partners\ntype: company\nslug: fund-b\n---\nFund B Partners notes.\n',
     'concepts/fund-c.md': '---\ntitle: Fund C\ntype: concept\n---\nThe Fund C idea.\n',
     [FILE_HELD]: '---\ntitle: Fund C notes\ntype: concept\nslug: concepts/fund-c\n---\nMore on Fund C.\n',
+    [OTHER_TYPE]: '---\ntitle: Quarterly talk\ntype: media\nslug: fund-b\n---\nA recorded talk.\n',
   };
   await managedBrain(async ({ engine, root }) => {
     const result = await sync(engine);
     expect(result.slug_lines_removed).toMatchObject({ removed: 0, failed: 0 });
-    expect(Object.values(result.slug_lines_removed!.left_by_reason).reduce((a, b) => a + b, 0)).toBe(2);
+    expect(Object.values(result.slug_lines_removed!.left_by_reason).reduce((a, b) => a + b, 0)).toBe(3);
+    expect(result.slug_lines_removed!.left_by_reason.different_type).toBe(1);
     for (const [path, content] of Object.entries(files)) expect(read(root, path)).toBe(content);
     const held = await holds(engine);
-    expect(held.map(hold => hold.path).sort()).toEqual([DB_ONLY_HELD, FILE_HELD]);
+    expect(held.map(hold => hold.path).sort()).toEqual([DB_ONLY_HELD, OTHER_TYPE, FILE_HELD].sort());
     for (const hold of held) expect(hold.meta.content_repair).toBeUndefined();
     const runner = await repairRunner(engine, { apply: true, noEmbed: true, logger: quiet });
     await runner.run('slug-conflicts', await resolveRepairScope(engine, 'default'), { explicit: true, sourceFlag: 'default', noLlm: true });
     const judged = new Map((await holds(engine)).map(hold => [hold.path, hold]));
+    expect([...judged.keys()].sort()).toEqual([DB_ONLY_HELD, FILE_HELD]);
+    expect(read(root, OTHER_TYPE)).not.toContain('slug: fund-b');
     expect(judged.get(DB_ONLY_HELD)!.meta.content_repair).toMatchObject({ action: 'pending', reason: 'llm_disabled', named: 'fund-b', named_db_only: true, lane_version: CONTENT_REPAIR_LANE_VERSION });
     expect(judged.get(FILE_HELD)!.meta.content_repair).toMatchObject({ action: 'pending', reason: 'llm_disabled', named: 'concepts/fund-c', lane_version: CONTENT_REPAIR_LANE_VERSION });
     expect(judged.get(FILE_HELD)!.meta.content_repair!.named_db_only).toBeUndefined();
@@ -143,7 +148,7 @@ export async function existingPageStopsAndAsks(databaseUrl?: string) {
     expect(verdict.human_reason).toContain(FILE_HELD);
     expect(verdict.human_reason).toContain('page `concepts/fund-c`');
     expect(verdict.human_reason).toContain('decide which page keeps the slug');
-    for (const [path, content] of Object.entries(files)) expect(read(root, path)).toBe(content);
+    for (const path of [DB_ONLY_HELD, FILE_HELD]) expect(read(root, path)).toBe(files[path]!);
   }, { databaseUrl, setup: plant(files, true) });
 }
 
