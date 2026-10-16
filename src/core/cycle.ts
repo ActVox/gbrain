@@ -581,6 +581,15 @@ export interface CycleOpts {
    */
   sourceId?: string;
   /**
+   * #6803: set by the autopilot-cycle handler for a connector source, whose
+   * cycle has no sync phase. The source's pages changed after this instant
+   * (null: never cycled, so every page of the source) are the cycle's
+   * incremental set; extract_facts reconciles through its bounded watermark
+   * drain. Without it a checkout-less source cycle took the full-walk mode and
+   * walked every page of the brain on every cycle.
+   */
+  sourceChangedSince?: string | null;
+  /**
    * #4700 — bare `gbrain dream` may opt the brain's default-like source
    * (sources.default / sole-non-default routing) into the full implicit
    * phase set instead of the freshness-only source cycle. Never set by the
@@ -2250,6 +2259,11 @@ async function runCycleUnscoped(
     // legitimate full reconcile — only a sync that ran and failed suppresses it.
     let syncAttempted = false;
     let synthesizeWrittenSlugs: string[] | undefined;
+    const sourceChangedSlugs = engine && cycleSourceId && opts.sourceChangedSince !== undefined
+      ? (await engine.executeRaw<{ slug: string }>(
+        'SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND ($2::timestamptz IS NULL OR updated_at>$2::timestamptz) ORDER BY slug',
+        [cycleSourceId, opts.sourceChangedSince])).map(row => row.slug)
+      : undefined;
     if (phases.includes('sync')) {
       checkAborted(cycleSignal);
       if (!engine) {
@@ -2406,7 +2420,7 @@ async function runCycleUnscoped(
         // (#1928, codex: keying off phases.includes('sync') wrongly suppressed
         // the skipped-sync full reconcile).
         const syncRanButFailed = syncAttempted && syncPagesAffected === undefined;
-        const xfSlugs = syncRanButFailed ? [] : syncPagesAffected;
+        const xfSlugs = syncRanButFailed || sourceChangedSlugs ? [] : syncPagesAffected;
         const { result, duration_ms } = await timePhase(() =>
           runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, xfSlugs, cycleSignal), 'extract_facts');
         result.duration_ms = duration_ms;
@@ -2624,10 +2638,11 @@ async function runCycleUnscoped(
         // cycle, do incremental over their union. If neither phase ran (e.g.,
         // user passed `--phase recompute_emotional_weight`), do full walk.
         const incremental: string[] | undefined =
-          (syncPagesAffected || synthesizeWrittenSlugs)
+          (syncPagesAffected || synthesizeWrittenSlugs || sourceChangedSlugs)
             ? Array.from(new Set([
                 ...(syncPagesAffected ?? []),
                 ...(synthesizeWrittenSlugs ?? []),
+                ...(sourceChangedSlugs ?? []),
               ]))
             : undefined;
         // #4797: raced + signal + lock-refresh + progress, like consolidate —

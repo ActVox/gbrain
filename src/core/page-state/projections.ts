@@ -462,6 +462,21 @@ export async function projectionBacklog(engine: Pick<BrainEngine, 'executeRaw'>)
 }
 
 /**
+ * #6803: the read-only preview of `gbrain projections drain`: the queued
+ * Markdown and code rows a drain would try, rows that last failed first, then oldest (at most `limit`),
+ * with each row's queue reason, so a row that last failed (`rebuild_failed`)
+ * is named before anything is rebuilt.
+ */
+export async function previewProjectionDrain(engine: Pick<BrainEngine, 'executeRaw'>, limit = 50):
+  Promise<{ pending: number; failed: number; rows: Array<{ source_id: string; slug: string; reason: string; updated_at: string }> }> {
+  const backlog = await projectionBacklog(engine);
+  const rows = await engine.executeRaw<{ source_id: string; slug: string; reason: string; updated_at: string }>(`SELECT s.id AS source_id,j.slug,j.reason,j.updated_at::text AS updated_at
+    FROM page_projection_jobs j ${PROJECTION_JOB_PROBES}
+    ORDER BY (j.reason='rebuild_failed') DESC,j.updated_at,j.slug LIMIT $1`, [Math.max(1, limit)]);
+  return { pending: backlog.pending, failed: backlog.failed, rows };
+}
+
+/**
  * Bounded and keyless. Unsupported media remains queued for its source importer.
  *
  * A queue row that no longer matches its live page is healed under the page

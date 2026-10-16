@@ -47,6 +47,8 @@ import { getEmbeddingModel, withBudgetTracker } from '../../ai/gateway.ts';
 import { embedStaleForSource } from '../../embed-stale.ts';
 import { createEmbedStallWatchdog, resolveEmbedStallAbortSeconds } from '../../embed-stall.ts';
 import { currentEmbeddingSignature } from '../../embedding.ts';
+import { readEmbedBackfillBlockers } from '../../embed-backfill-stall.ts';
+import { UnrecoverableError } from '../errors.ts';
 import { type DbPacer, createDbPacer, createNoopPacer } from '../../db-pacer.ts';
 import { resolvePaceMode, loadPaceModeConfig, readPaceEnv } from '../../pace-mode.ts';
 import type { BrainEngine } from '../../engine.ts';
@@ -345,7 +347,27 @@ export function makeEmbedBackfillHandler(
       // in a row while an entire corpus sat stripped. NULLed chunks stay NULL
       // for the next (fixed-config) run to pick up.
       if ((result.remaining ?? 0) > 0 || (result.blocked ?? 0) > 0) {
-        throw new Error(`embed-backfill: incomplete; ${result.remaining ?? 0} chunks remain and ${result.blocked ?? 0} projections are blocked. Durable progress is retained; inspect provider and projection readiness before retrying.`);
+        const message = `embed-backfill: incomplete; ${result.remaining ?? 0} chunks remain and ${result.blocked ?? 0} projections are blocked. Durable progress is retained; inspect provider and projection readiness before retrying.`;
+        // #6803: a run that embedded nothing records its blocker fingerprint, so
+        // automatic submission backs off and stops after identical failures
+        // (embed-backfill-stall.ts); a retry of this job that finds the same
+        // blockers dead-letters instead of failing the same way again.
+        let repeated = false;
+        if (result.embedded === 0) {
+          try {
+            const { fingerprint, remaining, blocked, signature } = await readEmbedBackfillBlockers(engine, sourceId, currentEmbeddingSignature());
+            const [prior] = job.attempts_made > 0
+              ? await engine.executeRaw<{ fingerprint: string | null }>("SELECT progress->'stall'->>'fingerprint' AS fingerprint FROM minion_jobs WHERE id=$1", [job.id])
+              : [];
+            await job.updateProgress({ embedded: 0, chunksProcessed: result.chunksProcessed, cursor: result.lastCursor, spentUsd: tracker.totalSpent,
+              stall: { fingerprint, remaining, blocked, signature } });
+            repeated = prior?.fingerprint === fingerprint;
+          } catch { /* the stall record is bookkeeping; the incomplete failure below stands either way */ }
+        }
+        if (repeated) {
+          throw new UnrecoverableError(`${message} No progress since the previous attempt and the same blockers remain; see gbrain doctor --only embed_backfill_stalled.`);
+        }
+        throw new Error(message);
       }
       if (result.embedded === 0 && (result.invalidated > 0 || result.chunksProcessed > 0)) {
         throw new Error(

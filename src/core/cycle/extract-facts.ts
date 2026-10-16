@@ -972,9 +972,10 @@ export async function runExtractFacts(
     // real incremental no-op; don't escalate to full-brain walk.
     slugs = opts.slugs;
   } else {
-    // Full walk: every page in the brain. Bounded by engine.getAllSlugs
-    // which is already the precedent for full-extract paths.
-    const allSlugs = await engine.getAllSlugs();
+    // Full walk: every page of this source. Each page reconciles under
+    // `sourceId`, so another source's slugs are never this run's work (#6803:
+    // the unscoped walk visited the whole brain on every connector cycle).
+    const allSlugs = await engine.getAllSlugs({ sourceId });
     slugs = Array.from(allSlugs);
   }
   // v0.35.5: union the canonicals touched by the phantom-redirect pass
