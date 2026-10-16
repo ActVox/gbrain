@@ -1,8 +1,8 @@
 /**
  * Segmented page tables under Postgres RLS (Wave B PR 2, fix lane B: B1, B2).
  *
- * 1. Protects: the five segment tables (page_segment_texts, page_body_manifest, page_body_stagings,
- *    page_body_staging_parts, page_view_digests) get the RLS posture of `pages`: enabled on every schema replay, so a
+ * 1. Protects: the six segment tables (page_segment_texts, page_body_manifest, page_body_stagings,
+ *    page_body_staging_parts, page_body_staging_texts, page_view_digests) get the RLS posture of `pages`: enabled on every schema replay, so a
  *    non-owner NOBYPASSRLS role with table SELECT and no policy reads none of their rows, as it reads no page. The
  *    operator recipe in docs/ENGINES.md (applied here verbatim) scopes them by source: a role scoped to src-a searches
  *    and reads its segmented page through every arm that probes the manifest, and never sees src-b's segment text,
@@ -22,7 +22,7 @@ import { importFromContent } from '../../src/core/import-file.ts';
 import type { GBrainConfig } from '../../src/core/config.ts';
 import { operations, type OperationContext } from '../../src/core/operations.ts';
 import { materializeSegmentedBody } from '../../src/core/page-body/ingest.ts';
-import type { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { conversationPage } from '../helpers/conversation-page.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
@@ -31,9 +31,10 @@ const tag = randomUUID().replaceAll('-', '').slice(0, 12);
 const OPEN = `gbrain_seg_rls_open_${tag}`;
 const READER = `gbrain_seg_rls_reader_${tag}`;
 const LEGACY = `gbrain_seg_rls_legacy_${tag}`;
+const WRITER = `gbrain_seg_rls_writer_${tag}`;
 const SOURCES = { 'src-a': 'alphaneedle', 'src-b': 'bravoneedle' } as const;
 const slugOf = (id: string) => `notes/ledger-${id}`;
-const PAGE_BODY_RLS_TABLES = ['page_body_manifest', 'page_body_staging_parts', 'page_body_stagings', 'page_segment_texts', 'page_view_digests'];
+const PAGE_BODY_RLS_TABLES = ['page_body_manifest', 'page_body_staging_parts', 'page_body_staging_texts', 'page_body_stagings', 'page_segment_texts', 'page_view_digests'];
 /** What a search and a body read touch besides the recipe's tables, opened to the reader. */
 const SEARCH_SIDE_TABLES = ['config', 'timeline_entries'];
 
@@ -86,7 +87,7 @@ const sourcesOf = (hits: Array<{ source_id?: unknown }>) => [...new Set(hits.map
     if (engine) {
       for (const p of policies) await engine.executeRaw(`DROP POLICY IF EXISTS ${p.name} ON ${p.table}`);
       for (const t of forced) await engine.executeRaw(`ALTER TABLE ${t} NO FORCE ROW LEVEL SECURITY`);
-      for (const role of [OPEN, READER, LEGACY]) {
+      for (const role of [OPEN, READER, LEGACY, WRITER]) {
         await engine.executeRaw(`DROP OWNED BY ${role}`).catch(() => undefined);
         await engine.executeRaw(`DROP ROLE IF EXISTS ${role}`);
       }
@@ -182,5 +183,47 @@ const sourcesOf = (hits: Array<{ source_id?: unknown }>) => [...new Set(hits.map
       expect(failure).toBe('42501');
       expect(sourcesOf(await asRole(engine, LEGACY, tx => tx.searchKeyword(SOURCES['src-a'], { sourceId: 'src-a' })))).toEqual(['src-a']);
     }, 120_000);
+
+    test('N7: a non-owner write role under the recipe creates a segmented page, recording its staging holds, and sees only its source', async () => {
+      // A login role, so every pooled connection of its engine runs as it, scoped to src-a by its own default.
+      const password = randomUUID();
+      await engine.executeRaw(`CREATE ROLE ${WRITER} LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS`);
+      await engine.executeRaw(`ALTER ROLE ${WRITER} SET app.scopes = 'src-a'`);
+      await engine.executeRaw(`GRANT USAGE ON SCHEMA public TO ${WRITER}`);
+      await engine.executeRaw(`GRANT ALL ON ALL TABLES IN SCHEMA public TO ${WRITER}`);
+      await engine.executeRaw(`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${WRITER}`);
+      // The recipe (and the pages policy) scopes the page tables; every other table under RLS opens to the writer.
+      const scoped = new Set(['pages', ...[...docsRecipe(WRITER).matchAll(/CREATE POLICY \w+ ON (\w+)/g)].map(m => m[1]!)]);
+      const rls = await engine.executeRaw<{ relname: string }>(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity ORDER BY 1`);
+      for (const { relname } of rls.filter(r => !scoped.has(r.relname))) {
+        await engine.executeRaw(`CREATE POLICY ${WRITER}_open ON ${relname} FOR ALL TO ${WRITER} USING (true) WITH CHECK (true)`);
+        policies.push({ name: `${WRITER}_open`, table: relname });
+      }
+      const url = new URL(process.env.DATABASE_URL!);
+      url.username = WRITER;
+      url.password = password;
+      const writer = new PostgresEngine();
+      await writer.connect({ database_url: url.toString(), poolSize: 4 });
+      expect(await writer.executeRaw("SELECT current_user AS role, current_setting('app.scopes', true) AS scopes")).toEqual([{ role: WRITER, scopes: 'src-a' }]);
+      try {
+        const holds = async () => Number((await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_body_staging_texts t JOIN page_body_stagings s ON s.id = t.staging_id
+          WHERE s.source_id = 'src-a' AND s.slug = 'notes/writer-ledger'`))[0]!.n);
+        const content = conversationPage(2 * 1024 * 1024, { seed: 73, title: 'Writer ledger', needles: [{ at: 0.4, word: 'writerneedle' }] });
+        const imported = await importFromContent(writer, 'notes/writer-ledger', content, { noEmbed: true, sourceId: 'src-a' });
+        expect(imported.status).toBe('imported');
+        expect(await engine.executeRaw("SELECT body_storage FROM pages WHERE slug = 'notes/writer-ledger' AND source_id = 'src-a'")).toEqual([{ body_storage: 'segmented' }]);
+        expect(await holds()).toBeGreaterThan(0);
+        expect({
+          own: sourcesOf(await writer.searchKeyword('writerneedle')),
+          other: sourcesOf(await writer.searchKeyword(SOURCES['src-b'])),
+          texts: sourcesOf(await writer.executeRaw<{ source_id: string }>('SELECT DISTINCT source_id FROM page_segment_texts')),
+          holds: sourcesOf(await writer.executeRaw<{ source_id: string }>('SELECT DISTINCT source_id FROM page_body_staging_texts')),
+          stagings: sourcesOf(await writer.executeRaw<{ source_id: string }>('SELECT DISTINCT source_id FROM page_body_stagings')),
+        }).toEqual({ own: ['src-a'], other: [], texts: ['src-a'], holds: ['src-a'], stagings: ['src-a'] });
+      } finally {
+        await writer.disconnect();
+      }
+    }, 300_000);
   });
 });

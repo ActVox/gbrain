@@ -3917,10 +3917,13 @@
           "form": "arrow",
           "helpers": [
             "CONTENT_CHUNKS_OCCURRENCE_GENERATION_INDEX",
+            "PLANNER_REPAIR_TABLES",
+            "analyzeAfterIndexBuild",
             "buildIndexOnline",
             "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "tableRows"
           ],
           "sha256": "9e2d0b4acff7a58c986f569e842abbb4272f34dd39721cf557cb223342b2c81d"
         },

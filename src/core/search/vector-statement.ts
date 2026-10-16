@@ -79,6 +79,8 @@ export interface VectorSearchStatementInput {
    * omitted; at most SCOPE_SCAN_MAX_CHUNKS adds the scope scan.
    */
   scope?: VectorScope;
+  /** chunkManifestReads; unset reads the manifest. */
+  chunkManifest?: boolean;
 }
 
 export interface VectorSearchStatement {
@@ -411,7 +413,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
               ${hardExcludeClause}
               ${pageVisibilityClause}
           ))
-          AND ${chunkGenerationProbe('cc')}
+          AND ${chunkGenerationProbe('cc', input.chunkManifest ?? true)}
           AND cc.${col} IS NOT NULL ${modalityFilter}
           ${chunkFilters.join('\n          ')}
           ${relaxedGeneration}

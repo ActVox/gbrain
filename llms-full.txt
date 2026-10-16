@@ -5531,13 +5531,18 @@ live in `test/postgres-engine-rls-scope.test.ts`.
 **Segmented page tables.** A page over 1 MiB stored in segments (`pages.segmented_storage`)
 keeps its text in `page_segment_texts`, its layout and headings in
 `page_body_manifest`, uploads in progress in `page_body_stagings` /
-`page_body_staging_parts`, and view sizes in `page_view_digests`. gbrain
-enables RLS on all five on every schema replay, as it does on `pages` and
+`page_body_staging_parts` (with the segment texts each one holds in
+`page_body_staging_texts`), and view sizes in `page_view_digests`. gbrain
+enables RLS on all six on every schema replay, as it does on `pages` and
 `content_chunks`, so with no policy a role that does not bypass RLS reads no row
 of them. Title search, the source-scoped vector scan, the chunk windows search
-reads around its hits and get_page check chunks against `page_body_manifest`
-(inline pages included), so a restricted read role needs `SELECT` on it; without
-it those reads fail with `permission_denied` (42501). Grant it together with
+reads around its hits, `get_chunks` and get_page check a chunk of a page stored
+in segments against `page_body_manifest`. A restricted read role that can see
+such a chunk (a segmented page of one of its sources) needs `SELECT` on it;
+without it those reads fail with `permission_denied` (42501). A role that sees
+no such chunk, as every role does while no page is segmented
+(`pages.segmented_storage` is off by default), reads as before without the
+grant (`test/e2e/segmented-switch-off-rls.test.ts`). Grant it together with
 these policies, never with an open one, or the role reads every source's segment
 text. A scoped role then sees exactly the segment rows of its sources:
 
@@ -5551,6 +5556,11 @@ CREATE POLICY page_body_manifest_scope_filter ON page_body_manifest
   USING (current_setting('app.scopes', true) = '*'
          OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
 CREATE POLICY page_body_stagings_scope_filter ON page_body_stagings
+  USING (current_setting('app.scopes', true) = '*'
+         OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+-- A write role records the texts each staging holds here; without a policy its
+-- segmented writes are refused.
+CREATE POLICY page_body_staging_texts_scope_filter ON page_body_staging_texts
   USING (current_setting('app.scopes', true) = '*'
          OR source_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
 -- Search joins sources; a scoped role sees its own.
@@ -5580,6 +5590,7 @@ ALTER TABLE page_segment_texts FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_manifest FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_stagings FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_staging_parts FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_body_staging_texts FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_view_digests FORCE ROW LEVEL SECURITY;
 ALTER TABLE content_chunks FORCE ROW LEVEL SECURITY;
 ```
@@ -5588,6 +5599,13 @@ ALTER TABLE content_chunks FORCE ROW LEVEL SECURITY;
 A role whose reads do not run through the scoped helper is scoped by its own
 default (`ALTER ROLE <reader-role> SET app.scopes = 'source-a,source-b'`). The
 policies read `app.scopes` only; the app-layer source filters stay layer 1.
+
+A write role that does not own the tables needs `SELECT, INSERT, UPDATE, DELETE`
+on all six, as on any table a migration adds, even while no page is segmented:
+purging soft-deleted pages, the maintenance sweep's facts pass, fact withdrawal
+and doctor's credential check name them. With the policies above it creates
+segmented pages and sees only its sources' rows
+(`test/e2e/segmented-rls-scope.test.ts`).
 
 **In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
 runs through this helper and a `LegacyUnscopedRead` when it runs on the pool
