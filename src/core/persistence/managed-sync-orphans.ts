@@ -80,10 +80,11 @@ interface CursorRow {
 
 /**
  * #6834: the cursor `c` (of source `s`) stands at its checkpoint, which ended refused because `last_commit` moved, and the
- * source now records a commit that is neither the cursor's start nor its target. Shared by the classification and the
+ * source now records a commit that is neither the cursor's start nor its target. A company-brain cursor records its
+ * approval and is never one. Shared by the classification and the
  * retirement's re-check, so both read the same rule. `$msg` is the moved-checkpoint message parameter.
  */
-const checkpointMovedSql = (msg: string) => `(c.completed_keys->0->'pending'->'intent'->>'kind'='managed_sync_checkpoint'
+const checkpointMovedSql = (msg: string) => `(c.completed_keys->0->'pending'->'intent'->>'kind'='managed_sync_checkpoint' AND c.completed_keys->0->>'companyReceiptId' IS NULL
   AND (c.completed_keys->0->>'index')::int>=(c.completed_keys->0->>'total')::int
   AND s.last_commit IS DISTINCT FROM c.completed_keys->0->>'from' AND s.last_commit IS DISTINCT FROM c.completed_keys->0->>'target'
   AND EXISTS(SELECT 1 FROM persistence_requests m WHERE m.source_id=s.id AND m.request_id=(c.completed_keys->0->'pending'->>'requestId')::uuid
