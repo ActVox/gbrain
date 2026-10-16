@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, sep } from 'node:path';
 import { opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { sha256 } from './digest.ts';
@@ -60,6 +60,28 @@ export function resolveCoordinationLock(path: string, worktreeId: string, record
   const lock = canonicalFilesystemPath(join(directory, `${worktreeId}.lock`));
   if (coordinationPathInsideRoot(root, lock)) throw insideRootRefusal(root, lock);
   return { path: lock, rule };
+}
+
+export interface CoordinationHomeIgnored { configured_directory: string; recorded_path: string; move_step: string }
+
+/**
+ * v3 review: a recorded lock always wins over GBRAIN_COORDINATION_HOME, so when the variable applies to `root`
+ * (rule 4) and names another directory than the recorded lock's, say so: the recorded file stays in use by every
+ * process, and the step that changes where it lives is the operator's (no claim or env change moves it). Null when
+ * the variable is unset, invalid, not read for this root, or already names the recorded location.
+ */
+export function coordinationHomeIgnored(root: string, recordedPath: string): CoordinationHomeIgnored | null {
+  const override = process.env.GBRAIN_COORDINATION_HOME?.trim();
+  if (!override) return null;
+  let resolved: ReturnType<typeof coordinationLockDirectory>;
+  try { resolved = coordinationLockDirectory(root, null); } catch { return null; }
+  if (resolved.rule !== 'coordination_home') return null;
+  const recorded = canonicalFilesystemPath(recordedPath);
+  if (recorded.startsWith(resolved.directory + sep)) return null;
+  return { configured_directory: resolved.directory, recorded_path: recorded,
+    move_step: `Nothing moves: every process keeps locking ${recorded}, because GBRAIN_COORDINATION_HOME only places the lock of a checkout that has no reservation yet, and no claim, transfer or environment change rewrites a recorded one. `
+      + `Make ${dirname(recorded)} survive container recreation (mount it), and unset GBRAIN_COORDINATION_HOME for this checkout's processes if it was meant to move the lock. `
+      + 'No gbrain command relocates a recorded lock yet (docs/architecture/topologies.md#coordination-lock).' };
 }
 
 /** How long a repair waits for another repairer of the same root before refusing. */

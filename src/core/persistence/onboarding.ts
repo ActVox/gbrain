@@ -5,7 +5,7 @@ import { existingLocalHostId, persistenceHome } from './identity.ts';
 import { containsPath, getWorktreeBinding, readManagedMode, type WorktreeBinding } from './ownership.ts';
 import { assertPhysicalRoot } from './physical-root.ts';
 import { readPhysicalRootReservation, readWedgedPhysicalRootReservation } from './physical-root-record.ts';
-import { coordinationLockDirectory } from './coordination-lock.ts';
+import { coordinationHomeIgnored, coordinationLockDirectory } from './coordination-lock.ts';
 import { inspectLegacyWriterLocks } from './legacy-locks.ts';
 import { UNSUPPORTED_MANAGED_BULK_WRITERS } from './maintenance.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
@@ -40,8 +40,11 @@ function coordinationLockStatus(root: string, binding: WorktreeBinding | null, h
     const wedged = readWedgedPhysicalRootReservation(root);
     if (wedged) return { path: wedged.coordinationPath, rule: 'reservation', old_path_wedge: true };
     const reservation = readPhysicalRootReservation(root)?.coordinationPath;
-    if (reservation) return { path: reservation, rule: 'reservation' };
-    if (binding?.coordination_path) return { path: binding.coordination_path, rule: 'binding' };
+    const recorded = reservation ? { path: reservation, rule: 'reservation' } : binding?.coordination_path ? { path: binding.coordination_path, rule: 'binding' } : null;
+    if (recorded) {
+      const ignored = coordinationHomeIgnored(root, recorded.path);
+      return ignored ? { ...recorded, coordination_home_ignored: ignored } : recorded;
+    }
     return { path: null, ...coordinationLockDirectory(root, host) };
   } catch (error) {
     return { path: binding?.coordination_path ?? null, rule: null, error: error instanceof Error ? error.message : String(error) };

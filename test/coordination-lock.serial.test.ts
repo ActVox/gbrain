@@ -18,7 +18,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { acceptWriterTransfer, claimWorktree, getWorktreeBinding, prepareWriterTransfer } from '../src/core/persistence/ownership.ts';
 import { localHostId, persistenceHome } from '../src/core/persistence/identity.ts';
@@ -105,6 +105,34 @@ test('two processes with different GBRAIN_COORDINATION_HOME values on one root l
     expect(joined.coordination_path).toBe(claimed.coordination_path);
   });
   expect(existsSync(join(homeB, 'locks'))).toBe(false);
+}, 30_000);
+
+test('GBRAIN_COORDINATION_HOME changed after the reservation: the recorded lock still wins, and writer status and doctor say so with the move step', async () => {
+  const { checkCoordinationLockLocation } = await import('../src/commands/doctor/checks/coordination-lock.ts');
+  const root = join(base, 'env-changed'), homeA = join(base, 'env-changed-a'), homeB = join(base, 'env-changed-b');
+  const sourceId = await source(root);
+  const claimed = await withEnv({ GBRAIN_HOME: root, GBRAIN_COORDINATION_HOME: homeA }, async () => {
+    const binding = await claimWorktree(engine, sourceId, root);
+    expect((await checkCoordinationLockLocation(engine)).details).toMatchObject({ checkouts: expect.not.arrayContaining([expect.objectContaining({ root })]) });
+    return binding;
+  });
+  await withEnv({ GBRAIN_HOME: root, GBRAIN_COORDINATION_HOME: homeB }, async () => {
+    expect((await claimWorktree(engine, sourceId, root)).coordination_path).toBe(claimed.coordination_path);
+    const status = await writerOnboardingPreflight(engine, sourceId) as { sources: Array<{ coordination_lock?: Record<string, unknown> }> };
+    const lock = status.sources[0]!.coordination_lock!;
+    expect(lock).toMatchObject({ path: claimed.coordination_path, rule: 'reservation' });
+    expect(lock.coordination_home_ignored).toMatchObject({ configured_directory: expect.stringContaining(join(homeB, 'locks')), recorded_path: claimed.coordination_path });
+    expect(String((lock.coordination_home_ignored as { move_step: string }).move_step)).toContain('No gbrain command relocates a recorded lock');
+    const doctor = await checkCoordinationLockLocation(engine);
+    expect(doctor.status).toBe('warn');
+    expect(doctor.message).toContain(`records its lock at ${claimed.coordination_path}`);
+    expect(doctor.message).toContain('the recorded lock wins');
+    expect(doctor.message).toContain(`Make ${dirname(claimed.coordination_path!)} survive container recreation`);
+  });
+  await withEnv({ GBRAIN_HOME: root, GBRAIN_COORDINATION_HOME: homeA }, async () => {
+    const status = await writerOnboardingPreflight(engine, sourceId) as { sources: Array<{ coordination_lock?: Record<string, unknown> }> };
+    expect(status.sources[0]!.coordination_lock!.coordination_home_ignored).toBeUndefined();
+  });
 }, 30_000);
 
 test('an ordinary root keeps its lock under persistenceHome() and never reads GBRAIN_COORDINATION_HOME', async () => {

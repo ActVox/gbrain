@@ -591,6 +591,17 @@ quarantine list). `gbrain sources writer status --json` prints
 that chose it; an unclaimed checkout without a reservation reports the
 `directory` a claim would use, and an unreadable setting reports `error`.
 
+<a id="coordination-home-ignored"></a>Because a recorded path wins, changing
+`GBRAIN_COORDINATION_HOME` after a checkout's reservation was written moves
+nothing: every process keeps locking the recorded file. When the variable applies
+to a checkout (rule 4) and names another directory than the recorded lock's,
+`writer status --json` adds `coordination_lock.coordination_home_ignored`
+(`configured_directory`, `recorded_path`, `move_step`) and doctor's
+`coordination_lock_location` warns with the same move step: make the recorded
+lock's directory survive container recreation (mount it), and unset the variable
+for that checkout's processes if it was meant to move the lock. No gbrain command
+relocates a recorded lock yet; never edit or delete the reservation to force one.
+
 A reservation written before this rule existed, for a checkout that contains
 `GBRAIN_HOME`, records its lock inside the checkout, so every claim refused with
 "The stable coordination lock must live outside the canonical checkout". Status
