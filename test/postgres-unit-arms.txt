@@ -20,6 +20,7 @@ test/belief-ledger-coverage.test.ts
 test/belief-ledger-group.test.ts
 test/belief-ledger-identity.test.ts
 test/belief-ledger-lifecycle.test.ts
+test/belief-ledger-page-at-time.test.ts
 test/belief-ledger-privacy.test.ts
 test/belief-ledger-purge-review.test.ts
 test/belief-ledger-purge.test.ts
