@@ -1,3 +1,4 @@
+import type { BrainEngine } from '../engine.ts';
 import type { ChunkInput, PageReadScope } from '../types.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
 
@@ -85,6 +86,16 @@ export function chunkDocumentOrder(chunk: string, manifest: string): string {
 /** A page of any kind chunked before the fence; remote reads withhold it until it is re-sealed. */
 export function belowSafeChunkFence(chunkerVersion: number | null | undefined): boolean {
   return (chunkerVersion ?? 0) < SAFE_FENCE_CHUNKER_VERSION;
+}
+
+/**
+ * A body write that removes a protected fence leaves `chunker_version < 0`
+ * (bodyWriteChunkVersion): the stored text lost its marker, but the source
+ * behind it (an image's pixels) did not, so only a fresh attestation counts.
+ */
+export async function provenanceDistrusted(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<boolean> {
+  const [row] = await engine.executeRaw<{ chunker_version: number | null }>('SELECT chunker_version FROM pages WHERE id = $1', [pageId]);
+  return (row?.chunker_version ?? 0) < 0;
 }
 
 /**
