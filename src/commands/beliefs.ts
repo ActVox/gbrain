@@ -16,6 +16,7 @@ import { coverageIntervals, coveredSources, fillCommitMarks, orphanLifetimes, re
 import { backfillBeliefHistory } from '../core/belief/backfill.ts';
 import { readLedgerSource } from '../core/belief/ledger.ts';
 import { readManagedMode } from '../core/persistence/managed-mode.ts';
+import { resolveSourceId, SourceTargetError } from '../core/source-resolver.ts';
 
 export const BELIEFS_USAGE = [
   'Usage: gbrain beliefs <enable|disable|status|reconcile|backfill> [--source <id>] [--json]',
@@ -26,15 +27,16 @@ export const BELIEFS_USAGE = [
   '  reconcile  Appends reconcile events for slugs whose state drifted from their newest event, and fills missing commit marks.',
   '             A drifted slug\'s interval stays uncertified on a managed source.',
   '  backfill   Seeds best-effort history before the coverage start from retained page versions (never certified).',
-  '  --source <id>  The source (default: every covered source for status and reconcile, "default" for the others).',
+  '  --source <id>  The source (default: every covered source for status and reconcile; the resolved source, as for other commands, for the rest).',
 ].join('\n');
 
 const SUBCOMMANDS = ['enable', 'disable', 'status', 'reconcile', 'backfill'] as const;
 
 function sourceArg(args: string[]): string | undefined {
   const at = args.indexOf('--source');
-  if (at >= 0) return args[at + 1];
-  return args.find(a => a.startsWith('--source='))?.slice('--source='.length);
+  const value = at >= 0 ? args[at + 1] : args.find(a => a.startsWith('--source='))?.slice('--source='.length);
+  if ((at >= 0 || value !== undefined) && (!value || value.startsWith('-'))) throw opError('invalid_params', '--source needs a source id.', 'Name the source after --source; gbrain sources list shows the source ids.');
+  return value;
 }
 
 const unknownSource = (sourceId: string) => opError('invalid_params', `Source ${sourceId} does not exist.`, 'Run gbrain sources list to see the source ids.');
@@ -50,7 +52,7 @@ async function sourceStatus(engine: BrainEngine, sourceId: string) {
 function renderInterval(i: CoverageInterval): string[] {
   const lines = [`  interval from ${i.started_at}${i.stopped_at ? ` to ${i.stopped_at}` : ' (open)'}: ${i.certified ? 'certified (links: journaled publications only)' : 'uncertified'}`,
     `    watermark: ${i.watermark ?? 'none yet'}; baseline: ${i.baseline.pages_done} page(s) done${i.baseline.complete ? ', complete' : `, ${i.baseline.pending ?? '?'} pending (rerun gbrain beliefs enable to resume)`}`];
-  for (const r of i.restores) lines.push(`    restore at ${r.at} from an archive of ${r.archive_created_at ?? 'unknown time'} (gap); purge replay: ${r.purge_replay ?? 'unknown'}`);
+  for (const r of i.restores) lines.push(`    restore at ${r.at} from an archive of ${r.archived_at ?? 'unknown time'} (gap); purge replay: ${r.purge_replay ?? 'unknown'}`);
   if (i.drift.length) lines.push(`    drift: ${i.drift.length} reconcile mark(s), uncertified permanently for ${[...new Set(i.drift.map(d => d.slug))].slice(0, 5).join(', ')}`);
   return lines;
 }
@@ -69,21 +71,26 @@ export async function runBeliefs(engine: BrainEngine, args: string[]): Promise<v
     }
     const named = sourceArg(args);
     if (named !== undefined && !await readLedgerSource(engine, named)) throw unknownSource(named);
+    const target = () => resolveSourceId(engine, named).catch(error => {
+      throw error instanceof SourceTargetError ? opError('invalid_params', error.message, 'Name the source after --source; gbrain sources list shows the source ids.') : error;
+    });
     if (sub === 'enable') {
-      const sourceId = named ?? 'default';
+      const sourceId = await target();
       const run = await enableBeliefLedger(engine, sourceId);
-      await report(args, { source_id: sourceId, ...run }, `Belief ledger ${run.resumed ? 'resumed' : 'enabled'} on ${sourceId}: ${run.pages} page(s) baselined; `
-        + `${run.certified ? 'certified (managed source)' : 'uncertified (unmanaged source: recorded, never certified)'}.`);
+      const outcome = !run.complete ? 'stopped before the baseline finished (a disable ran meanwhile); nothing is certified'
+        : run.certified ? 'certified (managed source)' : 'uncertified (unmanaged source: recorded, never certified)';
+      await report(args, { source_id: sourceId, ...run }, `Belief ledger ${run.resumed ? 'resumed' : 'enabled'} on ${sourceId}: ${run.pages} page(s) baselined; ${outcome}.`
+        + `${run.unkeyable.length ? ` ${run.unkeyable.length} slug(s) no page key can name were not baselined: ${run.unkeyable.slice(0, 5).join(', ')}.` : ''}`);
       return;
     }
     if (sub === 'disable') {
-      const sourceId = named ?? 'default';
+      const sourceId = await target();
       const stopped = await disableBeliefLedger(engine, sourceId);
       await report(args, { source_id: sourceId, stopped }, stopped ? `Belief ledger stopped on ${sourceId}.` : `The belief ledger was not recording ${sourceId}.`);
       return;
     }
     if (sub === 'backfill') {
-      const sourceId = named ?? 'default';
+      const sourceId = await target();
       const result = await backfillBeliefHistory(engine, sourceId);
       const incomplete = result.pages.filter(p => !p.complete);
       await report(args, result, `Backfilled ${result.events} event(s) before ${result.since} across ${result.pages.length} page(s) of ${sourceId} (best effort, never certified)`
@@ -105,7 +112,7 @@ export async function runBeliefs(engine: BrainEngine, args: string[]): Promise<v
     const results = [];
     for (const sourceId of sources) {
       const drift = await reconcileBeliefDrift(engine, sourceId);
-      results.push({ source_id: sourceId, checked: drift.scan.checked, reconciled: drift.reconciled, events: drift.events, commit_marks_filled: await fillCommitMarks(engine, sourceId) });
+      results.push({ source_id: sourceId, checked: drift.scan.checked, reconciled: drift.reconciled, events: drift.events, commit_marks_filled: await fillCommitMarks(engine, sourceId, { deep: true }) });
     }
     await report(args, { sources: results }, results.length ? results.map(r => `${r.source_id}: ${r.checked} slug(s) checked, ${r.reconciled.length} reconciled (${r.events} event(s)), `
       + `${r.commit_marks_filled} commit mark(s) filled.`).join('\n') : 'No source has belief ledger coverage; nothing to reconcile.');

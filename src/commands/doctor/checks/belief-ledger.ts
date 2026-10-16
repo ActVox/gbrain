@@ -42,24 +42,25 @@ async function runBeliefLedger(ctx: DoctorContext): Promise<Check[]> {
     for (const sourceId of sources) {
       if (ctx.doFix && !ctx.dryRun) {
         await reconcileBeliefDrift(engine, sourceId, deep ? { op: 'doctor_fix' } : { op: 'doctor_fix', limit: DRIFT_SAMPLE_PAGES });
-        await fillCommitMarks(engine, sourceId);
+        await fillCommitMarks(engine, sourceId, { deep });
       }
       const intervals = await coverageIntervals(engine, sourceId);
       const drift = await scanBeliefDrift(engine, sourceId, { deep });
       const open = intervals.at(-1)!;
       perSource.push({ source_id: sourceId, recording: !open.stopped_at, certified: open.certified, watermark: open.watermark, baseline: open.baseline,
         intervals: intervals.length, drift: { checked: drift.checked, candidates: drift.candidates, exact: drift.exact, slugs: drift.drifted.slice(0, 10).map(d => d.slug), count: drift.drifted.length },
-        drift_marks: open.drift.length, orphans: await orphanLifetimes(engine, sourceId, 5), unmarked: (await unmarkedPublications(engine, sourceId, 1000)).length,
+        drift_marks: open.drift.length, orphans: await orphanLifetimes(engine, sourceId, 5, { deep }), unmarked: (await unmarkedPublications(engine, sourceId, 1000, { deep })).length,
         restores: open.restores.filter(r => r.purge_replay && UNSAFE_REPLAY.has(r.purge_replay)) });
     }
     const details = { sources: perSource, deep, docs: DOCS };
     const restore = perSource.find(s => s.restores.length);
     if (restore) {
       const r = restore.restores.at(-1)!;
+      const unreplayed = r.replays.filter(x => x.outcome !== 'complete').map(x => x.request_id);
       checks.push({ name: 'belief_ledger_coverage', status: 'warn', details,
-        message: `A backup restore of ${restore.source_id} at ${r.at} could not replay every purge made after the archive (${r.archive_created_at ?? 'unknown time'}): purge replay ${r.purge_replay}`
-          + `${r.purge_requests.length ? ` for ${r.purge_requests.join(', ')}` : ''}. Content purged after the backup may be readable again.`,
-        fix: { argv: r.replay_argv ?? ['gbrain', 'beliefs', 'status', '--source', restore.source_id, '--json'], consent: [], actor: 'user', ask_user: true, requires_exclusive: false, docs: DOCS,
+        message: `A backup restore of ${restore.source_id} at ${r.at} could not replay every purge made after the archive (${r.archived_at ?? 'unknown time'}): purge replay ${r.purge_replay}`
+          + `${unreplayed.length ? ` for ${unreplayed.join(', ')}` : ''}. Content purged after the backup may be readable again.`,
+        fix: { argv: ['gbrain', 'beliefs', 'status', '--source', restore.source_id, '--json'], consent: [], actor: 'user', ask_user: true, requires_exclusive: false, docs: DOCS,
           why: 'The replay reads the purge events of the original brain; only the user can say where it is, or whether to run those purges again.',
           user_message: `Your restored brain may contain content you purged after the backup was made (${restore.source_id}). Do you have the original brain available so the purges can be replayed, or should they be run again?`,
           verify: doctorVerify('belief_ledger_coverage') } });

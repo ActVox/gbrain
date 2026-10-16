@@ -198,9 +198,9 @@ More: [docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physi
 
 More: [docs/designs/BELIEF_LEDGER.md#72-the-marked-history-backfill](../../docs/designs/BELIEF_LEDGER.md#72-the-marked-history-backfill)
 
-### belief_preparation_stale
+### belief_stale_preparation
 
-<a id="belief_preparation_stale"></a>
+<a id="belief_stale_preparation"></a>
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|

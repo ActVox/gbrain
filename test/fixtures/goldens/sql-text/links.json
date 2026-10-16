@@ -349,8 +349,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT s.incarnation::text AS incarnation, s.purge_epoch, (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $1 AND e.source_incarnation = s.incarnation ORDER BY e.id DESC LIMIT 1) AS coverage, (s.purge_epoch > 0 OR EXISTS (SELECT 1 FROM fact_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM take_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM page_purges WHERE source_id = s.id)) AS purges FROM sources s WHERE s.id = $2",
-            "textSha256": "f000174df490aafd95dbf40666721cc0a652e36b0cfe51bc5ff285bf1941ae75"
+            "sql": "SELECT s.incarnation::text AS incarnation, s.purge_epoch, (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $1 AND e.source_incarnation = s.incarnation AND e.event_type <> 'coverage.restored' ORDER BY e.id DESC LIMIT 1) AS coverage, (s.purge_epoch > 0 OR EXISTS (SELECT 1 FROM fact_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM take_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM page_purges WHERE source_id = s.id)) AS purges FROM sources s WHERE s.id = $2",
+            "textSha256": "07c43af557f387634ae6b15e2af1d0f2e84a0bb91c569b2569594a1e32fd21b8"
           },
           {
             "lane": "tx",
@@ -534,8 +534,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT s.incarnation::text AS incarnation, s.purge_epoch, (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $1 AND e.source_incarnation = s.incarnation ORDER BY e.id DESC LIMIT 1) AS coverage, (s.purge_epoch > 0 OR EXISTS (SELECT 1 FROM fact_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM take_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM page_purges WHERE source_id = s.id)) AS purges FROM sources s WHERE s.id = $2",
-            "textSha256": "f000174df490aafd95dbf40666721cc0a652e36b0cfe51bc5ff285bf1941ae75"
+            "sql": "SELECT s.incarnation::text AS incarnation, s.purge_epoch, (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $1 AND e.source_incarnation = s.incarnation AND e.event_type <> 'coverage.restored' ORDER BY e.id DESC LIMIT 1) AS coverage, (s.purge_epoch > 0 OR EXISTS (SELECT 1 FROM fact_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM take_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM page_purges WHERE source_id = s.id)) AS purges FROM sources s WHERE s.id = $2",
+            "textSha256": "07c43af557f387634ae6b15e2af1d0f2e84a0bb91c569b2569594a1e32fd21b8"
           },
           {
             "lane": "tx",
