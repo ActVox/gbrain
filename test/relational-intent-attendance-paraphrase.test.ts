@@ -13,12 +13,16 @@
  * evidence.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { parseRelationalQuery } from '../src/core/search/relational-intent.ts';
+import { parseRelationalQuery, type RelationalKind, type RelationDirection } from '../src/core/search/relational-intent.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { buildRelationalArm } from '../src/core/search/relational-recall.ts';
 import { installFixtureChunks } from './helpers/page-projection.ts';
 
-const ATTENDED = { kind: 'who_rel', linkTypes: ['attended'], direction: 'in' };
+const ATTENDED: { kind: RelationalKind; linkTypes: string[]; direction: RelationDirection } = {
+  kind: 'who_rel',
+  linkTypes: ['attended'],
+  direction: 'in',
+};
 const INVEST = ['invested_in', 'led_round'];
 
 const FORMS: Array<[string, string]> = [
