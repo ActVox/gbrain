@@ -83,6 +83,35 @@ Runbook: docs/guides/sync-unblock-runbook.md
 `);
 }
 
+/**
+ * #6803: the operator verb a `gbrain sync` argument vector asks for, shared by
+ * the CLI's pre-connect preflight (no watchdog, no owner delegation) and
+ * `runSyncInner`. `gbrain sync --status` is the status read, the same as
+ * `gbrain sync status` (it used to run a full sync, because nothing read the
+ * flag). `--preview` and `--check` are read by no sync path, so a sync that
+ * would silently run past them is refused.
+ */
+export function syncOperatorVerb(args: readonly string[]): 'status' | 'unblock' | null {
+  if (args[0] === 'status' || args[0] === 'unblock') return args[0];
+  if (args[0] === 'trigger') return null;
+  const unread = args.find(a => a === '--preview' || a === '--check' || a.startsWith('--preview=') || a.startsWith('--check='));
+  if (unread) {
+    const flag = unread.split('=')[0];
+    throw opError('invalid_params', `gbrain sync does not read ${flag}; it would have run a full sync.`,
+      'Preview a sync with --dry-run, or read where a source stands with gbrain sync status --source <id>.',
+      { fix: { argv: ['gbrain', 'sync', ...args.filter(a => a !== unread && a !== '--dry-run'), '--dry-run'], consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'The same sync with --dry-run reports what it would import and writes nothing.' } });
+  }
+  return args.includes('--status') ? 'status' : null;
+}
+
+/** `runSyncInner`'s operator route: `sync --status` prints one hint, then runs exactly `sync status`. */
+export async function runSyncOperator(engine: BrainEngine, verb: 'status' | 'unblock', args: string[]): Promise<void> {
+  if (args[0] === verb) return verb === 'status' ? runSyncStatus(engine, args.slice(1)) : runSyncUnblock(engine, args.slice(1));
+  process.stderr.write('[gbrain] sync --status is the status read, the same as gbrain sync status (it never syncs).\n');
+  return runSyncStatus(engine, args.filter(a => a !== '--status'));
+}
+
 function sourceOf(args: string[]): string {
   const explicit = args.find((a, i) => args[i - 1] === '--source') ?? null;
   const source = resolveSourceIdEngineFree(explicit, process.cwd());
@@ -97,10 +126,11 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
   const status = await readSyncStatus(engine, sourceId, { detail: args.includes('--detail') });
   const ctx = cliRenderContext();
   // #6696 (A4): the capacity picture rides every status read (unthrottled), from the 60 s snapshot.
-  const { cachedCapacitySnapshot, capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
+  // #6803 C4: one bounded wait per status read, shared with its notices; a slow snapshot reads unknown for this call only.
+  const { capacitySnapshotWithin, capacityNotices, CAPACITY_READ_WAIT_MS } = await import('../../core/persistence/capacity-snapshot.ts');
   const { renderNotice } = await import('../../core/agent-output.ts');
-  const snapshot = await cachedCapacitySnapshot(engine);
-  const notices = (await capacityNotices(engine, { throttle: false })).map(notice => renderNotice(notice, ctx));
+  const snapshot = await capacitySnapshotWithin(engine, Date.now() + CAPACITY_READ_WAIT_MS);
+  const notices = (await capacityNotices(engine, { throttle: false, snapshot })).map(notice => renderNotice(notice, ctx));
   const read = (r: typeof status.cursors_read) => r.status === 'read' ? r : { ...r, fix: renderAction(r.fix, ctx) };
   const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null,
     checkpoint_blockers_read: read(status.checkpoint_blockers_read), cursors_read: read(status.cursors_read), terminal_failures_read: read(status.terminal_failures_read),

@@ -8,7 +8,9 @@ import { readPreparationPolicy } from '../../../core/persistence/switches.ts';
 import { resolvePrepare, resolveSessionTimeouts } from '../../../core/db.ts';
 import { agentFix, checkError, doctorVerify } from '../check-fix.ts';
 import { lostCallerWrites } from '../../../core/repair/failed-writes.ts';
-import { readCapacityForecast, readCapacityThresholds } from '../../../core/persistence/capacity-forecast.ts';
+import { readCapacityThresholds } from '../../../core/persistence/capacity-forecast.ts';
+import { doctorCapacityForecast, forecastOrNull } from '../capacity-memo.ts';
+import { withStatementDeadline } from '../../../core/statement-deadline.ts';
 
 const WINDOW_DAYS = 7;
 const SAMPLE = 10_000;
@@ -83,7 +85,7 @@ export async function requestGrowthCheck(engine: BrainEngine): Promise<Check> {
     const soon = scopes.filter(scope => scope.days_to_exhaustion !== null && scope.days_to_exhaustion < warnDays);
     // Every principal shares one brain-wide key, so each key gets the largest value any scope needs.
     const needed = new Map<string, number>();
-    const forecast = soon.length ? await readCapacityForecast(engine, { limits }).catch(() => null) : null;
+    const forecast = soon.length ? await doctorCapacityForecast(engine, { limits }).catch(forecastOrNull) : null;
     for (const scope of soon) {
       const predicted = forecast?.rows.find(row => row.scope === scope.scope && row.resource === 'lifetime_ids');
       const value = predicted && predicted.per_day_7d > 0 ? predicted.recommended_limit
@@ -191,7 +193,9 @@ export async function sessionTimeoutsCheck(engine: BrainEngine): Promise<Check> 
       message: configured === null ? 'No session statement_timeout is configured (GBRAIN_STATEMENT_TIMEOUT=0).' : 'PGLite has no session to time out.' };
   }
   try {
-    const [row] = await engine.executeRaw<{ statement_timeout: string }>('SHOW statement_timeout');
+    // #6803: read outside the doctor entry's statement deadline, whose transaction-local statement_timeout would
+    // otherwise be what SHOW reports (a pooler's 0 would read as applied). SHOW touches no table.
+    const [row] = await withStatementDeadline(null, () => engine.executeRaw<{ statement_timeout: string }>('SHOW statement_timeout'));
     const applied = row?.statement_timeout ?? null;
     // #6278: the live stall ran through a transaction-mode pooler (Supavisor :6543), which can also leave a cancelled
     // round-trip incomplete (backend in ClientRead). The engine settles those client-side; the pooler mode is still worth naming.

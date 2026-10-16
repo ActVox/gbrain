@@ -2436,7 +2436,7 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
   // the only thing that stops the cron orphan-pileup. Disposed in the finally.
   let syncWatchdog: { dispose(): void } | null = null;
   // #6340: `sync status` / `sync unblock` read and schedule on the brain's own engine: no watchdog, no serve delegation (a delegate would refuse the subcommand).
-  const syncOperator = command === 'sync' && (args[0] === 'status' || args[0] === 'unblock');
+  const syncOperator = command === 'sync' && (await import('../commands/sync/operator.ts')).syncOperatorVerb(args) !== null;
   if (command === 'sync' && !syncOperator) {
     try {
       const { resolveSyncHardDeadline } = await import('../commands/sync.ts');
