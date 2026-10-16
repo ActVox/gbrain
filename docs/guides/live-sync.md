@@ -356,7 +356,8 @@ until the pair gets a disposition; there is no time limit, so a pair can still
 be repaired later. Restoring the old page settles it: run
 `gbrain restore <old-slug> --source-id <id> --force` (it then lives beside the
 new page; where the old file cannot be re-created the restore names
-`--detach`). To move and rewrite a page so it keeps its identity, give it a
+`--detach`). An unbound classic source on Postgres refuses page writes outside
+its checkout, so the report and doctor do not offer the restore there. To move and rewrite a page so it keeps its identity, give it a
 stable id or move, commit and sync first, then edit:
 
 ```yaml

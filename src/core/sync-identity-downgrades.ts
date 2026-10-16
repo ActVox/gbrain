@@ -11,6 +11,9 @@
  * a restore, a purge or a later delete of the restored page closes it.
  */
 import type { BrainEngine } from './engine.ts';
+import { isConnectorSourceKind } from './persistence/connector-identity.ts';
+import { getWorktreeBinding } from './persistence/ownership.ts';
+import { readDatabaseOnlyActivatedSources } from './persistence/unbound-source.ts';
 import { resolveSlugForPath, type DowngradedRename, type RenameDowngradeReason } from './sync.ts';
 
 export const IDENTITY_DOWNGRADE_OP = 'sync-identity-downgrade';
@@ -25,6 +28,23 @@ export interface IdentityDowngrade extends DowngradedRename {
   recorded_at: string; old_deleted_at: string;
   /** Set when the pair is remedied or closed without merging; the record is then closed. */
   disposition?: { kind: 'remedied' | 'closed'; at: string };
+  /** Read live: whether `gbrain restore` can write the old page back on this source (see `identityRestoreAvailable`). */
+  restore_available?: boolean;
+}
+
+type RestoreProbeEngine = Pick<BrainEngine, 'executeRaw' | 'getConfig' | 'kind'>;
+
+/**
+ * Whether a restore of a page that came from a canonical file can be admitted on this source, by the rule page writes
+ * follow (decideUnboundWrite): a bound source, a connector source, a source with no checkout, or a PGLite source not
+ * activated database-only can; an unbound Postgres source with a checkout refuses `owner_unavailable`, so no surface
+ * offers the restore there.
+ */
+export async function identityRestoreAvailable(engine: RestoreProbeEngine, sourceId: string): Promise<boolean> {
+  const [source] = await engine.executeRaw<{ local_path: string | null; kind: string | null }>("SELECT local_path, config->>'kind' AS kind FROM sources WHERE id = $1", [sourceId]);
+  if (!source?.local_path || isConnectorSourceKind(source.kind)) return true;
+  if (await getWorktreeBinding(engine as never, sourceId, null)) return true;
+  return engine.kind === 'pglite' && !(await readDatabaseOnlyActivatedSources(engine)).includes(sourceId);
 }
 
 /** SQL: the downgrade record `dg` is open for the page aliased `alias` (no disposition, old page still soft-deleted by that sync). */
@@ -82,14 +102,17 @@ export async function recordIdentityDowngrades(engine: BrainEngine, sourceId: st
  * Open records (no disposition, old page still soft-deleted by that sync), oldest first; every source when `sourceIds` is omitted.
  * `new_slug` is read live: the live page at the new path now (a held new file that was fixed later counts once it imports).
  */
-export async function listIdentityDowngrades(engine: Pick<BrainEngine, 'executeRaw'>, sourceIds?: readonly string[]): Promise<IdentityDowngrade[]> {
+export async function listIdentityDowngrades(engine: RestoreProbeEngine, sourceIds?: readonly string[]): Promise<IdentityDowngrade[]> {
   const rows = await engine.executeRaw<{ record: IdentityDowngrade | string; new_slug: string | null }>(
     `SELECT dg.completed_keys->0 AS record, np.slug AS new_slug FROM op_checkpoints dg JOIN pages p ON p.id::text = dg.fingerprint
       LEFT JOIN LATERAL (SELECT slug FROM pages WHERE source_id = p.source_id AND deleted_at IS NULL AND source_path = dg.completed_keys->0->>'to' LIMIT 1) np ON true
       WHERE dg.op = $1 AND p.deleted_at IS NOT NULL AND ${identityDowngradeOpen('p')}
         AND p.source_id = dg.completed_keys->0->>'source_id' AND ($2::text[] IS NULL OR p.source_id = ANY($2::text[]))
       ORDER BY dg.completed_keys->0->>'recorded_at', dg.fingerprint`, [IDENTITY_DOWNGRADE_OP, sourceIds ? [...sourceIds] : null]);
-  return rows.map(row => ({ ...(typeof row.record === 'string' ? JSON.parse(row.record) as IdentityDowngrade : row.record), new_slug: row.new_slug }));
+  const records = rows.map(row => ({ ...(typeof row.record === 'string' ? JSON.parse(row.record) as IdentityDowngrade : row.record), new_slug: row.new_slug }));
+  const restorable = new Map<string, boolean>();
+  for (const sourceId of new Set(records.map(record => record.source_id))) restorable.set(sourceId, await identityRestoreAvailable(engine, sourceId));
+  return records.map(record => ({ ...record, restore_available: restorable.get(record.source_id)! }));
 }
 
 /** A recorded downgrade (as opposed to a raw pair a sync has not recorded yet). */
@@ -106,7 +129,8 @@ export async function noteIdentityDowngrades<T extends { status: string; identit
   if (!pairs.length || !['synced', 'first_sync'].includes(result.status)) return result;
   try {
     const records = await recordIdentityDowngrades(engine, sourceId, pairs);
-    for (const line of identityDowngradeLines(records)) write(line);
+    const restore_available = await identityRestoreAvailable(engine, sourceId);
+    for (const line of identityDowngradeLines(records.map(record => ({ ...record, restore_available })))) write(line);
     return { ...result, identityDowngrades: records };
   } catch (error) {
     write(`  Could not record ${pairs.length} rename(s) whose identity was not kept: ${error instanceof Error ? error.message : String(error)}`);
@@ -129,7 +153,8 @@ export function identityDowngradeLines(records: readonly IdentityDowngrade[]): s
   return [
     ...records.map(record => `  Identity not kept: ${record.from} -> ${record.to} (git similarity ${record.similarity}%; ${REASON_TEXT[record.reason]}). `
       + `${record.facts} fact(s), ${record.links} link(s) and ${record.aliases} alias(es) stay on the soft-deleted ${record.old_slug}, which the purge keeps until the pair is settled; `
-      + `${record.new_slug ? `${record.new_slug} starts fresh.` : 'the new file did not import.'} To keep the old page, restore it: ${identityRestoreArgv(record).join(' ')}`),
+      + `${record.new_slug ? `${record.new_slug} starts fresh.` : 'the new file did not import.'}`
+      + (record.restore_available === false ? '' : ` To keep the old page, restore it: ${identityRestoreArgv(record).join(' ')}`)),
     '  A move keeps its page when the files share a frontmatter id: (or a unique slug: line or title); to move and rewrite a page, move, commit and sync, then edit.',
   ];
 }

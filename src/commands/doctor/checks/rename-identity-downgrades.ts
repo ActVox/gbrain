@@ -25,16 +25,19 @@ async function runRenameIdentityDowngrades(ctx: DoctorContext): Promise<Check[]>
       checks.push({ name: 'rename_identity_downgrades', status: 'ok', details, message: 'No rename that lost its page identity is waiting for a disposition.' });
       return checks;
     }
-    const first = open[0]!;
-    checks.push({ name: 'rename_identity_downgrades', status: 'warn', details,
+    const first = open[0]!, restorable = open.find(record => record.restore_available !== false);
+    const unrestorable = [...new Set(open.filter(record => record.restore_available === false).map(record => record.source_id))];
+    checks.push({ name: 'rename_identity_downgrades', status: 'warn', details: { ...details, restore_unavailable_sources: unrestorable },
       message: `${open.length} rename(s) did not keep their page identity, so each old page's facts, links and aliases stay on its soft-deleted slug, held from the purge until the pair is settled `
         + `(e.g. ${samples.map(record => `${record.source_id}:${record.from} -> ${record.to}, ${record.facts} fact(s) and ${record.links} link(s) on ${record.old_slug}`).join('; ')}; `
-        + `first: ${identityDowngradeReasonText(first.reason)}). ${identityStatusArgv(first.source_id).join(' ')} lists every pair. To keep an old page, restore it; `
+        + `first: ${identityDowngradeReasonText(first.reason)}). ${identityStatusArgv(first.source_id).join(' ')} lists every pair. `
+        + (restorable ? 'To keep an old page, restore it; ' : '')
+        + (unrestorable.length ? `A restore is not offered on ${unrestorable.join(', ')} (an unbound Postgres source refuses page writes outside its checkout); those pairs wait for a disposition. ` : '')
         + 'until a pair is restored or settled, its old page stays and this check names it.',
-      fix: agentFix(identityRestoreArgv(first),
-        `Restores ${first.old_slug} with its facts, links and aliases, beside ${first.new_slug ?? 'the new file'}; the record closes and the purge no longer waits for it.`,
+      ...(restorable ? { fix: agentFix(identityRestoreArgv(restorable),
+        `Restores ${restorable.old_slug} with its facts, links and aliases, beside ${restorable.new_slug ?? 'the new file'}; the record closes and the purge no longer waits for it.`,
         'rename_identity_downgrades', { docs: DOCS, ask_user: true,
-          user_message: `Sync did not keep the identity of ${first.old_slug} when ${first.from} became ${first.to}. Restore ${first.old_slug} as its own page so its ${first.facts} fact(s) and ${first.links} link(s) stay live?` }) });
+          user_message: `Sync did not keep the identity of ${restorable.old_slug} when ${restorable.from} became ${restorable.to}. Restore ${restorable.old_slug} as its own page so its ${restorable.facts} fact(s) and ${restorable.links} link(s) stay live?` }) } : {}) });
   } catch (error) {
     checks.push(checkError('rename_identity_downgrades', 'read the renames whose identity was not kept', error, { details: { count: 'unknown', docs: DOCS } }));
   }

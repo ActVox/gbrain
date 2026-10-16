@@ -114,11 +114,26 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
 
     // Doctor names them; the fix restores the first old page once the user asks (ask_user), and verify clears it.
     const { renameIdentityDowngradesEntry } = await import('../src/commands/doctor/checks/rename-identity-downgrades.ts');
-    const doctor = async () => (await renameIdentityDowngradesEntry.run({ engine } as unknown as DoctorContext)) as unknown as Array<{ status: string; details: { count: number; by_source: Array<{ source_id: string; count: number }> }; fix?: Record<string, unknown> & { argv: string[]; verify: { argv: string[] } } }>;
+    const doctor = async () => (await renameIdentityDowngradesEntry.run({ engine } as unknown as DoctorContext)) as unknown as Array<{ status: string; details: { count: number; by_source: Array<{ source_id: string; count: number }>; restore_unavailable_sources?: string[] }; fix?: Record<string, unknown> & { argv: string[]; verify: { argv: string[] } } }>;
     const mine = (finding: Awaited<ReturnType<typeof doctor>>[number]) => finding.details.by_source.find(entry => entry.source_id === s.id)?.count ?? 0;
     const [finding] = await doctor();
     expect(finding!.status).toBe('warn');
     expect(mine(finding!)).toBe(2);
+    const { purgeStaleCheckpoints } = await import('../src/core/op-checkpoint.ts');
+    const age = () => engine.executeRaw("UPDATE op_checkpoints SET updated_at = now() - interval '30 days' WHERE op = 'sync-identity-downgrade' AND fingerprint = ANY($1::text[])", [[String(a.id), String(b.id)]]);
+    const close = (id: number) => engine.executeRaw("UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,disposition}', jsonb_build_object('kind', 'closed', 'at', now()::text)) WHERE op = 'sync-identity-downgrade' AND fingerprint = $1", [String(id)]);
+    if (kind === 'postgres') {
+      // An unbound classic Postgres source refuses page writes outside its checkout, so no surface offers the restore
+      // there; the pairs still hold their old pages, with no time window, until a disposition.
+      expect(finding!.fix).toBeUndefined();
+      expect(finding!.details.restore_unavailable_sources).toContain(s.id);
+      await age(); await purgeStaleCheckpoints(engine);
+      expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs.filter(slug => slug.endsWith('-x-com'))).toEqual([]);
+      await close(a.id);
+      expect(mine((await doctor())[0]!)).toBe(1);
+      expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain('people/a-x-com');
+      return;
+    }
     const [, , slug, , sourceId] = finding!.fix!.argv;
     const restored = { 'people/a-x-com': { id: a.id, fact: 'A works on payments', alias: 'ali' }, 'people/b-x-com': { id: b.id, fact: 'B works on search', alias: 'bea' } }[slug!]!;
     const other = slug === 'people/a-x-com' ? { slug: 'people/b-x-com', id: b.id } : { slug: 'people/a-x-com', id: a.id };
@@ -137,15 +152,13 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect((await pageRow(s.id, other.slug))!.deleted_at).not.toBeNull();
     // No time window: a month-old open record survives the checkpoint sweep and still holds its old page, and doctor
     // still names it; only a disposition releases it. A restored page deleted again later is not held by its old record.
-    await engine.executeRaw("UPDATE op_checkpoints SET updated_at = now() - interval '30 days' WHERE op = 'sync-identity-downgrade' AND fingerprint = ANY($1::text[])", [[String(a.id), String(b.id)]]);
-    const { purgeStaleCheckpoints } = await import('../src/core/op-checkpoint.ts');
-    await purgeStaleCheckpoints(engine);
+    await age(); await purgeStaleCheckpoints(engine);
     expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).not.toContain(other.slug);
     expect(mine((await doctor())[0]!)).toBe(1);
     await engine.softDeletePage(slug!, { sourceId: s.id });
     expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain(slug);
     expect((await engine.executeRaw('SELECT fingerprint FROM op_checkpoints WHERE op = $1 AND fingerprint = ANY($2::text[])', ['sync-identity-downgrade', [String(a.id), String(b.id)]])).map(row => (row as { fingerprint: string }).fingerprint)).toEqual([String(other.id)]);
-    await engine.executeRaw("UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,disposition}', jsonb_build_object('kind', 'closed', 'at', now()::text)) WHERE op = 'sync-identity-downgrade' AND fingerprint = $1", [String(other.id)]);
+    await close(other.id);
     expect(mine((await doctor())[0]!)).toBe(0);
     expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain(other.slug);
   }), 180_000);
