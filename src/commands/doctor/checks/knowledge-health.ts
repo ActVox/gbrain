@@ -251,13 +251,17 @@ async function runFactsExtraction(ctx: DoctorContext): Promise<Check[]> {
         });
       }
     } else {
+      // #6778: an accepted write still committing and a retry after writer contention before admission are not
+      // failures, so they never count toward the threshold; contention that persists warns on its own.
+      const { WRITE_PENDING_ACCEPTED, WRITE_DEFERRED_UNADMITTED } = await import('../../../core/facts/absorb-log.ts');
+      const notFailures = [WRITE_PENDING_ACCEPTED, WRITE_DEFERRED_UNADMITTED];
       // Group per source so the breakdown is operator-friendly.
       const bySource = new Map<string, Array<{ reason: string; n: number }>>();
       let anyOverThreshold = false;
       for (const r of rows) {
         const n = typeof r.n === 'number' ? r.n : parseInt(r.n, 10);
         if (!Number.isFinite(n)) continue;
-        if (n >= threshold) anyOverThreshold = true;
+        if (n >= threshold && !notFailures.includes(r.reason)) anyOverThreshold = true;
         if (!bySource.has(r.source_id)) bySource.set(r.source_id, []);
         bySource.get(r.source_id)!.push({ reason: r.reason, n });
       }
@@ -266,14 +270,32 @@ async function runFactsExtraction(ctx: DoctorContext): Promise<Check[]> {
           `${sid}: ${reasons.map(x => `${x.n} ${x.reason}`).join(', ')}`,
         )
         .join(' | ');
+      const reasons = new Set(rows.map(r => r.reason));
+      const notes = [
+        reasons.has(WRITE_PENDING_ACCEPTED) ? `${WRITE_PENDING_ACCEPTED} rows are accepted facts writes still committing when the job stopped waiting; they are not failures.` : '',
+        reasons.has(WRITE_DEFERRED_UNADMITTED) ? `${WRITE_DEFERRED_UNADMITTED} rows found the canonical writer busy before anything was admitted; the job retries.` : '',
+      ].filter(Boolean).join(' ');
+      const contention = reasons.has(WRITE_DEFERRED_UNADMITTED) ? await persistentWriterContention(engine, WRITE_DEFERRED_UNADMITTED) : [];
+      const contended = contention.map(c =>
+        `source ${c.source_id}: ${c.n} facts write(s) deferred before admission with no later completed facts-absorb job, oldest ${new Date(c.oldest).toISOString()}`).join('; ');
       checks.push({
         name: 'facts_extraction_health',
-        status: anyOverThreshold ? 'warn' : 'ok',
-        message: anyOverThreshold
-          ? `Facts:absorb failures over the threshold (${threshold}) in the last 24h: ${summary}. ` +
-            `Run \`gbrain recall --since 24h --json\` to inspect what landed; ` +
-            `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.`
-          : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.`,
+        status: anyOverThreshold || contention.length ? 'warn' : 'ok',
+        message: [
+          anyOverThreshold
+            ? `Facts:absorb failures over the threshold (${threshold}) in the last 24h: ${summary}. ` +
+              `Run \`gbrain recall --since 24h --json\` to inspect what landed; ` +
+              `tune the gate via \`gbrain config set facts.absorb_warn_threshold N\`.`
+            : `Facts:absorb activity in last 24h (under threshold ${threshold}): ${summary}.`,
+          notes,
+          contended ? `Writer contention persists (${contended}). Check the canonical writer with \`gbrain sources writer status --source ${contention[0].source_id} --json\`.` : '',
+        ].filter(Boolean).join(' '),
+        ...(contention.length ? {
+          details: { persistent_writer_contention: contention.map(c => ({ source_id: c.source_id, deferred: c.n, oldest: new Date(c.oldest).toISOString() })) },
+          fix: agentFix(['gbrain', 'sources', 'writer', 'status', '--source', contention[0].source_id, '--json'],
+            `Read-only: names source ${contention[0].source_id}'s canonical owner, the write holding it and every write waiting behind it, so the contention can be traced to its holder.`,
+            'facts_extraction_health'),
+        } : {}),
       });
     }
     const note = await conversationPipelineNote(engine);
@@ -304,6 +326,33 @@ async function runFactsExtraction(ctx: DoctorContext): Promise<Check[]> {
     }
   }
   return checks;
+}
+
+/**
+ * #6778: per source, the facts writes deferred before admission (writer_lock_unavailable) in the last 24 h that no
+ * facts-absorb job for the same page completed after, when they persist: more than 10, or the oldest over an hour old.
+ */
+async function persistentWriterContention(engine: ReturnType<typeof connectedEngine>, reason: string) {
+  try {
+    return await engine.executeRaw<{ source_id: string; n: number; oldest: string | Date }>(
+      `SELECT l.source_id, COUNT(*)::int AS n, MIN(l.created_at) AS oldest
+         FROM ingest_log l
+        WHERE l.source_type = 'facts:absorb'
+          AND l.created_at >= now() - INTERVAL '24 hours'
+          AND split_part(l.summary, ':', 1) = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM minion_jobs j
+             WHERE j.name = 'facts-absorb' AND j.status = 'completed' AND j.finished_at >= l.created_at
+               AND j.data->>'slug' = l.source_ref AND COALESCE(j.data->>'sourceId', 'default') = l.source_id)
+        GROUP BY l.source_id
+       HAVING COUNT(*) > 10 OR MIN(l.created_at) < now() - INTERVAL '1 hour'
+        ORDER BY l.source_id`,
+      [reason],
+    );
+  } catch (err) {
+    if (isMissingSchemaObject(err, 'table', 'minion_jobs')) return [];
+    throw err;
+  }
 }
 
 /**
