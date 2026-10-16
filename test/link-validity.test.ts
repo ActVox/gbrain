@@ -140,6 +140,11 @@ describe('buildRelationshipState — inferred closures are upper bounds (W5)', (
     expect(buildRelationshipState('state', [], [start('2019-02-01'), inferredEnd('2025-03-01'), end('2025-03-01')]).lastEndUpperBound).toBe(false);
   });
 
+  test('a same-day explicit end and rejoin ends the old stint, so it does not override the new stint\'s inferred closure', () => {
+    const s = buildRelationshipState('state', [], [start('2019-02-01'), end('2022-01-01'), start('2022-01-01'), inferredEnd('2025-03-01')]);
+    expect(s).toMatchObject({ lastEnd: '2025-03-01', lastEndUpperBound: true });
+  });
+
   test('order invariance holds with inferred and explicit ends mixed', () => {
     const ev = [start('2019-02-01'), inferredEnd('2025-03-01'), end('2025-06-01', 2), start('2026-01-01')];
     const baseline = JSON.stringify(buildRelationshipState('state', [], ev));

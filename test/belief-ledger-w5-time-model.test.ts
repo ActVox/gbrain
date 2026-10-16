@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { loadRelationshipNotes, relationshipNoteKey } from '../src/core/link-relationship-notes.ts';
+import { refreshRelationships } from '../src/core/link-relationships.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, type BeliefBrain } from './helpers/belief-ledger.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -47,6 +48,22 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       // An explicit end after the inferred closure (a notice period) replaces it too; before W5 the earlier inferred date won.
       await b.put('people/alice-example', person([JOINED_ACME, JOINED_WIDGET, INFERRED, '- **2025-06-01** | linkedin — Left [Acme](../companies/acme-example)']));
       expect(await note(b)).toContain('ended: works_at acme-example (2025-06-01)');
+    }), 120_000);
+
+    test('a private page\'s explicit end does not turn the world-scope upper bound exact (remote notes)', () => brain(async b => {
+      await b.put('companies/acme-example', '---\ntype: company\ntitle: Acme\n---\nA company.\n');
+      await b.put('companies/widget-co', '---\ntype: company\ntitle: Widget\n---\nAnother company.\n');
+      await b.put('people/alice-example', person([JOINED_ACME, JOINED_WIDGET, INFERRED]));
+      await b.put('notes/hr-private', '---\ntype: note\ntitle: HR\nvisibility: private\n---\nPrivate HR note.\n');
+      const ids = Object.fromEntries((await b.engine.executeRaw<{ slug: string; id: number }>(
+        'SELECT slug, id FROM pages WHERE source_id = $1', [b.sourceId])).map(r => [r.slug, r.id]));
+      await b.engine.executeRaw(`INSERT INTO link_transitions (source_id, from_page_id, to_page_id, link_type, kind, occurred_on, producer, origin_page_id)
+        VALUES ($1, $2, $3, 'works_at', 'end', '2025-03-01', 'explicit', $4)`, [b.sourceId, ids['people/alice-example'], ids['companies/acme-example'], ids['notes/hr-private']]);
+      await refreshRelationships(b.engine, [{ from_page_id: ids['people/alice-example']!, to_page_id: ids['companies/acme-example']!, link_type: 'works_at' }]);
+      const notes = async (excludePrivate: boolean) => (await loadRelationshipNotes(b.engine,
+        [{ slug: 'people/alice-example', source_id: b.sourceId, summary: '' }], { excludePrivate })).get(relationshipNoteKey(b.sourceId, 'people/alice-example'));
+      expect(await notes(true)).toContain('ended: works_at acme-example (by 2025-03-01)');
+      expect(await notes(false)).toContain('ended: works_at acme-example (2025-03-01)');
     }), 120_000);
 
     test('the legacy engine copier refuses a brain whose page versions it would discard, and names how many', async () => {

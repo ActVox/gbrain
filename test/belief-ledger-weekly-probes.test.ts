@@ -97,11 +97,12 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         }));
         const hit = [...got].filter(x => expected.set.has(x)).length;
         tp += hit; fp += got.size - hit; fn += expected.set.size - hit;
-        for (const c of diff.changes.filter(c => c.change === 'changed' && (c.kind === 'fact' || c.kind === 'take'))) {
+        // Every gold re-score is reported as changed with its exact before and after, and nothing else is.
+        const rescored = Object.fromEntries(diff.changes.filter(c => c.change === 'changed' && (c.kind === 'fact' || c.kind === 'take')).map(c => {
           const field = c.kind === 'fact' ? 'confidence' : 'weight';
-          const want = expected.values.get(`${c.kind}|${c.slug}|${c.subject.claim}`);
-          if (want) expect([Number(c.before![field]), Number(c.after![field])]).toEqual(want.map(Number));
-        }
+          return [`${c.kind}|${c.slug}|${c.subject.claim}`, [Number(c.before![field]), Number(c.after![field])]];
+        }));
+        expect(rescored).toEqual(Object.fromEntries([...expected.values].map(([k, v]) => [k, v.map(Number)])));
         await new Promise(r => setTimeout(r, 2_200));
         const delta = await operationsByName.delta!.handler(b.ctx, { since: t0 }) as { pages: unknown[]; text: string };
         const beliefText = diff.changes.map(renderBeliefChange).join('\n');

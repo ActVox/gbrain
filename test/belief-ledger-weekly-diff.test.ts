@@ -7,7 +7,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { beliefsChangesArgs, runBeliefs } from '../src/commands/beliefs.ts';
 import { currentExitCode, setCliExitVerdict } from '../src/core/cli-force-exit.ts';
 import { operationsByName } from '../src/core/operations.ts';
-import { beliefChanges, renderBeliefChange, type BeliefChange } from '../src/core/belief/changes.ts';
+import { __setBeliefChangesPageSizeForTests, beliefChanges, renderBeliefChange, type BeliefChange } from '../src/core/belief/changes.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain } from './helpers/belief-ledger.ts';
 
@@ -120,6 +120,63 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       const before = await b.engine.executeRaw<{ t: string }>(`SELECT min(recorded_at) AS t FROM belief_events WHERE source_id = $1`, [b.sourceId]);
       const old = new Date(Date.parse(before[0]!.t) - 86_400_000).toISOString();
       expect((await changes(b, old, early)).coverage_from).toEqual(expect.any(String));
+    }), 120_000);
+
+    test('remote reads page on what each history page scanned, and before is the newest value at since', () => brain(async b => {
+      await b.put(slug, beliefPage({ facts: [{ claim: 'Acme has 40 staff', confidence: '0.1' }] }));
+      for (const c of ['0.2', '0.3', '0.4']) await b.put(slug, beliefPage({ facts: [{ claim: 'Acme has 40 staff', confidence: c }] }));
+      const t0 = await at(b);
+      await b.put('people/secret-example', beliefPage({ title: 'Secret', type: 'person', facts: ['Secret one', 'Secret two', 'Secret three'], frontmatter: { visibility: 'private' } }));
+      await b.put('people/secret-example', beliefPage({ title: 'Secret', type: 'person', facts: ['Secret four', 'Secret five'], frontmatter: { visibility: 'private' } }));
+      await b.put(slug, beliefPage({ facts: [{ claim: 'Acme has 40 staff', confidence: '0.9' }, 'Acme opened an office in Berlin'] }));
+      const t1 = await at(b);
+      const full = await changes(b, t0, t1, { remote: true });
+      expect(sorted(brief(full.changes))).toEqual(sorted([['fact', 'changed', 'Acme has 40 staff'], ['fact', 'added', 'Acme opened an office in Berlin']]));
+      expect(full.changes.find(c => c.change === 'changed')!.before!.confidence).toBe(0.4);
+      try {
+        for (const size of [1, 2, 3]) {
+          __setBeliefChangesPageSizeForTests(size);
+          expect(await changes(b, t0, t1, { remote: true })).toEqual(full);
+          expect(await changes(b, t0, t1)).toEqual(await (async () => { __setBeliefChangesPageSizeForTests(); const r = await changes(b, t0, t1); __setBeliefChangesPageSizeForTests(size); return r; })());
+        }
+      } finally { __setBeliefChangesPageSizeForTests(); }
+    }), 120_000);
+
+    test('remote callers: a creation body never shows a fact made private later, or counts of what it cannot read; a take retraction is shown', () => brain(async b => {
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'], takes: [{ claim: 'Acme will IPO', who: 'world', weight: '0.4' }] }));
+      const t0 = await at(b);
+      await b.put('companies/newco-example', beliefPage({ title: 'Newco', facts: ['Newco signed SECRET-CONTRACT', 'Newco is public'], takes: [{ claim: 'Newco is privately loved', who: 'garry-example' }] }));
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+      const t1 = await at(b);
+      // Made private after the window: the window's events never mention the fact, so only the creation body could show it.
+      await b.put('companies/newco-example', beliefPage({ title: 'Newco', facts: [{ claim: 'Newco signed SECRET-CONTRACT', visibility: 'private' }, 'Newco is public'],
+        takes: [{ claim: 'Newco is privately loved', who: 'garry-example' }] }));
+      const local = await changes(b, t0, t1);
+      expect(JSON.stringify(local)).toContain('SECRET-CONTRACT');
+      const remote = await changes(b, t0, t1, { remote: true });
+      expect(JSON.stringify(remote)).not.toContain('SECRET-CONTRACT');
+      expect(JSON.stringify(remote)).not.toContain('privately');
+      expect(sorted(brief(remote.changes))).toEqual(sorted([['page', 'added', 'companies/newco-example'], ['fact', 'added', 'Newco is public'], ['take', 'removed', 'Acme will IPO']]));
+      expect(remote.changes.find(c => c.kind === 'page')!.after).toBeNull();
+      expect(local.changes.find(c => c.kind === 'page')!.after).toMatchObject({ counts: expect.any(Object) });
+    }), 120_000);
+
+    test('page lifecycle nets out: a delete and its restore report nothing, and a page created and deleted inside the window reports nothing', () => brain(async b => {
+      const revision = async (s: string) => (await b.engine.executeRaw<{ r: string }>('SELECT knowledge_revision::text AS r FROM pages WHERE source_id=$1 AND slug=$2', [b.sourceId, s]))[0]!.r;
+      const del = async (s: string) => b.op('delete_page', { slug: s, expected_revision: await revision(s) });
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+      const t0 = await at(b);
+      await del(slug);
+      await b.op('restore_page', { slug, expected_revision: await revision(slug) });
+      await b.put('companies/gone-example', beliefPage({ title: 'Gone', facts: ['Gone was here'] }));
+      await del('companies/gone-example');
+      const t1 = await at(b);
+      expect(brief((await changes(b, t0, t1)).changes)).toEqual([]);
+      await del(slug);
+      const t2 = await at(b);
+      expect(brief((await changes(b, t1, t2)).changes)).toEqual([['page', 'deleted', slug]]);
+      expect(sorted(brief((await changes(b, t0, t2)).changes))).toEqual([['page', 'deleted', slug]]);
     }), 120_000);
 
     test('delta {beliefs: true} carries the diff and its text section; budget_tokens truncates it, and a remote caller gets the world view', () => brain(async b => {

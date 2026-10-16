@@ -1611,6 +1611,11 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    `before`, `after`, `cause` (the event type, the op, and any request,
    replacement, proposal or purge pointer the event recorded), `evidence`
    (event id, recorded time, slug, fence row) and the event's `trust_tier`.
+   Subjects net on hashes (the first event's prior hash against the last
+   one's value hash). Page events net per lifetime: a delete and its restore,
+   or a rename and its revert, report nothing, and so does a page created and
+   gone again inside the window; a purge, expiry, merge or hard delete is one
+   `removed` page entry.
 3. **A subject with no earlier event.** Section 4 records a page's creation
    as one snapshot event, so a fact or take first edited inside the window may
    have no event before `since`. Its `before` is read from the page body as
@@ -1619,7 +1624,8 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    `before_known` is false: the value is disclosed as unknown, never guessed.
    A page created inside the window is one `added` page entry plus one
    `added` entry per fence fact and take of its creation body; links that
-   came with it are counted on the page entry.
+   came with it are counted on the page entry (for local callers only: the
+   counts include beliefs a remote caller may not read).
 4. **Upper bounds.** A relationship end that only the nightly check inferred
    (a transition whose producer is `dream`) is flagged `upper_bound: true` and
    rendered `end by <date>`: the relationship ended on or before that date
@@ -1631,8 +1637,15 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    source with no coverage at all returns `not_recorded: true`.
 6. **Remote callers.** `delta` passes `remote: !include_private`. The history
    reader's rule applies (events world-visible when recorded, on a page
-   visible now, failing closed), and a body read for `before` is used only
-   where `remoteMayRead` passes that interval and only for world fence rows.
+   visible now, failing closed; takes of the holders the caller may read), and
+   a body read for `before` or a creation is used only where `remoteMayRead`
+   passes that interval, only for world fence rows, and never for a claim made
+   private later or a key a purge hid. A remote history page is filtered after
+   its SQL `LIMIT`, so reads page on the rows each page scanned, never on the
+   rows it returned. A take removal carries no value, so its holder is the
+   key's newest earlier value's; a take that came with its page's creation and
+   was removed later has no earlier event, so a remote caller does not see the
+   removal.
 7. **Budget.** Under `budget_tokens`, belief lines pack into what pages,
    facts and threads leave; a dropped line sets `truncated`. Without a
    budget the list is capped at 200 entries, and a window with more than

@@ -261,12 +261,19 @@ function dedupeEvents(transitions: readonly TransitionEvidence[]): StateEvent[] 
 
 /**
  * Drops an inferred end when an explicit end closes the same stint: the explicit date is when it ended, the inferred
- * one only bounds it. A stint runs from a start to the next start (an implicit stint before the first start).
+ * one only bounds it. Stints are assigned in replay order (an end sorts before a start on the same day, so a same-day
+ * end and rejoin end the old stint): an end belongs to the stint the last start before it opened, or to the implicit
+ * stint before the first start.
  */
 function withoutOverriddenInferredEnds(events: StateEvent[]): StateEvent[] {
-  const stintOf = (date: string) => events.filter(e => e.kind === 'start' && e.date <= date).at(-1)?.date ?? null;
-  const explicit = new Set(events.filter(e => e.kind === 'end' && !e.inferred).map(e => stintOf(e.date)));
-  return events.filter(e => !(e.kind === 'end' && e.inferred && explicit.has(stintOf(e.date))));
+  const stintOf = new Map<StateEvent, number>();
+  let stint = 0;
+  for (const e of events) {
+    if (e.kind === 'start') stint++;
+    else stintOf.set(e, stint);
+  }
+  const explicit = new Set([...stintOf].filter(([e]) => !e.inferred).map(([, s]) => s));
+  return events.filter(e => !(e.kind === 'end' && e.inferred && explicit.has(stintOf.get(e)!)));
 }
 
 /** Merge touching/overlapping stints and drop empty ones (until <= from). */
