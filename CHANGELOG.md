@@ -34,6 +34,28 @@ Nothing. Markers already written into files stay where they are (nothing rewrite
 
 A supported low-latency mode (ask 6) is a separate proposal. The repository-scaling preparation cost of ask 5 came from the embed cost estimate above; the remaining per-run work that grows with the repository (git discovery, the identity freeze) measured about 3 s at 308k pages.
 
+## [0.60.270.0] - 2026-10-16
+
+**Security: an image page edited free of private text can no longer slip back into remote image search.** Suppose an image's OCR text carried a private section and someone later edited that section out of the page. GBrain keeps such a page out of remote search, because the picture still shows what the text no longer says. Until now, re-importing the unchanged image while OCR was off or out of budget put it back: the page became searchable again, and remote callers of image search could see its name and title ranked by the private picture. Now that re-import is skipped unless a fresh OCR pass succeeds, and the page stays exactly as it was.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| an unchanged image whose private OCR section was edited out of its page, re-imported with OCR off or out of budget (`gbrain embed --stale --images`, `gbrain sync --full`) | re-imported, sealed, and ranked in remote `search_by_image` | `skipped`: "This image had protected OCR, so indexing it requires successful fresh OCR. Enable OCR and reimport the image." Body, chunks and seal state unchanged |
+| the same re-import with OCR on and succeeding | re-imported | re-imported and attested from the fresh OCR, as before |
+| a changed image | re-imported | unchanged behaviour |
+
+### What to do
+
+Upgrade. Nothing is rewritten on upgrade and there is no migration. Affected releases are v0.48.3.0 through v0.60.269.0. Exposure needed all three: an image whose OCR held a protected (`facts`/`takes`) section, a later edit that removed it, and a re-import with OCR disabled or over `embedding_image_ocr_max_images`. If you ran with image OCR off and edited protected text out of image pages, re-import those images with OCR enabled; a page already re-sealed this way can't be told apart from one sealed legitimately.
+
+### Itemized changes
+
+- `importImageFile` (`src/core/import-file.ts`) applies its fresh-OCR requirement to an existing page whose stored row is distrusted (`chunker_version < 0`) when the image hash is unchanged, in addition to a stored body that still carries protected OCR. It never enables OCR or raises the OCR budget on its own.
+- `provenanceDistrusted` (`src/core/search/safe-chunks.ts`) reads the stored `chunker_version` for that check.
+- `test/image-distrusted-reimport.test.ts` (PGLite, and Postgres through `test/e2e/image-distrusted-reimport-postgres.test.ts`) covers OCR disabled and OCR over budget, with a remote `search_by_image` caller, plus the successful-OCR path.
+
 ## [0.60.269.0] - 2026-10-16
 
 **Cheaper managed publishes, one way to retry, and three managed-sync bugs closed (#6712 PR 3).** A 336 KB page with 1,012 facts, 4,100 timeline rows and 50 code references now publishes in one transaction of 67 statements instead of 318, which takes 4.5 s instead of 19.5 s at 57 ms round trip through a transaction pooler. A plain `gbrain sync` retries the failure the previous run recorded, so `--retry-failed` becomes a deprecated alias, and `gbrain sync --help` lists the ten flags a managed brain needs first. Three managed-sync bugs are fixed: final validation timing out at the end of a long catch-up (#6735), a legacy page forked into a twin (#6727), and doctor calling a fresh cursor idle (#6763).
