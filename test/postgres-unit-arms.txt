@@ -74,8 +74,10 @@ test/large-pages/managed-sync-segmented-rename.test.ts
 test/large-pages/managed-sync-streamed.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
+test/large-pages/pinned-segmented-reads.test.ts
 test/large-pages/projection-demotion-race.test.ts
 test/large-pages/projection-parity.test.ts
+test/large-pages/purge-fact-inflight-staging.test.ts
 test/large-pages/purge-inflight-create.test.ts
 test/large-pages/purge-segment-residue.test.ts
 test/large-pages/purge-segmented-versions-batch.test.ts

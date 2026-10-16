@@ -34,8 +34,9 @@ import { jsonbParam, type SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead } from './brands.ts';
 import { joinFragments, sqlFragment, trustedSql, type SqlFragment } from './fragment.ts';
 import { compileRowNormalizer } from './normalize.ts';
+import { stagingNeedsTextSql } from '../page-body/schema.ts';
 
-const LIVE_STAGING_STATES = ['open', 'sealed', 'prepared'];
+export const LIVE_STAGING_STATES = ['open', 'sealed', 'prepared'];
 const TERMINAL_STAGING_STATES = ['committed', 'aborted', 'expired'];
 const NON_TERMINAL_REQUEST_STATES = ['queued', 'running', 'recovering'];
 
@@ -303,11 +304,7 @@ export async function flipBodyGeneration(exec: SqlExecutor, input: BodyFlipInput
             mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'none' } } }) });
     }
     const { rows: stagings } = await tx.run<{ state: string }>(sqlFragment`SELECT state FROM page_body_stagings WHERE id = ${input.stagingId}::uuid FOR UPDATE`);
-    if (!LIVE_STAGING_STATES.includes(stagings[0]?.state ?? '')) {
-      throw opError('body_staging_expired', `The staged body of this write to ${page.slug} is ${stagings[0]?.state ?? 'gone'}, so nothing was published.`,
-        'The write waited past its staging deadline and its staged segments were collected. Send the write again.',
-        { detail: JSON.stringify({ staging_id: input.stagingId, state: stagings[0]?.state ?? null }) });
-    }
+    if (!LIVE_STAGING_STATES.includes(stagings[0]?.state ?? '')) throw bodyStagingGoneError(page.slug, input.stagingId, stagings[0]?.state ?? null);
     const newLive = sqlFragment`(SELECT s.occurrence_id FROM page_body_manifest s WHERE s.page_id = ${input.pageId}
         AND (s.staging_id = ${input.stagingId}::uuid
           OR (s.staging_id IS NULL AND s.gen_to IS NULL AND NOT (s.occurrence_id = ANY(${[...input.closeOccurrences]}::bigint[])))))`;
@@ -345,6 +342,15 @@ export async function flipBodyGeneration(exec: SqlExecutor, input: BodyFlipInput
   });
 }
 
+/** A write's staging is no longer live, so the write publishes nothing: expired and collected, or aborted (a fact purge removed text it staged). */
+export function bodyStagingGoneError(slug: string, stagingId: string, state: string | null) {
+  return opError('body_staging_expired', `The staged body of this write to ${slug} is ${state ?? 'gone'}, so nothing was published.`,
+    state === 'aborted'
+      ? 'The staging was aborted (a fact purge removed text it staged, or its preparation failed). Send the write again; purged content is refused.'
+      : 'The write waited past its staging deadline and its staged segments were collected. Send the write again.',
+    { detail: JSON.stringify({ staging_id: stagingId, state }) });
+}
+
 export async function openBodyStaging(exec: SqlExecutor, input: BodyStagingInput): Promise<void> {
   await exec.run(sqlFragment`INSERT INTO page_body_stagings (id, kind, principal_kind, principal_id, client_request_id, source_id,
       source_incarnation, slug, page_id, mode, base_revision, base_generation, declared_bytes, declared_sha256, reserved_bytes,
@@ -370,8 +376,10 @@ export async function setBodyStagingState(exec: SqlExecutor, id: string, state: 
  * stagings (`liveStagingIds`). Deletes staged chunk rows (above the page's
  * generation) no live staging owns, manifest rows outside every root, and
  * unreferenced texts older than the grace window and older than every live
- * staging of their source (a text a concurrent writer is referencing is
- * row-locked by its FK check or its refresh and skipped). A page-scoped sweep
+ * staging of their source, that no live staging recorded
+ * (page_body_staging_texts: a create that deduped onto an older text holds it
+ * until it publishes); a text a concurrent writer is referencing is row-locked
+ * by its FK check or its refresh and skipped. A page-scoped sweep
  * (`pageId`) considers only the texts its own manifest deletes released, so
  * its cost is the page's, not the source's; the source-wide sweep collects the
  * rest. Rows of retired occurrences are deleted by the flip or, deferred, by
@@ -439,6 +447,7 @@ export async function sweepSegments(exec: SqlExecutor, opts: SegmentSweepOptions
         AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id = t.source_id AND m.sha256 = t.sha256)
         AND NOT EXISTS (SELECT 1 FROM page_body_stagings s WHERE s.source_id = t.source_id AND s.created_at <= t.created_at
                          AND s.id::text IN ${liveStagingIds})
+        AND NOT ${trustedSql(stagingNeedsTextSql('t'))}
       FOR UPDATE SKIP LOCKED)`)).affectedRows;
   return { retiredChunksDeleted: retiredChunksDeleted + orphanedChunksDeleted, manifestRowsDeleted: stagedRowsDeleted + closedRowsDeleted, textsDeleted, stagingsExpired };
 }
