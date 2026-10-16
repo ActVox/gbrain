@@ -9,7 +9,7 @@ import type { Check } from '../../doctor.ts';
 import type { BrainEngine } from '../../../core/engine.ts';
 import { PURGE_PARK_LIMIT, readPurgeParks } from '../../../core/persistence/purge-parks.ts';
 import { checkError, doctorVerify } from '../check-fix.ts';
-import { connectedEngine, type DoctorEntry } from '../context.ts';
+import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
 const NAME = 'purge_parked_pages';
 const SAMPLE = 20;
@@ -35,8 +35,10 @@ export async function checkPurgeParkedPages(engine: BrainEngine): Promise<Check>
   };
 }
 
-export const purgeParkedPagesEntry: DoctorEntry = {
-  name: NAME,
-  emits: [NAME],
-  run: async ctx => [await checkPurgeParkedPages(connectedEngine(ctx))],
-};
+async function runPurgeParkedPages(ctx: DoctorContext): Promise<Check[]> {
+  const checks: Check[] = [];
+  checks.push(await checkPurgeParkedPages(connectedEngine(ctx)));
+  return checks;
+}
+
+export const purgeParkedPagesEntry: DoctorEntry = { name: 'purge_parked_pages', emits: [NAME], run: runPurgeParkedPages };
