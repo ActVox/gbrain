@@ -13,6 +13,7 @@
 | Symptom | Next step | Who acts | Consent | Verify |
 |---|---|---|---|---|
 | A managed source's autopilot freshness `sync` jobs each land about one page, or `sources status` says `parked` while a sync job runs | upgrade (#6706: sync jobs drain to their deadline and count as the source's live drain), then restart `gbrain jobs work` / the supervisor so the worker loads the handler; a job result with `incomplete: true` names its follow-up (`continuation_job_id`) or the next step in `next` | agent | none | `gbrain sync status --source <id> --json` shows `live_job_id` or a cursor at `done`; `gbrain jobs get <id> --json` shows `outcome` |
+| Doctor `sync_freshness` says a source has "no successful sync recorded" or "first sync running" | follow the check's `fix`: `first sync running` (code `sync_first_run_in_progress`, warn) means wait; `no successful sync recorded` (code `sync_no_successful_sync`, fail) names the last attempt and its `reason`: wait for a queued job, inspect holds (`gbrain sync status --source <id> --json`), or retry (`gbrain sync --source <id>`) ([details](#sync-freshness-no-successful-sync)) | agent | none | `gbrain doctor --only sync_freshness --json` |
 | Recall returns conversation facts like "Date said …", "Attendees said …" or "Summary said …" | `gbrain repair conversation-labels` previews them ([conversation labels](repair.md#conversation-labels)); apply the printed command with `--yes` | agent, after the user agrees | `destructive` | `gbrain doctor --only conversation_label_facts --json` is ok |
 | Conversation facts are dated 1970-01-01 | same preview: `gbrain repair conversation-labels` (an undated page's pre-fix facts carry a `segment 1970-01-01` context); add a `date:` to the page frontmatter before re-extracting it | agent, after the user agrees | `destructive` | `gbrain doctor --only conversation_label_facts --json` is ok |
 | `remember` or `put_page` refused `source_changed` "The canonical file contains an uncoordinated local edit" on many pages nobody edited, or doctor `lost_caller_writes` warns | upgrade to v0.60.157.0 or later (a database-only v0.13.1 `validate: false` stamp was read as a file edit, #6429); then `gbrain repair failed-writes --source <id>` previews the refused writes and prints the apply command ([failed writes](repair.md#failed-writes)) | agent; the apply after the user agrees | none to preview | `gbrain doctor --only lost_caller_writes --json` is ok |
@@ -575,3 +576,31 @@ Automatic event extraction is on by default. See the
 three-step check, and the skip codes. `gbrain doctor` reports it as the
 `auto_chronicle` check. To turn it off, run
 `gbrain config set auto_chronicle false`.
+
+## Sync freshness: no successful sync recorded
+
+<a id="sync-freshness-no-successful-sync"></a>
+
+**Say to your agent:** *"Doctor says my source was never synced, but a sync keeps running. What's going on?"*
+
+A sync stamps a source's `last_sync_at` only when it succeeds, so a source whose
+syncs keep ending `partial` or failing has none, however many pages it imported.
+`gbrain doctor` keeps freshness and sync outcome apart for such a source:
+
+- **First sync running** (`warn`, code `sync_first_run_in_progress`): the source
+  holds a live sync lock inside the staleness ceiling. Running is not fresh, and
+  a second sync only contends for the lock, so the fix is to wait and re-run
+  `gbrain doctor --only sync_freshness --json`. A lock held past the ceiling
+  reads as wedged (`fail`) with its `--break-lock` command.
+- **No successful sync recorded** (`fail`, code `sync_no_successful_sync`): no
+  sync is running. The message names the last attempt, read-only from the newest
+  `sync` job and (on a managed brain) `gbrain sync status`: its time, result
+  (`failed`, `completed (partial)`, a managed error code) and held files, or
+  `no attempt recorded`. `details.no_successful_sync[]` carries each source's
+  `reason` and `fix`:
+  - `attempt_queued`: a sync job is queued or running; wait.
+  - `holds_pending`: files are held; inspect them with
+    `gbrain sync status --source <id> --json` and follow its `next`.
+  - `last_attempt_unsuccessful`: read the job (`gbrain jobs get <id> --json`)
+    or the managed failure, then retry.
+  - `no_attempt`: run `gbrain sync --source <id>` (`--no-pull` on a managed brain).

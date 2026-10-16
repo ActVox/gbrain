@@ -1042,6 +1042,14 @@ More: [docs/guides/troubleshooting.md#embedding-state](../../docs/guides/trouble
 
 More: [docs/guides/move-to-postgres.md#graduated-datastore](../../docs/guides/move-to-postgres.md#graduated-datastore)
 
+### entity_types_unavailable
+
+<a id="entity_types_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A schema pack in scope did not load, so the entity page types are unknown; onboarding's entity_link_coverage and timeline_coverage warn instead of grading the old hardcoded type list. | Entity types come from the active pack per source (the get_health predicate). Grading a fixed person/company list would count the wrong population on a pack with its own entity types, so the checks name the sources whose pack failed. | Run gbrain schema active --json (add --source <id> for a named source) to see which pack is active and why it did not load; fix or reinstall the pack, then gbrain onboard --json. | agent | `gbrain doctor --json` | 1 | no |
+
 ### eval_suite_unwired
 
 <a id="eval_suite_unwired"></a>
@@ -1307,6 +1315,16 @@ More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-page
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The canonical checkout is on a detached HEAD, so a push would target the wrong ref. | Only the operator of the brain host can change what blocks this. | Check out the branch the remote should track (git switch <branch>) on the brain host, then rerun. | host_admin | `gbrain doctor --json` | 1 | no |
+
+### git_durability_not_enabled
+
+<a id="git_durability_not_enabled"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A filesystem source's owner will not commit or push its page writes (Git durability is off, or not recorded and no harden post-commit hook is installed), so its Git effects complete as skipped; writer activate still proceeds and lists it under warnings. | Activation applies the effect runner's own policy: the binding's recorded setting decides, and only when nothing is recorded does the legacy hook decide (a failed probe counts as not durable). sources harden is refused once the brain is managed, so the recorded setting is the way to turn durability on. | Preview gbrain sources writer git-durability <source> --enable --dry-run on the owner host, then apply it with --admin-intent writer_git_durability; enabling re-queues the Git effects that were skipped while it was off. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs/guides/concurrent-writes.md#git-durability-at-activation)
 
 ### git_index_locked
 
@@ -3240,6 +3258,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | Another sync run of the source replaced the managed-sync cursor before this checkpoint published, so the checkpoint had nothing left to publish. | The replacing run (a --retry-failed rediscovery or a newer sync of the source) covers the source from its own discovery; the superseded checkpoint's receipt is a conflict, no managed-sync failure is recorded for it, and the run that awaited it goes on with the winning cursor. A same-run index lag still reports revision_conflict. | Nothing to repair: let the current sync finish. gbrain sync status --source <id> --json shows the cursor that now covers the source. | agent | `repeat the read that failed` | 1 | no |
 
+### sync_first_run_in_progress
+
+<a id="sync_first_run_in_progress"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A source's first sync is running (it holds a live sync lock inside the staleness ceiling) and no successful sync is recorded yet, so doctor sync_freshness warns instead of reading it as fresh. | A sync stamps last_sync_at only when it succeeds; a running sync is not a fresh source, and starting a second one beside it only contends for the lock. Over the staleness ceiling the lock reads as wedged (fail) instead. | Wait for the running sync, then run gbrain doctor --only sync_freshness --json again. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/troubleshooting.md#sync-freshness-no-successful-sync](../../docs/guides/troubleshooting.md#sync-freshness-no-successful-sync)
+
 ### sync_in_progress
 
 <a id="sync_in_progress"></a>
@@ -3251,6 +3279,18 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 Reasons: `candidate_in_flight`, `busy_set_unreadable`.
 
 More: [docs/guides/write-refusals.md#sync_in_progress](../../docs/guides/write-refusals.md#sync_in_progress)
+
+### sync_no_successful_sync
+
+<a id="sync_no_successful_sync"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| No successful sync is recorded for a source (last_sync_at is NULL) and no sync of it is running; doctor sync_freshness fails with the last attempt's time, result and held files. | The attempt comes from the newest sync job and, on a managed brain, the source's sync status (read-only). `reason` names the state: no_attempt (nothing recorded: run a sync), attempt_queued (a job is queued: wait), holds_pending (held files: inspect them first), last_attempt_unsuccessful (inspect the job or failure, then retry). | Follow the check fix: it waits, inspects holds (gbrain sync status --source <id> --json) or retries (gbrain sync --source <id>) depending on the state. | agent | `gbrain doctor --json` | 1 | no |
+
+Reasons: `no_attempt`, `attempt_queued`, `holds_pending`, `last_attempt_unsuccessful`.
+
+More: [docs/guides/troubleshooting.md#sync-freshness-no-successful-sync](../../docs/guides/troubleshooting.md#sync-freshness-no-successful-sync)
 
 ### sync_not_applicable
 
