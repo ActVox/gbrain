@@ -116,6 +116,7 @@ test/large-pages/segmented-body-unreachable.test.ts
 test/large-pages/segmented-bom.test.ts
 test/large-pages/segmented-conversation-facts.test.ts
 test/large-pages/segmented-conversation-sidecar-token.test.ts
+test/large-pages/segmented-core-list.test.ts
 test/large-pages/segmented-create-searchable.test.ts
 test/large-pages/segmented-delete-crash.slow.test.ts
 test/large-pages/segmented-delete-restore-file.slow.test.ts
@@ -133,6 +134,7 @@ test/large-pages/segmented-facts-reconcile.test.ts
 test/large-pages/segmented-file-drift-ledger.test.ts
 test/large-pages/segmented-file-drift.test.ts
 test/large-pages/segmented-forced-cuts.test.ts
+test/large-pages/segmented-frontmatter-reimport.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
 test/large-pages/segmented-leads.test.ts

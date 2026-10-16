@@ -59,6 +59,8 @@ import type { SyncRename } from '../persistence/sync-discovery.ts';
 import { canonicalRepairFields, confinedRepairTarget, managedRepairRoot, prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
+import { materializedSnapshot, segmentedOverCeiling } from '../persistence/segmented-apply.ts';
+import { pageBodyOverCeilingError } from '../page-body/page-shape.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
 import { gitChildEnv } from '../git-env.ts';
 
@@ -358,6 +360,11 @@ async function bindProposal(ctx: FileContext, path: string, hold: GitHoldRecord 
   const page = ctx.pages.get(sourcePath);
   const slug = page?.slug ?? (proposal.rename_from ? resolveSlugForPath(sourcePath) : hold?.slug ?? resolveSlugForPath(sourcePath));
   const snapshot = await engine.readPageSnapshot(slug, { sourceId: src.sourceId, includeDeleted: true });
+  // Wave B decision #1: the re-import compares the stored body whole, which a page stored in segments allows up to 24 MiB.
+  if (proposal.reimport && snapshot && segmentedOverCeiling(snapshot.page)) {
+    const refusal = pageBodyOverCeilingError(snapshot.page, `gbrain repair frontmatter (re-import of ${path})`);
+    return { source_id: src.sourceId, path, code: refusal.code, resolution: `${refusal.message} ${refusal.suggestion}` };
+  }
   const base: PageSnapshot | null = proposal.rename_from ? await engine.readPageSnapshot(proposal.rename_from.slug, { sourceId: src.sourceId, includeDeleted: true }) : snapshot;
   const publication = await prepareRepairPublication(engine, { sourceId: src.sourceId, slug, sourcePath, path, root: src.root, content: proposal.content,
     snapshot, base, ...screenConfig });
@@ -365,7 +372,8 @@ async function bindProposal(ctx: FileContext, path: string, hold: GitHoldRecord 
     ...(publication.refusal.line !== undefined ? { line: publication.refusal.line } : {}), resolution: resolution(publication.refusal, path, src.sourceId) };
   if (publication.status === 'overlay') return { source_id: src.sourceId, path, code: 'canonical_overlay',
     resolution: `Importing the repaired ${path} would keep page data the file does not carry (tags added outside the file, a withdrawal or sanitized text), so it is not written. Edit the file by hand to carry them (gbrain get --source ${src.sourceId} -- ${slug} shows the page), then preview again.` };
-  if (proposal.reimport && snapshot && digest(canonicalRepairFields(snapshot.page, snapshot.tags)) === publication.digest) {
+  const stored = proposal.reimport ? await materializedSnapshot(engine, snapshot) : null;
+  if (stored && digest(canonicalRepairFields(stored.page, stored.tags)) === publication.digest) {
     return { source_id: src.sourceId, path, code: 'embedded_frontmatter', resolution: `The page of ${path} already matches its file; nothing to re-import.` };
   }
   const original = readFileSync(join(src.root, path));
