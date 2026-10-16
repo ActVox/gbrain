@@ -110,10 +110,10 @@ async function* pieces(source: AsyncIterable<string | Uint8Array>): AsyncIterabl
 }
 export function isStreamedContent(content: unknown): content is StreamedFileContent { return content instanceof StreamedFileContent; }
 /** UTF-8 byte length of a file target's content. */
-export function contentBytes(content: string | Uint8Array | StreamedFileContent): number {
+export function fileContentBytes(content: string | Uint8Array | StreamedFileContent): number {
   return isStreamedContent(content) ? content.bytes : typeof content === 'string' ? Buffer.byteLength(content) : content.byteLength;
 }
-export function contentHash(content: string | Uint8Array | StreamedFileContent): string {
+export function fileContentHash(content: string | Uint8Array | StreamedFileContent): string {
   return isStreamedContent(content) ? content.hash : sha256(content);
 }
 
@@ -180,7 +180,7 @@ export function stageBeforeCopy(path: string, stage: RecoveryStagingFile, mode: 
   validateBeforeStagePath(path, stage.path);
   copyFileSync(path, stage.path, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
   let staged = false;
-  const fd = openSync(stage.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const fd = openSync(stage.path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
   try {
     if (mode !== null) fchmodSync(fd, mode);
     const copy = hashDescriptor(fd);

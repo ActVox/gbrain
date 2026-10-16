@@ -32,7 +32,7 @@ import { withNoRepoWriteThroughWarning } from '../write-through.ts';
 import { assertUnboundPublication, classifyUnboundPage, unboundWriteWarning } from './unbound-source.ts';
 import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFile, restoreBeforeStage, upgradeRecoveryStaging, type RecoveryStagingFile } from './staging.ts';
 import { assertManagedFilesystemWrite } from './filesystem-guard.ts';
-import { beforeStagePath, contentBytes, contentHash, hashDescriptor, hashFile, isStreamedContent, LARGE_FILE_MIN_BYTES, stageBeforeCopy, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
+import { beforeStagePath, fileContentBytes, fileContentHash, hashDescriptor, hashFile, isStreamedContent, LARGE_FILE_MIN_BYTES, stageBeforeCopy, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { bindPublicationTimeouts, publicationTransaction } from './publication-deadline.ts';
 import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertBundleRecoveryBinding, bundleFileHash, prepareBundleRecovery, publishStagedBundleFile, stageBundleFile, type MutationFile } from './bundle-files.ts';
@@ -297,7 +297,7 @@ export function pageRecoveryRecord(row: WriteRequest, file: PageMutationFile, bi
   const record: FileRecoveryRecord = {
     version: 1, path: file.path, root: file.root,
     before: before?.toString('base64') ?? null, beforeHash: before ? sha256(before) : null,
-    afterHash: file.content === null ? null : contentHash(file.content),
+    afterHash: file.content === null ? null : fileContentHash(file.content),
     mode: before ? statSync(file.path).mode & 0o7777 : null,
     ownerEpoch: String(binding.owner_epoch), attempt: row.execution_token!,
     staging: {
@@ -305,7 +305,7 @@ export function pageRecoveryRecord(row: WriteRequest, file: PageMutationFile, bi
       ...(before === null ? {} : { restoration: recoveryStagingFile(file.path, before) }),
     },
   };
-  const nextBytes = file.content === null ? 0 : contentBytes(file.content);
+  const nextBytes = file.content === null ? 0 : fileContentBytes(file.content);
   const beforeBytes = before?.byteLength ?? 0;
   return { record, bytes: Math.max(beforeBytes * 3 + nextBytes * 2, Buffer.byteLength(JSON.stringify(record)) + beforeBytes + nextBytes) + 4096 };
 }
@@ -325,14 +325,14 @@ function largeRecoveryRecord(row: WriteRequest, file: PageMutationFile, binding:
   try { prior = { ...hashDescriptor(fd), mode: fstatSync(fd).mode & 0o7777 }; } finally { closeSync(fd); }
   const record: FileRecoveryRecord = {
     version: 1, path: file.path, root: file.root, before: null, beforeHash: prior.hash,
-    afterHash: file.content === null ? null : contentHash(file.content), mode: prior.mode,
+    afterHash: file.content === null ? null : fileContentHash(file.content), mode: prior.mode,
     ownerEpoch: String(binding.owner_epoch), attempt: row.execution_token!,
     staging: {
       ...(file.content === null ? {} : { publication: publicationStage(file.path, file.content) }),
       before: { path: beforeStagePath(file.path), hash: prior.hash, bytes: prior.bytes },
     },
   };
-  const nextBytes = file.content === null ? 0 : contentBytes(file.content);
+  const nextBytes = file.content === null ? 0 : fileContentBytes(file.content);
   return { record, bytes: Buffer.byteLength(JSON.stringify(record)) + prior.bytes + nextBytes + 4096 };
 }
 

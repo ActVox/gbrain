@@ -81,7 +81,7 @@ import { isFenceEditWrite, pageGateTrust, pageWriteTrust, recordAgentPageLowerin
 import { suppliedTrustMarkerView } from '../trust/channel.ts';
 import { gateField, gateInput } from '../trust/gate-outcomes.ts';
 import { PUSH_SCAN_MAX_FILE_BYTES } from '../page-size-policy.ts';
-import { contentHash, FileBytes, isStreamedContent, LARGE_FILE_MIN_BYTES, StreamedFileContent } from './large-file.ts';
+import { fileContentHash, FileBytes, isStreamedContent, LARGE_FILE_MIN_BYTES, StreamedFileContent } from './large-file.ts';
 
 
 const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sourceId}'s canonical owner with its pending, failed and recovering requests, read-only.`,
@@ -241,9 +241,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     /** #6517: a delete whose file another live page of the source records owns no file; the census target and claimants are reported. */
     sharedOrigin?: { onShared: (shared: SharedOrigin) => void } } = {}): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
-  // A canonical file over the pre-push secret-scan cap would block every later push of the brain repo. A streamed file
-  // (restore_page of a page over the single-string ceiling: the file a delete removed) is exempt: the push gate scans a
-  // staged file over that cap in bounded windows (workspace-push.ts), and the database copy is the system of record.
+  // An in-memory canonical file over the 25 MiB push-scan cap is refused (only a page over the 24 MiB single-string
+  // ceiling renders one). That page's file is streamed instead (restore_page of a page whose body was not read back,
+  // large-file.ts), and the push gate scans a staged file over the cap in bounded windows (workspace-push.ts).
   if (content !== null && !isStreamedContent(content) && Buffer.byteLength(content, 'utf-8') > PUSH_SCAN_MAX_FILE_BYTES) throw opError('request_too_large', 'The canonical file would exceed the pre-push secret-scan cap.',
     `Nothing was written. The rendered file of ${row.slug} is over ${PUSH_SCAN_MAX_FILE_BYTES} bytes, which the pre-push secret scan cannot scan, so it would block every push of source ${row.source_id}. Keep the page under the 24 MiB page ceiling (docs/guides/memory-boundaries.md#large-pages).`);
   // #6212: a legacy slug (admitted only to delete or restore its existing row) never owns a file: its recorded
@@ -330,7 +330,7 @@ async function compareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 's
         { detail: 'file_database_drift', fix: readFix(`Previews how page ${row.slug}'s canonical file and database copy reconcile; a preview never changes canonical content.`,
           { argv: ['gbrain', 'sources', 'reconcile', row.source_id, row.slug, '--brain', 'host', '--preview', ...adopt] }) });
     }
-  } else if (before && !snapshot && content !== null && beforeHash() !== contentHash(content)
+  } else if (before && !snapshot && content !== null && beforeHash() !== fileContentHash(content)
     && !(options.capture && beforeHash() === options.capture.hash)) {
     throw await heldFileRefusal(engine, row, root, path, 'occupied', options.remote === true)
       ?? new OperationError('source_changed', 'An unindexed file already occupies the canonical page path.', 'Import the file before replacing it.');
