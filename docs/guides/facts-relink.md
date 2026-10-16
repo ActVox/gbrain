@@ -154,7 +154,7 @@ so doctor `unlinked_facts` then offers a paid re-extraction of its page
 | `fence_malformed` | no | The entity page has a ## Facts fence that cannot be normalized. Preview the fence repair of that page (`repair fences --slug <entity-slug>` on the brain host; read-only, and it names the exact edit for anything it will not repair), apply it, then rerun. |
 | `claim_unfenceable` | no | The claim text cannot be written to a fence row unchanged (for example it is wrapped in ~~). Forget it and remember a cleaned-up claim with --entity. |
 | `visibility_conflict` | no | The entity already has the same claim from the same source with the other visibility, and a page indexes only one. Forget the copy you do not want, then rerun. |
-| `fence_owned` | no | The fact lives in another page fence or is a conversation page's extracted fact. Relink does not move fence-owned facts; link conversation facts with gbrain facts relink --conversation (free, preview with --dry-run). |
+| `fence_owned` | no | The fact lives in another page fence or is a conversation page's extracted fact. Relink does not move fence-owned facts; conversation facts are linked by relink with --conversation (free, preview with --dry-run). |
 | `budget_exhausted` | no | The model tier reached --max-usd. Raise --max-usd (or pass off) and rerun with the printed continuation command. |
 | `revision_conflict` | no | The fact or the entity page changed while relink ran. Rerun. |
 

@@ -2,7 +2,7 @@
 
 Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place and the exact text. Version strings use `<WAVE>` for the wave's stamped version.
 
-## #6740 mention scan masks HTML comments
+## [S2] #6740 mention scan masks HTML comments
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -18,7 +18,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - #6740: cleanup of stale "Discussed in" timeline bullets already written; preview-first repair, next wave.
 
-## #6742 question type in gbrain-base-v2 (pack 1.4.0)
+## [S2] #6742 question type in gbrain-base-v2 (pack 1.4.0)
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -36,7 +36,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - Pinning a question no longer makes doctor warn about an undeclared `question` page type on the default schema pack (#6742). `gbrain-base-v2` is now 1.4.0.
 
-## #6720 atom pages inherit the source page's content date
+## [S2] #6720 atom pages inherit the source page's content date
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -57,7 +57,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - No row change: `src/core/cycle/extract-atoms.ts` is 1653 of its 1654 ceiling after this commit.
 
-## #6731 conversation extractor entity hints
+## [S2] #6731 conversation extractor entity hints
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -77,7 +77,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - `src/commands/extract-conversation-facts.ts` shrinks from 2087 to 2078 in this commit (the two extractor call sites share one input object). Lower its ceiling when the integrator settles the TSV after the later lane 3 commits (the #6764 commit adds a few lines back; see that section).
 
-## #6764 conversation facts: write-time subject inference and a doctor fix that can act on them
+## [S2] #6764 conversation facts: write-time subject inference and a doctor fix that can act on them
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -97,7 +97,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 
 - New exported symbols (no registry rows needed): `CONVERSATION_FIX_SLUGS` (doctor/checks/unlinked-facts.ts), `inferConversationSubjects` (core/facts/conversation-subject-infer.ts). The `replaces_cross_page_derived` suggestion lives in core/persistence/verb-errors.ts beside the existing `replaces_cross_page` text; no error-registry code was added.
 
-## #6764 free conversation relink as the doctor's primary fix (decision d1b)
+## [S2] #6764 free conversation relink as the doctor's primary fix (decision d1b)
 
 ### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
 
@@ -121,7 +121,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 - gstack pregate `literals` reports ~643 test locations "still carrying" MENTION_EXTRACTOR_VERSION 5. Every hit except test/mentions-pass.test.ts (fixed to use the symbol) is an unrelated literal 5 (array indexes, model names, counts); no test pins the mention version as a number. The `lanes` check flags this fragment file, which the integrator deletes.
 
 
-## #6764 follow-up (v3 review r2-d1)
+## [S2] #6764 follow-up (v3 review r2-d1)
 
 - The free path is `gbrain facts relink --conversation` (a flag on the existing verb). It stays a receipted, database-only linkage of the derived row: `entity_slug` plus the `entity relinked from mention` note on the row itself, one maintenance transaction per page (a `managed_maintenance_conversation_relink` request on a managed brain). Conversation ownership, fact id, provenance and trust are kept and no Markdown is edited, so the doctor envelope asks no consent (`[]`, actor agent; `host_admin` on the remote path). Conversation pages have no `## Facts` fence (canonical projection and the extract_facts reconcile skip extractor rows, #1928), so `FACTS_FENCE_COLUMNS` having no entity column does not matter here.
 - `extract-conversation-facts --force` keeps the link: `clearConversationFacts` expires relinked rows instead of deleting them and the replacement row of the same claim inherits the entity (new module `src/core/facts/conversation-relink-carry.ts`). Tested unmanaged and managed with write-time inference off, plus the extract_facts reconcile.
@@ -132,4 +132,12 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### src/core/behavior-change-notice.ts (replace the #6764 rows' paid-fallback wording)
 
 - In both #6764 rows, the paid fallback is "capped at the amount the user approves (`--max-cost-usd <N>`)", not "`--max-cost-usd 1`", and the second row should add: "A re-extraction of the page keeps a relinked fact's entity on the claim's new row. Rows the free pass could not resolve no longer count toward doctor's 25% new-fact warning."
+
+## [S2] #6764 follow-up (final v3 Eng review)
+
+- Paid-fix envelope fixture: test/conversation-reextract-envelope-6764.test.ts runs the free pass, takes doctor's paid fix, runs its preview_argv through the CLI (output names the target page, no model call, facts unchanged), then the real argv with N=1 against a zero-price stubbed provider (pricing.overrides 0/0), and asserts unlinked_facts clears.
+- \`extract-conversation-facts --dry-run --slugs ...\` now prints \`Targets: <slugs>\` (one line; src/commands/extract-conversation-facts.ts is 2080 of its 2087 ceiling, no TSV change).
+- test/trust-write-gate-drift.test.ts gains an EXEMPT row for src/core/facts/conversation-relink.ts (it writes entity_slug and a context note on existing rows, never claim text). The RELINK_REASONS.fence_owned text avoids a hand-built gbrain command (check:agent-contract).
+- The free relink is the trusted-local intent \`managed_maintenance_conversation_relink\` (database-only, no files, no model) on a managed brain; an unmanaged brain has no maintenance coordinator, so it uses the same writeDerivedFacts maintenance transaction as the extractor itself.
+- All Lane 3 rows in this file are S2.
 
