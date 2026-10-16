@@ -326,6 +326,7 @@
   "e2e:test/e2e/postgres-reconnect-singleton.test.ts": 522,
   "e2e:test/e2e/preview-approval-postgres.test.ts": 1312,
   "e2e:test/e2e/projection-drain-postgres.test.ts": 22004,
+  "e2e:test/e2e/projection-image-drain-postgres.test.ts": 9000,
   "e2e:test/e2e/projection-embedding-input-hash.test.ts": 2815,
   "e2e:test/e2e/projection-readiness-currency.test.ts": 1577,
   "e2e:test/e2e/projection-recovery-parity.test.ts": 30639,

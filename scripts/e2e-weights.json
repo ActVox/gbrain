@@ -411,6 +411,7 @@
   "test/e2e/preview-approval-postgres.test.ts": 2780,
   "test/e2e/private-visibility-plan-postgres.test.ts": 2630,
   "test/e2e/projection-drain-postgres.test.ts": 30590,
+  "test/e2e/projection-image-drain-postgres.test.ts": 9000,
   "test/e2e/projection-embedding-input-hash.test.ts": 2800,
   "test/e2e/projection-readiness-currency.test.ts": 2930,
   "test/e2e/projection-recovery-parity.test.ts": 36060,

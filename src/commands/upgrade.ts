@@ -834,6 +834,7 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
         await (await import('../core/feedback/upgrade-notice.ts')).printRetrievalFeedbackUpgradeNotice(engine);
         // Entity mention index: [AGENT] catch-up line while pages are due (best-effort).
         await (await import('../core/mentions/upgrade-notice.ts')).printMentionIndexUpgradeNotice(engine);
+        await (await import('../core/page-state/projection-upgrade-notice.ts')).printProjectionUpgradeNotice(engine); // #6803 image projections: read-only [AGENT] drain preview
         // Large pages: re-index pages an older gbrain stored chunkless for size (keyless-safe, time-boxed, resumable).
         await (await import('../core/oversized-backfill.ts')).printOversizedBackfillUpgradeNotice(engine);
 

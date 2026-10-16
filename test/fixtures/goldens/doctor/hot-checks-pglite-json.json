@@ -626,7 +626,7 @@
               "unresolved": {
                 "distinct_intents": 0,
                 "distinct_slugs": 0,
-                "oldest_age_seconds": null,
+                "oldest_age_seconds": "<volatile>",
                 "rows": 0
               },
               "window_days": 7
@@ -862,12 +862,59 @@
           {
             "category": "brain",
             "details": {
+              "archived": 0,
+              "as_of": "<ts>+00",
+              "failed": 0,
+              "ocr_required": 0,
+              "oldest_age_seconds": "<volatile>",
+              "pending": 1,
+              "protected": 0,
               "readiness": "projection_pending",
-              "ready": false
+              "ready": false,
+              "reimport": 0,
+              "sealable": 0,
+              "sealable_with_visual": 0
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "message": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn"
           },
@@ -3873,7 +3920,45 @@
             "tier": "symptom"
           },
           {
-            "fix": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "fix": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn",
             "tier": "symptom"
@@ -4543,7 +4628,7 @@
               "unresolved": {
                 "distinct_intents": 0,
                 "distinct_slugs": 0,
-                "oldest_age_seconds": null,
+                "oldest_age_seconds": "<volatile>",
                 "rows": 0
               },
               "window_days": 7
@@ -4779,12 +4864,59 @@
           {
             "category": "brain",
             "details": {
+              "archived": 0,
+              "as_of": "<ts>+00",
+              "failed": 0,
+              "ocr_required": 0,
+              "oldest_age_seconds": "<volatile>",
+              "pending": 1,
+              "protected": 0,
               "readiness": "projection_pending",
-              "ready": false
+              "ready": false,
+              "reimport": 0,
+              "sealable": 0,
+              "sealable_with_visual": 0
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "message": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn"
           },
@@ -7790,7 +7922,45 @@
             "tier": "symptom"
           },
           {
-            "fix": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "fix": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn",
             "tier": "symptom"

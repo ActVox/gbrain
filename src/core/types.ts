@@ -2070,7 +2070,7 @@ export const DEGRADED_STAGES = [
   'safe_index_pending',
   'vector_candidates_incomplete',
   'keyword_candidates_incomplete',
-  'projection_pending',
+  'projection_pending', 'projection_by_design',
   'projection_status_unknown',
   'keyword_count_unavailable',
 ] as const;
