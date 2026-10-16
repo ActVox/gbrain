@@ -104,6 +104,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
+  // #6113: a bare legacy embedding_model DB row; the fix previews migrate embeddings.
+  'embedding_identity_unqualified',
   // #5137: an env provider key shadowing a different config key.
   'embedding_key_source',
   'embedding_migration_state',
@@ -259,6 +261,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'db_only_collector_collision',
   'federation_health',
   'google_file_modes',
+  // #5012 item 9: a Google source's configured calendar was unreadable at its last sync (doctor/checks/google-calendar.ts).
+  'google_calendar_readable',
   'google_oauth',
   'home_dir_in_worktree',
   'index_audit',
@@ -294,6 +298,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'writer_version',
   'pgbouncer_prepare',
   'pglite_data_dir',
+  // #6573: a local IPC socket path over the platform's AF_UNIX budget (doctor/checks/local-ipc.ts).
+  'ipc_socket_path',
   // db-availability loop: engine-fit + repair-recurrence signals.
   'pglite_scale',
   'db_repair_recurrence',

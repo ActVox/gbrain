@@ -16,7 +16,7 @@ import { connectedEngine, type DoctorContext, type DoctorEntry } from '../contex
 import { claimSourcesFix, readUnclaimedLegacySources } from '../../../core/trust/claim.ts';
 import { TRUST_CLAIM_RESUME_COMMAND } from '../../../core/trust/claim-state.ts';
 import { relowerClaimedRows, TRUST_RELOWER_COMMAND, type TrustRelowerReport } from '../../../core/trust/backfill.ts';
-import { isUndefinedColumnError } from '../../../core/utils.ts';
+import { isMissingSchemaObject } from '../../../core/utils.ts';
 
 const VERIFY = { argv: ['gbrain', 'doctor', '--only', 'trust_sources_unclaimed', '--json'] };
 
@@ -49,7 +49,7 @@ async function runTrustSourcesUnclaimed(ctx: DoctorContext): Promise<Check[]> {
         fix: claimSourcesFix('trust_sources_unclaimed') });
     }
   } catch (err) {
-    if (isUndefinedColumnError(err, 'trust_tier')) {
+    if (isMissingSchemaObject(err, 'column', 'trust_tier')) {
       checks.push({ name: 'trust_sources_unclaimed', status: 'ok', details: { schema: 'pre_trust' }, message: 'This schema predates trust tiers; claiming arrives with the migration that adds them.' });
     } else {
       checks.push(checkError('trust_sources_unclaimed', 'read unclaimed sources', err));

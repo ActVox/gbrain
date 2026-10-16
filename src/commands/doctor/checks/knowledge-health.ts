@@ -13,6 +13,7 @@ import { zeroTotalContradictionsCheck } from '../../../core/eval-contradictions/
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { agentFix, checkError, doctorVerify } from '../check-fix.ts';
+import { isMissingSchemaObject } from '../../../core/utils.ts';
 
 async function runEvalCapture(ctx: DoctorContext): Promise<Check[]> {
   const { progress } = ctx;
@@ -284,7 +285,7 @@ async function runFactsExtraction(ctx: DoctorContext): Promise<Check[]> {
     }
   } catch (err) {
     const code = (err as { code?: string } | null)?.code;
-    if (code === '42P01' || code === '42703') {
+    if (isMissingSchemaObject(err, 'table', 'ingest_log') || isMissingSchemaObject(err, 'column', 'source_id')) {
       // ingest_log missing entirely (extreme legacy) or source_id column
       // missing (pre-v50 brain that hasn't run apply-migrations yet).
       checks.push({
@@ -459,8 +460,7 @@ async function runEffectiveDate(ctx: DoctorContext): Promise<Check[]> {
       });
     }
   } catch (err) {
-    const code = (err as { code?: string } | null)?.code;
-    if (code === '42703') {
+    if (isMissingSchemaObject(err, 'column', ['effective_date', 'effective_date_source'])) {
       // column doesn't exist — pre-v0.29.1 brain
       checks.push({ name: 'effective_date_health', status: 'ok', message: 'Skipped (effective_date column unavailable — run gbrain apply-migrations)' });
     } else {
@@ -519,8 +519,7 @@ async function runSalience(ctx: DoctorContext): Promise<Check[]> {
       });
     }
   } catch (err) {
-    const code = (err as { code?: string } | null)?.code;
-    if (code === '42703' || code === '42P01') {
+    if (isMissingSchemaObject(err, 'column', 'emotional_weight') || isMissingSchemaObject(err, 'table', 'takes')) {
       checks.push({ name: 'salience_health', status: 'ok', message: 'Skipped (emotional_weight or takes table unavailable — pre-v0.29 brain)' });
     } else {
       checks.push(checkError('salience_health', 'read pages', err));

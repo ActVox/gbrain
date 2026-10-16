@@ -258,9 +258,11 @@ function proposalSummary(p: TrustProposalRow, verb: 'Accept' | 'Dismiss' | 'Reve
     if (verb === 'Revert') return `Revert the agent edit of ${page}: restore version ${s.version_id ?? '?'} and its tier "${trustLabel(s.prior_tier)}"`;
     return `Dismiss ${trustProposalRef(p.id)}: ${page} stays "${trustLabel(s.edited_tier)}"`;
   }
-  const target = `${p.target_table === 'facts' ? 'f' : p.target_table === 'takes' ? 't' : ''}${p.target_id}`;
+  const target = `${p.target_table === 'facts' ? 'f' : p.target_table === 'takes' ? 't' : p.target_table === 'timeline_entries' ? 'timeline row ' : ''}${p.target_id}`;
   const related = p.related_id === null ? '' : ` with ${p.related_table === 'facts' ? 'f' : p.related_table === 'takes' ? 't' : ''}${p.related_id}`;
-  const what = p.action === 'forget' ? `forget ${target}` : p.action.startsWith('supersede') ? `supersede ${target}${related}` : `${p.action.replace('_', ' ')} ${target}${related}`;
+  // W1 #6783 §12 (a): a held take or timeline row names what the lower-tier write asked for.
+  const held = p.action === 'forget' && p.target_table !== 'facts' ? ({ removed: 'remove', replaced: 'replace', deactivated: 'deactivate', detail_changed: 'rewrite' } as Record<string, string>)[String(p.before_state.change)] : undefined;
+  const what = held ? `${held} ${target} as the page now says` : p.action === 'forget' ? `forget ${target}` : p.action.startsWith('supersede') ? `supersede ${target}${related}` : `${p.action.replace('_', ' ')} ${target}${related}`;
   return verb === 'Accept' ? `Accept ${trustProposalRef(p.id)}: ${what} (raises trust over "${trustLabel(storedTrustTier(p.before_state.prior_tier ?? p.before_state.tier))}")`
     : `Dismiss ${trustProposalRef(p.id)}: do not ${what}`;
 }
