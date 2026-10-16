@@ -59,6 +59,8 @@ export const FACTS_ABSORB_REASONS = [
   'gateway_rate_limit',
   'gateway_model_not_found',
   'write_refused',
+  'write_pending_accepted',
+  'write_deferred_unadmitted',
 ] as const;
 
 /**
