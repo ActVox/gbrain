@@ -4,6 +4,8 @@ import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
 import { loadSourceRow } from '../contextual-retrieval-service.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { readSegmentedConversationInput, type SegmentedConversationInput } from '../page-body/segment-conversation.ts';
 
 /**
  * The largest conversation parser input (UTF-8 bytes): the page ceiling plus
@@ -125,6 +127,17 @@ export async function readConversationBodyForParsing(
   engine: BrainEngine,
   page: Page,
 ): Promise<string> {
+  return (await readConversationInput(engine, page)).body;
+}
+
+/**
+ * readConversationBodyForParsing with the window it read: a segmented page's summary body is read through ranged
+ * reads, and one over CONVERSATION_WINDOW_BYTES is its newest window (page-body/segment-conversation.ts).
+ */
+export async function readConversationInput(
+  engine: BrainEngine,
+  page: Page,
+): Promise<SegmentedConversationInput> {
   const rawTranscript = extractRawTranscriptPath(page);
   if (rawTranscript) {
     const resolved = await resolveTranscriptPath(engine, page, rawTranscript);
@@ -132,7 +145,7 @@ export async function readConversationBodyForParsing(
       const { size, mtimeMs } = statSync(resolved);
       if (size > CONVERSATION_BODY_MAX_BYTES) throw new ConversationBodyTooLargeError(size, mtimeMs);
       const rawBody = readFileSync(resolved, 'utf8').trim();
-      if (rawBody.length > 0) return rawBody;
+      if (rawBody.length > 0) return { body: rawBody };
     }
     if (!resolved) {
       // Refusal is loud but class-only: never echo the attempted path
@@ -142,5 +155,5 @@ export async function readConversationBodyForParsing(
       );
     }
   }
-  return readSummaryBody(page);
+  return isSegmentedPage(page) ? readSegmentedConversationInput(engine, page) : { body: readSummaryBody(page) };
 }

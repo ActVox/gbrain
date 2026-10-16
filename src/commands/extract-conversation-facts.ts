@@ -372,7 +372,8 @@ import {
   parseConversation,
   type ParseConversationOpts as OrchestratorParseOpts,
 } from '../core/conversation-parser/parse.ts';
-import { ConversationBodyTooLargeError, CONVERSATION_BODY_MAX_BYTES, readConversationBodyForParsing } from '../core/conversation-parser/body.ts';
+import { ConversationBodyTooLargeError, CONVERSATION_BODY_MAX_BYTES, readConversationInput } from '../core/conversation-parser/body.ts';
+import { CONVERSATION_WINDOW_BYTES, type ConversationWindow } from '../core/page-body/segment-conversation.ts';
 import { setExtractionReceipt } from '../core/extraction-watermark.ts';
 import { conversationSkip } from '../core/facts/conversation-skip.ts';
 import { runLlmFallback } from '../core/conversation-parser/llm-fallback.ts';
@@ -539,8 +540,11 @@ async function skippedForSize(state: ExtractCoreState, snapshot: ConversationPag
     process.stderr.write(`[extract-conversation-facts] SKIP ${snapshot.page.slug}: ${origin === 'sidecar' ? 'raw_transcript sidecar ' : ''}`
       + `${(bytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_PAGE_BODY_BYTES / 1024 / 1024}MB cap\n`);
   }
+  const window = snapshot.window;
   if (!state.dryRun) await setExtractionReceipt(state.engine, snapshot.page.id, 'conversation_facts', over
-    ? { kind: 'skipped_too_large', pipeline: 'conversation_facts', processed_chars: 0, total_bytes: bytes, cap_bytes: MAX_PAGE_BODY_BYTES, origin } : null);
+    ? { kind: 'skipped_too_large', pipeline: 'conversation_facts', processed_chars: 0, total_bytes: bytes, cap_bytes: MAX_PAGE_BODY_BYTES, origin }
+    : window ? { kind: 'tail_window', pipeline: 'conversation_facts', processed_chars: snapshot.body.length, total_bytes: window.totalBytes,
+      cap_bytes: CONVERSATION_WINDOW_BYTES, origin: 'page' } : null);
   return over;
 }
 
@@ -717,6 +721,8 @@ export type DurableExtractionOutcome = 'complete' | 'non_extractable';
 interface ConversationPageSnapshot {
   page: Page;
   body: string;
+  /** A segmented page over the window cap: `body` is its newest window. */
+  window?: ConversationWindow;
   versionToken: string;
   /** The `raw_transcript` sidecar was over the cap and not read; `body` is empty. */
   oversizedSidecarBytes?: number;
@@ -769,8 +775,8 @@ async function preparePageSnapshot(
   page: Page,
 ): Promise<ConversationPageSnapshot> {
   try {
-    const body = await readConversationBodyForParsing(engine, page);
-    return { page, body, versionToken: snapshotVersionToken(page, body) };
+    const { body, window } = await readConversationInput(engine, page);
+    return { page, body, ...(window ? { window } : {}), versionToken: snapshotVersionToken(page, body) };
   } catch (error) {
     if (!(error instanceof ConversationBodyTooLargeError)) throw error;
     return { page, body: '', versionToken: `sidecar-oversized-${error.bytes}-${error.mtimeMs}`, oversizedSidecarBytes: error.bytes };
@@ -879,7 +885,8 @@ async function processPage(
   // `parseConversationMessages(body)` shape only saw the body, which
   // meant Telegram-bracket pages with frontmatter dates landed at
   // 1970-01-01. Now they pick up the correct date.
-  const parseResult = parseConversation(body, { page });
+  const fallbackDate = snapshot.window?.fallbackDate ?? undefined;
+  const parseResult = parseConversation(body, { page, ...(fallbackDate ? { fallbackDate } : {}) });
   let messages = parseResult.messages;
   if (parseResult.timezone_warning) {
     process.stderr.write(parseResult.timezone_warning + '\n');
@@ -926,7 +933,7 @@ async function processPage(
       body,
       engine: state.engine,
       signal: state.signal,
-      fallbackDate: deriveDateContext({ page }).fallbackDate,
+      fallbackDate: deriveDateContext({ page, ...(fallbackDate ? { fallbackDate } : {}) }).fallbackDate,
       propagateError: (error) =>
         error instanceof BudgetExhausted ||
         (state.signal?.aborted === true && isAbortError(error)),
