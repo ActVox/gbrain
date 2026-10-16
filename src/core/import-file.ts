@@ -26,7 +26,7 @@ import { sanitizeRemoteBody } from './remote-body.ts';
 import { installPageEmbeddings, installPageProjection, preparePageProjection, projectionBelowSafeFence, queuePageProjection, readProjectionSnapshot, resealSafeChunks,
   sealPageTextProjection, stampEmbeddingInputs, type ProjectionSnapshot } from './page-state/projections.ts';
 import { sanitizeText } from './batch-rows.ts';
-import { hasProtectedBody, safeChunksFilter } from './search/safe-chunks.ts';
+import { hasProtectedBody, provenanceDistrusted, safeChunksFilter } from './search/safe-chunks.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
 import { reuseStoredChunkVectors } from './import-chunk-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
@@ -1940,9 +1940,9 @@ export async function importImageFile(
   const ocr = opts.noEmbed
     ? { text: '', successful: false }
     : await _ocrLimiter(() => maybeOcr(engine, decoded.buf, decoded.mime));
-  if (hadProtectedOcr && !ocr.successful) {
+  if ((hadProtectedOcr || (existing?.content_hash === hash && await provenanceDistrusted(engine, existing.id))) && !ocr.successful) {
     return { slug: imageSlug, status: 'skipped', chunks: 0,
-      error: 'Replacing an image with protected OCR requires successful fresh OCR. Enable OCR and reimport the changed image.' };
+      error: 'This image had protected OCR, so indexing it requires successful fresh OCR. Enable OCR and reimport the image.' };
   }
   // Protection checks, chunks and stored OCR must agree on canonical text,
   // including markers made recognizable by NUL removal.
