@@ -15,6 +15,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { backgroundPaused, backgroundWorktreeInactive, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
 import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
+import { assertBackgroundOwner } from './owner-verification.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
 import { hostname } from 'node:os';
@@ -244,6 +245,8 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   const stamp = writerStamp();
   const origin = resolveAdmissionOrigin(input.origin);
+  // #6741 C: a background producer is refused before any receipt when the source's owner fails its verification.
+  if (origin === 'background' && input.worktreeId) await assertBackgroundOwner(engine, input.sourceId, ownerStatusFix);
   return { requestId, apply: async (tx: BrainEngine): Promise<WriteRequest> => {
     await declarePersistenceProtocol(tx);
     // The guards are sent together in lock order (worktree, source, writer, counters) and judged in
@@ -324,6 +327,7 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
   const items = inputs.map(input => ({ input, requestId: requireUuid(input.requestId ?? randomUUID()), fingerprint: intentDigest(input),
     bytes: jsonBytes(input.intent) + jsonBytes(input.authority), terminalBytes: Math.max(input.terminalReservation ?? 0, receiptReservation(input)) }));
   assertMutationProtocol({ target_kind: 'page', protocol_version: 1 });
+  if (first.worktreeId && resolveAdmissionOrigin(first.origin) === 'background') await assertBackgroundOwner(tx, first.sourceId, ownerStatusFix);
   const ids = items.map(item => item.requestId);
   // #5984: the checks are independent reads and share locks, so they go out back to back in the order they always
   // had (protocol, graduation, worktree, source, writer, counters); a failure is raised in that order.

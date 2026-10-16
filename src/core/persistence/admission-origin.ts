@@ -33,16 +33,19 @@ export const DEFAULT_BACKGROUND_PAUSE_SHARE = 0.8;
 /** What a paused admission's doctor finding names as paused. */
 export const BACKGROUND_PRODUCERS = ['managed maintenance', 'conversation facts', 'autopilot cycle phases', 'autopilot catch-up sync', 'minion jobs'] as const;
 
-const scope = new AsyncLocalStorage<AdmissionOrigin>();
+/** #6741 C: a run's origin, and its per-source owner verification outcomes (backgroundOwnerCheck). */
+interface OriginScope { origin: AdmissionOrigin; owners: Map<string, Promise<OperationError | null>> }
+const scope = new AsyncLocalStorage<OriginScope>();
 
 /** Runs `fn` with every admission inside it attributed to `origin` (a background scope wins over an inner interactive caller). */
 export function withAdmissionOrigin<T>(origin: AdmissionOrigin, fn: () => T): T {
-  return scope.run(scope.getStore() === 'background' ? 'background' : origin, fn);
+  const outer = scope.getStore();
+  return scope.run(outer?.origin === 'background' ? outer : { origin, owners: new Map() }, fn);
 }
 
 /** The origin an admission is charged to: a surrounding background scope, else the explicit origin, else the scope, else background. */
 export function resolveAdmissionOrigin(explicit?: AdmissionOrigin): AdmissionOrigin {
-  const surrounding = scope.getStore();
+  const surrounding = scope.getStore()?.origin;
   if (surrounding === 'background') return 'background';
   return explicit ?? surrounding ?? 'background';
 }
@@ -86,5 +89,26 @@ export function backgroundPaused(scopeKey: string, resource: 'lifetime_ids' | 't
 export function backgroundWorktreeInactive(sourceId: string, state: string, ownerStatusFix: Action): OperationError {
   return opError('owner_unavailable', `Background writes to source ${sourceId} are paused: its worktree is ${state}.`,
     `Nothing was submitted and no request id was used. Background work for source ${sourceId} resumes once its writer is active again; writer status shows what it is waiting on.`,
+    { fix: ownerStatusFix });
+}
+
+/**
+ * #6741 C: the owner verification of one source, at most once per background producer run: the outcome is cached in
+ * the surrounding background scope (withAdmissionOrigin('background', …)); an admission outside any scope verifies
+ * on its own.
+ */
+export function backgroundOwnerCheck(sourceId: string, verify: () => Promise<OperationError | null>): Promise<OperationError | null> {
+  const owners = scope.getStore()?.owners;
+  if (!owners) return verify();
+  let check = owners.get(sourceId);
+  if (!check) { check = verify(); owners.set(sourceId, check); }
+  return check;
+}
+
+/** #6741 C: the refusal of a background admission whose source's owner on this host fails the claim's owner verification. */
+export function backgroundOwnerUnverified(sourceId: string, physicalError: string | undefined, ownerStatusFix: Action): OperationError {
+  return opError('owner_unavailable', `Background writes to source ${sourceId} are paused: its canonical owner could not be verified.`,
+    `${physicalError ?? `Source ${sourceId}'s host binding has no canonical path or coordination lock path.`} Nothing was submitted and no request id was used. `
+      + `Writer status shows the recovery the source needs (a deleted owner marker is repaired by a writer self-transfer, the user's decision); background work resumes after it.`,
     { fix: ownerStatusFix });
 }
