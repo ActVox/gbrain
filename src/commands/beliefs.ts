@@ -35,7 +35,7 @@ const SUBCOMMANDS = ['enable', 'disable', 'status', 'reconcile', 'backfill'] as 
 function sourceArg(args: string[]): string | undefined {
   const at = args.indexOf('--source');
   const value = at >= 0 ? args[at + 1] : args.find(a => a.startsWith('--source='))?.slice('--source='.length);
-  if ((at >= 0 || value !== undefined) && (!value || value.startsWith('-'))) throw opError('invalid_params', '--source needs a source id.', 'Pass --source <id>; gbrain sources list shows the ids.');
+  if ((at >= 0 || value !== undefined) && (!value || value.startsWith('-'))) throw opError('invalid_params', '--source needs a source id.', 'Name the source after --source; gbrain sources list shows the source ids.');
   return value;
 }
 
@@ -72,7 +72,7 @@ export async function runBeliefs(engine: BrainEngine, args: string[]): Promise<v
     const named = sourceArg(args);
     if (named !== undefined && !await readLedgerSource(engine, named)) throw unknownSource(named);
     const target = () => resolveSourceId(engine, named).catch(error => {
-      throw error instanceof SourceTargetError ? opError('invalid_params', error.message, 'Pass --source <id>; gbrain sources list shows the ids.') : error;
+      throw error instanceof SourceTargetError ? opError('invalid_params', error.message, 'Name the source after --source; gbrain sources list shows the source ids.') : error;
     });
     if (sub === 'enable') {
       const sourceId = await target();
