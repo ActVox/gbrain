@@ -108,6 +108,8 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
     for (const b of t.active_blockers) console.log(`    BLOCKING ${b.kind}: request ${b.request_id}${b.slug ? ` (${b.slug})` : ''} [${b.category}]`);
     if (t.active_blockers.length || t.unresolved.rows) console.log(`    drill down: ${t.drill_down.join(' ')}`);
   }
+  const connector = status.connector_last_error;
+  if (connector) console.log(`  connector: ${connector.stopped ? 'STOPPED, ' : ''}the last ${connector.consecutive} run(s) ended on ${connector.code}${connector.slug ? ` at ${connector.slug}` : ''}: ${connector.message}`);
   for (const notice of notices) console.log(`  [gbrain notice ${notice.code}] ${notice.why}`);
   if (rendered.next) console.log(`  Next: ${rendered.next.command ?? rendered.next.argv?.join(' ')}\n  Why: ${rendered.next.why}`);
   else console.log('  Next: nothing; the source is synced and holds nothing.');
