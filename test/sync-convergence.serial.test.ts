@@ -140,6 +140,8 @@ const KILL_POINTS = [
   { point: 'sync:held_settled', per: 'held' }, { point: 'sync:retry_deferred', per: 'deferred' },
   // #6712 PR 1: inside the guarded kernel run of prescreened entries (its round also commits mode-only changes, so it has some).
   { point: 'sync:prescreened', per: 'group' },
+  // #6712 PR 2 (L5): after the checkpoint committed and the lease was released, before the owed tail runs (the next sync runs it).
+  { point: 'sync:tail_started', per: 'group' },
 ] as const satisfies ReadonlyArray<{ point: FaultPoint; per: 'page' | 'group' | 'save' | 'held' | 'deferred' }>;
 const MAX_RECOVERY_RUNS = 2;
 /** Oracle tests are named by the persistence gate's violation class (scripts/persistence/model.ts) they would report. */

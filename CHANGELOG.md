@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+### #6712 PR 2, lane L5: truthful receipts and fast status
+
+| Situation | Before | Now |
+|---|---|---|
+| a managed sync's checkpoint commits, then link extraction runs for minutes | the drain lease and the governed pass stayed held through the tail | the run returns `synced` at the commit; the tail runs after the lease is released, bounded, and a second sync can take the lease at once |
+| the process dies between the checkpoint commit and the tail | statistics and links for that run were never redone | the checkpoint recorded the tail as owed; the next sync of the source runs it |
+| the tail fails, is cut short or the deadline left no time | silent | the run stays `synced` with one `[gbrain notice sync_tail_degraded]` and its fix (`gbrain extract --stale --source <id>`, or doctor for statistics) |
+| a pass admits nothing with no unfinished request | `drain_stalled` / `no_admission`, a pooler warning, and a delegated run's one-time fallback | `drain_stalled` / `no_progress` with the same step and statement; `no_admission` is a retired reason |
+| `gbrain sync status` on a large brain | every heavy read on every call | a plain status skips the terminal summary, blocker list and cursor join (`*_read: not_read`, fix `--detail`); `state`, `reason` and bounded oldest-blocker / recovery probes always run; under 30 ms on a 61k-request fixture |
+| a status whose probe timed out | could read as nothing pending | `state: resumable`, `reason: status_unknown`, never `synced` |
+| a hold, `last_error`, a receipt, `managedWrite` or doctor `sync_failures` | internal codes only | `public_category` (drift, conflict, content_refused, file_missing, permission, storage, config, superseded, transient, defect) beside the unchanged `category` |
+
+- **Post-checkpoint tail** (`src/core/persistence/sync-tail.ts`, `sync-tail-record.ts`): `recordSyncTail` runs inside the checkpoint's publication transaction; `withSyncTail` runs the owed tail after the outermost drain lease is released (`performManagedBranch`, and `performManagedSync` when it took the lease). The failure clear and the retry-held `writer_yield` check stay in the pass. New fault point `sync:tail_started`, added to the convergence kill loop.
+- **`no_admission` retired**: the stall cause, its `drainNext` / `formatDrainSummary` branches, the transaction-pooler warning, the governor's `finish` window and the delegated `serve_no_admission` fallback are gone; `drain_stalled` keeps a `retired_reasons` tombstone. `drain-step.ts` stays: it still fences an abandoned pass at its next step and labels the `no_progress` stop.
+- **`sync status`** (`sync-status.ts`, `commands/sync/operator.ts`): `state`, `reason` (`SYNC_STATUS_REASONS`), `oldest_blocker`, `recovery`, `checkpoint_blockers_read`, `cursors_read`, `terminal_failures_read`, `--detail`; every existing field keeps its type. One text headline per state; the drain summary says `resumed run <id> and converged` when a drain finishes a run an earlier invocation started.
+- **`public_category`** (`public-category.ts`): a total mapping from `classifyTerminal`'s category and the fault code; `classifyRecordedFault` reads holds, failure rows and run stops as the failed receipt they stand for.
+- AGENTS.md and the sync-unblock runbook: the operator loop checks `*_read` and never reads a `not_read` field as "none".
+
 ## [0.60.255.0] - 2026-10-16
 
 **One drainer per managed source, one cursor per source, and a resume never refuses over processing flags (#6712 PR 1).** Two processes could drain one source at once (a cron `gbrain sync` beside a serve, a `--no-delegate` run beside a job), racing each other's checkpoints, and every writer, authority and option set got its own cursor, so a resume by a different process started over or refused with `cursor_processing_options_conflict`. Now every managed pass runs under the source's drain lease, a second run follows the holder instead of competing, the cursor key is the source itself, and the cursor's opt-outs are inherited.

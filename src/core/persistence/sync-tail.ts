@@ -68,7 +68,7 @@ export async function runSyncTail(engine: BrainEngine, sourceId: string, opts: {
 function tailNotice(sourceId: string, status: Exclude<SyncTailReport['status'], 'done'>, d: { statistics: SyncTailReport['statistics']; links?: ManagedLinkExtraction; failure: string | null }): Notice {
   const extract = { argv: ['gbrain', 'extract', '--stale', '--source', sourceId], consent: [], actor: 'agent' as const, requires_exclusive: false,
     why: 'Derives links for the pages this sync imported that are still stale; it changes no page content.',
-    verify: { argv: ['gbrain', 'extract', '--stale', '--source', sourceId, '--dry-run'] } };
+    verify: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] } };
   if (status === 'truncated') {
     return { code: 'sync_tail_degraded', kind: 'degraded', fix: extract,
       why: `The sync of source ${sourceId} is synced, but link extraction stopped at its budget with ${d.links!.remaining} page(s) still stale; their links and backlinks are missing until they are extracted.` };

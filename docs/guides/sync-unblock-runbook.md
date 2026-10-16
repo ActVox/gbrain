@@ -27,10 +27,19 @@ moving again; ask me only about the ones gbrain will not decide by itself."*
    host runs an older gbrain build than this checkout; restart them with the
    command it prints before anything else, and stop until it reads ok
    ([serve build drift](troubleshooting.md#serve-build-drift)).
-1. Read `status`. `cursor` is where the run stands (`index/total`, the
-   `pinned_target` commit, `last_advance_at`); `committed_last_10m` is the
-   signal that data is moving (a live process with a flat cursor is not
-   progress). `holds` and `last_error` each carry the triple below.
+1. Read `status`. `state` (`synced` | `resumable` | `blocked`) and `reason`
+   say where the source stands; `cursor` is where the run stands
+   (`index/total`, the `pinned_target` commit, `last_advance_at`);
+   `committed_last_10m` is the signal that data is moving (a live process with
+   a flat cursor is not progress). `holds` and `last_error` each carry the
+   triple below, plus `category` and `public_category`. `oldest_blocker` and
+   `recovery` are bounded live probes that need no cursor; when one times out
+   the state is `resumable` / `status_unknown`, never `synced`. A plain status
+   skips the heavy reads (the terminal-failure summary, the checkpoint blocker
+   list, the live cursor list): their fields keep their types, and
+   `terminal_failures_read`, `checkpoint_blockers_read` and `cursors_read` say
+   `not_read` with the `--detail` command as `fix`. Never read a `not_read`
+   field as "none"; run the fix when the step needs it.
 2. If `needs_human` is false and nothing committed in the last ten minutes,
    run `unblock --apply`: it performs the safe action for every hold that has
    one, refuses the rest by name, and prints the sync to run. For a content
