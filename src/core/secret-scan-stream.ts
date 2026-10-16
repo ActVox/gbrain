@@ -14,10 +14,17 @@
  * lines and indentation, under 18 Ki) and the bounded line values (jwt
  * 3 x 4096 + 2, basic_auth 2048, URL userinfo 384, assignment values 4096).
  *
- * OWNERSHIP. A window keeps a claim that starts before the next window's start
- * (it lies wholly inside this window, since it is shorter than the overlap);
- * the next window sees every later claim with all of the overlap behind it.
- * The last window keeps everything. A claim lying wholly inside a span kept by
+ * OWNERSHIP. A claim belongs to the window holding the start of the match that
+ * made it, anchor included (`from`: the `Bearer ` or `Authorization: Basic `
+ * keyword, an assignment key, or the boundary character before a value), not
+ * to the window holding the value's first character: a mid-line cut between
+ * an anchor and its value leaves the next window a value with no anchor, which
+ * no pattern claims. A window keeps a claim whose match starts before the next
+ * window's start (the whole match lies inside this window, since it is shorter
+ * than the overlap); the next window sees every match that starts at or after
+ * its start. The last window keeps everything. A match longer than the overlap
+ * (an anchor whose whitespace run before the token is that long) is the
+ * accepted miss. A claim lying wholly inside a span kept by
  * an earlier window is the seam's partial view of it (the body of a key cut at
  * the window start, a suffix of a split line) and is dropped, which also drops
  * an exact duplicate (same offset and pattern). Line numbers are 1-based over
@@ -71,7 +78,7 @@ export async function scanTextStream(
       if (text.length > streamScanWork.largestWindow) streamScanWork.largestWindow = text.length;
       const kept: Array<{ start: number; end: number }> = [];
       for (const claim of scanTextSpans(text, opts)) {
-        if (claim.start >= next) continue;
+        if (claim.from >= next) continue;
         const start = base + claim.start;
         const end = base + claim.end;
         if (carried.some((c) => c.start <= start && end <= c.end)) continue;

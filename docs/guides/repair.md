@@ -2263,7 +2263,9 @@ source.
 recovery whose prior file is over the 24 MiB single-string ceiling. Its prior
 bytes are kept as a staged copy beside the file (named in the record, with its
 SHA-256) instead of inside the record, and the preview's diff would read both
-files whole, so nothing was changed. Inspect the request read-only with
+files whole, so nothing was changed. The preview lists such a recovery under
+`refused` with this code and still lists the source's other recoveries; with
+`--request-id` naming it, the command refuses with this code. Inspect the request read-only with
 `gbrain sources writer status --source <id> --json`, ask the user which version
 to keep, put those bytes at the canonical path by hand (the staged copy holds
 the prior bytes; never delete it), and let the resident writer finish the
