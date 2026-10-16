@@ -58,6 +58,7 @@ test/graduation-verify.test.ts
 test/grandfather-managed.test.ts
 test/harness-skills-epoch.test.ts
 test/held-read-signals.test.ts
+test/hold-action-chain-6712.test.ts
 test/import-frontmatter-key-order-5158.test.ts
 test/import-inline-chunk-keep.test.ts
 test/import-revision-concurrency.test.ts
@@ -176,6 +177,7 @@ test/sync-drain-claims.test.ts
 test/sync-drain-head-blocked-6543.test.ts
 test/sync-drain-inpass-stall.test.ts
 test/sync-drain-write-capacity.test.ts
+test/sync-exits-l4-6712.test.ts
 test/sync-frontmatter-recovery.test.ts
 test/sync-frontmatter-slug-conflict.test.ts
 test/sync-full-cursor-slices-6349.test.ts

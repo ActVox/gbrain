@@ -7245,9 +7245,14 @@ Every hold and error has three fields, from one table
   `reconcile` previews two diverged versions; `upgrade` installs a newer gbrain;
   `none` waits for a person.
 - `needs_human`: a person has to choose or act before it clears;
-  `human_reason` says what. A page held three times with the same code
-  (`attempts`) is `needs_human` whatever its code says: it keeps moving under
-  the sync. A repair-class hold is `needs_human` when its stored repair state
+  `human_reason` says what. A page whose safe action failed three times with
+  the same code (`attempts`: a re-hold, or a failed `unblock --apply` or
+  repair) over at least 24 hours since it was first held is `needs_human`
+  whatever its code says, and `human_reason` ends with both numbers. Two holds
+  never escalate this way: a `worktree_dirty` file whose uncommitted bytes
+  changed in the last 24 hours (someone is still editing it) and a
+  `managed_image_sync_unsupported` image (held by design until multimodal
+  embedding is on or the image is excluded). A repair-class hold is `needs_human` when its stored repair state
   says so: a fence hold the lane marked `manual` (a manual-only reason, a gate
   rejection, a model answer the run does not retry) or `paid` (spend only the
   user raises), and a slug-conflict hold the lane decided a person must settle
@@ -7259,10 +7264,10 @@ Every hold and error has three fields, from one table
 <!-- sync-fault-table:begin (pinned by test/sync-runbook-table.test.ts) -->
 | Code | Class | Safe actions | Needs human | Escalate when |
 |---|---|---|---|---|
-| `worktree_dirty` | page | retry_when_clean | no | held 3 times: the file keeps changing without being committed |
+| `worktree_dirty` | page | retry_when_clean | no | 3 failed attempts over 24 h with no edit in the last 24 h: the uncommitted edit is abandoned |
 | `concurrent_write` | page | reconcile | yes | always: the file and the database page diverge |
 | `file_drift` | page | reconcile | yes | always: the page changed in the database since its file was last imported |
-| `preparation_stalled` | page | retry, upgrade | no | held 3 times, or writer status names a step that never finishes |
+| `preparation_stalled` | page | retry, upgrade | no | 3 failed attempts over 24 h, or writer status names a step that never finishes |
 | `invalid_fence` | page | repair | no | the fence repair preview offers no plan (a manual reason) |
 | `invalid_frontmatter` | page | repair | no | the repair preview needs an interpretation (--include-ambiguous) |
 | `frontmatter_slug_conflict` | page | repair | no | the repair preview needs an interpretation |
@@ -7271,10 +7276,18 @@ Every hold and error has three fields, from one table
 | `content_rejected` | page | none | yes | always |
 | `parser_regression` | page | upgrade | yes | always: a gbrain bug |
 | `managed_image_sync_unsupported` | page | none | no | never: images stay held while multimodal embedding is off |
+| `purged_content` | page | none | yes | always: only the owner clears a purge tombstone |
+| `write_gate_rejected` | page | none | yes | always: write_gate.external_mode=reject is the user's setting |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |
 | `source_changed` | page | retry | no | the same path fails again after a rerun |
+| `pending_import` | page | retry | no | the same path refuses again after a sync imported its file |
+| `raw_file_changed` | page | retry | no | the same path fails again after a rerun re-freezes it |
+| `file_database_drift` | page | reconcile | yes | always: the file and the database page diverge |
+| `canonical_file_missing` | page | repair | yes | always: no sync can import a file that is not there |
+| `source_binding_changed` | systemic | none | yes | always: the source or its checkout binding moved |
+| `unsafe_file_target` | systemic | none | yes | always: the file target resolves outside its source |
 | `cancelled` | page | retry | no | the same group is cancelled again after a rerun |
 | `knock_on` | page | retry | no | never: superseded; an older gbrain cancelled this page for another page's failure and a plain sync re-freezes it |
 | `run_replaced` | page | retry | no | never: another run of the source superseded this one and covers its pages |
@@ -7429,6 +7442,28 @@ That is not a page fault and no rerun clears it: preview
 apply with the printed `--apply --expect <hash>` once the user agrees. A cursor
 with a live pending request is kept; the loop above owns it
 ([repair guide](repair.md#managed-sync-orphans)).
+
+## Soak counters
+
+`gbrain doctor --json` reports `sync_soak_counters` (info, never a warning):
+how often a person or an agent had to step in, per UTC day for the last seven
+days, so a soak can show that sync keeps moving on its own.
+
+- `interventions`: `sync_non_plain` (a `gbrain sync` with a recovery flag such
+  as `--retry-failed`, `--full`, `--break-lock` or `--skip-failed`; the plain
+  scheduler flags `--all`, `--no-pull`, `--hard-deadline`, `--no-embed`,
+  `--no-lanes`, `--no-bulk` and `--json` do not count), `repair_apply` (a
+  `gbrain repair … --apply` of any kind but file-drift), `unblock_apply`,
+  `retry_held` (a `gbrain sources retry-held` without `--dry-run`) and
+  `needs_human` (a hold that turned `needs_human`, counted once, by the first
+  sync that sees it).
+- `content_decisions`: `file_drift_apply` (a `gbrain repair file-drift
+  --apply`) and `file_drift_hold` (a `file_drift` hold a sync found). These
+  are choices about which version of a page wins, not interventions; a
+  `keep_db` prefix reconciles with no decision and counts in neither line.
+
+Each line has one count per kind and a `total`; `by_day` lists both line
+totals for each day that recorded anything. Fields are only ever added.
 
 ## See also
 
@@ -10555,7 +10590,7 @@ Turning the `preparation_deadlines` switch off (`gbrain config set persistence.p
 
 <a id="session-timeouts-not-applied"></a>**Doctor warns `persistence_session_timeouts` with `session_timeouts_not_applied`?** gbrain sets `statement_timeout` (`GBRAIN_STATEMENT_TIMEOUT`, default 5min) and `idle_in_transaction_session_timeout` as connection startup parameters, and a transaction-mode pooler (PgBouncer with `ignore_startup_parameters`, Supavisor) drops them: `SHOW statement_timeout` through the configured URL reads `0`, so a statement outside a transaction has no server-side bound and a relation lock held in another session (a migration's `ALTER TABLE pages` queued behind a long transaction, for example) holds it for as long as the lock lasts. Managed write *preparation* reads are not affected since v0.60.108: they run under a transaction-local `statement_timeout` of the write's remaining preparation budget, so a lock-blocked read ends at the budget and the member is released `preparation_deadline` with no statement left on the server (#6278). For every other autocommit statement, set the default on the role instead of the connection: `ALTER ROLE <gbrain role> SET statement_timeout = '5min'` (read-only to check: `gbrain doctor --only persistence_session_timeouts --json`). Setting `GBRAIN_STATEMENT_TIMEOUT` has no effect through such a pooler.
 
-<a id="managed-sync-not-moving"></a>**The catch-up is parked (`sources status --json` says `data_moving: false`, doctor warns `managed_sync_not_moving`, `gbrain sources writer movement` exited 1), or the drain stopped `drain_stalled` with `cause: owner_wedged_here`?** Liveness is not movement: `/health` can be ok, the pid alive and `sync_running: true` while no page has committed for weeks. A managed source is *not moving* when an unfinished `managed-sync` cursor has had neither a committed `managed_sync_*` receipt nor a head step advance for longer than `persistence.preparation_ceiling_ms` (600 s) while a drain or a full consumer is live on the owner host; with nothing live it is `movement_state: parked` (a cursor left between cron runs; informational, not scored). Every surface routes to the same two read-only calls, so the agent reaches the owner, the step and the next action without SQL:
+<a id="managed-sync-not-moving"></a>**The catch-up is parked (`sources status --json` says `data_moving: false`, doctor warns `managed_sync_not_moving`, `gbrain sources writer movement` exited 1), or the drain stopped `drain_stalled` with `cause: owner_wedged_here`?** Liveness is not movement: `/health` can be ok, the pid alive and `sync_running: true` while no page has committed for weeks. A managed source is *not moving* when an unfinished `managed-sync` cursor has had neither a committed `managed_sync_*` receipt nor a head step advance for longer than `persistence.preparation_ceiling_ms` (600 s) while a drain or a full consumer is live on the owner host; with nothing live it is `movement_state: parked` (a cursor left between cron runs; informational, not scored). A parked cursor whose write queue still holds admitted requests while no consumer runs and nothing has moved for longer than that ceiling is stranded: nothing will ever drain it, so doctor `managed_sync_not_moving` fails (#6552, #6712 PR 2) and its fix is the resume sync with the cursor's stored options (`gbrain sync --source <id> …`), which consumes the queue itself; `details.stranded` counts such sources. Every surface routes to the same two read-only calls, so the agent reaches the owner, the step and the next action without SQL:
 
 1. `gbrain sources status <id> --json`: `data_moving`, `not_moving_since`, `movement_state` and, beside `data_moving: false`, the exact `gbrain sources writer status --source <id> --json` to run next. Doctor's `managed_sync_not_moving` fix is that same command.
 2. `gbrain sources writer status --source <id> --json`: every running claim ends in one `claim.next` envelope (`code` `claim_running`, `claim_overdue` or `claim_lapsed`). `claim_running` carries `retry_after_ms` and a `run` of the same status command while the owner is inside its allowance (the owner's own budget will cut the write; nothing to do but rerun after the delay), `tell_user_to_run` naming the owner `kind` and pid past the ceiling or when the owner reads `restart_required` (restart that process), `run` the printed resume command for a lapsed claim. `host.consumers` lists the processes on this host holding a consumer (pid, kind, mode `full|waiter_only`, started_at, the pool gauge), so a second consumer is visible in the same call.

@@ -26,7 +26,7 @@ import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { readSyncStatus, unblockSync } from '../src/core/persistence/sync-status.ts';
-import { classifySyncFault, HOLD_ATTEMPTS_NEEDS_HUMAN, SYNC_FAULT_TABLE } from '../src/core/persistence/sync-fault-class.ts';
+import { classifySyncFault, HOLD_ATTEMPTS_NEEDS_HUMAN, HOLD_ESCALATE_MS, SYNC_FAULT_TABLE } from '../src/core/persistence/sync-fault-class.ts';
 import { readGitHoldRetryPaths, readGitHold, readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
 import { runSyncUnblock } from '../src/commands/sync/operator.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
@@ -62,8 +62,14 @@ test('the classifier: every table code has a class and at least one safe action;
     expect(verdict).toMatchObject({ class: rule.class, safe_actions: rule.safe_actions, needs_human: rule.needs_human });
   }
   expect(classifySyncFault({ code: 'worktree_dirty', attempts: 1 })).toMatchObject({ class: 'page', safe_actions: ['retry_when_clean'], needs_human: false });
-  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN })).toMatchObject({ class: 'page', safe_actions: ['none'], needs_human: true });
-  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN }).human_reason).toContain(`held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times`);
+  // #6712 PR 2 (L4): escalation needs the failed attempts AND a day since the path was first held; a live editor never escalates.
+  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN })).toMatchObject({ class: 'page', safe_actions: ['retry_when_clean'], needs_human: false });
+  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN, held_for_ms: HOLD_ESCALATE_MS - 1 })).toMatchObject({ needs_human: false });
+  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN - 1, held_for_ms: 10 * HOLD_ESCALATE_MS })).toMatchObject({ needs_human: false });
+  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN, held_for_ms: HOLD_ESCALATE_MS })).toMatchObject({ class: 'page', safe_actions: ['none'], needs_human: true });
+  expect(classifySyncFault({ code: 'worktree_dirty', attempts: HOLD_ATTEMPTS_NEEDS_HUMAN, held_for_ms: HOLD_ESCALATE_MS }).human_reason).toContain(`held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times over 24 h`);
+  expect(classifySyncFault({ code: 'worktree_dirty', attempts: 9, held_for_ms: 9 * HOLD_ESCALATE_MS, live_editor: true })).toMatchObject({ needs_human: false });
+  expect(classifySyncFault({ code: 'managed_image_sync_unsupported', attempts: 9, held_for_ms: 9 * HOLD_ESCALATE_MS })).toMatchObject({ needs_human: false });
   expect(classifySyncFault({ code: 'concurrent_write' })).toMatchObject({ class: 'page', safe_actions: ['reconcile'], needs_human: true });
   expect(classifySyncFault({ code: 'source_changed', detail: 'pinned_git_worktree_conflict' })).toMatchObject({ class: 'page', safe_actions: ['retry'], needs_human: false });
   expect(classifySyncFault({ code: 'storage_error', message: 'write ECONNABORTED db.example.invalid:5432' })).toMatchObject({ class: 'connection', safe_actions: ['retry'], needs_human: false });
@@ -122,6 +128,10 @@ test('status joins the cursor, the recent commits, each hold with its triple and
   // Idempotent.
   await unblockSync(engine, f.id, { apply: true });
   expect(await readGitHoldRetryPaths(engine, f.id, source.incarnation)).toEqual(['b.md']);
+  // #6712 PR 2 (L4): each applied unblock that found c.md still dirty is one failed attempt on its hold (the preview counted
+  // none); three within minutes by a live editor never page a person.
+  expect((await readGitHold(engine, f.id, source.incarnation, 'c.md'))?.meta.attempts).toBe(3);
+  expect((await readSyncStatus(engine, f.id)).holds.find(hold => hold.path === 'c.md')).toMatchObject({ attempts: 3, needs_human: false, safe_actions: ['retry_when_clean'] });
   // The sync it names imports b, keeps c held, keeps d held; status then points the agent at d's human step only.
   const after = await performManagedSync(engine, f.opts);
   expect(after.status).toBe('synced');
