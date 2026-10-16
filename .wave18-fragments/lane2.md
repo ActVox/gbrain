@@ -1,6 +1,6 @@
 # Wave 18 lane 2, S2 fragments (scratch; the integrator applies these rows and deletes this file)
 
-**Every row in this file is S2** (each row is tagged). S1 rows (#6729 core, #6741 A/B/C, #6749) are in `.wave18-fragments/lane2-s1.md`.
+**Every row in this file is S2** (each row is tagged). S2 items: #6743, #6739, #6755, #6717 and the #6729 rename-identity remedy. S1 rows (#6729 core, #6741 A/B/C, #6749) are in `.wave18-fragments/lane2-s1.md`.
 
 ## #6743 fragment (integrator-owned rows)
 
@@ -152,3 +152,47 @@ None needed. The new line is emitted under the existing check name `minions_migr
 - [S2] CHANGELOG line suggestion: "Managed `sources add --kind google` keeps --contacts-dir, --future-days and --loops-exclude-labels in the source config, matching the unmanaged path (#6717)."
 - [S2] Note for existing users: a managed google source added before this fix lacks those keys; re-add it (or set the keys) to apply the tuning. No automatic backfill is done (the flags' values were never stored, so there is nothing to recover).
 
+## Wave 18 lane 2, S2 fragment: #6729 rename-identity remedy (scratch; the integrator applies these rows)
+
+Every row here is **S2**. The remedy is not S1. It sits on top of the S1 rows already in b78dbf210 (doctor registration and categories of `rename_identity_downgrades`, the doctor goldens). Patches apply on b78dbf210 (final S1 head); `check:orphan-modules` passes there and the doctor goldens did not change (PGLite and Postgres golden tests pass unchanged).
+
+### Already in the INTEGRATOR-ROW commit (last in the patch set) — S2
+
+1. **S2** `src/core/repair/core.ts` `REPAIR_KINDS`: append `'rename-identity'` after `'aliases'`.
+2. **S2** `src/core/repair/registry.ts`: `import { renameIdentityRepair, RENAME_IDENTITY_CONSENT_TEXT } from './rename-identity.ts';` and the `'rename-identity'` entry (handler `renameIdentityRepair`, `embeds: 'none'`, `checks: ['rename_identity_downgrades']`, `explicit_only: true`, `preview_bound: true`, `consent: 'destructive'`, `consentText: RENAME_IDENTITY_CONSENT_TEXT`, summary stating the managed limitation). `repairRunner().run` options gain `from?: string; close?: boolean` and pass them through.
+3. **S2** `src/core/error-registry.ts`: codes `fact_rows_collide` and `managed_remedy_unavailable` (class `caller`, docs `docs/guides/repair.md#rename-identity`); regenerated `docs/guides/error-codes.md` (`bun run build:error-codes`).
+4. **S2** Pinned explicit-kind lists gain `rename-identity`: `test/repair-explicit-only.test.ts` (`EXPLICIT`), `test/fix-wave-5-integration.test.ts` (`previews`).
+
+If the integrator applies these rows by hand instead of taking the commit, note that the `feat(repair)` commit does not typecheck alone (`src/commands/repair.ts` compares a `RepairKind` with `'rename-identity'`); it typechecks once row 1 lands.
+
+### BEHAVIOR_CHANGES (`src/core/behavior-change-notice.ts`, since = slot version) — S2
+
+- **S2**
+  ```ts
+  { since: '<slot>', text: 'New explicit-only repair kind `gbrain repair rename-identity --source <id>` for an inexact Git rename that sync split into a delete plus an add (#6729). Without `--slug` the preview lists the open pairs with their preview commands. `--slug <new-slug>` (and `--from <old-slug>` when two pairs share it) previews one pair and binds both page ids, both revisions and the disposition into its hash; `--apply --expect <hash> --yes` (destructive consent; without `--yes` a non-interactive run exits 3 with the consent payload) carries the old page id onto the new slug with its version history, timeline, links, facts and aliases, imports the new file onto it as an edit and retires the provisional page (soft-deleted under a purged slug). Facts of both pages survive or the carry refuses `fact_rows_collide` before writing. Carrying identity is classic-only: on a managed source the preview states `managed_remedy_unavailable` and names `--close`, and an apply refuses with that code. `--close` settles the pair and moves nothing, on both kinds of source. Both settle the record (`disposition` remedied or closed), which releases the purge hold. `--all`, the maintenance cycle and the remediation plan never run it.' },
+  ```
+- **S2**
+  ```ts
+  { since: '<slot>', text: 'The #6729 sync report, `gbrain sync status --json` (`identity_downgrades[].remedy`) and doctor `rename_identity_downgrades` now name each open pair\'s remedy: the `gbrain repair rename-identity` preview argv, the apply argv bound to the plan hash, `consent: ["destructive"]` and what releases the purge hold. On a managed source the remedy is `--close` (`carry_unavailable: "managed_remedy_unavailable"`), because carrying identity is unavailable there. Doctor\'s fix is the first pair\'s apply (`ask_user`, with `preview_argv` and `plan_hash`); `gbrain restore <old-slug> --source-id <id> --force` stays the named alternative wherever the source admits a restore (`restore_available`, so not on an unbound Postgres source with a checkout); there the remedy is the only fix doctor offers, and `restore_unavailable_sources` lists those sources.' },
+  ```
+
+### CHANGELOG — S2
+
+- **S2** When sync splits an inexact rename into a delete plus an add, `gbrain repair rename-identity` now finishes the rename on request: preview the pair, and after you agree the old page keeps its history, links and facts under the new name, or close the pair and let the old page go. Every surface that reports the pair names the command. Carrying identity works on classic sources; on a managed source only closing the pair is available this release (`managed_remedy_unavailable`) (#6729). Contributed by @javieraldape (PR #6732, rewritten).
+
+### KEY_FILES (`docs/architecture/key-files/`) — S2
+
+- **S2** new: `src/core/repair/rename-identity.ts`: `gbrain repair rename-identity` (#6729), explicit-only, preview-bound, destructive. `plan` selects one open pair (`--slug`/`--from`), hashes `identityRemedyParts` (brain, pair, both page ids and revisions, disposition) and saves the approved set; with no pair named it lists the open pairs. On a managed brain a carry preview returns no items with `details.code: managed_remedy_unavailable` and the `--close` preview, and an apply refuses with that code. `carryIdentity` (classic only): one maintenance transaction under both page locks re-checks the hash, the open record and `fenceRowChecks`, merges matching fence rows onto the old rows, retires the provisional page under `purgedSlug`, moves the old page to the new slug (`updateSlug` redirect), moves the provisional's page-id rows (`movePageIdReferences`), imports the new file, settles the record `remedied`. `--close` settles `closed`. Refusals: `fact_rows_collide`, `managed_remedy_unavailable`, `changed_since_preview`, `preview_changed`, `invalid_params`.
+- **S2** amend the S1 entry for `src/core/sync-identity-downgrades.ts`: also the per-pair remedy (`identityRemedyParts`, `identityRemedy`, `withIdentityRemedies`, `renameIdentityPreviewArgv`, `remedyAction`; on a managed brain the remedy is `--close` with `carry_unavailable: managed_remedy_unavailable`) that every surface prints, and `settleIdentityDowngrade` (sets `completed_keys[0].disposition = { kind: remedied | closed, at }` on an open record).
+- **S2** amend the S1 entry for `src/commands/doctor/checks/rename-identity-downgrades.ts`: fix = the first pair's `gbrain repair rename-identity` apply (destructive, `ask_user`, `preview_argv`, `plan_hash`; `--close` on a managed brain); restore is the alternative in its text only where `restore_available !== false`; `restore_unavailable_sources` lists the rest. The fix is the remedy everywhere, so unbound classic Postgres pairs now get an actionable fix. (Replaces the S1 restore fix.)
+- **S2** `src/core/persistence/preview-approval.ts`: `PreviewApprovalCommand` gains `'rename-identity'` (in the feat commit, not an integrator file).
+
+### Docs — S2
+
+- **S2** `docs/guides/repair.md`: committed in the docs commit (explicit-only list, kind table row, `#rename-identity` section with the managed limitation).
+- **S2** `docs/guides/live-sync.md` "Renaming a page": committed in the docs commit (names the remedy and `--close`, the managed limitation, links `repair.md#rename-identity`).
+
+### Tests that changed for the intended behaviour — S2
+
+- **S2** `test/sync-inexact-rename-6729.test.ts`, the classic crossed-pairs test: doctor's fix is now the remedy (argv, `preview_argv`, `consent: ['destructive']`, `plan_hash`); the test asserts the restore alternative in `fix.why` and still runs the restore and the verify.
+- **S2** new `test/repair-rename-identity-6729.test.ts` (9 tests, PGLite and Postgres), including the managed fixture: report, status and doctor name `--close` and `managed_remedy_unavailable` and no other route; the carry preview states the code; `--apply` refuses with it and moves no identity; `--close` settles the pair and the purge then takes the old page; `gbrain restore <old> --source-id <id> --force` works on the managed source, so the restore alternative stays on managed.
