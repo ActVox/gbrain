@@ -269,6 +269,7 @@ src/core/import-identity.ts	decideImportIdentity	field	META
 src/core/import-screen.ts	assessImportSanity	field	STREAM	
 src/core/import-screen.ts	screenImportContent	call:contentHash	META	
 src/core/import-screen.ts	screenImportContent	field	STREAM	
+src/core/line-grammar-report.ts	grammarDiagnosticsForPage	field	INLINE	grammar_diagnostics parses inline bodies only; a segmented page gets the skip (segmentedGrammarSkip)
 src/core/link-reconciliation.ts	reconcileSourceLinks	field	INLINE	inline arm; a segmented page streams through extractSegmentedPageLinks (page-body/segment-links.ts)
 src/core/link-temporal-apply.ts	applyTemporalEvidence	field	STREAM	
 src/core/link-temporal-apply.ts	temporalBodyOf	field	INLINE	bodies held as strings; a segmented page collects its TemporalBody in extractSegmentedPageLinks
@@ -294,7 +295,6 @@ src/core/ops/get-page-body.ts	readPartialBody	call:serializePageToMarkdown	SEGW
 src/core/ops/get-page-projection.ts	projectFetchText	call:serializePageToMarkdown	STREAM	fetch text of an inline page; spread of a segmented page throws
 src/core/ops/get-page-projection.ts	projectGetPage	call:serializePageToMarkdown	STREAM	full content render of an inline page
 src/core/ops/get-page-projection.ts	projectGetPage	field	STREAM	segmented page: getter throws page_body_segmented (windowed read in PR 2)
-src/core/ops/pages.ts	get_page	field	STREAM	get_page full body: segmented page: getter throws page_body_segmented (windowed read in PR 2)
 src/core/ops/pages.ts	stripPrivacyFencesForRemoteReader	field	STREAM	segmented page: getter throws page_body_segmented
 src/core/output/post-write.ts	runPostWriteLint	field	INLINE	
 src/core/output/validators/link.ts	linkValidator	field	INLINE	
@@ -524,7 +524,7 @@ src/core/utils.ts	contentHash	field	META	hashes a whole inline page; a segmented
 src/core/utils.ts	contentHashLegacy	field	META	legacy formula over an inline page; segmented: getter throws
 src/core/utils.ts	rowToPage	field	INLINE	installs throwing body getters on a segmented row (guardSegmentedBody); inline rows copy the columns
 src/core/utils.ts	rowToStalePage	field	STREAM	listStalePagesForExtraction lists inline pages only (segmented skipped in SQL, still counted stale)
-src/core/verbs/entity-card-identity.ts	readCardIdentity	field	LEAD	
+src/core/verbs/entity-card-identity.ts	excerptSource	field	LEAD	inline pages only; a segmented page reads truthLead (EXCERPT_LEAD_BYTES)
 src/core/verbs/entity-card.ts	selectEntityCandidates	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
 src/core/verbs/entity-names.ts	lookupOne	field	LEAD	bounded prefix rows
 src/core/verbs/entity-names.ts	lookupOne	sql	LEAD	boundedBodyPrefixSql AS compiled_truth

@@ -80,6 +80,12 @@ export function segmentedGrammarSkip(slug: string, sourceId: string): LineGramma
   };
 }
 
+/** get_page grammar_diagnostics: the report over the visible body, or the skip for a page stored in segments. */
+export async function grammarDiagnosticsForPage(engine: BrainEngine, page: { slug: string; source_id: string; body_storage?: string | null }, visibleBody: { compiled_truth: string }): Promise<LineGrammarReport | LineGrammarSkip> {
+  if (page.body_storage === 'segmented') return segmentedGrammarSkip(page.slug, page.source_id);
+  return lineGrammarReport(engine, { slug: page.slug, sourceId: page.source_id, body: visibleBody.compiled_truth });
+}
+
 export async function lineGrammarReport(engine: BrainEngine, opts: {
   slug: string; sourceId: string; body: string; limit?: number;
 }): Promise<LineGrammarReport> {
