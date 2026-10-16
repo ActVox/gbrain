@@ -402,7 +402,8 @@ export function normalizeResponse(result: { content: Array<{ text: string }>; _m
     const notices = meta.gbrain_notices as unknown[];
     const keep = notices.filter(n => !DISCLOSURE.test(JSON.stringify(n)));
     for (const n of notices) if (!keep.includes(n)) disclosures.push(JSON.stringify(n));
-    meta = { ...meta, gbrain_notices: keep };
+    const { gbrain_notices: _all, ...rest } = meta;
+    meta = keep.length || notices.length === 0 ? { ...rest, gbrain_notices: keep } : rest;
   }
   return { blocks, meta, disclosures, is_error: result.isError === true };
 }

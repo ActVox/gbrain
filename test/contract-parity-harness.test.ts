@@ -98,3 +98,13 @@ describe('contract-parity rounding flips', () => {
     expect(diff({ score: 0.6998 }, { score: 0.6996 })[0]?.note).not.toBe(ROUNDING_FLIP);
   });
 });
+
+describe('contract-parity disclosure in _meta', () => {
+  test('a notices array that held only the disclosure is removed, as if it never existed', () => {
+    const r = normalizeResponse({ content: [{ text: '[]' }], _meta: { gbrain_notices: [{ code: 'behavior_changes', text: 'Behavior change ...' }] } }, new Map());
+    expect(r.meta).toEqual({});
+    expect(r.disclosures).toHaveLength(1);
+    const kept = normalizeResponse({ content: [{ text: '[]' }], _meta: { gbrain_notices: [{ code: 'other' }] } }, new Map());
+    expect(kept.meta).toEqual({ gbrain_notices: [{ code: 'other' }] });
+  });
+});
