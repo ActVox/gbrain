@@ -193,6 +193,14 @@ async function scanFile(file: FileHandle, bom: number, prefix: Uint8Array, size:
 async function inferredPrefix(file: FileHandle, bom: number, size: number, relativePath: string): Promise<Uint8Array | null> {
   const buffer = Buffer.alloc(Math.min(FRONTMATTER_HEAD_MAX_BYTES, size - bom));
   await file.read(buffer, 0, buffer.length, bom);
+  return inferredHeadPrefix(buffer, relativePath);
+}
+
+/**
+ * The frontmatter inference would prepend to a file, from its head (at most FRONTMATTER_HEAD_MAX_BYTES after the BOM):
+ * empty when no rule applies, null when the head does not hold the first 20 lines inference reads (undecidable).
+ */
+export async function inferredHeadPrefix(buffer: Uint8Array, relativePath: string): Promise<Uint8Array | null> {
   const raw = utf8Prefix(buffer, buffer.length);
   const head = raw.slice(0, raw.lastIndexOf('\n') + 1);
   if (head.split('\n').length <= 20 || !head.trim()) return null;

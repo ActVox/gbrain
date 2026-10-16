@@ -87,6 +87,7 @@ test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-evidence-read-cost.test.ts
 test/large-pages/segmented-evidence.test.ts
+test/large-pages/segmented-file-drift.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
 test/large-pages/segmented-leads.test.ts

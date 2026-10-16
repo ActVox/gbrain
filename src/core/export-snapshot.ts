@@ -4,7 +4,7 @@ import type { PageWithdrawal } from './page-state/types.ts';
 import { rowToPage } from './utils.ts';
 import { EXPORT_PAYLOAD_LIMIT } from './export-stage.ts';
 import { isSegmentedPage } from './page-body/page-shape.ts';
-import { openSegmentedBody, readBodyRange } from './page-body/read-range.ts';
+import { openSegmentedBody, readBodyRange, type BodyLedger } from './page-body/read-range.ts';
 import { TIMELINE_SEPARATOR } from './page-window/document.ts';
 import type { Page } from './types.ts';
 
@@ -40,6 +40,11 @@ export async function readExportPage(tx: BrainEngine, key: { id: string; source_
   return { page, tags: row.export_tags as string[] };
 }
 
+/** The ledger an export overlays one page's body with: the source's withdrawals that apply to the page. */
+export function exportBodyLedger(slug: string, withdrawals: ExportWithdrawal[]): BodyLedger {
+  return { withdrawals: applicableWithdrawals(slug, withdrawals) };
+}
+
 function applicableWithdrawals(slug: string, withdrawals: ExportWithdrawal[]): PageWithdrawal[] {
   return withdrawals.filter(w => w.subject === '*' || w.subject === slug)
     .map(({ visibility, fact_hash, withdrawn_at, purged }) => ({ visibility, fact_hash, withdrawn_at, ...(purged ? { purged: true } : {}) }));
@@ -48,13 +53,13 @@ function applicableWithdrawals(slug: string, withdrawals: ExportWithdrawal[]): P
 /**
  * The Markdown file of a segmented page, piece by piece: `head` (serializeMarkdown's frontmatter and blank line), the
  * truth, TIMELINE_SEPARATOR before the first timeline byte, the timeline and the final newline. Each segment is read
- * once (readBodyRange, trusted stored body) with the overlay readExportPage gives an inline page, so the bytes are
- * those serializeMarkdown gives the same page read inline. A full collection every EXPORT_COLLECT_BYTES read keeps the
+ * once (readBodyRange, trusted stored body) under `ledger` (export: `exportBodyLedger`, the overlay readExportPage gives
+ * an inline page; a restore: the page snapshot's), so the bytes are those serializeMarkdown gives the same page read inline. A full collection every EXPORT_COLLECT_BYTES read keeps the
  * reads' garbage (protocol buffers, decoded texts) from piling up as in the streamed import (ingest.ts): a 127 MiB page
  * peaked ~700 MiB above a 2 MiB one without it, 8-55 MiB with it.
  */
-export async function* segmentedExportMarkdown(tx: BrainEngine, page: Page, withdrawals: ExportWithdrawal[], head: string): AsyncIterable<Uint8Array | string> {
-  const body = await openSegmentedBody(tx, { pageId: page.id, ledger: { withdrawals: applicableWithdrawals(page.slug, withdrawals) } });
+export async function* segmentedExportMarkdown(tx: BrainEngine, page: Pick<Page, 'id'>, ledger: BodyLedger, head: string): AsyncIterable<Uint8Array | string> {
+  const body = await openSegmentedBody(tx, { pageId: page.id, ledger });
   let uncollected = 0;
   const collect = (bytes: number) => {
     uncollected += bytes;
