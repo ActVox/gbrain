@@ -1271,6 +1271,15 @@ reconstructed state, not counts**, on PGLite and Postgres:
     over 1 MiB → per-subject creation events;
 40. N1 unchanged (388/388, 0 stale).
 
+**Probe 40 record (W1 lane C, 2026-10-14).** N1 (benchmark 0.5.0, generator
+`n1-knowledge-update-gen@1`, 897 tasks) ran against the lane C overlay
+`b3db5af98` (CLI 0.60.253.0, harness pin `77cf8e11`), three PGLite and three
+Postgres cells per arm. The ledger-on arm runs `gbrain beliefs enable --source
+vault` after the slice is seeded (`EVAL_BELIEF_LEDGER=1`). Both arms, on both
+engines: current value 388/388 with 0 stale served, history retained 385/385,
+negative controls 124/124, 0 private value leaks, 0 acknowledged writes lost,
+0 system errors.
+
 Each assertion gets a forced probe, a deliberately broken emitter that must
 fail it, per the shipping rules.
 

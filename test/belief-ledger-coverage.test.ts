@@ -414,7 +414,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         await restore([]);
         expect((await doctor(b)).status).toBe('ok');
         expect(await coverageAt(b.engine, b.sourceId, inGap)).toMatchObject({ ok: false, code: 'coverage_gap', reason: 'restore', from: archivedAt });
-        await restore([{ kind: 'intent', request: 'purge-1', request_id: 'req-purge-1', source_id: b.sourceId, source_incarnation: source.incarnation, scope: 'fact',
+        await restore([{ kind: 'intent', request: randomUUID(), request_id: 'req-purge-1', source_id: b.sourceId, source_incarnation: source.incarnation, scope: 'fact',
           recorded_at: new Date(Date.parse(archivedAt) + 1).toISOString(), purge_epoch: 1, facts: [], takes: [], lifetimes: [] }]);
         const asked = await doctor(b);
         expect(asked).toMatchObject({ status: 'warn', fix: { actor: 'user', ask_user: true } });
