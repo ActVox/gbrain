@@ -12,12 +12,39 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.263.0] - 2026-10-16
 
-**A write right after creating a very large page no longer has to wait out a doubled re-index (switch-on behavior only; no change with `pages.segmented_storage` off, the default).** With segmented storage on, creating a page over 1 MiB indexed it twice at once: once right after the write and once from the background job the write queued. Each pass held a database connection for every batch, and on a small connection pool the next write could miss its 5-second wait and come back `write_pending`. Now only one pass per page runs at a time in a process, and a page that's already indexed is skipped. No data was ever at risk: the shrink path versions the old body and demotes the page in one transaction.
+**A managed source no longer stays blocked forever on a "conflict" with a page that does not exist.** On a managed brain, a sync could end `BLOCKED` with `revision_conflict` on `__managed_sync_checkpoint__`, and every sync after it ended the same way: doctor's `sync_freshness` failed for good, `gbrain sources refresh` refused with `sync_in_progress`, and the printed fix said to read a page that `gbrain get` cannot find (#6834). That slug is the sync's own bookkeeping, not a page. The refusal meant another run (in practice an older gbrain, which kept one cursor per writer and option set, so two cursors of one source could race) had already moved the source's commit checkpoint, so this run's checkpoint could never publish. Now a run whose source already stands at its target finishes on the next plain sync, and one whose source moved anywhere else is named by doctor with a preview-first repair. No page content was ever at risk.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| The source's `last_commit` already equals the stuck run's target (the usual case: two cursors raced to the same commit) | every sync: `Sync BLOCKED ... revision_conflict ... slug: "__managed_sync_checkpoint__"` | the next plain sync finishes the run (`synced`) and clears the failure |
+| `last_commit` moved to some other commit | blocked forever; every repair channel reported nothing to repair | still blocked, but `gbrain repair managed-sync-orphans --source <id>` lists the cursor as `checkpoint_moved`; after its apply the next sync discovers from the recorded commit. Doctor `sync_failures` and `sync_freshness` name that repair as their fix |
+| The receipt's fix (`gbrain sync` output, `gbrain write-request`) | "Read the current page and review the intended change" | reason `sync_checkpoint_moved`: bookkeeping, not a page, and the step that finishes or retires the run |
+| The terminal-failure action for the refused checkpoint receipt | `gbrain get --source <id> -- __managed_sync_checkpoint__` (page_not_found) | `gbrain sync status --source <id> --json`; a later committed checkpoint of the source supersedes the receipt |
+| A fact-extraction batch refused on `__managed_facts_complete__` ("Some extracted facts have not committed.") | "Read the current page ..." | reason `facts_batch_incomplete`: the batch's completion record, not a page; the facts that committed stay, and the action inspects the receipt |
+
+### If a source is stuck now
+
+On this release: run `gbrain sync --source <id> --no-pull`. If it still ends blocked on `__managed_sync_checkpoint__`, preview and apply the repair doctor names:
+
+```bash
+gbrain repair managed-sync-orphans --source <id>                        # preview: lists the cursor as checkpoint_moved; writes nothing
+gbrain repair managed-sync-orphans --source <id> --apply --expect <hash>
+gbrain sync --source <id> --no-pull                                      # discovers from the source's recorded commit
+```
+
+On v0.60.255.0 through v0.60.262.0 (one cursor per source): `gbrain sync --source <id> --no-pull --retry-failed`, with the options the stuck run used (`resume_argv` in `gbrain sync status --source <id> --json`), rediscovers from the recorded commit and unblocks the source. On older releases, where a writer's sync reads only its own cursor, upgrade first.
 
 ### Itemized changes
 
-- **One projection per page per process** (`page-body/projection.ts`): a second call for the same page waits for the first, and a sealed page returns at once.
-- **Forced probe** in `test/large-pages/segmented-derived-work.test.ts`: holding the first projection open shows 2 concurrent projections of one page on master and 1 with the fix, on PGLite and Postgres. Fixes the nightly race-hunt failure #6143.
+- **Checkpoint at its target (#6834).** A managed-sync checkpoint refused "The source checkpoint changed during this sync." whose source now records exactly the run's target is revived marked overtaken (the #5522 rule the publication already applies), within the existing per-invocation revival bound. A checkpoint moved to any other commit stays refused: publishing it would move the source's commit backwards or past work nobody imported.
+- **`checkpoint_moved` orphans (#6834).** `classifyManagedSyncOrphans` lists an unfinished cursor whose checkpoint is that refusal, whose pages all committed, whose source records a commit other than the run's start and target, and with no open or recovering request under its key; for a path slice short of its target's end (#6349), any commit other than the run's start qualifies, since that checkpoint never moves `last_commit`. `retireManagedSyncOrphan` re-checks the same rule in the delete and binds it to the previewed run and checkpoint request, so a cursor whose source reached its target after the preview, or a run that replaced the previewed one under the same key, is kept (`no_longer_orphaned`). Retiring a path slice clears its slice record too, so the next discovery starts from the recorded commit instead of resuming that slice against it. Bookkeeping rows only (`op_checkpoints`); no page or file changes, nothing at upgrade.
+- **Doctor (#6834).** `sync_failures` sets `fix` to `gbrain repair managed-sync-orphans [--source <id>]` whenever it lists orphans. `sync_freshness` sets the same `fix` (and names it in the message) for a stale managed source with a `checkpoint_moved` cursor, instead of a plain sync that would block again.
+- **Diagnostics (#6834).** `writeFailureDiagnostic` gives the moved-checkpoint and incomplete-fact-batch refusals their own reasons and suggestions. `classifyTerminal` keeps both in `caller_conflict` but with class `systemic` and an action that reads sync status (checkpoint) or the receipt (fact batch), never `gbrain get` on a bookkeeping slug. The supersession rule counts a later committed checkpoint of the source as superseding a refused one. A page whose slug merely looks like a bookkeeping slug keeps the page diagnosis: the request's own kind (or, once compacted, its operation) decides. Ordinary page conflicts are unchanged.
+- `test/persistence-sync-failures.serial.test.ts` produced its checkpoint failure by moving `last_commit` to the run's own target, which now finishes; it moves it to a commit outside the run instead.
+- Tests: `test/sync-checkpoint-moved-6834.test.ts` (PGLite and Postgres) builds the race with two older cursor keys, a brain that already carries the refused receipt and failure row, a checkpoint moved elsewhere, a path slice, and a run replaced between preview and apply; it fails on v0.60.262.0 (every plain sync blocked, no orphan listed, the page fix printed) and passes here.
+- No schema change.
 
 ## [0.60.262.0] - 2026-10-16
 
