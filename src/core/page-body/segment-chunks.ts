@@ -85,7 +85,7 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
   const wholeSegment = { raw_byte_start: 0, raw_byte_end: segment.bytes.length };
 
   if (projection.trim()) {
-    for (const c of chunkProjectedText(projection, { maxTokens, spans: true })) {
+    for (const c of chunkProjectedText(projection, { maxTokens, spans: true, headingsLead: true })) {
       if (c.byte_start === undefined || c.byte_end === undefined) {
         push({ chunk_text: c.text, chunk_source: source, ...wholeSegment });
         continue;

@@ -69,6 +69,16 @@ export const STAGE_BATCH_BYTES: Readonly<Record<'postgres' | 'pglite', number>> 
 export const DEFAULT_FLIP_RETIRE_MAX_ROWS = 20_000;
 
 /**
+ * A segmented create of at most this many body bytes is searchable when its write commits: it chunks during preparation
+ * (outside the transaction, the chunk inputs held in memory) and its publication inserts the chunk rows, one staging
+ * statement's worth or a little more (STAGE_BATCH_BYTES), and seals. A larger create publishes unsealed and its projection runs after
+ * commit (`searchable: 'pending'` on the receipt). The insert is the part the publication holds the page lock for:
+ * about 0.3 s per MB on PGLite and 0.25 s on Postgres (a 20 MB chat page, 8,900 chunk rows): ~1.2 s at this bound,
+ * ~7 s at 24 MiB, and 30 s to over a minute at the 128/256 MiB ceilings, with every write to the page waiting behind it.
+ */
+export const SEGMENTED_CREATE_SEAL_MAX_BYTES = 4 * 1024 ** 2;
+
+/**
  * Snapshots of an inline page over the inline cap kept per page (Wave A). Each
  * one is a full copy of the body, so an append-heavy 24 MiB page would otherwise
  * grow history by 24 MiB per write. Snapshots at or under the inline cap, and

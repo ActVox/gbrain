@@ -4591,6 +4591,7 @@
           "quarantined?: boolean | undefined",
           "refusal?: ContentRefusal | undefined",
           "resealed?: { pendingChunks: number; pendingChars: number; } | undefined",
+          "searchable?: boolean | \"pending\" | undefined",
           "skip_reason?: \"purged_content\" | \"content_rejected\" | \"file_too_large\" | \"frontmatter_slug_conflict\" | \"invalid_fence\" | \"invalid_frontmatter\" | \"parser_regression\" | \"rename_held\" | \"write_gate_rejected\" | \"malformed_path\" | \"slug_collision\" | undefined",
           "slug: string",
           "status: \"error\" | \"imported\" | \"skipped\"",

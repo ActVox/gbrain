@@ -18,7 +18,7 @@ import { importFromContent } from '../../src/core/import-file.ts';
 import { installFaultHook, type FaultPoint } from '../../src/core/persistence/fault-points.ts';
 import { materializeSegmentedBody } from '../../src/core/page-body/ingest.ts';
 import { rebuildPendingSegmentedProjections } from '../../src/core/page-body/projection.ts';
-import { BODY_STAGING_HARD_MS } from '../../src/core/page-body/limits.ts';
+import { BODY_STAGING_HARD_MS, SEGMENTED_CREATE_SEAL_MAX_BYTES } from '../../src/core/page-body/limits.ts';
 import { conversationBody, conversationPage } from '../helpers/conversation-page.ts';
 
 let engine: PGLiteEngine;
@@ -94,7 +94,7 @@ describe('replace: a crash at any step leaves the previous generation', () => {
 
 describe('create: a crash after the projection staged its chunks', () => {
   test('the page publishes unsealed, the projection queue seals it, and a second rebuild adds nothing', async () => {
-    const created = conversationPage(2 * 1024 * 1024, { seed: 31, needles: [{ at: 0.9, word: NEEDLE }] });
+    const created = conversationPage(SEGMENTED_CREATE_SEAL_MAX_BYTES + 256 * 1024, { seed: 31, needles: [{ at: 0.9, word: NEEDLE }] });
     crashAt('segmented:projection_staged');
     const result = await importFromContent(engine, 'notes/fresh', created, { sourceId: 'default', noEmbed: true });
     installFaultHook(undefined);
@@ -124,7 +124,7 @@ describe('create: a crash after the projection staged its chunks', () => {
 
 describe('replace of a page whose projection never ran', () => {
   test('the rewrite chunks every kept occurrence with the flip and seals the page', async () => {
-    const created = conversationPage(2 * 1024 * 1024, { seed: 41, needles: [{ at: 0.2, word: NEEDLE }] });
+    const created = conversationPage(SEGMENTED_CREATE_SEAL_MAX_BYTES + 256 * 1024, { seed: 41, needles: [{ at: 0.2, word: NEEDLE }] });
     crashAt('segmented:projection_staged');
     await importFromContent(engine, 'notes/unchunked', created, { sourceId: 'default', noEmbed: true });
     installFaultHook(undefined);

@@ -653,6 +653,8 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText }
   { since: 'TBD', text: 'A page over 24 MiB imported or synced from its file is no longer stamped `embed_skip` and `content_flag: oversized` for its size: while `content_sanity.bytes_block` is unset, a segmented page is judged against its page ceiling, and the markup check samples its head, middle and tail as it does for any large page. A `content_sanity.bytes_block` set above 24 MiB no longer holds such a file; one set below the page still stops its embedding.' },
   { since: 'TBD', text: 'Forget and purge on a page stored in segments now rewrite and re-index only the segments that hold the struck or purged row.' },
   { since: 'TBD', text: 'Export accepts a page stored in segments up to the page ceiling (was 32 MiB per page), streams it to disk, and still aborts rather than produce a partial export.' },
+  { since: 'TBD', text: 'A write that stores a page in segments says in its receipt whether search sees it: `searchable: true` when it commits (every new page up to 4 MiB and every rewrite), or `searchable: "pending"` for a larger new page while its chunks are built after commit, with `searchable_retry_after_ms` and a `searchable_fix` that reads the receipt again (`get_write_request`) until it says `searchable: true`. A new page up to 4 MiB was previously searchable only once a post-commit build finished.' },
+  { since: 'TBD', text: 'Chunks of a page stored in segments keep a Markdown heading with the text after it, so a section appended after a full last chunk re-embeds only its own chunk (was two). Inline pages chunk as before.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */
