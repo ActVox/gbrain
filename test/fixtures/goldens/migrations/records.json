@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 243,
+    "count": 244,
     "gaps": [
       17,
       18,
@@ -9,6 +9,7 @@
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
+      "BELIEF_FACTS_STREAM_INDEX": "9e4491eb9e0b94924a58deea3feff1b315ec0efd25a77a4e6515b362beffbc92",
       "BOUNDED_TIMELINE_CHECKPOINT": "385c4da3e28732343148795d6e9a86670813a7a7cfa1e52f8a5bb494680a3c0d",
       "CHECKPOINT": "3c6ff909363c4ba1c9d730e748654ab90aa07549ddf4bf36b8f93c5f4ea3680b",
       "CONTENT_CHUNKS_OCCURRENCE_INDEX": "7b692ba777b30399ab5a3b100eb40b3b9d1b3fb2322dc4dc808ba8a4d667912c",
@@ -60,7 +61,7 @@
       "tableRows": "906d2413b13d76a06d5910885e47ed5c544be4ff3a2266e83146715721b24270",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 248,
+    "latest": 249,
     "records": [
       {
         "handler": {
@@ -3830,6 +3831,32 @@
         "transaction": false,
         "verify": "absent",
         "version": 248
+      },
+      {
+        "handler": {
+          "form": "arrow",
+          "helpers": [
+            "BELIEF_FACTS_STREAM_INDEX",
+            "PLANNER_REPAIR_TABLES",
+            "analyzeAfterIndexBuild",
+            "buildIndexOnline",
+            "dropInvalidConcurrentIndex",
+            "migrationNotice",
+            "quietMigrationNotices",
+            "tableRows"
+          ],
+          "sha256": "48c7bc5cb1a62090ed3b9f4e3426a3314453ee34e1fbaea990e7a87c929fb923"
+        },
+        "idempotent": true,
+        "name": "belief_ledger",
+        "sql": {
+          "length": 4645,
+          "sha256": "8a5992e82eebda6cc28a91dd588d2b0e9d58fd2d5207ddb1b83e771e50519048"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 249
       }
     ],
     "versions": [
@@ -4075,7 +4102,8 @@
       245,
       246,
       247,
-      248
+      248,
+      249
     ]
   },
   "normalizer": "migrations-record-v1"

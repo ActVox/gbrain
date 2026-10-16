@@ -105,6 +105,7 @@ import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
 import { plannerStatsEntry } from './checks/planner-stats.ts';
 import { revisionBackfillEntry } from './checks/revision-backfill.ts';
+import { beliefLedgerEntry } from './checks/belief-ledger.ts';
 import { trustTiersEntry } from './checks/trust-tiers.ts';
 import { trustScanEntry } from './checks/trust-scan.ts';
 import { trustSourcesUnclaimedEntry } from './checks/trust-sources-unclaimed.ts';
@@ -224,6 +225,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   retrievalFeedbackEntry,
   transcriptSecretExposureEntry,
   revisionBackfillEntry,
+  beliefLedgerEntry,
   trustTiersEntry,
   trustScanEntry,
   trustSourcesUnclaimedEntry,

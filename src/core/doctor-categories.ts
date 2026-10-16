@@ -78,6 +78,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'safe_index_pending',
   'self_capture',
   'brain_score',
+  // W1: belief ledger coverage intervals, drift, orphan lifetimes and unsafe restores.
+  'belief_ledger_coverage',
   'calibration_freshness',
   'child_table_orphans',
   'chronicle_projection_health',

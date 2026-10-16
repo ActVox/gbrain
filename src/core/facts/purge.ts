@@ -44,6 +44,11 @@ import { findRequestsCarrying, redactionCounterKeys, redactRequestIntents } from
 import { withPageTierKept } from '../trust/fence-append.ts';
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { carriesClaimSql, claimNeedles, purgeCompletion, verifyFactPurge, type PurgeReceipt, type StoreCount } from './purge-verify.ts';
+import { noteBelief, withBeliefBatch } from '../belief/ledger.ts';
+import { markBeliefCommits } from '../belief/append.ts';
+import { appendPurgeCommitted, appendPurgeIntent } from '../belief/purge-mirror.ts';
+import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, redactCarryingFields, redactPurgedKeys, registerLiveCarriers, registerVersionCarriers, sourceHasBeliefEvents,
+  type LedgerPurgeReport } from '../belief/purge.ts';
 
 export const PURGE_OPERATION = 'purge_fact';
 const PURGE_TERMINAL_RESERVATION = 64 * 1024;
@@ -134,6 +139,25 @@ export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, al
     reviewRows: review.decide_review_queue + review.decide_review_proposals + review.decide_proposals, review, revision };
 }
 
+/** The belief streams a fact purge batches: each purged fact's stream, the rewritten pages, and each derived row's stream. */
+async function factPurgeStreams(tx: BrainEngine, sourceId: string, plan: PurgePlan): Promise<string[]> {
+  const facts = await tx.executeRaw<{ slug: string }>(`SELECT DISTINCT COALESCE(source_markdown_slug, entity_slug) AS slug FROM facts
+    WHERE id = ANY($1::bigint[]) AND COALESCE(source_markdown_slug, entity_slug) IS NOT NULL`, [plan.factIds]);
+  const derived = await derivedStreamSlugs(tx, sourceId, plan.derived.rows);
+  return [...new Set([...facts.map(f => f.slug), ...plan.pages.map(page => page.slug), ...derived.values()])].sort();
+}
+
+/** The ledger redaction's statement timeout refuses the whole purge with the typed code, as the journal lookup does (#6511). */
+async function ledgerLookup<T>(fn: () => Promise<T>, factId: number, sourceId: string): Promise<T> {
+  try { return await fn(); } catch (error) {
+    if ((error as { code?: unknown } | null)?.code !== '57014') throw error;
+    throw opError('purge_lookup_timeout', 'This purge could not finish; nothing was purged. Do not assume the requested content was erased.',
+      `The belief ledger's redaction scan for fact ${factId} in source ${sourceId} exceeded the purge transaction's statement budget, so the transaction rolled back and nothing was removed, tombstoned or redacted. `
+      + 'Run the purge again with a new request id; if it times out again, report it with the belief_ledger_coverage entry of gbrain doctor --json.',
+    { fix: readFix('Lists the request-table indexes and their state, read-only.', { argv: ['gbrain', 'repair', 'request-indexes', '--json'] }) });
+  }
+}
+
 /** Pages with a pending recovery record or an unfinished mirror refuse a purge, as effects refuse other writes. */
 async function assertNoPendingPublication(tx: BrainEngine, sourceId: string, pages: PurgePlan['pages'], ownRequest: string): Promise<void> {
   if (!pages.length) return;
@@ -150,7 +174,7 @@ async function assertNoPendingPublication(tx: BrainEngine, sourceId: string, pag
 }
 
 /** Drop purged rows from each affected page's stored body; returns the slugs rewritten. */
-async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: PurgePlan['pages']): Promise<string[]> {
+export async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: PurgePlan['pages']): Promise<string[]> {
   if (!pages.length) return [];
   const rows = await tx.executeRaw<Record<string, unknown>>(`SELECT p.*,COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id),'[]'::jsonb) AS purge_tags
     FROM pages p WHERE p.source_id=$1 AND p.id=ANY($2::int[]) ORDER BY p.slug`, [sourceId, pages.map(p => p.page_id)]);
@@ -173,7 +197,7 @@ async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: Purge
 const VERSION_REDACTION_BATCH = 5000;
 
 /** Redact the row from every retained snapshot that carries the claim; returns redacted and still-carrying (prose) counts. */
-async function redactPageVersions(tx: BrainEngine, sourceId: string, claim: string, pageIds: number[]): Promise<{ redacted: number; prose: Array<{ slug: string; version_id: number }> }> {
+export async function redactPageVersions(tx: BrainEngine, sourceId: string, claim: string, pageIds: number[]): Promise<{ redacted: number; prose: Array<{ slug: string; version_id: number }> }> {
   const [needle, escaped] = claimNeedles(claim);
   let redacted = 0;
   const prose: Array<{ slug: string; version_id: number }> = [];
@@ -279,6 +303,9 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
   let rewritten: string[] = [];
   let counts: StoreCount = {};
   let prose: Array<{ slug: string; version_id: number }> = [];
+  let ledger = null as LedgerPurgeReport | null;
+  let derivedHidden: Awaited<ReturnType<typeof hideDerivedRows>> = { hidden: {}, markedOnly: {} };
+  const beliefReport = { appended: 0 };
   const row = await retryWriteAdmission(p.requestId, remaining => ctx.engine.transaction(async tx => {
     await declareDurablePersistence(tx, `${Math.min(2000, remaining)}ms`, '30s');
     const [source] = await tx.executeRaw<{ incarnation: string; archived: boolean }>('SELECT incarnation,archived FROM sources WHERE id=$1 FOR UPDATE', [p.sourceId]);
@@ -306,7 +333,16 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       const plan = committedPlan;
       await assertNoPendingPublication(tx, p.sourceId, plan.pages, admitted.id);
       const intents = await redactRequestIntents(tx, plan.requests, admitted.id, { needles: [current.fact] });
-      await tx.lockPageKeys(plan.pages.map(page => ({ sourceId: p.sourceId, slug: page.slug })));
+      const ledgerPresent = await sourceHasBeliefEvents(tx, p.sourceId);
+      const streams = ledgerPresent ? await factPurgeStreams(tx, p.sourceId, plan) : [];
+      await tx.lockPageKeys([...new Set([...plan.pages.map(page => page.slug), ...streams])].map(slug => ({ sourceId: p.sourceId, slug })));
+      const epoch = await bumpPurgeEpoch(tx, p.sourceId);
+      const derivedTargets = ledgerPresent ? await ledgerLookup(() => derivedBeliefTargets(tx, p.sourceId, plan.derived.rows), current.id, p.sourceId) : [];
+      const walk = plan.derived.truncated ? 'truncated' as const : 'complete' as const;
+      const purgeCause = { purge_request: admitted.id, ...(walk === 'truncated' ? { derived_walk: walk } : {}) };
+      await withBeliefBatch(tx, { sourceId: p.sourceId, slugs: streams, publicationId: admitted.id, op: PURGE_OPERATION, remote: false, cause: purgeCause, report: beliefReport }, async () => {
+      noteBelief({ kind: 'purged', table: 'facts', ids: plan.factIds, request: admitted.id });
+      noteBelief({ kind: 'purged', table: 'takes', ids: plan.takes.map(t => t.id), request: admitted.id });
       // Derived rows are hidden while their evidence still exists.
       const derived = await hideDerivedRows(tx, plan.derived.rows, { sourceId: p.sourceId, requestId: admitted.id, reason: `purge:${token}` });
       await tx.executeRaw(`INSERT INTO fact_purges(source_id,visibility,subject,fact_hash,request_id,actor,reason)
@@ -351,8 +387,22 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
         query_cache: cache, decide_review: review, open_loops: loops, take_proposals: proposals, core_edit_notices: notices,
         write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts,
         derived_hidden: Object.values(derived.hidden).reduce((a, b) => a + b, 0) };
+      derivedHidden = derived;
+      });
+      ledger = ledgerPresent ? await ledgerLookup(async () => ({
+        purged_events: await redactPurgedKeys(tx, { sourceId: p.sourceId, claimFps: [current.fact_hash], lifetimes: [] }),
+        redacted_fields: await redactCarryingFields(tx, { sourceId: p.sourceId, request: admitted.id, claims: [current.fact] }),
+        live_carriers: await registerLiveCarriers(tx, { sourceId: p.sourceId, request: admitted.id, claims: [current.fact] }),
+        version_carriers: await registerVersionCarriers(tx, { sourceId: p.sourceId, request: admitted.id, claims: [current.fact], versionIds: prose.map(v => v.version_id) }),
+        derived_hidden: await appendDerivedHidden(tx, { sourceId: p.sourceId, request: admitted.id, publicationId: admitted.id, op: PURGE_OPERATION,
+          targets: derivedTargets, truncated: walk === 'truncated' }),
+        derived_walk: walk }), current.id, p.sourceId) : null;
+      counts.belief_events = ledger ? ledger.purged_events + ledger.redacted_fields.length : 0;
+      appendPurgeIntent({ request: admitted.id, request_id: p.requestId, source_id: p.sourceId, source_incarnation: source.incarnation, scope: 'fact',
+        purge_epoch: epoch, facts: [{ fact_hash: current.fact_hash, visibility: current.visibility, subject: plan.subject }], takes: [], lifetimes: [] });
       return completeWrite(tx, admitted, 'committed', { purge: { fact_id: p.id, hash8: token, fact_hash: current.fact_hash, subject: plan.subject,
-        visibility: current.visibility, removed: counts, derived: { ...derived, truncated: plan.derived.truncated }, pages: rewritten.length },
+        visibility: current.visibility, removed: counts, derived: { ...derivedHidden, truncated: plan.derived.truncated }, pages: rewritten.length,
+        ...(ledger ? { ledger: { purged_events: ledger.purged_events, redacted_fields: ledger.redacted_fields.length, live_carriers: ledger.live_carriers.length, version_carriers: ledger.version_carriers?.length ?? 0, derived_hidden: ledger.derived_hidden, derived_walk: ledger.derived_walk } } : {}) },
         persistence: { mode: 'database' } });
     }, requestAttribution(admitted));
   }), 30_000);
@@ -362,8 +412,10 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
     await rebuildPendingPageProjections(ctx.engine, 100, { pages: { sourceId: p.sourceId, slugs: slugs.slice(start, start + 100) } }).catch(() => undefined);
   }
   if (row.state !== 'committed') return { ...(row.outcome ?? {}), request_id: row.request_id, state: row.state, error: row.error_code };
+  appendPurgeCommitted(row.id);
+  if (beliefReport.appended || ledger?.derived_hidden) await markBeliefCommits(ctx.engine, [row.id]).catch(() => undefined);
   const receipt: PurgeReceipt = await verifyFactPurge(ctx.engine, { target, plan: committedPlan, dryRun: false, removed: counts, prose,
-    vacuum: params.vacuum === true });
+    vacuum: params.vacuum === true, ledger });
   return { ...receipt, purge: (row.outcome as { purge?: unknown } | null)?.purge, request_id: row.request_id, state: row.state, similar_active: similar,
     ...await purgeCompletion(ctx.engine, row as WriteRequest, receipt) };
 }

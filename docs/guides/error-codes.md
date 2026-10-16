@@ -188,6 +188,26 @@ More: [docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database](../.
 
 More: [docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy](../../docs/guides/in-agent-setup.md#large-or-non-standard-brains-quiesced-physical-copy)
 
+### belief_coverage_required
+
+<a id="belief_coverage_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The belief ledger is not enabled on this source, so it has no coverage start to work from. | The history backfill seeds events before the source's coverage start; with no coverage there is no cut to backfill before. | Ask the user, then run `gbrain beliefs enable --source <id>` first. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/BELIEF_LEDGER.md#72-the-marked-history-backfill](../../docs/designs/BELIEF_LEDGER.md#72-the-marked-history-backfill)
+
+### belief_stale_preparation
+
+<a id="belief_stale_preparation"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A purge ran in the source after a belief ledger payload was prepared, so the append was refused. | A payload prepared outside its appending transaction records the source's purge epoch; appending it after a purge could write the purged text back into history. | Run the same command again; it prepares the payload from the current, redacted state. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/designs/BELIEF_LEDGER.md#65-purge-removal-from-active-memory-never-a-physical-erasure-promise](../../docs/designs/BELIEF_LEDGER.md#65-purge-removal-from-active-memory-never-a-physical-erasure-promise)
+
 ### benchmark_duplicate_task_id
 
 <a id="benchmark_duplicate_task_id"></a>
@@ -793,6 +813,26 @@ More: [docs/guides/core-memory.md#remote-edits](../../docs/guides/core-memory.md
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Cost preview requires yes. | The step needs the user's decision before it runs. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
+
+### coverage_from
+
+<a id="coverage_from"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The belief ledger does not cover that time for this page or source: it starts at the page's baseline cut or the source's watermark. | Recorded history exists only from a page's baseline (or creation) after the ledger was enabled; earlier times are unknown, not empty. | Ask about a time at or after the `from` time, or run `gbrain beliefs backfill --source <id>` for best-effort history before it. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](../../docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark)
+
+### coverage_gap
+
+<a id="coverage_gap"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The belief ledger was not recording at that time: coverage was stopped, or a backup restore left a gap between the archive's time and the restore. | The request itself was wrong or no longer matches the brain; nothing was changed. | Ask about a time outside the gap; `gbrain beliefs status --source <id>` lists the intervals and gaps. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](../../docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark)
 
 ### cursor_incarnation_retired
 
@@ -2607,6 +2647,16 @@ More: [docs/guides/memory-boundaries.md#purge](../../docs/guides/memory-boundari
 | A page purge's in-transaction journal lookup hit the publication transaction's statement budget, so the purge failed terminally; nothing was removed, tombstoned or redacted, and later writes to the source move again. | The lookup is deterministic on a large request table, not contention: retrying it as `database_contention` requeued the same purge forever and held every later write to its source behind it. The substring search for the page's claims now runs at preparation under the preparation budget; this code is for the lookups that still run inside the transaction (the slug lookup, the tail and pending re-checks, the locking read). | Do not assume the requested content was erased. If the receipt names the slug index as missing or INVALID, run gbrain repair request-indexes --apply first; then submit the purge again with a new request_id (a retry with the same id returns this failure). Run: gbrain repair request-indexes --json | host_admin | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/write-refusals.md#purge_lookup_timeout](../../docs/guides/write-refusals.md#purge_lookup_timeout)
+
+### purge_mirror_unwritable
+
+<a id="purge_mirror_unwritable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A purge could not append its intent line to the purge mirror (<brain home>/.gbrain/purge-events.jsonl), so it was refused; nothing was removed, tombstoned or redacted. | Restore replays the purges recorded in that text-free mirror; a purge that committed without its line would come back silently from an older backup. | Do not assume the requested content was erased. Make the mirror a writable regular file owned by the brain's user (mode 0600), then run the purge again with a new request_id. | host_admin | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#purge_mirror_unwritable](../../docs/guides/write-refusals.md#purge_mirror_unwritable)
 
 ### purged_content
 
