@@ -12,74 +12,39 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.263.0] - 2026-10-16
 
-**Managed sync tells the truth about where it stands, and every held file has a way out (#6712 PR 2).** A managed `gbrain sync` returns `synced` the moment its checkpoint commits: link extraction and planner statistics run after the drain lease is released, and a crash between the two is made up by the next sync. `gbrain sync status` stays fast on large brains and never reads a timed-out probe as "nothing pending". Each of the 14 hold codes now leads an agent to a cleared hold or to one decision sentence for the user, and a hold asks a person only after its safe action failed three times over at least a day. Every `gbrain sync` flag lives in one table, and the `sync.*` config keys are split into tunables, rollback keys and retired keys (five retired keys become `GBRAIN_SYNC_*` environment variables, and doctor names any stored value that stopped applying).
+**A managed source no longer stays blocked forever on a "conflict" with a page that does not exist.** On a managed brain, a sync could end `BLOCKED` with `revision_conflict` on `__managed_sync_checkpoint__`, and every sync after it ended the same way: doctor's `sync_freshness` failed for good, `gbrain sources refresh` refused with `sync_in_progress`, and the printed fix said to read a page that `gbrain get` cannot find (#6834). That slug is the sync's own bookkeeping, not a page. The refusal meant another run (in practice an older gbrain, which kept one cursor per writer and option set, so two cursors of one source could race) had already moved the source's commit checkpoint, so this run's checkpoint could never publish. Now a run whose source already stands at its target finishes on the next plain sync, and one whose source moved anywhere else is named by doctor with a preview-first repair. No page content was ever at risk.
 
 ### What you'd see
 
 | Situation | Before | Now |
 |---|---|---|
-| a managed sync's checkpoint commits, then link extraction runs for minutes | the drain lease and the governed pass stayed held through the tail | the run returns `synced` at the commit; the tail runs after the lease is released, bounded, and a second sync can take the lease at once |
-| the process dies between the checkpoint commit and the tail | statistics and links for that run were never redone | the checkpoint recorded the tail as owed; the next sync of the source runs it |
-| the tail fails, is cut short or the deadline left no time | silent | the run stays `synced` with one `[gbrain notice sync_tail_degraded]` and its fix (`gbrain extract --stale --source <id>`, or doctor for statistics); `sync --all` prints it per source and puts `tail` and `notices` in each source's JSON entry |
-| a pass admits nothing with no unfinished request | `drain_stalled` / `no_admission`, a pooler warning, and a delegated run's one-time fallback | `drain_stalled` / `no_progress` with the same step and statement; `no_admission` is a retired reason |
-| `gbrain sync status` on a large brain | every heavy read on every call | a plain status skips the terminal summary, blocker list and cursor join (`*_read: not_read`, fix `--detail`); `state`, `reason` and bounded oldest-blocker / recovery probes always run (an unfinished write is `resumable` / `request_pending`, never synced); under 30 ms on a 61k-request fixture |
-| a status whose probe timed out | could read as nothing pending | `state: resumable`, `reason: status_unknown`, never `synced` |
-| a hold, `last_error`, a receipt, `managedWrite` or doctor `sync_failures` | internal codes only | `public_category` (drift, conflict, content_refused, file_missing, permission, storage, config, superseded, transient, defect) beside the unchanged `category` |
-| a managed-sync file `write_gate.external_mode=reject` refuses | its receipt failed at preparation and the whole source stopped `blocked_by_failures` | the file is held `write_gate_rejected` (needs a person) and the rest syncs |
-| `sync status` shows a `purged_content` or `write_gate_rejected` hold | `Unknown code` (systemic, needs a person) | a page hold with its own sentence (unpurge or edit; switch the gate or edit) |
-| you exclude a held file with `sync.exclude` (its printed fix), or multimodal is off for a held image | the hold stayed until some unrelated commit | the next `gbrain sync` releases it, even with nothing new committed |
-| you switch `write_gate.external_mode` or `junk_disposition` back, add `gbrain trust allow` for the file, or `gbrain pages unpurge` its content | n/a | the next `gbrain sync` re-screens the held file and imports it |
-| a hold is re-held three times within an hour | `needs_human` | still the agent's: `needs_human` needs 3 failed attempts and 24 h since it was first held; a file still being edited (`worktree_dirty`) and an image never escalate |
-| `unblock --apply` finds a dirty file still uncommitted, or a repair holds the file again | not counted | counts as a failed attempt toward that rule |
-| a `worktree_dirty` edit nobody touched for a day | n/a | `needs_human`: the fix (`sync unblock --apply` behind `ask_user`) runs once the person commits or restores the file; new bytes in the file hand it back to the agent |
-| a `source_changed` receipt (`sources writer failures`, `write-request`) | `sources reconcile … --preview` for every reason | by recorded reason: two-sided drift → `repair file-drift --slug … --prefer database`; missing file → `repair ghost-pages`; admission race → retry; binding or unsafe target → writer status |
-| many drift receipts | one command per page | `repair file-drift --all-drifted --since <oldest receipt instant>` |
-| `gbrain repair file-drift --since 7d` | unknown flag | narrows `--all-drifted` to recent drift; the preview and apply carry one concrete instant |
-| a managed sync with live pages whose files are gone | silent | `[sync] N live page(s) … have no canonical file`, with the `repair ghost-pages` preview; sync never deletes them |
-| a parked cursor with a non-empty queue and no consumer (#6552) | doctor listed it as parked (info) | doctor `managed_sync_not_moving` fails with the resume sync as its fix |
-| `gbrain doctor --json` | no intervention counts | `sync_soak_counters`: interventions and content decisions per day for 7 days |
-| `gbrain config set sync.hold_cap 200` | Stored and applied | Warns that the key is retired, names `GBRAIN_SYNC_HOLD_CAP`, writes nothing (exit 0) |
-| A brain with `sync.parser_regression=hold` stored | Holds the file | Stops with `sync_parser_regression` until `GBRAIN_SYNC_PARSER_REGRESSION=hold` is set; `gbrain doctor --only sync_config_keys` reports the stored value as unapplied |
-| `gbrain config get sync.bulk` with nothing stored | `Config key not found` (exit 1) | `true`, with `default: sync.bulk is a rollback key ...` on stderr |
-| `gbrain config set sync.foreground_priority false` | Refused as an unknown key without `--force` | Written, with a note that it is a rollback key honored until at least 2027-01-14 |
-| `gbrain sync --no-lanes` while a PGLite serve holds the brain | `Unsupported owner-delegated sync option: --no-lanes` | Runs (PGLite publishes without lanes, so the flag is accepted and not sent) |
-| An older sync CLI sends `explicitProcessing` to a newer serve | Silently dropped | Dropped, with one `[gbrain notice]` naming the field and its window in the serve log and the delegated run's progress lines |
+| The source's `last_commit` already equals the stuck run's target (the usual case: two cursors raced to the same commit) | every sync: `Sync BLOCKED ... revision_conflict ... slug: "__managed_sync_checkpoint__"` | the next plain sync finishes the run (`synced`) and clears the failure |
+| `last_commit` moved to some other commit | blocked forever; every repair channel reported nothing to repair | still blocked, but `gbrain repair managed-sync-orphans --source <id>` lists the cursor as `checkpoint_moved`; after its apply the next sync discovers from the recorded commit. Doctor `sync_failures` and `sync_freshness` name that repair as their fix |
+| The receipt's fix (`gbrain sync` output, `gbrain write-request`) | "Read the current page and review the intended change" | reason `sync_checkpoint_moved`: bookkeeping, not a page, and the step that finishes or retires the run |
+| The terminal-failure action for the refused checkpoint receipt | `gbrain get --source <id> -- __managed_sync_checkpoint__` (page_not_found) | `gbrain sync status --source <id> --json`; a later committed checkpoint of the source supersedes the receipt |
+| A fact-extraction batch refused on `__managed_facts_complete__` ("Some extracted facts have not committed.") | "Read the current page ..." | reason `facts_batch_incomplete`: the batch's completion record, not a page; the facts that committed stay, and the action inspects the receipt |
+
+### If a source is stuck now
+
+On this release: run `gbrain sync --source <id> --no-pull`. If it still ends blocked on `__managed_sync_checkpoint__`, preview and apply the repair doctor names:
+
+```bash
+gbrain repair managed-sync-orphans --source <id>                        # preview: lists the cursor as checkpoint_moved; writes nothing
+gbrain repair managed-sync-orphans --source <id> --apply --expect <hash>
+gbrain sync --source <id> --no-pull                                      # discovers from the source's recorded commit
+```
+
+On v0.60.255.0 through v0.60.262.0 (one cursor per source): `gbrain sync --source <id> --no-pull --retry-failed`, with the options the stuck run used (`resume_argv` in `gbrain sync status --source <id> --json`), rediscovers from the recorded commit and unblocks the source. On older releases, where a writer's sync reads only its own cursor, upgrade first.
 
 ### Itemized changes
 
-#### Truthful receipts and fast status
-
-- **Post-checkpoint tail** (`src/core/persistence/sync-tail.ts`, `sync-tail-record.ts`): `recordSyncTail` runs inside the checkpoint's publication transaction; `withSyncTail` runs the owed tail after the outermost drain lease is released (`performManagedBranch`, and `performManagedSync` when it took the lease). The failure clear and the retry-held `writer_yield` check stay in the pass. New fault point `sync:tail_started`, added to the convergence kill loop.
-- **`no_admission` retired**: the stall cause, its `drainNext` / `formatDrainSummary` branches, the transaction-pooler warning, the governor's `finish` window and the delegated `serve_no_admission` fallback are gone; `drain_stalled` keeps a `retired_reasons` tombstone. `drain-step.ts` stays: it still fences an abandoned pass at its next step and labels the `no_progress` stop.
-- **`sync status`** (`sync-status.ts`, `commands/sync/operator.ts`): `state`, `reason` (`SYNC_STATUS_REASONS`), `oldest_blocker`, `recovery`, `checkpoint_blockers_read`, `cursors_read`, `terminal_failures_read`, `--detail`; every existing field keeps its type. One text headline per state; the drain summary says `resumed run <id> and converged` when a drain finishes a run an earlier invocation started.
-- **`public_category`** (`public-category.ts`): a total mapping from `classifyTerminal`'s category and the fault code; `classifyRecordedFault` reads holds, failure rows and run stops as the failed receipt they stand for.
-- AGENTS.md and the sync-unblock runbook: the operator loop checks `*_read` and never reads a `not_read` field as "none".
-
-#### Hold exits and escalation
-
-- Fault table: `purged_content` and `write_gate_rejected` rows; `source_changed` reasons (`file_database_drift`, `canonical_file_missing`, `pending_import`, `raw_file_changed`, `source_binding_changed`, `unsafe_file_target`) each get their own row. The runbook table is regenerated.
-- Hold escalation: `HOLD_ESCALATE_MS` (24 h) beside `HOLD_ATTEMPTS_NEEDS_HUMAN`; holds record `first_held_at`, `edited_at` and `needs_human_at`. Attempt and edit stamps are guarded on the record they read, so they never overwrite a newer hold.
-- Doctor `managed_sync_not_moving` ages a stranded queue from its oldest admitted request when the cursor has never moved (`SourceMovement.admitted_since`).
-- `src/core/since.ts`: one `--since` parser for `agent logs` and `repair file-drift`.
-- `src/core/persistence/sync-ghosts.ts`: the bounded post-sync ghost count (`SyncResult.ghostPages`).
-- `src/core/persistence/soak-counters.ts`: the counters and doctor's `sync_soak_counters`.
-- Managed sync's freeze screen applies the write gate as preparation does, owner trust allow rules included (`SyncImportScreenInput.writeGateSource`); a discovery with nothing to write releases holds that left the source (`releaseDiscoveredHolds`).
-
-#### Sync flags and config keys
-
-- `src/core/sync-flags.ts` (new): `SYNC_FLAGS`, every sync flag with its route on the serve and owner hand-offs. `WIRE_BOOL_FLAGS`, `VALUE_FLAGS`, `IGNORED_FLAGS`, the managed pick list (`sync-delegate.ts`), `DELEGATED_SYNC_OPTION_FIELDS` (`sync-ipc.ts`), `SYNC_BOOLEAN_FLAGS` and `SYNC_VALUE_FLAGS` (`sync-wire.ts`) are views of it.
-- `src/core/wire-skew.ts`: a retired wire field names the hand-offs that accept it and its shape; both validators accept, drop and report it, and the resident prints `retiredWireNotice`. `CONFIG_ROLLBACK_WINDOWS` records each rollback key's window (calendar date plus version floor).
-- `src/core/sync-config-keys.ts` (new): `SYNC_TUNABLE_KEYS`, the rollback keys, `RETIRED_SYNC_KEYS` with replacements, `effectiveSyncKey` (for `config get`) and `syncKeySetNotice` (for `config set`).
-- Readers: `readSyncHoldPolicy` reads the hold cap, the escalation thresholds and the parser-regression policy from `GBRAIN_SYNC_*`; `resolveBulkSettings` reads only `GBRAIN_SYNC_BULK_MAX_TXN_MS`.
-- Doctor: `sync_config_keys` (meta) reports stored retired keys as unapplied and lists stored rollback keys with their windows.
-- Help and printed fixes name only live keys: `--no-bulk` help, the `git_held_files` escalation line, the parser-regression hold and stop messages, the `parser_regression` registry entry.
-- Docs: `docs/guides/live-sync.md#sync-config-keys`, `docs/guides/repair.md`, `docs/guides/write-refusals.md`, `docs/guides/troubleshooting.md`; migration note `skills/migrations/v0.60.263.0.md`.
-
-### For contributors
-
-- Crash robot: `consumer:prepared` now counts once per write request, like `consumer:preparing`, and both key on the request row (`FaultDetail.writeId`) rather than the shared request id. A prepared request whose publication was requeued used to count twice, so `caller_bound_replay` counted 4 or 5 and a crash at `#5` could go unreached. Keying on the request id would also have collapsed that schedule's rows, which share one id, from 4 to 2. `test/persistence-crash-robot.test.ts` fails under both the old counting and request-id keying.
-- Retire a sync config key in `RETIRED_SYNC_KEYS`; `test/error-registry-retired.test.ts` then fails on any source line, help text or registered fix that still names it.
-- Tests: `test/sync-flag-table-6712.test.ts`, `test/sync-config-keys-6712.test.ts`, `test/sync-managed-cron-flags-6712.test.ts`.
+- **Checkpoint at its target (#6834).** A managed-sync checkpoint refused "The source checkpoint changed during this sync." whose source now records exactly the run's target is revived marked overtaken (the #5522 rule the publication already applies), within the existing per-invocation revival bound. A checkpoint moved to any other commit stays refused: publishing it would move the source's commit backwards or past work nobody imported.
+- **`checkpoint_moved` orphans (#6834).** `classifyManagedSyncOrphans` lists an unfinished cursor whose checkpoint is that refusal, whose pages all committed, whose source records a commit other than the run's start and target, and with no open or recovering request under its key; for a path slice short of its target's end (#6349), any commit other than the run's start qualifies, since that checkpoint never moves `last_commit`. `retireManagedSyncOrphan` re-checks the same rule in the delete and binds it to the previewed run and checkpoint request, so a cursor whose source reached its target after the preview, or a run that replaced the previewed one under the same key, is kept (`no_longer_orphaned`). Retiring a path slice clears its slice record too, so the next discovery starts from the recorded commit instead of resuming that slice against it. Bookkeeping rows only (`op_checkpoints`); no page or file changes, nothing at upgrade.
+- **Doctor (#6834).** `sync_failures` sets `fix` to `gbrain repair managed-sync-orphans [--source <id>]` whenever it lists orphans. `sync_freshness` sets the same `fix` (and names it in the message) for a stale managed source with a `checkpoint_moved` cursor, instead of a plain sync that would block again.
+- **Diagnostics (#6834).** `writeFailureDiagnostic` gives the moved-checkpoint and incomplete-fact-batch refusals their own reasons and suggestions. `classifyTerminal` keeps both in `caller_conflict` but with class `systemic` and an action that reads sync status (checkpoint) or the receipt (fact batch), never `gbrain get` on a bookkeeping slug. The supersession rule counts a later committed checkpoint of the source as superseding a refused one. A page whose slug merely looks like a bookkeeping slug keeps the page diagnosis: the request's own kind (or, once compacted, its operation) decides. Ordinary page conflicts are unchanged.
+- `test/persistence-sync-failures.serial.test.ts` produced its checkpoint failure by moving `last_commit` to the run's own target, which now finishes; it moves it to a commit outside the run instead.
+- Tests: `test/sync-checkpoint-moved-6834.test.ts` (PGLite and Postgres) builds the race with two older cursor keys, a brain that already carries the refused receipt and failure row, a checkpoint moved elsewhere, a path slice, and a run replaced between preview and apply; it fails on v0.60.262.0 (every plain sync blocked, no orphan listed, the page fix printed) and passes here.
+- No schema change.
 
 ## [0.60.262.0] - 2026-10-16
 

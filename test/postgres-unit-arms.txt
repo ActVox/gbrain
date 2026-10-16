@@ -176,6 +176,7 @@ test/source-retire-missing-checkout.test.ts
 test/source-row-diagnostics.test.ts
 test/stats-health-source-scope.test.ts
 test/sync-capacity-preflight.test.ts
+test/sync-checkpoint-moved-6834.test.ts
 test/sync-drain-claims.test.ts
 test/sync-drain-head-blocked-6543.test.ts
 test/sync-drain-inpass-stall.test.ts
