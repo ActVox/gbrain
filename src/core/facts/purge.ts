@@ -44,6 +44,8 @@ import { cancelRequestsHoldingStagings, findRequestsCarrying, findRequestsHoldin
 import { withPageTierKept } from '../trust/fence-append.ts';
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
+import { liveStagingSql } from '../page-body/schema.ts';
+import { escapeFenceCell } from '../fence-shared.ts';
 import { carriesClaimSql, claimNeedles, purgeCompletion, verifyFactPurge, type PurgeReceipt, type StoreCount } from './purge-verify.ts';
 
 export const PURGE_OPERATION = 'purge_fact';
@@ -153,11 +155,16 @@ export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, al
   const [versions] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_versions v JOIN pages p ON p.id=v.page_id
     WHERE p.source_id=$1 AND (${carriesClaimSql('v', 2)}
       OR (v.body_storage='segmented' AND ${SEGMENTED_VERSION_CARRIES}))`, [target.source_id, ...claimNeedles(target.fact)]);
+  // A live staging that recorded a text holding the claim, plain or as a fence cell (page_body_staging_texts: a create
+  // holds its manifest rows in memory until it publishes), is aborted with the rest: the purge deletes that text and the
+  // create refuses cleanly (body_staging_expired) instead of failing on the manifest's text foreign key.
   const stagings = [...new Set([...(await engine.executeRaw<{ id: string }>(`SELECT s.id::text AS id FROM page_body_stagings s
-    WHERE s.source_id=$1 AND s.state IN ('open','sealed','prepared') AND (EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE s.source_id=$1 AND ((s.state IN ('open','sealed','prepared') AND (EXISTS (SELECT 1 FROM page_body_manifest m
         JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256 WHERE m.staging_id=s.id AND strpos(lower(convert_from(t.body,'UTF8')),$2)>0)
-      OR EXISTS (SELECT 1 FROM page_body_staging_parts pt WHERE pt.staging_id=s.id AND position(convert_to($3::text,'UTF8') in pt.body)>0))
-    ORDER BY s.id`, [target.source_id, target.fact.toLowerCase(), target.fact])).map(row => row.id),
+      OR EXISTS (SELECT 1 FROM page_body_staging_parts pt WHERE pt.staging_id=s.id AND position(convert_to($3::text,'UTF8') in pt.body)>0)))
+      OR (${liveStagingSql('s')} AND EXISTS (SELECT 1 FROM page_body_staging_texts r JOIN page_segment_texts t ON t.source_id=r.source_id AND t.sha256=r.sha256
+        WHERE r.staging_id=s.id AND (strpos(lower(convert_from(t.body,'UTF8')),$2)>0 OR strpos(lower(convert_from(t.body,'UTF8')),$4)>0))))
+    ORDER BY s.id`, [target.source_id, target.fact.toLowerCase(), target.fact, escapeFenceCell(target.fact).toLowerCase()])).map(row => row.id),
   ...await stagingsWithClaimAcrossParts(engine, target.source_id, target.fact)])].sort();
   const held = await findRequestsHoldingStagings(engine, target.source_id, stagings);
   // #6511 [R5]: a statement timeout of this unindexable substring search is deterministic on a large journal, not contention: the typed code, not a retry.
@@ -297,7 +304,8 @@ async function redactPageVersions(tx: BrainEngine, sourceId: string, claim: stri
  * Wave B (spec 11), after the body and version rewrites: stagings holding the claim are aborted (their upload parts
  * deleted, requests that reference them cancelled with purged_content), closed manifest rows outside every GC root
  * go, and every segment text the rewrites replaced, or that still holds the claim, is deleted once nothing
- * references it, in this transaction (purge never waits for GC).
+ * references it, in this transaction (purge never waits for GC). A live staging that recorded such a text was aborted
+ * by the plan (planFactPurge), so no write in flight still needs it.
  */
 async function purgeSegmentStorage(tx: BrainEngine, sourceId: string, claim: string, plan: PurgePlan, pageIds: number[], replaced: Uint8Array[], ownRequest: string):
   Promise<{ texts: number; stagings: number; parts: number; cancelled: number }> {
@@ -306,7 +314,7 @@ async function purgeSegmentStorage(tx: BrainEngine, sourceId: string, claim: str
   const staged: number[] = [];
   if (plan.stagings.length) {
     staged.push(...(await tx.executeRaw<{ page_id: number | null }>(`UPDATE page_body_stagings SET state='aborted',updated_at=now()
-      WHERE id=ANY($1::uuid[]) RETURNING page_id`, [plan.stagings])).flatMap(row => row.page_id === null ? [] : [Number(row.page_id)]));
+      WHERE id=ANY($1::uuid[]) AND state<>'committed' RETURNING page_id`, [plan.stagings])).flatMap(row => row.page_id === null ? [] : [Number(row.page_id)]));
     parts = (await tx.executeRaw('DELETE FROM page_body_staging_parts WHERE staging_id=ANY($1::uuid[]) RETURNING 1', [plan.stagings])).length;
   }
   for (const pageId of new Set([...pageIds, ...staged])) await tx.sweepSegments({ pageId });

@@ -22,9 +22,10 @@
 import type { BrainEngine } from '../engine.ts';
 import { opError } from '../ops/contract.ts';
 import { SEGMENT_MAX_BYTES } from './limits.ts';
-import { bodyRowWork, openSegmentedBody, readBodyRange, trustedSegments } from './read-range.ts';
+import { bodyRowWork, confirmBodyPin, openSegmentedBody, readBodyRange, trustedSegments, type BodyPin } from './read-range.ts';
 import { ledgerApplies } from './segment-ledger.ts';
 import { cutBlocked, SEGMENTER_VERSION } from './segmenter.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 import { readEntryState } from './entry-state.ts';
 import type { BodyRegion } from './types.ts';
 
@@ -220,7 +221,8 @@ export const retainedGenerationWork = { bytes: 0, skipped: 0 };
 /**
  * The stored text of a retained segmented generation (a segmented page_versions row references a generation; its body
  * columns are NULL) as `${compiled_truth}\n${timeline}`, cut into blocks as bodyBlocks cuts the live body (runBlocks),
- * from the generation's manifest rows, so a page demoted inline since still yields its segmented versions. A run whose
+ * from the generation's manifest rows, so a page demoted inline since still yields its segmented versions. Rows that do
+ * not tile the version's body_bytes refuse with page_body_rows_unreadable (body-tiling.ts) before any text is read. A run whose
  * key is in `seen` (a run of the live body read without an overlay, or of a generation read before) is skipped, and
  * each run read is added to it. `stop` is asked before each segment read, as in bodyBlocks.
  */
@@ -228,6 +230,7 @@ export async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'execu
   page: { id: number; slug: string; sourceId: string }, generation: number,
   opts: { seen?: Set<string>; stop?: () => boolean } = {}): AsyncIterable<string> {
   const rows = await engine.readManifest(page.id, { generation });
+  await assertGenerationTiles(engine, page.id, generation, rows);
   const [state] = await engine.executeRaw<{ segmenter_version: number | null }>('SELECT segmenter_version FROM pages WHERE id=$1', [page.id]);
   const stale = Number(state?.segmenter_version) !== SEGMENTER_VERSION;
   const collect = readGarbageCollector();
@@ -261,10 +264,15 @@ export async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'execu
   }
 }
 
-/** The first `chars` UTF-16 units of a segmented page's trusted compiled truth, reading at most 4 x `chars` + 4 bytes. */
-export async function truthLead(engine: BrainEngine, pageId: number, chars: number): Promise<string> {
+/**
+ * The first `chars` UTF-16 units of a segmented page's trusted compiled truth, reading at most 4 x `chars` + 4 bytes;
+ * with `pin`, at the revision a caller authorized (openSegmentedBody) or not at all.
+ */
+export async function truthLead(engine: BrainEngine, pageId: number, chars: number, pin?: BodyPin): Promise<string> {
   const parts: Buffer[] = [];
-  for await (const piece of readBodyRange(engine, { pageId, space: 'stored', start: 0, end: 4 * chars + 4, audience: 'trusted', region: 'truth' })) parts.push(piece.bytes);
+  const body = await openSegmentedBody(engine, { pageId, ...(pin ? { pin } : {}) });
+  for await (const piece of readBodyRange(engine, { pageId, space: 'stored', start: 0, end: 4 * chars + 4, audience: 'trusted', region: 'truth', body })) parts.push(piece.bytes);
+  await confirmBodyPin(engine, body);
   return new TextDecoder('utf-8', { ignoreBOM: true }).decode(Buffer.concat(parts)).slice(0, chars);
 }
 

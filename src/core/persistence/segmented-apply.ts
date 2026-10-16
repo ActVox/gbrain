@@ -34,6 +34,7 @@ import { pageSearchVectorSql } from '../fts-language.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { overlayCanonicalBodies, readPageSnapshot } from '../page-state/snapshot.ts';
 import { faultPoint } from './fault-points.ts';
+import { bodyStagingGoneError, LIVE_STAGING_STATES } from '../engine-sql/page-body.ts';
 import { segmentedPageSearchable } from './searchable.ts';
 import { stableJson } from './digest.ts';
 
@@ -141,6 +142,10 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
   const { prepared } = input;
   let pageId = input.pageId;
   if (prepared.createRows) {
+    // A create inserts its manifest rows before the flip checks its staging: a staging a fact purge aborted (and whose
+    // claim-bearing texts it deleted) refuses here, not on the manifest's text foreign key.
+    const [staging] = await tx.executeRaw<{ state: string }>('SELECT state FROM page_body_stagings WHERE id=$1::uuid FOR UPDATE', [prepared.stagingId]);
+    if (!LIVE_STAGING_STATES.includes(staging?.state ?? '')) throw bodyStagingGoneError(input.slug, prepared.stagingId, staging?.state ?? null);
     pageId = (await tx.createSegmentedPageShell(input.slug, input.meta, { sourceId: input.sourceId })).id;
     await tx.stageManifestRows(prepared.createRows.map(row => ({ ...row, pageId: pageId! })));
   }

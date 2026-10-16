@@ -34,6 +34,7 @@ import { newFenceChunkBudget } from '../markdown-chunks.ts';
 import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
@@ -343,14 +344,17 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
 
 /**
  * The rows of `rows` whose occurrence has no live chunk row at `generation`: new
- * occurrences, and kept ones a crashed or deferred projection never chunked.
+ * occurrences, and kept ones a crashed or deferred projection never chunked. One
+ * index probe per occurrence (content_chunks_occurrence_generation_idx), never a
+ * scan of the page's chunk rows.
  */
 export async function occurrencesWithoutChunks(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, generation: number,
   rows: readonly ManifestRowInput[]): Promise<ManifestRowInput[]> {
   if (!rows.length) return [];
-  const chunked = new Set((await engine.executeRaw<{ occurrence_id: number }>(`SELECT DISTINCT occurrence_id FROM content_chunks
-    -- chunk-visibility-ok: write path; the generation predicate is explicit, at the generation the caller diffed against
-    WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[]) AND body_generation<=$3`,
+  const chunked = new Set((await engine.executeRaw<{ occurrence_id: number }>(`SELECT o AS occurrence_id FROM unnest($2::bigint[]) AS o
+    WHERE EXISTS (SELECT 1 FROM content_chunks c
+      -- chunk-visibility-ok: write path; the generation predicate is explicit, at the generation the caller diffed against
+      WHERE c.page_id=$1 AND c.occurrence_id=o AND c.body_generation<=$3::bigint)`,
   [pageId, rows.map(row => row.occurrenceId), generation])).map(row => Number(row.occurrence_id)));
   return rows.filter(row => !chunked.has(row.occurrenceId));
 }
@@ -438,6 +442,7 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
 export async function* readSegmentedBody(engine: BrainEngine, pageId: number, sourceId: string,
   opts: { generation?: number } = {}): AsyncIterable<{ region: BodyRegion; bytes: Uint8Array }> {
   const rows = await engine.readManifest(pageId, opts.generation === undefined ? {} : { generation: opts.generation });
+  await assertGenerationTiles(engine, pageId, opts.generation, rows);
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   for (let start = 0; start < rows.length;) {
     let end = start, bytes = 0;

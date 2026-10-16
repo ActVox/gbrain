@@ -23,6 +23,7 @@ import { pageBodySegmentedError } from './page-shape.ts';
 import { ContentHashStream } from './content-hash-stream.ts';
 import type { StoredRegion } from './segmenter.ts';
 import type { BodyRegion, JsonObject, ManifestRow } from './types.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 
 /** Rewrites one fence (the text of a stored facts or takes region, markers included), given the body region holding it; called in body order. */
 export type FenceTransform = (fence: string, at: { region: BodyRegion }) => Promise<string>;
@@ -152,6 +153,7 @@ export async function rewriteLiveSegmentedFences(tx: BrainEngine, pageId: number
   if (page?.body_storage !== 'segmented') return null;
   const sourceId = page.source_id, slug = page.slug, frontmatter = page.frontmatter ?? {};
   const rows = await tx.readManifest(pageId);
+  await assertGenerationTiles(tx, pageId, undefined, rows);
   const units = await changedUnits(tx, sourceId, rows, transform);
   if (!units.length) return null;
   const generation = Number(page.body_generation);
@@ -178,16 +180,25 @@ const MANIFEST_COLUMNS = `page_id,occurrence_id,seq,region,source_id,sha256,byte
  * their other generations, and the rebuilt rows (new occurrences, every
  * coordinate and hash midstate recomputed) cover exactly this one. Each
  * version row of the generation gets the rebuilt content_hash and size.
- * Returns the replaced segment shas, or null when no fence changed.
+ * Returns the replaced segment shas, or null when no fence changed. A change
+ * to the page's live generation is refused (the page row is locked, so the
+ * generation cannot become live under the rebuild).
  */
 export async function rewriteSegmentedGeneration(tx: BrainEngine, pageId: number, generation: number, transform: FenceTransform,
   version: { title: string; type: string; frontmatter: JsonObject; tags: readonly string[] }): Promise<Uint8Array[] | null> {
-  const [page] = await tx.executeRaw<{ slug: string; source_id: string; body_flags: JsonObject | null }>('SELECT slug,source_id,body_flags FROM pages WHERE id=$1', [pageId]);
+  const [page] = await tx.executeRaw<{ slug: string; source_id: string; body_flags: JsonObject | null; body_storage: string; body_generation: number | string }>(
+    'SELECT slug,source_id,body_flags,body_storage,body_generation FROM pages WHERE id=$1 FOR UPDATE', [pageId]);
   if (!page) return null;
   const sourceId = page.source_id;
   const rows = await tx.readManifest(pageId, { generation });
+  await assertGenerationTiles(tx, pageId, generation, rows);
   const units = await changedUnits(tx, sourceId, rows, transform);
   if (!units.length) return null;
+  // Rebuilding rows in place is for retained generations only: the live one changes by a flip (rewriteLiveSegmentedFences),
+  // which moves the revision and the chunks with it.
+  if (page.body_storage === 'segmented' && Number(page.body_generation) === generation) {
+    throw new Error(`rewriteSegmentedGeneration: generation ${generation} is the live body of page ${page.slug}; rewrite it with rewriteLiveSegmentedFences.`);
+  }
   const prepared = await prepareSegmentedBody(tx, { sourceId, slug: page.slug, live: null, ...version,
     truth: rewrittenRegion(tx, sourceId, rows, units, 'truth'), timeline: rewrittenRegion(tx, sourceId, rows, units, 'timeline'),
     hasTimeline: rows.some(row => row.region === 'timeline'), flags: page.body_flags ?? {}, declaredBytes: bodyBytesOf(rows, units),
@@ -216,6 +227,7 @@ export async function rewriteSegmentedGeneration(tx: BrainEngine, pageId: number
 export async function rewrittenContentHash(engine: BrainEngine, pageId: number, sourceId: string, generation: number, transform: FenceTransform,
   meta: { title: unknown; type: unknown; frontmatter: Record<string, unknown>; tags: string[] }): Promise<string | null> {
   const rows = await engine.readManifest(pageId, { generation });
+  await assertGenerationTiles(engine, pageId, generation, rows);
   const units = await changedUnits(engine, sourceId, rows, transform);
   if (!units.length) return null;
   const hash = ContentHashStream.begin(meta);

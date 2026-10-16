@@ -7,7 +7,7 @@
  * (`stageBeforeCopy`, model.ts) instead of embedding its bytes.
  */
 import { createHash } from 'node:crypto';
-import { closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync, readSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
@@ -123,6 +123,12 @@ const BEFORE_STAGE = '.tmp.before-';
  * Older binaries accept only `.tmp.<uuid>` stage names, so a record naming one blocks them instead of being misread.
  */
 export function beforeStagePath(path: string): string { return atomicStagingPath(path).replace(/\.tmp\.(?=[0-9a-f-]{36}$)/, BEFORE_STAGE); }
+/**
+ * Where `stageBeforeCopy` writes the copy before renaming it to its before stage, so a copy a crash cut short is never
+ * at the stage's name. Recovery removes it unread: the rename is the commit point, so a copy still under this name was
+ * never the prior file's only copy (publication starts after the rename).
+ */
+export function beforeStageCopyPath(stagePath: string): string { return `${stagePath}.copying`; }
 export function validateBeforeStagePath(path: string, stagePath: string): void {
   const at = stagePath.lastIndexOf(BEFORE_STAGE);
   if (at < 0) throw new Error('atomic-write: invalid journaled staging path');
@@ -171,27 +177,41 @@ export async function stageStreamedContent(engine: BrainEngine, path: string, co
 }
 
 /**
- * Copies the canonical file at `path` to its reserved before stage (exclusive; the kernel copies, no user-space
- * buffer), sets its recorded mode, fsyncs it and checks it holds the recorded bytes. False (the copy removed) when
- * the file changed since its digest was recorded.
+ * Copies the canonical file at `path` to its reserved before stage: the kernel copies it (no user-space buffer) to
+ * `beforeStageCopyPath` (exclusive), its recorded mode is set, it is checked to hold the recorded bytes and fsynced,
+ * and only then renamed to the stage's name, so a stage under that name is always a whole copy. False (the copy
+ * removed) when the file changed since its digest was recorded; a copy that fails or throws is removed too.
+ * `boundary` (crash seams): after the copy is written (`stage_copying`, unverified and unflushed) and once it is
+ * flushed (`stage_flushed`, before the rename).
  */
-export function stageBeforeCopy(path: string, stage: RecoveryStagingFile, mode: number | null): boolean {
+export async function stageBeforeCopy(path: string, stage: RecoveryStagingFile, mode: number | null,
+  boundary?: (phase: 'stage_copying' | 'stage_flushed') => Promise<void>): Promise<boolean> {
   assertManagedFilesystemWrite(path);
   validateBeforeStagePath(path, stage.path);
-  copyFileSync(path, stage.path, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+  const copying = beforeStageCopyPath(stage.path);
   let staged = false;
-  const fd = openSync(stage.path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
   try {
-    if (mode !== null) fchmodSync(fd, mode);
-    const copy = hashDescriptor(fd);
-    largeFileWork.bytesCopied += copy.bytes;
-    if (copy.bytes !== stage.bytes || copy.hash !== stage.hash) return false;
-    fsyncSync(fd);
+    copyFileSync(path, copying, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+    await boundary?.('stage_copying');
+    const fd = openSync(copying, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+    try {
+      if (mode !== null) fchmodSync(fd, mode);
+      const copy = hashDescriptor(fd);
+      largeFileWork.bytesCopied += copy.bytes;
+      if (copy.bytes !== stage.bytes || copy.hash !== stage.hash) return false;
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    await boundary?.('stage_flushed');
+    if (existsAt(stage.path)) throw opError('unexpected_staging_bytes', 'A file already holds the reserved before stage name.',
+      'A recovery staging file changed outside gbrain. Inspect the pending recovery in writer status and tell the user; never delete or edit staging files by hand.');
+    renameSync(copying, stage.path);
     staged = true;
   } finally {
-    closeSync(fd);
-    if (!staged) removeOwnStage(stage.path);
+    if (!staged) removeOwnStage(copying);
   }
   flushDirectory(dirname(stage.path));
   return true;
+}
+function existsAt(path: string): boolean {
+  try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }

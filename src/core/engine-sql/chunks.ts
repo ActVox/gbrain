@@ -1025,6 +1025,26 @@ export async function getEmbeddingsByChunkIds(exec: LegacyUnscopedRead, ids: num
   }
 
 /**
+ * The text-space cosine re-score in SQL (`search/cosine-rescore.ts`): one
+ * `(id, cosine)` row per hydrated chunk, the rows `getEmbeddingsByChunkIds`
+ * returns (same active column, halfvec read exactly as vector, same
+ * visibility). A hydrated vector whose dimensions differ from the query's,
+ * or a zero-norm vector or query, scores 0 without reaching the operator, as
+ * `cosineSimilarity` does; an absent or invisible chunk returns no row.
+ */
+export function cosineByChunkIdsStatement(ids: number[], column: string, query: Float32Array): { text: string; params: unknown[] } {
+  if (!COLUMN_NAME_REGEX.test(column)) throw new EmbeddingColumnNotRegisteredError(column, []);
+  const col = trustedSql(`cc.${quoteIdentifier(column)}`);
+  const q = `[${Array.from(query).join(',')}]`;
+  return renderFragment(sqlFragment`
+    SELECT cc.id, CASE WHEN vector_dims(${col}::vector) <> ${query.length}::int OR vector_norm(${col}::vector) = 0 OR vector_norm(${q}::vector) = 0
+                       THEN 0::float8 ELSE 1 - (${col}::vector <=> ${q}::vector) END AS cosine
+      FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+     WHERE cc.id = ANY(${ids}::int[]) AND ${col} IS NOT NULL AND ${trustedSql(chunkVisibleFilter('p', 'cc'))}
+  `);
+}
+
+/**
  * Evidence delivery: ONE batched read of chunk_index windows, keyed by
  * page_id. Every requested page is re-authorized with the search legs'
  * visibility predicate (source scope, deleted, current text projection,

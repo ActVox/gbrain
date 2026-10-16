@@ -38,7 +38,8 @@ import { walkMarkdownFiles } from '../../commands/extract.ts';
 import { takesPreparation } from '../takes-write.ts';
 import { withWriteTrust } from '../persistence/context.ts';
 import { derivedWriteTrust, recordTaintEdges } from '../trust/taint.ts';
-import { storedTrustTier } from '../trust/tier.ts';
+import { storedTrustTier, type TrustTier } from '../trust/tier.ts';
+import { contestHeldRows, guardTakeRows, heldRows, type HeldChange } from '../trust/fence-guard.ts';
 import { applyGateDecision, derivedGateConfig, derivedGateInput, emptyGateTally, type GateTally } from '../trust/derived-gate.ts';
 import { decideTakeWrite, recordFlaggedRow } from '../write-gate-store.ts';
 import { buildTakeRows } from '../batch-rows.ts';
@@ -108,6 +109,29 @@ async function getPageIdForSlug(engine: BrainEngine, slug: string, sourceId: str
   return rows[0]?.id ?? null;
 }
 
+/** The tier a takes reconcile restates the page at: its page's tier, capped as a projection (upsertProjectedTakes). */
+async function reconcileTier(engine: BrainEngine, pageId: number): Promise<{ tier: TrustTier; sourceId: string; slug: string } | null> {
+  const [page] = await engine.executeRaw<{ source_id: string; slug: string; trust_tier: string | null }>('SELECT source_id, slug, trust_tier FROM pages WHERE id = $1', [pageId]);
+  if (!page) return null;
+  const tier = derivedWriteTrust({ channel: 'derive:takes_fence', inputs: [{ table: 'pages', id: pageId, tier: storedTrustTier(page.trust_tier) }], projection: true }).tier;
+  return { tier, sourceId: page.source_id, slug: page.slug };
+}
+
+/**
+ * W1 #6783 §12 (a): of the stored takes a reconcile would delete, those more trusted than the page's restatement or held
+ * by an open contest stay; each gets the owner's `forget` proposal. Then the rest are deleted.
+ */
+async function deleteUnheldTakes(engine: BrainEngine, pageId: number, where: string, params: unknown[], change: HeldChange): Promise<void> {
+  const candidates = (await engine.executeRaw<{ id: number }>(`SELECT id FROM takes WHERE page_id = $1 AND ${where}`, [pageId, ...params])).map(r => Number(r.id));
+  if (!candidates.length) return;
+  const page = await reconcileTier(engine, pageId);
+  const held = page ? await heldRows(engine, 'takes', candidates, { writer: page.tier, pending: true }) : new Map();
+  if (page && held.size) await contestHeldRows(engine, { sourceId: page.sourceId, slug: page.slug, table: 'takes', proposer: 'takes_reextract', writer: page.tier,
+    rows: [...held].map(([id, tier]) => ({ id, tier, change })) });
+  const ids = candidates.filter(id => !held.has(id));
+  if (ids.length) await engine.executeRaw('DELETE FROM takes WHERE id = ANY($1::bigint[])', [ids]);
+}
+
 /**
  * Remove takes whose rows left the page's fence. Only a fence that parsed
  * cleanly is authoritative (a skipped malformed row is not a deletion), and a
@@ -122,17 +146,14 @@ async function pruneRemovedTakes(
   dryRun: boolean,
 ): Promise<void> {
   if (dryRun || warnings.length > 0 || !hasBegin) return;
-  await engine.executeRaw(
-    'DELETE FROM takes WHERE page_id = $1 AND NOT (row_num = ANY($2::integer[]))',
-    [pageId, takes.map(t => t.rowNum)],
-  );
+  await deleteUnheldTakes(engine, pageId, 'NOT (row_num = ANY($2::integer[]))', [takes.map(t => t.rowNum)], 'removed');
 }
 
 /** Rebuild: drop indexed rows the fence no longer carries with the same claim; rows that still match keep resolution and vector. */
 async function deleteDivergedTakes(engine: BrainEngine, pageId: number, takes: ParsedTake[]): Promise<void> {
-  await engine.executeRaw(`DELETE FROM takes WHERE page_id = $1 AND NOT EXISTS (
+  await deleteUnheldTakes(engine, pageId, `NOT EXISTS (
       SELECT 1 FROM jsonb_to_recordset($2::text::jsonb) AS f(row_num int, claim text) WHERE f.row_num = takes.row_num AND f.claim = takes.claim)`,
-  [pageId, JSON.stringify(takes.map(t => ({ row_num: t.rowNum, claim: t.claim })))]);
+  [JSON.stringify(takes.map(t => ({ row_num: t.rowNum, claim: t.claim })))], 'replaced');
 }
 
 function parsedTakeToBatchInput(pageId: number, t: ParsedTake): TakeBatchInput {
@@ -177,8 +198,17 @@ async function upsertProjectedTakes(engine: BrainEngine, rows: TakeBatchInput[],
       const decisions = group.map(r => decideTakeWrite({ claim: r.claim, source: r.source }, { sourceId: pages.get(r.page_id)?.source_id ?? 'default',
         slug: pages.get(r.page_id)?.slug ?? null, payload: { ...r }, input: derivedGateInput(trust), cfg }));
       for (const [i, d] of decisions.entries()) if (d.action !== 'insert') await applyGateDecision(tx, d, { table: 'takes', sourceId: pages.get(group[i].page_id)?.source_id ?? 'default' }, async () => null, tally);
-      const allowed = group.filter((_, i) => decisions[i].action === 'insert');
-      const flags = decisions.filter(d => d.action === 'insert');
+      // W1 #6783 §12 (a): a row that would replace or deactivate a more trusted (or contested) take is not written.
+      const held = await guardTakeRows(tx, group.filter((_, i) => decisions[i].action === 'insert').map(r => ({ page_id: r.page_id, row_num: r.row_num, claim: r.claim,
+        kind: r.kind, holder: r.holder, active: r.active ?? true })), [], { pending: true });
+      for (const pageId of new Set(held.map(h => h.page_id))) {
+        const page = pages.get(pageId);
+        if (page) await contestHeldRows(tx, { sourceId: page.source_id, slug: page.slug, table: 'takes', proposer: 'takes_reextract', rows: held.filter(h => h.page_id === pageId) });
+      }
+      const heldKeys = new Set(held.map(h => `${h.page_id}:${h.row_num}`));
+      const insertable = (r: TakeBatchInput, i: number) => decisions[i].action === 'insert' && !heldKeys.has(`${r.page_id}:${r.row_num}`);
+      const allowed = group.filter(insertable);
+      const flags = decisions.filter((d, i) => insertable(group[i], i));
       const count = allowed.length ? await tx.addTakesBatch(allowed) : 0;
       for (const [i, r] of allowed.entries()) {
         const page = pages.get(r.page_id);

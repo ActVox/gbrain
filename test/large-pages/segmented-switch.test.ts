@@ -6,7 +6,7 @@
  *    off, and doctor offers the switch; a writer older than SEGMENTED_WRITER_FLOOR (or unstamped) seen in the last seven days keeps writes
  *    inline, even with an explicit `on`, and doctor `segmented_storage` names it with an upgrade fix; once that
  *    observation is gone the next write promotes; an explicit `off` keeps pages inline and reports it as a choice;
- *    a stored segmented page over 32 MiB still exports while the switch is off. Every write the gate sees must carry the
+ *    (a stored segmented page over 32 MiB exporting while the switch is off is in segmented-real-size.slow.test.ts). Every write the gate sees must carry the
  *    segment-reader mark (v251): a release at exactly the floor version without it, an older binary's import or sync
  *    run (ingest_log), its resident heartbeat and its uncommitted requests all block; this build's do not. An
  *    unreadable gate blocks, an unparsable stamp blocks, the 7-day window ends between day 6 and day 8, and the gate is
@@ -18,7 +18,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -32,22 +32,12 @@ import { VERSION } from '../../src/version.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import { segmentedStorageCheck } from '../../src/commands/doctor/checks/segmented-storage.ts';
 import { startConsumerHeartbeat } from '../../src/core/persistence/consumer-heartbeat.ts';
-import { runExport } from '../../src/commands/export.ts';
 import { conversationPage } from '../helpers/conversation-page.ts';
 import { editRequest, freshBrainFactory, requestFixture } from '../helpers/persistence-request-fixture.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 import { withEnv } from '../helpers/with-env.ts';
 
 const content = conversationPage(2 * 1024 * 1024, { seed: 61 });
-
-async function quietExport(engine: BrainEngine, out: string): Promise<void> {
-  const { log, error } = console;
-  const exit = process.exit;
-  const messages: string[] = [];
-  console.log = console.error = (...args: unknown[]) => { messages.push(args.join(' ')); };
-  process.exit = ((code: number) => { throw new Error(`EXIT:${code} ${messages.join('\n')}`); }) as never;
-  try { await runExport(engine, ['--dir', out]); } finally { console.log = log; console.error = error; process.exit = exit; }
-}
 
 async function storage(engine: BrainEngine, slug: string): Promise<string | undefined> {
   return (await engine.executeRaw<{ body_storage: string }>('SELECT body_storage FROM pages WHERE slug=$1', [slug]))[0]?.body_storage;
@@ -123,17 +113,6 @@ for (const kind of testBackends()) {
       expect(await storage(engine, 'notes/held-on')).toBe('segmented');
       expect(await segmentedStorageCheck(engine)).toMatchObject({ status: 'ok', details: { effective: 'on' } });
     }), 120_000);
-
-    test('a stored segmented page over the 32 MiB inline export limit still exports while the switch is off', async () => {
-      await engine.setConfig('pages.segmented_storage', 'on');
-      expect((await importFromContent(engine, 'notes/stored', content, { noEmbed: true })).status).toBe('imported');
-      expect(await storage(engine, 'notes/stored')).toBe('segmented');
-      await engine.executeRaw('UPDATE pages SET body_bytes=$2 WHERE slug=$1', ['notes/stored', 40 * 1024 * 1024]);
-      await engine.setConfig('pages.segmented_storage', 'off');
-      const out = join(home, `export-${kind}`);
-      await quietExport(engine, out);
-      expect(readFileSync(join(out, 'notes/stored.md'), 'utf8')).toContain(content.trimEnd().slice(-120));
-    }, 120_000);
 
     /** The gate as a write reads it, after the per-engine cache is dropped. */
     const segmentedNow = async (e: BrainEngine = engine) => { _resetSegmentedWriterGateForTests(); return (await readPageBodyPolicy(e)).segmented; };

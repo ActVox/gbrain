@@ -249,6 +249,10 @@ export async function runPersistenceAdminCli(group: Group, args: string[], conne
       await writeStdoutFinal(renderWriterFailures(result as Parameters<typeof renderWriterFailures>[0], parsed.json));
       return;
     }
+    // #5182: activation proceeds, but a source whose Git effects it leaves skipped is named for a person on stderr too.
+    if (parsed.operation === 'writer_activate' && !parsed.json) {
+      for (const warning of (result as { warnings?: Array<{ message: string }> }).warnings ?? []) process.stderr.write(`warning: ${warning.message}\n`);
+    }
     await writeStdoutFinal(JSON.stringify(result, bigintToStringReplacer, 2) + '\n');
     // #6678: a credential repair that refused some parked pushes on their own is partial and exits 1.
     if (parsed.operation === 'writer_git_durability' && (result as { status?: unknown }).status === 'partial') setCliExitVerdict(1);

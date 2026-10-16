@@ -10,7 +10,8 @@
  * 2. Fails when: the segmented redaction reads one LIMIT 5000 page with no
  *    continuation (the later generation keeps the purged claim).
  * 3. Fixture: 5,000 extra version rows of the first page reference generation
- *    0, which no manifest row covers (empty, so each costs one manifest read),
+ *    0, which no manifest row covers (an empty, 0-byte generation, so each costs
+ *    one manifest read and its rows tile it),
  *    and push the second page's real version past the first batch.
  * Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
@@ -85,7 +86,7 @@ describe('purge_fact over more than one batch of segmented versions', () => {
       const [first] = await engine.executeRaw<{ g: number }>('SELECT min(gen_from) AS g FROM page_body_manifest WHERE page_id=$1', [a.id]);
       expect(Number(first!.g)).toBeGreaterThan(0);
       await coordinated(engine, tx => tx.executeRaw(`INSERT INTO page_versions (page_id,body_storage,body_generation,body_bytes,content_hash,frontmatter,knowledge_revision,title,type,tags,is_deleted,source_path)
-        SELECT v.page_id,'segmented',0,v.body_bytes,v.content_hash,v.frontmatter,v.knowledge_revision,v.title,v.type,v.tags,v.is_deleted,v.source_path
+        SELECT v.page_id,'segmented',0,0,v.content_hash,v.frontmatter,v.knowledge_revision,v.title,v.type,v.tags,v.is_deleted,v.source_path
           FROM page_versions v CROSS JOIN generate_series(1,5000) WHERE v.page_id=$1 AND v.body_storage='segmented' AND v.body_generation=$2`, [a.id, aGeneration]));
       await importFromContent(engine, 'notes/batch-b', page('Batch B', 'First tail.'), { noEmbed: true, sourceId: 'default' });
       await importFromContent(engine, 'notes/batch-b', page('Batch B', 'Second tail.'), { noEmbed: true, sourceId: 'default' });

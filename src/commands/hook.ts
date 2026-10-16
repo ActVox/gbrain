@@ -72,7 +72,7 @@ import {
   decideCorpusMode,
   gcCorpusArtifacts,
   gcCorpusTurnFiles,
-  CORPUS_PROGRESS_SUFFIX,
+  CORPUS_FAILURE_SUFFIX, CORPUS_PROGRESS_SUFFIX,
   CORPUS_PROGRESS_LOCK_SUFFIX,
   HARVEST_RECEIPT_SUFFIX,
   segmentHash,
@@ -1850,7 +1850,7 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
         const retentionMs = corpusRetentionDays(cfg) * 24 * 60 * 60 * 1000;
         for (const gcDir of [dir, root]) { // the spool and the legacy top level
           gcCorpusTurnFiles(gcDir, retentionMs); // [G15]; un-ingested turns kept longer (E-N1)
-          gcCorpusArtifacts(gcDir, retentionMs, [CORPUS_INGESTED_SUFFIX, CORPUS_CLAIM_SUFFIX, CORPUS_PROGRESS_SUFFIX, CORPUS_PROGRESS_LOCK_SUFFIX, HARVEST_RECEIPT_SUFFIX], [dir, root]); // #6611
+          gcCorpusArtifacts(gcDir, retentionMs, [CORPUS_INGESTED_SUFFIX, CORPUS_CLAIM_SUFFIX, CORPUS_PROGRESS_SUFFIX, CORPUS_PROGRESS_LOCK_SUFFIX, HARVEST_RECEIPT_SUFFIX, CORPUS_FAILURE_SUFFIX], [dir, root]); // #6611
         }
       }
     }

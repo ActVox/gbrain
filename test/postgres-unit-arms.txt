@@ -32,6 +32,7 @@ test/doctor-frontmatter-holds.test.ts
 test/doctor-image-embedding-coverage.test.ts
 test/doctor-keyword-plan-6495.test.ts
 test/doctor-routing-skill-pack-source.test.ts
+test/doctor-sync-freshness-skill-pack-6076.test.ts
 test/embed-stale-images-managed-6529.test.ts
 test/embedding-completion-atomic.serial.test.ts
 test/engine-sql-facts-keyset.test.ts
@@ -62,7 +63,9 @@ test/import-frontmatter-key-order-5158.test.ts
 test/import-inline-chunk-keep.test.ts
 test/import-revision-concurrency.test.ts
 test/keyword-statement-timeout-knob-6495.test.ts
+test/keyword-timeout-negative-cache-6495.test.ts
 test/lane-apply-pipelining.test.ts
+test/large-pages/chunk-retirement-plan.test.ts
 test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
@@ -74,8 +77,10 @@ test/large-pages/managed-sync-segmented-rename.test.ts
 test/large-pages/managed-sync-streamed.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
+test/large-pages/pinned-segmented-reads.test.ts
 test/large-pages/projection-demotion-race.test.ts
 test/large-pages/projection-parity.test.ts
+test/large-pages/purge-fact-inflight-staging.test.ts
 test/large-pages/purge-inflight-create.test.ts
 test/large-pages/purge-segment-residue.test.ts
 test/large-pages/purge-segmented-versions-batch.test.ts
@@ -94,6 +99,7 @@ test/large-pages/segmented-conversation-sidecar-token.test.ts
 test/large-pages/segmented-create-searchable.test.ts
 test/large-pages/segmented-delete-crash.slow.test.ts
 test/large-pages/segmented-delete-restore-file.slow.test.ts
+test/large-pages/segmented-delete-stage-crash.slow.test.ts
 test/large-pages/segmented-derived-parity.test.ts
 test/large-pages/segmented-derived-passes.test.ts
 test/large-pages/segmented-derived-work.test.ts
@@ -113,6 +119,7 @@ test/large-pages/segmented-loser-chunks.test.ts
 test/large-pages/segmented-maintenance-commands.test.ts
 test/large-pages/segmented-prior-view.test.ts
 test/large-pages/segmented-read-refusals.test.ts
+test/large-pages/segmented-real-size.slow.test.ts
 test/large-pages/segmented-remember-refusal.test.ts
 test/large-pages/segmented-repair-scans.test.ts
 test/large-pages/segmented-retained-blocks.test.ts
@@ -192,10 +199,12 @@ test/persistence-reconcile-git-dirty-6138.test.ts
 test/persistence-skill-bundles.serial.test.ts
 test/persistence-skill-crash.slow.test.ts
 test/persistence-skip-cost.test.ts
+test/persistence-sync-cursor-adoption.test.ts
 test/persistence-sync-cursor-options.test.ts
 test/persistence-sync-cursor-strategy-6696.test.ts
 test/persistence-sync-fence-holds.test.ts
 test/persistence-sync-holds.test.ts
+test/persistence-sync-lease.test.ts
 test/persistence-write-stall.test.ts
 test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts
@@ -225,6 +234,7 @@ test/source-retire-missing-checkout.test.ts
 test/source-row-diagnostics.test.ts
 test/stats-health-source-scope.test.ts
 test/sync-capacity-preflight.test.ts
+test/sync-checkpoint-moved-6834.test.ts
 test/sync-drain-claims.test.ts
 test/sync-drain-head-blocked-6543.test.ts
 test/sync-drain-inpass-stall.test.ts
@@ -239,6 +249,7 @@ test/sync-import-provenance-disk.test.ts
 test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-origin-live-wins-6517.test.ts
+test/sync-prescreen-drift-6712.test.ts
 test/sync-slug-root-mode-6694.test.ts
 test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
@@ -249,6 +260,7 @@ test/takes-vector-lifecycle-5885.serial.test.ts
 test/terminal-failures-6650.test.ts
 test/trust-channel-writes.test.ts
 test/trust-guarded-supersession.test.ts
+test/trust-held-removals.test.ts
 test/trust-owner-actions.test.ts
 test/unbound-source-6536.test.ts
 test/withdrawal-overlay-concurrency.test.ts

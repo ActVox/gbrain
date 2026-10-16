@@ -7,7 +7,8 @@
  *    commits with a pending chronicle decision; the unmanaged discovery never
  *    reads a segmented page as `too_short` (which would retire its events);
  *    execution judges a segmented page within the single-string ceiling and,
- *    since PR 2 (lane 2e, full-pass mode), one above it too, from its lead;
+ *    since PR 2 (lane 2e, full-pass mode), one above it too, from its lead
+ *    (segmented-real-size.slow.test.ts, at that size);
  *    backfill counts segmented pages as eligible; a remote write's `links`
  *    effect on a segmented page commits its mention edges, read block by
  *    block; the facts backstop queues for a segmented page and a facts-absorb
@@ -15,6 +16,9 @@
  *    trusted put_page (auto_link on) publishes a segmented page with its derived
  *    links and temporal evidence, edit_page edits one, and a put_page that
  *    shrinks one to inline versions the segmented body before demoting it;
+ *    a segmented create is projected once at a time (#6143: the resident
+ *    drain waits for the publication's own projection instead of chunking
+ *    the same page beside it);
  *    re-linking one later (autoLinkWrittenPage, `extract --slugs`) reads its
  *    body; the managed stale-links pass after a managed import links a
  *    segmented page within the ceiling and one over it.
@@ -48,12 +52,14 @@ import { __setChatTransportForTests, resetGateway, type ChatOpts, type ChatResul
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
+import { SEGMENTED_CREATE_SEAL_MAX_BYTES } from '../../src/core/page-body/limits.ts';
 import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
 import { withVerifiedLocalRegistration } from '../../src/core/persistence/identity.ts';
 import { extractManagedStaleLinks } from '../../src/core/persistence/links-maintenance.ts';
 import { autoLinkWrittenPage } from '../../src/core/ops/pages.ts';
 import { importManagedFile } from '../../src/core/persistence/import-mutations.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
+import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 
 const config = { engine: 'pglite' as const, embedding_disabled: true };
 const CLIENT = 'client-segmented-derived';
@@ -187,21 +193,6 @@ describe('Life Chronicle on segmented pages', () => {
     }
   }, 300_000);
 
-  test('execution judges a segmented page over the single-string ceiling from its lead, without materializing it', async () => {
-    for (const engine of engines) {
-      await importFromContent(engine, 'meetings/segmented-offsite', meeting('Offsite'), { sourceId: 'default', noEmbed: true });
-      const page = await storage(engine, 'meetings/segmented-offsite');
-      await upsertChronicleRow(engine, { sourceId: 'default', pageId: page.id, contentHash: page.content_hash, slug: 'meetings/segmented-offsite',
-        state: 'pending', reason: null, trigger: 'auto', nextAttemptAt: null });
-      await engine.executeRaw('UPDATE pages SET body_bytes=$2 WHERE id=$1', [page.id, PAGE_MAX_BYTES + 1]);
-      const judged: string[] = [];
-      await runPhaseChronicle(engine, { judge: async (input) => { judged.push(input.body); return { events: [] }; } });
-      expect(judged).toHaveLength(1);
-      expect(judged[0]!.slice(0, 200)).toBe(body.slice(0, 200));
-      expect(await ledger(engine)).toEqual([{ slug: 'meetings/segmented-offsite', state: 'extracted', reason: 'no_events', scheduled: false }]);
-    }
-  }, 300_000);
-
   test('backfill counts a segmented chronicle page as eligible', async () => {
     for (const engine of engines) {
       await importFromContent(engine, 'meetings/segmented-review', meeting('Review'), { sourceId: 'default', noEmbed: true });
@@ -310,6 +301,39 @@ describe('trusted coordinated writes of segmented pages', () => {
       expect(page.body_storage).toBe('inline');
       expect(await engine.executeRaw('SELECT body_storage FROM page_versions WHERE page_id=$1 ORDER BY id', [page.id])).toEqual([{ body_storage: 'segmented' }]);
     }
+  }, 300_000);
+
+  test('a segmented create is projected once at a time: the resident drain waits for the publication\'s own projection (#6143)', async () => {
+    const slug = 'meetings/segmented-single-flight';
+    const concurrent: Record<string, number> = {}, pages: Record<string, unknown> = {};
+    for (const engine of engines) {
+      await linkTargets(engine);
+      let inside = 0, most = 0, arrivals = 0;
+      // The first projection of the page to stage its chunks holds its seal open for a while: a second projection of the
+      // same page running beside it (the resident drain picking up the queued job) reaches the same point meanwhile.
+      installFaultHook(async (point, detail) => {
+        if (point !== 'segmented:projection_staged' || detail.slug !== slug) return;
+        inside++; arrivals++; most = Math.max(most, inside);
+        if (arrivals === 1) for (const until = Date.now() + 1500; inside < 2 && Date.now() < until;) await new Promise(resolve => setTimeout(resolve, 20));
+        inside--;
+      });
+      try {
+        // Over SEGMENTED_CREATE_SEAL_MAX_BYTES, so the create commits unsealed and its chunks are built after commit.
+        const content = linkedMeeting('Single flight', conversationBody(SEGMENTED_CREATE_SEAL_MAX_BYTES, { seed: 62 }));
+        expect((await localCall(engine, 'put_page', { slug, content, wait_ms: 30_000 })).isError).toBe(false);
+        for (const until = Date.now() + 120_000; Date.now() < until;) {
+          const [row] = await engine.executeRaw<{ sealed: boolean }>(`SELECT text_projection_revision=knowledge_revision AS sealed FROM pages
+            WHERE source_id='default' AND slug=$1`, [slug]);
+          if (row?.sealed) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      } finally { installFaultHook(undefined); }
+      concurrent[engine.kind] = most;
+      pages[engine.kind] = await engine.executeRaw(`SELECT body_storage, text_projection_revision=knowledge_revision AS sealed FROM pages
+        WHERE source_id='default' AND slug=$1`, [slug]);
+    }
+    expect(concurrent).toEqual(Object.fromEntries(engines.map(engine => [engine.kind, 1])));
+    expect(pages).toEqual(Object.fromEntries(engines.map(engine => [engine.kind, [{ body_storage: 'segmented', sealed: true }]])));
   }, 300_000);
 
   test('re-linking a segmented page later (autoLinkWrittenPage, extract --slugs) reads its body', async () => {

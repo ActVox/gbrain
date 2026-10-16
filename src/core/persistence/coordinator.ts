@@ -163,7 +163,8 @@ async function stageLargeFiles(engine: BrainEngine, row: WriteRequest, file: Pag
   const before = record.staging?.before, publication = record.staging?.publication;
   if (!before && !isStreamedContent(file.content)) return;
   await withFilesystemPublication([file.root], async () => {
-    if (before && !stageBeforeCopy(file.path, before, record.mode)) throw localEditRefusal('The canonical file changed after preparation.', row, false, 'while its prior bytes were being staged');
+    if (before && !await stageBeforeCopy(file.path, before, record.mode,
+      phase => faultPoint(`large_file:${phase}`, { requestId: row.request_id, sourceId: row.source_id, operation: row.operation }))) throw localEditRefusal('The canonical file changed after preparation.', row, false, 'while its prior bytes were being staged');
     if (isStreamedContent(file.content)) {
       prepareParent(file);
       await stageStreamedContent(engine, file.path, file.content, publication!, record.mode);
@@ -582,9 +583,39 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
           const actual = current.recovery.version === 2 ? bundleFileHash(record) : fileHash(record.path);
           if (actual !== record.beforeHash && actual !== record.afterHash) throw unexpectedRecoveryBytes('Canonical recovery bytes changed outside publication.', current, 'was edited outside gbrain and');
         }
+        // A terminal outcome's prior-file copy is dropped unread when its canonical file still holds the prior bytes.
         await withFilesystemPublication([...new Set(records.map(record => record.root))], async () => {
-          for (const record of records) cleanupRecoveryStaging(record, { keepBefore: !isTerminal(current) });
+          for (const record of records) cleanupRecoveryStaging(record, { keepBefore: !isTerminal(current),
+            priorIntact: isTerminal(current) && !!record.staging?.before && fileHash(record.path) === record.beforeHash });
         });
+        // A live request's restoration runs inside this guard too, so a refusal there is recorded as its blocked reason.
+        if (!isTerminal(current)) for (let index = 0; index < records.length; index++) {
+          const record = records[index];
+          hooks.fileBoundary?.('before_restore', current, index);
+          const actual = current.recovery.version === 2 ? bundleFileHash(record) : fileHash(record.path);
+          if (actual !== record.beforeHash && actual !== record.afterHash) throw unexpectedRecoveryBytes('Canonical recovery bytes changed during restoration.', current, 'changed while recovery was restoring it and');
+          if (record.staging?.before) {
+            await withFilesystemPublication([record.root], async () => {
+              if (actual === record.afterHash && actual !== record.beforeHash) restoreBeforeStage(record, phase => hooks.fileBoundary?.(`restoration_${phase}`, current, index));
+              else cleanupRecoveryStaging(record, { priorIntact: actual === record.beforeHash });
+            });
+          } else if (actual === record.afterHash && actual !== record.beforeHash) {
+            await withFilesystemPublication([record.root], async () => {
+              const file = { path: record.path, root: record.root, content: record.before === null ? null : Buffer.from(record.before, 'base64') };
+              if (current.recovery!.version === 2) {
+                const restored = { ...record, beforeHash: record.afterHash, afterHash: record.beforeHash,
+                  mode: record.afterHash === null ? null : record.afterMode ?? record.mode, afterMode: record.mode ?? undefined,
+                  staging: { publication: record.staging?.restoration } };
+                stageBundleFile(file, restored);
+                if (file.content !== null) hooks.fileBoundary?.('restoration_staging_flushed', current, index);
+                publishStagedBundleFile(restored, phase => hooks.fileBoundary?.(`restoration_${phase}`, current, index));
+              } else publishFile(file, record.staging?.restoration?.path,
+                () => hooks.fileBoundary?.('restoration_staging_flushed', current, index), record.mode);
+            });
+          }
+          hooks.fileBoundary?.('after_restore', current, index);
+          assertRecoveryStagingAbsent(record);
+        }
       }
       catch (error) {
         if (!(error instanceof OperationError) || !['unexpected_staging_bytes','unexpected_file_bytes','storage_error'].includes(error.code)) throw error;
@@ -597,33 +628,6 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       // A delivered or durable terminal outcome is immutable. Only its known
       // temporary files are cleaned; its canonical file is never restored.
       if (isTerminal(current)) return { ...current, blocked_reason: null };
-      for (let index = 0; index < records.length; index++) {
-        const record = records[index];
-        hooks.fileBoundary?.('before_restore', current, index);
-        const actual = current.recovery.version === 2 ? bundleFileHash(record) : fileHash(record.path);
-        if (actual !== record.beforeHash && actual !== record.afterHash) throw unexpectedRecoveryBytes('Canonical recovery bytes changed during restoration.', current, 'changed while recovery was restoring it and');
-        if (record.staging?.before) {
-          await withFilesystemPublication([record.root], async () => {
-            if (actual === record.afterHash && actual !== record.beforeHash) restoreBeforeStage(record, phase => hooks.fileBoundary?.(`restoration_${phase}`, current, index));
-            else cleanupRecoveryStaging(record);
-          });
-        } else if (actual === record.afterHash && actual !== record.beforeHash) {
-          await withFilesystemPublication([record.root], async () => {
-            const file = { path: record.path, root: record.root, content: record.before === null ? null : Buffer.from(record.before, 'base64') };
-            if (current.recovery!.version === 2) {
-              const restored = { ...record, beforeHash: record.afterHash, afterHash: record.beforeHash,
-                mode: record.afterHash === null ? null : record.afterMode ?? record.mode, afterMode: record.mode ?? undefined,
-                staging: { publication: record.staging?.restoration } };
-              stageBundleFile(file, restored);
-              if (file.content !== null) hooks.fileBoundary?.('restoration_staging_flushed', current, index);
-              publishStagedBundleFile(restored, phase => hooks.fileBoundary?.(`restoration_${phase}`, current, index));
-            } else publishFile(file, record.staging?.restoration?.path,
-              () => hooks.fileBoundary?.('restoration_staging_flushed', current, index), record.mode);
-          });
-        }
-        hooks.fileBoundary?.('after_restore', current, index);
-        assertRecoveryStagingAbsent(record);
-      }
       // Withdrawal is authoritative DB state and is never rolled back here.
       const failure: PublicationFailure | undefined = terminalError ?? (current.error_code ? {code:current.error_code,message:current.error_message ?? 'Publication failed before database completion.',
         ...(current.error_detail ? { detail: current.error_detail as unknown as PublicationFailureDetail } : {})} : undefined);
