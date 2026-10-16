@@ -70,12 +70,15 @@ export function __suppressBeliefTouchedSignalForTests(suppressed: boolean): void
  * pages are the same pages at the same slugs: its rows are `known`'s, with fact
  * entity pages and link endpoints read fresh. With `track_counts` off every part is read.
  */
-export async function readBeliefState(tx: BrainEngine, sourceId: string, slugs: readonly string[], pageIds: readonly number[] = [], known?: RawState): Promise<RawState> {
+export async function readBeliefState(tx: BrainEngine, sourceId: string, slugs: readonly string[], pageIds: readonly number[] = [], known?: RawState,
+  planModePrev?: string): Promise<RawState> {
   // One statement: each part selects the batch's pages itself ($1 source, $2 slugs, $3 page ids) and returns its rows as JSON.
   // Fingerprints of claim texts `known` (the batch's pre-read) already has are not recomputed: the SQL fingerprint
   // is most of a large page's read. The statement runs with a generic plan (restored after): under the default
   // plan_cache_mode a bulk import re-plans it for every page as the tables grow (about 3 ms each, rising with size).
-  // $5 `known`'s counters, $6 its stream pages (id:slug), $7 its facts' entity slugs, $8 the test suppression.
+  // $5 `known`'s counters, $6 its stream pages (id:slug), $7 its facts' entity slugs, $8 the test suppression,
+  // $9 the plan_cache_mode to restore (the statement is planned before it runs, so it restores the mode itself);
+  // `planModePrev`: the caller already switched to generic plans (readLedgerSource's `batch`) and this is the mode it replaced.
   const knownFp = new Map<string, string>([...(known?.facts ?? []).map(f => [f.fact, f.fp] as const), ...(known?.takes ?? []).map(k => [k.claim, k.claim_fp] as const)]);
   const params = [sourceId, [...slugs], [...pageIds], [...knownFp.keys()], known?.counts ?? null, (known?.pages ?? []).map(p => `${p.id}:${p.slug}`),
     [...new Set((known?.facts ?? []).flatMap(f => f.entity_slug == null ? [] : [f.entity_slug]))], touchedSignalSuppressed];
@@ -84,11 +87,12 @@ export async function readBeliefState(tx: BrainEngine, sourceId: string, slugs: 
   const unwritten = (i: number) => `(SELECT ok FROM reuse) AND ($8::boolean OR (${WRITES[i]})::text = ($5::text[])[${i + 1}])`;
   const part = (i: number, sql: string) => `CASE WHEN ${unwritten(i)} THEN NULL ELSE (SELECT COALESCE(json_agg(q), '[]'::json) FROM (
 ${sql}) q) END`;
-  const [mode] = await tx.executeRaw<{ prev: string }>(`SELECT current_setting('plan_cache_mode') AS prev, set_config('plan_cache_mode', 'force_generic_plan', true)`);
+  params.push(planModePrev ?? (await tx.executeRaw<{ prev: string }>(`SELECT current_setting('plan_cache_mode') AS prev,
+    set_config('plan_cache_mode', 'force_generic_plan', true)`))[0]!.prev);
   const [row] = await tx.executeRaw<Record<string, Record<string, unknown>[] | null>>(`WITH reuse AS (SELECT ($8::boolean OR current_setting('track_counts') = 'on')
       AND $5::text[] IS NOT NULL AND ARRAY(SELECT p.id || ':' || p.slug FROM pages p
         WHERE p.source_id = $1 AND (p.slug = ANY($2::text[]) OR p.id = ANY($3::int[])) ORDER BY 1) = ARRAY(SELECT unnest($6::text[]) ORDER BY 1) AS ok)
-  SELECT
+  SELECT set_config('plan_cache_mode', $9, true) AS restored,
     (SELECT COALESCE(json_agg(q), '[]'::json) FROM (
 SELECT p.id, p.slug, p.deleted_at IS NOT NULL AS deleted, p.knowledge_revision::text AS revision,
       p.content_hash, p.trust_tier, (${privatePagesFilterFragment('p')}) AS visible, s.incarnation::text AS incarnation,
@@ -120,7 +124,6 @@ SELECT p.id, p.slug, p.deleted_at IS NOT NULL AS deleted, p.knowledge_revision::
 SELECT p.id, p.slug, p.source_id, s.incarnation::text AS incarnation FROM pages p JOIN sources s ON s.id = p.source_id
       WHERE p.id = ANY(ARRAY(SELECT unnest(ARRAY[e.from_page_id, e.to_page_id, e.origin_page_id])
         FROM ((${OWNED_ROWS('links', PAGE_IDS, ENDS)}) UNION ALL (${OWNED_ROWS('link_transitions', PAGE_IDS, ENDS)})) e))) q) AS endpoints`, params);
-  await tx.executeRaw(`SELECT set_config('plan_cache_mode', $1, true)`, [mode!.prev]);
   const { pages: pageRows, counts, facts, entity_pages: entityPages, takes, links, transitions, endpoints } = row!;
   const byId = new Map(endpoints!.map(r => [Number(r.id), { id: Number(r.id), slug: String(r.slug), source_id: String(r.source_id), incarnation: String(r.incarnation) }]));
   const endpoint = (id: unknown): RawEndpoint | null => id == null ? null : byId.get(Number(id)) ?? null;
@@ -131,7 +134,8 @@ SELECT p.id, p.slug, p.source_id, s.incarnation::text AS incarnation FROM pages 
   return {
     pages,
     facts: facts ? facts.map(r => toFact(r.fp == null ? { ...r, fp: knownFp.get(String(r.fact)) } : r))
-      : known!.facts.map(f => ({ ...f, entity_page_id: f.entity_slug == null ? null : entityPageOf.get(f.entity_slug) ?? null })),
+      : known!.facts.some(f => f.entity_page_id !== (f.entity_slug == null ? null : entityPageOf.get(f.entity_slug) ?? null))
+        ? known!.facts.map(f => ({ ...f, entity_page_id: f.entity_slug == null ? null : entityPageOf.get(f.entity_slug) ?? null })) : known!.facts,
     takes: takes ? takes.map(r => toTake(r.claim_fp == null ? { ...r, claim_fp: knownFp.get(String(r.claim)) } : r)) : known!.takes,
     links: links ? links.map(r => ({ id: Number(r.id), from: endpoint(r.f)!, to: endpoint(r.t)!, origin: endpoint(r.o), link_type: String(r.link_type),
       link_source: (r.link_source as string | null) ?? null, context: String(r.context ?? ''), origin_field: (r.origin_field as string | null) ?? null,

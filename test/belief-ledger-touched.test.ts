@@ -7,7 +7,9 @@
  * touched signal and shows the drift check catches the event it loses.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { __suppressBeliefTouchedSignalForTests, readBeliefState } from '../src/core/belief/state.ts';
+import { __suppressBeliefTouchedSignalForTests, readBeliefState, type RawState } from '../src/core/belief/state.ts';
+import { withBeliefBatch } from '../src/core/belief/ledger.ts';
+import { keyedSubjects } from '../src/core/belief/subjects.ts';
 import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
@@ -88,6 +90,25 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       });
     }, 120_000);
 
+    test('a batch reads state under generic plans and leaves its projections and the rest of the transaction on the mode it found', async () => {
+      await brain(async b => {
+        await seeded(b);
+        const modes = await b.engine.transaction(async tx => {
+          await tx.lockPageKeys([{ sourceId: b.sourceId, slug: SLUG }]);
+          await tx.executeRaw("SET LOCAL plan_cache_mode = 'force_custom_plan'");
+          const mode = async () => (await tx.executeRaw<{ m: string }>("SELECT current_setting('plan_cache_mode') AS m"))[0]!.m;
+          const inside = await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [SLUG], op: 'probe_plan_mode' }, mode);
+          return [inside, await mode()];
+        });
+        expect(modes).toEqual(['force_custom_plan', 'force_custom_plan']);
+        await expect(b.engine.transaction(async tx => {
+          await tx.executeRaw("SET LOCAL plan_cache_mode = 'force_custom_plan'");
+          try { await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [SLUG], op: 'probe_unheld' }, async () => null); } catch {}
+          return (await tx.executeRaw<{ m: string }>("SELECT current_setting('plan_cache_mode') AS m"))[0]!.m;
+        })).resolves.toBe('force_custom_plan');
+      });
+    }, 120_000);
+
     test('with track_counts off the post-read reads every table again', async () => {
       await brain(async b => {
         await seeded(b);
@@ -109,3 +130,18 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     }, 120_000);
   });
 }
+
+test('reused take subjects take their visibility from the side they are keyed for', () => {
+  const page = { id: 7, slug: SLUG, deleted: false, revision: '1', content_hash: null, tier: 'unknown', visible: true, large: false, incarnation: 'i' };
+  const take = { id: 70, page_id: 7, row_num: 1, claim: 'Acme will win', claim_fp: 'fp', kind: 'take', holder: 'brain', weight: 0.5, since_date: null,
+    until_date: null, source: null, active: true, resolved_at: null, resolved_outcome: null, resolved_value: null, resolved_unit: null, resolved_source: null,
+    resolved_by: null, resolved_quality: null, tier: 'unknown' };
+  const pre: RawState = { pages: [page], facts: [], takes: [take], links: [], transitions: [], writerTier: null };
+  const post: RawState = { ...pre, pages: [{ ...page, visible: false }] };
+  const ctx = (state: RawState) => ({ incarnation: 'i', lifetimes: new Map([[7, '00000000-0000-0000-0000-000000000007']]), pagesBySlug: new Map(state.pages.map(p => [p.slug, p])) });
+  const visibility = (state: RawState) => (id: number) => state.pages.find(p => p.id === id)?.visible === false ? 'private' : 'world';
+  const before = keyedSubjects(ctx(pre), pre, visibility(pre));
+  const after = keyedSubjects(ctx(post), post, visibility(post), { state: pre, subjects: before });
+  expect(before.map(s => s.visibility)).toEqual(['world']);
+  expect(after.map(s => [s.key, s.visibility])).toEqual([[before[0]!.key, 'private']]);
+});

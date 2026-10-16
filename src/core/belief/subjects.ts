@@ -50,10 +50,23 @@ export function keyFact(ctx: KeyContext, f: RawFact): { key: string; stream: str
   return { stream, entity, key: factKey(subject, f.fp, f.visibility) };
 }
 
-export function keyedSubjects(ctx: KeyContext, state: RawState, pageVisibility: (pageId: number) => string): Subject[] {
+/**
+ * `earlier`: the same batch's other side, keyed with the same lifetimes. Its fact and take subjects are reused when
+ * `state` carries the very same row arrays over the same pages at the same slugs (the post-read reused them), with
+ * take visibility taken from this side.
+ */
+export function keyedSubjects(ctx: KeyContext, state: RawState, pageVisibility: (pageId: number) => string,
+  earlier?: { state: RawState; subjects: Subject[] }): Subject[] {
+  const samePages = earlier != null && earlier.state.pages.length === state.pages.length
+    && state.pages.every(p => earlier.state.pages.some(q => q.id === p.id && q.slug === p.slug));
+  const reuse = (kind: 'fact' | 'take', rows: unknown[], before: unknown[]) => samePages && rows === before ? earlier!.subjects.filter(s => s.kind === kind) : null;
+  const pageIdBySlug = new Map(state.pages.map(p => [p.slug, p.id]));
   const out: Subject[] = [];
+  const reusedFacts = reuse('fact', state.facts, earlier?.state.facts ?? []);
+  const reusedTakes = reuse('take', state.takes, earlier?.state.takes ?? []);
+  if (reusedFacts) out.push(...reusedFacts);
   const facts = new Map<string, { rows: RawFact[]; stream: string; entity: SubjectRef | null }>();
-  for (const f of state.facts) {
+  for (const f of reusedFacts ? [] : state.facts) {
     const { key, stream, entity } = keyFact(ctx, f);
     const group = facts.get(key) ?? { rows: [], stream, entity };
     group.rows.push(f);
@@ -68,8 +81,9 @@ export function keyedSubjects(ctx: KeyContext, state: RawState, pageVisibility: 
       label: { subject_slug: stream, ...(head.entity_slug && head.entity_slug !== stream ? { entity_slug: head.entity_slug } : {}) } });
   }
   const pagesById = new Map(state.pages.map(p => [p.id, p]));
+  if (reusedTakes) out.push(...reusedTakes.map(t => ({ ...t, visibility: pageVisibility(pageIdBySlug.get(t.stream)!) })));
   const byClaim = new Map<string, RawTake[]>();
-  for (const t of state.takes) {
+  for (const t of reusedTakes ? [] : state.takes) {
     const group = `${t.page_id}\u0000${takeClaimHash(t.claim, t.kind, t.holder)}`;
     byClaim.set(group, [...byClaim.get(group) ?? [], t]);
   }
