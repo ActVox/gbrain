@@ -22,8 +22,10 @@
 import type { BrainEngine } from '../engine.ts';
 import { opError } from '../ops/contract.ts';
 import { SEGMENT_MAX_BYTES } from './limits.ts';
-import { bodyRowWork, confirmBodyPin, openSegmentedBody, readBodyRange, trustedSegments, type BodyPin, type TrustedSegment } from './read-range.ts';
-import { cutBlocked } from './segmenter.ts';
+import { bodyRowWork, confirmBodyPin, openSegmentedBody, readBodyRange, trustedSegments, type BodyPin } from './read-range.ts';
+import { ledgerApplies } from './segment-ledger.ts';
+import { cutBlocked, SEGMENTER_VERSION } from './segmenter.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 import { readEntryState } from './entry-state.ts';
 import type { BodyRegion } from './types.ts';
 
@@ -79,6 +81,11 @@ export interface BodyBlockOptions {
   want?: (run: { seqs: readonly number[]; first: boolean }) => boolean;
   /** Asked before each segment is read: true ends the read with BodyReadStopped (a caller's time budget ran out). */
   stop?: () => boolean;
+  /**
+   * Collects the key (runKey) of each run read whole, when no withdrawal applies to the page (each block's text is its
+   * stored text), so a retained generation's run with the same key need not be read (retainedGenerationBlocks).
+   */
+  runKeys?: Set<string>;
 }
 
 /** bodyBlocks ended before a segment read because `stop` said so; nothing after the blocks already yielded was read. */
@@ -101,7 +108,7 @@ export function blockTooLargeError(slug: string, sourceId: string, bytes: number
  * segment, not after a bare `\r`) and a structural cut before the segment's first line would have been allowed
  * (`cutBlocked` on its stored entry state, the parser state at the cut). Pages of another segmenter version never do.
  */
-function freshAfterForcedCut(previous: Uint8Array, seg: TrustedSegment, stale: boolean): boolean {
+function freshAfterForcedCut(previous: Uint8Array, seg: Pick<CutSegment, 'raw' | 'entryState'>, stale: boolean): boolean {
   if (stale || previous[previous.length - 1] !== 0x0a) return false;
   const entry = readEntryState(seg.entryState);
   if (!entry) return false;
@@ -111,12 +118,62 @@ function freshAfterForcedCut(previous: Uint8Array, seg: TrustedSegment, stale: b
   return !cutBlocked(entry, utf8.decode(seg.raw.subarray(0, end)));
 }
 
+/** One stored segment as the block cutter reads it: where it sits, its stored bytes and entry state, and its text in pieces. */
+interface CutSegment {
+  byteStart: number;
+  byteLen: number;
+  raw: Uint8Array;
+  entryState: unknown;
+  texts: readonly string[];
+}
+
+/**
+ * The texts of one run of segments joined by forced cuts (`segments` in order, the first at stored byte `start`): a
+ * block ends at each forced cut freshAfterForcedCut allows, and one longer than BLOCK_MAX_BYTES refuses with
+ * `page_body_segmented`. Counts each block's bytes and units in segmentedPassWork.
+ */
+async function* runBlocks(segments: AsyncIterable<CutSegment>, start: number, page: { slug: string; sourceId: string }, stale: boolean,
+  collect: (bytes: number) => void): AsyncIterable<string> {
+  let parts: Buffer[] = [];
+  let previous: Uint8Array | null = null;
+  let end = start;
+  const flush = (to: number): string => {
+    const text = Buffer.concat(parts).toString('utf8');
+    collect(to - start);
+    segmentedPassWork.bytes += to - start;
+    segmentedPassWork.blocks += text.length;
+    parts = [];
+    start = to;
+    return text;
+  };
+  for await (const seg of segments) {
+    bodyRowWork.visits++;
+    if (previous && freshAfterForcedCut(previous, seg, stale)) yield flush(seg.byteStart);
+    end = seg.byteStart + seg.byteLen;
+    if (end - start > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, page.sourceId, end - start);
+    for (const text of seg.texts) parts.push(Buffer.from(text, 'utf8'));
+    previous = seg.raw;
+  }
+  yield flush(end);
+}
+
+const toJson = (v: unknown) => typeof v === 'string' ? JSON.parse(v) as unknown : v;
+
+/**
+ * The identity of a run's stored text and of every cut the block cutter can make in it: its region, whether its page is
+ * of another segmenter version, and each segment's SHA-256 and entry state. Two runs with one key yield the same blocks.
+ */
+function runKey(region: BodyRegion, stale: boolean, segments: ReadonlyArray<{ sha256: Uint8Array; entryState: unknown }>): string {
+  return JSON.stringify([region, stale, segments.map(seg => [Buffer.from(seg.sha256).toString('hex'), toJson(seg.entryState)])]);
+}
+
 export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug: string; source_id?: string },
   opts: BodyBlockOptions = {}): AsyncIterable<BodyBlock> {
   const body = await openSegmentedBody(engine, { pageId: Number(page.id) });
   const forced = new Set((await engine.executeRaw<{ seq: number }>(`SELECT seq FROM page_body_manifest WHERE page_id=$1 AND staging_id IS NULL
       AND gen_from<=$2 AND (gen_to IS NULL OR gen_to>$2) AND cut_kind='forced'`, [body.pageId, body.generation])).map(row => Number(row.seq)));
   const collect = readGarbageCollector();
+  const runKeys = opts.runKeys && !ledgerApplies(body.ledger) ? opts.runKeys : undefined;
   let at = 0;
   for (const [n, region] of (opts.regions ?? ['truth', 'timeline'] as const).entries()) {
     if (n > 0) {
@@ -130,36 +187,79 @@ export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug:
       let j = i;
       while (j + 1 < rows.length && forced.has(rows[j]!.seq)) j++;
       bodyRowWork.visits += j - i + 1;
-      if (opts.want && !opts.want({ seqs: rows.slice(i, j + 1).map(row => row.seq), first: i === 0 })) {
+      const run = rows.slice(i, j + 1);
+      i = j + 1;
+      if (opts.want && !opts.want({ seqs: run.map(row => row.seq), first: run[0] === rows[0] })) {
         at = NaN;
-        i = j + 1;
         continue;
       }
-      let parts: Buffer[] = [];
-      let start = rows[i]!.byteStart;
-      let previous: Uint8Array | null = null;
-      const flush = (end: number): BodyBlock => {
-        const text = Buffer.concat(parts).toString('utf8');
-        collect(end - start);
-        segmentedPassWork.bytes += end - start;
-        segmentedPassWork.blocks += text.length;
+      const stop = opts.stop;
+      const read: Array<{ sha256: Uint8Array; entryState: unknown }> = [];
+      const segments = async function* (): AsyncIterable<CutSegment> {
+        for await (const seg of trustedSegments(engine, body, run, stop && (() => { if (stop()) throw new BodyReadStopped(page.slug); }))) {
+          bodyRowWork.visits++;
+          read.push({ sha256: seg.row.sha256, entryState: seg.entryState });
+          yield { byteStart: seg.row.byteStart, byteLen: seg.row.byteLen, raw: seg.raw, entryState: seg.entryState, texts: seg.pieces.map(piece => piece.text) };
+        }
+      };
+      for await (const text of runBlocks(segments(), run[0]!.byteStart, { slug: page.slug, sourceId: body.sourceId }, body.stale, collect)) {
         const block = { region, text, at };
         at += text.length;
-        parts = [];
-        start = end;
-        return block;
-      };
-      const stop = opts.stop;
-      for await (const seg of trustedSegments(engine, body, rows.slice(i, j + 1), stop && (() => { if (stop()) throw new BodyReadStopped(page.slug); }))) {
-        bodyRowWork.visits++;
-        if (previous && freshAfterForcedCut(previous, seg, body.stale)) yield flush(seg.row.byteStart);
-        const end = seg.row.byteStart + seg.row.byteLen;
-        if (end - start > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, body.sourceId, end - start);
-        for (const piece of seg.pieces) parts.push(Buffer.from(piece.text, 'utf8'));
-        previous = seg.raw;
+        yield block;
       }
-      yield flush(rows[j]!.byteStart + rows[j]!.byteLen);
+      runKeys?.add(runKey(region, body.stale, read));
+    }
+  }
+}
+
+/**
+ * @internal Retained-generation reads, for the bounded-work test: bytes of the runs a retained generation read
+ * (`bytes`) and of the runs it skipped because a run with the same key was already read (`skipped`). Counts, not time.
+ */
+export const retainedGenerationWork = { bytes: 0, skipped: 0 };
+
+/**
+ * The stored text of a retained segmented generation (a segmented page_versions row references a generation; its body
+ * columns are NULL) as `${compiled_truth}\n${timeline}`, cut into blocks as bodyBlocks cuts the live body (runBlocks),
+ * from the generation's manifest rows, so a page demoted inline since still yields its segmented versions. Rows that do
+ * not tile the version's body_bytes refuse with page_body_rows_unreadable (body-tiling.ts) before any text is read. A run whose
+ * key is in `seen` (a run of the live body read without an overlay, or of a generation read before) is skipped, and
+ * each run read is added to it. `stop` is asked before each segment read, as in bodyBlocks.
+ */
+export async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'executeRaw' | 'readManifest' | 'readSegmentTexts'>,
+  page: { id: number; slug: string; sourceId: string }, generation: number,
+  opts: { seen?: Set<string>; stop?: () => boolean } = {}): AsyncIterable<string> {
+  const rows = await engine.readManifest(page.id, { generation });
+  await assertGenerationTiles(engine, page.id, generation, rows);
+  const [state] = await engine.executeRaw<{ segmenter_version: number | null }>('SELECT segmenter_version FROM pages WHERE id=$1', [page.id]);
+  const stale = Number(state?.segmenter_version) !== SEGMENTER_VERSION;
+  const collect = readGarbageCollector();
+  for (const [n, region] of (['truth', 'timeline'] as const).entries()) {
+    if (n > 0) yield '\n';
+    const own = rows.filter(row => row.region === region);
+    for (let i = 0; i < own.length;) {
+      let j = i;
+      while (j + 1 < own.length && own[j]!.cutKind === 'forced') j++;
+      const run = own.slice(i, j + 1);
       i = j + 1;
+      const bytes = run.reduce((sum, row) => sum + row.byteLen, 0);
+      const key = runKey(region, stale, run);
+      if (opts.seen?.has(key)) {
+        retainedGenerationWork.skipped += bytes;
+        continue;
+      }
+      opts.seen?.add(key);
+      retainedGenerationWork.bytes += bytes;
+      const segments = async function* (): AsyncIterable<CutSegment> {
+        for (const row of run) {
+          if (opts.stop?.()) throw new BodyReadStopped(page.slug);
+          const hex = Buffer.from(row.sha256).toString('hex');
+          const raw = (await engine.readSegmentTexts(page.sourceId, [row.sha256])).get(hex);
+          if (raw === undefined) throw new Error(`Segment text of page ${page.id} generation ${generation} is missing.`);
+          yield { byteStart: row.byteStart, byteLen: row.byteLen, raw, entryState: toJson(row.entryState), texts: [utf8.decode(raw)] };
+        }
+      };
+      yield* runBlocks(segments(), run[0]!.byteStart, page, stale, collect);
     }
   }
 }
