@@ -10,9 +10,10 @@ export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
  * Writers older than this do not understand segmented page bodies (Wave B): a pre-Wave-B binary reads a segmented
  * page's NULL body columns, and the release that added segmented storage behind the switch purges, forgets and exports
  * without its segment texts. A recent one keeps `pages.segmented_storage` effectively off (`page-body/limits.ts`).
- * A placeholder equal to the branch's VERSION until the merge-slot stamp, which sets it to the release that turns the
- * switch on (the `since` of its BEHAVIOR_CHANGES row, pinned by test/large-pages/segmented-switch.test.ts). That
- * release must be above v0.60.252.0, the release that added segmented storage with the switch off. A version alone
+ * v0.60.290.0 shipped segment readers with the switch off, but its withdrawal mirror skips segmented pages and its
+ * projection builder renews a claim it may have lost, so the floor is the release that turns the switch on: a
+ * placeholder equal to the branch's VERSION until the merge-slot stamp sets it and the `since` of the switch-on
+ * BEHAVIOR_CHANGES row to the same release (pinned by test/large-pages/segmented-switch.test.ts). A version alone
  * cannot tell a build with segment readers from a release of the same version without them (every release from
  * v0.60.252.0 until the stamp has none), so the gate also requires the segment-reader mark (migration v254) on
  * every write it sees: an unmarked writer blocks whatever its version, the floor included (`segmentedGateWriters`).

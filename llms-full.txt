@@ -5710,7 +5710,7 @@ and the fix is the read-only `gbrain migrate --to postgres --plan --json`.
 | Cost | Free | Supabase Pro ($25/mo) |
 | Concurrency | Single process | Connection pooling |
 | Backups | Manual (file copy) | Managed by Supabase |
-| Largest page | 24 MiB; 128 MiB stored in segments with `pages.segmented_storage on` (`pages.max_bytes`) | 24 MiB; 256 MiB stored in segments with `pages.segmented_storage on` (`pages.max_bytes`) |
+| Largest page | 128 MiB, stored in segments (`pages.max_bytes`) | 256 MiB, stored in segments (`pages.max_bytes`) |
 
 **The belief ledger lives only in the database.** `belief_events` and its side tables record what the brain had recorded, and when (`gbrain beliefs status`). Markdown carries only current state, so a rebuild from Markdown, `gbrain reinit-pglite` or a dropped database starts an empty history; back up the database itself. After restoring a Postgres (or PGLite) backup, replay the purges made after the backup was taken: until then content purged later is readable again, and `gbrain doctor --only belief_ledger_coverage` reports a restore whose purge replay was partial, unavailable or unverified. Graduation copies the ledger verbatim (equal event keys and digests); the legacy copier refuses a brain that has one.
 
