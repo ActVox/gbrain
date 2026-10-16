@@ -16,6 +16,12 @@ const CODE_REPAIR = 'For code metadata repair, run `gbrain reindex-code --force 
  */
 export async function checkProjectionReadiness(engine: BrainEngine, scope: PageReadScope = {}, opts: { resident?: boolean } = {}): Promise<Check> {
   const readiness = await probeProjectionReadiness(engine, scope);
+  // Wave B: pages stored in segments whose chunks were not built after their write committed (not searchable yet);
+  // counted brain-wide, so only for an unscoped (local) doctor.
+  const segmented = readiness.status === 'projection_pending' && Object.keys(scope).length === 0 ? Number((await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM pages
+    WHERE deleted_at IS NULL AND body_storage='segmented' AND text_projection_revision IS DISTINCT FROM knowledge_revision`).catch(() => []))[0]?.n ?? 0) : 0;
+  const segmentedNote = segmented ? ` ${segmented} page(s) stored in segments are not searchable yet; ${opts.resident
+    ? 'the resident builds them too.' : '`gbrain projections drain` builds them as well.'}` : '';
   return {
     name: 'text_projection_readiness',
     status: readiness.ready ? 'ok' : 'warn',
@@ -24,9 +30,9 @@ export async function checkProjectionReadiness(engine: BrainEngine, scope: PageR
       : readiness.status === 'projection_pending'
         ? `Visible pages have missing or stale text projections; search and code results may be incomplete. ${opts.resident
           ? 'The resident gbrain process that holds this PGLite brain is rebuilding queued Markdown and code projections (up to 100 pages per pass, fewer while writes wait). On the brain host, `gbrain doctor` shows the pending count and how to drain faster.'
-          : 'Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres.'} ${CODE_REPAIR} ${UNCHANGED}`
+          : 'Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres.'}${segmentedNote} ${CODE_REPAIR} ${UNCHANGED}`
         : 'Text projection readiness is unknown because its read-only probe failed; index completeness could not be verified.',
-    details: { readiness: readiness.status, ready: readiness.ready },
+    details: { readiness: readiness.status, ready: readiness.ready, ...(segmented ? { segmented_pending: segmented } : {}) },
   };
 }
 

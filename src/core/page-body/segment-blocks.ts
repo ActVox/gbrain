@@ -62,6 +62,11 @@ export interface BodyBlockOptions {
   regions?: readonly BodyRegion[];
   /** Text between two regions (default '\n', as in `${compiled_truth}\n${timeline}`). */
   separator?: string;
+  /**
+   * Read only the runs this accepts (the manifest seqs of a block, and whether it is its region's first); it is asked
+   * as each run is reached, so it may depend on the blocks already read. A block after a skipped run has `at` NaN.
+   */
+  want?: (run: { seqs: readonly number[]; first: boolean }) => boolean;
 }
 
 /** `page_body_segmented`: a run a derived pass must read whole is over BLOCK_MAX_BYTES. */
@@ -90,6 +95,11 @@ export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug:
       while (j + 1 < rows.length && forced.has(rows[j]!.seq)) j++;
       const start = rows[i]!.byteStart;
       const end = rows[j]!.byteStart + rows[j]!.byteLen;
+      if (opts.want && !opts.want({ seqs: rows.slice(i, j + 1).map(row => row.seq), first: i === 0 })) {
+        at = NaN;
+        i = j + 1;
+        continue;
+      }
       if (end - start > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, body.sourceId, end - start);
       const parts: Buffer[] = [];
       for await (const piece of readBodyRange(engine, { pageId: body.pageId, space: 'stored', start, end, audience: 'trusted', region, body })) parts.push(piece.bytes);

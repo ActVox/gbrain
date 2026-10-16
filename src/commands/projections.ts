@@ -1,7 +1,8 @@
 /**
  * `gbrain projections drain` (#5401): rebuilds queued Markdown and code text
  * projections in-process, in batches of up to 100, until every row queued
- * before the run started has been tried once. Trusted local CLI only; it is not
+ * before the run started has been tried once; pages stored in segments go
+ * first through buildSegmentedProjection, skipping a live claim (Wave B). Trusted local CLI only; it is not
  * an operation, so MCP and remediation cannot run it.
  *
  * Postgres: safe beside a resident owner, because each page is rebuilt under
@@ -26,7 +27,8 @@ export const PROJECTION_DRAIN_DOCS = 'docs/guides/repair.md#projection-drain';
 export const PROJECTIONS_HELP = `Usage: gbrain projections drain [--limit <n>] [--json]
 
 Rebuild queued Markdown and code text projections now, in batches of up to 100,
-until every row queued before the run started has been tried once.
+until every row queued before the run started has been tried once. Pages stored
+in segments are built first, except one another gbrain process is building.
 
   --limit <n>   Try at most n pages in this run (default: no cap)
   --json        Print {rebuilt, superseded, failed, remaining} to stdout

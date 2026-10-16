@@ -3,8 +3,9 @@
  * segmented page do O(page) work.
  *
  * Protects: links (with temporal inputs), takes, timeline (entries and the
- * stored canonical map), mentions and the watermark planner, run over a
- * segmented page, count their work in `segmentedPassWork`: bytes read, units
+ * stored canonical map), mentions, the watermark planner, the facts fence
+ * view, the stale-cache file comparison and the conversation parser input,
+ * run over a segmented page, count their work in `segmentedPassWork`: bytes read, units
  * of the blocks yielded and of the link windows built around them, and units
  * copied past a block (a takes fence join, the planner's tail window). Counts,
  * not CPU time, so a co-tenant cannot move them.
@@ -17,10 +18,12 @@
  * Why existing coverage misses it: segmented-derived-parity checks results and
  * reads per call; segmented-derived-memory bounds memory, not work.
  * Seams: `segmentedPassWork` (@internal counters in segment-blocks.ts).
- * Measured (deterministic; per byte at n, doubling ratio): bytes 6.86 x2.00
+ * Measured (deterministic; per byte at n, doubling ratio): bytes 10.82 x1.99
  * (seven page reads: role phrases, link windows, takes, timeline, canonical
- * timeline, mentions, the planner's truth), blocks 5.88 x2.00, windows 2.00
- * x2.00 (a window holds the whole block before its own), carry 0.52 x1.99.
+ * timeline, mentions, the planner's truth; the file read twice and the stored
+ * body once for the stale-cache check; the conversation input; the fence view
+ * reads only its marker segments), blocks 5.95 x1.99, windows 2.00 x2.00 (a
+ * window holds the whole block before its own), carry 0.52 x1.99.
  * Prefix-re-reading driver (n = 1 MiB): bytes and blocks x2.68.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -31,6 +34,12 @@ import { extractSegmentedPageLinks } from '../../src/core/page-body/segment-link
 import { bodyBlocks, segmentedPassWork } from '../../src/core/page-body/segment-blocks.ts';
 import { parseTakesFenceBlocks } from '../../src/core/page-body/segment-takes.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../../src/core/takes-fence.ts';
+import { FACTS_FENCE_BEGIN, FACTS_FENCE_END } from '../../src/core/facts-fence.ts';
+import { segmentedBodyMatchesFile, segmentedFactsFenceView } from '../../src/core/page-body/segment-facts.ts';
+import { readSegmentedConversationInput } from '../../src/core/page-body/segment-conversation.ts';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { segmentedTimelineText } from '../../src/core/timeline-extract.ts';
 import { storedCanonicalTimeline } from '../../src/core/persistence/canonical-projections.ts';
 import { pageMentions } from '../../src/core/mentions/pass.ts';
@@ -43,9 +52,10 @@ import { countWorkAsync, describeWork, linearityViolations, MAX_DOUBLING_RATIO, 
 
 const MB = 1024 * 1024;
 /** Per input byte, about 2x the measured value or more. */
-const PER_BYTE = { 'pass.bytes': 14, 'pass.blocks': 12, 'pass.windows': 4, 'pass.carry': 1.2 };
+const PER_BYTE = { 'pass.bytes': 22, 'pass.blocks': 12, 'pass.windows': 4, 'pass.carry': 1.2 };
 
 let engine: PGLiteEngine;
+let dir: string;
 
 /** `bytes` of linked, dated, mentioning conversation with a takes fence mid-page and dated bullets in the timeline. */
 function page(bytes: number): string {
@@ -55,6 +65,8 @@ function page(bytes: number): string {
     parts.push(`## Section ${i}\n\n${conversationBody(64 * 1024, { seed: 100 + i })}\n\n`
       + `- **2026-03-${String(10 + (i % 18)).padStart(2, '0')}** Met [[people/alice-example]] and [Acme Example](../companies/acme-example.md) about launch ${i}; `
       + `Alice Example reviewed it.\n\n`);
+    if (i === Math.floor(units / 3)) parts.push(`## Facts\n\n${FACTS_FENCE_BEGIN}\n| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n`
+      + `|---|-------|------|------------|------------|------------|------------|-------------|--------|---------|\n| 1 | Ships quarterly | fact | 1.0 | world | medium |  |  | notes |  |\n${FACTS_FENCE_END}\n\n`);
     if (i === Math.floor(units / 2)) parts.push(`${TAKES_FENCE_BEGIN}\n| # | claim | kind | who | weight | since | source |\n|---|-------|------|-----|--------|-------|--------|\n`
       + `| 1 | Acme ships quarterly | fact | world | 1.0 | 2026-01 | notes |\n${TAKES_FENCE_END}\n\n`);
   }
@@ -86,6 +98,9 @@ async function passes(slug: string): Promise<void> {
   const plan = await planSegmentedExtraction(engine, Number(p.id), { pipelineVersion: EXTRACTION_PIPELINE_VERSION.facts_backstop, bytes: half, sha256: '0'.repeat(64) },
     { cap: 8000, pipeline: 'facts_backstop', emptyTail: 'skip' });
   expect(plan.mode).toBe('head');
+  expect((await segmentedFactsFenceView(engine, p)).body.facts).toHaveLength(1);
+  expect(await segmentedBodyMatchesFile(engine, p, join(dir, `${slug.replace('/', '-')}.md`))).toBe('fresh');
+  expect((await readSegmentedConversationInput(engine, p)).window).toBeUndefined();
 }
 
 /** The deliberately quadratic driver: re-reads the body's prefix through bodyBlocks before each block. */
@@ -103,16 +118,19 @@ const sample = async (bytes: number, slug: string, run: (slug: string) => Promis
   ({ bytes, work: await countWorkAsync({ pass: segmentedPassWork }, () => run(slug)) });
 
 beforeAll(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'segmented-linear-'));
   engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
   await engine.setConfig('pages.segmented_storage', 'on');
   await engine.putPage('people/alice-example', { type: 'person', title: 'Alice Example', compiled_truth: 'Fixture.', timeline: '', frontmatter: {} }, { sourceId: 'default' });
   await engine.putPage('companies/acme-example', { type: 'company', title: 'Acme Example', compiled_truth: 'Fixture.', timeline: '', frontmatter: {} }, { sourceId: 'default' });
   for (const [slug, bytes] of [['notes/linear-1', MB], ['notes/linear-2', 2 * MB], ['notes/linear-4', 4 * MB], ['notes/linear-8', 8 * MB]] as const) {
-    expect(await importFromContent(engine, slug, page(bytes), { sourceId: 'default', noEmbed: true })).toMatchObject({ status: 'imported' });
+    const content = page(bytes);
+    writeFileSync(join(dir, `${slug.replace('/', '-')}.md`), content);
+    expect(await importFromContent(engine, slug, content, { sourceId: 'default', noEmbed: true })).toMatchObject({ status: 'imported' });
   }
 }, 600_000);
 
-afterAll(async () => { await engine.disconnect(); });
+afterAll(async () => { await engine.disconnect(); rmSync(dir, { recursive: true, force: true }); });
 
 describe('derived pass work over a segmented page', () => {
   test('work per byte is bounded and doubles with the page', async () => {

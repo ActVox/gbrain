@@ -346,6 +346,11 @@ Receipts include `request_id`, `state`, and `retry_after_ms`, with optional
 revision, outcome, persistence status, and timestamps. Terminal receipts have
 `retry_after_ms: null`. Private queued content, credential hashes, and recovery
 bytes are never part of the receipt.
+A committed write of a page stored in segments also says whether search sees
+it yet: `searchable: true`, or `searchable: "pending"` with
+`searchable_retry_after_ms` and `searchable_fix` (read the receipt again) while
+its chunks are built after commit; see
+[when a segmented write is searchable](memory-boundaries.md#segmented-searchable).
 
 Nonterminal receipts may include a validated `diagnostic` with `age_ms`,
 `assessment` (`pending`, `blocked`, or `stalled`), a closed `reason`, and

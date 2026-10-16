@@ -204,7 +204,7 @@ export async function runMaintenanceSweep(
         // subquery) rather than every row a bulk-sync day may have touched.
         const rows = await engine.executeRaw<{ slug: string }>(
           `SELECT slug FROM (
-             SELECT slug, compiled_truth, updated_at FROM pages
+             SELECT id, slug, compiled_truth, body_storage, updated_at FROM pages
               WHERE source_id = $1
                 AND deleted_at IS NULL
                 AND updated_at >= $2::timestamptz
@@ -212,6 +212,8 @@ export async function runMaintenanceSweep(
               LIMIT $4
            ) AS recent
             WHERE compiled_truth LIKE $3
+               OR (body_storage = 'segmented' AND EXISTS (SELECT 1 FROM page_body_manifest m
+                     WHERE m.page_id = recent.id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.facts_slots <> '[]'::jsonb))
             ORDER BY updated_at DESC
             LIMIT $5`,
           [sourceId, cutoffIso, `%${FACTS_FENCE_BEGIN_MARKER}%`, FENCE_LIKE_SCAN_CAP, batchLimit],

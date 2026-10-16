@@ -291,6 +291,12 @@ its own: each pass rebuilds up to 100 pages and starts no new page after
 250 ms, and takes 2 pages while writes are waiting. A page whose rebuild fails
 is retried after 30 seconds.
 
+Pages stored in segments are drained first, one build each; a page another
+gbrain process is building (its claim renewed within the last 60 seconds) is
+left to that process. This is how a brain with no resident (CLI only, or
+driven by cron) makes a large new page searchable after its post-commit build
+died.
+
 To drain now:
 
 ```bash
