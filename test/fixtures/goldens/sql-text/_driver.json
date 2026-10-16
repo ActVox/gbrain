@@ -1265,12 +1265,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 8,
@@ -1310,12 +1310,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 10,
@@ -1339,12 +1339,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 7,
@@ -1366,12 +1366,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 8,
