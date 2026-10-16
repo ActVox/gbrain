@@ -9,6 +9,7 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { readBeliefHistory } from '../src/core/belief/history.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain } from './helpers/belief-ledger.ts';
 
 const remote = (b: BeliefBrain, slug?: string) => readBeliefHistory(b.engine, { sourceId: b.sourceId, slug, remote: true });
@@ -72,8 +73,13 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         // Forced probe: the recorded-visibility rule alone still shows the world assertion of the claim made private.
         expect((await local(b, 'companies/acme-example')).some(e => e.visibility === 'world' && JSON.stringify(e.value ?? {}).includes('payroll'))).toBe(true);
         // A re-added source is a new incarnation of the same id (probe 17).
-        await b.engine.executeRaw('DELETE FROM page_write_guards WHERE source_incarnation = (SELECT incarnation FROM sources WHERE id = $1)', [b.sourceId]);
-        await b.engine.executeRaw('UPDATE sources SET incarnation = gen_random_uuid() WHERE id = $1', [b.sourceId]);
+        // The background consumer keeps writing page guards for the old incarnation, so stop it, then swap under the source row lock.
+        await disposePersistenceConsumer(b.engine);
+        await b.engine.transaction(async tx => {
+          await tx.executeRaw('SELECT 1 FROM sources WHERE id = $1 FOR UPDATE', [b.sourceId]);
+          await tx.executeRaw('DELETE FROM page_write_guards WHERE source_incarnation = (SELECT incarnation FROM sources WHERE id = $1)', [b.sourceId]);
+          await tx.executeRaw('UPDATE sources SET incarnation = gen_random_uuid() WHERE id = $1', [b.sourceId]);
+        });
         expect(await local(b, 'companies/acme-example')).toEqual([]);
       }, { databaseUrl: engineCase.databaseUrl });
     }, 120_000);
