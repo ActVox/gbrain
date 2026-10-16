@@ -71,6 +71,7 @@ test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
 test/large-pages/forget-reason-segmented.test.ts
 test/large-pages/forget-scope.test.ts
+test/large-pages/held-budget-shrink.test.ts
 test/large-pages/managed-import-outside-root.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
@@ -107,6 +108,7 @@ test/large-pages/segmented-embedding-paths.test.ts
 test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-evidence-read-cost.test.ts
 test/large-pages/segmented-evidence.test.ts
+test/large-pages/segmented-extraction-stale.test.ts
 test/large-pages/segmented-facts-forced-lines.test.ts
 test/large-pages/segmented-facts-reconcile.test.ts
 test/large-pages/segmented-file-drift-ledger.test.ts

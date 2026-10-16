@@ -38,6 +38,7 @@ import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import { splitEmbeddingSignature, lockEmbeddingSources } from '../embedding-invalidation.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from '../embed-skip.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from '../quarantine.ts';
+import { pageBudgetLimitedFilter } from '../page-size-policy.ts';
 import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
 import { mapChunkWindowRows, type ChunkWindowOpts, type ChunkWindowPage, type ChunkWindowRequest } from '../search/chunk-windows.ts';
 import type { SqlExecutor } from './executor.ts';
@@ -62,6 +63,9 @@ export interface ChunkPageGuards {
 export type ChunkTransactionRunner = <T>(fn: (tx: Pick<BrainEngine, 'executeRaw'>) => Promise<T>) => Promise<T>;
 
 type StaleChunkOpts = { sourceId?: string; signature?: string; includeNullSignature?: boolean };
+
+/** Held or capped large pages (page-embedding-budget.ts) leave the embedding queue while the hold applies. */
+const budgetLimited = trustedSql(pageBudgetLimitedFilter('p'));
 
 export async function upsertChunksOnce(
   exec: SqlExecutor,
@@ -512,8 +516,8 @@ function staleChunkWhere(column: string, opts?: StaleChunkOpts): SqlFragment {
     conds.push(sqlFragment`${staleColRef} IS NULL`);
   }
   conds.push(sqlFragment`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
-  // Large pages held for approval or at their spend cap (page-embedding-budget.ts) leave the queue until it changes.
-  conds.push(sqlFragment`NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')`);
+  // Large pages held for approval or at their spend cap (page-embedding-budget.ts) leave the queue until it changes or the page is no longer large.
+  conds.push(sqlFragment`NOT ${budgetLimited}`);
   if (opts?.sourceId !== undefined) conds.push(sqlFragment`p.source_id = ${opts.sourceId}`);
   return joinFragments(conds, ' AND ');
 }
@@ -619,7 +623,7 @@ export async function invalidateContentDriftEmbeddings(
             AND cc.${colId} IS NOT NULL
             AND cc.embedded_text_hash IS NOT NULL
             AND cc.embedded_text_hash <> md5(cc.chunk_text)
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')${srcClause}
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}${srcClause}
           RETURNING cc.page_id`);
       return (await tx.executeRaw(text, params)).length;
     });
@@ -657,7 +661,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
             FROM content_chunks cc
             JOIN pages p ON p.id = cc.page_id
             WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')
+              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}
               AND ${generation}
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT ${limit}
@@ -668,7 +672,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
             FROM content_chunks cc
             JOIN pages p ON p.id = cc.page_id
             WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')
+              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}
               AND ${generation}
               AND (
                 p.updated_at < ${afterUpdated}::timestamptz
@@ -687,7 +691,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
           JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
             AND p.source_id = ${opts.sourceId}
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}
               AND ${generation}
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
           LIMIT ${limit}
@@ -699,7 +703,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
           JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
             AND p.source_id = ${opts.sourceId}
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}
               AND ${generation}
             AND (
               p.updated_at < ${afterUpdated}::timestamptz
@@ -718,7 +722,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}
               AND ${generation}
             AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
           ORDER BY cc.page_id, cc.chunk_index
@@ -732,7 +736,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
         JOIN pages p ON p.id = cc.page_id
         WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
           AND p.source_id = ${opts.sourceId}
-          AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = p.id AND peb.state <> 'open')
+          AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND NOT ${budgetLimited}
               AND ${generation}
           AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
         ORDER BY cc.page_id, cc.chunk_index
