@@ -29,11 +29,11 @@ type Sql = ReturnType<typeof postgres>;
 const serverJit = new WeakMap<object, Promise<boolean>>();
 
 /** Whether a statement on this pool needs the JIT-off envelope; a failed read counts as on, since the envelope is always correct. */
+// engine-sql-ok: jit is a Postgres server setting; PGLite has no JIT provider
 export function needsJitOff(pool: Sql, nested: boolean): Promise<boolean> {
   if (nested) return Promise.resolve(true);
   let known = serverJit.get(pool);
   if (!known) {
-    // engine-sql-ok: jit is a Postgres server setting; PGLite has no JIT provider
     known = pool.unsafe(`SELECT current_setting('jit') AS jit`).then(rows => (rows[0] as { jit?: string } | undefined)?.jit !== 'off');
     serverJit.set(pool, known);
     known.catch(() => { if (serverJit.get(pool) === known) serverJit.delete(pool); });
