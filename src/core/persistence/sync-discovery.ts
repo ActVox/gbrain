@@ -214,6 +214,32 @@ export async function resolveManagedSyncContext(engine: BrainEngine, opts: SyncO
       why: 'The sync command routes a connector source to its own coordinator.' } });
   return { binding, root, gitRoot, sourceId, incarnation: source.incarnation, source };
 }
+/** #6865: which Git paths of one managed source sync admits, and the page origin each maps to under the source's slug mode. */
+export interface SyncEligibility { scope: string; slugMode: 'git-root' | 'source-root'; nativeRoot: string; nativeGitRoot: string;
+  eligible: (gitPath: string) => boolean; sourcePath: (gitPath: string) => string; }
+/**
+ * #6865: the eligibility rules managed discovery applies to a Git path (the source's scope, `sync.exclude`, `sync.include_hidden`,
+ * the strategy and reserved skillpack paths) and the origin a path maps to under the slug mode. Discovery and the unindexed-file
+ * detector share this one definition, so a file the detector reports is a file a sync would screen.
+ */
+export async function loadSyncEligibility(engine: BrainEngine, context: Pick<ManagedSyncContext, 'root' | 'gitRoot' | 'sourceId' | 'source'>,
+  opts: Pick<SyncOpts, 'strategy' | 'exclude' | 'includeHidden' | 'srcSubpath'> = {}, company = !!currentCompanyBrainSync(context.sourceId)): Promise<SyncEligibility> {
+  const strategy = opts.strategy ?? context.source.config?.strategy ?? 'markdown';
+  const nativeRoot = realpathSync.native(context.root), nativeGitRoot = realpathSync.native(context.gitRoot);
+  const scope = relative(nativeGitRoot, nativeRoot).split(sep).join('/');
+  const probe = resolveSlugForPath(join(scope, 'x.md'));
+  const slugMode = company ? 'source-root' : scope ? await resolveSlugRootMode(engine, { sourceId: context.sourceId, explicitGitRoot: opts.srcSubpath !== undefined,
+    slugPrefix: probe.slice(0, -2), dryRun: true }) : 'git-root';
+  const sourcePath = (path: string) => slugMode === 'source-root' && scope ? path.slice(scope.length + 1) : path;
+  const exclude = await syncExcludePatterns(engine, opts.exclude);
+  const includeHidden = [...new Set([...(opts.includeHidden ?? []), ...(await engine.getConfig('sync.include_hidden') ?? '')
+    .split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
+  // Reserved skillpack paths belong to the shared skill publisher; the managed importer always refuses them.
+  const eligible = (path: string) => (!scope || path.startsWith(`${scope}/`)) &&
+    !matchesAnyGlob(scope ? path.slice(scope.length + 1) : path, exclude) && !isReservedSkillBundlePath(sourcePath(path)) &&
+    isSyncable(path, { strategy: strategy as 'markdown', includeHidden });
+  return { scope, slugMode, nativeRoot, nativeGitRoot, eligible, sourcePath };
+}
 /** The cursor bound: entries and serialized bytes one frozen manifest may hold. */
 let cursorBound = { entries: 100_000, bytes: 16 * 1024 ** 2 };
 /** Test seam: a smaller cursor bound (call with no argument to restore the default). */
@@ -281,21 +307,8 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     const resume = await resumableSliceStage(engine, opts, gitRoot, sourceId, incarnation);
     if (resume) return discoverManagedSync(engine, opts, context ?? { binding, root, gitRoot, sourceId, incarnation, source }, resume, walk);
   }
-  const strategy = opts.strategy ?? source.config?.strategy ?? 'markdown';
-  const nativeRoot = realpathSync.native(root), nativeGitRoot = realpathSync.native(gitRoot);
-  const scope = relative(nativeGitRoot, nativeRoot).split(sep).join('/');
-  const probe = resolveSlugForPath(join(scope, 'x.md'));
-  const slugMode = company ? 'source-root' : scope ? await resolveSlugRootMode(engine, { sourceId, explicitGitRoot: opts.srcSubpath !== undefined,
-    slugPrefix: probe.slice(0, -2), dryRun: true }) : 'git-root';
-  const sourcePath = (path: string) => slugMode === 'source-root' && scope ? path.slice(scope.length + 1) : path;
+  const { scope, slugMode, nativeRoot, nativeGitRoot, eligible, sourcePath } = await loadSyncEligibility(engine, { root, gitRoot, sourceId, source }, opts, !!company);
   const originScope: SyncOriginScope = { sourceId, root, scope, slugMode };
-  const exclude = await syncExcludePatterns(engine, opts.exclude);
-  const includeHidden = [...new Set([...(opts.includeHidden ?? []), ...(await engine.getConfig('sync.include_hidden') ?? '')
-    .split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
-  // Reserved skillpack paths belong to the shared skill publisher; the managed importer always refuses them.
-  const eligible = (path: string) => (!scope || path.startsWith(`${scope}/`)) &&
-    !matchesAnyGlob(scope ? path.slice(scope.length + 1) : path, exclude) && !isReservedSkillBundlePath(sourcePath(path)) &&
-    isSyncable(path, { strategy: strategy as 'markdown', includeHidden });
   const target = stage?.target ?? company?.plan.revision?.commit ?? syncGit(gitRoot, ['rev-parse', 'HEAD']).trim();
   const head = stage?.head ?? target;
   const slicing = stage?.slice ?? null;
