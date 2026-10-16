@@ -33,6 +33,8 @@ import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
 import { setRowTier } from '../src/core/trust/page-handlers.ts';
 import { extractTakesFromDb } from '../src/core/cycle/extract-takes.ts';
 import { materializeSegmentedBody } from '../src/core/page-body/ingest.ts';
+import { runRepairCommand } from '../src/commands/repair.ts';
+import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -281,6 +283,78 @@ describe('held removals (W1 #6783 §12 (a))', () => {
       expect((await listTrustProposals(engine, { sourceId: b.sourceId })).filter(p => p.status === 'pending')).toHaveLength(2);
     }
   }), 120_000);
+});
+
+/** The v0.60.253.0 accept of a held take whose fence row kept its claim: an owner takes_remove bound to the proposal (what that release ran). */
+async function acceptAsV253(b: Brain, proposalId: number, slug: string, rowNum: number) {
+  const nonce = randomUUID();
+  await b.engine.executeRaw(`UPDATE trust_proposals SET after_state = after_state || jsonb_build_object('accept_nonce', $2::text) WHERE id = $1`, [proposalId, nonce]);
+  await submitPageMutation(b.local as never, { operation: 'takes_remove', params: { slug, source_id: b.sourceId, row_num: rowNum,
+    trust_accept: proposalId, trust_accept_nonce: nonce, request_id: randomUUID() } });
+}
+async function repairCli(b: Brain, args: string[]): Promise<Record<string, any>> {
+  let printed = '';
+  const original = console.log, write = process.stdout.write;
+  console.log = (...parts: unknown[]) => { printed += `${parts.map(String).join(' ')}\n`; };
+  process.stdout.write = ((chunk: string | Uint8Array) => { printed += String(chunk); return true; }) as typeof process.stdout.write;
+  try { await runRepairCommand(b.engine, [...args, '--source', b.sourceId, '--json']); } finally { console.log = original; process.stdout.write = write; }
+  return JSON.parse(printed).results[0];
+}
+
+describe('gbrain repair accepted-takes (the v0.60.253.0 accept bug)', () => {
+  test('a take the v0.60.253.0 accept removed stays gone through a republish and reconcile; the repair restores exactly the accepted row from the records (managed and unmanaged)', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const [engine, managed] of engines.flatMap(e => [[e, true], [e, false]] as const)) {
+      const b = await brain(engine);
+      if (!managed) await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      const slug = 'people/mina-example';
+      await run(b.local, 'put_page', { slug, content: page('Mina', 'Mina.') });
+      for (const claim of ['Mina will move to Lima', 'Mina prefers tea', 'Mina ships the atlas']) await run(b.local, 'takes_add', { slug, claim, kind: 'bet', holder: 'world', weight: 0.6 });
+      const before = await takesOf(b, slug);
+      // Take 3 is graded in its fence (v0.60.253.0's takes_remove refused a resolved row); take 2 only in the database.
+      await run(b.local, 'takes_resolve', { slug, row_num: before[2]!.row_num, quality: 'correct', resolved_at: '2026-10-01' });
+      await coordinated(b, tx => tx.executeRaw(`UPDATE takes SET resolved_at='2026-10-02', resolved_quality='incorrect' WHERE id=$1`, [before[1]!.id]));
+      for (const take of before) await confirm(b, 'takes', take.id);
+      const current = await localContent(b, slug);
+      const edited = String(current.content).replace('Mina will move to Lima', '~~Mina will move to Lima~~').replace(/(\| Mina prefers tea \| )bet/, '$1take')
+        .replace(/(\| )(Mina ships the atlas)( \|)/, '$1~~$2~~$3');
+      await run(b.local, 'put_page', { slug, content: edited, expected_revision: current.revision });
+      const struck = (await proposalsFor(b, 'takes', before[0]!.id))[0]!;
+      const rekinded = (await proposalsFor(b, 'takes', before[1]!.id))[0]!;
+      const graded = (await proposalsFor(b, 'takes', before[2]!.id))[0]!;
+      await acceptAsV253(b, struck.id, slug, before[0]!.row_num);
+      await acceptAsV253(b, rekinded.id, slug, before[1]!.row_num);
+      expect(((await acceptAsV253(b, graded.id, slug, before[2]!.row_num).then(() => null, (e: unknown) => e)) as Error | null)?.message).toBe('Resolved takes are immutable.');
+      expect((await takesOf(b, slug)).map(t => t.claim)).toEqual(['Mina ships the atlas']);
+      // Nothing brings them back on its own: the page no longer carries the rows.
+      const again = await localContent(b, slug);
+      expect(String(again.content)).not.toContain('Mina will move to Lima');
+      await run(b.local, 'put_page', { slug, content: `${String(again.content)}\nMore.`, expected_revision: again.revision });
+      await extractTakesFromDb(engine, { slugs: [slug], sourceId: b.sourceId } as never);
+      expect((await takesOf(b, slug)).map(t => t.claim)).toEqual(['Mina ships the atlas']);
+      // Preview lists both, writes nothing.
+      const preview = await repairCli(b, ['accepted-takes']);
+      expect(preview.preview_hash).toBeString();
+      expect((preview.listing as Array<{ item: string; class: string }>).map(l => [l.item, l.class])).toEqual([
+        [`${b.sourceId}:${slug}#${before[0]!.row_num}`, 'accepted_deactivated'], [`${b.sourceId}:${slug}#${before[1]!.row_num}`, 'accepted_replaced']]);
+      expect((await takesOf(b, slug)).map(t => t.claim)).toEqual(['Mina ships the atlas']);
+      const applied = await repairCli(b, ['accepted-takes', '--apply', '--expect', preview.preview_hash]);
+      expect(applied.applied).toBe(2);
+      const after = await engine.executeRaw<{ row_num: number; claim: string; kind: string; active: boolean; trust_tier: string; resolved_quality: string | null }>(
+        'SELECT row_num, claim, kind, active, trust_tier, resolved_quality FROM takes WHERE page_id=$1 ORDER BY row_num', [await pageId(b, slug)]);
+      // The tier is the accepted write's (what a correct accept leaves); take 2's database-only grade is in no record and stays lost.
+      expect(after).toEqual([
+        { row_num: before[0]!.row_num, claim: 'Mina will move to Lima', kind: 'bet', active: false, trust_tier: 'agent_written', resolved_quality: null },
+        { row_num: before[1]!.row_num, claim: 'Mina prefers tea', kind: 'take', active: true, trust_tier: 'agent_written', resolved_quality: null },
+        { row_num: before[2]!.row_num, claim: 'Mina ships the atlas', kind: 'bet', active: true, trust_tier: 'user_confirmed', resolved_quality: 'correct' },
+      ]);
+      const text = String((await localContent(b, slug)).content);
+      expect(text).toContain('~~Mina will move to Lima~~');
+      expect(text).toContain('| Mina prefers tea | take |');
+      expect(text).not.toContain('(removed)');
+      // A second preview finds nothing; the restored rows hold.
+      expect((await repairCli(b, ['accepted-takes'])).listing ?? []).toEqual([]);
+    }
+  }), 240_000);
 });
 
 describe('derived-tier propagation (W1 #6783 §12 (b))', () => {
