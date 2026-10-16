@@ -46,21 +46,38 @@ async function readProjectionPage(engine: Pick<BrainEngine, 'executeRaw'>, ref: 
   return page ?? null;
 }
 
-/** Delete, in bounded batches, chunk rows the live generation does not hold: other occurrences, inline rows, older duplicates. */
-async function retireStaleChunks(engine: Pick<BrainEngine, 'executeRaw' | 'kind'>, pageId: number, generation: number, live: readonly number[]): Promise<number> {
+/** Chunk rows of page $1 that generation $2 (live occurrences $3) does not hold: other occurrences, inline rows, older duplicates. */
+const STALE_CHUNKS_SQL = `SELECT s.id FROM content_chunks s -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
+  WHERE s.page_id=$1
+  AND (s.body_generation IS NULL
+    OR (s.body_generation<=$2 AND NOT (s.occurrence_id=ANY($3::bigint[])))
+    OR (s.body_generation<=$2 AND EXISTS (SELECT 1 FROM content_chunks n WHERE n.page_id=s.page_id AND n.occurrence_id=s.occurrence_id
+      AND n.body_generation>s.body_generation AND n.body_generation<=$2)))`;
+
+/** The page still stores a chunk row its live generation does not hold (a deferred retirement): sealing it would show the row. */
+export async function hasStaleChunks(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, generation: number, live: readonly number[]): Promise<boolean> {
+  return (await engine.executeRaw(`${STALE_CHUNKS_SQL} LIMIT 1`, [pageId, generation, live])).length > 0;
+}
+
+/**
+ * Delete, in bounded batches, chunk rows the live generation does not hold: other occurrences, inline rows, older
+ * duplicates. Each batch re-reads the page under its page lock and deletes only while the page is still segmented at
+ * `generation` (a demotion's inline rows are the page's live chunks); `moved` when it was not.
+ */
+async function retireStaleChunks(engine: BrainEngine, ref: { sourceId: string; slug: string }, pageId: number, generation: number,
+  live: readonly number[]): Promise<{ retired: number; moved: boolean }> {
   let retired = 0;
   for (;;) {
-    const rows = await engine.executeRaw<{ id: number }>(`DELETE FROM content_chunks c
-      WHERE c.id IN (SELECT s.id FROM content_chunks s -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
-        WHERE s.page_id=$1
-        AND (s.body_generation IS NULL
-          OR (s.body_generation<=$2 AND NOT (s.occurrence_id=ANY($3::bigint[])))
-          OR (s.body_generation<=$2 AND EXISTS (SELECT 1 FROM content_chunks n WHERE n.page_id=s.page_id AND n.occurrence_id=s.occurrence_id
-            AND n.body_generation>s.body_generation AND n.body_generation<=$2)))
-        LIMIT $4)
-      RETURNING c.id`, [pageId, generation, live, DEFAULT_FLIP_RETIRE_MAX_ROWS]);
-    retired += rows.length;
-    if (rows.length < DEFAULT_FLIP_RETIRE_MAX_ROWS) return retired;
+    const deleted = await engine.transaction(async tx => {
+      await tx.lockPageKeys([ref]);
+      const [page] = await tx.executeRaw<{ body_generation: number | string; body_storage: string }>('SELECT body_generation, body_storage FROM pages WHERE id=$1', [pageId]);
+      if (page?.body_storage !== 'segmented' || Number(page.body_generation) !== generation) return null;
+      return (await tx.executeRaw<{ id: number }>(`DELETE FROM content_chunks c WHERE c.id IN (${STALE_CHUNKS_SQL} LIMIT $4) RETURNING c.id`,
+        [pageId, generation, live, DEFAULT_FLIP_RETIRE_MAX_ROWS])).length;
+    });
+    if (deleted === null) return { retired, moved: true };
+    retired += deleted;
+    if (deleted < DEFAULT_FLIP_RETIRE_MAX_ROWS) return { retired, moved: false };
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
   }
 }
@@ -94,7 +111,8 @@ async function buildClaimedProjection(engine: BrainEngine, ref: { sourceId: stri
   const generation = Number(page.body_generation);
   const pageId = Number(page.id);
   const liveRows = await engine.readManifest(pageId);
-  const retired = await retireStaleChunks(engine, pageId, generation, liveRows.map(row => Number(row.occurrenceId)));
+  const { retired, moved } = await retireStaleChunks(engine, ref, pageId, generation, liveRows.map(row => Number(row.occurrenceId)));
+  if (moved) return { chunks: 0, retired, sealed: false };
   const frontmatter = page.frontmatter ?? {};
   const quarantined = isQuarantined(frontmatter);
   const unchunked = await occurrencesWithoutChunks(engine, pageId, generation, liveRows);

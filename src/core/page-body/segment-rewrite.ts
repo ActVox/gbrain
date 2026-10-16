@@ -121,6 +121,13 @@ async function rewriteOwner(engine: BrainEngine): Promise<SegmentedStagingOwner>
 /** The replaced rows' segment shas: texts the rewrite stopped referencing from this generation. */
 const replacedShas = (rows: readonly ManifestRow[], units: readonly FenceUnit[]) => units.flatMap(unit => rows.slice(unit.from, unit.to + 1).map(row => row.sha256));
 
+/**
+ * The tier and corpus generation the page's stored vectors were embedded under (its contextual-retrieval stamp), so vector
+ * reuse admits them as an import of the same body would. A fence edit is not authorship: the stamp stays as it is.
+ */
+const rewriteTier = (page: { contextual_retrieval_mode: string | null; corpus_generation: string | null }) => page.contextual_retrieval_mode === 'title'
+  ? { tier: 'title' as const, corpusGeneration: page.corpus_generation } : { tier: 'none' as const, corpusGeneration: null };
+
 export interface LiveFenceRewrite {
   /** Segment shas the old generation referenced in place of the rewritten units. */
   replaced: Uint8Array[];
@@ -138,8 +145,9 @@ export interface LiveFenceRewrite {
  */
 export async function rewriteLiveSegmentedFences(tx: BrainEngine, pageId: number, transform: FenceTransform): Promise<LiveFenceRewrite | null> {
   const [page] = await tx.executeRaw<{ id: number; slug: string; source_id: string; title: string; type: string; page_kind: string; frontmatter: JsonObject | null;
-    body_generation: number | string; body_flags: JsonObject | null; body_storage: string; deleted_at: string | null; tags: string[] }>(`SELECT p.id,p.slug,p.source_id,p.title,
-      p.type,p.page_kind,p.frontmatter,p.body_generation,p.body_flags,p.body_storage,p.deleted_at,
+    body_generation: number | string; body_flags: JsonObject | null; body_storage: string; deleted_at: string | null; tags: string[];
+    contextual_retrieval_mode: string | null; corpus_generation: string | null }>(`SELECT p.id,p.slug,p.source_id,p.title,
+      p.type,p.page_kind,p.frontmatter,p.body_generation,p.body_flags,p.body_storage,p.deleted_at,p.contextual_retrieval_mode,p.corpus_generation,
       COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id),'[]'::jsonb) AS tags FROM pages p WHERE p.id=$1`, [pageId]);
   if (page?.body_storage !== 'segmented') return null;
   const sourceId = page.source_id, slug = page.slug, frontmatter = page.frontmatter ?? {};
@@ -151,7 +159,7 @@ export async function rewriteLiveSegmentedFences(tx: BrainEngine, pageId: number
     live: { id: pageId, generation, storage: 'segmented', title: page.title, type: page.type, flags: page.body_flags },
     truth: rewrittenRegion(tx, sourceId, rows, units, 'truth'), timeline: rewrittenRegion(tx, sourceId, rows, units, 'timeline'),
     hasTimeline: rows.some(row => row.region === 'timeline'), flags: page.body_flags ?? {}, declaredBytes: bodyBytesOf(rows, units),
-    owner: await rewriteOwner(tx), chunking: { quarantined: isQuarantined(frontmatter), corpusGeneration: null, tier: 'none' } });
+    owner: await rewriteOwner(tx), chunking: { quarantined: isQuarantined(frontmatter), ...rewriteTier(page) } });
   const { flipRetireMaxRows } = await readPageBodyPolicy(tx);
   const applied = await withPageTierKept(tx, { sourceId, slug }, () => applySegmentedBody(tx, { slug, sourceId, pageId, prepared, promotion: false,
     retireMaxRows: flipRetireMaxRows, meta: { title: page.title, type: page.type as never, frontmatter, page_kind: page.page_kind as never } }));

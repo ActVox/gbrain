@@ -31,6 +31,7 @@ import { jsonbParam, type SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead, ScopedRead } from './brands.ts';
 import type { ScopedReadRunner } from './cjk-search.ts';
 import { compileRowNormalizer } from './normalize.ts';
+import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { renderFragment, sqlFragment, trustedSql } from './fragment.ts';
 import { quoteIdentifier, resolveWriteColumnFromConfigRows } from '../search/embedding-column.ts';
 
@@ -327,7 +328,8 @@ export async function purgeDeletedPages(
       if (texts.length) await tx.run(sqlFragment`DELETE FROM page_segment_texts t
         USING unnest(${texts.map(r => r.source_id)}::text[], ${texts.map(r => r.sha)}::text[]) AS d(source_id, sha)
         WHERE t.source_id = d.source_id AND t.sha256 = decode(d.sha, 'hex')
-          AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id = t.source_id AND m.sha256 = t.sha256)`);
+          AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id = t.source_id AND m.sha256 = t.sha256)
+          AND NOT ${trustedSql(stagingNeedsTextSql('t'))}`);
       const slugs = rows.map((r) => r.slug);
       return { slugs, count: slugs.length };
     });
