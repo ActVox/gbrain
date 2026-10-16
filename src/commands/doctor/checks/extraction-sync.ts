@@ -34,7 +34,8 @@ import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../cor
 import { readOnlyCatalogPackSourceIds } from '../../../core/shared-skills/adopted-packs.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
-import { checkError } from '../check-fix.ts';
+import { agentFix, checkError } from '../check-fix.ts';
+import { classifyManagedSyncOrphans } from '../../../core/persistence/managed-sync-orphans.ts';
 import { firstSyncRunning, noSuccessfulSync, stoppedConnectorIssues, type SyncOutcomeEntry } from '../sync-outcome.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
 
@@ -1311,6 +1312,7 @@ export async function checkSyncFreshness(
     let managed = false;
     try { managed = await persistenceEnabledForHealth(engine); } catch { /* pre-persistence brain */ }
     let upstream_unknown_count = 0, upstream_behind_count = 0;
+    const staleIds: string[] = [];
     const stoppedConnectors = await stoppedConnectorIssues(engine, sources, now - failMs).catch(() => new Map());
     for (const source of sources) {
       if (ownedContent.has(source.id)) { writer_owned_count++; continue; }
@@ -1467,11 +1469,11 @@ export async function checkSyncFreshness(
       if (thresholdAgeMs > failMs) {
         issues.push(`Source ${display} last synced ${ageDays}d ago — brain search is stale!`);
         hasFailures = true;
-        stale_count++;
+        stale_count++; staleIds.push(source.id);
       } else if (thresholdAgeMs > warnMs) {
         issues.push(`Source ${display} last synced ${ageHours}h ago`);
         hasWarnings = true;
-        stale_count++;
+        stale_count++; staleIds.push(source.id);
       } else {
         synced_recently_count++;
       }
@@ -1489,12 +1491,19 @@ export async function checkSyncFreshness(
       + (read_only_pack_count ? `. ${read_only_pack_count} read-only skill-pack source(s): no commits to sync` : '') + (catalogPacks.note ? `. ${catalogPacks.note}` : '');
 
     const remedy = issues.length > outcomes.length;
-    const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix;
+    // #6834: a stale managed source whose unfinished cursor no sync can publish (its checkpoint moved elsewhere) is retired, not re-synced.
+    const moved = managed && localOnly && staleIds.length ? (await classifyManagedSyncOrphans(engine, staleIds).catch(() => ({ orphans: [] }))).orphans
+      .filter(orphan => orphan.reason === 'checkpoint_moved') : [];
+    const movedFix = moved.length ? agentFix(['gbrain', 'repair', 'managed-sync-orphans', ...(new Set(moved.map(o => o.source_id)).size === 1 ? ['--source', moved[0]!.source_id] : [])],
+      `The unfinished sync of ${[...new Set(moved.map(o => o.source_id))].join(', ')} can never checkpoint (its source's last_commit moved outside the run), so a plain sync stays blocked. The preview lists the cursor and prints the apply command with its hash; writes nothing.`,
+      'sync_freshness', { docs: 'docs/guides/repair.md#managed-sync-orphans' }) : undefined;
+    const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix ?? movedFix;
+    const movedNote = movedFix ? `. ${movedFix.why} Run \`${movedFix.argv!.join(' ')}\`` : '';
     if (hasFailures) {
       return {
         name: 'sync_freshness',
         status: 'fail',
-        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source` : ''}${inProgressNote}`,
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source` : ''}${movedNote}${inProgressNote}`,
         details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }
@@ -1502,7 +1511,7 @@ export async function checkSyncFreshness(
       return {
         name: 'sync_freshness',
         status: 'warn',
-        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh` : ''}${inProgressNote}`,
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh` : ''}${movedNote}${inProgressNote}`,
         details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }
