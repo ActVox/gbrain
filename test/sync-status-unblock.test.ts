@@ -146,7 +146,7 @@ test('status joins the cursor, the recent commits, each hold with its triple and
   expect(noHuman.map(hold => hold.path)).toEqual(['c.md']);
 }), 120_000);
 
-test('status reports an older release\'s recorded failure as a retryable page fault with --retry-failed as next', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+test('status reports an older release\'s recorded failure as a retryable page fault with the plain sync as next', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   const f = await fixture({ 'a.md': note('Alpha one.'), 'b.md': note('Beta one.') });
   expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
   writeFileSync(join(f.root, 'a.md'), note('Alpha two.')); writeFileSync(join(f.root, 'b.md'), note('Beta two.'));
@@ -159,7 +159,7 @@ test('status reports an older release\'s recorded failure as a retryable page fa
   expect(status.cursor).toMatchObject({ index: 1, total: 2, done: false });
   expect(status.last_error).toMatchObject({ code: 'source_changed', class: 'page', safe_actions: ['retry'], needs_human: false, path: 'b.md', phase: 'receipt' });
   expect(status.needs_human).toBe(false);
-  expect(status.next).toMatchObject({ argv: ['gbrain', 'sync', '--source', f.id, '--no-pull', '--no-embed', '--no-extract', '--retry-failed'] });
+  expect(status.next).toMatchObject({ argv: ['gbrain', 'sync', '--source', f.id, '--no-pull', '--no-embed', '--no-extract'] });
   const converted = await performManagedSync(engine, { ...f.opts, retryFailed: true });
   expect(converted).toMatchObject({ status: 'synced', held: [{ path: 'b.md', code: 'worktree_dirty' }] });
   expect((await readSyncStatus(engine, f.id)).last_error).toBeNull();

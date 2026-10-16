@@ -15,7 +15,7 @@ import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
-import { checkpointRevival } from './sync-slug-mode.ts';
+import { CHECKPOINT_MOVED_MESSAGE, checkpointRevival } from './sync-slug-mode.ts';
 import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
@@ -32,7 +32,7 @@ import { importAnalyzeEveryPages, maybeRefreshPlannerStats } from '../planner-st
 import { recordManagedSyncFailure, clearManagedSyncFailureAfterSuccess, formatManagedSyncFailure, managedSyncRetryCommand, type ManagedSyncFailure, type ManagedSyncRootCause } from './sync-failures.ts';
 import { writeFailureDiagnostic } from './verb-errors.ts';
 import { stampDrainStep } from './drain-step.ts';
-import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
+import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointRetryCommand, checkpointTimeoutHint, probeCheckpointBlocker, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import { principalKey, type WriteRequest } from './model.ts';
 import { readJournalLimits } from './limits.ts';
@@ -62,7 +62,7 @@ import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
-import { receiptClass, resumableStop, stopRecorded } from './sync-stop-class.ts';
+import { receiptClass, recordedStop, replaysContentRefusal, replaysUnchangedRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
 import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
 import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
@@ -194,7 +194,7 @@ function stampProgress(prior: CursorProgress | undefined, fromIndex: number, ind
 const OP = 'managed-sync';
 type CursorHeader = Omit<Cursor, 'entries' | 'companyPlan'> & { total: number };
 const header = ({ entries, companyPlan: _plan, ...value }: Cursor): CursorHeader => ({ ...value, total: entries.length });
-/** A managed sync run stopped before admitting the current entry; the recorded failure lets --retry-failed rediscover. */
+/** A managed sync run stopped before admitting the current entry; the next sync retries the recorded failure by rediscovering. */
 function syncRunRefusal(code: RegistryCode, message: string, retry: Parameters<typeof checkpointRetryCommand>[0], cause: string): OperationError {
   return opError(code, message, `${cause} Pages committed earlier in this run stay committed. Check the source with the command in fix, then run: ${checkpointRetryCommand(retry)}`,
     { fix: readFix(`Shows source ${retry.sourceId}'s owner and every pending, failed or recovering request, read-only.`,
@@ -349,6 +349,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     // #6340: page faults (the database page moved under the manifest) hold the entry, imports and deletes alike, when holds
     // are on; `sync.holds=fail` and company-brain cursors keep the refusals.
     const holdsOn = !!run.screen && !cursor.companyPlan;
+    if (entry.legacySlugs?.length && !holdsOn) throw syncRunRefusal('page_identity_changed', 'Legacy pages sync cannot import into match the imported file.', retry, `${entry.path} imports as page ${entry.slug}, but pages ${entry.legacySlugs.join(', ')} of source ${cursor.sourceId}, imported from a file of that name, record no file (sync.holds=fail); keep the file's page, remove the others, then sync again.`);
     const [occupant, snapshot] = await Promise.all([alreadyImportedAtOrigin(engine, cursor, entry, originScope).catch(error => {
       if (!holdsOn || !(error instanceof OperationError) || error.code !== 'page_identity_changed') throw error;
       return { originFault: error };
@@ -763,7 +764,7 @@ async function holdFailedFenceRequest(engine: BrainEngine, cursor: Cursor, key: 
 
 const CHECKPOINT_REVIVAL_LIMIT = 3;
 type SettleInput = Parameters<typeof settleFailedRequest>[1];
-/** #6712: an entry the run stopped on (a transport or systemic fault, a legacy knock-on) is re-frozen in place at most this many times in a row; then its failure stays recorded until --retry-failed. */
+/** #6712: an entry the run stopped on (a transport or systemic fault, a legacy knock-on) is re-frozen in place at most this many times in a row; then its failure is recorded and the next sync resets the bound. */
 export const STOPS_PER_ENTRY = 3;
 
 /**
@@ -771,7 +772,7 @@ export const STOPS_PER_ENTRY = 3;
  * receipt, a systemic stop an earlier invocation recorded, or a legacy knock-on an older gbrain cancelled) is re-frozen in
  * place under a fresh request: the cursor does not advance past it and the failed receipt is recorded as converted
  * (`convertedFromFailed`), so it never blocks the checkpoint. Bounded by `STOPS_PER_ENTRY` re-freezes in a row at the
- * entry (`Pending.stops`); null past the bound, so the failure is recorded and stays until --retry-failed.
+ * entry (`Pending.stops`); null past the bound, so the failure is recorded and the next sync resets the bound (`retryRecordedFailure`).
  */
 async function refreezeInPlace(engine: BrainEngine, input: SettleInput): Promise<Cursor | null> {
   const { cursor, key, pending, assertActive } = input;
@@ -795,23 +796,28 @@ async function refreezeInPlace(engine: BrainEngine, input: SettleInput): Promise
 /** #6643: checkpoint revivals per sync invocation (keyed by its run options object), so a refusal loop ends the invocation, never the cursor. */
 const checkpointRevivalsByRun = new WeakMap<object, number>();
 /** A same-run index lag ("The sync cursor is not fully committed.") stays a recorded failure (managed-sync-checkpoint-replaced.test.ts pins it). */
-const revivableCheckpointRefusal = (done: Pick<WriteRequest, 'state' | 'error_code' | 'recovery'>) => !done.recovery && done.state === 'failed' && done.error_code === 'recovery_required';
+const revivableCheckpointRefusal = (done: Pick<WriteRequest, 'state' | 'error_code' | 'recovery'>) => !done.recovery && done.state === 'failed'
+  && (done.error_code === 'recovery_required' || done.error_code === CHECKPOINT_VALIDATION_TIMEOUT);
 /**
  * #6643: a checkpoint refused because a receipt blocked it (`recovery_required`) is re-assessed whenever the run resumes: when nothing blocks it any more (a
  * knock-on, a receipt at an index the cursor settled), a fresh checkpoint request replaces it by cursor swap, and its
  * publication validates everything again. The completed manifest and the old receipt stay as they are. Null when it
  * still blocks, or after `CHECKPOINT_REVIVAL_LIMIT` revivals in this invocation (the next invocation re-assesses).
  * #6694/#6834: a slug-mode refusal the source now admits, or a moved checkpoint at this run's target, revives too (sync-slug-mode.ts).
+ * #6735: so does a validation timeout, once per invocation and only once an earlier invocation recorded the stop, so a resume
+ * re-validates the pinned checkpoint instead of rediscovering the manifest.
  */
 async function reviveCheckpoint(engine: BrainEngine, input: SettleInput): Promise<Cursor | null> {
   const { cursor, key, pending, done } = input;
   const refused = revivableCheckpointRefusal(done) || (pending.intent.kind === 'managed_sync_checkpoint' && await checkpointRevival(engine, cursor, pending.intent, done));
   const revivals = checkpointRevivalsByRun.get(input.run) ?? 0;
-  if (pending.intent.kind !== 'managed_sync_checkpoint' || !refused || done.recovery || cursor.index !== cursor.entries.length || revivals >= CHECKPOINT_REVIVAL_LIMIT) return null;
+  const timedOut = done.error_code === CHECKPOINT_VALIDATION_TIMEOUT;
+  if (pending.intent.kind !== 'managed_sync_checkpoint' || !refused || done.recovery || cursor.index !== cursor.entries.length || revivals >= (timedOut ? 1 : CHECKPOINT_REVIVAL_LIMIT)
+    || (timedOut && !await stopRecorded(engine, key, cursor.runId))) return null;
   const base: Cursor = { ...withoutPending(cursor), ...(refused === 'overtaken' ? { overtaken: true as const } : {}) };
   const fresh = await freezeEntry(engine, base, key, input.assertActive, input.run);
   if (!('requestId' in fresh)) return null;
-  const blocker = await findIncompleteSyncReceipt(engine, cursor.binding.worktree_id, cursor.runId, fresh.intent.supersededRequests ?? [], fresh.intent.settled ?? null);
+  const blocker = await probeCheckpointBlocker(engine, cursor.binding.worktree_id, cursor.runId, fresh.intent.supersededRequests ?? [], fresh.intent.settled ?? null);
   input.assertActive();
   if (blocker) return null;
   checkpointRevivalsByRun.set(input.run, revivals + 1);
@@ -1328,39 +1334,53 @@ interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boole
  */
 
 /**
- * `--retry-failed` on an unfinished cursor whose pending request failed (or whose run has a ledger row). #6340: a pending
- * request that failed on a page fault (a page that moved, a dirty file) converts in place with the frozen manifest; every
- * other failure keeps the explicit rediscovery from HEAD. Null when nothing applies (an unfinished request, no failure).
+ * #6712 PR 3 (L7): a plain sync retries the failure an earlier invocation recorded for this run (`stopRecorded`), which
+ * `--retry-failed` (now its deprecated alias) used to do on request. A stop the drain re-freezes in place (a transport fault,
+ * a resumable systemic stop, a legacy knock-on) is left to the drain, its `STOPS_PER_ENTRY` bound reset once spent; a
+ * checkpoint refused only by a receipt that no longer blocks it revives in the drain. Under the hold screen a page's refusal
+ * converts in place with the frozen manifest (#5988, #6340); a content refusal a newer commit may fix, and every other
+ * recorded failure, rediscovers from HEAD. Null when nothing applies: no failure of this run is recorded, its request is
+ * unfinished or committed (the drain advances past it, keeping the run's counts), a refusal would refuse the same bytes again,
+ * or it needs a person's decision (a slug-mode refusal, a moved source checkpoint: `gbrain repair managed-sync-orphans`).
  */
-async function retryFailedStart(engine: BrainEngine, cursor: Cursor, key: string, input: { opts: SyncOpts; context: ManagedSyncContext; authority: SyncAuthority;
+async function retryRecordedFailure(engine: BrainEngine, cursor: Cursor, key: string, input: { opts: SyncOpts; context: ManagedSyncContext; authority: SyncAuthority;
   processingOptions: SyncProcessingOptions; syncOptions: SyncCursorOptions; startupConfig: BrainEngine; frozenRun: Parameters<typeof freezeEntry>[4]; runStartedAt: string;
   discoveryRun: string; assertActive: () => void }): Promise<{ cursor: Cursor; discoveryTarget?: string } | { wait: RetryWait } | null> {
   const { opts, context, authority, processingOptions, syncOptions, assertActive } = input;
+  const recorded = await recordedStop(engine, key, cursor.runId);
+  assertActive();
+  if (!recorded) return null;
   const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
   assertActive();
-  // #6712: --retry-failed resets the in-place re-freeze bound of an entry the run stopped on for a fault not its page's; the drain re-freezes it again.
-  if (failed && cursor.pending && (cursor.pending.stops ?? 0) >= STOPS_PER_ENTRY && ['failed', 'conflict', 'cancelled'].includes(failed.state) && (isSyncKnockOn(failed) || receiptClass(failed) === 'transport' || resumableStop(failed))) {
+  const terminal = !!failed && ['failed', 'conflict', 'cancelled'].includes(failed.state);
+  if (failed && !terminal) return null;
+  const fault = terminal ? receiptClass(failed!) : null;
+  if (terminal && cursor.pending && cursor.pending.intent.kind !== 'managed_sync_checkpoint'
+    && (fault === 'transport' || isSyncKnockOn(failed!) || (fault === 'systemic' && resumableStop(failed!)))) {
+    if ((cursor.pending.stops ?? 0) < STOPS_PER_ENTRY) return null;
     const { stops: _stops, ...pending } = cursor.pending;
     return { cursor: await saveCursor(engine, key, cursor, { ...cursor, pending }, false, assertActive) };
   }
-  // #6643/#6712: a legacy knock-on (re-frozen in place, `refreezeInPlace`) and a checkpoint refused only by a receipt that no
-  // longer blocks it recover in the drain (settleFailedRequest); neither rediscovers the frozen manifest. A checkpoint a
-  // receipt still blocks (since #6712 a legacy knock-on the cursor never settled is one) rediscovers, as --retry-failed says.
-  if (failed && cursor.pending && isSyncKnockOn(failed)) return null;
-  if (failed && cursor.pending?.intent.kind === 'managed_sync_checkpoint' && cursor.index === cursor.entries.length && revivableCheckpointRefusal(failed)
-    && !await findIncompleteSyncReceipt(engine, cursor.binding.worktree_id, cursor.runId, cursor.convertedFromFailed ?? [], cursor.settled ?? null)) return null;
-  const recorded = await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1 AND completed_keys->0->>'run_id'=$2", [key, cursor.runId]);
+  if (terminal && cursor.pending?.intent.kind === 'managed_sync_checkpoint' && cursor.index === cursor.entries.length
+    && (revivableCheckpointRefusal(failed!) || await checkpointRevival(engine, cursor, cursor.pending.intent, failed!))
+    && !await probeCheckpointBlocker(engine, cursor.binding.worktree_id, cursor.runId, cursor.convertedFromFailed ?? [], cursor.settled ?? null)) return null;
+  // A slug-mode refusal the pin still disagrees with is a person's choice (rediscovering would adopt the new pin), and a
+  // checkpoint the source's last_commit moved away from is never rediscovered by itself (#6834: a path-sliced run would
+  // rediscover its slice's older target and move last_commit backward). Both stay recorded with their decision;
+  // `gbrain repair managed-sync-orphans` retires the cursor (and its slice record), and the next sync discovers again.
+  if (terminal && (failed!.error_code === 'slug_root_mode_mismatch'
+    || cursor.pending?.intent.kind === 'managed_sync_checkpoint' && failed!.error_code === 'revision_conflict' && failed!.error_message === CHECKPOINT_MOVED_MESSAGE)) return null;
+  const page = terminal && cursor.pending!.intent.kind !== 'managed_sync_checkpoint';
+  // The screen converts with the cursor's own options; a content, fence or stalled-preparation refusal it keeps replays.
+  const head = () => syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
+  const screen = page && !(isContentRefusal(failed!.error_code, failed!.error_message) && head() !== cursor.target) ? await loadSyncScreenRun(input.startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote) : null;
+  const converted = screen ? await convertBlockedCursor(engine, cursor, key, assertActive, { ...input.frozenRun, screen, observedAt: cursor.discoveredAt ?? input.runStartedAt }) : cursor;
   assertActive();
-  if (!((failed && ['failed', 'conflict', 'cancelled'].includes(failed.state)) || (recorded.length && (failed?.state === 'committed' || !failed)))) return null;
+  if (screen && (converted !== cursor || isContentRefusal(failed!.error_code, failed!.error_message) || fenceReceiptLocation(failed!) || preparationStalled(failed!))) return { cursor: converted };
+  if (page && replaysUnchangedRefusal(failed!, recorded, { root: cursor.root, intent: cursor.pending!.intent, target: cursor.target, head })) return null;
   const blocker = await oldRunBlocker(engine, cursor, key);
   assertActive();
   if (blocker) return { wait: blocker };
-  // Only the #6340 page faults convert here (a content refusal under --retry-failed keeps its explicit rediscovery; #6513: a checkpoint is never a page fault).
-  const pageFault = !!failed && !!cursor.pending && cursor.pending.intent.kind !== 'managed_sync_checkpoint' && (pinnedWorktreeConflict(failed) || failed.error_code === 'revision_conflict');
-  const screen = pageFault ? await loadSyncScreenRun(input.startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote) : null;
-  const converted = screen ? await convertBlockedCursor(engine, cursor, key, assertActive, { ...input.frozenRun, screen, observedAt: cursor.discoveredAt ?? input.runStartedAt }) : cursor;
-  assertActive();
-  if (converted !== cursor) return { cursor: converted };
   const discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
   const discovery = await discoverManagedSync(engine, opts, context);
   assertActive();
@@ -1494,12 +1514,15 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     assertActive();
     if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, syncOptions, embedDeferred: opts.embedDeferred, assertActive, state });
     assertActive();
-    if (company && opts.retryFailed && cursor && !cursor.done && !opts.dryRun) {
+    const companyStop = company && cursor && !cursor.done && !opts.dryRun ? await recordedStop(engine, key, cursor.runId) : null;
+    if (companyStop && cursor) {
       const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
       const unfinished = await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) LIMIT 1", [cursor.sourceId]);
       assertActive();
       // #6712: a legacy knock-on is re-frozen in place by the drain (refreezeInPlace), within its stop bound.
-      if (!unfinished.length && (failed && ['failed', 'conflict', 'cancelled'].includes(failed.state) && !isSyncKnockOn(failed) || !cursor.pending && !cursor.processingOptions)) {
+      // The approved manifest pins the content, so a content refusal this version recorded replays until the approval changes.
+      if (!unfinished.length && (failed && ['failed', 'conflict', 'cancelled'].includes(failed.state) && !isSyncKnockOn(failed) && !replaysContentRefusal(failed, companyStop, () => true)
+        || !cursor.pending && !cursor.processingOptions)) {
         if (cursor.processingOptions && digest(cursor.processingOptions) !== digest(processingOptions)) {
           throw syncRunRefusal('invalid_params', 'The approved company sync must retain its original processing options.',
             { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? syncOptions, repoPath: frozenRun.repoPath },
@@ -1511,8 +1534,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       }
     }
     const startupConfig = await preparationConfigView(engine); // #5984 G3: one config read answers the startup's config reads
-    if (cursor && opts.retryFailed && !opts.dryRun && !company && !cursor.done) {
-      const retried = await retryFailedStart(engine, cursor, key, { opts, context, authority, processingOptions, syncOptions, startupConfig, frozenRun, runStartedAt, discoveryRun, assertActive });
+    let retried: Awaited<ReturnType<typeof retryRecordedFailure>> = null;
+    if (cursor && !opts.dryRun && !company && !cursor.done) {
+      retried = await retryRecordedFailure(engine, cursor, key, { opts, context, authority, processingOptions, syncOptions, startupConfig, frozenRun, runStartedAt, discoveryRun, assertActive });
       if (retried && 'wait' in retried) return { ...result(cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: retried.wait }) };
       if (retried) { cursor = retried.cursor; if (retried.discoveryTarget) { phase = 'discovery'; discoveryTarget = retried.discoveryTarget; } }
     }
@@ -1560,7 +1584,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     if (opts.dryRun) return dryRun(cursor);
     frozenRun.screen = company ? null : await loadSyncScreenRun(startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote);
     const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
-    if (frozenRun.screen && !opts.retryFailed && cursor.pending && !cursor.done) {
+    if (frozenRun.screen && !retried && cursor.pending && !cursor.done) {
       phase = 'freeze';
       cursor = await convertBlockedCursor(engine, cursor, key, assertActive, frozenRun);
     }
