@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 import { contentHash } from '../utils.ts';
 import { assertInlineBody } from '../page-body/page-shape.ts';
 import { assertPageRevision, type PageSnapshot } from './types.ts';
@@ -12,6 +14,8 @@ export async function materializePageSnapshot(engine: BrainEngine, snapshot: Pag
   const sourceId = snapshot.page.source_id;
   const slug = snapshot.page.slug;
   const attribution = await maintenanceAttribution(engine);
+  const publicationId = randomUUID();
+  const report = { appended: 0 };
   await engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId, slug }]);
     const current = await tx.readPageSnapshot(slug, { sourceId, includeDeleted: true });
@@ -29,10 +33,11 @@ export async function materializePageSnapshot(engine: BrainEngine, snapshot: Pag
       ? (await tx.executeRaw<{ content_hash: string | null }>('SELECT content_hash FROM pages WHERE id=$1', [page.id]))[0]?.content_hash : undefined;
     const hash = contentHash({ ...page, tags: current.tags });
     if (stored !== undefined && stored !== hash) await createPageVersion(tx, slug, sourceId, current);
-    await withCoordinatedWrite(tx, [sourceId], () => withBeliefBatch(tx, { sourceId, slugs: [slug], op: 'withdrawal_materialize', pageEventType: 'page.view_changed' },
+    await withCoordinatedWrite(tx, [sourceId], () => withBeliefBatch(tx, { sourceId, slugs: [slug], publicationId, op: 'withdrawal_materialize', pageEventType: 'page.view_changed', report },
       () => tx.executeRaw(`UPDATE pages SET compiled_truth=$1,timeline=$2,content_hash=$3
       WHERE id=$4 AND knowledge_revision=$5::uuid`,
     [page.compiled_truth, page.timeline, hash, page.id, current.revision])), attribution);
     await tx.executeRaw("SELECT set_config('gbrain.materializing_revision',$1,true)", [previous[0]?.revision ?? '']);
   });
+  if (report.appended) await markBeliefCommits(engine, [publicationId]).catch(() => undefined);
 }

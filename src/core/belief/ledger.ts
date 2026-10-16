@@ -28,7 +28,9 @@ export type BeliefNote =
   | { kind: 'withdrawn'; factIds: number[] }
   | { kind: 'superseded'; oldId: number; newId: number | null }
   | { kind: 'purged'; table: 'facts' | 'takes' | 'pages'; ids: number[]; request: string; derivedWalk?: 'truncated' }
-  | { kind: 'transferred'; fromSlug: string; table: 'facts' | 'takes' | 'links'; ids: number[] };
+  | { kind: 'transferred'; fromSlug: string; table: 'facts' | 'takes' | 'links'; ids: number[] }
+  /** A tier change another writer caused (derived propagation): the batch's own `trust.retiered` for the row carries this cause. */
+  | { kind: 'retier_cause'; table: 'facts' | 'takes' | 'pages'; rowId: number; cause: Record<string, unknown> };
 
 export interface BeliefBatchOptions {
   sourceId: string;
@@ -136,9 +138,18 @@ async function streamLifetimes(tx: BrainEngine, sourceId: string, incarnation: s
   const out = new Map<number, string>();
   const pairs = streams.flatMap(s => [s.pre, s.post]).filter((p): p is RawPage => !!p).map(p => ({ incarnation, slug: p.slug }));
   const open = await readOpenLifetimes(tx, pairs);
-  const openAt = (slug: string) => open.get(`${incarnation}\u0000${slug}`) ?? null;
   const fits = (row: { page_id: number | null } | null, id: number) => !!row && (row.page_id == null || row.page_id === id);
   const mint = (page: RawPage) => mintLifetime(tx, { sourceId, incarnation, slug: page.slug, pageId: page.id });
+  // Renamed pages keep their lifetimes. Each moving lifetime is parked first, so renames that swap or chain slugs in one
+  // transaction neither end one another's lifetimes nor collide on the open-slug index; the slugs they leave read as free.
+  const moving = new Map<number, string>();
+  for (const { pre, post } of streams) {
+    const row = pre && post && pre.slug !== post.slug ? open.get(`${incarnation}\u0000${pre.slug}`) ?? null : null;
+    if (row && fits(row, post!.id)) moving.set(post!.id, row.page_lifetime);
+  }
+  const movingLifetimes = new Set(moving.values());
+  const openAt = (slug: string) => { const row = open.get(`${incarnation}\u0000${slug}`) ?? null; return row && movingLifetimes.has(row.page_lifetime) ? null : row; };
+  for (const [pageId, lifetime] of moving) await renameLifetime(tx, lifetime, `~moving-${lifetime}`, pageId);
   for (const { pre, post } of streams) {
     if (!pre || post) continue;
     const row = openAt(pre.slug);
@@ -146,21 +157,24 @@ async function streamLifetimes(tx: BrainEngine, sourceId: string, incarnation: s
     out.set(pre.id, lifetime);
     await endLifetime(tx, lifetime);
   }
+  const renames: Array<[string, RawPage]> = [];
   for (const { pre, post } of streams) {
     if (!post) continue;
-    const row = openAt(pre?.slug ?? post.slug);
     if (pre && pre.slug !== post.slug) {
       const target = openAt(post.slug);
-      if (target && target.page_lifetime !== row?.page_lifetime) await endLifetime(tx, target.page_lifetime);
-      if (fits(row, post.id)) { await renameLifetime(tx, row!.page_lifetime, post.slug, post.id); out.set(post.id, row!.page_lifetime); }
+      if (target) await endLifetime(tx, target.page_lifetime);
+      const lifetime = moving.get(post.id);
+      if (lifetime) { renames.push([lifetime, post]); out.set(post.id, lifetime); }
       else out.set(post.id, await mint(post));
       continue;
     }
+    const row = openAt(post.slug);
     if (row && row.page_id === post.id) { out.set(post.id, row.page_lifetime); continue; }
     if (pre && row && row.page_id == null) { out.set(post.id, row.page_lifetime); continue; }
     if (row) await endLifetime(tx, row.page_lifetime);
     out.set(post.id, await mint(post));
   }
+  for (const [lifetime, post] of renames) await renameLifetime(tx, lifetime, post.slug, post.id);
   return out;
 }
 
@@ -210,6 +224,29 @@ function transferSources(notes: BeliefNote[], preSubjects: Subject[], lifetimeOf
     }
   }
   return out;
+}
+
+/**
+ * Subject events for one stream between two keyed sides, outside a batch's
+ * own diff: the fallback rename re-describes the lifetime it moves onto
+ * another row. `transfers` maps `kind:rowId` to the subject the row left.
+ */
+export function streamSubjectDrafts(input: { sourceId: string; incarnation: string; slug: string; lifetime: string | null; op: string; writerTier: string | null;
+  stateHash: string; before: Subject[]; after: Subject[]; transfers: Map<string, { from: Subject; fromLifetime: string | null }> }): BeliefEventDraft[] {
+  const opts: BeliefBatchOptions = { sourceId: input.sourceId, slugs: [input.slug], op: input.op };
+  const batch: Batch = { opts, publicationId: '', incarnation: input.incarnation, managed: false, purgesPossible: false, notes: [],
+    pre: { pages: [], facts: [], takes: [], links: [], transitions: [], writerTier: null } };
+  return subjectDrafts({ opts, batch, writerTier: tierOrUnknown(input.writerTier), lifetimeAt: () => input.lifetime, streamHash: () => input.stateHash,
+    cause: (extra = {}) => ({ op: input.op, ...extra }), postSubjects: input.after, transfers: input.transfers }, input.slug, input.before, input.after);
+}
+
+const RETIER_TABLE: Record<string, string> = { fact: 'facts', take: 'takes', page: 'pages' };
+/** The cause fields (minus `op`) another writer attached to this row's tier change, e.g. the inputs of a derived propagation. */
+function retierCauseOf(notes: BeliefNote[], s: { kind: string; rowIds: number[] }): Record<string, unknown> {
+  const note = notes.find(n => n.kind === 'retier_cause' && n.table === RETIER_TABLE[s.kind] && s.rowIds.includes(n.rowId));
+  if (note?.kind !== 'retier_cause') return {};
+  const { op: _op, ...rest } = note.cause;
+  return rest;
 }
 
 /** Subject events of one stream side: asserted/retracted/revised, adoption, replacement links, retiering. */
@@ -275,7 +312,7 @@ function subjectDrafts(d: DiffContext, slug: string, before: Subject[], after: S
     if (!prior || transferred.has(s)) continue;
     const type = changeType(s.kind, prior, s);
     if (type) draft(s, type, s.value, prior);
-    if (prior.tier !== s.tier && s.kind !== 'link' && s.kind !== 'link_transition') draft(s, 'trust.retiered', { from: prior.tier, to: s.tier }, prior);
+    if (prior.tier !== s.tier && s.kind !== 'link' && s.kind !== 'link_transition') draft(s, 'trust.retiered', { from: prior.tier, to: s.tier }, prior, retierCauseOf(batch.notes, s));
   }
   return out;
 }
@@ -309,7 +346,8 @@ function pageDrafts(d: DiffContext, stream: Stream, lifetime: string, after: Sub
   else if (d.opts.pageEventType === 'page.view_changed' && p0!.content_hash !== p1!.content_hash) {
     emit('page.view_changed', { revision_before: p0!.revision, revision_after: p1!.revision, materialized: true }, p1!.tier);
   }
-  if (p0!.tier !== p1!.tier) emit('trust.retiered', { from: p0!.tier, to: p1!.tier }, p1!.tier);
+  if (p0!.tier !== p1!.tier) push({ ...base, eventType: 'trust.retiered', trustTier: p1!.tier, value: { from: p0!.tier, to: p1!.tier },
+    cause: d.cause(retierCauseOf(d.batch.notes, { kind: 'page', rowIds: [p1!.id] })) });
   return silenced || (p0!.deleted && p1!.deleted);
 }
 
@@ -363,11 +401,22 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
     const silenced = pageDrafts(d, stream, lifetimes.get(page.id)!, after, draft => drafts.push(draft));
     if (!silenced) drafts.push(...subjectDrafts(d, page.slug, before, after));
   }
-  const dbSlugs = new Set([...preSubjects, ...postSubjects].filter(s => s.dbOnly).map(s => s.stream));
-  for (const slug of dbSlugs) drafts.push(...subjectDrafts(d, slug, preSubjects.filter(s => s.dbOnly && s.stream === slug), postSubjects.filter(s => s.dbOnly && s.stream === slug)));
+  // A renamed page's database-only facts follow it: their pre side is diffed under the slug the page moved to, so a rename moves no key.
+  const renamedTo = new Map(streams.flatMap(s => s.pre && s.post && s.pre.slug !== s.post.slug ? [[s.pre.slug, s.post.slug] as const] : []));
+  const dbPre = preSubjects.filter(s => s.dbOnly), dbPost = postSubjects.filter(s => s.dbOnly);
+  const dbStream = (s: Subject) => renamedTo.get(s.stream) ?? s.stream;
+  for (const slug of new Set([...dbPre.map(dbStream), ...dbPost.map(s => s.stream)])) {
+    drafts.push(...subjectDrafts(d, slug, dbPre.filter(s => dbStream(s) === slug), dbPost.filter(s => s.stream === slug)));
+  }
 
+  // A contested fact outside the batch's streams is keyed and hashed as its own stream holds it now (its page's lifetime when the page exists).
+  const extraStreams = new Map<string, Awaited<ReturnType<typeof currentStateHash>>>();
+  for (const f of extraFacts) {
+    const stream = f.sms ?? f.entity_slug;
+    if (stream && !extraStreams.has(stream)) extraStreams.set(stream, await currentStateHash(tx, opts.sourceId, batch.incarnation, stream));
+  }
   for (const note of batch.notes) {
-    if (note.kind === 'contested') drafts.push(...contestedDraft(d, note, { pre, post, preSubjects, postSubjects, extraFacts, lifetimes }));
+    if (note.kind === 'contested') drafts.push(...contestedDraft(d, note, { pre, post, preSubjects, postSubjects, extraFacts, extraStreams, lifetimes }));
     else if (note.kind === 'held') {
       const page = postPageAt(note.slug);
       const lifetime = lifetimeAt(note.slug);
@@ -383,7 +432,8 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
 
 /** `trust.contested` on the held row's key: its tier as trust_tier, the challenger's as writer_tier (section 6.1). */
 function contestedDraft(d: DiffContext, note: Extract<BeliefNote, { kind: 'contested' }>, s: { pre: RawState; post: RawState; preSubjects: Subject[];
-  postSubjects: Subject[]; extraFacts: Awaited<ReturnType<typeof readFactsById>>; lifetimes: Map<number, string> }): BeliefEventDraft[] {
+  postSubjects: Subject[]; extraFacts: Awaited<ReturnType<typeof readFactsById>>; extraStreams: Map<string, Awaited<ReturnType<typeof currentStateHash>>>;
+  lifetimes: Map<number, string> }): BeliefEventDraft[] {
   const cause = d.cause({ proposal: `tp${note.proposalId}`, guard: note.guard });
   const base = { sourceId: d.opts.sourceId, incarnation: d.batch.incarnation, eventType: 'trust.contested', writerTier: d.writerTier, value: null };
   if (note.table === 'pages') {
@@ -400,9 +450,12 @@ function contestedDraft(d: DiffContext, note: Extract<BeliefNote, { kind: 'conte
   const fact = kind === 'fact' ? s.extraFacts.find(f => f.id === note.rowId) : undefined;
   if (!fact) return [];
   const stream = fact.sms ?? fact.entity_slug ?? '';
-  const key = keyFact({ incarnation: d.batch.incarnation, lifetimes: s.lifetimes, pagesBySlug: new Map(s.post.pages.map(p => [p.slug, p])) }, fact).key;
-  return [{ ...base, lifetime: d.lifetimeAt(stream), slug: stream, stream, subjectKind: 'fact', subjectKey: key, trustTier: fact.tier,
-    visibility: fact.visibility, claimFp: fact.fp, stateHash: d.streamHash(stream), cause }];
+  const own = s.extraStreams.get(stream);
+  const page = own?.state.pages.find(p => p.slug === stream) ?? null;
+  const lifetimes = new Map([...s.lifetimes, ...own?.lifetimes ?? []]);
+  const key = keyFact({ incarnation: d.batch.incarnation, lifetimes, pagesBySlug: new Map(page ? [[stream, page]] : []) }, fact).key;
+  return [{ ...base, lifetime: page ? lifetimes.get(page.id) ?? null : null, slug: stream, stream, subjectKind: 'fact', subjectKey: key, trustTier: fact.tier,
+    visibility: fact.visibility, claimFp: fact.fp, stateHash: own?.hash ?? d.streamHash(stream), cause }];
 }
 
 /** The current belief-set hash of one stream, for the doctor drift check and reconcile. */
