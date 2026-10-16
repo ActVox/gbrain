@@ -50,6 +50,17 @@ export function resolveAdmissionOrigin(explicit?: AdmissionOrigin): AdmissionOri
   return explicit ?? surrounding ?? 'background';
 }
 
+/**
+ * #6741 C: whether this admission is declared background work: an explicit background origin, or a surrounding
+ * background run (withAdmissionOrigin). An admission with neither (a direct caller relying on the default) is charged
+ * as background but is not a declared producer run, so it keeps the publication's own fences (a physical-root change
+ * fails its receipt with the specific code, as sync dispatch and put_page always have).
+ */
+export function declaredBackground(explicit?: AdmissionOrigin): boolean {
+  const surrounding = scope.getStore()?.origin;
+  return surrounding === 'background' || (explicit ?? surrounding) === 'background';
+}
+
 export function isAdmissionOrigin(value: unknown): value is AdmissionOrigin {
   return value === 'interactive' || value === 'background';
 }
