@@ -9,7 +9,9 @@ import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-fla
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
-import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath } from '../sync.ts';
+import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath, slugifyPath } from '../sync.ts';
+import { databaseOnlyPageSql } from './unbound-pages.ts';
+import { validateSlug } from '../utils.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
@@ -40,7 +42,9 @@ export interface SyncEntry { path: string; sourcePath: string; action: 'import' 
   /** #6712 PR 1: the import provenance matches the pinned blob, the frozen revision and this parser; the no-op kernel decides (sync-prescreen.ts). */
   prescreened?: true;
   /** #6712 PR 1: the page moved since its last recorded import (or has no record); imported only when the freeze proves it a no-op, else held `file_drift`. */
-  drift?: SyncDriftSide; }
+  drift?: SyncDriftSide;
+  /** #6727: live pages with no recorded origin whose slugs fold to this file's slug, several or one the importer cannot write; the freeze holds it `legacy_slug_conflict`. */
+  legacySlugs?: string[]; }
 /** Files that map to a slug another origin keeps; they are left out of the manifest until one is renamed. */
 export interface SyncSlugCollision { slug: string; kept: string; skipped: string[]; }
 /** #5032: a file sync skipped on this host with a named refusal, without failing the run. */
@@ -477,6 +481,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (!slug) throw opError('invalid_params', 'The imported file has no usable page slug.',
       `${entry.sourcePath} in ${sourceId} yields no page slug from its path or frontmatter; nothing was written. Rename the file or set a frontmatter slug and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
     if (!company && entry.action === 'import' && !origin && !isCodeFilePath(entry.sourcePath)) {
+      slug = await adoptLegacyPage(engine, identities, bySlug.get(slug), slug, entry);
       entry.slug = slug;
       claims.set(slug, [...(claims.get(slug) ?? []), entry]);
       continue;
@@ -560,6 +565,36 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (uncommitted.added || uncommitted.modified || uncommitted.deleted) discovered.uncommitted = uncommitted;
   }
   return discovered;
+}
+type LegacyIdentity = { id: number; slug: string; source_path: string | null; deleted_at: Date | string | null };
+/**
+ * #6727: per discovery, its live pages with no recorded origin whose slug the current fold changes, by folded slug. Built on
+ * first need; database-only pages (never imported from a file) are left out by one read over just those candidates, so a
+ * source without legacy pages issues no extra statement.
+ */
+const legacyByFold = new WeakMap<LegacyIdentity[], Promise<Map<string, string[]>>>();
+async function foldLegacyPages(engine: BrainEngine, identities: LegacyIdentity[]): Promise<Map<string, string[]>> {
+  const candidates = identities.filter(page => page.deleted_at == null && page.source_path == null && slugifyPath(page.slug) !== page.slug);
+  const databaseOnly = new Set(candidates.length ? (await engine.executeRaw<{ id: number }>(
+    `SELECT p.id FROM pages p WHERE p.id=ANY($1::bigint[]) AND ${databaseOnlyPageSql('p')}`, [candidates.map(page => Number(page.id))])).map(row => Number(row.id)) : []);
+  return candidates.filter(page => !databaseOnly.has(Number(page.id)))
+    .reduce((map, page) => map.set(slugifyPath(page.slug), [...map.get(slugifyPath(page.slug)) ?? [], page.slug]), new Map<string, string[]>());
+}
+/**
+ * #6727: the slug a file with no recorded origin imports as. With no live page at its folded slug, exactly one legacy page
+ * (an older gbrain imported it before the current fold) folding to it is the file's: it imports into that page (same id,
+ * links and history). Several, or one whose slug the importer cannot write as it stands (`validateSlug` lowercases), keep
+ * the folded slug and are named on the entry, so the freeze holds the file `legacy_slug_conflict`.
+ */
+async function adoptLegacyPage(engine: BrainEngine, identities: LegacyIdentity[], holder: LegacyIdentity | undefined, slug: string, entry: SyncEntry): Promise<string> {
+  if (holder && holder.deleted_at == null) return slug;
+  let folded = legacyByFold.get(identities);
+  if (!folded) legacyByFold.set(identities, folded = foldLegacyPages(engine, identities));
+  const legacy = (await folded).get(slug) ?? [];
+  const writable = () => { try { return validateSlug(legacy[0]!) === legacy[0]; } catch { return false; } };
+  if (legacy.length === 1 && writable()) return legacy[0]!;
+  if (legacy.length) entry.legacySlugs = [...legacy].sort();
+  return slug;
 }
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */
 function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {

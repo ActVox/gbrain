@@ -119,6 +119,7 @@ Every hold and error has three fields, from one table
 | `managed_image_sync_unsupported` | page | none | no | never: images stay held while multimodal embedding is off |
 | `purged_content` | page | none | yes | always: only the owner clears a purge tombstone |
 | `write_gate_rejected` | page | none | yes | always: write_gate.external_mode=reject is the user's setting |
+| `legacy_slug_conflict` | page | none | yes | always: only a person decides which legacy page the file takes over |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |
