@@ -24,6 +24,7 @@ import { compareVersions } from '../migration-ledger.ts';
 import { classifySyncFault, SYNC_FAULT_TABLE, type SyncFaultClass, type SyncSafeAction } from './sync-fault-class.ts';
 import { isSyncKnockOn, knockOnRoot, SYNC_CURSOR_FENCE_ORIGIN, SYNC_KNOCK_ON_ORIGIN, cursorFenceCause, syncKnockOnSql } from './sync-knock-on.ts';
 import { writeFailureDiagnostic } from './verb-errors.ts';
+import { publicCategory, type PublicCategory } from './public-category.ts';
 
 export type TerminalCategory =
   | 'recovery_pending' | 'recovery_blocked'
@@ -56,6 +57,8 @@ export interface TerminalInput {
 
 export interface TerminalVerdict {
   category: TerminalCategory;
+  /** #6712 PR 2: the closed public vocabulary beside `category` (`public-category.ts`); total. */
+  public_category: PublicCategory;
   /** The code the verdict is keyed on: the row's `error_code`, or the refinement its origin names. */
   code: string;
   origin: string | null;
@@ -120,7 +123,7 @@ function stringField(detail: Record<string, unknown> | null | undefined, key: st
   return typeof value === 'string' ? value : null;
 }
 
-type Partial_ = Omit<TerminalVerdict, 'defect' | 'fixed_in' | 'historical' | 'escalate'> & { escalate?: string };
+type Partial_ = Omit<TerminalVerdict, 'defect' | 'fixed_in' | 'historical' | 'escalate' | 'public_category'> & { escalate?: string };
 
 /** The read-time verdict for one terminal receipt that did not commit; null for a committed receipt with no recovery record. */
 export function classifyTerminal(input: TerminalInput): TerminalVerdict | null {
@@ -129,7 +132,7 @@ export function classifyTerminal(input: TerminalInput): TerminalVerdict | null {
   const fixedIn = (TERMINAL_FIXED_IN as Partial<Record<TerminalCategory, string>>)[verdict.category] ?? null;
   const ran = build(input);
   const historical = fixedIn !== null && (verdict.category === 'legacy_publication_refusal' || (ran !== null && compareVersions(ran, fixedIn) < 0));
-  return { ...verdict, escalate: verdict.escalate ?? escalateOf(verdict.code), defect: DEFECTS.has(verdict.category), fixed_in: fixedIn, historical };
+  return { ...verdict, public_category: publicCategory(verdict), escalate: verdict.escalate ?? escalateOf(verdict.code), defect: DEFECTS.has(verdict.category), fixed_in: fixedIn, historical };
 }
 
 function fromTable(category: TerminalCategory, code: string, origin: string | null, action: Action, detail?: string | null, message?: string | null): Partial_ {
@@ -325,4 +328,16 @@ export function dispositionOf(later: { state: string; same_intent: boolean } | n
   if (later.same_intent && later.state === 'committed') return 'already_written';
   if (later.same_intent) return 'duplicate';
   return 'superseded';
+}
+
+/**
+ * #6712 PR 2 (L5): the verdict of a fault recorded without its receipt at hand (a hold, a managed-sync failure row, a run
+ * stop), read as the failed receipt it stands for, so `last_error`, holds and doctor's `sync_failures` render the same
+ * `category` / `public_category` as the receipt itself.
+ */
+export function classifyRecordedFault(input: { source_id: string; code: string; slug?: string | null; request_id?: string | null;
+  error_detail?: Record<string, unknown> | null; message?: string | null }): TerminalVerdict {
+  return classifyTerminal({ source_id: input.source_id, slug: input.slug ?? '', operation: 'submit_job', state: 'failed', error_code: input.code,
+    error_detail: input.error_detail ?? null, recovery: null, blocked_reason: null, compacted: false, error_message: input.message ?? null,
+    ...(input.request_id ? { request_id: input.request_id } : {}) })!;
 }

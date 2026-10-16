@@ -38,10 +38,15 @@ import { laneFaultInMessage } from './sync-window.ts';
 import { cursorFenceCause, syncKnockOnSql } from './sync-knock-on.ts';
 import { listIncompleteSyncReceipts, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { drainEstimate } from './sync-drain.ts';
+import { classifyRecordedFault, type TerminalCategory } from './terminal-classify.ts';
+import type { PublicCategory } from './public-category.ts';
 import { resolveManagedSyncContext } from './sync-discovery.ts';
 
 export interface SyncStatusHold extends SyncFaultVerdict {
   code: string;
+  /** #6712 PR 2: the `classifyTerminal` category of the hold's code and the public category beside it. */
+  category: TerminalCategory;
+  public_category: PublicCategory;
   slug: string | null;
   path: string;
   attempts: number;
@@ -53,6 +58,9 @@ export interface SyncStatusHold extends SyncFaultVerdict {
 
 export interface SyncStatusError extends SyncFaultVerdict {
   code: string;
+  /** #6712 PR 2: the `classifyTerminal` category of the recorded failure and the public category beside it. */
+  category: TerminalCategory;
+  public_category: PublicCategory;
   /** A refinement of `code`: a lane fault (`cancelled`), or #6513 the closed `reason` of a database refusal. */
   detail?: string;
   message: string;
@@ -102,7 +110,7 @@ export type SyncTerminalSummary = { status: 'unknown'; reason: string } | {
   status: 'ok'; window_days: number; active_blockers: Array<{ kind: 'recovery' | 'checkpoint'; request_id: string; slug?: string; category: string }>;
   unresolved: { rows: number; distinct_slugs: number; distinct_intents: number; oldest_age_seconds: number | null };
   historical_rows: number; new_last_24h: number; defects: number;
-  categories: Array<{ category: string; code: string; origin: string | null; rows: number; unresolved: number }>; drill_down: string[];
+  categories: Array<{ category: string; public_category: PublicCategory; code: string; origin: string | null; rows: number; unresolved: number }>; drill_down: string[];
 };
 
 /** #6650: the source's slice of the terminal-failure summary, with PR A's checkpoint blockers passed in rather than recomputed. */
@@ -116,7 +124,7 @@ async function terminalSummary(engine: BrainEngine, sourceId: string, blockers: 
     active_blockers: (s?.active_blockers ?? []).map(b => ({ kind: b.kind, request_id: b.request_id, ...(b.slug ? { slug: b.slug } : {}), category: b.category })),
     unresolved: { rows: s?.unresolved.rows ?? 0, distinct_slugs: s?.unresolved.distinct_slugs ?? 0, distinct_intents: s?.unresolved.distinct_intents ?? 0, oldest_age_seconds: s?.unresolved.oldest_age_seconds ?? null },
     historical_rows: s?.historical_rows ?? 0, new_last_24h: s?.new_last_24h ?? 0, defects: (s?.defects ?? []).reduce((sum, d) => sum + d.rows, 0),
-    categories: (s?.categories ?? []).slice(0, 10).map(c => ({ category: c.category, code: c.code, origin: c.origin, rows: c.rows, unresolved: c.unresolved })),
+    categories: (s?.categories ?? []).slice(0, 10).map(c => ({ category: c.category, public_category: c.public_category, code: c.code, origin: c.origin, rows: c.rows, unresolved: c.unresolved })),
     drill_down: ['gbrain', 'sources', 'writer', 'failures', sourceId, '--group-by', 'category', '--json'] };
 }
 
@@ -167,7 +175,8 @@ function holdVerdict(record: GitHoldRecord, auto: FenceAutoRepair | undefined): 
 function holdStatus(record: GitHoldRecord, auto?: FenceAutoRepair): SyncStatusHold {
   const attempts = record.meta.attempts ?? 1;
   const verdict = holdVerdict(record, auto);
-  return { code: record.code, slug: record.slug, path: record.path, attempts, held_since: record.held_at, ...verdict,
+  const terminal = classifyRecordedFault({ source_id: record.source_id, code: record.code, slug: record.slug });
+  return { code: record.code, category: terminal.category, public_category: terminal.public_category, slug: record.slug, path: record.path, attempts, held_since: record.held_at, ...verdict,
     retry_after: verdict.safe_actions[0] === 'retry' || verdict.safe_actions[0] === 'retry_when_clean' ? null : 'after the named step', fix: gitHoldFix(record, auto) };
 }
 
@@ -196,11 +205,13 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string): Pro
   const retired = failure || header ? null : await retiredCursorStands(engine, sourceId, source.incarnation);
   const repairPreview: Action = { argv: ['gbrain', 'repair', 'managed-sync-orphans', '--source', sourceId], consent: [], actor: 'agent', requires_exclusive: false,
     why: 'Previews the sync bookkeeping nothing current can resume or clear (an old incarnation\'s cursor and failure rows, stale mirror rows) with the hash its --apply takes; writes nothing.' };
-  const lastError: SyncStatusError | null = failure ? { code: failure.code, ...(laneFault ? { detail: laneFault } : {}), message: failure.message, ...(failure.write_error_detail ? { write_error_detail: failure.write_error_detail } : {}),
+  const recorded = failure ? classifyRecordedFault({ source_id: sourceId, code: failure.code, request_id: failure.request_id, error_detail: failure.write_error_detail ?? null, message: failure.message }) : null;
+  const lastError: SyncStatusError | null = failure ? { code: failure.code, category: recorded!.category, public_category: recorded!.public_category,
+    ...(laneFault ? { detail: laneFault } : {}), message: failure.message, ...(failure.write_error_detail ? { write_error_detail: failure.write_error_detail } : {}),
     path: failure.path, phase: failure.phase, first_seen: failure.first_seen, attempts: failure.attempts,
     ...(failure.request_id ? { request_id: failure.request_id } : {}), ...(rootCause ? { root_cause: rootCause } : {}),
     ...classifySyncFault({ code: failure.code, detail: laneFault, message: failure.message }) }
-    : retired ? { code: 'cursor_incarnation_retired', message: `An unfinished sync cursor of ${sourceId} was recorded under an incarnation the source no longer has; no current sync selects it, and it says nothing about whether the current files are imported. `
+    : retired ? { code: 'cursor_incarnation_retired', category: 'sync_fault', public_category: 'superseded', message: `An unfinished sync cursor of ${sourceId} was recorded under an incarnation the source no longer has; no current sync selects it, and it says nothing about whether the current files are imported. `
       + `Retire it with ${repairPreview.argv!.join(' ')} (preview, then --apply with the printed hash).`, phase: 'resume', first_seen: retired.first_seen, attempts: 1, ...classifySyncFault({ code: 'cursor_incarnation_retired' }) } : null;
   const unfinished = !!header && !header.done;
   const remaining = header ? Math.max(0, Number(header.total) - Number(header.index)) : null;

@@ -77,6 +77,9 @@ export interface ManagedSyncWriteDiagnostic {
   reason: string;
   message: string;
   suggestion: string;
+  /** #6712 PR 2: a terminal receipt's `classifyTerminal` category and the public category beside it. */
+  category?: import('./terminal-classify.ts').TerminalCategory;
+  public_category?: import('./public-category.ts').PublicCategory;
   write_request: WriteReceipt;
   line_endings?: 'crlf_lf_only';
   ledger_recorded?: boolean;

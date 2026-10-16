@@ -24,6 +24,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { isStatementTimeout } from './bounded-reads.ts';
 import { readReceiptRetentionDays, DEFAULT_RECEIPT_RETENTION_DAYS } from './limits.ts';
+import type { PublicCategory } from './public-category.ts';
 import { classifyTerminal, dispositionOf, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
   type TerminalDisposition, type TerminalVerdict, CONNECTION_MESSAGE_PATTERN, LEGACY_PUBLICATION_PREFIX } from './terminal-classify.ts';
 
@@ -113,7 +114,7 @@ export interface TerminalSourceSummary {
   new_last_24h_older_builds: { rows: number; builds: string[] };
   daily_7d: number[];
   defects: Array<{ category: TerminalCategory; code: string; origin: string | null; rows: number; human_reason?: string; action: Action }>;
-  categories: Array<{ category: TerminalCategory; code: string; origin: string | null; rows: number; unresolved: number; historical: number; class: string; needs_human: boolean }>;
+  categories: Array<{ category: TerminalCategory; public_category: PublicCategory; code: string; origin: string | null; rows: number; unresolved: number; historical: number; class: string; needs_human: boolean }>;
 }
 export type TerminalSummary = { status: 'ok'; window_days: number; window_clamped: boolean; retention_days: number; sources: TerminalSourceSummary[] } | { status: 'unknown'; window_days: number; reason: string };
 
@@ -201,7 +202,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
     }
     const cat = s.categories.find(c => c.category === verdict.category && c.code === verdict.code && c.origin === verdict.origin);
     if (cat) { cat.rows += n; cat.unresolved += unresolved ? n : 0; cat.historical += historical ? n : 0; }
-    else s.categories.push({ category: verdict.category, code: verdict.code, origin: verdict.origin, rows: n, unresolved: unresolved ? n : 0, historical: historical ? n : 0,
+    else s.categories.push({ category: verdict.category, public_category: verdict.public_category, code: verdict.code, origin: verdict.origin, rows: n, unresolved: unresolved ? n : 0, historical: historical ? n : 0,
       class: verdict.class, needs_human: verdict.needs_human });
   }
   for (const [sourceId, blockers] of opts.checkpointBlockers ?? []) {
@@ -255,12 +256,12 @@ export interface TerminalFailureQuery {
   category?: string;
 }
 export interface TerminalFailureRow {
-  request_id: string; slug: string; operation: string; state: string; code: string; origin: string | null; category: TerminalCategory;
+  request_id: string; slug: string; operation: string; state: string; code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory;
   class: string; safe_actions: string[]; needs_human: boolean; human_reason?: string; disposition: TerminalDisposition; blocking: boolean; historical: boolean;
   compacted: boolean; ended_at: string; cursor: string; inspect: Action; fix: Action; root_request_id?: string;
 }
 export interface TerminalFailureGroup {
-  code: string; origin: string | null; category: TerminalCategory; rows: number; class: string; needs_human: boolean; human_reason?: string;
+  code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory; rows: number; class: string; needs_human: boolean; human_reason?: string;
   filter: { code: string; origin: string | null; category: TerminalCategory }; drill_down: string[]; fix: Action; samples: Array<Pick<TerminalFailureRow, 'request_id' | 'slug' | 'state' | 'ended_at' | 'inspect'>>;
 }
 export type TerminalFailureListing = {
@@ -314,7 +315,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
       const historical = !row.has_recovery && (disposition !== 'unknown' || v.historical);
       const matches = (!q.category || v.category === q.category) && (!q.code || v.code === q.code)
         && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (state === 'all' || !historical);
-      if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, class: v.class,
+      if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, public_category: v.public_category, class: v.class,
         safe_actions: v.safe_actions, needs_human: v.needs_human, ...(v.human_reason ? { human_reason: v.human_reason } : {}), disposition, blocking: row.has_recovery, historical,
         compacted: row.compacted, ended_at: row.ended_at, cursor: row.sequence, ...(v.root_request_id ? { root_request_id: v.root_request_id } : {}),
         inspect: { argv: terminalInspectArgv(row.request_id), consent: [], actor: 'agent', requires_exclusive: false, why: 'The receipt with its diagnosis and structured fix, read-only.' },
@@ -336,7 +337,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
     let g = groups.get(key);
     if (!g) {
       const filter = { code: row.code, origin: row.origin, category: row.category };
-      groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, rows: 0, class: row.class, needs_human: row.needs_human,
+      groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, public_category: row.public_category, rows: 0, class: row.class, needs_human: row.needs_human,
         ...(row.human_reason ? { human_reason: row.human_reason } : {}), filter, fix: row.fix, samples: [],
         drill_down: terminalFailuresArgv({ sourceId: q.sourceId, state: q.state, sinceDays: q.sinceDays, category: row.category, code: row.code, origin: row.origin ?? NO_ORIGIN }) });
     }
