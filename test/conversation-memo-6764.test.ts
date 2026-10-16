@@ -7,8 +7,9 @@
  * a miss `RELINK_REASONS` does not memoize (`no_page`) is re-armed by a page
  * created later. Hermetic: PGLite plus a zero-price stubbed chat transport.
  */
-import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { __setChatTransportForTests, configureGateway, resetGateway, type ChatResult } from '../src/core/ai/gateway.ts';
 import { runExtractConversationFacts } from '../src/commands/extract-conversation-facts.ts';
 import { runConversationRelink } from '../src/core/facts/conversation-relink.ts';
@@ -25,10 +26,21 @@ const config = { engine: 'pglite', embedding_disabled: true } as never;
 let engine: PGLiteEngine;
 let chatCalls = 0;
 
-beforeEach(async () => {
+beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+}, 60_000);
+
+afterAll(async () => {
+  __setChatTransportForTests(null);
+  resetGateway();
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+  await engine.executeRaw('DELETE FROM fact_relink_attempts');
   resetGateway();
   configureGateway({ chat_model: MODEL, embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536,
     base_urls: { litellm: 'http://localhost:4000' }, env: { LITELLM_BASE_URL: 'http://localhost:4000', OPENAI_API_KEY: 'test' } });
@@ -44,12 +56,6 @@ beforeEach(async () => {
   await engine.setConfig('pricing.overrides', JSON.stringify({ [MODEL]: { input: 0, output: 0 } }));
   await engine.setConfig('embedding.disabled', 'true');
   await engine.putPage(MEETING, { type: 'meeting' as never, title: 'Lease review', compiled_truth: TRANSCRIPT, timeline: '', frontmatter: { date: '2026-08-12' } });
-}, 60_000);
-
-afterEach(async () => {
-  __setChatTransportForTests(null);
-  resetGateway();
-  await engine.disconnect();
 });
 
 async function legacyRow(fact: string): Promise<void> {
