@@ -175,9 +175,18 @@ interface StatusExpectation { holds?: Array<{ code: string; path: string }>; nee
 /**
  * What a converged source's status must say. Field-present assertions first: a renderer that drops a field fails
  * here, not in an agent's loop. `checkpoint_blockers` and `cursors` are arrays on every status (#6712 PR 0 made
- * `checkpoint_blockers` always present). TODO(PR 2 of #6712): read `sync status --json --detail` once it exists,
- * with the heavy reads it moves behind the flag.
+ * `checkpoint_blockers` always present). The harness reads `sync status --json --detail`: since #6712 PR 2 the
+ * terminal summary, blocker list and cursor join run only behind the flag.
  */
+/** The default (no `--detail`) status after the chaos: every skipped heavy read says so and names the `--detail` command (#6712 PR 2, DX F1). */
+function fastStatusProblems(status: Record<string, unknown> | null): string[] {
+  if (!status) return ['sync status --json printed no JSON document'];
+  return (['checkpoint_blockers_read', 'cursors_read', 'terminal_failures_read'] as const).flatMap(field => {
+    const read = status[field] as { status?: string; fix?: { argv?: string[] } } | undefined;
+    return read?.status === 'not_read' && read.fix?.argv?.includes('--detail') ? [] : [`sync status --json: ${field} is ${JSON.stringify(read)}, expected not_read with a --detail fix`];
+  });
+}
+
 function statusProblems(status: Record<string, unknown> | null, expected: StatusExpectation = {}): string[] {
   if (!status) return ['sync status --json printed no JSON document'];
   const out = STATUS_FIELDS.filter(field => !(field in status)).map(field => `sync status --json: field ${field} missing`);
@@ -570,9 +579,9 @@ class Brain {
     const head = this.git('rev-parse', 'HEAD');
     return source.last_commit === head ? [] : [`sources.last_commit ${source.last_commit} is not HEAD ${head}`];
   }
-  async status(): Promise<Record<string, unknown> | null> {
-    const r = await this.spawnCli(['sync', 'status', '--source', SOURCE, '--json']).result;
-    this.keepLog('status.json', `${r.out}\n${r.err}`);
+  async status(detail = true): Promise<Record<string, unknown> | null> {
+    const r = await this.spawnCli(['sync', 'status', '--source', SOURCE, '--json', ...(detail ? ['--detail'] : [])]).result;
+    this.keepLog(detail ? 'status.json' : 'status-fast.json', `${r.out}\n${r.err}`);
     return lastJson(r.out);
   }
   recoveryProblems(): string[] {
@@ -748,6 +757,7 @@ function oracleTests(b: Brain, end: () => EndState): void {
     b.verdict(await b.ledgerProblems());
   });
   test(as('wedge', 'sync status --json reports the converged state with every field present'), async () => b.verdict(statusProblems(await b.status(), end().status)));
+  test(as('wedge', 'plain sync status --json names every heavy read it skipped instead of reading as all-clear'), async () => b.verdict(fastStatusProblems(await b.status(false))));
   if (end().bigPage !== false) test(as('lost_write', 'the large page keeps every fence fact exactly once and loses no timeline entry'), async () => {
     const { problems, timelineDuplicates, timelineStrays } = await b.childRowProblems();
     b.note(`large page timeline (measured, not asserted): ${timelineDuplicates} duplicate rows, ${timelineStrays} rows not in the file`);
@@ -780,6 +790,13 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
   test('the status oracle accepts a converged status, with the finished cursor done or retired', () => {
     expect(statusProblems(converged())).toEqual([]);
     expect(statusProblems({ ...converged(), cursor: null, run_id: null })).toEqual([]);
+  });
+  test('the fast-status oracle accepts named skipped reads and fails a skipped read that looks read', () => {
+    const notRead = { status: 'not_read', fix: { argv: ['gbrain', 'sync', 'status', '--source', SOURCE, '--detail', '--json'] } };
+    const fast = { checkpoint_blockers_read: notRead, cursors_read: notRead, terminal_failures_read: notRead };
+    expect(fastStatusProblems(fast)).toEqual([]);
+    expect(fastStatusProblems({ ...fast, terminal_failures_read: { status: 'read' } })).toEqual(['sync status --json: terminal_failures_read is {"status":"read"}, expected not_read with a --detail fix']);
+    expect(fastStatusProblems({ ...fast, cursors_read: undefined })).toHaveLength(1);
   });
   // Forced probe: every field the oracle requires fails it when missing, so a renderer that drops one cannot pass.
   test('the status oracle fails when any required field is missing or not an array', () => {

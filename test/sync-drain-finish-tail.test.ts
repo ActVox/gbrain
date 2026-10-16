@@ -149,4 +149,12 @@ test('a --no-extract run owes statistics only, and a run past its deadline defer
   expect(await readSyncTail(engine, id)).not.toBeNull();
   expect((await runSyncTail(engine, id))?.status).toBe('done');
   expect(await stale(id)).toBe(0);
+  // An obligation that cannot be read is a failed tail with its notice, never a silent synced receipt.
+  const unreadable = new Proxy(engine, { get(target, prop, receiver) {
+    if (prop === 'executeRaw') return (sql: string, ...rest: unknown[]) => /managed-sync-tail|op=\$1 AND fingerprint=\$2/.test(sql) && /^SELECT completed_keys/.test(sql)
+      ? Promise.reject(new Error('connection terminated'))
+      : (target.executeRaw as (...a: unknown[]) => unknown).call(target, sql, ...rest);
+    return Reflect.get(target, prop, receiver);
+  } }) as unknown as BrainEngine;
+  expect(await runSyncTail(unreadable, id)).toMatchObject({ status: 'failed', runs: 0, notice: { code: 'sync_tail_degraded', kind: 'degraded' } });
 }), 120_000);

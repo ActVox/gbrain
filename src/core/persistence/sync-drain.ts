@@ -306,7 +306,7 @@ export interface StallProbe {
    */
   fingerprint(result: SyncResult): Promise<{ key: string; stall: Omit<DrainStall, 'stalled_seconds'>; claim?: DrainClaim | null } | null>;
   /** #6278: the source's head while a pass runs (its oldest running request, else its oldest queued one); null when nothing is unfinished. Bounded; may reject. */
-  head?(): Promise<{ head_state: string; claim: DrainClaim | null; request_id?: string | null; claimable_here?: boolean | null; blocked_by?: HeadBlocker | null; consumer?: string } | null>;
+  head?(): Promise<{ head_state: string; claim: DrainClaim | null; request_id?: string | null; write_request_id?: string | null; claimable_here?: boolean | null; blocked_by?: HeadBlocker | null; consumer?: string } | null>;
   /** #6317: the head owner's heartbeat row on this host, or null (no row: an older owner, PGLite, the table absent, or another host). Never rejects. */
   owner?(claim: DrainClaim): Promise<DrainOwnerRow | null>;
   /** #6317: whether a consumer here could reclaim a lapsed head: this process's own, or a live full row on this host. Never rejects. */
@@ -750,18 +750,19 @@ export function engineStallProbe(engine: BrainEngine, sourceId?: string): StallP
       return (await listHostConsumers(engine, localHostId()).catch(() => [])).some(row => (row.mode === 'full' || row.mode === 'promoted') && row.liveness === 'live');
     },
     ...(sourceId ? { async head() {
-      const [row] = await engine.executeRaw<{ head_state: string; head_claim_phase: unknown; head_token: string | null; head_lapsed: boolean | null; head_kind: string | null; head_request_id: string | null }>(
-        `SELECT h.state AS head_state, h.id::text AS head_request_id, h.claim_phase AS head_claim_phase, h.execution_token::text AS head_token,
+      const [row] = await engine.executeRaw<{ head_state: string; head_claim_phase: unknown; head_token: string | null; head_lapsed: boolean | null; head_kind: string | null; head_request_id: string | null;
+        head_write_request_id: string | null }>(
+        `SELECT h.state AS head_state, h.id::text AS head_request_id, h.request_id::text AS head_write_request_id, h.claim_phase AS head_claim_phase, h.execution_token::text AS head_token,
            (h.claim_expires_at IS NOT NULL AND h.claim_expires_at < now()) AS head_lapsed, h.intent->>'kind' AS head_kind
          FROM persistence_source_bindings b
          JOIN sources s ON s.id = b.source_id AND s.incarnation = b.source_incarnation
-         JOIN LATERAL (SELECT e.id, e.state, e.claim_phase, e.execution_token, e.claim_expires_at, e.intent FROM persistence_requests e
+         JOIN LATERAL (SELECT e.id, e.request_id, e.state, e.claim_phase, e.execution_token, e.claim_expires_at, e.intent FROM persistence_requests e
            WHERE e.worktree_id = b.worktree_id AND e.state IN ('queued','running','recovering') ORDER BY (e.state <> 'running'), e.sequence LIMIT 1) h ON true
          WHERE b.source_id = $1`, [sourceId], { timeoutMs: HEAD_READ_TIMEOUT_MS, signal: AbortSignal.timeout(HEAD_READ_TIMEOUT_MS + 500) });
       if (!row) return null;
       const { localHostId } = await import('./identity.ts');
       const bound = { timeoutMs: HEAD_READ_TIMEOUT_MS, signal: AbortSignal.timeout(HEAD_READ_TIMEOUT_MS + 500) };
-      return { head_state: row.head_state, request_id: row.head_request_id, claim: drainClaimOf(row, await (budgets ??= readPreparationBudgets(engine))),
+      return { head_state: row.head_state, request_id: row.head_request_id, write_request_id: row.head_write_request_id, claim: drainClaimOf(row, await (budgets ??= readPreparationBudgets(engine))),
         ...await headClaimability(engine, { id: row.head_request_id, state: row.head_state }, localHostId(), bound), consumer: await describeHostConsumer(engine, { signal: bound.signal }) };
     } } : {}),
   };

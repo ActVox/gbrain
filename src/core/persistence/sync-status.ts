@@ -126,8 +126,8 @@ export interface SyncStatus {
 }
 export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
 /** Why the source is in its state; one closed list. */
-export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'status_unknown',
-  'needs_human', 'head_blocked', 'recovery_blocked'] as const;
+export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'request_pending',
+  'status_unknown', 'needs_human', 'head_blocked', 'recovery_blocked'] as const;
 export type SyncStatusReason = typeof SYNC_STATUS_REASONS[number];
 export type SyncStatusRead = { status: 'read' } | { status: 'not_read'; fix: Action };
 /** The bound of each default probe (the oldest blocker, the recovery records). */
@@ -288,7 +288,9 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     resume_argv: resume, ...blockers, cursors: detail ? await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures) : [],
-    terminal_failures: terminal, next: next ?? recovery_next ?? (stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+    terminal_failures: terminal, next: next ?? recovery_next ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
+      why: `Write request ${oldest.request.request_id} of this source is still ${oldest.request.state}${oldest.request.step ? ` (step ${oldest.request.step})` : ''}; a running owner finishes it on its own, and the next sync of this source drains it.` } satisfies Action
+      : stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `The oldest-blocker or recovery probe did not answer within ${SYNC_STATUS_PROBE_MS / 1000} s, so this status does not know the state (it is not reported synced). Rerun it after a short wait; gbrain doctor --json checks the database if it keeps timing out.` } satisfies Action : null),
     state, reason: stateReason,
     oldest_blocker: oldest, recovery, checkpoint_blockers_read: detail ? { status: 'read' } : notRead('checkpoint blocker list'),
@@ -306,6 +308,7 @@ function statusState(s: { human: boolean; oldest: SyncStatus['oldest_blocker']; 
   if (s.lastError) return ['resumable', 'last_error'];
   if (s.actionable) return ['resumable', 'holds_actionable'];
   if (s.recovery.status === 'ok' && s.recovery.count > 0) return ['resumable', 'recovery_pending'];
+  if (s.oldest.status === 'ok' && s.oldest.request) return ['resumable', 'request_pending'];
   if (s.oldest.status !== 'ok' || s.recovery.status !== 'ok') return ['resumable', 'status_unknown'];
   return ['synced', s.holds ? 'held_by_design' : 'nothing_pending'];
 }
@@ -316,7 +319,7 @@ async function oldestBlocker(engine: BrainEngine, sourceId: string): Promise<Syn
   try {
     const row = await Promise.race([head(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no answer within ${SYNC_STATUS_PROBE_MS} ms`)), SYNC_STATUS_PROBE_MS + 1_000).unref?.())]);
     if (!row) return { status: 'ok', request: null };
-    return { status: 'ok', request: { request_id: row.request_id ?? '', state: row.head_state, phase: row.claim?.phase ?? null, step: row.claim?.step ?? null, lapsed: row.claim?.lapsed === true,
+    return { status: 'ok', request: { request_id: row.write_request_id ?? row.request_id ?? '', state: row.head_state, phase: row.claim?.phase ?? null, step: row.claim?.step ?? null, lapsed: row.claim?.lapsed === true,
       blocked_by: row.blocked_by ? { predicate: row.blocked_by.predicate, state: row.blocked_by.state, intervention: row.blocked_by.intervention } : null } };
   } catch (error) {
     return { status: 'unknown', reason: error instanceof Error ? error.message : String(error) };
@@ -327,9 +330,9 @@ async function oldestBlocker(engine: BrainEngine, sourceId: string): Promise<Syn
 async function recoveryProbe(engine: BrainEngine, sourceId: string): Promise<SyncStatus['recovery']> {
   try {
     const rows = await engine.executeRaw<{ n: number | string; request_id: string | null; slug: string | null; blocked: boolean | null }>(
-      `SELECT count(*) AS n, (array_agg(request_id::text ORDER BY sequence))[1] AS request_id, (array_agg(slug ORDER BY sequence))[1] AS slug,
-         (array_agg(blocked_reason IN ('unexpected_staging_bytes','unexpected_file_bytes') ORDER BY sequence))[1] AS blocked
-       FROM persistence_requests WHERE source_id=$1 AND recovery IS NOT NULL`, [sourceId], { timeoutMs: SYNC_STATUS_PROBE_MS, signal: AbortSignal.timeout(SYNC_STATUS_PROBE_MS + 500) });
+      `SELECT (SELECT count(*) FROM persistence_requests WHERE source_id=$1 AND recovery IS NOT NULL) AS n, f.request_id::text AS request_id, f.slug,
+         f.blocked_reason IN ('unexpected_staging_bytes','unexpected_file_bytes') AS blocked
+       FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT request_id, slug, blocked_reason FROM persistence_requests WHERE source_id=$1 AND recovery IS NOT NULL ORDER BY sequence LIMIT 1) f ON true`, [sourceId], { timeoutMs: SYNC_STATUS_PROBE_MS, signal: AbortSignal.timeout(SYNC_STATUS_PROBE_MS + 500) });
     const row = rows[0];
     const count = Number(row?.n ?? 0);
     return { status: 'ok', count, first: count && row?.request_id ? { request_id: row.request_id, slug: row.slug ?? '', blocked: row.blocked === true } : null };

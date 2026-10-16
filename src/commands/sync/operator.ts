@@ -142,6 +142,7 @@ export function syncStatusHeadline(status: Pick<SyncStatus, 'source_id' | 'state
     case 'last_error': return `Source ${status.source_id} is resumable: the last run recorded a failure that a rerun holds or retries.`;
     case 'holds_actionable': return `Source ${status.source_id} is resumable: held files have a safe action (sync unblock).`;
     case 'recovery_pending': return `Source ${status.source_id} is resumable: a write's recovery record waits for an owner pass.`;
+    case 'request_pending': return `Source ${status.source_id} is resumable: a write request is still unfinished; the next sync drains it.`;
     case 'status_unknown': return `Source ${status.source_id}: state unknown (a probe did not answer); not reported synced.`;
     case 'needs_human': return `Source ${status.source_id} is blocked: a person has to decide (see NEEDS HUMAN below).`;
     case 'head_blocked': return `Source ${status.source_id} is blocked: its oldest write waits on something only an operator clears.`;

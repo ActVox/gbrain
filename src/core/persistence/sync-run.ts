@@ -1395,7 +1395,8 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
   const remote = currentSubmissionAuthority()?.kind === 'remote_generic';
   return withDrainLease(engine, sourceId, { holder: opts.drainHolder ?? { kind: slice ? 'owner_slice' : 'cli', id: null }, remote },
     signal => performManagedPass(engine, signal ? { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, signal]) : signal } : opts, slice))
-    .then(result => withSyncTail(engine, sourceId, result, { signal: opts.signal, deadlineAtMs: opts.deadlineAtMs }))
+    // #6712 PR 2: an owner slice is time-bounded, so its tail gets the slice's budget (pages it leaves stay stale, with the notice).
+    .then(result => withSyncTail(engine, sourceId, result, { signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, ...(slice ? { budgetMs: slice.maxMs } : {}) }))
     .catch(async error => {
       if (!(error instanceof LockUnavailableError) || error.lockId !== syncLockId(sourceId)) throw error;
       return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null), { remote });
