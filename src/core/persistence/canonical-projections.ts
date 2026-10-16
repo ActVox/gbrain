@@ -188,19 +188,19 @@ async function segmentedPriorView(engine: BrainEngine, page: { id: number; slug:
   keys.forEach((key, i) => { const at = index.get(key); if (at) at.push(i); else index.set(key, [i]); });
   const flags = new Uint8Array(keys.length);
   const mark = (key: string, bit: number) => { for (const i of index.get(key) ?? []) flags[i]! |= bit; };
-  const takes: Record<BodyRegion, TakesFenceScan> = { truth: new TakesFenceScan(page), timeline: new TakesFenceScan(page) };
+  const takes = new Map<BodyRegion, TakesFenceScan>((['truth', 'timeline'] as const).map(region => [region, new TakesFenceScan(page)]));
   let region: BodyRegion | null = null;
   let regionAt = 0;
   for await (const block of bodyBlocks(engine, page)) {
     if (block.region && block.region !== region) { region = block.region; regionAt = block.at; }
-    if (block.region) takes[block.region].push({ text: block.text, at: block.at - regionAt });
+    if (block.region) takes.get(block.region)!.push({ text: block.text, at: block.at - regionAt });
     const safe = sanitizeRemoteBody(block.text, { keepMaterializedMarkers: true });
     for (const t of extractTimelineFromContent(safe, slug)) mark(timelineKey(t), PRIOR_ENTRY);
     for (const t of parseTimelineEntries(safe)) mark(timelineKey({ ...t, source: t.source ?? 'markdown' }), PRIOR_ENTRY);
     for (const key of markedTimeline(safe, slug)) mark(key, PRIOR_MARKED);
     for (const t of supersededCitationTimeline(safe)) mark(timelineKey(t), PRIOR_SUPERSEDED);
   }
-  const fields = [takes.truth.result(), takes.timeline.result()];
+  const fields = [...takes.values()].map(scan => scan.result());
   const view: PriorView = {
     rows: { entry: i => (flags[i]! & PRIOR_ENTRY) !== 0, marked: i => (flags[i]! & PRIOR_MARKED) !== 0, superseded: i => (flags[i]! & PRIOR_SUPERSEDED) !== 0 },
     takeRows: new Set(fields.flatMap(field => field.parsed.takes.map(t => t.rowNum))), takesWarn: fields.some(field => field.parsed.warnings.length > 0),

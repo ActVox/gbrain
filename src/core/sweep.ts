@@ -388,7 +388,7 @@ async function runLinksTimelinePass(
   type Extracted = Awaited<ReturnType<typeof extractPageLinks>>;
   type Snapshot = NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>;
   const { extractSegmentedPageLinks, segmentedRoleText } = await import('./page-body/segment-links.ts');
-  const { bodyBlocks, BodyReadStopped, detachedValue } = await import('./page-body/segment-blocks.ts');
+  const { bodyBlocks, detachedValue } = await import('./page-body/segment-blocks.ts');
 
   /**
    * One batch through every phase. A segmented page's reads ask `stop` before each segment, so one that does not fit
@@ -617,10 +617,22 @@ async function runLinksTimelinePass(
     }
   };
 
-  // #C5: a segmented page is read several times per pass and can outlast any budget, so it never shares a batch: the
-  // inline pages run first as one batch, then each segmented page alone, smallest first, while budget remains. One
-  // that does not fit stops at a segment bound and is deferred (left unstamped) until its page changes, so it cannot
-  // take the budget of the rest of this sweep, or of later sweeps in this process.
+  await runLinksTimelineBatches(recent, ctx, runBatch);
+}
+
+/**
+ * #C5: a segmented page is read several times per pass and can outlast any budget, so it never shares a batch: the
+ * inline pages run first as one batch, then each segmented page alone, smallest first, while budget remains. One
+ * that does not fit stops at a segment bound (BodyReadStopped) and is deferred (left unstamped) until its page
+ * changes, so it cannot take the budget of the rest of this sweep, or of later sweeps in this process.
+ */
+async function runLinksTimelineBatches(
+  recent: Array<{ slug: string; updated_at_iso: string; body_storage: string | null; body_bytes: number | null }>,
+  ctx: Pick<PassCtx, 'sourceId' | 'overBudget' | 'skip'> & { log: (msg: string) => void },
+  runBatch: (recent: Array<{ slug: string; updated_at_iso: string }>, stop?: () => boolean) => Promise<void>,
+): Promise<void> {
+  const { sourceId, overBudget, skip, log } = ctx;
+  const { BodyReadStopped } = await import('./page-body/segment-blocks.ts');
   const pending = recent.filter(row => {
     if (deferredSegmentedPages.get(`${sourceId}\0${row.slug}`) !== row.updated_at_iso) return true;
     skip('segmented_page_deferred');
