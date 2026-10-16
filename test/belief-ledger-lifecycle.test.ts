@@ -1,6 +1,6 @@
 /**
  * Belief ledger lifecycle probes (docs/designs/BELIEF_LEDGER.md section 11:
- * 1, 2, 3, 5, 7, 12, 18, 21, 39). Each asserts exact event types, keys and
+ * 1, 2, 3, 5, 7, 18, 21, 39; probe 12 is in belief-ledger-group.test.ts). Each asserts exact event types, keys and
  * values on PGLite and on Postgres when DATABASE_URL is set, and each has a
  * forced probe: a deliberately broken emitter that must make it fail.
  */
