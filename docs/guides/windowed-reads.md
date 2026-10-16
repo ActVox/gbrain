@@ -100,8 +100,9 @@ refusal instead of a partial page: upgrade it (`gbrain upgrade`).
 
 ## page_body_segmented
 
-The page's body is stored in segments (pages over 1 MiB with
-`pages.segmented_storage` on), and the command or tool that hit it reads or
+The page's body is stored in segments (a page over 1 MiB written while
+`pages.segmented_storage` is on; see
+[segmented page storage](memory-boundaries.md#segmented-page-storage)), and the command or tool that hit it reads or
 writes the whole body as one string. It stopped before reading or changing
 anything, so the page is intact. Read the page's revision and stored size with
 `get_page` `body: "none"` (`gbrain get --body none <slug>`; the size is

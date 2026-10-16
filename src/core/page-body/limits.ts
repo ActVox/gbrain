@@ -3,12 +3,14 @@
  * number and config key in one place. The product numbers (ceilings, version
  * retention) are open product calls; change them here and nowhere else.
  *
- * `pages.segmented_storage` defaults to `off`: while it is off no page is ever
- * segmented, every page stays inline up to `PAGE_MAX_BYTES` (Wave A) and no
- * code path below the inline threshold changes.
+ * `pages.segmented_storage` defaults to `on`, and is effectively on only while
+ * no recent writer predates segmented pages (`segmentedWriterBlockers`). While
+ * it is off no page is newly segmented, every page stays inline up to
+ * `PAGE_MAX_BYTES` (Wave A) and no code path below the inline threshold changes.
  */
 import type { BrainEngine } from '../engine.ts';
 import { PAGE_INLINE_MAX_BYTES, PAGE_MAX_BYTES } from '../page-size-policy.ts';
+import type { RecentWriterVersion } from '../persistence/writer-versions.ts';
 
 export { PAGE_INLINE_MAX_BYTES };
 
@@ -84,8 +86,13 @@ export const SEGMENT_TEXT_GC_GRACE_MS = 60 * 60 * 1000;
 export const BODY_STAGING_IDLE_MS = 60 * 60 * 1000;
 export const BODY_STAGING_HARD_MS = 24 * 60 * 60 * 1000;
 
+/** A writer below `SEGMENTED_WRITER_FLOOR` keeps the switch off until this many days after its last committed request. */
+export const SEGMENTED_WRITER_WINDOW_DAYS = 7;
+/** The writer-version gate is read at most once per this many ms per engine (a transaction engine shares its root's entry). */
+export const SEGMENTED_WRITER_GATE_TTL_MS = 60_000;
+
 export interface PageBodyPolicy {
-  /** `pages.segmented_storage = on`. */
+  /** The effective switch: `pages.segmented_storage` is not `off` and no recent writer predates segmented pages. */
   segmented: boolean;
   /** Largest page body admitted: `PAGE_MAX_BYTES` while the switch is off, else `pages.max_bytes` or the engine ceiling. */
   maxBytes: number;
@@ -94,7 +101,7 @@ export interface PageBodyPolicy {
   versionsMaxPinnedBytes: number;
 }
 
-type PolicyEngine = Pick<BrainEngine, 'getConfig' | 'kind'>;
+type PolicyEngine = Pick<BrainEngine, 'getConfig' | 'kind' | 'executeRaw'>;
 
 function positiveInt(raw: string | null, fallback: number): number {
   if (raw === null || raw.trim() === '') return fallback;
@@ -102,9 +109,43 @@ function positiveInt(raw: string | null, fallback: number): number {
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
-/** True when `pages.segmented_storage` is `on` (default `off`). */
-export function parseSegmentedStorage(raw: string | null): boolean {
-  return /^(on|true|1|yes)$/i.test((raw ?? '').trim());
+/** The effective `pages.segmented_storage` when it is not configured. */
+export const SEGMENTED_STORAGE_DEFAULT: 'on' | 'off' = 'off';
+
+/** The configured `pages.segmented_storage`: unset means SEGMENTED_STORAGE_DEFAULT; an unrecognized value counts as `off`. */
+export function parseSegmentedStorage(raw: string | null): 'on' | 'off' | 'unset' | 'invalid' {
+  const value = (raw ?? '').trim();
+  if (!value) return 'unset';
+  if (/^(on|true|1|yes)$/i.test(value)) return 'on';
+  return /^(off|false|0|no)$/i.test(value) ? 'off' : 'invalid';
+}
+
+let writerGate = new WeakMap<object, { at: number; blockers: RecentWriterVersion[] }>();
+
+/**
+ * Writers that committed a request in the last `SEGMENTED_WRITER_WINDOW_DAYS` days with a version below
+ * `SEGMENTED_WRITER_FLOOR` or no stamp. Any one keeps segmented storage off. Cached per engine for
+ * `SEGMENTED_WRITER_GATE_TTL_MS`; `fresh` (doctor) reads through.
+ */
+export async function segmentedWriterBlockers(engine: Pick<BrainEngine, 'executeRaw'>, opts: { fresh?: boolean } = {}): Promise<RecentWriterVersion[]> {
+  let root: object = engine;
+  for (let proto = Object.getPrototypeOf(root); proto && !Object.hasOwn(proto, 'constructor'); proto = Object.getPrototypeOf(proto)) root = proto;
+  const cached = writerGate.get(root);
+  if (!opts.fresh && cached && Date.now() - cached.at < SEGMENTED_WRITER_GATE_TTL_MS) return cached.blockers;
+  const { recentWriterVersions, SEGMENTED_WRITER_FLOOR, writerVersionBelowFloor } = await import('../persistence/writer-versions.ts');
+  const blockers = (await recentWriterVersions(engine, SEGMENTED_WRITER_WINDOW_DAYS)).filter(row => writerVersionBelowFloor(row.version, SEGMENTED_WRITER_FLOOR));
+  writerGate.set(root, { at: Date.now(), blockers });
+  return blockers;
+}
+
+/** Whether the configured switch asks for segmented storage, before the writer gate. */
+export function segmentedStorageRequested(setting: ReturnType<typeof parseSegmentedStorage>): boolean {
+  return setting === 'on' || (setting === 'unset' && SEGMENTED_STORAGE_DEFAULT === 'on');
+}
+
+/** Test seam: forget cached writer-gate reads. */
+export function _resetSegmentedWriterGateForTests(): void {
+  writerGate = new WeakMap();
 }
 
 /** The engine's default segmented ceiling. */
@@ -112,14 +153,19 @@ export function segmentedPageCeiling(kind: BrainEngine['kind']): number {
   return kind === 'pglite' ? SEGMENTED_PAGE_CEILING_BYTES.pglite : SEGMENTED_PAGE_CEILING_BYTES.postgres;
 }
 
-/** Read the segmented-storage policy once per write. A configured `pages.max_bytes` never exceeds the engine ceiling. */
+/**
+ * Read the segmented-storage policy once per write. The switch is effectively on when it is configured `on`
+ * (or unset while SEGMENTED_STORAGE_DEFAULT is `on`) and no recent writer predates segmented pages; an
+ * unreadable gate counts as blocked. A configured `pages.max_bytes` never exceeds the engine ceiling.
+ */
 export async function readPageBodyPolicy(engine: PolicyEngine): Promise<PageBodyPolicy> {
   const read = (key: string) => engine.getConfig(key).catch(() => null);
   const [switchRaw, maxRaw, retireRaw, versionsRaw, pinnedRaw] = await Promise.all([
     read(PAGE_BODY_CONFIG_KEYS.segmentedStorage), read(PAGE_BODY_CONFIG_KEYS.maxBytes), read(PAGE_BODY_CONFIG_KEYS.flipRetireMaxRows),
     read(PAGE_BODY_CONFIG_KEYS.versionsMaxPerPage), read(PAGE_BODY_CONFIG_KEYS.versionsMaxPinnedBytes),
   ]);
-  const segmented = parseSegmentedStorage(switchRaw);
+  const setting = parseSegmentedStorage(switchRaw);
+  const segmented = segmentedStorageRequested(setting) && (await segmentedWriterBlockers(engine).catch(() => null))?.length === 0;
   const ceiling = segmentedPageCeiling(engine.kind);
   return {
     segmented,

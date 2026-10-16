@@ -6,6 +6,15 @@ import type { SqlEngine } from './model.ts';
 /** Writers older than this may still delete database-only timeline rows during publication. */
 export const WRITER_VERSION_FLOOR = '0.60.5.0';
 export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
+/**
+ * Writers older than this do not understand segmented page bodies (Wave B): a pre-Wave-B binary reads a segmented
+ * page's NULL body columns, and the release that added segmented storage behind the switch purges, forgets and exports
+ * without its segment texts. A recent one keeps `pages.segmented_storage` effectively off (`page-body/limits.ts`).
+ * A placeholder equal to the branch's VERSION until the merge-slot stamp, which sets it to the release that turns the
+ * switch on (the `since` of its BEHAVIOR_CHANGES row, pinned by test/large-pages/segmented-switch.test.ts). That
+ * release must be above v0.60.252.0, the release that added segmented storage with the switch off.
+ */
+export const SEGMENTED_WRITER_FLOOR = '0.60.252.0';
 
 /** Numeric comparison on all four components; null when either side is not a version. */
 export function compareWriterVersions(a: string, b: string): number | null {
@@ -19,10 +28,10 @@ export function compareWriterVersions(a: string, b: string): number | null {
   return 0;
 }
 export function writerVersionLabel(version: string | null): string { return version ?? UNSTAMPED_WRITER; }
-/** True for a missing stamp or a recorded version below the floor (an unparsable version counts as below). */
-export function writerVersionBelowFloor(version: string | null): boolean {
+/** True for a missing stamp or a recorded version below `floor` (an unparsable version counts as below). */
+export function writerVersionBelowFloor(version: string | null, floor = WRITER_VERSION_FLOOR): boolean {
   if (version === null) return true;
-  const order = compareWriterVersions(version, WRITER_VERSION_FLOOR);
+  const order = compareWriterVersions(version, floor);
   return order === null || order < 0;
 }
 

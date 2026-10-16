@@ -16,15 +16,16 @@
  *   inference (head: the first 20 lines must be in it); the frontmatter holds
  *   and the path-authoritative slug; gate-owned marker strip (a quarantine
  *   override binds the whole body, so it is dropped: fail closed); content
- *   sanity (junk patterns read a 2 KB head, size from the stored byte count);
+ *   sanity (junk patterns read a 2 KB head and the prose pass the head, middle
+ *   and tail windows; size from the stored byte count, against
+ *   `content_sanity.bytes_block` or, unset, the page ceiling `pages.max_bytes`);
  *   type preservation and subtype; provenance,
  *   effective date, tags, frontmatter aliases; the content hash (resumed per
  *   segment); the no-op skip; identity dedup by hash (an external `id` holds);
  *   code-reference edges (per line, skipped when the body has protected
  *   regions); the read-back check and the gate receipt.
- * - holds: a registered guardrail (it reads the whole payload); the
- *   content-sanity prose pass (it runs only when `bytes_block` is above the
- *   body size); a write gate that applies to the source's tier; facts or takes
+ * - holds: a registered guardrail (it reads the whole payload); a write gate
+ *   that applies to the source's tier; facts or takes
  *   fences (fence normalization, withdrawal and purge preservation parse the
  *   whole body); derived entity aliases (a linkable page type); NUL bytes (the
  *   size check needs the stored byte count before the hash); invalid UTF-8
@@ -45,7 +46,7 @@ import { FRONTMATTER_HEAD_MAX_BYTES, SEGMENT_MAX_BYTES, type PageBodyPolicy } fr
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { classifyImportHold, resolveParsedSubtype, type ParsedMarkdown } from '../markdown.ts';
 import { loadImportSanityConfig, settleContentDisposition, stripGateOwnedMarkers } from '../import-screen.ts';
-import { DEFAULT_BYTES_BLOCK, SCAN_HEAD_BYTES } from '../content-sanity.ts';
+import { JUNK_SAMPLE_CHARS } from '../content-sanity.ts';
 import { QUARANTINE_OVERRIDE_KEY } from '../quarantine-override.ts';
 import { hasGuardrails } from '../guardrails.ts';
 import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
@@ -128,16 +129,25 @@ async function* regionStream(pieces: readonly BodyPiece[], read: (start: number,
   }
 }
 
-/** The first `max` bytes of a region (NUL-free), as text cut on a code-point boundary. */
-async function regionHead(pieces: readonly BodyPiece[], read: (start: number, end: number) => AsyncIterable<Uint8Array>, max: number): Promise<string> {
-  const parts: Uint8Array[] = [];
-  let bytes = 0;
-  for await (const part of regionStream(pieces, (start, end) => read(start, Math.min(end, start + max)), () => undefined)) {
-    parts.push(part);
-    bytes += part.length;
-    if (bytes >= max) break;
+/**
+ * Bytes `[from, from + max)` of a stored body as text, one window of the content-sanity sample (`sampleWindows`
+ * cuts the same head, middle and tail of a string body); a code point cut at either end decodes as U+FFFD.
+ */
+async function bodyWindow(pieces: readonly BodyPiece[], read: (start: number, end: number) => AsyncIterable<Uint8Array>, from: number, max: number): Promise<string> {
+  const parts: Buffer[] = [];
+  let at = 0;
+  for (const piece of pieces) {
+    if (at >= from + max) break;
+    const text = 'text' in piece ? Buffer.from(sanitizeText(piece.text), 'utf8') : null;
+    const length = 'text' in piece ? text!.length : piece.end - piece.start;
+    const start = Math.max(from, at), end = Math.min(from + max, at + length);
+    if (start < end) {
+      if ('text' in piece) parts.push(text!.subarray(start - at, end - at));
+      else for await (const part of read(piece.start + start - at, piece.start + end - at)) parts.push(Buffer.from(part));
+    }
+    at += length;
   }
-  return utf8Prefix(Buffer.concat(parts), max);
+  return Buffer.concat(parts).toString('utf8');
 }
 
 /**
@@ -254,10 +264,11 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   const sanity = await loadImportSanityConfig(engine);
   if (writeGateApplies(writeGate.tier, sanity.writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) return hold(slug, size, `the write gate scans the whole body of a ${writeGate.tier} page`);
   const bodyBytes = scan.truthBytes + (scan.timelineBytes ? 1 + scan.timelineBytes : 0);
-  if (!sanity.disabled && (sanity.cs.bytes_block ?? DEFAULT_BYTES_BLOCK) >= bodyBytes) return hold(slug, size, 'the content-sanity prose pass samples the whole body below content_sanity.bytes_block');
-  const truthHead = await regionHead(scan.truth, read, SCAN_HEAD_BYTES * 4);
-  const head = { ...parsed, compiled_truth: truthHead, timeline: truthHead.length >= SCAN_HEAD_BYTES ? '' : await regionHead(scan.timeline, read, SCAN_HEAD_BYTES * 4) };
-  const disposition = await settleContentDisposition(engine, head, { slug, sourceId, stripped: false, writeGate, bodyBytes });
+  const body: BodyPiece[] = [...scan.truth, ...(scan.timelineBytes ? [{ text: '\n' }, ...scan.timeline] : [])];
+  const sample = [0, Math.floor((bodyBytes - JUNK_SAMPLE_CHARS) / 2), bodyBytes - JUNK_SAMPLE_CHARS];
+  const windows = await Promise.all(sample.map(from => bodyWindow(body, read, from, JUNK_SAMPLE_CHARS)));
+  const disposition = await settleContentDisposition(engine, { ...parsed, compiled_truth: windows.join(''), timeline: '' },
+    { slug, sourceId, stripped: false, writeGate, bodyBytes, defaultBytesBlock: input.policy.maxBytes });
   const existing = opts.coordinated ? opts.coordinated.snapshot?.page ?? null : await engine.getPage(slug, { sourceId, includeDeleted: true });
   if (existing?.deleted_at) return hold(slug, size, 'restoring a deleted page rewrites its body through the inline writer');
   if (existing) stabilizeSafetyAssessments(parsed.frontmatter, existing.frontmatter);
