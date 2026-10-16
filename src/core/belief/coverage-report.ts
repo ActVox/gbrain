@@ -329,3 +329,22 @@ export async function coveredSources(engine: BrainEngine): Promise<string[]> {
     WHERE e.subject_kind = 'coverage' ORDER BY 1`);
   return rows.map(r => r.source_id);
 }
+
+/** The cycle's extract phase: a sampled drift reconcile and commit-mark fill on each covered source (or the cycle's source); failures become details. */
+export async function cycleBeliefReconcile(engine: BrainEngine, sourceId?: string): Promise<Record<string, unknown>> {
+  const sources = sourceId ? (await coveredSources(engine)).filter(s => s === sourceId) : await coveredSources(engine);
+  if (!sources.length) return {};
+  const out = { belief_slugs_checked: 0, belief_slugs_reconciled: 0, belief_events_appended: 0, belief_commit_marks_filled: 0 };
+  try {
+    for (const source of sources) {
+      const run = await reconcileBeliefDrift(engine, source, { limit: DRIFT_SAMPLE_PAGES, op: 'cycle_extract' });
+      out.belief_slugs_checked += run.scan.checked;
+      out.belief_slugs_reconciled += run.reconciled.length;
+      out.belief_events_appended += run.events;
+      out.belief_commit_marks_filled += await fillCommitMarks(engine, source);
+    }
+    return out;
+  } catch (error) {
+    return { ...out, belief_reconcile_error: error instanceof Error ? error.message : String(error) };
+  }
+}
