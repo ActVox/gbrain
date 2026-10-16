@@ -143,7 +143,8 @@ export const CLI_FLAG_REGISTRY: Record<string, readonly string[]> = {
 // Routing flags a fix naming each CLI-only command carries (A1 render-time pin,
 // src/core/fix-routing.ts): '--brain' when the command opens its brain (not a
 // pre-connect command, or its code reads the global brain option); '--source'
-// when the command-table record declares routes_source (consumption-checked).
+// (or the declared '--source-id') when the command-table record declares
+// routes_source (consumption-checked).
 export const CLI_ROUTING_FLAGS: Record<string, readonly string[]> = {
   'advisor': ['--brain'],
   'agent': ['--brain'],
@@ -178,7 +179,7 @@ export const CLI_ROUTING_FLAGS: Record<string, readonly string[]> = {
   'enrich': ['--brain', '--source'],
   'eval': ['--brain'],
   'export': ['--brain', '--source'],
-  'extract': ['--brain', '--source'],
+  'extract': ['--brain', '--source-id'],
   'extract-conversation-facts': ['--brain'],
   'facts': ['--brain', '--source'],
   'features': ['--brain'],

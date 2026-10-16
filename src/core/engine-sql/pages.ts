@@ -727,6 +727,19 @@ function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attenda
   return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}`;
 }
 
+/**
+ * #6803 (D1): the live page count, the stale count without attendance-blocked pages and the attendance-blocked count
+ * in one statement, so doctor's `links_extraction_lag` and the sync nudge share one predicate and one threshold input.
+ * `attendance: false` is the pre-v180 shape (no marker column: nothing is attendance-blocked).
+ */
+export function extractionLagStatement(opts: { sourceId?: string; versionTs: string; attendance: boolean }): { text: string; params: unknown[] } {
+  const source = opts.sourceId ? sqlFragment` AND source_id = ${opts.sourceId}` : sqlFragment``;
+  const stale = stalePagesWhere({ versionTs: opts.versionTs, ...(opts.attendance ? { attendance: 'exclude' as const } : {}) });
+  const blocked = opts.attendance ? sqlFragment`count(*) FILTER (WHERE ${stalePagesWhere({ versionTs: opts.versionTs, attendance: 'blocked' })})::int` : sqlFragment`0`;
+  return renderFragment(sqlFragment`SELECT count(*)::int AS total, count(*) FILTER (WHERE ${stale})::int AS stale, ${blocked} AS attendance_blocked
+    FROM pages WHERE deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))}${source}`);
+}
+
 export async function countStalePagesForExtraction(exec: ScopedRead, opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }): Promise<number> {
     const { text, params } = renderFragment(sqlFragment`SELECT count(*)::int AS count FROM pages WHERE ${stalePagesWhere(opts)}`);
     const { rows } = await exec.unsafe<{ count?: number }>(text, params);
