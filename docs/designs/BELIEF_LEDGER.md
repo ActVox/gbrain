@@ -1418,3 +1418,22 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
 10. **Ontology rows** are keyed into their provenance stream (the
     observation's `source_markdown_slug`) as database-only subjects, not into
     the entity's stream.
+11. **Purge carrier registration resolves lifetimes outside the purge's page
+    locks.** `registerLiveCarriers` and `registerVersionCarriers` key the
+    carrying fields of pages the purge does not lock (any page quoting the
+    claim) and may mint their open lifetime without that page's key. Taking
+    those keys inside the purge transaction would break the global lock
+    order, so a concurrent rename of such a page can mint a second lifetime.
+12. **Owner release reach (6.5).** A publication is an owner edit only when a
+    local caller journals a direct edit (`put_page`, `edit_page`,
+    `takes_update`, `takes_resolve`) with no internal intent kind; append
+    still requires the writer tier at or above `OWNER_TIER_FLOOR`. The trust
+    channel records those verbs as `agent_written` even from the local CLI,
+    so in W1 the release that reaches the floor is the owner confirm action
+    (`trust confirm`).
+13. **Short claims quote a field only as a word.** A claim shorter than eight
+    characters matches a carrying field only where no letter or digit of a
+    space-separated script (Latin, Greek, Cyrillic, Armenian, Georgian) is
+    glued to it; CJK, Thai, punctuation and markup still match as
+    substrings. The inventory of claims stays exhaustive; only a short claim
+    inside a longer word (`ceo` in `herbaceous`) no longer redacts.

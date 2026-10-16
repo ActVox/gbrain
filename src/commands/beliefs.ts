@@ -17,9 +17,10 @@ import { backfillBeliefHistory } from '../core/belief/backfill.ts';
 import { readLedgerSource } from '../core/belief/ledger.ts';
 import { readManagedMode } from '../core/persistence/managed-mode.ts';
 import { resolveSourceId, SourceTargetError } from '../core/source-resolver.ts';
+import { replayPurgesCli } from './beliefs-replay-purges.ts';
 
 export const BELIEFS_USAGE = [
-  'Usage: gbrain beliefs <enable|disable|status|reconcile|backfill> [--source <id>] [--json]',
+  'Usage: gbrain beliefs <enable|disable|status|reconcile|backfill|replay-purges> [--source <id>] [--json]',
   '  enable     Start recording the belief ledger on a source: baselines every page (resumable) and sets the watermark.',
   '             Only a managed source\'s coverage is certified; an unmanaged source is recorded but uncertified.',
   '  disable    Stop recording (appends coverage.stopped); enabling again starts a new interval with a new baseline.',
@@ -27,10 +28,12 @@ export const BELIEFS_USAGE = [
   '  reconcile  Appends reconcile events for slugs whose state drifted from their newest event, and fills missing commit marks.',
   '             A drifted slug\'s interval stays uncertified on a managed source.',
   '  backfill   Seeds best-effort history before the coverage start from retained page versions (never certified).',
+  '  replay-purges --archived-at <iso> (--purge-mirror <abs path> | --from-url-env <VAR>) [--apply]',
+  '             After a Postgres restore, replays the purges the restored backup does not hold (dry run unless --apply).',
   '  --source <id>  The source (default: every covered source for status and reconcile; the resolved source, as for other commands, for the rest).',
 ].join('\n');
 
-const SUBCOMMANDS = ['enable', 'disable', 'status', 'reconcile', 'backfill'] as const;
+const SUBCOMMANDS = ['enable', 'disable', 'status', 'reconcile', 'backfill', 'replay-purges'] as const;
 
 function sourceArg(args: string[]): string | undefined {
   const at = args.indexOf('--source');
@@ -67,7 +70,7 @@ export async function runBeliefs(engine: BrainEngine, args: string[]): Promise<v
   if (args.includes('--help') || args.includes('-h') || !sub) { console.log(BELIEFS_USAGE); return; }
   try {
     if (!(SUBCOMMANDS as readonly string[]).includes(sub)) {
-      throw opError('invalid_params', `Unknown beliefs subcommand '${sub}'.`, 'gbrain beliefs --help lists enable, disable, status, reconcile and backfill.');
+      throw opError('invalid_params', `Unknown beliefs subcommand '${sub}'.`, 'gbrain beliefs --help lists enable, disable, status, reconcile, backfill and replay-purges.');
     }
     const named = sourceArg(args);
     if (named !== undefined && !await readLedgerSource(engine, named)) throw unknownSource(named);
@@ -95,6 +98,11 @@ export async function runBeliefs(engine: BrainEngine, args: string[]): Promise<v
       const incomplete = result.pages.filter(p => !p.complete);
       await report(args, result, `Backfilled ${result.events} event(s) before ${result.since} across ${result.pages.length} page(s) of ${sourceId} (best effort, never certified)`
         + `${incomplete.length ? `; ${incomplete.length} page(s) incomplete (${[...new Set(incomplete.flatMap(p => p.reasons))].join(', ')})` : ''}.`);
+      return;
+    }
+    if (sub === 'replay-purges') {
+      const { value, text } = await replayPurgesCli(engine, args);
+      await report(args, value, text);
       return;
     }
     const sources = named ? [named] : await coveredSources(engine);
