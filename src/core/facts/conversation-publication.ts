@@ -76,6 +76,7 @@ import { ALLOWED_TYPES, pageTypesForAllowed, type AllowedType } from './conversa
 import { withWriteTrust } from '../persistence/context.ts';
 import { conversationDerivation } from '../persistence/derived-facts.ts';
 import { RELINKED_DERIVED_ROW, inheritRelinkedEntities } from './conversation-relink-carry.ts';
+import { recordReextractMemo } from './conversation-memo.ts';
 import { recordTaintEdges } from '../trust/taint.ts';
 import { applyGateDecision, derivedGateConfig, derivedGateInput } from '../trust/derived-gate.ts';
 import { decideFactWrite, recordFlaggedRow } from '../write-gate-store.ts';
@@ -497,6 +498,7 @@ async function applyEntry(tx: BrainEngine, row: WriteRequest, entry: Conversatio
     if (flags[i] && ids.length === kept.length) await recordFlaggedRow(tx, flags[i]!, { table: 'facts', id, sourceId: row.source_id });
   }
   const outcome = entry.rows.find(fact => OUTCOME_SOURCES.has(fact.source));
+  if (outcome?.source === TERMINAL_AUDIT_SOURCE) await recordReextractMemo(tx, row.source_id, entry.slug); // #6764
   return { ...base, status: 'committed', deleted, facts_inserted: kept.filter(fact => !OUTCOME_SOURCES.has(fact.source)).length,
     page_outcome: outcome ? (outcome.source === TERMINAL_AUDIT_SOURCE ? 'complete' : 'non_extractable') : null, newest_end: entry.newest_end,
     vectors_dropped: vectors ? 0 : entry.rows.filter(fact => fact.embedding).length };

@@ -136,6 +136,15 @@ without a second copy. A fact no entity can be proven for is recorded,
 so doctor `unlinked_facts` then offers a paid re-extraction of its page
 (`gbrain extract-conversation-facts --slugs … --force`, previewed with
 `--dry-run`, capped with `--max-cost-usd`) instead of this relink again.
+A miss the table below does not remember (`no_page`, `no_mention`,
+`withdrawn`) is tried for free again once a new page is created in the
+source, for example the missing entity page.
+
+Every completed extraction of a page is remembered with the page's content
+hash. While the page still has that content, doctor offers no paid
+re-extraction for it: facts still unlinked there are listed for linking by
+hand (forget each one and remember it again with `--entity`). Editing the
+page's content offers the re-extraction again.
 
 ## Why a fact was not linked
 

@@ -141,3 +141,15 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 - The free relink is the trusted-local intent `managed_maintenance_conversation_relink` (database-only, no files, no model) on a managed brain; an unmanaged brain has no maintenance coordinator, so it uses the same writeDerivedFacts maintenance transaction as the extractor itself.
 - All Lane 3 rows in this file are S2.
 
+## [S2] #6764 follow-up (v4 DX: the free, paid, manual sequence converges)
+
+- The paid attempt is memoized per (source_id, transcript slug, content_hash) in the existing `fact_relink_attempts` table (tier `paid_reextract`, `target_slug` the page, `reason` the hash, keyed on the page's completion outcome row); no schema change and no migration. Every completed extraction of a page writes it (unmanaged `extract-conversation-facts.ts`, managed `conversation-publication.ts` `applyEntry`), so a page already extracted with entity hints and write-time inference on its current content is never offered the paid argv again. New module `src/core/facts/conversation-memo.ts`.
+- Doctor `details.conversation.fix` gains `manual`: no envelope `fix` and no paid argv; the message names the hand route (forget it and remember it again with --entity) until the page's content changes, which re-arms `reextract`.
+- Free outcomes: only `RELINK_REASONS` memoized:true misses (`ambiguous`, `unverified_match`) stay tried for good; `no_page`, `no_mention` and `withdrawn` misses are re-armed for the free relink by any page created in the source after the attempt.
+- `extract-conversation-facts.ts` is 2081 of its 2087 ceiling (one import line). No TSV change.
+- Doctor golden drift: none new from this follow-up (`details.conversation.fix` gains the value `manual`; no new field).
+- Test: test/conversation-memo-6764.test.ts (free, paid at zero price with N=1, then manual and no paid argv; a new entity page re-arms a `no_page` row; a content edit re-arms the paid fallback). Fails 3/3 on 6be0e3410, passes 3/3 after. test/conversation-facts-managed.test.ts gains the managed memo test (pglite here; postgres in the e2e tier).
+
+### src/core/behavior-change-notice.ts (append to the second #6764 row)
+
+- "Once a page was re-extracted on its current content, doctor stops offering the paid re-extraction for it and lists the facts left for linking by hand (`--entity`); editing the page offers it again."

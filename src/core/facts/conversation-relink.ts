@@ -19,7 +19,8 @@
  * it. A row inference cannot resolve gets a `conversation_unresolved` memo in
  * `fact_relink_attempts` (operational, like relink's model verdict memos), so
  * doctor `unlinked_facts` offers it the paid re-extraction fallback instead
- * of this relink again. Trusted local CLI only.
+ * of this relink again; conversation-memo.ts says which misses a new page
+ * re-arms and how the paid attempt is remembered. Trusted local CLI only.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
@@ -36,6 +37,7 @@ import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../persis
 import { writeDerivedFacts } from '../persistence/derived-facts.ts';
 import { AUDIT_ROW_SOURCES } from './audit-sources.ts';
 import { CONVERSATION_UNRESOLVED } from './relink-reasons.ts';
+import { conversationTriedSql } from './conversation-memo.ts';
 import { appendContextNote } from './subject-infer.ts';
 import { inferConversationSubject } from './conversation-subject-infer.ts';
 
@@ -70,7 +72,7 @@ async function hasAttemptsTable(engine: BrainEngine): Promise<boolean> {
 /** The pages with the most unlinked derived rows not yet tried by this relink, up to `limit`. */
 export async function conversationRelinkPages(engine: BrainEngine, sourceId: string, limit = CONVERSATION_RELINK_PAGES): Promise<string[]> {
   const untried = await hasAttemptsTable(engine)
-    ? 'AND NOT EXISTS (SELECT 1 FROM fact_relink_attempts a WHERE a.source_id = f.source_id AND a.fact_id = f.id)' : '';
+    ? `AND NOT ${conversationTriedSql}` : '';
   const rows = await engine.executeRaw<{ slug: string }>(
     `SELECT f.source_markdown_slug AS slug FROM facts f WHERE f.source_id = $1 AND f.source_markdown_slug IS NOT NULL AND ${ACTIVE}
         AND ${derivedConversationRow('$2')} ${untried}

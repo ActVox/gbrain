@@ -113,6 +113,7 @@ import {
 } from '../core/entities/resolve-on-save.ts';
 import { CONVERSATION_ENTITY_HINTS_CAP, conversationEntityHints } from '../core/facts/conversation-entity-hints.ts';
 import { inferConversationSubjects } from '../core/facts/conversation-subject-infer.ts';
+import { recordReextractMemo } from '../core/facts/conversation-memo.ts';
 
 // Re-exported verbatim so existing importers (this file's own helpers below
 // and this file's tests) keep working unchanged; doctor.ts, jobs.ts,
@@ -1133,7 +1134,7 @@ async function processPage(
     // page's facts in one transaction.
     const terminal = terminalAuditFact(page.slug, rowNum, snapshot.versionToken);
     if (state.managed) managedRows.push(terminal);
-    else await writeDerivedFacts(state.engine, state.sourceId, page.slug, db => db.insertFacts([terminal], { source_id: state.sourceId })); // gbrain-allow-direct-insert: page-level TERMINAL audit row (Codex C7 / E16) marks extraction completion in the durable facts table — there's no fence equivalent because this is internal audit state, not user-facing knowledge
+    else await writeDerivedFacts(state.engine, state.sourceId, page.slug, db => db.insertFacts([terminal], { source_id: state.sourceId }).then(async r => { await recordReextractMemo(db, state.sourceId, page.slug); return r; })); // #6764 paid-attempt memo; gbrain-allow-direct-insert: page-level TERMINAL audit row (Codex C7 / E16) marks extraction completion in the durable facts table — there's no fence equivalent because this is internal audit state, not user-facing knowledge
     rowNum++;
   } else if (fullyProcessed && newestEnd !== null) {
     process.stderr.write(

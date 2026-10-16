@@ -30,7 +30,7 @@ import { AUDIT_ROW_SOURCES } from '../../../core/facts/audit-sources.ts';
 import type { Check } from '../../doctor.ts';
 import type { Action } from '../../../core/agent-output.ts';
 import { doctorVerify } from '../check-fix.ts';
-import { CONVERSATION_UNRESOLVED } from '../../../core/facts/relink-reasons.ts';
+import { conversationPaidSql, conversationTriedSql } from '../../../core/facts/conversation-memo.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
 export const UNLINKED_NEW_SHARE_WARN = 0.25;
@@ -40,15 +40,20 @@ export const UNLINKED_WINDOW_PER_SOURCE = 100_000;
 /** Conversation pages one re-extraction fix names (`--slugs`). */
 export const CONVERSATION_FIX_SLUGS = 50;
 const DERIVED = `f.source LIKE 'cli:extract-conversation-facts%'`;
+/** The conversation share's fixes, in the order doctor offers them: free relink, then the paid fallback, then by hand. */
+const CONVERSATION_FIXES = ['relink', 'reextract', 'manual'] as const;
+type ConversationFix = typeof CONVERSATION_FIXES[number];
 
 export interface UnlinkedFactsStats {
   sources: number;
   window: { active: number; unlinked: number; fence_owned: number; conversation: number; capped: boolean };
   /**
    * The conversation share's fix target: the source with the most unlinked conversation-extractor rows free relink has
-   * not tried (`fix: 'relink'`), else the most it tried and could not resolve (`fix: 'reextract'`), with those rows' pages, most rows first.
+   * not tried (`fix: 'relink'`), else the most it tried and could not resolve on pages not yet re-extracted on their
+   * current content (`fix: 'reextract'`), else the most left after both (`fix: 'manual'`: link by hand, no paid
+   * offer until the page content changes), with those rows' pages, most rows first.
    */
-  conversation: { source_id: string; fix: 'relink' | 'reextract'; pages: number; slugs: string[] } | null;
+  conversation: { source_id: string; fix: 'relink' | 'reextract' | 'manual'; pages: number; slugs: string[] } | null;
   new_7d: { facts: number; unlinked: number; no_subject: number; conversation_unresolved: number };
   no_subject: number | null;
   origins: Array<{ origin: string; unlinked: number }>;
@@ -73,15 +78,18 @@ export async function unlinkedFactsStats(engine: BrainEngine, sourceIds?: readon
   const hasAttempts = !!tables.attempts;
   const ids = sourceIds?.length ? [...sourceIds] : (await engine.executeRaw<{ id: string }>('SELECT id FROM sources ORDER BY id')).map((r) => r.id);
   const audit = [...AUDIT_ROW_SOURCES];
-  const tried = hasAttempts ? `EXISTS (SELECT 1 FROM fact_relink_attempts a WHERE a.source_id = f.source_id AND a.fact_id = f.id AND a.outcome = '${CONVERSATION_UNRESOLVED}')` : 'false';
-  const windowRows = await engine.executeRaw<{ source_id: string; origin: string; active: number; unlinked: number; fence_owned: number; conversation: number; conversation_tried: number }>(
+  const tried = hasAttempts ? conversationTriedSql : 'false';
+  const paid = hasAttempts ? conversationPaidSql : 'false';
+  const windowRows = await engine.executeRaw<{ source_id: string; origin: string; active: number; unlinked: number; fence_owned: number; conversation: number; conversation_tried: number; conversation_paid: number }>(
     `SELECT s.id AS source_id, w.origin, COUNT(*)::int AS active, COUNT(*) FILTER (WHERE w.unlinked)::int AS unlinked,
             COUNT(*) FILTER (WHERE w.unlinked AND w.fence_owned AND NOT w.derived)::int AS fence_owned,
             COUNT(*) FILTER (WHERE w.unlinked AND w.derived)::int AS conversation,
-            COUNT(*) FILTER (WHERE w.unlinked AND w.derived AND w.tried)::int AS conversation_tried
+            COUNT(*) FILTER (WHERE w.unlinked AND w.derived AND w.tried)::int AS conversation_tried,
+            COUNT(*) FILTER (WHERE w.unlinked AND w.derived AND w.tried AND w.paid)::int AS conversation_paid
        FROM unnest($1::text[]) AS s(id) CROSS JOIN LATERAL (
          SELECT ${ORIGIN} AS origin, f.entity_slug IS NULL AS unlinked, ${DERIVED} AS derived,
                 CASE WHEN f.entity_slug IS NULL AND ${DERIVED} THEN ${tried} ELSE false END AS tried,
+                CASE WHEN f.entity_slug IS NULL AND ${DERIVED} THEN ${paid} ELSE false END AS paid,
                 (f.row_num IS NOT NULL OR f.source_markdown_slug IS NOT NULL) AS fence_owned
            FROM facts f WHERE f.source_id = s.id AND ${ACTIVE}
           ORDER BY f.created_at DESC LIMIT $3) w
@@ -90,11 +98,12 @@ export async function unlinkedFactsStats(engine: BrainEngine, sourceIds?: readon
   );
   const perSource = new Map<string, number>();
   const byOrigin = new Map<string, number>();
-  const derivedBySource = new Map<string, { untried: number; tried: number }>();
+  const derivedBySource = new Map<string, Record<ConversationFix, number>>();
   for (const r of windowRows) {
     perSource.set(r.source_id, (perSource.get(r.source_id) ?? 0) + n(r.active));
-    const d = derivedBySource.get(r.source_id) ?? { untried: 0, tried: 0 };
-    derivedBySource.set(r.source_id, { untried: d.untried + n(r.conversation) - n(r.conversation_tried), tried: d.tried + n(r.conversation_tried) });
+    const d = derivedBySource.get(r.source_id) ?? { relink: 0, reextract: 0, manual: 0 };
+    derivedBySource.set(r.source_id, { relink: d.relink + n(r.conversation) - n(r.conversation_tried),
+      reextract: d.reextract + n(r.conversation_tried) - n(r.conversation_paid), manual: d.manual + n(r.conversation_paid) });
     if (n(r.unlinked) > 0) byOrigin.set(r.origin, (byOrigin.get(r.origin) ?? 0) + n(r.unlinked));
   }
   const judged = hasAttempts
@@ -123,13 +132,13 @@ export async function unlinkedFactsStats(engine: BrainEngine, sourceIds?: readon
     relinked = {};
     for (const r of rows.filter((x) => x.outcome === 'linked')) relinked[r.tier ?? 'unknown'] = (relinked[r.tier ?? 'unknown'] ?? 0) + n(r.n);
   }
-  const fixKind = [...derivedBySource.values()].some(d => d.untried > 0) ? 'relink' : 'reextract';
-  const share = (d: { untried: number; tried: number }) => fixKind === 'relink' ? d.untried : d.tried;
-  const [derivedSource] = [...derivedBySource].filter(([, d]) => share(d) > 0).sort((a, b) => share(b[1]) - share(a[1]) || a[0].localeCompare(b[0]));
+  const fixKind = CONVERSATION_FIXES.find(k => [...derivedBySource.values()].some(d => d[k] > 0)) ?? 'manual';
+  const [derivedSource] = [...derivedBySource].filter(([, d]) => d[fixKind] > 0).sort((a, b) => b[1][fixKind] - a[1][fixKind] || a[0].localeCompare(b[0]));
+  const hitSql = { relink: `NOT ${tried}`, reextract: `${tried} AND NOT ${paid}`, manual: `${tried} AND ${paid}` }[fixKind];
   let conversation: UnlinkedFactsStats['conversation'] = null;
   if (derivedSource) {
     const pages = await engine.executeRaw<{ slug: string }>(
-      `SELECT w.slug FROM (SELECT f.source_markdown_slug AS slug, f.entity_slug IS NULL AND ${DERIVED} AND ${fixKind === 'relink' ? 'NOT ' : ''}${tried} AS hit
+      `SELECT w.slug FROM (SELECT f.source_markdown_slug AS slug, f.entity_slug IS NULL AND ${DERIVED} AND ${hitSql} AS hit
            FROM facts f WHERE f.source_id = $1 AND ${ACTIVE} ORDER BY f.created_at DESC LIMIT $3) w
         WHERE w.hit AND w.slug IS NOT NULL GROUP BY w.slug ORDER BY COUNT(*) DESC, w.slug`,
       [derivedSource[0], audit, UNLINKED_WINDOW_PER_SOURCE],
@@ -179,10 +188,12 @@ export function unlinkedFactsVerdict(stats: UnlinkedFactsStats | null, opts: { t
   ];
   if (stats.origins.length > 0) parts.push(`top origins: ${stats.origins.slice(0, 3).map((o) => `${o.origin} ${o.unlinked}`).join(', ')}`);
   const c = stats.conversation;
-  const fix = c ? (c.fix === 'relink' ? relinkFix : reextractFix)(c, opts.thinClient === true) : undefined;
-  const conversationHint = !fix ? '' : c!.fix === 'relink'
-    ? ` Conversation facts are derived from their page, so plain relink never examines them; link them for free (preview first): ${fix.preview_argv!.join(' ')}. Facts it cannot resolve fall back to a paid re-extraction.`
-    : ` Free conversation relink could not resolve these conversation facts; re-extract instead (paid, preview first): ${fix.preview_argv!.join(' ')}.`;
+  const fix = c && c.fix !== 'manual' ? (c.fix === 'relink' ? relinkFix : reextractFix)(c, opts.thinClient === true) : undefined;
+  const conversationHint = !c ? '' : c.fix === 'manual'
+    ? ` ${c.pages} conversation page(s) in source ${c.source_id} (${c.slugs.join(', ')}) were re-extracted on their current content and free relink still could not resolve their facts with no entity; link each by hand (forget it and remember it again with --entity). Re-extraction is offered again when a page's content changes.`
+    : c.fix === 'relink'
+      ? ` Conversation facts are derived from their page, so plain relink never examines them; link them for free (preview first): ${fix!.preview_argv!.join(' ')}. Facts it cannot resolve fall back to a paid re-extraction.`
+      : ` Free conversation relink could not resolve these conversation facts; re-extract instead (paid, preview first): ${fix!.preview_argv!.join(' ')}.`;
   return {
     status: warn ? 'warn' : 'ok',
     message: `${parts.join('; ')}${warn || w.unlinked > 0 ? `. ${warn ? `Over ${UNLINKED_NEW_SHARE_WARN * 100}% of new facts are unlinked; ` : ''}${hint}` : ''}${conversationHint}`,
