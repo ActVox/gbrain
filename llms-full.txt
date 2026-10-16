@@ -4033,6 +4033,8 @@ per-token price), obtain each value as `how` describes and substitute it for
 | `host_admin` | the operator of the brain host (a remote brain over HTTP, scope grants, server restarts). Never authorizable from MCP |
 | `provider` | an outside service you wait on (rate limits, outages) |
 
+A fix whose expected run time exceeds 120 seconds (`AGENT_TOOL_LIMIT_MS`, the longest an agent tool call reliably stays open) is never `agent`: gbrain gives it actor `user` (or `host_admin` on a remote brain), so it renders `tell_user_to_run` and the user runs it in a terminal on the brain host.
+
 ### The `next` decision table
 
 First matching row wins.
