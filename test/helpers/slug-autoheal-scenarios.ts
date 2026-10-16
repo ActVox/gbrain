@@ -114,7 +114,7 @@ export async function killSwitchKeepsHold(databaseUrl?: string) {
 
 /** A slug: line naming an existing page stays held with nothing recorded; the lane's verdict then names both pages. */
 export async function existingPageStopsAndAsks(databaseUrl?: string) {
-  const files = {
+  const files: Record<string, string> = {
     [DB_ONLY_HELD]: '---\ntitle: Fund B Partners\ntype: company\nslug: fund-b\n---\nFund B Partners notes.\n',
     'concepts/fund-c.md': '---\ntitle: Fund C\ntype: concept\n---\nThe Fund C idea.\n',
     [FILE_HELD]: '---\ntitle: Fund C notes\ntype: concept\nslug: concepts/fund-c\n---\nMore on Fund C.\n',
