@@ -118,9 +118,9 @@ src/core/cycle/extract-atoms.ts	discoverExtractablePages	field	STREAM	see sql ro
 src/core/cycle/extract-atoms.ts	discoverExtractablePages	sql	STREAM	minCompiledTruthChars is false for NULL: segmented pages are never discovered (skip until per-segment extraction, PR 4)
 src/core/cycle/extract-atoms.ts	minCompiledTruthChars	sql	STREAM	false for a segmented page (NULL body): skip
 src/core/cycle/extract-atoms.ts	runPhaseExtractAtoms	call:serializeMarkdown	SEGW	
-src/core/cycle/extract-facts.ts	canonicalCacheState	field	STREAM	segmented page: getter throws page_body_segmented
-src/core/cycle/extract-facts.ts	planFenceReconcile	field	STREAM	managed preparer: segmented page: getter throws page_body_segmented before any write
-src/core/cycle/extract-facts.ts	runExtractFacts	field	STREAM	segmented page skipped with warning FACTS_RECONCILE_SEGMENTED; its facts index is preserved (per-segment reconcile, PR 4)
+src/core/cycle/extract-facts.ts	canonicalCacheState	field	INLINE	inline arm; a segmented page compares its stored regions with the canonical file by length and SHA-256 (segmentedBodyMatchesFile)
+src/core/cycle/extract-facts.ts	planFenceReconcile	field	NONE	view.timeline is the parsed facts fence of the timeline section (FactsFenceView); a segmented page reads it from its marker segments (segmentedFactsFenceView)
+src/core/cycle/extract-facts.ts	sameBody	field	INLINE	inline arm; segmented pages compare content_hash and body_bytes
 src/core/cycle/extract-takes.ts	readPageTakes	field	INLINE	inline arm; a segmented page streams through parseTakesFenceBlocks (page-body/segment-takes.ts)
 src/core/cycle/grade-takes.ts	GradeTakesPhase.process	field	STREAM	
 src/core/cycle/link-manifest.ts	buildLinkManifest	field	STREAM	
@@ -200,6 +200,7 @@ src/core/extract-timeline-from-meetings.ts	extractTimelineFromMeetings	sql	STREA
 src/core/extract/receipt-writer.ts	writeReceipt	call:putPage	INLINE	
 src/core/facts-fence.ts	factsFenceSection	field	SEGW	
 src/core/facts-fence.ts	factsFenceSections	field	SEGW	
+src/core/facts-fence.ts	factsFenceView	field	INLINE	inline arm; a segmented page reads its fences from its marker segments (segmentedFactsFenceView)
 src/core/facts/backstop.ts	runFactsBackstop	field	STREAM	
 src/core/facts/backstop.ts	runPipeline	field	STREAM	
 src/core/facts/drain.ts	estimateBacklogUsd	sql	META	
@@ -317,6 +318,7 @@ src/core/page-body/ingest.ts	stageBody	field	NONE	not a stored body: the write's
 src/core/page-body/page-shape.ts	fenceBody	field	INLINE	reads a body that is a string (inline or materialized); an unread segmented body holds no fences and reads as empty
 src/core/page-body/page-shape.ts	pageBodyBytes	field	INLINE	inline branch of pageBodyBytes; a segmented page answers body_bytes
 src/core/page-body/schema.ts	PAGE_GENERATION_BUMP_FN_SQL	sql	STREAM	trigger DDL: compares the body columns of inline rows; segmented rows compare body_generation (lane 1a)
+src/core/page-body/segment-facts.ts	fileRegionDigests	field	NONE	scan.truth / scan.timeline are BodyScanner regions of the canonical file, streamed from the file; not a page body
 src/core/page-body/segment-ledger.ts	overlaySegmentText	field	NONE	not the page body: compiled_truth of overlayCanonicalBodies over one segment's text (at most one segment, never the whole body)
 src/core/page-body/streamed-import.ts	importScanned	field	LEAD	bounded heads of the streamed file's regions for the sanity and type checks; the body itself streams to the segmenter
 src/core/page-embedding-budget.ts	planPageEmbedding	field	META	lane 1e file: body_bytes for segmented pages
