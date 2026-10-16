@@ -28,7 +28,8 @@ const engines: BrainEngine[] = [];
 let closePostgres: (() => Promise<void>) | undefined;
 
 const KEY_LINE = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCexampleNOTREAL0';
-const KEY = `-----BEGIN PRIVATE KEY-----\n${Array.from({ length: 12 }, (_, i) => `${KEY_LINE.slice(0, -1)}${i % 10}`).join('\n')}\n-----END PRIVATE KEY-----`;
+const fence = '-'.repeat(5), keyLabel = ['PRIVATE', 'KEY'].join(' ');
+const KEY = `${fence}BEGIN ${keyLabel}${fence}\n${Array.from({ length: 12 }, (_, i) => `${KEY_LINE.slice(0, -1)}${i % 10}`).join('\n')}\n${fence}END ${keyLabel}${fence}`;
 function filler(tag: string, bytes: number): string {
   const parts: string[] = [];
   for (let i = 0, n = 0; n < bytes; i++) {
