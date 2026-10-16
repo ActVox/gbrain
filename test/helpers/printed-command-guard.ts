@@ -38,6 +38,8 @@ export interface PrintedCommandProducer {
   fill?: Record<string, string>;
   /** Which extracted commands this producer owns (a doc section also names unrelated, mutating commands such as `gbrain upgrade`); default all. */
   owns?: (argv: string[]) => boolean;
+  /** Env overlay for this producer's command runs (a surface that names a multimodal-only command runs on a multimodal brain). */
+  env?: Record<string, string | undefined>;
 }
 
 export const PRINTED_COMMAND_PRODUCERS: PrintedCommandProducer[] = [];

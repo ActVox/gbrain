@@ -11,8 +11,11 @@
  * Fails when: a surface prints `gbrain reindex --held` (which does not exist),
  * an approve without `--source` (refused on a multi-source brain), or a
  * placeholder.
- * Extension point: test/helpers/printed-command-guard.ts
- * (`PRINTED_COMMAND_PRODUCERS`); lane A's projection texts register there.
+ * Also guards the projection drain's printed commands (#6803 A9): `PROJECTIONS_HELP`,
+ * `projectionFailureNextAction`, the resident drain steps and Action, doctor's
+ * resident readiness, `formatDrainResult` and the repair and embedding-migration
+ * docs, run on a multimodal brain because they name `embed --stale --images`.
+ * Extension point: test/helpers/printed-command-guard.ts (`PRINTED_COMMAND_PRODUCERS`).
  * Serial: it installs the process-wide CLI fix routing (installCliRouting), which
  * every renderAction in the process reads.
  */
@@ -22,6 +25,8 @@ import { addSizeState, readPageSizeStates, sizeStateLines, type SyncSizeStates }
 import { budgetLimitedReport } from '../src/core/held-embedding.ts';
 import { heldPreviewCommand } from '../src/core/held-embedding-action.ts';
 import { argvOf, gbrain, makeHeldBrain, seedHeldPage, startFakeEmbeddings, withBrain, type FakeEmbeddings, type HeldBrain } from './helpers/held-embedding-fixture.ts';
+import { PROJECTIONS_HELP, formatDrainResult, projectionFailureNextAction, residentDrainAction, residentDrainSteps } from '../src/commands/projections.ts';
+import { residentProjectionReadiness } from '../src/commands/doctor/checks/projection-readiness.ts';
 import { PRINTED_COMMAND_PRODUCERS, docSection, dryForm, extractCommands, registerPrintedCommandProducer, type GuardFixture } from './helpers/printed-command-guard.ts';
 
 const ROUTING = { brain: 'host', source: 'alpha' };
@@ -90,6 +95,58 @@ registerPrintedCommandProducer({
   owns: heldCommand,
 });
 
+/** Lane A (#6803 part 2, plan A9): the projection drain's printed commands join the guard. */
+const MULTIMODAL = { GBRAIN_EMBEDDING_MULTIMODAL: 'true' };
+const projectionCommand = (argv: string[]) => argv[0] === 'projections'
+  || (argv[0] === 'embed' && argv.includes('--images')) || (argv[0] === 'doctor' && argv.includes('text_projection_readiness'));
+registerPrintedCommandProducer({
+  name: 'PROJECTIONS_HELP',
+  text: async () => PROJECTIONS_HELP.split('\n').filter(l => !l.startsWith('Usage:')).join('\n'),
+  fill: { '<n>': '10' },
+  owns: projectionCommand,
+  env: MULTIMODAL,
+});
+registerPrintedCommandProducer({
+  name: 'projectionFailureNextAction',
+  text: async () => ['Code projection requires a recorded source path', 'This page kind requires its source importer', 'revision_conflict: moved', 'other']
+    .map(reason => projectionFailureNextAction({ source_id: 'alpha', slug: 'archive/day-b', reason })).join('\n'),
+  owns: projectionCommand,
+  env: MULTIMODAL,
+});
+registerPrintedCommandProducer({
+  name: 'resident drain steps, Action and doctor readiness',
+  text: async () => {
+    const status = { pending: 2, failed: 0, oldest_age_seconds: 60, sealable: 3, sealable_with_visual: 1, reimport: 1, ocr_required: 1, protected: 1, archived: 0 };
+    const action = residentDrainAction({ pid: 4242, subcommand: 'serve' } as never, 'host', status);
+    const readiness = residentProjectionReadiness(4242, status, residentDrainSteps(4242, 'host', 10), action.then);
+    return [residentDrainSteps(4242, 'host', 10), action.user_message ?? '', action.then?.argv?.join(' ') ?? '', action.then?.verify?.argv?.join(' ') ?? '',
+      readiness.message, readiness.fix?.argv?.join(' ') ?? ''].join('\n');
+  },
+  owns: projectionCommand,
+  env: MULTIMODAL,
+});
+registerPrintedCommandProducer({
+  name: 'formatDrainResult (limited drain with image remainders)',
+  text: async () => formatDrainResult({ rebuilt: 2, superseded: 0, failed: [], remaining: 4, limited: true, sealed: 3, sealed_with_visual: 1, sealed_text_only: 2,
+    statistics_refreshed: false, remaining_by_class: { pending: 0, failed: 0, oldest_age_seconds: 60, sealable: 2, sealable_with_visual: 0, reimport: 1, ocr_required: 1, protected: 1, archived: 0 } } as never, 10),
+  owns: projectionCommand,
+  env: MULTIMODAL,
+});
+registerPrintedCommandProducer({
+  name: 'docs/guides/repair.md (projection drain)',
+  text: async () => docSection('docs/guides/repair.md', 'id="projection-drain"', 'id="embedding-key-source"'),
+  fill: { '<n>': '10', '<id>': 'alpha' },
+  owns: projectionCommand,
+  env: MULTIMODAL,
+});
+registerPrintedCommandProducer({
+  name: 'docs/guides/embedding-migration.md (recovery)',
+  text: async () => docSection('docs/guides/embedding-migration.md', '## Recovery', '## '),
+  fill: { '<n>': '10', '<id>': 'alpha' },
+  owns: projectionCommand,
+  env: MULTIMODAL,
+});
+
 let fake: FakeEmbeddings;
 let brain: HeldBrain;
 let fixture: GuardFixture;
@@ -133,7 +190,7 @@ test('every printed command runs in dry form through the real CLI with exit 0', 
       if (command.includes('<') || command.includes('>')) { failures.push(`${producer.name}: placeholder left in ${command}`); continue; }
       if (argv[0] === 'reindex' && argv.includes('--held')) { failures.push(`${producer.name}: ${command} does not exist`); continue; }
       if (argv[0] === 'embed' && argv.includes('--max-usd') && !argv.includes('--source')) { failures.push(`${producer.name}: approve without --source: ${command}`); continue; }
-      const out = await fixture.run(dryForm(argv));
+      const out = await fixture.run(dryForm(argv), producer.env);
       if (out.exitCode !== 0) failures.push(`${producer.name}: gbrain ${dryForm(argv).join(' ')} exited ${out.exitCode}: ${(out.stderr || out.stdout).slice(0, 400)}`);
     }
   }
