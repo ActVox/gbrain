@@ -143,6 +143,31 @@ describe('pre-push secret scan over the 25 MiB cap', () => {
     expect(streamScanWork.bytes).toBe(SIZE);
   }, T);
 
+  test('a newline-free stretch cut mid-line between an anchor and its value still blocks: Bearer and Basic at every seam', async () => {
+    // One line: every window is cut mid-line at exactly the overlap before its end.
+    const cut = (k: number): number => k * (W - STREAM_SCAN_OVERLAP_CHARS);
+    const token = 'Q7' + randomBytes(30).toString('hex');
+    const basic = Buffer.from('alice:' + randomBytes(9).toString('hex')).toString('base64');
+    const placed: Array<{ at: number; text: string }> = [
+      { at: cut(1) - ' Bearer '.length, text: ' Bearer ' + token + ' ' },
+      { at: cut(2) - ' Bearer '.length + 4, text: ' Bearer ' + token.split('').reverse().join('') + ' ' },
+      { at: cut(3) - ' Authorization: Basic '.length, text: ' Authorization: Basic ' + basic + ' ' },
+    ];
+    const size = 30 * 1024 ** 2;
+    expect(cut(3) + STREAM_SCAN_OVERLAP_CHARS).toBeLessThan(size);
+    const body = Buffer.alloc(size, 'a');
+    for (const p of placed) body.write(p.text, p.at, 'latin1');
+    writeFileSync(join(work, 'big.md'), body);
+    const before = git(bare, 'rev-parse', 'refs/heads/main');
+    const r = await push();
+    expect(r.status).toBe('blocked_secrets');
+    expect((r.findings ?? []).map((f) => `${f.file}:${f.line}:${f.pattern}`).sort()).toEqual(['big.md:1:basic_auth', 'big.md:1:bearer', 'big.md:1:bearer']);
+    expect(JSON.stringify(r).includes(token)).toBe(false);
+    expect(git(bare, 'rev-parse', 'refs/heads/main')).toBe(before);
+    expect(streamScanWork.windows).toBe(4);
+    expect(streamScanWork.largestWindow).toBeLessThanOrEqual(STREAM_SCAN_WINDOW_CHARS);
+  }, T);
+
   test('a staged blob over the streamed-scan ceiling still blocks as unscannable', async () => {
     const huge = join(work, 'huge.bin');
     writeFileSync(huge, '');

@@ -94,6 +94,7 @@ test/large-pages/segmented-conversation-sidecar-token.test.ts
 test/large-pages/segmented-create-searchable.test.ts
 test/large-pages/segmented-delete-crash.slow.test.ts
 test/large-pages/segmented-delete-restore-file.slow.test.ts
+test/large-pages/segmented-delete-stage-crash.slow.test.ts
 test/large-pages/segmented-derived-parity.test.ts
 test/large-pages/segmented-derived-passes.test.ts
 test/large-pages/segmented-derived-work.test.ts
