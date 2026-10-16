@@ -62,7 +62,7 @@ test('the three kinds are disjoint; tunables and rollback keys are registered, r
 test('config set of a retired key warns, names its replacement and writes nothing', async () => withEnv(CLEAR, async () => {
   const set = await config(['set', 'sync.hold_cap', '200']);
   expect(set.exit).toBeNull();
-  expect(set.err).toContain('sync.hold_cap was retired in 0.60.264.0');
+  expect(set.err).toContain('sync.hold_cap was retired in 0.60.265.0');
   expect(set.err).toContain('GBRAIN_SYNC_HOLD_CAP=<value>');
   expect(set.err).toContain('nothing was written');
   expect(await engine.getConfig('sync.hold_cap')).toBeNull();
