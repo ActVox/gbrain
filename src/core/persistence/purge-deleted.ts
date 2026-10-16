@@ -8,6 +8,7 @@ import { submitPageMutation } from './page-mutations.ts';
 import { withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
 import { linkStreamSlugs } from './page-purge.ts';
+import { identityDowngradePurgeHold } from '../sync-identity-downgrades.ts';
 
 /** A tombstone that moved under a concurrent writer; the next run retries it. */
 const DEFERRAL_CODES = new Set(['revision_conflict', 'page_not_found', 'page_identity_changed']);
@@ -62,7 +63,7 @@ export async function consentedPurgeDeletedPages(engine: BrainEngine, olderThanH
 async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: number): Promise<string[]> {
   const hours = String(Math.max(0, Math.floor(olderThanHours)));
   const rows = await engine.executeRaw<{ id: number; source_id: string; slug: string }>(`SELECT p.id, p.source_id, p.slug FROM pages p
-    WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - ($1 || ' hours')::interval
+    WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - ($1 || ' hours')::interval AND ${identityDowngradePurgeHold('p')}
       AND EXISTS (SELECT 1 FROM belief_events e WHERE e.source_id = p.source_id AND e.subject_kind = 'coverage')
     ORDER BY p.deleted_at ASC, p.source_id ASC, p.slug ASC`, [hours]);
   const slugs: string[] = [];
@@ -72,7 +73,7 @@ async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: num
       const slugs = [...new Set([row.slug, ...await linkStreamSlugs(tx, row.source_id, row.id)])].sort();
       await tx.lockPageKeys(slugs.map(slug => ({ sourceId: row.source_id, slug })));
       return withBeliefBatch(tx, { sourceId: row.source_id, slugs, publicationId, op: 'purge_deleted_pages', hardDeleteEvent: 'page.expired', report },
-        async () => (await tx.executeRaw(`DELETE FROM pages WHERE id = $1 AND deleted_at IS NOT NULL AND deleted_at < now() - ($2 || ' hours')::interval RETURNING id`,
+        async () => (await tx.executeRaw(`DELETE FROM pages WHERE id = $1 AND deleted_at IS NOT NULL AND deleted_at < now() - ($2 || ' hours')::interval AND ${identityDowngradePurgeHold('pages')} RETURNING id`,
           [row.id, hours])).length > 0);
     });
     if (report.appended) await markBeliefCommits(engine, [publicationId]).catch(() => undefined);
@@ -98,7 +99,7 @@ export async function purgeDeletedPagesCoordinated(engine: BrainEngine, olderTha
   const hours = Math.max(0, Math.floor(olderThanHours));
   const rows = await engine.executeRaw<{ source_id: string; slug: string; cutoff: string }>(
     `SELECT p.source_id, p.slug, (now() - ($1 || ' hours')::interval)::text AS cutoff FROM pages p JOIN sources s ON s.id = p.source_id
-      WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - ($1 || ' hours')::interval AND NOT s.archived
+      WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - ($1 || ' hours')::interval AND NOT s.archived AND ${identityDowngradePurgeHold('p')}
       ORDER BY p.deleted_at ASC, p.source_id ASC, p.slug ASC`, [String(hours)]);
   const config = loadConfig() ?? { engine: engine.kind };
   const slugs: string[] = [];

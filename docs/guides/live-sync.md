@@ -339,6 +339,27 @@ and refuses `revision_conflict` if that page changed after the sync admitted
 it; the Git projection is the sync's own commit. Keep `frontmatter.id` as it
 is; a changed id is a different page.
 
+Git reports a move that also changed the file as a similarity guess (`R087`),
+and two template-shaped files moved in one commit can be paired the wrong way
+round (#6729). So sync keeps the page identity across an inexact rename only
+when the files confirm it: both carry the same `frontmatter.id` and no other
+file or page shares it, or neither carries an id and they share a `slug:` line
+or title that no other file in the source uses. An exact move (`R100`) needs no
+signal. Any other pair is imported as a delete plus an add: the new file
+starts a fresh page, and the old page keeps its facts, links and aliases on
+its soft-deleted slug. The sync report prints each such pair, `gbrain sync
+status --source <id> --json` lists it under `identity_downgrades`, doctor
+`rename_identity_downgrades` names it, and the purge leaves the old page alone
+for 72 hours. If the pair really was one page that moved, carry its identity
+before the window ends: `gbrain repair rename-identity --source <id>` previews
+the pairs, and `--apply --expect <hash>` moves the previewed set onto the new
+pages (the same carrier a confirmed rename uses, with an `old -> new` slug
+redirect). The reverse also holds: a new file whose `frontmatter.id` uniquely
+matches a file deleted in the same range is treated as its rename, even when
+Git did not pair them. A managed sync refuses `page_identity_changed`
+(`rename_identity_conflict`) when a file would take over a page whose
+`frontmatter.id` differs from the file's own.
+
 `put_page` at a new slug is not a rename. A content-only write cannot prove the
 old file is gone, so a create-only `put_page` whose `frontmatter.id` and
 content match an existing page resolves to that page (`duplicate`: the receipt

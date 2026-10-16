@@ -1,0 +1,271 @@
+/**
+ * #6729: an inexact Git rename (R<100) is a similarity guess, so it keeps the old page's identity only when the files
+ * confirm it (a shared frontmatter id, or a unique slug: line or title). Every other pair is a delete plus an add, the
+ * old page keeps its facts, links and aliases on its soft-deleted slug for 72 h, the run records it, the purge leaves it
+ * alone, doctor names it, and gbrain repair rename-identity carries the identity when a person confirms the move.
+ * Classic sync, managed sync and the dirty-tree manifest each keep an R<100 fixture; R100 variants sit beside them.
+ * New modules are imported lazily so this file loads (and fails by behavior) on a master without them.
+ */
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { performSync } from '../src/commands/sync.ts';
+import { claimWorktree } from '../src/core/persistence/ownership.ts';
+import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
+import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import type { DoctorContext } from '../src/commands/doctor/context.ts';
+import type { OperationContext } from '../src/core/ops/contract.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { testBackends } from './helpers/test-backends.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const commit = (root: string, message: string) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', message); return git(root, 'rev-parse', 'HEAD'); };
+const write = (root: string, path: string, body: string) => { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), body); };
+const BODY = Array.from({ length: 30 }, (_, i) => `- Shared meeting ${i}: discussed the project roadmap, hiring and next steps.`).join('\n');
+const doc = (front: string, tail = '') => `---\n${front}\n---\n\n${BODY}\n${tail}`;
+const diffStatus = (root: string) => git(root, 'diff', '--name-status', '-M', 'HEAD~1', 'HEAD').split('\n').sort();
+const repairCtx = (engine: BrainEngine) => ({ engine, config: { engine: engine.kind }, remote: false, dryRun: false, logger: { info() {}, warn() {}, error() {} } }) as unknown as OperationContext;
+
+for (const kind of testBackends()) describe(`inexact Git rename identity (#6729, ${kind})`, () => {
+  let engine: BrainEngine, close: (() => Promise<void>) | undefined;
+  const home = mkdtempSync(join(tmpdir(), 'gbrain-6729-'));
+  const env = { GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home };
+  beforeAll(async () => {
+    if (kind === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
+    else { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
+  }, 120_000);
+  afterAll(async () => {
+    await disposePersistenceConsumer(engine);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1').catch(() => undefined);
+    if (close) await close(); else await engine.disconnect();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  async function classic(files: Record<string, string>) {
+    const id = `c${randomUUID().replace(/-/g, '').slice(0, 14)}`, root = join(home, id);
+    mkdirSync(root, { recursive: true }); git(root, 'init', '-q', '-b', 'main');
+    for (const [path, body] of Object.entries(files)) write(root, path, body);
+    commit(root, 'initial');
+    await engine.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,'{}')", [id, root]);
+    const sync = (extra: Record<string, unknown> = {}) => performSync(engine, { repoPath: root, sourceId: id, noPull: true, noEmbed: true, noExtract: true, concurrency: 1, ...extra });
+    await sync();
+    return { id, root, sync };
+  }
+  async function managed(files: Record<string, string>) {
+    const id = `m${randomUUID().replace(/-/g, '').slice(0, 14)}`, root = join(home, id);
+    mkdirSync(root, { recursive: true }); git(root, 'init', '-q');
+    for (const [path, body] of Object.entries(files)) write(root, path, body);
+    commit(root, 'initial');
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    await engine.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,'{}')", [id, root]);
+    await claimWorktree(engine, id, root);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    const sync = (extra: Record<string, unknown> = {}) => performManagedSync(engine, { sourceId: id, noPull: true, ...extra });
+    await sync();
+    return { id, root, sync };
+  }
+  const pageRow = async (sourceId: string, slug: string) => (await engine.executeRaw<{ id: number; deleted_at: string | null }>(
+    'SELECT id, deleted_at FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0];
+  const factSlugs = (sourceId: string) => engine.executeRaw<{ entity_slug: string; fact: string }>('SELECT entity_slug, fact FROM facts WHERE source_id=$1 ORDER BY fact', [sourceId]);
+  const redirects = (sourceId: string) => engine.executeRaw<{ alias_slug: string; canonical_slug: string }>('SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id=$1 ORDER BY alias_slug', [sourceId]);
+  const aliasOwner = async (sourceId: string, alias: string) => (await engine.executeRaw<{ slug: string }>('SELECT slug FROM page_aliases WHERE source_id=$1 AND alias_norm=$2 ORDER BY slug', [sourceId, alias])).map(row => row.slug);
+
+  test('classic: crossed inexact pairs with one shared title keep their own facts and aliases, are recorded, held from purge, named by doctor, and the remedy carries a confirmed one', () => withEnv(env, async () => {
+    const s = await classic({
+      'people/a-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Ali]', 'Works on payments.\n'),
+      'people/b-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Bea]', 'Works on search.\n'),
+      'people/peer.md': '---\ntype: person\ntitle: Peer\n---\n\nA different person.\n',
+    });
+    const a = (await pageRow(s.id, 'people/a-x-com'))!, b = (await pageRow(s.id, 'people/b-x-com'))!, peer = (await pageRow(s.id, 'people/peer'))!;
+    await engine.insertFact({ fact: 'A works on payments', entity_slug: 'people/a-x-com', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
+    await engine.insertFact({ fact: 'B works on search', entity_slug: 'people/b-x-com', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
+    await engine.executeRaw("INSERT INTO links(from_page_id,to_page_id,link_type,link_source) VALUES($1,$2,'knows','test')", [a.id, peer.id]);
+    // Both files move and are rewritten; Git pairs them by body similarity alone, and their shared title cannot confirm either pair.
+    git(s.root, 'mv', 'people/a-x-com.md', 'people/bob.md'); git(s.root, 'mv', 'people/b-x-com.md', 'people/alice.md');
+    write(s.root, 'people/bob.md', doc('type: person\ntitle: Colleague\naliases: [Bobby]', 'Works on search.\n'));
+    write(s.root, 'people/alice.md', doc('type: person\ntitle: Colleague\naliases: [Alicia]', 'Works on payments.\n'));
+    commit(s.root, 'move and rewrite both');
+    for (const line of diffStatus(s.root)) expect(line).toMatch(/^R0\d\d\t/);
+    const result = await s.sync();
+    expect(result).toMatchObject({ status: 'synced', renamed: 0 });
+    const alice = (await pageRow(s.id, 'people/alice'))!, bob = (await pageRow(s.id, 'people/bob'))!;
+    expect([alice.id, bob.id]).not.toContain(a.id);
+    expect([alice.id, bob.id]).not.toContain(b.id);
+    expect((await pageRow(s.id, 'people/a-x-com'))!.deleted_at).not.toBeNull();
+    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'people/a-x-com', fact: 'A works on payments' }, { entity_slug: 'people/b-x-com', fact: 'B works on search' }]);
+    expect(await aliasOwner(s.id, 'ali')).toEqual(['people/a-x-com']);
+    expect(await aliasOwner(s.id, 'bea')).toEqual(['people/b-x-com']);
+    expect(await redirects(s.id)).toEqual([]);
+    expect(result.identityDowngrades?.map(entry => [entry.from, entry.to, entry.reason]).sort()).toEqual([
+      ['people/a-x-com.md', 'people/alice.md', 'title_not_unique'], ['people/b-x-com.md', 'people/bob.md', 'title_not_unique']]);
+    expect(result.identityDowngrades?.find(entry => entry.from === 'people/a-x-com.md')).toMatchObject({ old_slug: 'people/a-x-com', new_slug: 'people/alice', facts: 1, links: 1, aliases: 1 });
+
+    // The purge leaves both old pages while their records are open.
+    expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs.filter(slug => slug.endsWith('-x-com'))).toEqual([]);
+    expect(await pageRow(s.id, 'people/a-x-com')).toBeDefined();
+
+    // Doctor names them with the read-only remedy preview.
+    const { renameIdentityDowngradesEntry } = await import('../src/commands/doctor/checks/rename-identity-downgrades.ts');
+    const doctor = async () => (await renameIdentityDowngradesEntry.run({ engine } as unknown as DoctorContext)) as unknown as Array<{ status: string; details: { count: number; by_source: Array<{ source_id: string; count: number }> }; fix?: Record<string, unknown> & { argv: string[] } }>;
+    const [finding] = await doctor();
+    expect(finding!.status).toBe('warn');
+    expect(finding!.details.by_source.find(entry => entry.source_id === s.id)?.count).toBe(2);
+    expect(finding!.fix).toMatchObject({ argv: ['gbrain', 'repair', 'rename-identity', '--source', expect.any(String), '--json'], consent: [], actor: 'agent',
+      verify: { argv: ['gbrain', 'doctor', '--only', 'rename_identity_downgrades', '--json'] } });
+    expect(finding!.fix).not.toHaveProperty('ask_user');
+    const { deriveNext } = await import('../src/core/agent-output.ts');
+    expect(deriveNext(finding!.fix as never, { transport: 'cli', isCallable: () => false, preapproved: () => false })).toBe('run');
+
+    // The person confirms a-x-com really became alice: preview, then apply exactly the previewed pair.
+    const { renameIdentityRepair } = await import('../src/core/repair/rename-identity.ts');
+    const scope = { brain_id: 'test', source_ids: [s.id] };
+    const preview = await renameIdentityRepair.plan(engine, scope, null, { apply: false });
+    expect(preview.items.map(item => [item.slug, item.change?.to]).sort()).toEqual([['people/a-x-com', 'people/alice'], ['people/b-x-com', 'people/bob']]);
+    await expect(renameIdentityRepair.plan(engine, scope, null, { apply: true })).rejects.toMatchObject({ code: 'invalid_params' });
+    const approved = await renameIdentityRepair.plan(engine, scope, null, { apply: true, expect: preview.preview_hash });
+    const pick = approved.items.find(item => item.slug === 'people/a-x-com')!;
+    expect(await renameIdentityRepair.apply(repairCtx(engine), pick)).toMatchObject({ applied: true, outcome: 'carried' });
+    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'people/alice', fact: 'A works on payments' }, { entity_slug: 'people/b-x-com', fact: 'B works on search' }]);
+    expect(await aliasOwner(s.id, 'ali')).toEqual(['people/alice']);
+    expect(await engine.executeRaw('SELECT from_page_id FROM links WHERE to_page_id=$1', [peer.id])).toEqual([{ from_page_id: alice.id }]);
+    expect(await redirects(s.id)).toEqual([{ alias_slug: 'people/a-x-com', canonical_slug: 'people/alice' }]);
+    // Verify: the carried pair left the finding, and its old page is no longer held from the purge.
+    const [after] = await doctor();
+    expect(after!.details.by_source.find(entry => entry.source_id === s.id)?.count).toBe(1);
+    expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain('people/a-x-com');
+    expect((await pageRow(s.id, 'people/b-x-com'))!.deleted_at).not.toBeNull();
+  }), 180_000);
+
+  test('classic: a move plus edit keeps its identity through a unique title, and an exact move needs no signal', () => withEnv(env, async () => {
+    const s = await classic({ 'notes/plan.md': doc('title: Roadmap Q3 planning'), 'notes/untitled.md': doc('type: note') });
+    const plan = (await pageRow(s.id, 'notes/plan'))!, untitled = (await pageRow(s.id, 'notes/untitled'))!;
+    await engine.insertFact({ fact: 'Roadmap ships in Q3', entity_slug: 'notes/plan', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
+    git(s.root, 'mv', 'notes/plan.md', 'notes/roadmap.md'); write(s.root, 'notes/roadmap.md', doc('title: Roadmap Q3 planning', 'An added paragraph.\n'));
+    git(s.root, 'mv', 'notes/untitled.md', 'notes/moved.md');
+    commit(s.root, 'move and edit');
+    expect(diffStatus(s.root)).toEqual([expect.stringMatching(/^R0\d\d\tnotes\/plan.md\tnotes\/roadmap.md$/), 'R100\tnotes/untitled.md\tnotes/moved.md']);
+    expect(await s.sync()).toMatchObject({ status: 'synced', renamed: 2, added: 0, deleted: 0 });
+    expect((await pageRow(s.id, 'notes/roadmap'))!.id).toBe(plan.id);
+    expect((await pageRow(s.id, 'notes/moved'))!.id).toBe(untitled.id);
+    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'notes/roadmap', fact: 'Roadmap ships in Q3' }]);
+  }), 180_000);
+
+  test('classic: an id-bearing move and edit in two commits before one sync keeps its identity; a no-signal move and edit does not', () => withEnv(env, async () => {
+    const s = await classic({ 'notes/x.md': doc('id: note-6729-x\ntitle: First title'), 'notes/plain.md': doc('type: note') });
+    const x = (await pageRow(s.id, 'notes/x'))!, plain = (await pageRow(s.id, 'notes/plain'))!;
+    await engine.insertFact({ fact: 'X has a fact', entity_slug: 'notes/x', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
+    git(s.root, 'mv', 'notes/x.md', 'notes/y.md'); commit(s.root, 'move');
+    write(s.root, 'notes/y.md', `---\nid: note-6729-x\ntitle: A new title\n---\n\nRewritten from scratch, nothing like before.\n`); commit(s.root, 'rewrite');
+    git(s.root, 'mv', 'notes/plain.md', 'notes/plain-2.md'); write(s.root, 'notes/plain-2.md', doc('type: note', 'An edit.\n')); commit(s.root, 'move and edit plain');
+    const result = await s.sync();
+    expect(result.status).toBe('synced');
+    expect((await pageRow(s.id, 'notes/y'))!.id).toBe(x.id);
+    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'notes/y', fact: 'X has a fact' }]);
+    expect((await pageRow(s.id, 'notes/plain-2'))!.id).not.toBe(plain.id);
+    expect((await pageRow(s.id, 'notes/plain'))!.deleted_at).not.toBeNull();
+    expect(result.identityDowngrades?.map(entry => [entry.from, entry.reason])).toEqual([['notes/plain.md', 'no_identity_signal']]);
+  }), 180_000);
+
+  test('classic: a template id reused by a new note while the old note is deleted stays a delete plus an add', () => withEnv(env, async () => {
+    const s = await classic({ 'templates/meeting.md': doc('id: tmpl-6729\ntitle: Meeting template'), 'notes/standup-1.md': doc('id: tmpl-6729\ntitle: Standup one') });
+    const one = (await pageRow(s.id, 'notes/standup-1'))!;
+    await engine.insertFact({ fact: 'Standup one decided X', entity_slug: 'notes/standup-1', visibility: 'world', source: 'synthetic' }, { source_id: s.id });
+    git(s.root, 'rm', '-q', 'notes/standup-1.md');
+    write(s.root, 'notes/standup-2.md', doc('id: tmpl-6729\ntitle: Standup two', 'Different decisions.\n'));
+    commit(s.root, 'replace one note with another from the template');
+    await s.sync();
+    expect((await pageRow(s.id, 'notes/standup-2'))!.id).not.toBe(one.id);
+    expect(await factSlugs(s.id)).toEqual([{ entity_slug: 'notes/standup-1', fact: 'Standup one decided X' }]);
+  }), 180_000);
+
+  test('dirty tree: an uncommitted move plus edit with no signal is a delete plus an add; one with a unique title keeps its identity', () => withEnv(env, async () => {
+    const s = await classic({ 'notes/draft.md': doc('type: note'), 'notes/spec.md': doc('title: Storage spec 6729') });
+    const draft = (await pageRow(s.id, 'notes/draft'))!, spec = (await pageRow(s.id, 'notes/spec'))!;
+    git(s.root, 'mv', 'notes/draft.md', 'notes/draft-2.md'); write(s.root, 'notes/draft-2.md', doc('type: note', 'Edited.\n'));
+    git(s.root, 'mv', 'notes/spec.md', 'notes/storage-spec.md'); write(s.root, 'notes/storage-spec.md', doc('title: Storage spec 6729', 'Edited.\n'));
+    git(s.root, 'add', '-A');
+    expect(git(s.root, 'diff', '--cached', '--name-status', '-M').split('\n').every(line => /^R0\d\d\t/.test(line))).toBe(true);
+    const result = await s.sync({ workingTree: true });
+    expect(result.status).toBe('synced');
+    expect((await pageRow(s.id, 'notes/draft-2'))!.id).not.toBe(draft.id);
+    expect((await pageRow(s.id, 'notes/storage-spec'))!.id).toBe(spec.id);
+  }), 180_000);
+
+  test('three pages sharing one title: an inexact move of one of them is a delete plus an add', () => withEnv(env, async () => {
+    const s = await classic({ 'notes/a.md': doc('title: Weekly sync'), 'notes/b.md': doc('title: Weekly sync', 'B.\n'), 'notes/c.md': doc('title: Weekly sync', 'C.\n') });
+    const a = (await pageRow(s.id, 'notes/a'))!;
+    git(s.root, 'mv', 'notes/a.md', 'notes/a-2.md'); write(s.root, 'notes/a-2.md', doc('title: Weekly sync', 'An edit.\n'));
+    commit(s.root, 'move and edit one');
+    expect(diffStatus(s.root)).toEqual([expect.stringMatching(/^R0\d\d\tnotes\/a.md\tnotes\/a-2.md$/)]);
+    const result = await s.sync();
+    expect((await pageRow(s.id, 'notes/a-2'))!.id).not.toBe(a.id);
+    expect(result.identityDowngrades?.map(entry => entry.reason)).toEqual(['title_not_unique']);
+  }), 180_000);
+
+  test('2,000 moved and edited id-bearing files (Git pairs most inexactly, the rest as delete plus add) all become renames through one cat-file stream within 20 s', async () => {
+    const { confirmRenameIdentities } = await import('../src/core/sync-rename-identity.ts');
+    const { buildSyncManifest } = await import('../src/core/sync.ts');
+    const root = join(home, 'bulk'); mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q', '-b', 'main');
+    const N = 2000;
+    for (let i = 0; i < N; i++) writeFileSync(join(root, `notes/n${i}.md`), doc(`id: bulk-${i}\ntitle: Bulk note ${i}`));
+    const base = commit(root, 'bulk');
+    for (let i = 0; i < N; i++) { rmSync(join(root, `notes/n${i}.md`)); writeFileSync(join(root, `notes/m${i}.md`), doc(`id: bulk-${i}\ntitle: Bulk note ${i} moved`, 'Edited.\n')); }
+    const target = commit(root, 'bulk move and edit');
+    const manifest = buildSyncManifest(git(root, '-c', 'diff.renameLimit=5000', 'diff', '--name-status', '-M', base, target));
+    expect(manifest.renamed.length).toBeGreaterThan(N / 2);
+    expect(manifest.renamed.every(rename => (rename.similarity ?? 100) < 100)).toBe(true);
+    const engine0 = { executeRaw: async () => [] } as unknown as BrainEngine;
+    const started = performance.now();
+    const confirmed = await confirmRenameIdentities(engine0, root, base, target, manifest, { sourceId: 'bulk' });
+    const elapsed = performance.now() - started;
+    expect(confirmed.renamed.length).toBe(N);
+    expect(confirmed.renamed.every(rename => rename.from.replace('notes/n', '') === rename.to.replace('notes/m', ''))).toBe(true);
+    expect(confirmed.added).toEqual([]);
+    expect(confirmed.deleted).toEqual([]);
+    expect(elapsed).toBeLessThan(20_000);
+  }, 300_000);
+
+  test('managed: crossed inexact pairs with one shared title never swap identities; a unique title keeps one', () => withEnv(env, async () => {
+    const s = await managed({
+      'people/a-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Ali]', 'Works on payments.\n'),
+      'people/b-x-com.md': doc('type: person\ntitle: Colleague\naliases: [Bea]', 'Works on search.\n'),
+      'notes/plan.md': doc('title: Managed roadmap 6729'),
+    });
+    const a = (await pageRow(s.id, 'people/a-x-com'))!, b = (await pageRow(s.id, 'people/b-x-com'))!, plan = (await pageRow(s.id, 'notes/plan'))!;
+    git(s.root, 'mv', 'people/a-x-com.md', 'people/bob.md'); git(s.root, 'mv', 'people/b-x-com.md', 'people/alice.md');
+    write(s.root, 'people/bob.md', doc('type: person\ntitle: Colleague\naliases: [Bobby]', 'Works on search.\n'));
+    write(s.root, 'people/alice.md', doc('type: person\ntitle: Colleague\naliases: [Alicia]', 'Works on payments.\n'));
+    git(s.root, 'mv', 'notes/plan.md', 'notes/roadmap.md'); write(s.root, 'notes/roadmap.md', doc('title: Managed roadmap 6729', 'Edited.\n'));
+    commit(s.root, 'move and rewrite');
+    for (const line of diffStatus(s.root)) expect(line).toMatch(/^R0\d\d\t/);
+    const result = await s.sync();
+    expect(result).toMatchObject({ status: 'synced', renamed: 1 });
+    const alice = (await pageRow(s.id, 'people/alice'))!, bob = (await pageRow(s.id, 'people/bob'))!;
+    expect([alice.id, bob.id]).not.toContain(a.id);
+    expect([alice.id, bob.id]).not.toContain(b.id);
+    expect((await pageRow(s.id, 'people/a-x-com'))!.deleted_at).not.toBeNull();
+    expect((await pageRow(s.id, 'notes/roadmap'))!.id).toBe(plan.id);
+    expect(await aliasOwner(s.id, 'ali')).toEqual(['people/a-x-com']);
+    expect(await redirects(s.id)).toEqual([{ alias_slug: 'notes/plan', canonical_slug: 'notes/roadmap' }]);
+    expect(result.identityDowngrades?.map(entry => entry.from).sort()).toEqual(['people/a-x-com.md', 'people/b-x-com.md']);
+    const { readSyncStatus } = await import('../src/core/persistence/sync-status.ts');
+    expect((await readSyncStatus(engine, s.id, { detail: false })).identity_downgrades.map(entry => entry.old_slug).sort()).toEqual(['people/a-x-com', 'people/b-x-com']);
+  }), 180_000);
+
+  test('managed: a file whose explicit id differs from the page holding its slug does not take that page over', () => withEnv(env, async () => {
+    const s = await managed({ 'notes/Foo Bar.md': doc('id: doc-one-6729\ntitle: Document one') });
+    const one = (await pageRow(s.id, 'notes/foo-bar'))!;
+    git(s.root, 'rm', '-q', 'notes/Foo Bar.md');
+    write(s.root, 'notes/foo-bar.md', doc('id: doc-two-6729\ntitle: Document two', 'A different document.\n'));
+    commit(s.root, 'replace with a different document at the same slug');
+    await expect(s.sync()).rejects.toMatchObject({ code: 'page_identity_changed', detail: 'rename_identity_conflict' });
+    expect((await pageRow(s.id, 'notes/foo-bar'))).toMatchObject({ id: one.id, deleted_at: null });
+  }), 180_000);
+});

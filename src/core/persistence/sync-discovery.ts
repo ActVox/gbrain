@@ -9,7 +9,8 @@ import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-fla
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
-import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath } from '../sync.ts';
+import { confirmedSyncDelta, confirmRenameIdentities, frontmatterIdentity } from '../sync-rename-identity.ts';
+import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath, type DowngradedRename, type SyncManifest } from '../sync.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
@@ -59,7 +60,9 @@ export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot
   /** #5459 (P4.5): live pages the tree walk left alone because their file is in the working tree and their import provenance is the working tree or unknown. */
   workingTreeKept?: string[];
   /** #6349 (P4.4): this discovery is one path slice of its target; the checkpoint records it instead of advancing `last_commit` until `done`. */
-  slice?: SyncSliceState; }
+  slice?: SyncSliceState;
+  /** #6729: inexact Git renames split into a delete plus an add (origin form); recorded after the run commits. */
+  identityDowngrades?: DowngradedRename[]; }
 export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   source: { last_commit: string | null; config: Record<string, unknown> }; }
 /** The persisted `sync.exclude` globs (plus a run's `--exclude`), as discovery matches them against a path relative to the source root. */
@@ -291,8 +294,10 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const detached = !company && syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
   // #6349: a staged run stops at a commit, so uncommitted working-tree changes wait for the stage that reaches HEAD.
   const working = !company && !stage && (detached || (opts.workingTree ?? (await engine.getConfig('sync.include_working_tree') === 'true')));
-  const dirty = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitRoot);
-  const delta = !opts.full && !walk && source.last_commit ? computeSyncDelta(gitRoot, source.last_commit, target) : null;
+  // #6729: inexact renames keep their page identity only when confirmed (an imported dirty tree reads its target side from the working tree).
+  const confirm = { sourceId, sourcePathOf: sourcePath }, built: SyncManifest = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitRoot);
+  const dirty = working ? await confirmRenameIdentities(engine, gitRoot, 'HEAD', null, built, confirm) : built;
+  const delta = !opts.full && !walk && source.last_commit ? await confirmedSyncDelta(engine, gitRoot, source.last_commit, target, confirm) : null;
   const entries = new Map<string, SyncEntry>();
   const renamedFrom = new Map<string, string>();
   let workingTreeKept: string[] | undefined;
@@ -309,10 +314,8 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // A deletion or rename touching one is refused on both sides, so the page
   // keeps its identity until the change is synced from macOS or Linux.
   const refused = new Map<string, SyncFileRefusal>();
-  const refusalMessages = {
-    import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
-    delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.`,
-  };
+  const refusalMessages = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+    delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.` };
   const record = (path: string, message: string) => {
     if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through', message,
       suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
@@ -450,11 +453,11 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   }
   const discovered: SyncDiscovery = { discoveredAt, ...(released.length ? { releasedHolds: released } : {}), ...(retryTaken.length ? { retryTaken } : {}),
     ...(refused.size ? { fileRefusals: [...refused.values()] } : {}), binding: { ...binding, owner_epoch: String(binding.owner_epoch), topology_generation: String(binding.topology_generation) }, root, gitRoot, sourceId, incarnation, from: source.last_commit, target, entries: selected, slugMode, ...(company ? { companyPlan: company.plan } : {}), ...(stage ? { stagedHead: stage.head } : {}),
-    ...(workingTreeKept ? { workingTreeKept } : {}) };
+    ...(workingTreeKept ? { workingTreeKept } : {}), ...(company ? {} : identityDowngradesOf([delta?.status === 'ok' ? delta.manifest : null, working ? dirty : null], eligible, sourcePath)) };
   // Freeze all logical identities in one database statement, before yielding
   // between pages. A later interactive edit must conflict with this scan.
-  const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null }>(
-    'SELECT id,slug,source_path,knowledge_revision,deleted_at FROM pages WHERE source_id=$1', [sourceId]);
+  const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null; fm_id: string | null }>(
+    "SELECT id,slug,source_path,knowledge_revision,deleted_at,frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1", [sourceId]);
   const bySlug = new Map(identities.map(p => [p.slug, p]));
   const byPath = new Map<string, typeof identities>();
   const storableIdentities = identities.filter(storable);
@@ -521,6 +524,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (losers.length) collisions.push({ slug, kept: kept ?? winner!.sourcePath, skipped: losers.map(entry => entry.sourcePath) });
     if (!winner) continue;
     if (holder) {
+      assertTakeoverIdentity(discovered, winner, holder);
       // Same slug, vanished origin: the file takes over the page (and its history) instead of racing a deletion.
       Object.assign(winner, { pageId: holder.id, revision: holder.knowledge_revision });
       if (holderOrigin !== null) {
@@ -560,6 +564,26 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (uncommitted.added || uncommitted.modified || uncommitted.deleted) discovered.uncommitted = uncommitted;
   }
   return discovered;
+}
+/** #6729: the inexact Git renames this discovery split into a delete plus an add, in origin form, for the sync report and its durable record. */
+function identityDowngradesOf(manifests: Array<SyncManifest | null>, eligible: (path: string) => boolean, sourcePath: (path: string) => string): Pick<SyncDiscovery, 'identityDowngrades'> {
+  const pairs = manifests.flatMap(manifest => manifest?.downgradedRenames ?? []).filter(pair => eligible(pair.from) || eligible(pair.to))
+    .map(pair => ({ ...pair, from: sourcePath(pair.from), to: sourcePath(pair.to) }));
+  return pairs.length ? { identityDowngrades: pairs } : {};
+}
+/**
+ * #6729: a file that takes over the page holding its slug (a vanished or deleted origin) inherits that page's identity,
+ * so it must not when both carry an explicit frontmatter id and the ids differ: they are two different documents that
+ * happen to map to one slug. The sync is refused before any write, naming both.
+ */
+function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
+  if (!holder.fm_id) return;
+  const incoming = frontmatterIdentity(readSyncContent(discovery, winner)).id;
+  if (!incoming || incoming === holder.fm_id) return;
+  throw opError('page_identity_changed', 'A file would take over a page whose frontmatter id differs from its own.',
+    `${winner.sourcePath} in ${discovery.sourceId} maps to page ${holder.slug}, whose file is gone, but its frontmatter id '${incoming}' differs from the page's id '${holder.fm_id}', so it is a different document and must not inherit that page's facts, links and history; nothing was written. `
+    + `Give the file the page's id if it is the same document, or rename it so its slug differs, commit, then run gbrain sync --no-pull --source ${discovery.sourceId}.`,
+    { detail: 'rename_identity_conflict' });
 }
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */
 function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {

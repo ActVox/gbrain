@@ -23,8 +23,15 @@ export interface SyncManifest {
   added: string[];
   modified: string[];
   deleted: string[];
-  renamed: Array<{ from: string; to: string }>;
+  /** `similarity`: Git's rename score (100 = byte-identical); absent for a pairing that did not come from Git's similarity guess. */
+  renamed: Array<{ from: string; to: string; similarity?: number }>;
+  /** #6729: inexact Git renames whose identity could not be confirmed; each was split into a delete of `from` plus an add of `to`. */
+  downgradedRenames?: DowngradedRename[];
 }
+
+/** #6729: why an inexact Git rename did not keep its page identity (see `confirmRenameIdentities`). */
+export type RenameDowngradeReason = 'id_conflict' | 'id_shared' | 'id_one_side' | 'title_not_unique' | 'slug_not_unique' | 'no_identity_signal';
+export interface DowngradedRename { from: string; to: string; similarity: number; reason: RenameDowngradeReason }
 
 export interface RawManifestEntry {
   action: 'A' | 'M' | 'D' | 'R';
@@ -228,7 +235,9 @@ export function buildSyncManifest(gitDiffOutput: string): SyncManifest {
           // A copy leaves the source in place — only the destination is new.
           manifest.added.push(newPath);
         } else {
-          manifest.renamed.push({ from: oldPath, to: newPath });
+          // #6729: the score rides along; confirmRenameIdentities decides whether an inexact pair keeps its identity.
+          const similarity = Number(action.slice(1));
+          manifest.renamed.push({ from: oldPath, to: newPath, ...(action.length > 1 && Number.isInteger(similarity) ? { similarity } : {}) });
         }
       }
     }
