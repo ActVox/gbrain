@@ -110,6 +110,7 @@ import { chatFallbackChainEntry } from './checks/chat-fallback.ts';
 import { providerConsentEntry } from './checks/provider-consent.ts';
 import { behaviorChangesEntry } from './checks/behavior-changes.ts';
 import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
+import { syncConfigKeysEntry } from './checks/sync-config-keys.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
@@ -223,6 +224,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   ghostPagesEntry,
   missingRecordedFilesEntry,
   fenceIntegrityEntry,
+  syncConfigKeysEntry,
   searchModeEntry,
 ];
 

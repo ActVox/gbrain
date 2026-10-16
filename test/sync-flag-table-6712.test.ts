@@ -116,7 +116,7 @@ test('a newer CLI never sends a retired field to the serve, whatever its options
   const received: Array<Record<string, unknown>> = [];
   const server = await startResolveIpcServer(sock, {
     resolve: async () => null,
-    sync_start: req => { received.push(req.options as Record<string, unknown>); return { ok: false, protocol: 2, error: 'shutting_down' }; },
+    sync_start: (req: { options: unknown }) => { received.push(req.options as Record<string, unknown>); return { ok: false, protocol: 2, error: 'shutting_down' }; },
     sync_status: () => ({ ok: false, protocol: 2, error: 'unknown_job' }),
     sync_abort: () => ({ ok: true, protocol: 2 as const }),
   } as never, { secret });

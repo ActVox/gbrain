@@ -127,7 +127,7 @@ export interface SyncResult {
   connectorHolds?: { held: number; newly_held: number; retry_command: string; status_command: string };
   /**
    * #5988 Git holds: files held this run instead of blocking (detail capped at
-   * `sync.hold_cap`), their count, the source's outstanding total and the
+   * `GBRAIN_SYNC_HOLD_CAP`), their count, the source's outstanding total and the
    * exact inspect and repair commands. Remote callers get `held_count` and
    * `holds_fix` (a host-operator relay) only.
    */

@@ -241,10 +241,10 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
     const provenance = await readSyncImportProvenance(engine, input.cursor.sourceId, input.cursor.incarnation, snapshot.page.id);
     if (provenance?.validated === true && provenance.raw_sha256 === sha256(content) && provenance.origin === entry.sourcePath) {
       const why = `gbrain ${VERSION} refuses ${entry.path} (${refusal.reason ?? 'yaml_parse'}${refusal.line !== undefined ? `, line ${refusal.line}` : ''}), but gbrain ${provenance.gbrain_version} imported these exact bytes and validated them.`;
-      if (run.policy.parserRegression === 'hold') return heldEntry(entry, slug, pageId, { code: 'parser_regression', message: `${why} Held under sync.parser_regression=hold.` }, content, blob);
+      if (run.policy.parserRegression === 'hold') return heldEntry(entry, slug, pageId, { code: 'parser_regression', message: `${why} Held under GBRAIN_SYNC_PARSER_REGRESSION=hold.` }, content, blob);
       throw opError('sync_parser_regression', `Sync stopped: ${why}`,
         `This is a gbrain bug. Report it with the gbrain version (${VERSION}), the file (${entry.path}) and the code (${refusal.code}${refusal.reason ? `/${refusal.reason}` : ''}). `
-          + `Upgrade, or pin the last good version (${provenance.gbrain_version}), then run: ${input.retryCommand}. To hold such files and let the rest sync meanwhile, the user can set sync.parser_regression=hold.`,
+          + `Upgrade, or pin the last good version (${provenance.gbrain_version}), then run: ${input.retryCommand}. To hold such files and let the rest sync meanwhile, the user can set GBRAIN_SYNC_PARSER_REGRESSION=hold for the process that syncs.`,
         { fix: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false,
           why: 'Collects the gbrain version and brain health to attach to the bug report; the sync checkpoint did not advance past this file.' } });
     }

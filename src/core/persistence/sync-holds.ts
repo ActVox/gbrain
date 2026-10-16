@@ -49,6 +49,7 @@ import { MARKDOWN_CHUNKER_VERSION } from '../chunkers/recursive.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
 import { HOLD_ATTEMPTS_NEEDS_HUMAN } from './sync-fault-class.ts';
+import { retiredSyncSetting, type RetiredSyncKeyName } from '../sync-config-keys.ts';
 
 export const GIT_HOLD_OP = 'sync-hold';
 export const GIT_HOLD_SUMMARY_OP = 'sync-hold-summary';
@@ -58,7 +59,7 @@ export const SYNC_IMPORT_PROVENANCE_OP = 'sync-import-provenance';
 export const SYNC_CONVERSION_OP = 'sync-conversions';
 /** How many conversions the log keeps per source. */
 export const SYNC_CONVERSION_KEEP = 20;
-/** Default for `sync.hold_cap`: how many holds a result lists in detail. Storage is never capped. */
+/** Default for `GBRAIN_SYNC_HOLD_CAP`: how many holds a result lists in detail. Storage is never capped. */
 export const GIT_HOLD_CAP = 500;
 export const GIT_HOLD_ESCALATE_COUNT = 50;
 export const GIT_HOLD_ESCALATE_PCT = 5;
@@ -600,7 +601,7 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
     case 'parser_regression':
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `gbrain refuses ${record.path}, whose exact bytes imported under an earlier version. This is a gbrain bug: report it with the gbrain version, the file and the code, then upgrade or pin the last good version.`,
-        why: 'The same bytes imported before, so only gbrain changed; sync holds the file under sync.parser_regression=hold.' };
+        why: 'The same bytes imported before, so only gbrain changed; sync holds the file under GBRAIN_SYNC_PARSER_REGRESSION=hold.' };
     case 'rename_held':
       return repair(true, `The page that ${record.path} renames changed after the rename was recorded, so it was not moved; the preview proposes re-binding the rename to the current page for approval.`);
     case 'frontmatter_slug_conflict':
@@ -701,18 +702,19 @@ export interface SyncHoldPolicy {
   parserRegression: 'stop' | 'hold';
 }
 
-export async function readSyncHoldPolicy(engine: Pick<BrainEngine, 'getConfig'>): Promise<SyncHoldPolicy> {
-  const read = async (key: string) => (await engine.getConfig(key).catch(() => null))?.trim().toLowerCase() || null;
-  const number = (value: string | null, fallback: number) => {
-    const parsed = value === null ? NaN : Number(value);
+/**
+ * `sync.holds` is the brain's choice (fail-closed or hold). The cap, the escalation thresholds and the
+ * parser-regression stop retired as config keys in #6712 PR 2: their `GBRAIN_SYNC_*` environment variables
+ * (`RETIRED_SYNC_KEYS`) tune them for the process that syncs, and a stored key is not applied.
+ */
+export async function readSyncHoldPolicy(engine: Pick<BrainEngine, 'getConfig'>, env: NodeJS.ProcessEnv = process.env): Promise<SyncHoldPolicy> {
+  const mode = (await engine.getConfig('sync.holds').catch(() => null))?.trim().toLowerCase() || null;
+  const number = (key: RetiredSyncKeyName, fallback: number) => {
+    const parsed = Number(retiredSyncSetting(key, env));
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
   };
-  // Sequential: five point reads, without widening the caller's connection pool.
-  const values: Array<string | null> = [];
-  for (const key of ['sync.holds', 'sync.hold_cap', 'sync.hold_escalate_count', 'sync.hold_escalate_pct', 'sync.parser_regression']) values.push(await read(key));
-  const [mode, cap, count, pct, regression] = values;
-  return { mode: mode === 'fail' ? 'fail' : 'hold', cap: Math.floor(number(cap, GIT_HOLD_CAP)), escalateCount: number(count, GIT_HOLD_ESCALATE_COUNT),
-    escalatePct: number(pct, GIT_HOLD_ESCALATE_PCT), parserRegression: regression === 'hold' ? 'hold' : 'stop' };
+  return { mode: mode === 'fail' ? 'fail' : 'hold', cap: Math.floor(number('sync.hold_cap', GIT_HOLD_CAP)), escalateCount: number('sync.hold_escalate_count', GIT_HOLD_ESCALATE_COUNT),
+    escalatePct: number('sync.hold_escalate_pct', GIT_HOLD_ESCALATE_PCT), parserRegression: retiredSyncSetting('sync.parser_regression', env).toLowerCase() === 'hold' ? 'hold' : 'stop' };
 }
 
 /** More holds than the source should carry, or too large a share of this run's screened imports. */

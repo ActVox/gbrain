@@ -69,7 +69,7 @@ async function each(run: (engine: BrainEngine) => Promise<void>) {
   await withEnv(env, async () => {
     for (const engine of engines) {
       try { await run(engine); }
-      finally { await disposePersistenceConsumer(engine); for (const key of ['sync.holds', 'sync.parser_regression', 'sync.hold_escalate_count']) await engine.unsetConfig(key); }
+      finally { await disposePersistenceConsumer(engine); for (const key of ['sync.holds', 'sync.parser_regression']) await engine.unsetConfig(key); }
     }
   });
 }
@@ -330,13 +330,16 @@ test('parser regression: stops only when provenance proves the same bytes import
   const head = await s.lastCommit();
   await expect(s.sync()).rejects.toMatchObject({ code: 'sync_parser_regression' });
   expect(await s.lastCommit()).toBe(head);
+  // #6712 PR 2: a stored sync.parser_regression (retired) is not applied; the process's GBRAIN_SYNC_PARSER_REGRESSION is.
   await engine.setConfig('sync.parser_regression', 'hold');
-  const held = await s.sync({ retryFailed: true });
+  await expect(s.sync({ retryFailed: true })).rejects.toMatchObject({ code: 'sync_parser_regression' });
+  expect(await s.lastCommit()).toBe(head);
+  await engine.unsetConfig('sync.parser_regression');
+  const held = await withEnv({ GBRAIN_SYNC_PARSER_REGRESSION: 'hold' }, () => s.sync({ retryFailed: true }));
   expect(held.held?.[0]).toMatchObject({ path: 'notes/a.md', code: 'parser_regression' });
   expect(await s.lastCommit()).not.toBe(head);
 
   // A page without provenance (imported before validation) is held normally on a full walk, never a stop.
-  await engine.unsetConfig('sync.parser_regression');
   const t = await source(engine, { 'notes/b.md': note('B') });
   await t.sync();
   await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint LIKE $2', [SYNC_IMPORT_PROVENANCE_OP, `${t.id}:%`]);
@@ -345,8 +348,7 @@ test('parser regression: stops only when provenance proves the same bytes import
   expect(full.held?.[0]).toMatchObject({ path: 'notes/b.md', code: 'invalid_frontmatter', stale: true });
 }), 240_000);
 
-test('escalation flags a source past its threshold; sync.holds=fail restores blocking; retry-held re-screens an unchanged hold', () => each(async engine => {
-  await engine.setConfig('sync.hold_escalate_count', '1');
+test('escalation flags a source past its threshold; sync.holds=fail restores blocking; retry-held re-screens an unchanged hold', () => each(async engine => withEnv({ GBRAIN_SYNC_HOLD_ESCALATE_COUNT: '1' }, async () => {
   const s = await source(engine, { 'notes/a.md': FOLDED, 'notes/b.md': FOLDED, 'notes/ok.md': note('Ok') });
   const result = await s.sync();
   expect(result).toMatchObject({ held_count: 2, holds_escalated: true });
@@ -363,7 +365,7 @@ test('escalation flags a source past its threshold; sync.holds=fail restores blo
   const t = await source(engine, { 'notes/a.md': FOLDED });
   expect((await t.sync()).status).toBe('blocked_by_failures');
   expect(await t.holds()).toEqual([]);
-}), 240_000);
+})), 240_000);
 
 test('files imported by quoting are counted with their common directory', () => each(async engine => {
   const s = await source(engine, { 'tweets/2026/one.md': AUTHOR, 'tweets/2026/two.md': AUTHOR.replace('Payments roundup', 'Second roundup') });
