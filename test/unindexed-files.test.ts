@@ -222,7 +222,7 @@ for (const mode of ['git-root', 'source-root'] as const) {
     await s.legacy({ 'brain/notes/c.md': note('C'), 'other/y.md': note('Y') });
     const scan = await findUnindexedFiles(engine, s.id);
     expect(scan).toMatchObject({ complete: true, scanned: 3, unindexed: 1 });
-    expect(scan.files).toEqual([{ path: 'notes/c.md', source_path: mode === 'git-root' ? 'brain/notes/c.md' : 'notes/c.md', code: 'clean', slug_taken: false }]);
+    expect(scan.files).toEqual([{ path: 'notes/c.md', source_path: mode === 'git-root' ? 'brain/notes/c.md' : 'notes/c.md', code: 'clean', slug_taken: false, deleted_page: false }]);
   }), 240_000);
 }
 

@@ -47,6 +47,16 @@ function sourceLine(state: UnindexedState): string {
     + `${hours(state.age_ms)} h ago${samples ? `; e.g. ${samples}` : ''})`;
 }
 
+/** The read-only note on files a re-screen cannot import (slug collisions, deleted pages), or '' when there are none. */
+function blockedNote(states: UnindexedState[]): string {
+  const found = states.filter(state => state.state !== 'missing' && state.blocked);
+  if (!found.length) return '';
+  const samples = found.flatMap(state => state.record!.samples.filter(sample => sample.slug_taken || sample.deleted_page).slice(0, 3)
+    .map(sample => `${state.source_id}:${sample.path} (${sample.slug_taken ? 'its slug belongs to another page' : 'its page was deleted'})`)).slice(0, 5).join(', ');
+  return `${found.reduce((n, state) => n + state.blocked, 0)} committed file(s) cannot be imported as they are${samples ? ` (e.g. ${samples})` : ''}: `
+    + 'rename one of two files that share a slug, or delete the file of a deleted page (or restore the page with gbrain restore), commit, then sync.';
+}
+
 /** The read-only note on scaffolding-named files sync skips on purpose, or '' when there are none. */
 function metafileNote(states: UnindexedState[]): string {
   const found = states.filter(state => state.state !== 'missing' && state.record?.metafile_skipped);
@@ -76,9 +86,9 @@ async function runUnindexedFiles(ctx: DoctorContext): Promise<Check[]> {
     const states = await judgeUnindexedFiles(engine, sources);
     const details = { docs: DOCS, sources: states.map(({ source_id, state, record, ...rest }) => !record || state === 'missing' ? { source_id, state }
       : { source_id, state, unscheduled: rest.unscheduled, waiting: rest.waiting, still_unindexed: rest.still_unindexed, age_hours: hours(rest.age_ms), complete: record.complete,
-        scanned: record.scanned, unindexed: record.unindexed, slug_taken: record.slug_taken, by_code: record.by_code, samples: record.samples, target: record.target, computed_at: record.computed_at,
+        scanned: record.scanned, unindexed: record.unindexed, slug_taken: record.slug_taken, deleted_page: record.deleted_page ?? 0, by_code: record.by_code, samples: record.samples, target: record.target, computed_at: record.computed_at,
         metafile_skipped: record.metafile_skipped ?? 0, metafile_samples: record.metafile_samples ?? [] }) };
-    const scaffolding = metafileNote(states);
+    const scaffolding = [blockedNote(states), metafileNote(states)].filter(Boolean).join(' ');
     const unindexed = states.filter(state => state.state === 'unindexed');
     const waiting = states.filter(state => state.state === 'scheduled');
     if (unindexed.length || waiting.length) {
@@ -90,7 +100,7 @@ async function runUnindexedFiles(ctx: DoctorContext): Promise<Check[]> {
       checks.push({ name: 'unindexed_files', status: 'warn', details, fix,
         message: `Committed files in managed Git sources have no page and no hold, so they are missing from search: ${[...unindexed, ...waiting].map(sourceLine).join('; ')}. `
           + 'Usually an older gbrain refused them before refusals became holds. Schedule them with gbrain sources retry-held <id> --unindexed, then run the sync it prints: '
-          + 'each file then imports or is held with its reason (a file sharing a slug with another page stays out until one of them is renamed).'
+          + 'each file then imports or is held with its reason.'
           + (scaffolding ? ` ${scaffolding}` : '') });
       return checks;
     }
@@ -106,12 +116,14 @@ async function runUnindexedFiles(ctx: DoctorContext): Promise<Check[]> {
       return checks;
     }
     if (scaffolding) {
-      const first = states.find(state => state.record?.metafile_skipped)!;
+      const first = states.find(state => state.record?.metafile_skipped || state.blocked)!;
+      const metafile = first.record!.metafile_skipped ? first.record!.metafile_samples[0] : undefined;
       checks.push(infoCheck('unindexed_files', `Every other committed file of ${states.length} managed Git source(s) is indexed, held or excluded. ${scaffolding}`, 'degraded', {
         argv: await gitFollowUpSync(engine, first.source_id, []), consent: [], actor: 'user', requires_exclusive: false, verify: doctorVerify('unindexed_files'), docs: DOCS,
-        why: 'Sync skips index.md and the other scaffolding names on purpose; a file renamed to an ordinary name is imported by the next sync.',
-        user_message: `Sync skips files named index.md (and README.md, schema.md, log.md, RESOLVER.md) on purpose, as folder scaffolding, so ${first.record!.metafile_samples[0]} is not in search. `
-          + 'To index such a file, rename it, for example investors/fund-a/index.md -> investors/fund-a.md, commit, then run this sync.' }, details));
+        why: metafile ? 'Sync skips index.md and the other scaffolding names on purpose; a file renamed to an ordinary name is imported by the next sync.'
+          : 'A re-screen cannot import these files as they are; after the rename, delete or restore is committed, the next sync settles them.',
+        user_message: metafile ? `Sync skips files named index.md (and README.md, schema.md, log.md, RESOLVER.md) on purpose, as folder scaffolding, so ${metafile} is not in search. `
+          + 'To index such a file, rename it, for example investors/fund-a/index.md -> investors/fund-a.md, commit, then run this sync.' : blockedNote([first]) }, details));
       return checks;
     }
     checks.push({ name: 'unindexed_files', status: 'ok', details,

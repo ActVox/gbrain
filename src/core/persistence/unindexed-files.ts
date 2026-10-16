@@ -11,7 +11,11 @@
  * source-path space: a file counts as indexed when a live page records its
  * origin, held when it has a sync hold, and `scheduled` when a re-screen is
  * already requested for it. A file whose path slug belongs to a live page with
- * another or no origin is not indexed either; it is counted as `slug_taken`.
+ * another or no origin is not indexed either; it is counted as `slug_taken`,
+ * and one whose page was deleted while the file stayed committed as
+ * `deleted_page`. Neither is ever scheduled: a re-screen cannot import them
+ * (a collision, or a page sync keeps deleted), so a person renames, deletes or
+ * restores, and doctor names them read-only.
  * Lookups run in batches on the existing indexes, never over every page at
  * once. A file sync skips on purpose as folder scaffolding (`index.md`,
  * `README.md` and the other `isSyncMetafile` names) that would otherwise be eligible
@@ -29,7 +33,10 @@
  * write) and stores the result per source in `op_checkpoints` (op
  * `unindexed-files`), where doctor `unindexed_files` reads it through
  * `judgeUnindexedFiles`. An incomplete stored result is continued and
- * accumulated by the next pass.
+ * accumulated by the next pass while its target commit and eligibility
+ * fingerprint are unchanged; otherwise the pass starts over. Blobs are read
+ * and screened in slices bounded by bytes, with the deadline checked between
+ * slices (a file left unread counts as `unscreened`).
  */
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts } from '../../commands/sync.ts';
@@ -43,6 +50,7 @@ import { loadSyncEligibility, resolveManagedSyncContext, syncExcludePatterns, ty
 import { heldGitPaths, readGitHoldRetryPaths, requestGitHoldRetry } from './sync-holds.ts';
 import { readBlobContents, type TreeBlob } from './sync-blobs.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
+import { createHash } from 'node:crypto';
 
 export const UNINDEXED_FILES_OP = 'unindexed-files';
 /** Paths one pass schedules for a re-screen, and the most scheduled paths a stored result names. */
@@ -55,15 +63,19 @@ export const UNINDEXED_SCAN_BUDGET_MS = 60_000;
 /** A stored result older than this is stale. */
 export const UNINDEXED_STALE_MS = 7 * 24 * 3_600_000;
 const BATCH = 1_000;
+/** Blob bytes one screening slice holds in memory at most (a single larger blob is read alone); each slice is released before the next. */
+const SCREEN_SLICE_BYTES = 32 * 1024 ** 2;
 
-export interface UnindexedFile { path: string; source_path: string; code: string; slug_taken: boolean }
-export interface UnindexedSample { path: string; code: string; slug_taken?: true }
+export interface UnindexedFile { path: string; source_path: string; code: string; slug_taken: boolean; deleted_page: boolean }
+export interface UnindexedSample { path: string; code: string; slug_taken?: true; deleted_page?: true }
 
 export interface UnindexedScan {
   source_id: string;
   incarnation: string;
   /** The commit whose tree was scanned (the source's last synced commit); null when the source never synced. */
   target: string | null;
+  /** Fingerprint of what decides eligibility (scope, slug mode, sync excludes); a continuation needs the same one. */
+  eligibility: string;
   complete: boolean;
   /** The last Git path examined when the budget stopped the scan; null when complete. */
   cursor: string | null;
@@ -71,8 +83,10 @@ export interface UnindexedScan {
   scanned: number;
   /** Files with no page, no hold and no scheduled re-screen. */
   unindexed: number;
-  /** Of `unindexed`: the path slug belongs to a live page with another or no recorded origin. */
+  /** Of `unindexed`: the path slug belongs to a live page with another or no recorded origin; never scheduled (a re-screen cannot import it). */
   slug_taken: number;
+  /** Of `unindexed`: the file's page was deleted while the file stayed committed; never scheduled (sync keeps the page deleted). */
+  deleted_page: number;
   /** Files with no page and no hold whose re-screen is already scheduled. */
   scheduled: number;
   by_code: Record<string, number>;
@@ -118,6 +132,16 @@ export interface UnindexedRecord extends Omit<UnindexedScan, 'files' | 'schedule
 
 interface TreeEntry { path: string; oid: string; size: number }
 
+/** Reads `entries` in slices of at most `SCREEN_SLICE_BYTES` and visits each with its text (undefined when too large to read); stops before a slice once `stop()` is true. */
+function visitBlobSlices<T extends TreeBlob>(gitRoot: string, entries: T[], visit: (entry: T, content: string | undefined) => void, stop: () => boolean): void {
+  for (let i = 0; i < entries.length && !stop();) {
+    const slice: T[] = [];
+    for (let bytes = 0; i < entries.length && (!slice.length || bytes + entries[i]!.size <= SCREEN_SLICE_BYTES); i++) { bytes += entries[i]!.size; slice.push(entries[i]!); }
+    const contents = readBlobContents(gitRoot, slice);
+    for (const entry of slice) visit(entry, contents.get(entry.oid));
+  }
+}
+
 /** The blobs of `target` under `scope` in tree order, after `after`, in batches; the child stops when the consumer does. */
 async function* treeBatches(gitRoot: string, target: string, scope: string, after: string | null, size: number): AsyncGenerator<TreeEntry[]> {
   const child = spawn('git', ['-c', 'core.quotepath=false', '--literal-pathspecs', '-C', gitRoot, 'ls-tree', '-r', '-l', '-z', target, ...(scope ? ['--', scope] : [])],
@@ -149,6 +173,8 @@ async function* treeBatches(gitRoot: string, target: string, scope: string, afte
   }
 }
 
+const eligibilityKey = (scope: string, slugMode: string, exclude: string[]) => createHash('sha256').update(JSON.stringify([scope, slugMode, exclude])).digest('hex').slice(0, 16);
+
 /** Files of one managed Git source with no live page, no hold and no scheduled re-screen; bounded by `opts`. */
 export async function findUnindexedFiles(engine: BrainEngine, sourceId: string, opts: UnindexedScanOpts = {}): Promise<UnindexedScan> {
   const context = opts.context ?? await resolveManagedSyncContext(engine, { sourceId, noPull: true } as SyncOpts);
@@ -156,14 +182,15 @@ export async function findUnindexedFiles(engine: BrainEngine, sourceId: string, 
   const now = opts.now ?? Date.now;
   const keep = opts.keep ?? UNINDEXED_SCHEDULE_CAP;
   const screenLimit = opts.screenLimit ?? UNINDEXED_SCREEN_LIMIT;
-  const scan: UnindexedScan = { source_id: sourceId, incarnation, target: context.source.last_commit, complete: true, cursor: null, scanned: 0, unindexed: 0,
-    slug_taken: 0, scheduled: 0, by_code: {}, samples: [], metafile_skipped: 0, metafile_samples: [], files: [], scheduled_paths: [] };
-  if (!scan.target) return scan;
   const { scope, slugMode, eligible, sourcePath } = await loadSyncEligibility(engine, context);
   const exclude = await syncExcludePatterns(engine);
+  const scan: UnindexedScan = { source_id: sourceId, incarnation, target: context.source.last_commit, eligibility: eligibilityKey(scope, slugMode, exclude), complete: true, cursor: null, scanned: 0, unindexed: 0,
+    slug_taken: 0, deleted_page: 0, scheduled: 0, by_code: {}, samples: [], metafile_skipped: 0, metafile_samples: [], files: [], scheduled_paths: [] };
+  if (!scan.target) return scan;
   const scaffolding = (path: string) => isSyncMetafile(path) && !matchesAnyGlob(scope ? path.slice(scope.length + 1) : path, exclude)
     && !isReservedSkillBundlePath(sourcePath(path)) && eligible(`${path.slice(0, path.lastIndexOf('/') + 1)}gbrain-metafile-probe${path.slice(path.lastIndexOf('.'))}`);
   const retry = new Set(await readGitHoldRetryPaths(engine, sourceId, incarnation));
+  const pastDeadline = () => opts.deadlineAt !== undefined && now() >= opts.deadlineAt;
   let screened = 0;
   for await (const batch of treeBatches(gitRoot, scan.target, scope, opts.cursor ?? null, opts.batch ?? BATCH)) {
     const rows = batch.filter(entry => eligible(entry.path) && !isWindowsColonTarget(entry.path)).map(entry => {
@@ -177,13 +204,12 @@ export async function findUnindexedFiles(engine: BrainEngine, sourceId: string, 
         [sourceId, metafiles.map(entry => sourcePath(entry.path))])).map(page => page.source_path));
       const unread = metafiles.filter(entry => !indexed.has(sourcePath(entry.path))).slice(0, Math.max(0, screenLimit - screened));
       screened += unread.length;
-      const contents = readBlobContents(gitRoot, unread.map((entry): TreeBlob => ({ oid: entry.oid, size: entry.size })));
-      for (const entry of unread) {
-        const frontmatter = parseMarkdownHead(contents.get(entry.oid) ?? '').frontmatter;
-        if (frontmatter.type == null && frontmatter.title == null) continue;
+      visitBlobSlices(gitRoot, unread, (entry, content) => {
+        const frontmatter = parseMarkdownHead(content ?? '').frontmatter;
+        if (frontmatter.type == null && frontmatter.title == null) return;
         scan.metafile_skipped++;
         if (scan.metafile_samples.length < UNINDEXED_SAMPLE_LIMIT) scan.metafile_samples.push(scope ? entry.path.slice(scope.length + 1) : entry.path);
-      }
+      }, () => false);
     }
     if (rows.length) {
       const origins = rows.flatMap(row => row.legacy ? [row.origin, row.legacy] : [row.origin]);
@@ -201,25 +227,27 @@ export async function findUnindexedFiles(engine: BrainEngine, sourceId: string, 
       const slugs = fresh.map(row => resolveSlugForPath(row.origin)).filter(Boolean);
       const taken = new Set(slugs.length ? (await engine.executeRaw<{ slug: string }>(
         'SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND slug = ANY($2::text[])', [sourceId, slugs])).map(page => page.slug) : []);
+      const deleted = new Set(fresh.length ? (await engine.executeRaw<{ source_path: string }>(
+        'SELECT source_path FROM pages WHERE source_id=$1 AND deleted_at IS NOT NULL AND source_path = ANY($2::text[])', [sourceId, fresh.map(row => row.origin)])).map(page => page.source_path) : []);
       const toScreen = fresh.slice(0, Math.max(0, screenLimit - screened));
       screened += toScreen.length;
-      const contents = readBlobContents(gitRoot, toScreen.map((row): TreeBlob => ({ oid: row.oid, size: row.size })));
-      const codes = new Map(toScreen.map(row => {
-        const content = contents.get(row.oid);
-        if (content === undefined) return [row.root, 'file_too_large'];
+      const codes = new Map<string, string>();
+      visitBlobSlices(gitRoot, toScreen, (row, content) => {
+        if (content === undefined) { codes.set(row.root, 'file_too_large'); return; }
         const result = screenImportContent({ content, path: row.origin, byteLength: row.size, expectedSlug: resolveSlugForPath(row.origin) || null });
-        return [row.root, result.status === 'refused' ? result.refusal.code : 'clean'];
-      }));
+        codes.set(row.root, result.status === 'refused' ? result.refusal.code : 'clean');
+      }, pastDeadline);
       for (const row of fresh) {
-        const code = codes.get(row.root) ?? 'unscreened', slugTaken = taken.has(resolveSlugForPath(row.origin));
+        const code = codes.get(row.root) ?? 'unscreened', slugTaken = taken.has(resolveSlugForPath(row.origin)), deletedPage = deleted.has(row.origin);
         scan.unindexed++;
         if (slugTaken) scan.slug_taken++;
+        if (deletedPage) scan.deleted_page++;
         scan.by_code[code] = (scan.by_code[code] ?? 0) + 1;
-        if (scan.samples.length < UNINDEXED_SAMPLE_LIMIT) scan.samples.push({ path: row.root, code, ...(slugTaken ? { slug_taken: true as const } : {}) });
-        if (scan.files.length < keep) scan.files.push({ path: row.root, source_path: row.origin, code, slug_taken: slugTaken });
+        if (scan.samples.length < UNINDEXED_SAMPLE_LIMIT) scan.samples.push({ path: row.root, code, ...(slugTaken ? { slug_taken: true as const } : {}), ...(deletedPage ? { deleted_page: true as const } : {}) });
+        if (scan.files.length < keep) scan.files.push({ path: row.root, source_path: row.origin, code, slug_taken: slugTaken, deleted_page: deletedPage });
       }
     }
-    if ((opts.deadlineAt !== undefined && now() >= opts.deadlineAt) || (opts.maxScanned !== undefined && scan.scanned >= opts.maxScanned)) {
+    if (pastDeadline() || (opts.maxScanned !== undefined && scan.scanned >= opts.maxScanned)) {
       scan.complete = false;
       scan.cursor = batch[batch.length - 1]!.path;
       break;
@@ -252,17 +280,21 @@ export async function refreshUnindexedFiles(engine: BrainEngine, sourceId: strin
   const context = opts.context ?? await resolveManagedSyncContext(engine, { sourceId, noPull: true } as SyncOpts);
   const now = opts.now ?? Date.now;
   const stored = (await readUnindexedFiles(engine, [sourceId])).get(sourceId);
-  const previous = stored && !stored.complete && stored.incarnation === context.incarnation && stored.cursor ? stored : null;
+  const eligibility = await loadSyncEligibility(engine, context);
+  const key = eligibilityKey(eligibility.scope, eligibility.slugMode, await syncExcludePatterns(engine));
+  const previous = stored && !stored.complete && stored.incarnation === context.incarnation && stored.cursor
+    && stored.target === context.source.last_commit && stored.eligibility === key ? stored : null;
   const scan = await findUnindexedFiles(engine, sourceId, { ...opts, context, cursor: previous?.cursor ?? null });
-  const scheduled = opts.schedule === false ? [] : scan.files.map(file => file.path);
+  const scheduled = opts.schedule === false ? [] : scan.files.filter(file => !file.slug_taken && !file.deleted_page).map(file => file.path);
   if (scheduled.length) await requestGitHoldRetry(engine, sourceId, context.incarnation, scheduled);
   const pending = [...new Set([...(previous?.pending ?? []), ...scan.scheduled_paths, ...scheduled])];
-  const { scope, slugMode } = await loadSyncEligibility(engine, context);
+  const { scope, slugMode } = eligibility;
   const at = new Date(now()).toISOString();
   const record: UnindexedRecord = {
-    version: 1, source_id: sourceId, incarnation: context.incarnation, target: scan.target, complete: scan.complete, cursor: scan.cursor,
+    version: 1, source_id: sourceId, incarnation: context.incarnation, target: scan.target, eligibility: scan.eligibility, complete: scan.complete, cursor: scan.cursor,
     started_at: previous?.started_at ?? at, computed_at: at,
     scanned: (previous?.scanned ?? 0) + scan.scanned, unindexed: (previous?.unindexed ?? 0) + scan.unindexed, slug_taken: (previous?.slug_taken ?? 0) + scan.slug_taken,
+    deleted_page: (previous?.deleted_page ?? 0) + scan.deleted_page,
     scheduled: (previous?.scheduled ?? 0) + scan.scheduled, by_code: addCounts(previous?.by_code ?? {}, scan.by_code),
     samples: [...(previous?.samples ?? []), ...scan.samples].slice(0, UNINDEXED_SAMPLE_LIMIT),
     metafile_skipped: (previous?.metafile_skipped ?? 0) + scan.metafile_skipped,
@@ -283,8 +315,10 @@ export interface UnindexedState {
   record: UnindexedRecord | null;
   /** `missing`: no result for the current incarnation; `partial`: nothing found so far but the scan is incomplete. */
   state: 'ok' | 'unindexed' | 'scheduled' | 'partial' | 'stale' | 'missing';
-  /** Found files no pass scheduled. */
+  /** Found files no pass scheduled that a re-screen could import (not `slug_taken`, not `deleted_page`). */
   unscheduled: number;
+  /** Found files a re-screen cannot import (`slug_taken` + `deleted_page`): a person renames, deletes or restores; never scheduled. */
+  blocked: number;
   /** Scheduled paths the next sync has not re-screened yet. */
   waiting: number;
   /** Scheduled paths a sync re-screened that still have no page and no hold. */
@@ -301,10 +335,11 @@ export async function judgeUnindexedFiles(engine: Pick<BrainEngine, 'executeRaw'
   const out: UnindexedState[] = [];
   for (const source of sources) {
     const record = records.get(source.id) ?? null;
-    const base = { source_id: source.id, record, unscheduled: 0, waiting: 0, still_unindexed: 0, age_ms: record ? Math.max(0, now - Date.parse(record.computed_at)) : null };
+    const base = { source_id: source.id, record, unscheduled: 0, blocked: 0, waiting: 0, still_unindexed: 0, age_ms: record ? Math.max(0, now - Date.parse(record.computed_at)) : null };
     if (!record || record.incarnation !== source.incarnation) { out.push({ ...base, state: 'missing' }); continue; }
     if (base.age_ms! > UNINDEXED_STALE_MS) { out.push({ ...base, state: 'stale' }); continue; }
-    const unscheduled = Math.max(0, record.unindexed - record.scheduled_now);
+    const blocked = (record.slug_taken ?? 0) + (record.deleted_page ?? 0);
+    const unscheduled = Math.max(0, record.unindexed - blocked - record.scheduled_now);
     const retry = new Set(await readGitHoldRetryPaths(engine, source.id, source.incarnation));
     const waiting = record.pending.filter(path => retry.has(path)).length;
     const consumed = record.pending.filter(path => !retry.has(path));
@@ -317,7 +352,7 @@ export async function judgeUnindexedFiles(engine: Pick<BrainEngine, 'executeRaw'
       stillUnindexed = consumed.filter(path => !indexed.has(`${record.source_prefix}${path}`) && !held.has(path)).length;
     }
     const state = unscheduled || stillUnindexed ? 'unindexed' : waiting ? 'scheduled' : record.complete && !record.pending_truncated ? 'ok' : 'partial';
-    out.push({ ...base, state, unscheduled, waiting, still_unindexed: stillUnindexed });
+    out.push({ ...base, state, unscheduled, blocked, waiting, still_unindexed: stillUnindexed });
   }
   return out;
 }

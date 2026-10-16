@@ -55,7 +55,7 @@ import { OperationError, type OperationContext } from '../ops/contract.ts';
 import { trustedCliRequired } from '../ops/op-fix.ts';
 import { shellQuote, type Action } from '../agent-output.ts';
 import { autoFixFrontmatter, createFrontmatterBackup, makeFrontmatterBackupRunId } from '../brain-writer.ts';
-import { classifyImportHold, parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
+import { classifyImportHold, coerceFrontmatterString, parseMarkdown, parseMarkdownHead, serializePageToMarkdown } from '../markdown.ts';
 import { MAX_FILE_SIZE, type ImportScreenResult } from '../import-screen.ts';
 import { importFromFile } from '../import-file.ts';
 import { resolveSlugForPath, slugifyPath } from '../sync.ts';
@@ -172,11 +172,12 @@ function checkoutSlugs(root: string): Set<string> {
   return out;
 }
 
-/** The declared `slug:` value of a file as written, or null when the frontmatter has none. */
+/**
+ * The declared `slug:` value of a file as the import reads it (the YAML scalar: a trailing comment, quoting and
+ * escapes resolved, as `parseMarkdown` coerces it), or null when the frontmatter has none.
+ */
 function declaredSlug(content: string): string | null {
-  const block = /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content)?.[1];
-  const line = block?.split(/\r?\n/).find(l => /^slug:\s*\S/.test(l));
-  return line ? line.replace(/^slug:\s*/, '').trim().replace(/^["']|["']$/g, '') : null;
+  return coerceFrontmatterString(parseMarkdownHead(content).frontmatter.slug).trim() || null;
 }
 
 /** The slug a declared value is looked up by: as written, then as the screen normalizes it. */
@@ -644,7 +645,7 @@ async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, a
         return { applied: false, outcome: 'skipped', reason: 'changed_since_read', detail: { ...detail, message: `${cand.path} changed while it was being repaired; the next run reads it again.` }, ...spend };
       }
       if (error instanceof OperationError && error.code === 'sync_in_progress') {
-        await recordState(engine, { src, path: cand.path, hold: cand.hold }, { action: 'pending', reason: 'sync_in_progress', next_attempt_after: nextAttempt('sync_in_progress') });
+        if (extra.trigger !== 'sync') await recordState(engine, { src, path: cand.path, hold: cand.hold }, { action: 'pending', reason: 'sync_in_progress', next_attempt_after: nextAttempt('sync_in_progress') });
         return { applied: false, outcome: 'skipped', reason: 'sync_in_progress', detail: { ...detail, message: error.message }, ...spend };
       }
       throw error;
@@ -780,10 +781,7 @@ export async function healAbsentSlugLine(ctx: OperationContext, run: AbsentSlugH
     return left(analysis.status === 'held' || analysis.status === 'skip' ? analysis.reason : analysis.status === 'deterministic' ? analysis.rule : analysis.status,
       `${path} is not a stray slug: line naming no page; the content-repair lane decides it on the maintenance run.`);
   }
-  const held: HeldFn = async (reason, message, state, extra = {}) => {
-    if (state) await recordState(ctx.engine, cand, state);
-    return { applied: false, outcome: 'held', reason, detail: { path, message, ...extra } };
-  };
+  const held: HeldFn = async (reason, message, _state, extra = {}) => ({ applied: false, outcome: 'held', reason, detail: { path, message, ...extra } });
   return write(ctx, src, cand, analysis.after, { action: 'remove_slug', tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0, ...styleOnly(analysis), ...declaredAlias(cand) },
     { embed: run.embed, expect: null, noLlm: true }, held, { rule: 'absent_page', trigger: 'sync' });
 }

@@ -14,8 +14,11 @@
  * - never while the source has an unfinished managed sync cursor (another drainer, or this run's own resumable
  *   stop), and every write re-reads the busy set at admission, so no file whose publication is in flight is edited;
  * - only under local authority: a sync a remote job or agent submitted defers to the maintenance run;
- * - bounded: at most `SLUG_HEAL_MAX_FILES` files and `SLUG_HEAL_BUDGET_MS` (or the caller's deadline) per sync, one
- *   checkout scan per source; the rest are counted as pending for the next sync or the maintenance run;
+ * - the declared slug is checked again inside the publication: a page, an alias or a file at its path written since
+ *   the heal read the source refuses the write;
+ * - bounded: only holds the lane has not judged for these bytes (a current-lane verdict is the lane's), at most
+ *   `SLUG_HEAL_MAX_FILES` attempts and `SLUG_HEAL_BUDGET_MS` (or the caller's deadline) per sync, one checkout scan
+ *   per source; the rest are counted as pending for the next sync or the maintenance run;
  * - `sync.slug_conflicts.auto_remove false` turns it off (held until the maintenance run or an operator repairs
  *   them), and so does `fences.repair.enabled false` (the whole lane); a skipped heal says which setting skipped it.
  * Nothing here runs at upgrade. A failure is counted and never fails the sync whose checkpoint already committed.
@@ -26,13 +29,14 @@ import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import { serr } from '../console-prefix.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { readGitSourceHolds } from '../persistence/sync-holds.ts';
+import { contentRepairLaneCurrent } from '../persistence/sync-fault-class.ts';
 import { FENCE_REPAIR_ENABLED_KEY, fenceRepairEnabled } from '../fence-repair/config.ts';
 import { absentSlugHealRun, healAbsentSlugLine } from './slug-conflicts.ts';
 
 export const SLUG_AUTO_REMOVE_KEY = 'sync.slug_conflicts.auto_remove';
 /** The longest one sync spends healing; a caller deadline that comes sooner wins. */
 export const SLUG_HEAL_BUDGET_MS = 60_000;
-/** The most files one sync heals (each is one coordinated write and one commit); the rest wait for the next pass. */
+/** The most held files one sync examines (each heal is one coordinated write and one commit); the rest wait for the next pass. */
 export const SLUG_HEAL_MAX_FILES = 200;
 
 const FALSE = /^(false|0|off|no)$/i;
@@ -90,9 +94,11 @@ export async function healAfterManagedSync(engine: BrainEngine, outer: SyncOpts,
   if (outer.dryRun || !OK_STATUSES.includes(result.status)) return result;
   const sourceId = outer.sourceId ?? 'default';
   try {
-    const holds = ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.code === 'frontmatter_slug_conflict');
-    if (!holds.length) return result;
-    const base = { removed: 0, pending: holds.length, failed: 0, left_by_reason: {} as Record<string, number>, removed_paths: [] as string[] };
+    const all = ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.code === 'frontmatter_slug_conflict');
+    if (!all.length) return result;
+    const holds = all.filter(hold => !contentRepairLaneCurrent(hold.meta.content_repair));
+    const judged = all.length - holds.length;
+    const base = { removed: 0, pending: holds.length, failed: 0, left_by_reason: (judged ? { lane_verdict: judged } : {}) as Record<string, number>, removed_paths: [] as string[] };
     const authority = currentSubmissionAuthority();
     const skipped: SlugHealReport['skipped'] = FALSE.test(String(await engine.getConfig(SLUG_AUTO_REMOVE_KEY) ?? '').trim()) ? 'disabled'
       : !(await fenceRepairEnabled(engine)) ? 'lane_paused'
@@ -105,8 +111,9 @@ export async function healAfterManagedSync(engine: BrainEngine, outer: SyncOpts,
       remote: false, dryRun: false, sourceId } as unknown as OperationContext;
     const deadline = Math.min(now() + SLUG_HEAL_BUDGET_MS, outer.deadlineAtMs ?? Infinity);
     const healed: string[] = [];
+    let attempts = 0;
     for (const hold of [...holds].sort((a, b) => a.path.localeCompare(b.path))) {
-      if (healed.length + base.failed >= SLUG_HEAL_MAX_FILES || now() >= deadline || outer.signal?.aborted) break;
+      if (attempts++ >= SLUG_HEAL_MAX_FILES || now() >= deadline || outer.signal?.aborted) break;
       base.pending--;
       try {
         const outcome = await healAbsentSlugLine(ctx, run, hold.path);
