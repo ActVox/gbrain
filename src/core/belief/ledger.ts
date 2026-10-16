@@ -61,6 +61,12 @@ export function noteBelief(note: BeliefNote): void {
   store.getStore()?.notes.push(note);
 }
 
+/** True when an enclosing batch on this async context already records these slugs (a nested writer must not append them twice). */
+export function beliefBatchCovers(sourceId: string, slugs: readonly string[]): boolean {
+  const outer = store.getStore();
+  return !!outer && outer.opts.sourceId === sourceId && slugs.every(slug => outer.opts.slugs.includes(slug));
+}
+
 /** Coverage and purge probes for one source, in one read. */
 export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<{ incarnation: string; purgeEpoch: number; coverage: string | null; managed: boolean; purgesPossible: boolean } | null> {
   const [row] = await tx.executeRaw<Record<string, unknown>>(`SELECT s.incarnation::text AS incarnation, s.purge_epoch,
