@@ -147,11 +147,15 @@ the entity was named or inferred from the fact.
 ## page_body_rows_unreadable
 
 A read of a segmented page found manifest rows that do not cover the page's
-stored body: they must run from byte 0 to the page's `body_bytes` without a
-gap. The usual cause is a database role that can read the page row but not
-its segment rows (a row-level security policy or grant on `pages` only); a
-damaged database is the other. gbrain returns nothing rather than an empty or
-truncated page. The brain host's operator gives the reading role the same
+stored body: they must run from byte 0 to the page's `body_bytes` (a retained
+version's own `body_bytes` for an older generation) without a gap. The usual
+cause is a database role that can read the page row but not its segment rows
+(a row-level security policy or grant on `pages` only); a damaged database is
+the other. gbrain returns nothing rather than an empty or truncated page, and
+every reader that produces the body checks it: `get_page`, `fetch`, export,
+backup and restore file writes, body digests, fence rewrites and purges, and
+timeline extraction. An export with such a page fails instead of writing a
+short file. The brain host's operator gives the reading role the same
 access to `page_body_manifest` and `page_segment_texts` it has to `pages`;
 `gbrain doctor --json` checks the segment tables.
 

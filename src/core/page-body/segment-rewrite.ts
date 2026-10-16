@@ -23,6 +23,7 @@ import { pageBodySegmentedError } from './page-shape.ts';
 import { ContentHashStream } from './content-hash-stream.ts';
 import type { StoredRegion } from './segmenter.ts';
 import type { BodyRegion, JsonObject, ManifestRow } from './types.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 
 /** Rewrites one fence (the text of a stored facts or takes region, markers included), given the body region holding it; called in body order. */
 export type FenceTransform = (fence: string, at: { region: BodyRegion }) => Promise<string>;
@@ -152,6 +153,7 @@ export async function rewriteLiveSegmentedFences(tx: BrainEngine, pageId: number
   if (page?.body_storage !== 'segmented') return null;
   const sourceId = page.source_id, slug = page.slug, frontmatter = page.frontmatter ?? {};
   const rows = await tx.readManifest(pageId);
+  await assertGenerationTiles(tx, pageId, undefined, rows);
   const units = await changedUnits(tx, sourceId, rows, transform);
   if (!units.length) return null;
   const generation = Number(page.body_generation);
@@ -189,6 +191,7 @@ export async function rewriteSegmentedGeneration(tx: BrainEngine, pageId: number
   if (!page) return null;
   const sourceId = page.source_id;
   const rows = await tx.readManifest(pageId, { generation });
+  await assertGenerationTiles(tx, pageId, generation, rows);
   const units = await changedUnits(tx, sourceId, rows, transform);
   if (!units.length) return null;
   // Rebuilding rows in place is for retained generations only: the live one changes by a flip (rewriteLiveSegmentedFences),
@@ -224,6 +227,7 @@ export async function rewriteSegmentedGeneration(tx: BrainEngine, pageId: number
 export async function rewrittenContentHash(engine: BrainEngine, pageId: number, sourceId: string, generation: number, transform: FenceTransform,
   meta: { title: unknown; type: unknown; frontmatter: Record<string, unknown>; tags: string[] }): Promise<string | null> {
   const rows = await engine.readManifest(pageId, { generation });
+  await assertGenerationTiles(engine, pageId, generation, rows);
   const units = await changedUnits(engine, sourceId, rows, transform);
   if (!units.length) return null;
   const hash = ContentHashStream.begin(meta);

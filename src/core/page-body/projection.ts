@@ -31,6 +31,7 @@ import { PROJECTION_RETRY_READY_SQL, SEGMENTED_JOB_PROBES, SEGMENTED_PROJECTION_
 import { occurrencesWithoutChunks, stageOccurrenceChunks } from './ingest.ts';
 import { DEFAULT_FLIP_RETIRE_MAX_ROWS } from './limits.ts';
 import type { JsonObject } from './types.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 
 export interface SegmentedProjectionResult { chunks: number; retired: number; sealed: boolean }
 
@@ -111,6 +112,7 @@ async function buildClaimedProjection(engine: BrainEngine, ref: { sourceId: stri
   const generation = Number(page.body_generation);
   const pageId = Number(page.id);
   const liveRows = await engine.readManifest(pageId);
+  await assertGenerationTiles(engine, pageId, generation, liveRows);
   const { retired, moved } = await retireStaleChunks(engine, ref, pageId, generation, liveRows.map(row => Number(row.occurrenceId)));
   if (moved) return { chunks: 0, retired, sealed: false };
   const frontmatter = page.frontmatter ?? {};

@@ -37,6 +37,7 @@ import { credentialSafeProjection } from '../credential-projection.ts';
 import { loadFenceChunkOverlay, markFenceChunk, renderFenceLowTier, type FenceChunkOverlay, type FenceLowTierRow } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { regionTrust } from './ingest.ts';
+import { assertRowsTile, generationBodyBytes } from './body-tiling.ts';
 import { readBodyLedger, overlaySegmentText, type BodyLedger } from './segment-ledger.ts';
 import { SEGMENTER_VERSION, type FactsSlot, type OutlineHeading, type StoredRegion } from './segmenter.ts';
 import { overlaidPieces, projectionStaleError, projectSegment, type ProjectedPiece, type SegmentProjection } from './segment-projection.ts';
@@ -184,35 +185,18 @@ export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: num
     WHERE m.page_id=$1 AND m.staging_id IS NULL AND m.gen_from<=$2 AND (m.gen_to IS NULL OR m.gen_to>$2) ORDER BY m.seq`, [opts.pageId, generation]);
   const slug = String(page.slug);
   const sourceId = String(page.source_id);
-  assertRowsTile(rows, slug, sourceId, opts.pin && generation === Number(page.body_generation) ? Number(page.body_bytes ?? 0) : null);
+  const bodyRows = rows.map(r => ({
+    seq: Number(r.seq), occurrenceId: Number(r.occurrence_id), region: r.region as BodyRegion, sha256: bytesOf(r.sha256),
+    byteStart: Number(r.byte_start), byteLen: Number(r.byte_len), lineStart: Number(r.line_start), lineCount: Number(r.line_count), staticProjBytes: Number(r.static_proj_bytes),
+    staticProjLines: Number(r.static_proj_lines), outlineCount: Number(r.outline_count), hasFacts: r.has_facts === true, hasDate: r.has_date === true,
+  }));
+  assertRowsTile(bodyRows, { slug, sourceId, total: await generationBodyBytes(engine, { id: opts.pageId, body_generation: page.body_generation, body_bytes: page.body_bytes }, generation) });
   const ledger = opts.ledger ?? await readBodyLedger(engine, sourceId, slug);
   return {
     pageId: opts.pageId, sourceId, slug, generation, bodyBytes: Number(page.body_bytes ?? 0), bodyLines: Number(page.body_lines ?? 0), truthBytes: Number(page.truth_bytes ?? 0),
     flags: (toJson(page.body_flags) ?? {}) as JsonObject, ledger, stale: Number(page.segmenter_version) !== SEGMENTER_VERSION, ...(opts.pin ? { pin: opts.pin } : {}),
-    rows: rows.map(r => ({
-      seq: Number(r.seq), occurrenceId: Number(r.occurrence_id), region: r.region as BodyRegion, sha256: bytesOf(r.sha256),
-      byteStart: Number(r.byte_start), byteLen: Number(r.byte_len), lineStart: Number(r.line_start), lineCount: Number(r.line_count), staticProjBytes: Number(r.static_proj_bytes),
-      staticProjLines: Number(r.static_proj_lines), outlineCount: Number(r.outline_count), hasFacts: r.has_facts === true, hasDate: r.has_date === true,
-    })),
+    rows: bodyRows,
   };
-}
-
-/**
- * The generation's rows must run from byte 0 without a gap, and for a pinned (authorized) read of the live generation to
- * its body_bytes (`total`): a role that sees the page row but not its manifest rows, or rows missing, would otherwise
- * read as a short or empty body. A trusted unpinned reader sees every row, so it checks only that they start at 0 and
- * leave no gap.
- */
-function assertRowsTile(rows: Array<Record<string, unknown>>, slug: string, sourceId: string, total: number | null): void {
-  let end = 0;
-  for (const row of rows) {
-    if (Number(row.byte_start) !== end) { end = -1; break; }
-    end += Number(row.byte_len);
-  }
-  if (end >= 0 && (total === null ? rows.length > 0 : end === total)) return;
-  throw opError('page_body_rows_unreadable', `Page ${slug} (source ${sourceId}): the segment rows readable here do not cover its ${total ?? 'stored'}-byte body, so nothing was read.`,
-    "Give the role that reads the brain the same access to page_body_manifest and page_segment_texts it has to pages, then read again.",
-    { detail: JSON.stringify({ rows: rows.length, covered_bytes: end >= 0 ? end : null, body_bytes: total }) });
 }
 
 /** After a pinned read, before its text is returned: the page is still at the pin and still admits the caller. */

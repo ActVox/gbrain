@@ -33,6 +33,14 @@ import { readCardIdentity } from '../../src/core/verbs/entity-card-identity.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 import { importSegmented } from '../helpers/segmented-privacy-fixture.ts';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runExport } from '../../src/commands/export.ts';
+import { materializeSegmentedBody } from '../../src/core/page-body/ingest.ts';
+import { storedBodyDigests } from '../../src/core/page-body/body-digests.ts';
+import { readBodyLedger } from '../../src/core/page-body/segment-ledger.ts';
+import { withEnv } from '../helpers/with-env.ts';
 
 const SECRET = ['zz', 'secret', 'pinned', 'token'].join('');
 const NEEDLE = 'zzpinneedle';
@@ -93,6 +101,19 @@ async function raced(seam: 'open' | 'read', flip: () => Promise<void>, read: () 
     engine.executeRaw = exec;
     engine.readSegmentTexts = texts;
   }
+}
+
+const home = mkdtempSync(join(tmpdir(), 'gbrain-pinned-reads-'));
+afterAll(() => { rmSync(home, { recursive: true, force: true }); });
+
+/** `gbrain export --dir out`; a non-zero exit throws with what it printed. */
+async function quietExport(out: string): Promise<void> {
+  const { log, error } = console;
+  const exit = process.exit;
+  const messages: string[] = [];
+  console.log = console.error = (...args: unknown[]) => { messages.push(args.join(' ')); };
+  process.exit = ((code: number) => { throw new Error(`EXIT:${code} ${messages.join('\n')}`); }) as never;
+  try { await withEnv({ GBRAIN_HOME: home }, () => runExport(engine, ['--dir', out])); } finally { console.log = log; console.error = error; process.exit = exit; }
 }
 
 const refused = (outcome: Outcome) => ({ ok: outcome.ok, code: outcome.code, leaked: outcome.text.includes(SECRET) });
@@ -216,6 +237,22 @@ for (const kind of testBackends()) {
       await engine.executeRaw('DELETE FROM page_body_manifest WHERE page_id=$1 AND staging_id IS NULL AND gen_to IS NULL AND seq=(SELECT max(seq) / 2 FROM page_body_manifest WHERE page_id=$1 AND gen_to IS NULL)', [id]);
       const outcome = await call('get_page', { slug, body: 'window', bytes: { offset: 0, length: 20_000 } }).then(() => 'ok', (e: { canonical?: string; code?: string }) => e.canonical ?? e.code);
       expect(outcome).toBe('page_body_rows_unreadable');
+    }, 240_000);
+
+    test('a live manifest that lost its trailing row: export, materialize and the stored body digest refuse, never a short body', async () => {
+      const { slug, id } = await page();
+      const intact = join(home, `intact-${kind}`);
+      await quietExport(intact);
+      expect(existsSync(join(intact, `${slug}.md`))).toBe(true);
+      await engine.executeRaw(`DELETE FROM page_body_manifest WHERE page_id=$1 AND staging_id IS NULL AND gen_to IS NULL
+        AND seq=(SELECT max(seq) FROM page_body_manifest WHERE page_id=$1 AND staging_id IS NULL AND gen_to IS NULL)`, [id]);
+      const short = join(home, `short-${kind}`);
+      const exported = await quietExport(short).then(() => 'ok', (e: Error) => e.message);
+      expect(exported).toContain(`Page ${slug} (source default): the segment rows readable here do not cover`);
+      expect(existsSync(join(short, `${slug}.md`))).toBe(false);
+      const code = (e: { canonical?: string; code?: string }) => e.canonical ?? e.code;
+      expect(await materializeSegmentedBody(engine, id, 'default').then(() => 'ok', code)).toBe('page_body_rows_unreadable');
+      expect(await storedBodyDigests(engine, id, await readBodyLedger(engine, 'default', slug)).then(() => 'ok', code)).toBe('page_body_rows_unreadable');
     }, 240_000);
 
     // N8: get_versions tells a remote caller a segmented version's projected size, never its stored body_bytes.

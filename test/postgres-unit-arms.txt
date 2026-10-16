@@ -114,6 +114,7 @@ test/large-pages/segmented-loser-chunks.test.ts
 test/large-pages/segmented-maintenance-commands.test.ts
 test/large-pages/segmented-prior-view.test.ts
 test/large-pages/segmented-read-refusals.test.ts
+test/large-pages/segmented-real-size.slow.test.ts
 test/large-pages/segmented-remember-refusal.test.ts
 test/large-pages/segmented-repair-scans.test.ts
 test/large-pages/segmented-search-dedup.test.ts
