@@ -165,7 +165,7 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
           });
           if (submission.status === 'submitted') {
             embedJobId = submission.jobId;
-          } else if (submission.status === 'cooldown' || submission.status === 'spend_capped' || submission.status === 'no_worker_surface') {
+          } else if (submission.status === 'cooldown' || submission.status === 'spend_capped' || submission.status === 'no_worker_surface' || submission.status === 'stalled') {
             embedSkipReason = submission.status;
           } else {
             submission satisfies never;
