@@ -25,6 +25,7 @@ test/belief-ledger-privacy.test.ts
 test/belief-ledger-purge-review.test.ts
 test/belief-ledger-purge.test.ts
 test/belief-ledger-restore.test.ts
+test/belief-ledger-touched.test.ts
 test/belief-ledger-trust.test.ts
 test/belief-ledger-w5-time-model.test.ts
 test/belief-ledger-weekly-diff.test.ts
