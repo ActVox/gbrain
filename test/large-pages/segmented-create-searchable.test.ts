@@ -13,10 +13,15 @@
  *    builds it (the write's post-commit build claims the page's queue row, so
  *    the resident's queue route does not chunk it a second time). A create
  *    within the bound that dies inside its publication leaves nothing behind.
+ *    A larger create whose post-commit build died is named by doctor and
+ *    built by `gbrain projections drain` once the dead build's claim lapses
+ *    (exactly one build; a live claim is left alone), and the receipt's
+ *    `searchable_fix` names that drain as its fallback.
  * 2. Fails when: a small create publishes unsealed (its reply would depend on
  *    the post-commit projection beating the reply deadline), the receipt has
  *    no `searchable` contract, a receipt claims searchable before search sees
- *    the page, or two projections chunk the same body.
+ *    the page, two projections chunk the same body, or the drain skips (or
+ *    races a live build of) a page stored in segments.
  * 3. Existing coverage: segmented-embedding-paths.test.ts covers an unsealed
  *    create recovered by the projection queue and `embed`.
  * 4. Runs on PGLite, and on Postgres when DATABASE_URL is set.
@@ -35,6 +40,8 @@ import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { segmentChunkWork } from '../../src/core/page-body/ingest.ts';
 import { SEGMENTED_CREATE_SEAL_MAX_BYTES } from '../../src/core/page-body/limits.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
+import { drainProjections, projectionDrainWork, SEGMENTED_PROJECTION_CLAIM, SEGMENTED_PROJECTION_LEASE_SECONDS } from '../../src/core/page-state/projections.ts';
+import { checkProjectionReadiness } from '../../src/commands/doctor/checks/projection-readiness.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
@@ -107,6 +114,48 @@ for (const kind of testBackends()) {
       expect(await found(needle, slug)).toBe(true);
     }, 120_000);
 
+    test('a larger create whose post-commit build died is built by projections drain once its claim lapses, exactly once', async () => {
+      const slug = 'chats/drained';
+      const needle = `zzdrained${kind}`;
+      installFaultHook(point => { if (point === 'segmented:projection_staged') throw new Error('post-commit build died'); });
+      const imported = await importFromContent(engine, slug, page(SEGMENTED_CREATE_SEAL_MAX_BYTES + 256 * 1024, needle), { sourceId: 'default', noEmbed: true });
+      installFaultHook(undefined);
+      expect(imported.searchable).toBe('pending');
+      // Killed before any of its chunk rows committed.
+      await engine.executeRaw("DELETE FROM content_chunks WHERE page_id=(SELECT id FROM pages WHERE source_id='default' AND slug=$1)", [slug]);
+      const claim = (ageSeconds: number) => engine.executeRaw(`UPDATE page_projection_jobs SET reason=$2, updated_at=now()-make_interval(secs => $3)
+        WHERE slug=$1 AND source_incarnation=(SELECT incarnation FROM sources WHERE id='default')`, [slug, SEGMENTED_PROJECTION_CLAIM, ageSeconds]);
+      const reset = () => { for (const k of Object.keys(projectionDrainWork) as Array<keyof typeof projectionDrainWork>) projectionDrainWork[k] = 0; segmentChunkWork.chunks = 0; };
+
+      const doctor = await checkProjectionReadiness(engine);
+      expect(doctor.message).toContain('`gbrain projections drain` builds them as well');
+      expect((doctor.details as { segmented_pending?: number }).segmented_pending).toBe(1);
+
+      // A build another process holds (its claim is live) is left to it.
+      await claim(1);
+      reset();
+      const skipped = await drainProjections(engine);
+      expect(skipped.rebuilt).toBe(0);
+      expect(projectionDrainWork.segmented_pages).toBe(0);
+      expect(segmentChunkWork.chunks).toBe(0);
+      expect(await found(needle, slug)).toBe(false);
+
+      // The process died: its claim lapses and the drain builds the page.
+      await claim(SEGMENTED_PROJECTION_LEASE_SECONDS + 1);
+      let builds = 0;
+      installFaultHook(point => { if (point === 'segmented:projection_staged') builds++; });
+      reset();
+      const drained = await drainProjections(engine);
+      expect(drained.failed).toEqual([]);
+      expect(drained.rebuilt).toBe(1);
+      expect(drained.remaining).toBe(0);
+      expect(builds).toBe(1);
+      expect(projectionDrainWork.segmented_pages).toBe(1);
+      expect(segmentChunkWork.chunks).toBe(await pageChunks(slug));
+      expect(await found(needle, slug)).toBe(true);
+      expect((await checkProjectionReadiness(engine)).status).toBe('ok');
+    }, 180_000);
+
     test('a larger create says pending, and the documented wait reaches searchable; one projection chunks it', async () => {
       const slug = 'chats/projected';
       const needle = `zzpending${kind}`;
@@ -132,6 +181,7 @@ for (const kind of testBackends()) {
       const fix = receipt.searchable_fix as { argv: string[]; next: string; mcp?: unknown };
       expect(fix.argv).toEqual(['gbrain', 'write-request', '--', requestId]);
       expect(fix.next).toBe('run');
+      expect((fix as { then?: { argv: string[] } }).then?.argv).toEqual(['gbrain', 'projections', 'drain']);
 
       release();
       for (let i = 0; receipt.searchable === 'pending' && i < 600; i++) {

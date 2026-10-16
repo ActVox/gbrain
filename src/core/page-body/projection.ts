@@ -26,7 +26,8 @@ import type { BrainEngine } from '../engine.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { sealSegmentedPage } from '../persistence/segmented-apply.ts';
-import { PROJECTION_RETRY_READY_SQL, SEGMENTED_PROJECTION_CLAIM, SEGMENTED_PROJECTION_LEASE_SECONDS } from '../page-state/projections.ts';
+import { PROJECTION_RETRY_READY_SQL, SEGMENTED_JOB_PROBES, SEGMENTED_PROJECTION_CLAIM, SEGMENTED_PROJECTION_CLAIMED_SQL, SEGMENTED_PROJECTION_LEASE_SECONDS,
+  type ProjectionRebuildFailure } from '../page-state/projections.ts';
 import { occurrencesWithoutChunks, stageOccurrenceChunks } from './ingest.ts';
 import { DEFAULT_FLIP_RETIRE_MAX_ROWS } from './limits.ts';
 import type { JsonObject } from './types.ts';
@@ -113,32 +114,43 @@ async function buildClaimedProjection(engine: BrainEngine, ref: { sourceId: stri
 
 /**
  * The projection queue's segmented route: the queued rows of live segmented
- * pages (failed rows after their retry window), rebuilt by
+ * pages (failed rows after their retry window, unless `retryCooldown` is
+ * false; never a row another process's live claim holds), rebuilt by
  * `buildSegmentedProjection` at the queued revision. A failure marks the row
  * `rebuild_failed` like the inline route; a page whose revision moved is
- * left to the row the trigger queued for its new revision.
+ * left to the row the trigger queued for its new revision. `listed` names
+ * every row this call took (`<source_incarnation>/<slug>`), for a caller that
+ * tries each row once (`exclude`: `gbrain projections drain`).
  */
 export async function rebuildPendingSegmentedProjections(engine: BrainEngine, limit: number,
-  opts: { deadlineMs?: number; now?: () => number } = {}): Promise<{ rebuilt: number; failed: number }> {
+  opts: { deadlineMs?: number; now?: () => number; notAfter?: string; reasons?: readonly string[]; retryCooldown?: boolean; exclude?: readonly string[];
+    onFailure?: (failure: ProjectionRebuildFailure) => void } = {}): Promise<{ rebuilt: number; failed: number; listed: string[] }> {
   const now = opts.now ?? Date.now;
   const startedAt = now();
+  const params: unknown[] = [Math.max(1, limit)];
+  const filters = [opts.retryCooldown === false ? `NOT ${SEGMENTED_PROJECTION_CLAIMED_SQL}` : PROJECTION_RETRY_READY_SQL];
+  if (opts.notAfter !== undefined) filters.push(`j.updated_at<=$${params.push(opts.notAfter)}::text::timestamptz`);
+  if (opts.reasons) filters.push(`j.reason=ANY($${params.push(opts.reasons)}::text[])`);
+  if (opts.exclude?.length) filters.push(`NOT (j.source_incarnation::text || '/' || j.slug)=ANY($${params.push(opts.exclude)}::text[])`);
   const jobs = await engine.executeRaw<{ source_id: string; source_incarnation: string; slug: string; revision: string }>(`SELECT s.id AS source_id,
       j.source_incarnation::text AS source_incarnation, j.slug, j.revision::text AS revision
-    FROM page_projection_jobs j JOIN sources s ON s.incarnation=j.source_incarnation AND NOT s.archived
-    JOIN pages p ON p.source_id=s.id AND p.slug=j.slug AND p.deleted_at IS NULL AND p.body_storage='segmented'
-    WHERE ${PROJECTION_RETRY_READY_SQL} ORDER BY j.updated_at, j.slug LIMIT $1`, [Math.max(1, limit)]);
+    FROM page_projection_jobs j ${SEGMENTED_JOB_PROBES}
+    WHERE ${filters.join(' AND ')} ORDER BY j.updated_at, j.slug LIMIT $1`, params);
   let rebuilt = 0, failed = 0;
+  const listed: string[] = [];
   for (const [index, job] of jobs.entries()) {
     if (opts.deadlineMs !== undefined && index > 0 && now() - startedAt >= opts.deadlineMs) break;
+    listed.push(`${job.source_incarnation}/${job.slug}`);
     try {
       if (!(await buildSegmentedProjection(engine, { sourceId: job.source_id, slug: job.slug }, { expectedRevision: job.revision })).sealed) continue;
       rebuilt++;
       await engine.executeRaw('DELETE FROM page_projection_jobs WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid', [job.source_incarnation, job.slug, job.revision]);
-    } catch {
+    } catch (error) {
       failed++;
       await engine.executeRaw(`UPDATE page_projection_jobs SET reason='rebuild_failed', updated_at=now()
         WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid`, [job.source_incarnation, job.slug, job.revision]);
+      opts.onFailure?.({ source_id: job.source_id, slug: job.slug, reason: (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300) });
     }
   }
-  return { rebuilt, failed };
+  return { rebuilt, failed, listed };
 }

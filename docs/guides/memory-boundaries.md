@@ -172,7 +172,11 @@ about 10 seconds for 20 MB: its receipt says `searchable: "pending"`, with
 `searchable_retry_after_ms` and a `searchable_fix` that reads the receipt again
 (`get_write_request`, `gbrain write-request -- <id>`). Read it at that interval
 until it says `searchable: true`; search finds the page from then on. Until
-then, search does not return the page. A quarantined page says
+then, search does not return the page. If it still says `"pending"` after a
+minute, no running gbrain process is building it (a brain with no resident
+writer, or a build that died): `gbrain projections drain`, the fix's fallback,
+builds it now, and doctor `text_projection_readiness` names how many such
+pages wait. A quarantined page says
 `searchable: false`. `gbrain import` waits for the build and reports
 `searchable` in its result the same way.
 
