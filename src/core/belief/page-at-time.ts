@@ -105,15 +105,15 @@ function visibilityAt(e: PageEventRow, t: number): 'visible' | 'not_visible' | '
 
 interface Draft { lifetime: string; slug: string; revision: string | null; deleted: boolean; gone: BodyReason | null; content: boolean; event: PageInterval['event'] }
 
-/** Replays one lifetime's events into intervals: one per content state (a revision, or a view change at one revision), rename or removal. A purge-redacted event keeps its own interval, with no revision. */
+/** Replays one lifetime's events into intervals: one per content state (a revision, or a view change at one revision), rename or removal. A purge-redacted event (value NULL) carries no revision, so a purged lifetime's content changes collapse: its intervals split only where its slug or deleted state changed, which the event type and row still say. */
 function replay(events: PageEventRow[]): Draft[] {
   const out: Draft[] = [];
   let state: { slug: string; deleted: boolean; revision: string | null } | null = null;
   for (const e of events) {
     const v = e.value ?? {};
     const gone = GONE[e.event_type] ?? (v.hard === true ? 'hard_deleted' : null);
-    const content = gone == null && (typeof v.revision_after === 'string' || e.purged);
-    const next: { slug: string; deleted: boolean; revision: string | null } = { slug: e.slug, revision: content ? (v.revision_after as string | undefined) ?? null : state?.revision ?? null,
+    const content = gone == null && typeof v.revision_after === 'string';
+    const next: { slug: string; deleted: boolean; revision: string | null } = { slug: e.slug, revision: content ? v.revision_after as string : state?.revision ?? null,
       deleted: gone != null || e.event_type === 'page.deleted' || (v.deleted === true && e.event_type !== 'page.restored') };
     if (state && !content && gone == null && next.slug === state.slug && next.deleted === state.deleted) continue;
     state = next;

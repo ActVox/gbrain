@@ -118,9 +118,11 @@ Two lifetimes scope every key:
   side table `belief_page_lifetimes (source_id, source_incarnation, slug,
   page_lifetime, started_at, ended_at)`. It is not derived from
   `knowledge_revision`, which changes on every write (`src/schema.sql:1862`)
-  and whose first value is not recoverable once versions are pruned. A delete
-  then recreate of a slug starts a new lifetime. A rename keeps the lifetime
-  and records the new slug. Subjects with no page (database-only facts whose
+  and whose first value is not recoverable once versions are pruned. A soft
+  delete keeps the lifetime: a later write to the slug restores the same page
+  row and appends `page.restored` on it. Only a page removed outright (purge,
+  retention cleanup) and then written again at the slug starts a new
+  lifetime. A rename keeps the lifetime and records the new slug. Subjects with no page (database-only facts whose
   `entity_slug` names no page) have a NULL `page_lifetime` and are scoped by
   source lifetime and subject slug alone.
 
@@ -1186,7 +1188,7 @@ W2's interval tests map onto these directly:
 | Before, at and after creation and each of two edits | (1) |
 | Stalled transaction straddling T, including one that commits after ceiling plus grace | (2) |
 | Rolled-back write | No event, because the append is in the rolled-back transaction |
-| Delete then recreate | A new page lifetime |
+| Soft delete then write; purge then write | `page.restored` on the same lifetime; a new page lifetime |
 | Version-id tie | Per-page `id` order under the page lock |
 | Create, forget, materialize, edit | (1), the added preimages |
 

@@ -176,6 +176,11 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect((await refusal(read(b, { slug: 'notes/old-example', known_as_of: after })))?.code).toBe('page_not_found');
       const lifetimes = new Set((await b.events()).filter(e => e.subject_kind === 'page').map(e => e.page_lifetime));
       expect(lifetimes.size).toBe(1);
+      const created = (await b.events()).find(e => e.event_type === 'page.published' && e.slug === 'notes/old-example')!;
+      const kept = await b.engine.executeRaw<{ knowledge_revision: string; compiled_truth: string }>(`SELECT v.knowledge_revision::text AS knowledge_revision, v.compiled_truth FROM page_versions v
+        JOIN pages p ON p.id = v.page_id WHERE p.source_id = $1 AND p.slug = $2 ORDER BY v.id`, [b.sourceId, 'notes/new-example']);
+      expect(kept.map(v => v.knowledge_revision)).toEqual([created.value!.revision_after as string]);
+      expect(kept[0]!.compiled_truth).toContain('Before the move.');
       // Forced probe: without the rename's preimage (the move advances the revision), the body before the rename is disclosed missing, not borrowed from the live page.
       await b.engine.executeRaw('DELETE FROM page_versions WHERE page_id = (SELECT id FROM pages WHERE source_id = $1 AND slug = $2)', [b.sourceId, 'notes/new-example']);
       expect(await read(b, { slug: 'notes/old-example', known_as_of: before })).toMatchObject({ body: 'unavailable', body_reason: 'version_missing' });
@@ -209,18 +214,84 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(await read(b, { slug, known_as_of: await at(b) })).toMatchObject({ certified: false, uncertified_reason: 'unmanaged' });
     }, { managed: false }), 120_000);
 
-    test('a purged page discloses every body as purged, never a neighbouring version', () => brain(async b => {
-      await b.put(slug, draft('First draft.'));
+    test('a purged page reads as one interval with no body: its content changes collapse, and nothing purged comes back to a local or remote caller', () => brain(async b => {
+      await b.put(slug, beliefPage({ prose: 'First draft.', facts: ['Acme sells purple widgets'] }));
       await pause();
-      await b.put(slug, draft('Second draft.'));
+      await b.put(slug, beliefPage({ prose: 'Second draft.', facts: ['Acme sells purple widgets', 'Acme opened a Lisbon office'] }));
       const t = await at(b);
+      const [create] = await pageEvents(b, slug);
       const revision = (await b.engine.executeRaw<{ r: string }>('SELECT knowledge_revision::text AS r FROM pages WHERE source_id=$1 AND slug=$2', [b.sourceId, slug]))[0]!.r;
       await b.op('delete_page', { slug, purge: true, expected_revision: revision });
-      const history = await versions(b, { slug, known_as_of: await at(b), include_body: true });
-      expect(history.versions.map((v: any) => [v.event, v.body, v.body_reason, v.compiled_truth])).toEqual([
-        ['page.purged', 'unavailable', 'purged', undefined], ['page.published', 'unavailable', 'purged', undefined], ['page.published', 'unavailable', 'purged', undefined]]);
-      expect(await read(b, { slug, known_as_of: t })).toMatchObject({ event: 'page.published', deleted: false, body: 'unavailable', body_reason: 'purged' });
-      expect((await read(b, { slug, known_as_of: t })).compiled_truth).toBeUndefined();
+      const after = await at(b);
+      const purge = (await pageEvents(b, slug)).at(-1)!;
+      const remote = { ...b.ctx, remote: true, transport: 'stdio', takesHoldersAllowList: ['world'] } as typeof b.ctx;
+      const shapeOf = (h: Record<string, any>) => h.versions.map((v: any) => [v.event_id, v.event, v.deleted, v.body, v.body_reason, v.until]);
+      const history = await versions(b, { slug, known_as_of: after, include_body: true, diff: true });
+      expect(shapeOf(history)).toEqual([[purge.id, 'page.purged', true, 'unavailable', 'purged', null], [create!.id, 'page.published', false, 'unavailable', 'purged', iso(purge.recorded_at)]]);
+      expect(history.versions.every((v: any) => v.diff === null && v.compiled_truth === undefined && v.title === undefined)).toBe(true);
+      const atT = await read(b, { slug, known_as_of: t });
+      expect(atT).toMatchObject({ event_id: create!.id, deleted: false, body: 'unavailable', body_reason: 'purged' });
+      const leaked = (v: unknown) => ['First draft', 'Second draft', 'purple widgets', 'Lisbon'].filter(s => JSON.stringify(v).includes(s));
+      expect(leaked([history, atT])).toEqual([]);
+      expect((await refusal(operationsByName.get_page!.handler(remote, { slug, known_as_of: t })))?.code).toBe('page_not_found');
+      expect((await refusal(operationsByName.get_versions!.handler(remote, { slug, known_as_of: after, include_body: true, diff: true })))?.code).toBe('page_not_found');
+      // Forced probe: a purge that left the revisions in its redacted events would split the purged lifetime into one interval per edit again.
+      await b.engine.executeRaw(`UPDATE belief_events SET value = jsonb_build_object('revision_before', NULL, 'revision_after', gen_random_uuid()::text)
+        WHERE source_id = $1 AND page_lifetime = $2::uuid AND event_type = 'page.published' AND purged`, [b.sourceId, create!.page_lifetime]);
+      expect((await versions(b, { slug, known_as_of: after })).versions).toHaveLength(3);
+    }), 120_000);
+
+    test('purge_fact: no historical body or diff returns the purged claim; the surviving claim still reads (control)', () => brain(async b => {
+      await b.put(slug, beliefPage({ prose: 'Profile.', facts: ['Acme sells purple widgets', 'Acme opened a Lisbon office'] }));
+      await pause();
+      await b.put(slug, beliefPage({ prose: 'Profile, edited.', facts: ['Acme sells purple widgets', 'Acme opened a Lisbon office'] }));
+      const edited = await at(b);
+      const [fact] = await b.engine.executeRaw<{ id: number }>(`SELECT id FROM facts WHERE source_id = $1 AND fact = 'Acme opened a Lisbon office' AND expired_at IS NULL ORDER BY id LIMIT 1`, [b.sourceId]);
+      const purgeOp = operationsByName.purge_fact!;
+      const dry = await purgeOp.handler(b.ctx, { id: Number(fact!.id), dry_run: true }) as Record<string, any>;
+      await purgeOp.handler(b.ctx, { id: Number(fact!.id), confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: randomUUID() });
+      const now = await at(b);
+      const remote = { ...b.ctx, remote: true, transport: 'stdio', takesHoldersAllowList: ['world'] } as typeof b.ctx;
+      const reads = async (ctx: typeof b.ctx) => [
+        await operationsByName.get_page!.handler(ctx, { slug, known_as_of: edited }),
+        await operationsByName.get_versions!.handler(ctx, { slug, known_as_of: now, include_body: true, diff: true })];
+      for (const ctx of [b.ctx, remote]) {
+        const out = JSON.stringify(await reads(ctx));
+        expect(out).not.toContain('Lisbon');
+        expect(out).toContain('purple widgets');
+      }
+      // Forced probe: a version the purge failed to redact returns the claim through the historical read.
+      await b.engine.executeRaw(`UPDATE page_versions SET compiled_truth = compiled_truth || ' Acme opened a Lisbon office.'
+        WHERE page_id = (SELECT id FROM pages WHERE source_id = $1 AND slug = $2)`, [b.sourceId, slug]);
+      expect(JSON.stringify(await reads(remote))).toContain('Lisbon');
+    }), 180_000);
+
+    test('remote callers: a private page never answers; a page made private hides every interval; one made public shows only what was recorded while world', () => brain(async b => {
+      const remote = { ...b.ctx, remote: true, transport: 'stdio', takesHoldersAllowList: ['world'] } as typeof b.ctx;
+      const rread = (params: Record<string, unknown>) => operationsByName.get_page!.handler(remote, params) as Promise<Record<string, any>>;
+      const rversions = (params: Record<string, unknown>) => operationsByName.get_versions!.handler(remote, params) as Promise<Record<string, any>>;
+      const priv = (prose: string) => beliefPage({ prose, frontmatter: { visibility: 'private' } });
+      await b.put('companies/secret-example', priv('Secret plans.'));
+      await b.put('companies/public-example', draft('Public profile.'));
+      await b.put('companies/closing-example', draft('Open at first.'));
+      await b.put('companies/opening-example', priv('Private at first.'));
+      const t1 = await at(b);
+      await b.put('companies/closing-example', priv('Now private.'));
+      await b.put('companies/opening-example', draft('Now public.'));
+      const t2 = await at(b);
+      expect((await rread({ slug: 'companies/public-example', known_as_of: t1 })).compiled_truth).toContain('Public profile.');
+      expect((await refusal(rread({ slug: 'companies/secret-example', known_as_of: t2 })))?.code).toBe('page_not_found');
+      expect((await refusal(rread({ slug: 'companies/closing-example', known_as_of: t1 })))?.code).toBe('page_not_found');
+      expect((await refusal(rversions({ slug: 'companies/closing-example', known_as_of: t2, include_body: true })))?.code).toBe('page_not_found');
+      expect((await refusal(rread({ slug: 'companies/opening-example', known_as_of: t1 })))?.code).toBe('page_not_found');
+      expect((await rread({ slug: 'companies/opening-example', known_as_of: t2 })).compiled_truth).toContain('Now public.');
+      const opened = await rversions({ slug: 'companies/opening-example', known_as_of: t2, include_body: true, diff: true });
+      expect(opened.versions).toHaveLength(1);
+      expect(JSON.stringify(opened)).not.toContain('Private at first.');
+      expect((await read(b, { slug: 'companies/closing-example', known_as_of: t1 })).compiled_truth).toContain('Open at first.');
+      // Forced probe: an event recorded while private, relabelled world, would surface the private body to the remote caller.
+      await b.engine.executeRaw(`UPDATE belief_events SET visibility = 'world' WHERE source_id = $1 AND slug = 'companies/opening-example'`, [b.sourceId]);
+      expect(JSON.stringify(await rversions({ slug: 'companies/opening-example', known_as_of: t2, include_body: true }))).toContain('Private at first.');
     }), 120_000);
   });
 }
