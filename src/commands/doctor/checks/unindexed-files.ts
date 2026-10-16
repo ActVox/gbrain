@@ -25,7 +25,7 @@ import { managedPersistenceEnabled } from '../../../core/persistence/ownership.t
 import { judgeUnindexedFiles, type UnindexedState } from '../../../core/persistence/unindexed-files.ts';
 import { gitFollowUpSync } from '../../sources-retry-held.ts';
 
-const DOCS = 'docs/guides/troubleshooting.md#unindexed-files';
+const DOCS = 'docs/guides/repair.md#unindexed-files';
 
 const hours = (ms: number | null) => ms === null ? null : Math.round(ms / 3_600_000);
 

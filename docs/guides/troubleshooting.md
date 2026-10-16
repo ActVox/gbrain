@@ -29,7 +29,6 @@
 | [Doctor residue (`timeline_history`, `derived_visibility`, `safe_index_pending`)](#doctor-residue) | preview `gbrain doctor --remediation-plan --json` or `gbrain repair`; then `gbrain repair <kind> --apply` | brain host, after the user agrees | `destructive` (rewrites derived rows) | `gbrain doctor --only timeline_history,derived_visibility,safe_index_pending --json` |
 | Low health score | preview `gbrain doctor --remediation-plan --json`; then `gbrain doctor --remediate --yes --target-score 90 --max-usd 5` | agent, after the user agrees | `paid`; `destructive` with `--include-repairs` (approve with `--expect <plan_hash>` from the preview) | `gbrain doctor --json` |
 | [Sync held a file (`Held <path>: invalid_frontmatter …`, `git_held_files`)](#held-files) | `gbrain sources status <id>`, then preview `gbrain repair frontmatter --source <id>` and apply the printed `--apply --expect <hash> --yes` | agent; the apply after the user agrees | `destructive` (rewrites the previewed lines of the files) | `gbrain doctor --only git_held_files --json` |
-| [Committed file with no page or hold (`unindexed_files`)](#unindexed-files) | `gbrain sources retry-held <id> --unindexed`, then the sync it prints | agent | none | `gbrain doctor --only unindexed_files --json` |
 | [Sync held a file for its facts or takes fence (`Held <path>: invalid_fence …`)](#held-fence-files) | nothing for most holds: the next maintenance run repairs and commits the fence. To see or do it now, preview `gbrain repair fences --source <id>` and run its printed `--apply --expect <hash>`; to pause automatic repair, `gbrain config set fences.repair.enabled false` (ask the user first). A `manual` reason needs the edit the hold names | agent; the apply needs no extra consent | none (model repair spends within the `fences.repair.*` caps; raising them is `paid`, the user's call) | `gbrain doctor --only fence_integrity --json` |
 | A managed catch-up on a live checkout keeps dying (`revision_conflict`, `pinned_git_worktree_conflict`, `page_identity_changed`, `write ECONNABORTED`), or you want an agent to drive the recovery | `gbrain sync status --source <id> --json` (cursor, `committed_last_10m`, each hold and the last error with `class` / `safe_actions` / `needs_human`); when nothing moved and `needs_human` is false, `gbrain sync unblock --source <id> --apply`, then the sync it prints ([runbook](sync-unblock-runbook.md)) | agent; a person only when `needs_human` names a slug | none | `gbrain sync status --source <id> --json` |
 | [Every write on a source stays pending; writer status shows a request `recovering` with `unexpected_file_bytes`](repair.md#stuck-recovery) | preview `gbrain repair stuck-recovery --source <id>` on the owner host, show the user the diff it prints, then run the choice they pick: `--keep prior` or `--keep disk` with `--apply --expect <hash> --yes`; never delete the file to unblock it | agent; the apply after the user picks a version | `destructive` (both versions are backed up first) | `gbrain sources writer status --source <id> --json` shows no recovering request |
@@ -579,20 +578,6 @@ Automatic event extraction is on by default. See the
 three-step check, and the skip codes. `gbrain doctor` reports it as the
 `auto_chronicle` check. To turn it off, run
 `gbrain config set auto_chronicle false`.
-
-## Unindexed files
-
-<a id="unindexed-files"></a>
-
-A file an older gbrain refused before refusals became holds has no page and no
-hold; incremental sync never revisits it. The
-maintenance phase `unindexed_files` finds such files (bounded, never
-clean while incomplete) and schedules a re-screen; doctor
-`unindexed_files` reports them. Run `gbrain sources retry-held <id> --unindexed`, then the sync it prints: each file imports or becomes a
-[hold](#held-files). `slug_taken` stays until one of the two files is renamed.
-`metafile_skipped` (never scheduled) lists titled scaffolding files sync skips
-on purpose (`index.md`, `README.md`, ...): rename one
-(`investors/fund-a/index.md` to `investors/fund-a.md`), commit and sync.
 
 ## Sync freshness: no successful sync recorded
 

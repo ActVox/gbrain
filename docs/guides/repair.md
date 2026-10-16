@@ -1887,6 +1887,19 @@ the next maintenance run, so pause first if you want to keep the original.
 | `models.fence_repair` | unset: the first measured model with a key (`openai:gpt-6.1-sol` with an OpenAI key, else `anthropic:claude-opus-5-5` with an Anthropic key), else none | The model Tier 3 calls (`gbrain models` shows it). A model you set always runs; one gbrain has no price for runs under the default caps at an estimated ceiling (the highest chat rate gbrain knows; `gbrain pricing set` makes it exact) and waits for its price under a cap you set. |
 | `fences.normalize` | `true` | `false` stops the inline rewrite on writes and syncs: a fixable fence is held or refused like any other. |
 
+<a id="unindexed-files"></a>
+### Unindexed files
+
+A file an older gbrain refused before refusals became holds has no page and no
+hold; incremental sync never revisits it. The
+maintenance phase `unindexed_files` finds such files (bounded, never
+clean while incomplete) and schedules a re-screen; doctor
+`unindexed_files` reports them. Run `gbrain sources retry-held <id> --unindexed`, then the sync it prints: each file imports or becomes a
+[hold](#held-files). `slug_taken` stays until one of the two files is renamed.
+`metafile_skipped` (never scheduled) lists titled scaffolding files sync skips
+on purpose (`index.md`, `README.md`, ...): rename one
+(`investors/fund-a/index.md` to `investors/fund-a.md`), commit and sync.
+
 ## Resume
 
 Runs are resumable. After each page commits, the position is saved under the
