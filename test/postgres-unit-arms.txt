@@ -19,6 +19,7 @@ test/behavior-change-notice.test.ts
 test/capture-consent-admission.test.ts
 test/capture-dispatch-provenance-6524.test.ts
 test/chronicle-backfill-max-usd.test.ts
+test/claim-lease-holder-only-6712.test.ts
 test/claude-cli-output-cap.test.ts
 test/colon-slug-windows-5032.test.ts
 test/company-brain-policy.test.ts
