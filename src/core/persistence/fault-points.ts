@@ -24,6 +24,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 1: after a pass took the source's drain lease (before it reads the cursor); after each cursor the fan-in
   // superseded is retired (before the next one), and after a pass stamped its authority on a cursor another writer started.
   | 'sync:lease_acquired' | 'sync:cursor_adopted'
+  // #6712 PR 2 (L5): after the drain lease is released, before the owed tail (statistics, links) of a committed checkpoint runs.
+  | 'sync:tail_started'
   // #6511: the page purge's in-transaction journal lookups (page-purge.ts `journalLookup`); a hook that throws a 57014 models a statement timeout there.
   | 'purge:slug_lookup' | 'purge:tail_recheck' | 'purge:pending_recheck' | 'purge:redaction_read'
   // #6511: before each keyset chunk of the preparation-time journal sweep (a stalling hook models a slow chunk), and the fact purge's planning read.
