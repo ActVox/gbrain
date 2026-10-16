@@ -60,11 +60,13 @@ const OWNED_ROWS = (table: 'links' | 'link_transitions', ids: string, columns = 
 export async function readBeliefState(tx: BrainEngine, sourceId: string, slugs: readonly string[], pageIds: readonly number[] = [], known?: RawState): Promise<RawState> {
   // One statement: each part selects the batch's pages itself ($1 source, $2 slugs, $3 page ids) and returns its rows as JSON.
   // Fingerprints of claim texts `known` (the batch's pre-read) already has are not recomputed: the SQL fingerprint
-  // is most of a large page's read.
+  // is most of a large page's read. The statement runs with a generic plan (restored after): under the default
+  // plan_cache_mode a bulk import re-plans it for every page as the tables grow (about 3 ms each, rising with size).
   const knownFp = new Map<string, string>([...(known?.facts ?? []).map(f => [f.fact, f.fp] as const), ...(known?.takes ?? []).map(k => [k.claim, k.claim_fp] as const)]);
   const params = [sourceId, [...slugs], [...pageIds], [...knownFp.keys()]];
   const STREAM_SLUGS = `$2::text[] || ARRAY(SELECT p.slug FROM pages p WHERE p.source_id = $1 AND p.id = ANY($3::int[]))`;
   const PAGE_IDS = `ARRAY(SELECT p.id FROM pages p WHERE p.source_id = $1 AND (p.slug = ANY($2::text[]) OR p.id = ANY($3::int[])))`;
+  const [mode] = await tx.executeRaw<{ prev: string }>(`SELECT current_setting('plan_cache_mode') AS prev, set_config('plan_cache_mode', 'force_generic_plan', true)`);
   const [row] = await tx.executeRaw<Record<string, Record<string, unknown>[]>>(`SELECT
     (SELECT COALESCE(json_agg(q), '[]'::json) FROM (
 SELECT p.id, p.slug, p.deleted_at IS NOT NULL AS deleted, p.knowledge_revision::text AS revision,
@@ -98,6 +100,7 @@ SELECT x.id, x.from_page_id AS f, x.to_page_id AS t, x.origin_page_id AS o,
 SELECT p.id, p.slug, p.source_id, s.incarnation::text AS incarnation FROM pages p JOIN sources s ON s.id = p.source_id
       WHERE p.id = ANY(ARRAY(SELECT unnest(ARRAY[e.from_page_id, e.to_page_id, e.origin_page_id])
         FROM ((${OWNED_ROWS('links', PAGE_IDS, ENDS)}) UNION ALL (${OWNED_ROWS('link_transitions', PAGE_IDS, ENDS)})) e))) q) AS endpoints`, params);
+  await tx.executeRaw(`SELECT set_config('plan_cache_mode', $1, true)`, [mode!.prev]);
   const { pages: pageRows, facts, takes, links, transitions, endpoints } = row!;
   const byId = new Map(endpoints.map(r => [Number(r.id), { id: Number(r.id), slug: String(r.slug), source_id: String(r.source_id), incarnation: String(r.incarnation) }]));
   const endpoint = (id: unknown): RawEndpoint | null => id == null ? null : byId.get(Number(id)) ?? null;

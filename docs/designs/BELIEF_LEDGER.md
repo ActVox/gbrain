@@ -1093,6 +1093,18 @@ managed sync of 20 typical pages on Postgres costs about 4–5 ms per member.
 End-to-end on/off medians on the 4-core bench machine vary by ±10 ms between
 identical runs, so the in-transaction figure is the one to compare.
 
+Bulk work with coverage on, 1000 typical pages plus 20 people pages, 4-core
+machine, median of 2 runs, after section 13 item 16:
+
+| Run | PGLite off → on | Postgres off → on |
+|---|---|---|
+| legacy `gbrain import` | 5.7 → 7.1 s (+1.4 ms/page) | 7.1 → 9.6 s (+2.6 ms/page) |
+| re-import, every page edited | 6.3 → 7.6 s (+1.4 ms/page) | 7.4 → 9.4 s (+2.0 ms/page) |
+| managed sync, create | 24.8 → 27.6 s (+11%) | 15.1 → 18.7 s (+24%) |
+| managed sync, every page edited | 29.2 → 32.7 s (+12%) | within noise |
+| `beliefs enable` baseline | 1.2 s (1.2 ms/page) | 1.8 s (1.8 ms/page) |
+| `beliefs backfill`, 2 prior versions per page | 9.7 s (25,040 events) | 7.3 s |
+
 Cheaper options, none in W1: skip the post-read of tables a publication did
 not write (projections would report what they touched), keep each stream's
 subject snapshot on its lifetime row so the pre read is a key lookup, or
@@ -1483,3 +1495,10 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
     `idx_facts_belief_stream (source_id, source_markdown_slug) WHERE
     expired_at IS NULL` (v249's handler builds it online), and the post read
     reuses the pre read's claim fingerprints. Section 9 has the cost.
+16. **The state read runs with a generic plan.** Under the default
+    `plan_cache_mode` a bulk import kept re-planning the read for every page
+    as its tables grew (about 3 ms each), so the ledger's per-page cost rose
+    with the size of the import (0.8, 4.0 and 5.5 ms per page at 300, 1000
+    and 2000 pages on PGLite). The read now sets `force_generic_plan` for
+    that one statement, transaction-local, and restores the previous value;
+    the cost stays about 0.6 ms per page at every size.
