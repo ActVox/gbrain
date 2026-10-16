@@ -9,7 +9,8 @@ import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-fla
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
-import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath, slugifyPath } from '../sync.ts';
+import { confirmedSyncDelta, confirmRenameIdentities, explicitIdVeto, frontmatterIdentity, identityHeadDigest } from '../sync-rename-identity.ts';
+import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath, slugifyPath, type DowngradedRename, type SyncManifest } from '../sync.ts';
 import { databaseOnlyPageSql } from './unbound-pages.ts';
 import { validateSlug } from '../utils.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
@@ -35,6 +36,8 @@ import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, t
 export interface SyncRename { sourcePath: string; slug: string; pageId: number; revision: string; }
 export interface SyncEntry { path: string; sourcePath: string; action: 'import' | 'delete'; working: boolean; slug?: string; pageId?: number | null; revision?: string | null;
   renameFrom?: SyncRename;
+  /** #6729: a dirty-tree rename's verdict digest (see `SyncManifest.renamed`); readSyncContent refuses bytes that differ. */
+  identityHead?: string;
   /** #5565: a deleted file no page records as its origin; its slug's page keeps another origin, so the deletion is a fenced no-op. */
   unownedDeletion?: boolean;
   /** #5988: a held rename destination whose source page changed since the rename was recorded; the freeze screen holds it as `rename_held`. */
@@ -63,7 +66,9 @@ export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot
   /** #5459 (P4.5): live pages the tree walk left alone because their file is in the working tree and their import provenance is the working tree or unknown. */
   workingTreeKept?: string[];
   /** #6349 (P4.4): this discovery is one path slice of its target; the checkpoint records it instead of advancing `last_commit` until `done`. */
-  slice?: SyncSliceState; }
+  slice?: SyncSliceState;
+  /** #6729: inexact Git renames split into a delete plus an add (origin form); recorded after the run commits. */
+  identityDowngrades?: DowngradedRename[]; }
 export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   source: { last_commit: string | null; config: Record<string, unknown> }; }
 /** The persisted `sync.exclude` globs (plus a run's `--exclude`), as discovery matches them against a path relative to the source root. */
@@ -295,10 +300,12 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const detached = !company && syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
   // #6349: a staged run stops at a commit, so uncommitted working-tree changes wait for the stage that reaches HEAD.
   const working = !company && !stage && (detached || (opts.workingTree ?? (await engine.getConfig('sync.include_working_tree') === 'true')));
-  const dirty = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitRoot);
-  const delta = !opts.full && !walk && source.last_commit ? computeSyncDelta(gitRoot, source.last_commit, target) : null;
+  // #6729: inexact renames keep their page identity only when confirmed (an imported dirty tree reads its target side from the working tree).
+  const confirm = { sourceId, sourcePathOf: sourcePath }, built: SyncManifest = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitRoot);
+  const dirty = working ? await confirmRenameIdentities(engine, gitRoot, 'HEAD', null, built, confirm) : built;
+  const delta = !opts.full && !walk && source.last_commit ? await confirmedSyncDelta(engine, gitRoot, source.last_commit, target, confirm) : null;
   const entries = new Map<string, SyncEntry>();
-  const renamedFrom = new Map<string, string>();
+  const renamedFrom = new Map<string, { from: string; identityHead?: string }>();
   let workingTreeKept: string[] | undefined;
   let treeAbsent: Array<{ id: number; gitPath: string }> = [];
   const discoveredAt = new Date().toISOString();
@@ -313,10 +320,8 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // A deletion or rename touching one is refused on both sides, so the page
   // keeps its identity until the change is synced from macOS or Linux.
   const refused = new Map<string, SyncFileRefusal>();
-  const refusalMessages = {
-    import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
-    delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.`,
-  };
+  const refusalMessages = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+    delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.` };
   const record = (path: string, message: string) => {
     if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through', message,
       suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
@@ -334,14 +339,14 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (refuse(path, action)) return;
     if (eligible(path)) entries.set(path, { path: relative(nativeRoot, join(nativeGitRoot, path)).split(sep).join('/'), sourcePath: sourcePath(path), action, working });
   };
-  const putRename = (rename: { from: string; to: string }, working = false) => {
+  const putRename = (rename: SyncManifest['renamed'][number], working = false) => {
     if (isWindowsColonTarget(rename.from) || isWindowsColonTarget(rename.to)) {
       for (const path of [rename.from, rename.to]) {
         record(path, `${path} is one side of the rename ${rename.from} -> ${rename.to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.`);
       }
       return;
     }
-    put(rename.from, 'delete', working); put(rename.to, 'import', working); renamedFrom.set(rename.to, rename.from);
+    put(rename.from, 'delete', working); put(rename.to, 'import', working); renamedFrom.set(rename.to, { from: rename.from, ...(working && rename.identityHead ? { identityHead: rename.identityHead } : {}) });
   };
   if (delta?.status === 'ok') {
     for (const path of [...delta.manifest.added, ...delta.manifest.modified]) put(path, 'import');
@@ -454,11 +459,11 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   }
   const discovered: SyncDiscovery = { discoveredAt, ...(released.length ? { releasedHolds: released } : {}), ...(retryTaken.length ? { retryTaken } : {}),
     ...(refused.size ? { fileRefusals: [...refused.values()] } : {}), binding: { ...binding, owner_epoch: String(binding.owner_epoch), topology_generation: String(binding.topology_generation) }, root, gitRoot, sourceId, incarnation, from: source.last_commit, target, entries: selected, slugMode, ...(company ? { companyPlan: company.plan } : {}), ...(stage ? { stagedHead: stage.head } : {}),
-    ...(workingTreeKept ? { workingTreeKept } : {}) };
+    ...(workingTreeKept ? { workingTreeKept } : {}), ...(company ? {} : identityDowngradesOf([delta?.status === 'ok' ? delta.manifest : null, working ? dirty : null], eligible, sourcePath)) };
   // Freeze all logical identities in one database statement, before yielding
   // between pages. A later interactive edit must conflict with this scan.
-  const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null }>(
-    'SELECT id,slug,source_path,knowledge_revision,deleted_at FROM pages WHERE source_id=$1', [sourceId]);
+  const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null; fm_id: string | null }>(
+    "SELECT id,slug,source_path,knowledge_revision,deleted_at,frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1", [sourceId]);
   const bySlug = new Map(identities.map(p => [p.slug, p]));
   const byPath = new Map<string, typeof identities>();
   const storableIdentities = identities.filter(storable);
@@ -526,6 +531,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (losers.length) collisions.push({ slug, kept: kept ?? winner!.sourcePath, skipped: losers.map(entry => entry.sourcePath) });
     if (!winner) continue;
     if (holder) {
+      assertTakeoverIdentity(discovered, winner, holder);
       // Same slug, vanished origin: the file takes over the page (and its history) instead of racing a deletion.
       Object.assign(winner, { pageId: holder.id, revision: holder.knowledge_revision });
       if (holderOrigin !== null) {
@@ -536,19 +542,19 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       continue;
     }
     Object.assign(winner, { pageId: null, revision: null });
-    const from = renamedFrom.get(gitPath(winner));
+    const { from, identityHead } = renamedFrom.get(gitPath(winner)) ?? {};
     const deletion = from === undefined ? undefined : [...deletions.values()].find(entry => gitPath(entry) === from);
     const moved = deletion?.pageId == null ? undefined : identities.find(page => page.id === deletion.pageId);
     if (deletion && moved && !deleted.has(moved.id) && moved.source_path != null) {
       // A Git rename moves the page to its new slug, like the library path's updateSlug: same page id, inbound links and an alias.
-      winner.renameFrom = { sourcePath: moved.source_path, slug: moved.slug, pageId: moved.id, revision: moved.knowledge_revision };
+      Object.assign(winner, { renameFrom: { sourcePath: moved.source_path, slug: moved.slug, pageId: moved.id, revision: moved.knowledge_revision }, ...(identityHead ? { identityHead } : {}) });
       retired.add(deletion);
       continue;
     }
     // #5988: a held rename destination (or a held one renamed again) still owes its page the move; the deletion of a held path stays to clear its hold.
     const held = holdByPath.get(winner.path)?.meta.rename_from ?? (deletion ? holdByPath.get(deletion.path)?.meta.rename_from : undefined);
     const origin = held ? identities.find(page => page.id === held.pageId) : undefined;
-    if (held && origin && !deleted.has(origin.id) && origin.source_path != null && sameSyncOrigin(origin.source_path, held.sourcePath, originScope, origin.slug)) {
+    if (held && origin && !deleted.has(origin.id) && origin.source_path != null && sameSyncOrigin(origin.source_path, held.sourcePath, originScope, origin.slug) && !explicitIdVeto(incomingId(discovered, winner), origin.fm_id)) {
       if (origin.knowledge_revision === held.revision) winner.renameFrom = held;
       else winner.renameHeld = held;
     }
@@ -596,6 +602,29 @@ async function adoptLegacyPage(engine: BrainEngine, identities: LegacyIdentity[]
   if (legacy.length) entry.legacySlugs = [...legacy].sort();
   return slug;
 }
+/** #6729: the inexact Git renames this discovery split into a delete plus an add, in origin form, for the sync report and its durable record. */
+function identityDowngradesOf(manifests: Array<SyncManifest | null>, eligible: (path: string) => boolean, sourcePath: (path: string) => string): Pick<SyncDiscovery, 'identityDowngrades'> {
+  const pairs = manifests.flatMap(manifest => manifest?.downgradedRenames ?? []).filter(pair => eligible(pair.from) || eligible(pair.to))
+    .map(pair => ({ ...pair, from: sourcePath(pair.from), to: sourcePath(pair.to) }));
+  return pairs.length ? { identityDowngrades: pairs } : {};
+}
+/**
+ * #6729: a file that takes over the page holding its slug (a vanished or deleted origin) inherits that page's identity,
+ * so it must not when both carry an explicit frontmatter id and the ids differ: they are two different documents that
+ * happen to map to one slug. The sync is refused before any write, naming both.
+ */
+function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
+  const incoming = holder.fm_id ? incomingId(discovery, winner) : null;
+  if (!explicitIdVeto(incoming, holder.fm_id)) return;
+  throw opError('page_identity_changed', 'A file would take over a page whose frontmatter id differs from its own.',
+    `${winner.sourcePath} in ${discovery.sourceId} maps to page ${holder.slug}, whose file is gone, but its frontmatter id '${incoming}' differs from the page's id '${holder.fm_id}', so it is a different document and must not inherit that page's facts, links and history; nothing was written. `
+    + `Give the file the page's id if it is the same document, or rename it so its slug differs, commit, then run gbrain sync --no-pull --source ${discovery.sourceId}.`,
+    { detail: 'rename_identity_conflict' });
+}
+/** #6729: the frontmatter id of the file an entry imports (null when it has none or cannot be read). */
+function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string | null {
+  try { return frontmatterIdentity(readSyncContent(discovery, entry)).id; } catch { return null; }
+}
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */
 function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {
   return opError('page_identity_changed', 'Several pages claim the same imported origin.',
@@ -610,6 +639,10 @@ export function readSyncContent(discovery: SyncDiscovery, entry: SyncEntry): str
     if (bytes === null) throw opError('source_changed', 'The discovered working-tree file disappeared.',
       `${entry.path} left the working tree of ${discovery.sourceId} between discovery and import, so nothing was imported from it. Run gbrain sync --no-pull --source ${discovery.sourceId} to rediscover the tree.`,
       { fix: managedSyncFix(discovery.sourceId, 'A new discovery reads the working tree as it is now.') });
+    if (entry.identityHead && identityHeadDigest(bytes) !== entry.identityHead) throw opError('source_changed', 'A renamed working-tree file changed after its page identity was confirmed.',
+      `${entry.path} changed in the working tree of ${discovery.sourceId} after sync confirmed it keeps the page of its rename, so nothing was imported from it and no identity moved. Run gbrain sync --no-pull --retry-failed --working-tree --source ${discovery.sourceId} to re-check it.`,
+      { fix: { ...managedSyncFix(discovery.sourceId, 'A retry rediscovers the tree and re-checks the rename against the file as it is now.'),
+        argv: ['gbrain', 'sync', '--no-pull', '--retry-failed', '--working-tree', '--source', discovery.sourceId] } });
     return bytes.toString('utf8');
   }
   return syncGit(discovery.gitRoot, ['show', `${discovery.target}:${syncGitPath(discovery, entry.path)}`]);

@@ -2688,6 +2688,29 @@
         {
           "category": "brain",
           "details": {
+            "by_source": [],
+            "count": 0,
+            "docs": "docs/guides/live-sync.md#renaming-a-page",
+            "samples": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No rename that lost its page identity is waiting for a disposition.",
+          "name": "rename_identity_downgrades",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "parked": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No soft-deleted page is parked by the managed purge.",
+          "name": "purge_parked_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "count": 0,
             "docs": "docs/storage-tiering.md#restoring-a-page-whose-file-is-gone",
             "sources": []
