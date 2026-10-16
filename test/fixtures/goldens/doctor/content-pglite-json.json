@@ -2856,6 +2856,17 @@
           "status": "ok"
         },
         {
+          "category": "meta",
+          "details": {
+            "rollback": [],
+            "unapplied": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No retired sync config key is stored on this brain.",
+          "name": "sync_config_keys",
+          "status": "ok"
+        },
+        {
           "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "Mode: conservative (no per-key overrides — mode bundle is canonical).",

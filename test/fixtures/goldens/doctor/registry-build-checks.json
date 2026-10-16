@@ -822,6 +822,10 @@
         "name": "fence_integrity"
       },
       {
+        "category": "meta",
+        "name": "sync_config_keys"
+      },
+      {
         "category": "ops",
         "name": "search_mode"
       },

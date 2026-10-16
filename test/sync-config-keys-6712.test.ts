@@ -147,4 +147,7 @@ test('doctor sync_config_keys reports a stored retired key as unapplied, and is 
   expect(check).toMatchObject({ name: 'sync_config_keys', status: 'warn', fix: { argv: ['gbrain', 'config', 'get', 'sync.hold_escalate_count'], actor: 'agent' } });
   expect(check!.message).toContain('sync.hold_escalate_count=10 (in effect: 50; set GBRAIN_SYNC_HOLD_ESCALATE_COUNT');
   expect(check!.message).toContain('sync.waive_batch=false (until at least');
+  // The documented way to clear it: config unset of the retired key.
+  expect((await config(['unset', 'sync.hold_escalate_count'])).exit).toBeNull();
+  expect(await syncConfigKeysEntry.run(ctx)).toMatchObject([{ name: 'sync_config_keys', status: 'ok' }]);
 }));

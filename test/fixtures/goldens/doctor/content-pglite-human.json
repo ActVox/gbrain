@@ -193,6 +193,7 @@
       "  [OK] ghost_pages: No live page is missing its canonical file (5 page(s) inspected).",
       "  [INFO] missing_recorded_files: Not applicable: no source is a classic checkout on this host (managed sources are checked by ghost_pages).",
       "  [OK] fence_integrity: No malformed facts or takes fence is held, stored or waiting in a checkout (2 source(s) scanned).",
+      "  [OK] sync_config_keys: No retired sync config key is stored on this brain.",
       "  [OK] search_mode: Mode: conservative (no per-key overrides — mode bundle is canonical).",
       "  [OK] hidden_by_search_policy: No pages hidden by search-exclude policy.",
       "  [OK] eval_drift: No retrieval-affecting files changed in working tree.",
