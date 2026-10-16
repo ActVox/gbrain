@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.261.0] - 2026-10-16
+
+**One purged item no longer stops a whole Google sync, a source whose syncs keep dying now says so, and Claude refusals through `claude-cli` stop being retried forever.** If you purged a page that a connector keeps listing (a recurring calendar event whose future occurrences you deleted with `--purge`, while the series stays on the calendar), the next sync that reached it ended there. Every sync after it died the same way, so nothing more from that account was imported: no new mail, contacts or events. And every status surface said the source was fine. Now the purged item is skipped and recorded, as the purge intends, and the rest of the sync goes through. Separately, when Claude refused a prompt under its usage policy through the `claude-cli` model provider, atom extraction counted it as an ordinary error and sent the same page back to the model on every run; it now takes the same bounded give-up path as other providers' refusals.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A Google or GitHub connector lists an item whose content you purged | the whole sync job dies with `purged_content`, and so does every later one | the item is skipped and listed in `gbrain sources status` ("skipped as purged content"); everything else imports and the cursor moves on |
+| A connector source's syncs keep ending on an error | `sync status`: `last_error: null`, `needs_human: false`; doctor `sync_freshness` ok until 24 h passed | `sources status` and `sync status` name the error, the item and a read-only next step; after 3 failed runs in a row the source reads STOPPED in both, and doctor `sync_freshness` warns (fails once the last good sync is past the fail age) |
+| `claude-cli` answers "API Error: <model> can't help with this ... https://www.anthropic.com/legal/aup" during `extract_atoms` | counted as a generic error; the page is re-sent on every run and never given up on | treated as a content block (`claude_cli_usage_policy`); after the usual consecutive-failure limit the page is tombstoned and stops costing calls |
+
+### If a Google source is stuck now
+
+Upgrade to this release; the next sync skips the purged occurrence by itself and imports the backlog. Nothing to clear, no flags.
+
+On an older release you can unblock it by hand: `gbrain pages purges list` names the purged slugs, and `gbrain pages unpurge <slug>` for the occurrence the failing job names lets that one occurrence back in so the sync can finish. Each week the next purged occurrence of the series enters the 60-day calendar window and stops the source again, so the lasting fix on an older release is ending the series (or deleting its future occurrences) in Google Calendar itself.
+
+### Itemized changes
+
+- **Per-item purged skip (#6831).** A managed connector page import whose content matches one of the source's page purge tombstones is skipped before admission (`ManagedConnectorSync.carriesPurgedPage`, same content hash the pages guard compares). If the guard still refuses at publication (`failed` / `purged_content`, for example a purge that landed mid-run), that refusal is skipped the same way, wherever it surfaces: the item's own wait, the pending set at the end of the run, or the pending set a previous run left. A skipped item is not a receipt the checkpoint waits on and never joins the automatic retry set. Every other failed receipt still fails the run, as before. Covers every connector on this path: Google contacts, calendar and Gmail, and GitHub.
+- **Run failures recorded (#6831).** The connector state row records the error a run ended on (`last_failure`: code, message, item slug and request when the run ended on an item's receipt, time, and the count of runs in a row that ended that way); a run that finishes clears it. It also keeps the 20 most recent purged skips (`purged_items`) and the run's `last_run.purged_skipped` count.
+- **Status surfaces (#6831).** `gbrain sources status` (human and `--json` `connector.last_failure`, `connector.stopped`, `connector.purged_items`); `gbrain sync status --json` gains `connector_last_error` (with `class`, `safe_actions`, `needs_human` and a read-only `fix`), and its `next` names that fix when nothing else applies. `last_error`, the managed-sync cursor and its resume command are unchanged for connector sources. Doctor `sync_freshness` reports a connector source with 3 or more failed runs in a row as STOPPED.
+- **`claude-cli` refusals (#6816).** `providerContentBlockReason` recognizes the `claude-cli` adapter's usage-policy refusal: the `claude-cli reported error: API Error:` prefix with no API status, the usage-policy link, and one of the refusal phrases Claude Code has used ("can't help with this", "safeguards flagged this", "violate our Usage Policy"). Any other `claude-cli` error is unchanged. With `chat_fallback_on_refusal: false`, such a refusal is no longer sent on to the next model in `chat_fallback_chain`.
+- Tests: `test/connector-purged-item-6831.test.ts` (PGLite) and `test/e2e/connector-purged-item-6831.test.ts` (Postgres) fail on v0.60.260.0 with `purged_content` ending the run and pass here; `test/claude-cli-refusal-6816.test.ts` runs the real adapter and gateway against a stub CLI.
+- No schema change.
+
 ## [0.60.260.0] - 2026-10-16
 
 **An approved `doctor --remediate --include-repairs` run no longer fails with `preview_changed` because autovacuum analyzed a table between the preview and the run.** Hotfix for LHF wave 2 item 6 (GBRA-107, reported by GBRA-101).

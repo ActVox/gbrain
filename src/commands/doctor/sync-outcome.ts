@@ -61,3 +61,23 @@ export async function noSuccessfulSync(engine: BrainEngine, sourceId: string, di
       held: attempt.held, job_id: attempt.job_id, fix },
   };
 }
+
+/**
+ * #6831: sync_freshness's verdict for each Google or GitHub connector source whose last CONNECTOR_STOPPED_RUNS or more
+ * runs ended on an error. Such a source imports nothing, but its last_sync_at can still look recent, so freshness alone
+ * reads it as healthy. The line names the error, the item and the read-only next step; it is a failure once the source's
+ * last successful sync is older than `failBeforeMs` (sync_freshness's fail age), a warning before that.
+ */
+export async function stoppedConnectorIssues(engine: BrainEngine, sources: Array<{ id: string; last_sync_at: string | Date | null }>,
+  failBeforeMs: number): Promise<Map<string, { issue: string; fail: boolean }>> {
+  const { readConnectorLastError } = await import('../../core/persistence/connector-status.ts');
+  const issues = new Map<string, { issue: string; fail: boolean }>();
+  for (const source of sources) {
+    const failure = await readConnectorLastError(engine, source.id);
+    if (!failure?.stopped) continue;
+    issues.set(source.id, { fail: !source.last_sync_at || new Date(source.last_sync_at).getTime() < failBeforeMs,
+      issue: `Source '${source.id}' is STOPPED: its last ${failure.consecutive} connector syncs ended on ${failure.code}${failure.slug ? ` at ${failure.slug}` : ''} `
+        + `(last ${failure.at.slice(0, 16).replace('T', ' ')}), so nothing from it is imported; inspect with \`${failure.fix.argv!.join(' ')}\`` });
+  }
+  return issues;
+}
