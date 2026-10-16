@@ -1589,3 +1589,84 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    its version redaction pass then redacts that version like every other
    one, so the interval before a purge reads the body as it stood, minus the
    purged claim.
+
+## 15. W4 as built: the weekly change diff
+
+1. **Surface.** One reader, two doors. `delta {beliefs: true}` (full surface
+   only, so the served starter schema is unchanged) adds `beliefs` for the
+   same window as the rest of the wake, and `gbrain beliefs changes
+   [<entity>...] [--since 7d]` prints it from the CLI. Both call
+   `beliefChanges` (`src/core/belief/changes.ts`). On a thin client the CLI
+   calls the host's `delta`, so it lists what a remote caller may see.
+   `entities` (the CLI's positionals) keeps changes whose stream page, fact
+   subject or entity, or link end is one of the named slugs.
+2. **One entry per belief that ended the window different.** Events are read
+   from `readBeliefHistory` between `since` (exclusive) and `until`
+   (inclusive), grouped by subject key, and compared end to end: `before` is
+   the subject's newest event at or before `since`, `after` its newest event
+   in the window. An edit and its revert, or an assert and its retraction,
+   report nothing. Each entry carries `kind` (`page`, `fact`, `take`,
+   `link`, `link_transition`), `change` (`added`, `removed`, `changed`;
+   page events add `deleted`, `restored`, `renamed`), a readable `subject`,
+   `before`, `after`, `cause` (the event type, the op, and any request,
+   replacement, proposal or purge pointer the event recorded), `evidence`
+   (event id, recorded time, slug, fence row) and the event's `trust_tier`.
+3. **A subject with no earlier event.** Section 4 records a page's creation
+   as one snapshot event, so a fact or take first edited inside the window may
+   have no event before `since`. Its `before` is read from the page body as
+   recorded at `since` (page-at-time, section 14). When no body answers (a
+   pruned, purged or segmented body, or no version), `before` is null and
+   `before_known` is false: the value is disclosed as unknown, never guessed.
+   A page created inside the window is one `added` page entry plus one
+   `added` entry per fence fact and take of its creation body; links that
+   came with it are counted on the page entry.
+4. **Upper bounds.** A relationship end that only the nightly check inferred
+   (a transition whose producer is `dream`) is flagged `upper_bound: true` and
+   rendered `end by <date>`: the relationship ended on or before that date
+   (section 16).
+5. **What is never a change.** Backfill and baseline events are skipped:
+   backfill carries source times, and a baseline is the state a coverage run
+   found. A window that starts before the source's coverage sets
+   `coverage_from`, because earlier changes are unknown rather than absent; a
+   source with no coverage at all returns `not_recorded: true`.
+6. **Remote callers.** `delta` passes `remote: !include_private`. The history
+   reader's rule applies (events world-visible when recorded, on a page
+   visible now, failing closed), and a body read for `before` is used only
+   where `remoteMayRead` passes that interval and only for world fence rows.
+7. **Budget.** Under `budget_tokens`, belief lines pack into what pages,
+   facts and threads leave; a dropped line sets `truncated`. Without a
+   budget the list is capped at 200 entries, and a window with more than
+   50,000 events stops reading and sets `truncated`.
+8. **Measured at $0.** Four seeded synthetic weeks (37 gold changes) give
+   set-F1 1.0 with exact before and after values on PGLite and Postgres
+   (`test/belief-ledger-weekly-probes.test.ts`). The cited diff costs 258,
+   233, 215 and 273 tokens against 227, 182, 307 and 281 for the plain list
+   of changed pages, so the cited answer costs about the same as the list it
+   replaces while naming each claim, its old value and its evidence.
+
+## 16. W5 as built: the time-model fixes
+
+1. **Inferred ends are upper bounds.** `RelationshipState.lastEndUpperBound`
+   (`link-validity.ts`) is true when every transition behind the last end has
+   producer `dream`: the nightly contradiction check closed the stint on the
+   day it noticed, so the true end is on or before that date. The relationship
+   note renders `ended: works_at acme-example (by 2025-03-01)`.
+2. **An explicit end replaces the inferred one.** An explicit end of the same
+   stint, earlier or later than the inferred closure, replaces it
+   (`withoutOverriddenInferredEnds`), so a late correction from the page is
+   the end the reader sees.
+3. **Correction to the plan: page versions are not copied between engines.**
+   `gbrain migrate --to <engine>` on a source brain that holds page versions and
+   no journal tables refuses `writer_coordinator_required` (reason
+   `page_history`, "Engine migration would discard N page versions.")
+   instead of copying them. The legacy copier re-creates pages with new ids,
+   so carrying versions would mean re-keying every version to its new page;
+   graduation to a managed brain already carries them
+   (`persistence/graduation-copy.ts`), so the plan's copy step is replaced by
+   the refusal, which names how many versions the copy would have discarded.
+4. **Dropped from the plan.** The `since_supplied` probe passes on master, so
+   no fix shipped for it; the probe stays as a regression pin
+   (`test/belief-ledger-w5-time-model.test.ts`).
+5. **E2 moves to a custodian.** The rerun of the P1 E2 late-closure eval runs
+   on held-out text in owner custody, preregistered in gbrain-evals before any
+   run; nothing in this repository reads the held-out set.

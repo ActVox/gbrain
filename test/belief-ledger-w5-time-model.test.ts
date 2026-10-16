@@ -3,7 +3,7 @@
  * on PGLite and on Postgres when DATABASE_URL is set; and the `since_supplied` probe the plan required before any
  * takes change (a late-captured take keeps its valid time, and an update without `since` keeps the stored one).
  */
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { loadRelationshipNotes, relationshipNoteKey } from '../src/core/link-relationship-notes.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, type BeliefBrain } from './helpers/belief-ledger.ts';
@@ -24,6 +24,14 @@ const takes = async (b: BeliefBrain, slug: string) => b.engine.executeRaw<{ row_
 for (const engineCase of testBackends().map(beliefEngineCase)) {
   describe(`W5 time model (${engineCase.name})`, () => {
     const brain = (run: (b: BeliefBrain) => Promise<void>) => beliefBrain(run, { managed: true, databaseUrl: engineCase.databaseUrl });
+    // A bare brain (no managed persistence rows) for the legacy copier cell.
+    let bare: { engine: BrainEngine; close: () => Promise<void> };
+    beforeAll(async () => {
+      if (engineCase.databaseUrl) { bare = await isolatedPersistencePostgres(engineCase.databaseUrl); return; }
+      const pglite = new PGLiteEngine(); await pglite.connect({}); await pglite.initSchema();
+      bare = { engine: pglite, close: () => pglite.disconnect() };
+    }, 120_000);
+    afterAll(async () => { await bare?.close(); });
 
     test('a closure only the nightly check dated reads as an upper bound; an explicit end on either side of it replaces it', () => brain(async b => {
       await b.put('companies/acme-example', '---\ntype: company\ntitle: Acme\n---\nA company.\n');
@@ -42,17 +50,15 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
     }), 120_000);
 
     test('the legacy engine copier refuses a brain whose page versions it would discard, and names how many', async () => {
-      let engine: BrainEngine; let close: () => Promise<void>;
-      if (engineCase.databaseUrl) ({ engine, close } = await isolatedPersistencePostgres(engineCase.databaseUrl));
-      else { const pglite = new PGLiteEngine(); await pglite.connect({}); await pglite.initSchema(); engine = pglite; close = () => pglite.disconnect(); }
-      try {
+      const { engine } = bare;
+      {
         const side = { side: 'source' as const, from: engine.kind as 'pglite' | 'postgres', to: (engine.kind === 'pglite' ? 'postgres' : 'pglite') as 'pglite' | 'postgres' };
         await assertLegacyEngineMigration(engine, side);
         await engine.putPage('notes/history', { type: 'note', title: 'History', compiled_truth: 'first body' });
         for (let i = 0; i < 3; i++) await engine.createVersion('notes/history');
         await expect(assertLegacyEngineMigration(engine, side)).rejects.toMatchObject({
           code: 'writer_coordinator_required', reason: 'page_history', message: 'Engine migration would discard 3 page versions.' });
-      } finally { await close(); }
+      }
     }, 120_000);
 
     test('since_supplied probe: a late-captured take keeps its valid time, and an update without since keeps the stored one', () => brain(async b => {

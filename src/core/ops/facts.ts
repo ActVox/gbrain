@@ -1218,16 +1218,9 @@ const delta: Operation = {
     // `text` must honor the budget AND the boundary-tie exclusion the
     // structured arrays reflect — the assembler's render predates both.
     let text = renderDelta(pages, facts, threads, effectiveSince);
-    let beliefs: import('../belief/changes.ts').BeliefChanges | undefined;
-    if (p.beliefs === true) {
-      const { beliefChanges, renderBeliefChange } = await import('../belief/changes.ts');
-      beliefs = await beliefChanges(ctx.engine, { sourceId, since: effectiveSince, until: horizon, remote: !includePrivate, entities: parseEntityList(p.entities) });
-      if (budgetTokens !== null) {
-        const pack = beliefBudget > 0 ? packToBudget(beliefs.changes, c => lineCost(renderBeliefChange(c)), beliefBudget) : dropAll(beliefs.changes);
-        if (pack.meta.dropped > 0) beliefs = { ...beliefs, changes: pack.items, truncated: true };
-      }
-      if (beliefs.changes.length) text = [text || TURN_CONTEXT_ENVELOPE, '', `## Belief changes since ${effectiveSince}`, ...beliefs.changes.map(renderBeliefChange)].join('\n');
-    }
+    const diff = p.beliefs === true ? await (await import('../belief/changes.ts')).deltaBeliefs(ctx.engine, { sourceId, since: effectiveSince, until: horizon,
+      remote: !includePrivate, entities: parseEntityList(p.entities) }, budgetTokens !== null ? beliefBudget : null, text, TURN_CONTEXT_ENVELOPE) : null;
+    if (diff) text = diff.text;
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
 
     return {
@@ -1263,7 +1256,7 @@ const delta: Operation = {
       ...(budgetTokens !== null
         ? { budget_tokens: budgetTokens, budget_used: budgetUsed, dropped_count: droppedCount }
         : {}),
-      ...(beliefs ? { beliefs } : {}),
+      ...(diff ? { beliefs: diff.beliefs } : {}),
     };
   },
 };

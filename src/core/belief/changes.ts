@@ -27,6 +27,7 @@ import { coverageAt } from './coverage-report.ts';
 import { readPageAtTime, remoteMayRead } from './page-at-time.ts';
 import { bodySubjects } from './backfill.ts';
 import { canonicalJson } from './keys.ts';
+import { estimateTokens, packToBudget } from '../search/token-budget.ts';
 
 export type BeliefChangeKind = 'page' | 'fact' | 'take' | 'link' | 'link_transition';
 export interface BeliefChange {
@@ -217,6 +218,32 @@ async function readCreationSubjects(engine: BrainEngine, q: BeliefChangesQuery, 
   const read = await readPageAtTime(engine, { sourceId: q.sourceId, slug: creation.slug, at: new Date(until), history: true, withBodies: true }).catch(() => null);
   const interval = read?.intervals.find(i => i.event.id === creation.id);
   return read && interval ? subjectsOf(engine, q, read, interval) : null;
+}
+
+const lineCost = (line: string) => estimateTokens(line + '\n');
+
+/**
+ * `delta {beliefs: true}`: the window's changes and the wake's `text` with their section appended (under `envelope`
+ * when the wake has no text of its own); `text` comes back unchanged when nothing changed. Under a budget the header and each line pack into what pages, facts
+ * and threads left (`budget`); a cut sets `truncated`.
+ */
+export async function deltaBeliefs(engine: BrainEngine, q: BeliefChangesQuery, budget: number | null, text: string, envelope: string): Promise<{ beliefs: BeliefChanges; text: string }> {
+  let beliefs = await beliefChanges(engine, q);
+  const header = `## Belief changes since ${q.since}`;
+  if (budget !== null) {
+    const room = budget - lineCost('') - lineCost(header);
+    const kept = room > 0 ? packToBudget(beliefs.changes, c => lineCost(renderBeliefChange(c)), room).items : [];
+    if (kept.length < beliefs.changes.length) beliefs = { ...beliefs, changes: kept, truncated: true };
+  }
+  return { beliefs, text: beliefs.changes.length ? [text || envelope, '', header, ...beliefs.changes.map(renderBeliefChange)].join('\n') : text };
+}
+
+/** The CLI's text for a whole window: a header, the coverage note, one line per change. */
+export function renderBeliefChanges(b: BeliefChanges): string {
+  if (b.not_recorded) return `The belief ledger is not recording ${b.source_id}; enable it with gbrain beliefs enable --source ${b.source_id}.`;
+  return [`Belief changes on ${b.source_id} from ${b.since} to ${b.until}: ${b.changes.length}${b.truncated ? ' (truncated: more changed than this lists)' : ''}`,
+    ...(b.coverage_from ? [`  The ledger starts at ${b.coverage_from}; changes before it are unknown, not absent.`] : []),
+    ...b.changes.map(renderBeliefChange)].join('\n');
 }
 
 /** One line per change, for `delta`'s text block and the CLI. */

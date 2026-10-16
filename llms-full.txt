@@ -5641,6 +5641,8 @@ The legacy copier handles every other direction: `gbrain migrate --to pglite`, P
 | A Postgres brain moving to PGLite | `report` | The brain stays on Postgres; moving down would drop its history. |
 | A target that already holds persistence history | `tell_user_to_run` | Rerun with an empty database the user provides (`--path` for a PGLite target). |
 
+A brain with page versions but no write history gets the same refusal with `reason: page_history` and the number of versions in the message: the legacy copier re-creates pages without their versions, so the copy would discard them. Graduation (PGLite to Postgres) carries them.
+
 On Windows, a PGLite brain with history gets `graduation_unsupported_platform` instead: it stays on PGLite and is shared with `gbrain mcp expose`.
 
 <a id="graduation-writer-held"></a>**Graduation refused: the brain is held (`graduation_source_writer_held`).** Graduation needs the PGLite kernel lock. A live stdio `gbrain serve` hands the brain over through the intent marker `<path>.gbrain-graduation.json` and exits; autopilot pauses. When another holder (an HTTP serve, a daemon, another command) does not release the brain within 30 seconds, the run refuses and names it with its pid and transport (`fix.next: tell_user_to_run`). The user stops that process, then the agent reruns the same `gbrain migrate` command. Verify with the read-only `gbrain migrate --status --json`. Nothing has changed in either datastore.
@@ -9954,7 +9956,7 @@ timeline entry's event page) follows the same page rule, and facts and takes
 fence rows never count as an edit. The same assembler serves
 the off-by-default hook push ([push context](../guides/push-context.md)).
 
-### delta(since?, since_slug?, cursor?, entities?, budget_tokens?, session_id?, include_private?) — read, zero LLM
+### delta(since?, since_slug?, cursor?, entities?, budget_tokens?, session_id?, include_private?, beliefs?) — read, zero LLM
 
 "What changed since T" for heartbeats — pages updated after
 the cursor (oldest first) + facts recorded after the cursor + open-thread
@@ -10025,6 +10027,26 @@ are still returned and `budget_used` (the token estimate of `text`) reports the
 real rendered size, which then exceeds the budget. `since` is always
 normalized ISO (never the raw input string). Replay recipe:
 [ambient recall guide](../guides/ambient-recall.md#replay-after-a-degraded-wake).
+
+**Belief changes (`beliefs: true`, full surface only).** Adds `beliefs`: each
+belief that ended the window different from how it started, read from the
+belief ledger for the same window as the wake (`since` to the wake's horizon).
+`{ source_id, since, until, coverage_from, changes[], truncated, not_recorded? }`;
+each change is `{ kind, slug, change, subject, before, after, before_known,
+upper_bound?, cause, evidence: { event_id, recorded_at, slug, row? }, trust_tier }`.
+An edit and its revert in the window report nothing. `before_known: false`
+means the earlier value is unknown (no body answers at `since`), never that
+it was empty; `upper_bound: true` marks a relationship end the nightly check
+inferred, so it ended on or before that date. `coverage_from` is set when the
+ledger starts after `since` (earlier changes are unknown, not absent), and
+`not_recorded` when the source has no ledger coverage. `entities` narrows the
+list to changes on or about the named slugs. A caller without
+`include_private` (every remote caller) gets the world view: events that were
+world-visible when recorded, on pages visible now. Under `budget_tokens` the
+belief lines pack into what pages, facts and threads leave, and `truncated`
+reports a cut; `text` gains a `## Belief changes since <since>` section. The
+CLI twin is `gbrain beliefs changes [<entity>...] [--since 7d]`. Design:
+[BELIEF_LEDGER.md section 15](../designs/BELIEF_LEDGER.md#15-w4-as-built-the-weekly-change-diff).
 
 ## Latency classes (per verb)
 

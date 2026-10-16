@@ -3,7 +3,9 @@
  * week" as a cited belief diff from the belief ledger: before, after, cause and an evidence pointer per belief, netted over
  * the window. Each cell runs on PGLite and on Postgres when DATABASE_URL is set; forced probes show the cell can fail.
  */
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
+import { beliefsChangesArgs, runBeliefs } from '../src/commands/beliefs.ts';
+import { currentExitCode, setCliExitVerdict } from '../src/core/cli-force-exit.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import { beliefChanges, renderBeliefChange, type BeliefChange } from '../src/core/belief/changes.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -124,6 +126,38 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(tight.budget_used).toBeLessThanOrEqual(200);
       const remote = await delta({ beliefs: true }, true);
       expect(remote.beliefs.changes).toHaveLength(3);
+      // An empty window adds no section and leaves the wake's text as it was.
+      const later = new Date(Date.now() + 60_000).toISOString();
+      const quiet = [await delta({ since: later }), await delta({ since: later, beliefs: true })];
+      expect(quiet[1]!.beliefs.changes).toEqual([]);
+      expect(quiet[1]!.text).toBe(quiet[0]!.text);
+    }), 120_000);
+
+    test('gbrain beliefs changes prints the same diff for an entity and a --since window, and refuses a bad --since', () => brain(async b => {
+      await b.put(slug, beliefPage({ facts: ['Acme sells widgets'] }));
+      const t0 = await at(b);
+      await b.put(slug, beliefPage({ facts: ['Acme sells gadgets'] }));
+      await b.put('companies/widget-co', beliefPage({ facts: ['Widget Co makes widgets'] }));
+      const t1 = await at(b);
+      const logs: string[] = [];
+      const log = spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+      try {
+        await runBeliefs(b.engine, ['changes', slug, '--since', t0, '--source', b.sourceId]);
+      } finally { log.mockRestore(); }
+      const expected = await changes(b, t0, t1, { entities: [slug] });
+      const printed = logs.join('\n').split('\n');
+      expect(printed[0]).toStartWith(`Belief changes on ${b.sourceId} from ${t0} to `);
+      expect(printed.slice(1)).toEqual(expected.changes.map(renderBeliefChange));
+      expect(printed.join('\n')).toContain('Acme sells gadgets');
+      expect(printed.join('\n')).not.toContain('Widget Co');
+      expect(beliefsChangesArgs(['changes', 'a', '--source', 's', 'b', '--since', '7d'], Date.parse('2026-10-08T00:00:00Z')))
+        .toEqual({ entities: ['a', 'b'], since: '2026-10-01T00:00:00.000Z' });
+      const err = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await runBeliefs(b.engine, ['changes', '--since', 'last tuesday', '--source', b.sourceId]);
+      } finally { err.mockRestore(); }
+      expect(currentExitCode()).toBe(2);
+      setCliExitVerdict(0);
     }), 120_000);
   });
 }
