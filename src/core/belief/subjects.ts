@@ -28,16 +28,18 @@ const pageRef = (ctx: KeyContext, id: number | null | undefined, slug: string | 
 const endpointRef = (ctx: KeyContext, e: RawEndpoint | null): SubjectRef | null => e == null ? null
   : ctx.lifetimes.has(e.id) ? lifetimeRef(ctx.lifetimes.get(e.id)!) : slugRef(e.incarnation, e.slug);
 
+/** Built with its keys in canonical order, so `canonicalJson` does not sort them. */
 export function factValue(f: RawFact, entity: SubjectRef | null, count: number): Record<string, unknown> {
-  return { fact: f.fact, kind: f.kind, notability: f.notability, context: f.context, confidence: f.confidence, valid_from: f.valid_from,
-    valid_until: f.valid_until, claim_metric: f.claim_metric, claim_value: f.claim_value, claim_unit: f.claim_unit, claim_period: f.claim_period,
-    event_type: f.event_type, value: f.value, ...(f.sms != null ? { entity } : {}), ...(count > 1 ? { count } : {}) };
+  return { claim_metric: f.claim_metric, claim_period: f.claim_period, claim_unit: f.claim_unit, claim_value: f.claim_value, confidence: f.confidence,
+    context: f.context, ...(count > 1 ? { count } : {}), ...(f.sms != null ? { entity } : {}), event_type: f.event_type, fact: f.fact, kind: f.kind,
+    notability: f.notability, valid_from: f.valid_from, valid_until: f.valid_until, value: f.value };
 }
 
+/** Built with its keys in canonical order, so `canonicalJson` does not sort them. */
 export function takeValue(t: RawTake): Record<string, unknown> {
-  return { claim: t.claim, kind: t.kind, holder: t.holder, weight: t.weight, since_date: t.since_date, until_date: t.until_date, source: t.source,
-    active: t.active, resolved_at: t.resolved_at, resolved_outcome: t.resolved_outcome, resolved_value: t.resolved_value, resolved_unit: t.resolved_unit,
-    resolved_source: t.resolved_source, resolved_by: t.resolved_by, resolved_quality: t.resolved_quality };
+  return { active: t.active, claim: t.claim, holder: t.holder, kind: t.kind, resolved_at: t.resolved_at, resolved_by: t.resolved_by,
+    resolved_outcome: t.resolved_outcome, resolved_quality: t.resolved_quality, resolved_source: t.resolved_source, resolved_unit: t.resolved_unit,
+    resolved_value: t.resolved_value, since_date: t.since_date, source: t.source, until_date: t.until_date, weight: t.weight };
 }
 
 /** One fact row keyed: claim facts by (subject, fp, visibility); ontology observations by their stint identity. */

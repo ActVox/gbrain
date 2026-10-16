@@ -202,7 +202,8 @@ function stateHashOf(page: RawPage | null, lifetime: string | null, subjects: Su
   const live = page && !page.deleted;
   return sha256Hex(canonicalJson({
     page: page ? { lifetime, deleted: page.deleted, revision: page.revision, visible: page.visible, tier: page.tier } : null,
-    subjects: subjects.filter(s => live || s.dbOnly).map(s => [s.kind, s.key, s.vhash, s.tier]).sort((a, b) => (a.join('\u0000') < b.join('\u0000') ? -1 : 1)),
+    subjects: subjects.filter(s => live || s.dbOnly).map(s => { const row = [s.kind, s.key, s.vhash, s.tier]; return { row, order: row.join('\u0000') }; })
+      .sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0)).map(s => s.row),
   }));
 }
 

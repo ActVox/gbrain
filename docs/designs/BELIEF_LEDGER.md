@@ -1132,6 +1132,22 @@ create writes every table and reads every claim for the first time. The
 earlier +24% (lane 32) and +35% (one noisy rep of two) came from too few
 reps to quote.
 
+**After the keying pass** (section 13, item 21), the same bench, master
+(09943580e) against the branch, 3 interleaved rounds of 15 runs per cell
+(ranges of the round medians):
+
+| Cell | Ledger ms, master → branch | Ledger share, master → branch |
+|---|---|---|
+| PGLite typical edit | 4.1–5.4 → 4.2–5.0 | 6.1–6.7% → 6.0–6.7% |
+| PGLite large edit | 17.5–20.6 → 14.3–16.1 | 3.9–4.3% → 5.6–6.4% |
+| Postgres typical edit | 5.2–7.3 → 4.4–6.2 | 9.5–10.7% → 7.9–8.5% |
+| Postgres large edit | 20.1–24.4 → 14.7–18.2 | 10.3–11.3% → 8.4–9.3% |
+
+Master here lacks items 17 to 21, so the PGLite large share again rises
+because `put_page` lost about 45% of its time. Large Postgres edits now meet
+the 10% target; typical edits do not meet 5% on either engine, and creates
+were not measured again.
+
 **Targets for turning recording on by default:** typical edit ≤5%, large
 edit ≤10% and managed-sync create ≤10% of the write's time, ledger on
 against off. After this pass W1 meets none of them on Postgres (typical
@@ -1567,3 +1583,11 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
     validity check and a write per batch, so about 6–7%, still above the 5%
     target, for a migration plus invalidation on purge, redaction and
     unmanaged writers. Not built.
+21. **Keying without re-sorting.** `canonicalJson` sorts an object's keys
+    only when they are not already in order and caches the quoted form of
+    key names (at most 4,096); fact and take values are built with their
+    keys in canonical order; the state hash computes each subject's sort key
+    once. The bytes are unchanged, so every stored value, claim and state
+    hash stays valid: test/belief-ledger-canonical-json.test.ts holds the
+    serializer and the state hash to the original implementation on a
+    seeded corpus and every edge case, and broken variants fail it.
