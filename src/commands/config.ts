@@ -881,6 +881,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const key = positionals[1];
   const value = positionals[2];
   if ((action === 'get' || action === 'set') && key) (await import('../core/questions/auto-think-migration.ts')).noteAutoThinkReplacement(key);
+  if ((action === 'get' || action === 'set') && key && await (await import('../core/sync-config-keys.ts')).handleSyncKeyConfig(engine, action, key)) return; // #6712 PR 2
 
   if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack')) {
     const effective = key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);
@@ -891,15 +892,6 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     console.log(String(effective.value));
     console.error(`[config] source: ${effective.note}`);
     return;
-  }
-  if (action === 'get' && key) {
-    // #6712 PR 2: a retired or rollback sync key prints the value a sync runs with, and where it comes from.
-    const effective = (await import('../core/sync-config-keys.ts')).effectiveSyncKey(key, await engine.getConfig(key));
-    if (effective) {
-      console.log(effective.value);
-      console.error(`[config] source: ${effective.origin}`);
-      return;
-    }
   }
   if (action === 'get' && key) {
     // #2120: `get` used to read only the DB plane, so a runtime-effective key
@@ -986,12 +978,6 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
     const value = tail.find(a => !a.startsWith('-')) ?? args[2];
-    // #6712 PR 2: a retired sync key is no longer read (warn, write nothing); a rollback key is written with its window.
-    const syncNotice = (await import('../core/sync-config-keys.ts')).syncKeySetNotice(key);
-    if (syncNotice) {
-      for (const line of syncNotice.lines) console.error(line);
-      if (!syncNotice.writes) return;
-    }
 
     // Bootstrap hook-lane keys are FILE-plane canonical: they are read by
     // engine-free processes (the harness hook children and the detached

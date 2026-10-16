@@ -50,9 +50,9 @@ test('the three kinds are disjoint; tunables and rollback keys are registered, r
   for (const key of SYNC_TUNABLE_KEYS) { expect(KNOWN_CONFIG_KEYS).toContain(key); expect(retired).not.toContain(key); expect(SYNC_ROLLBACK_KEYS as string[]).not.toContain(key); }
   for (const key of SYNC_ROLLBACK_KEYS) { expect(KNOWN_CONFIG_KEYS).toContain(key); expect(retired).not.toContain(key); }
   for (const key of retired) expect(KNOWN_CONFIG_KEYS).not.toContain(key);
-  expect(RETIRED_SYNC_KEYS['sync.hold_cap'].replacement.default).toBe(String(GIT_HOLD_CAP));
-  expect(RETIRED_SYNC_KEYS['sync.hold_escalate_count'].replacement.default).toBe(String(GIT_HOLD_ESCALATE_COUNT));
-  expect(RETIRED_SYNC_KEYS['sync.hold_escalate_pct'].replacement.default).toBe(String(GIT_HOLD_ESCALATE_PCT));
+  expect(String(RETIRED_SYNC_KEYS['sync.hold_cap'].replacement.default)).toBe(String(GIT_HOLD_CAP));
+  expect(String(RETIRED_SYNC_KEYS['sync.hold_escalate_count'].replacement.default)).toBe(String(GIT_HOLD_ESCALATE_COUNT));
+  expect(String(RETIRED_SYNC_KEYS['sync.hold_escalate_pct'].replacement.default)).toBe(String(GIT_HOLD_ESCALATE_PCT));
   for (const window of Object.values(CONFIG_ROLLBACK_WINDOWS)) {
     expect(window.honored_until).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(window.floor).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
@@ -143,7 +143,9 @@ test('doctor sync_config_keys reports a stored retired key as unapplied, and is 
   expect(clean).toMatchObject([{ name: 'sync_config_keys', status: 'ok' }]);
   await engine.setConfig('sync.hold_escalate_count', '10');
   await engine.setConfig('sync.waive_batch', 'false');
-  const [check] = await syncConfigKeysEntry.run(ctx);
+  const checks = await syncConfigKeysEntry.run(ctx);
+  if (!Array.isArray(checks)) throw new Error('sync_config_keys returned no checks');
+  const [check] = checks;
   expect(check).toMatchObject({ name: 'sync_config_keys', status: 'warn', fix: { argv: ['gbrain', 'config', 'get', 'sync.hold_escalate_count'], actor: 'agent' } });
   expect(check!.message).toContain('sync.hold_escalate_count=10 (in effect: 50; set GBRAIN_SYNC_HOLD_ESCALATE_COUNT');
   expect(check!.message).toContain('sync.waive_batch=false (until at least');

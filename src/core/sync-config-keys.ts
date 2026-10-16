@@ -115,3 +115,21 @@ export function syncKeySetNotice(key: string): { writes: boolean; lines: string[
   ] };
   return null;
 }
+
+/**
+ * `gbrain config get|set` of a retired or rollback key. `get` prints the value in effect (stdout) and its origin
+ * (stderr); `set` prints the key's notice. True when the command is done: every `get`, and the `set` of a retired key,
+ * which writes nothing. A rollback key's `set` returns false so the write goes ahead; any other key returns false.
+ */
+export async function handleSyncKeyConfig(engine: { getConfig(key: string): Promise<string | null> }, action: 'get' | 'set', key: string): Promise<boolean> {
+  if (!retiredSyncKey(key) && !rollbackSyncKey(key)) return false;
+  if (action === 'set') {
+    const notice = syncKeySetNotice(key)!;
+    for (const line of notice.lines) console.error(line);
+    return !notice.writes;
+  }
+  const effective = effectiveSyncKey(key, await engine.getConfig(key))!;
+  console.log(effective.value);
+  console.error(`[config] source: ${effective.origin}`);
+  return true;
+}
