@@ -16,6 +16,7 @@ import { quarantineSharedSkillRestore, validateSharedSkillRestoreMode, type Shar
 import { isPhysicalRootMetadata } from '../persistence/physical-root-record.ts';
 import { protectNewBackupPath } from './private-path.ts';
 import { PURGE_MIRROR_FILE, readPurgeMirror, replayPurgesInRestore, type PurgeReplayState, type ReplayRecord } from '../belief/purge-mirror.ts';
+import { pgliteBackupPreflight } from './preflight.ts';
 
 interface SourceInventory { id: string; local_path: string | null; managed_relative_path: string | null }
 interface BackupMetadata {
@@ -138,9 +139,13 @@ export async function createPgliteBackup(options: { output: string; root?: strin
     throw new AgentInstallError('pglite_required', 'Full local snapshots require an existing file-configured PGLite brain.');
   }
   const dbPath = state.config.database_path;
-  if (typeof dbPath !== 'string' || resolve(dbPath) !== join(root, '.gbrain', 'brain.pglite') || !existsSync(dbPath)) {
+  if (typeof dbPath !== 'string' || !existsSync(dbPath)) {
     throw new AgentInstallError('unmanaged_database_path', 'This recovery format requires .gbrain/brain.pglite within the selected root.');
   }
+  // #6649: refuse a layout or a size this format cannot hold before the lock, the dump and the archive write.
+  const refusal = pgliteBackupPreflight(root, dbPath, () => checkedManagedPaths(root, readInstallReceipt(root)?.managed_paths ?? [])
+    .flatMap(path => walkFiles(root, path)).reduce((sum, path) => sum + lstatSync(confinedPath(root, path)).size, 0));
+  if (refusal) throw refusal;
   confinedPath(root, '.gbrain/brain.pglite');
   const lock = await acquireBootstrapLock(root);
   let work: string | undefined;

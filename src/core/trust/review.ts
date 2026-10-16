@@ -20,6 +20,7 @@ import { opError } from '../ops/contract.ts';
 import { currentHoldStore, trustKillSwitchState } from './owner-actions.ts';
 import { getTrustProposal, listTrustProposals, pendingTrustProposalsFor, trustProposalRef, type TrustProposalAction, type TrustProposalRow } from './proposals.ts';
 import { lowerPageState, readPageTrustState } from './page-handlers.ts';
+import { TRUST_MARKER_REPAIR_COMMAND } from './marker-repair.ts';
 import { formatTrustRef, pageRef, parseTrustRef, resolvePageRef } from './refs.ts';
 import { compareTrust, OWNER_TIER_FLOOR, storedTrustTier, trustLabel, USER_SAID_ORIGIN_MARKER, type TrustTier } from './tier.ts';
 import { isUserSaid, trustFields, trustLabelWords } from '../eligibility/labels.ts';
@@ -46,7 +47,7 @@ export interface TrustReviewItem {
   label: string;
   summary: string;
   /** Complete argv per decision (DX-7). Tier-raising ones are the user's to run on a TTY (DX-3). */
-  commands: Partial<Record<'confirm' | 'drop' | 'release' | 'revert' | 'explain', string[]>>;
+  commands: Partial<Record<'confirm' | 'drop' | 'release' | 'revert' | 'repair' | 'explain', string[]>>;
 }
 
 export interface TrustReviewFilter {
@@ -116,7 +117,15 @@ async function pageOf(engine: BrainEngine, p: TrustProposalRow): Promise<string 
   return null;
 }
 
-function proposalItem(p: TrustProposalRow, page: string | null): TrustReviewItem {
+/** #6550: an agent edit lowered the page to unknown only because its frontmatter still carries an `unknown` marker. */
+async function loweredByUnknownMarker(engine: BrainEngine, p: TrustProposalRow): Promise<boolean> {
+  const s = lowerPageState(p);
+  if (s.edited_tier !== 'unknown' || s.prior_tier === 'unknown') return false;
+  const [row] = await engine.executeRaw<{ marker: string | null }>(`SELECT frontmatter->>'trust_tier' AS marker FROM pages WHERE id = $1`, [p.target_id]);
+  return row?.marker === 'unknown';
+}
+
+function proposalItem(p: TrustProposalRow, page: string | null, markerRepair = false): TrustReviewItem {
   const ref = trustProposalRef(p.id);
   if (p.action === 'lower_page') {
     const s = lowerPageState(p);
@@ -124,7 +133,8 @@ function proposalItem(p: TrustProposalRow, page: string | null): TrustReviewItem
       ref, kind: 'lowered_page', detail: p.action, source_id: p.source_id, page, day: day(p.updated_at), created_at: p.created_at,
       tier: s.edited_tier, label: trustLabel(s.edited_tier),
       summary: `An agent edit lowered ${page ?? `page ${p.target_id}`} from "${trustLabel(s.prior_tier)}" to "${trustLabel(s.edited_tier)}"`,
-      commands: { confirm: trust('confirm', ref), ...(s.version_id !== null ? { revert: trust('revert', ref) } : {}), drop: trust('drop', ref), explain: trust('explain', ref) },
+      commands: { confirm: trust('confirm', ref), ...(s.version_id !== null ? { revert: trust('revert', ref) } : {}), drop: trust('drop', ref),
+        ...(markerRepair ? { repair: [...TRUST_MARKER_REPAIR_COMMAND] } : {}), explain: trust('explain', ref) },
     };
   }
   const tier = storedTrustTier(p.after_state.tier ?? p.before_state.related_tier ?? p.before_state.new_tier);
@@ -182,7 +192,7 @@ export async function buildTrustReview(engine: BrainEngine, filter: TrustReviewF
       : filter.kind === 'lowered_page' ? 'lower_page' : undefined;
     for (const p of await listTrustProposals(engine, { status: 'pending', sourceId: filter.sourceId, action, since: filter.since, limit: 1000 })) {
       if (filter.kind === 'proposal' && p.action === 'lower_page') continue;
-      items.push(proposalItem(p, await pageOf(engine, p)));
+      items.push(proposalItem(p, await pageOf(engine, p), p.action === 'lower_page' && await loweredByUnknownMarker(engine, p)));
     }
   }
   if (wants(filter, 'preference')) items.push(...await standingPreferences(engine, filter));

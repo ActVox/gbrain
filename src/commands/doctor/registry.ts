@@ -40,6 +40,7 @@ import {
   connectionEntry,
   connectionGateEntry,
 } from './checks/db-connection.ts';
+import { ipcSocketPathEntry } from './checks/local-ipc.ts';
 import {
   pgvectorEntry,
   rlsEntry,
@@ -48,6 +49,7 @@ import {
   embeddingsEntry,
 } from './checks/schema-health.ts';
 import { embeddingStateEntry } from './checks/embedding-state.ts';
+import { embeddingIdentityEntry } from './checks/embedding-identity.ts';
 import {
   embeddingProviderEntry,
   alternativeProvidersEntry,
@@ -149,6 +151,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   harnessWiringDoctorEntry,
   agentContractEntry,
   pgliteDataDirEntry,
+  ipcSocketPathEntry,
   projectionResidentEntry,
   offlineConnectionEntry,
   dbChecksGateEntry,
@@ -172,6 +175,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   embeddingQueryPrefixEntry,
   embeddingColumnRegistryEntry,
   embeddingEnvOverrideEntry,
+  embeddingIdentityEntry,
   supersessionCalibrationEntry,
   factAdmissionFloorsEntry,
   chatFallbackChainEntry,

@@ -1385,6 +1385,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.hnsw_iterative_scan',
   'search.cjk_keyword_deadline_ms',
   'search.keyword_statement_timeout_ms',
+  'search.keyword_timeout_negative_cache_seconds', // #6495: seconds, default 600, 0 = off (postgres-engine/keyword-timeout-cache.ts)
   'search.adaptive_return',
   'search.adaptive_return_entity_max',
   'search.adaptive_return_other_max',
@@ -1481,6 +1482,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // W14 P4.6b: USD per UTC day that loops_extract jobs may spend, brain-wide
   // (default 2.00; 0 = no paid loop extraction). Validated in google/loops-spend.ts.
   'loops.extraction_max_usd_per_day',
+  // #5012: boolean, default false (off). On, Gmail Updates mail opens a reply-owed loop only for a sender the owner wrote to.
+  'loops.updates_require_reciprocity',
   // #2113: output-token cap for the per-turn facts extractor (default 4000).
   'facts.extraction_max_tokens',
   // Automatic facts drain caps (src/core/facts/drain.ts FACTS_DRAIN_KEYS).
@@ -1578,6 +1581,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // dream.synthesize.* pair from #1594).
   'dream.patterns.subagent_timeout_ms',
   'dream.patterns.subagent_wait_timeout_ms',
+  'dream.patterns.min_interval_hours', 'dream.patterns.child_read_budget_kb', // #6297: hours (default 6) / KB (default 200), 0 = off; cycle/phase-config-values.ts
   // Paid-loop breaker: dead submissions of one dream key within 24h before
   // it is refused (default 3; 0 disables). `gbrain dream reset-key` clears one.
   'dream.breaker.max_dead_submissions',
