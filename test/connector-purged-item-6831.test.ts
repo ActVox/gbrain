@@ -22,6 +22,7 @@ import { connectorStatusLines, readConnectorSourceStatuses } from '../src/core/p
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { checkSyncFreshness } from '../src/commands/doctor/checks/extraction-sync.ts';
 import { opError } from '../src/core/ops/contract.ts';
+import { CredentialError } from '../src/core/creds/errors.ts';
 import { contact, createConnectorFixture, json, options, settleConnectorWrites, withGoogleAccount } from './helpers/connector-fixture.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -178,6 +179,11 @@ test('#6831: a connector source whose runs keep ending on an error reads as stop
     const doctor = await checkSyncFreshness(engine);
     expect(doctor.status).not.toBe('ok');
     expect(doctor.message).toContain(`Source '${f.id}' is STOPPED: its last ${CONNECTOR_STOPPED_RUNS} connector syncs ended on invalid_fence`);
+
+    // A credential failure that ends the run counts too.
+    await expect(withConnectorSync(engine, f.id, 'google', cfg, options, async () => { throw new CredentialError('scope_missing', undefined, 'services without grant: calendar'); }))
+      .rejects.toMatchObject({ code: 'scope_missing' });
+    expect((await connectorState(engine, f.id)).last_failure).toMatchObject({ code: 'scope_missing', consecutive: CONNECTOR_STOPPED_RUNS + 1 });
 
     // A run that finishes clears the record.
     await withConnectorSync(engine, f.id, 'google', cfg, options, async () => undefined);

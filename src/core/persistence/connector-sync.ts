@@ -47,6 +47,7 @@ import { readConnectorV2Cutoff } from './connector-checkpoint-migration.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
 import { intentCarriesPurgedContent } from './purged-intent.ts';
 import { PERSISTENCE_IPC_MAX_BYTES } from './ipc.ts';
+import { isCredentialError, type CredentialError } from '../creds/errors.ts';
 import type { GoogleSourceConfig } from '../google/types.ts';
 
 interface ConnectorLease { handle: DbLockHandle; signal: AbortSignal; }
@@ -313,7 +314,7 @@ export async function withConnectorSync<T>(engine: BrainEngine, sourceId: string
       result = await work(session, options);
     } catch (error) {
       if (!(error instanceof ConnectorWaitBudgetStop)) {
-        if (error instanceof OperationError) await session.finish(error).catch(() => {});
+        if (error instanceof OperationError || isCredentialError(error)) await session.finish(error).catch(() => {});
         throw error;
       }
       await session.finish();
@@ -748,7 +749,7 @@ export class ManagedConnectorSync {
    * error the run ended on (#6831): it is recorded with a count of runs in a row that ended that way, and a run that
    * ends without one clears it.
    */
-  async finish(failure?: OperationError): Promise<void> {
+  async finish(failure?: OperationError | CredentialError): Promise<void> {
     await this.refreshPending().catch(() => {});
     const now = new Date().toISOString();
     const outstanding = [...this.pendingRows.values()].map(pending => pending.entry);
@@ -768,8 +769,9 @@ export class ManagedConnectorSync {
     const listed = new Set<string>();
     const purgedItems = [...this.purged].reverse().concat(this.connectorState.purged_items ?? [])
       .filter(entry => !listed.has(entry.slug) && !!listed.add(entry.slug)).slice(0, CONNECTOR_PURGED_LIMIT);
-    const item = failure?.writeRequest?.request_id === this.lastFailedItem?.requestId ? this.lastFailedItem : null;
-    const lastFailure = failure ? { code: failure.writeError ?? failure.code, message: failure.message, slug: item?.slug ?? null, request_id: item?.requestId ?? null,
+    const receipt = failure instanceof OperationError ? failure.writeRequest : undefined;
+    const item = receipt && receipt.request_id === this.lastFailedItem?.requestId ? this.lastFailedItem : null;
+    const lastFailure = failure ? { code: (failure instanceof OperationError ? failure.writeError : undefined) ?? failure.code, message: failure.message, slug: item?.slug ?? null, request_id: item?.requestId ?? null,
       at: now, consecutive: (this.connectorState.last_failure?.consecutive ?? 0) + 1 } : null;
     this.connectorState = { ...this.connectorState, pending, upgrade_recovery: recovery, purged_items: purgedItems, last_failure: lastFailure, last_run: {
       page_admissions: this.counts.page_admissions, skipped_unchanged: this.counts.skipped_unchanged, pending: pending.length,
@@ -778,9 +780,10 @@ export class ManagedConnectorSync {
     await this.writeState();
   }
   /**
-   * #6831: records a connector item the pages guard refused as purged content. Its receipt is not one the checkpoint
-   * waits on, and it never joins the automatic retry set; the next run that lists the same content replays the same
-   * refused receipt and skips it again, until the owner clears the tombstone (`gbrain pages unpurge <slug>`).
+   * #6831: records a connector item skipped because its content matches a page purge tombstone, either screened out
+   * before admission (`row` null) or refused by the pages guard at publication. A refused receipt is not one the
+   * checkpoint waits on, and it never joins the automatic retry set. The item stays skipped on every run that lists the
+   * same content until the owner clears the tombstone (`gbrain pages unpurge <slug>`).
    */
   private skipPurged(slug: string, row: WriteRequest | null): void {
     if (row) this.receipts = this.receipts.filter(id => id !== row.id);
@@ -791,8 +794,9 @@ export class ManagedConnectorSync {
   }
   /**
    * #6831: screens a page import against the source's page purge tombstones before admission, with the content hash
-   * the pages guard compares (`intentCarriesPurgedContent`), so a purged item that keeps being listed costs no refused receipt per run. A miss here
-   * (the publication renders different bytes) still ends in the guard's refusal, which `submit` skips the same way.
+   * the pages guard compares (`intentCarriesPurgedContent`), so a purged item that keeps being listed costs no refused
+   * receipt per run. A miss here (the publication renders different bytes, or a purge lands mid-run) still ends in the
+   * guard's refusal, which `submit` and the pending-set paths skip the same way.
    */
   private async carriesPurgedPage(slug: string, content: string | undefined): Promise<boolean> {
     if (!this.hasPagePurges || !content) return false;
