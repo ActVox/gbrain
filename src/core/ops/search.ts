@@ -41,6 +41,7 @@ import { privateProvenanceFilterFragment, resolveExcludePrivatePages } from '../
 import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
 import { expandEngineTypeFilters } from '../schema-pack/query-types.ts';
+import { reconcileTypeFilter } from './search-type-filter.ts';
 import { probeProjectionReadiness } from '../search/projection-readiness.ts';
 import { resolveBoostMap, resolveHardExcludes } from '../search/source-boost.ts';
 import { pageReadFilter } from '../search/read-policy-sql.ts';
@@ -251,40 +252,6 @@ async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope
   } catch {
     return false;
   }
-}
-
-/**
- * Agents guess page types ("company", "account", "deal") that a brain may not
- * have, and a filter on a type with no pages silently hides every page
- * (gbrain-evals Cat 40: type-filtered agent runs failed 62% of tasks against
- * 51% unfiltered). Requested types with no readable pages in scope are
- * dropped, the rest stay; when none remain the filter is lifted. Either way
- * the caller is told which types exist so it can refine.
- */
-async function reconcileTypeFilter(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean,
-  types: string[] | undefined): Promise<{ types: string[] | undefined; notice?: string }> {
-  if (!types || scope.sourceIds?.length === 0) return { types };
-  const params: unknown[] = [];
-  let present: Set<string>;
-  try {
-    const rows = await ctx.engine.executeRaw<{ type: string }>(
-      `SELECT DISTINCT p.type FROM pages p WHERE ${pageReadFilter('p', { ...scope, excludePrivate }, params, true)} LIMIT 500`, params);
-    present = new Set(rows.map(r => r.type));
-  } catch {
-    return { types };
-  }
-  const keep: string[] = [];
-  const missing: string[] = [];
-  for (const type of types) {
-    // A schema-pack lookup failure propagates: typed reads fail closed rather than fall back to literal types.
-    const expanded = (await expandEngineTypeFilters(ctx.engine, { types: [type], ...scope })).types ?? [type];
-    (expanded.length === 0 || expanded.some(t => present.has(t)) ? keep : missing).push(type);
-  }
-  if (missing.length === 0) return { types };
-  const available = [...present].sort().join(', ');
-  return keep.length === 0
-    ? { types: undefined, notice: `No pages have type ${missing.join(', ')}, so the type filter was dropped and every page type was searched. Page types in this brain: ${available}.` }
-    : { types: keep, notice: `No pages have type ${missing.join(', ')}; filtered to ${keep.join(', ')}. Page types in this brain: ${available}.` };
 }
 
 const FACT_MATCH_STOPWORDS = new Set(['the', 'and', 'for', 'who', 'what', 'when', 'where', 'which', 'with', 'from', 'that', 'this', 'are', 'was', 'were', 'our', 'your', 'their', 'now', 'current', 'currently', 'should', 'does', 'did', 'has', 'have', 'how', 'any', 'all', 'about', 'into', 'its', 'next']);
@@ -500,6 +467,7 @@ async function buildRetrievalResponseMeta(
       ...(m.answerability ? { answerability: m.answerability } : {}),
       ...(m.relational_plan ? { relational_plan: m.relational_plan } : {}),
       ...(m.rerank_gate ? { rerank_gate: m.rerank_gate } : {}),
+      ...(m.cosine_rescore ? { cosine_rescore: m.cosine_rescore } : {}),
     } : {}),
     ...((m?.degraded !== undefined || degraded.length > 0) ? { degraded } : {}),
     projection_readiness: readiness,

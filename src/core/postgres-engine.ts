@@ -18,6 +18,7 @@ import { reservedTransactions, type ReservedTransactions } from './postgres-engi
 import { traceSqlOptions } from './sql-trace.ts';
 import { hasPostgresCancellationCapability, postgresCancellationUnavailable, reserveWithCancellation } from './postgres-engine/cancellation.ts';
 import { runBoundedStatement } from './postgres-engine/bounded-statement.ts';
+import { needsJitOff, runJitOffStatement } from './postgres-engine/jit-off-statement.ts';
 import { schemaDiagnosticConnection, withSchemaLockTimeout } from './postgres-engine/schema-lock-timeout.ts';
 export { hasPostgresCancellationCapability } from './postgres-engine/cancellation.ts';
 import type {
@@ -2879,13 +2880,14 @@ export class PostgresEngine implements BrainEngine {
   async executeRaw<T = Record<string, unknown>>(
     sql: string,
     params?: unknown[],
-    opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number },
+    opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; jitOff?: boolean; prepare?: boolean },
   ): Promise<T[]> {
     // try/finally (not .finally on the promise): runUnsafe throws
     // SYNCHRONOUSLY on a pre-aborted signal, which would skip a chained
     // .finally and leak the counter.
     this.checkoutGauge.acquire('raw');
     try {
+      if (opts?.jitOff && await needsJitOff(this.sql, this._pageTransaction)) return await runJitOffStatement<T>(this.sql, this._pageTransaction, sql, params, opts, (c, s, p, o) => this.runUnsafe(c, s, p, o), () => this.checkoutGauge.checkedOut());
       // #6278: a transaction-local statement_timeout, which holds through a transaction-mode pooler (postgres-engine/bounded-statement.ts).
       if (opts?.timeoutMs !== undefined && !this._pageTransaction) {
         return await runBoundedStatement<T>(this.sql, sql, params, { ...opts, timeoutMs: opts.timeoutMs }, () => this.checkoutGauge.checkedOut());
