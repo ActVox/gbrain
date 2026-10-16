@@ -178,6 +178,26 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database](../../docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database)
 
+### belief_coverage_required
+
+<a id="belief_coverage_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The belief ledger is not enabled on this source, so it has no coverage start to work from. | The history backfill seeds events before the source's coverage start; with no coverage there is no cut to backfill before. | Ask the user, then run `gbrain beliefs enable --source <id>` first. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/BELIEF_LEDGER.md#72-the-marked-history-backfill](../../docs/designs/BELIEF_LEDGER.md#72-the-marked-history-backfill)
+
+### belief_preparation_stale
+
+<a id="belief_preparation_stale"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A purge ran in the source after a belief ledger payload was prepared, so the append was refused. | A payload prepared outside its appending transaction records the source's purge epoch; appending it after a purge could write the purged text back into history. | Run the same command again; it prepares the payload from the current, redacted state. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/designs/BELIEF_LEDGER.md#65-purge-removal-from-active-memory-never-a-physical-erasure-promise](../../docs/designs/BELIEF_LEDGER.md#65-purge-removal-from-active-memory-never-a-physical-erasure-promise)
+
 ### benchmark_duplicate_task_id
 
 <a id="benchmark_duplicate_task_id"></a>
@@ -747,6 +767,26 @@ More: [docs/guides/core-memory.md#remote-edits](../../docs/guides/core-memory.md
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Cost preview requires yes. | The step needs the user's decision before it runs. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
+
+### coverage_from
+
+<a id="coverage_from"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The belief ledger does not cover that time for this page or source: it starts at the page's baseline cut or the source's watermark. | Recorded history exists only from a page's baseline (or creation) after the ledger was enabled; earlier times are unknown, not empty. | Ask about a time at or after the `from` time, or run `gbrain beliefs backfill --source <id>` for best-effort history before it. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](../../docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark)
+
+### coverage_gap
+
+<a id="coverage_gap"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The belief ledger was not recording at that time: coverage was stopped, or a backup restore left a gap between the archive's time and the restore. | The request itself was wrong or no longer matches the brain; nothing was changed. | Ask about a time outside the gap; `gbrain beliefs status --source <id>` lists the intervals and gaps. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](../../docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark)
 
 ### cursor_incarnation_retired
 
