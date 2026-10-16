@@ -17,6 +17,15 @@ import { enableBeliefLedger, disableBeliefLedger } from '../src/core/belief/cove
 import {
   beliefEventVisibility, coverageAt, coverageIntervals, fillCommitMarks, orphanLifetimes, reconcileBeliefDrift, scanBeliefDrift, unmarkedPublications,
 } from '../src/core/belief/coverage-report.ts';
+import { randomUUID } from 'node:crypto';
+import type { BrainEngine } from '../src/core/engine.ts';
+import type { OperationError } from '../src/core/ops/contract.ts';
+import type { InventoryEntry } from '../src/core/persistence/engine-graduation.types.ts';
+import { GRADUATION_INVENTORY } from '../src/core/persistence/graduation-inventory.ts';
+import { copySequences } from '../src/core/persistence/graduation-copy.ts';
+import { assertLegacyEngineMigration } from '../src/core/persistence/maintenance.ts';
+import { copiedEntries, copyAll, digestMismatches } from './helpers/graduation-copy-harness.ts';
+import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, shape, type BeliefBrain } from './helpers/belief-ledger.ts';
 
@@ -318,6 +327,58 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         expect((await coverageIntervals(b.engine, b.sourceId)).map(i => i.incarnation)).toEqual([fresh.incarnation]);
         expect((await coverageIntervals(b.engine, b.sourceId)).at(-1)!.stopped_at).not.toBeNull();
       }, { managed: false });
+    }, 120_000);
+
+    test('probe 9: graduation PGLite -> ' + engineCase.name + ' carries an identical ledger: equal event_key sets, digests and replay', async () => {
+      await beliefBrain(async b => {
+        await seeded(b);
+        await b.put('companies/acme-example', page({ facts: ['Acme raised a seed round', { claim: 'Acme has ten staff', confidence: '0.5' }] }));
+        await b.engine.executeRaw(`UPDATE takes SET resolved_at = now(), resolved_outcome = true WHERE claim = 'Acme will hire fast'`);
+        await reconcileBeliefDrift(b.engine, b.sourceId);
+        const ledger = GRADUATION_INVENTORY.entries.filter(e => e.relation.startsWith('belief_'));
+        expect(ledger.map(e => [e.relation, e.class]).sort()).toEqual(['belief_commit_marks', 'belief_events', 'belief_page_lifetimes', 'belief_redactions',
+          'belief_retier_manifest'].map(r => [r, 'carry']));
+        const keys = async (engine: BrainEngine) => (await engine.executeRaw<{ k: string }>(`SELECT encode(event_key, 'hex') AS k FROM belief_events ORDER BY id`)).map(r => r.k);
+        const replay = async (engine: BrainEngine) => ({ intervals: await coverageIntervals(engine, b.sourceId), drift: (await scanBeliefDrift(engine, b.sourceId, { deep: true })).drifted,
+          events: (await engine.executeRaw<Record<string, unknown>>(`SELECT id::int AS id, subject_key, event_type, value_hash, state_hash, recorded_at FROM belief_events ORDER BY id`))
+            .map(r => ({ ...r, recorded_at: new Date(r.recorded_at as string).toISOString() })) });
+        const graduate = async (mutate: (entries: readonly InventoryEntry[]) => readonly InventoryEntry[]) => {
+          const t = await isolatedSharedSkillsEngine(engineCase.databaseUrl);
+          const e = { source: b.engine, target: t.engine };
+          await copyAll(e, mutate(await copiedEntries(e)), { bypass: 'session_replication_role', runId: randomUUID() });
+          await copySequences(e);
+          return t;
+        };
+        const target = await graduate(entries => entries);
+        try {
+          expect(await keys(target.engine)).toEqual(await keys(b.engine));
+          expect(await digestMismatches({ source: b.engine, target: target.engine }, ledger)).toEqual([]);
+          expect(await replay(target.engine)).toEqual(await replay(b.engine));
+          const [{ next }] = await target.engine.executeRaw<{ next: number }>(`SELECT nextval('belief_events_id_seq')::int AS next`);
+          expect(next).toBe(await b.lastId() + 1);
+        } finally { await target.close(); }
+        // Forced probe: a copier that drops one ledger row is caught by the key-set comparison.
+        const broken = await graduate(entries => entries.map(entry => entry.relation === 'belief_events' ? { ...entry, rowFilter: 'id <> 1' } : entry));
+        try { expect(await keys(broken.engine)).not.toEqual(await keys(b.engine)); } finally { await broken.close(); }
+      }, { managed: false });
+    }, 300_000);
+
+    test('probe 9: the legacy engine copier refuses a brain with a ledger, naming it', async () => {
+      const t = await isolatedSharedSkillsEngine(engineCase.databaseUrl);
+      try {
+        const [{ incarnation }] = await t.engine.executeRaw<{ incarnation: string }>(`SELECT incarnation::text AS incarnation FROM sources WHERE id = 'default'`);
+        await t.engine.executeRaw(`INSERT INTO belief_events (event_key, source_id, source_incarnation, slug, subject_kind, subject_key, event_type, trust_tier, visibility,
+          publication_id, ord, state_hash, cause) VALUES (decode(md5('k'), 'hex'), 'default', $1::uuid, '', 'coverage', '["coverage"]', 'coverage.started', 'unknown', 'world',
+          gen_random_uuid(), 0, '', '{}'::jsonb)`, [incarnation]);
+        expect(await t.engine.executeRaw('SELECT 1 FROM persistence_requests UNION ALL SELECT 1 FROM fact_withdrawals UNION ALL SELECT 1 FROM persistence_worktrees')).toEqual([]);
+        const refusal = await assertLegacyEngineMigration(t.engine).then(() => null, (error: OperationError) => error);
+        expect(refusal?.code).toBe('writer_coordinator_required');
+        expect(refusal?.message).toContain('belief ledger');
+        expect(String((refusal?.toJSON() as { why?: string }).why)).toContain('rows in belief_events');
+        // Forced probe: the same brain without its ledger row is not refused, so the refusal is the ledger's.
+        await t.engine.executeRaw('DELETE FROM belief_events');
+        await expect(assertLegacyEngineMigration(t.engine)).resolves.toBeUndefined();
+      } finally { await t.close(); }
     }, 120_000);
   });
 }
