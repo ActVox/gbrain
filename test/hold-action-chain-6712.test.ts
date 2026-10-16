@@ -55,7 +55,8 @@ const home = mkdtempSync(join(tmpdir(), 'gbrain-hold-chain-'));
 const engines: BrainEngine[] = [];
 let closePostgres: (() => Promise<void>) | undefined;
 const env = { GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home, OPENAI_API_KEY: 'sk-test-not-used', VOYAGE_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, GBRAIN_EMBEDDING_MULTIMODAL: undefined };
-const CONFIG = ['sync.write_through', 'sync.parser_regression', 'sync.exclude', 'content_sanity.junk_disposition', 'write_gate.external_mode'];
+const REGRESSION_HOLD = { GBRAIN_SYNC_PARSER_REGRESSION: 'hold' };
+const CONFIG = ['sync.write_through', 'sync.exclude', 'content_sanity.junk_disposition', 'write_gate.external_mode'];
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (root: string, message = 'content') => { git(root, 'add', '-A'); git(root, 'commit', '-qm', message); };
 const note = (title: string, body = 'A synthetic observation.', extra = '') => `---\ntitle: ${title}\n${extra}---\n${body}\n`;
@@ -425,9 +426,9 @@ test('file_too_large, content_rejected, write_gate_rejected, purged_content and 
   s.write('notes/regressed.md', FOLDED);
   await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,raw_sha256}',to_jsonb($3::text)) WHERE op=$1 AND fingerprint LIKE $2`,
     [SYNC_IMPORT_PROVENANCE_OP, `${s.id}:%:${(await engine.getPage('notes/regressed', { sourceId: s.id }))!.id}`, sha256(FOLDED)]);
-  await engine.setConfig('sync.parser_regression', 'hold');
+  // #6712 PR 2: the parser-regression policy is the syncing process's GBRAIN_SYNC_PARSER_REGRESSION (sync.parser_regression is retired).
   commit(s.root, 'copy and regress');
-  await s.sync();
+  await withEnv(REGRESSION_HOLD, () => s.sync());
   const expected: Record<string, [string, string]> = {
     'notes/big.md': ['file_too_large', 'over the page size limit'],
     'notes/junk.md': ['content_rejected', 'content-sanity gate'],
@@ -439,14 +440,14 @@ test('file_too_large, content_rejected, write_gate_rejected, purged_content and 
   for (const [path, [, says]] of Object.entries(expected)) expect(expectAsked(await agent(engine, s.id, path))).toContain(says);
   // The user leaves the oversized file out (its fix): the next sync releases the hold although nothing was committed.
   await engine.setConfig('sync.exclude', 'notes/big.md');
-  await s.sync();
+  await withEnv(REGRESSION_HOLD, () => s.sync());
   expect((await s.held()).map(hold => hold.path)).not.toContain('notes/big.md');
   expect(await s.held()).toHaveLength(4);
   // The user's other exits are a setting or a tombstone, not a commit: each clears its hold on the next sync.
   await engine.setConfig('write_gate.external_mode', 'quarantine');
   await engine.setConfig('content_sanity.junk_disposition', 'quarantine');
   expect((await cli(engine, ['gbrain', 'pages', 'unpurge', 'notes/leaked', '--source', s.id])).exit).toBe(0);
-  await s.sync();
+  await withEnv(REGRESSION_HOLD, () => s.sync());
   expect(await s.held()).toEqual([{ path: 'notes/regressed.md', code: 'parser_regression' }]);
   expect(await engine.getPage('notes/vendor', { sourceId: s.id })).not.toBeNull();
   expect(await engine.getPage('notes/leaked-copy', { sourceId: s.id })).not.toBeNull();
