@@ -81,7 +81,8 @@ function expectedStale(rows: readonly ChunkRow[], generation: number, live: Read
  * A segmented page at generation 2 left unsealed by a replace that deferred its retirement: `half` occurrences kept
  * from generation 1, `half` closed and replaced by new ones, `perOccurrence` chunk rows each. Plus one kept
  * occurrence with a newer duplicate row set at generation 2 (a projection that raced a flip), inline rows a
- * promotion deferred, and rows a pending staging holds at generation 3 for a closed occurrence.
+ * promotion deferred, and rows a pending staging holds at generation 3 for a closed occurrence. The generation 2
+ * manifest tiles the body: the kept rows, then the new rows from the byte the kept ones end at.
  */
 async function deferredPage(engine: BrainEngine, slug: string, half: number, perOccurrence: number) {
   const v1 = Array.from({ length: 2 * half }, (_, i) => segmentText(`## Part ${i}\n\nFirst body of ${slug}, part ${i}.\n`));
@@ -89,7 +90,8 @@ async function deferredPage(engine: BrainEngine, slug: string, half: number, per
   const kept = page.occurrences.slice(0, half), closed = page.occurrences.slice(half);
   const v2 = Array.from({ length: half }, (_, i) => segmentText(`## Part ${half + i}\n\nSecond body of ${slug}, part ${i}.\n`));
   const staged = await stageGeneration(engine, { pageId: page.pageId, slug, genFrom: 2, texts: v2 });
-  await engine.executeRaw('UPDATE page_body_manifest SET seq = seq + $2 WHERE staging_id = $1::uuid', [staged.stagingId, half]);
+  const keptBytes = v1.slice(0, half).reduce((n, text) => n + text.body.byteLength, 0);
+  await engine.executeRaw('UPDATE page_body_manifest SET seq = seq + $2, byte_start = byte_start + $3 WHERE staging_id = $1::uuid', [staged.stagingId, half, keptBytes]);
   let next = 0;
   const insert = async (occurrences: readonly (number | null)[], generation: number | null) => {
     await engine.executeRaw(`INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, occurrence_id, local_ordinal, raw_byte_start, raw_byte_end, body_generation)
