@@ -392,7 +392,7 @@ export const CODES = {
   profile_incompatible: { class: 'caller', summary: "The stored profile is incompatible with this operation." },
   projection_owner_resident: { class: 'host_only', summary: "A resident owner holds the projection." },
   // #6643, retired by #6712 (one page, one fate): no page waits on another page's fate any more, so nothing re-freezes knock-ons.
-  knock_on_exhausted: { class: 'server', retired_in: '0.60.254.0',
+  knock_on_exhausted: { class: 'server', retired_in: '0.60.255.0',
     summary: "Retired: an older gbrain stopped a managed sync that kept re-freezing a page cancelled only because another page of the same sync did not commit. This build never cancels a page for another page's failure, so the stop is superseded.",
     why: "Since #6712 each page of a sync has its own fate: a page that does not commit is held or stops the run on its own, and the pages after it still publish. A ledger row or receipt with this code was written by an older build.",
     docs: 'docs/guides/sync-unblock-runbook.md#decision-table',

@@ -4,16 +4,17 @@
  * A lower-tier write never deletes, replaces or deactivates a take or timeline
  * row more trusted than it (trust/fence-guard.ts): the row stays and a `forget`
  * proposal targets it. Accepting applies what the write asked for:
- * - a take the page's fence still carries with the same claim (a refused
- *   `takes_remove`) is removed by an owner `takes_remove` bound to the
+ * - a refused `takes_remove` whose take the page's fence still carries with
+ *   the same claim is removed by an owner `takes_remove` bound to the
  *   proposal by a one-time nonce, so the fence and the index change together;
- * - otherwise the page's current text rules that row: the fence row at its
+ * - otherwise (a page publish removed, rewrote, re-kinded or struck through
+ *   the row) the page's current text rules that row: the fence row at its
  *   number (or the timeline entry with its date, source and summary) replaces
  *   it at the writer's tier, and when the page no longer carries one the row
  *   is deleted.
- * Dismissing keeps the row (the default reject). A segmented page has no body
- * string to rule the row, so its accept refuses (`page_body_segmented`) and the
- * proposal stays pending.
+ * A segmented page within the single-string ceiling is read back from its
+ * segments; one over it holds no fences and refuses (`page_body_segmented`),
+ * leaving the proposal pending. Dismissing keeps the row (the default reject).
  */
 import type { BrainEngine } from '../engine.ts';
 import { parseTakesFence } from '../takes-fence.ts';
@@ -26,12 +27,14 @@ import { reprojectTimelineRow } from '../persistence/canonical-projections.ts';
 import { decisionResult, getTrustProposal, transitionTrustProposal, type TrustDecisionContext, type TrustDecisionResult, type TrustProposalRow } from './proposals.ts';
 import { storedTrustTier } from './tier.ts';
 import { assertInlineBody } from '../page-body/page-shape.ts';
+import { materializeSegmentedBody } from '../page-body/ingest.ts';
+import { segmentedOverCeiling } from '../persistence/segmented-apply.ts';
 
-interface HeldPageRow { id: number; page_id: number; source_id: string; slug: string; body_storage: 'inline' | 'segmented' | null; compiled_truth: string; timeline: string | null }
+interface HeldPageRow { id: number; page_id: number; source_id: string; slug: string; body_storage: 'inline' | 'segmented' | null; body_bytes: number | null; compiled_truth: string | null; timeline: string | null }
 
 async function heldRow(engine: BrainEngine, table: string, id: number): Promise<(HeldPageRow & Record<string, unknown>) | undefined> {
   const columns = table === 'takes' ? 'x.row_num, x.claim' : 'x.date::text AS date, x.source, x.summary';
-  const [row] = await engine.executeRaw<HeldPageRow & Record<string, unknown>>(`SELECT x.id, x.page_id, ${columns}, p.source_id, p.slug, p.body_storage, p.compiled_truth, p.timeline
+  const [row] = await engine.executeRaw<HeldPageRow & Record<string, unknown>>(`SELECT x.id, x.page_id, ${columns}, p.source_id, p.slug, p.body_storage, p.body_bytes, p.compiled_truth, p.timeline
     FROM ${table === 'takes' ? 'takes' : 'timeline_entries'} x JOIN pages p ON p.id = x.page_id WHERE x.id = $1`, [id]);
   return row;
 }
@@ -53,10 +56,11 @@ export async function acceptHeldRemoval(engine: BrainEngine, proposal: TrustProp
     await transitionTrustProposal(engine, proposal.id, 'pending', 'superseded', { decidedBy: ctx.decidedBy });
     return decisionResult(proposal, 'accept', 'superseded', { reason: 'row_missing' });
   }
-  assertInlineBody(row, 'trust confirm (held removal)');
-  const body = { compiled_truth: row.compiled_truth, timeline: row.timeline ?? '' };
-  const fenceRow = table === 'takes' ? parseTakesFence(`${row.compiled_truth}\n${row.timeline ?? ''}`).takes.find(t => t.rowNum === Number(row.row_num)) : undefined;
-  if (fenceRow && fenceRow.claim === row.claim) {
+  if (segmentedOverCeiling(row)) assertInlineBody(row, 'trust confirm (held removal)');
+  const body = row.body_storage === 'segmented' ? await materializeSegmentedBody(engine, Number(row.page_id), row.source_id)
+    : { compiled_truth: row.compiled_truth ?? '', timeline: row.timeline ?? '' };
+  const fenceRow = table === 'takes' ? parseTakesFence(`${body.compiled_truth}\n${body.timeline}`).takes.find(t => t.rowNum === Number(row.row_num)) : undefined;
+  if (proposal.proposer === 'takes_remove' && fenceRow && fenceRow.claim === row.claim) {
     const nonce = crypto.randomUUID();
     await engine.executeRaw(`UPDATE trust_proposals SET after_state = after_state || jsonb_build_object('accept_nonce', $2::text) WHERE id = $1 AND status = 'pending'`, [proposal.id, nonce]);
     const { submitPageMutation } = await import('../persistence/page-mutations.ts');
