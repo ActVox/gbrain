@@ -115,6 +115,8 @@ export interface IngestFileOutcome {
   drift: boolean;
   /** E-N4: assistant turns parsed with zero user turns (counted in driftFiles). */
   userTurnsMissing?: boolean;
+  /** #6741: a Codex sub-agent rollout with no user turn by design (counted in subagentRollouts, not drift). */
+  subagentRollout?: boolean;
   /** Adapter degraded to a bounded read (e.g. codex head+tail) — part of the file was never scanned. */
   truncated: boolean;
   error?: string;
@@ -133,6 +135,8 @@ export interface TranscriptsIngestResult {
   imperatives: number;
   partsDeleted: number;
   driftFiles: number;
+  /** #6741: Codex sub-agent rollouts with no user turns by design; understood, so they keep the scan clean. */
+  subagentRollouts: number;
   /** Files whose adapter reported a truncated (partially-unscanned) read. */
   truncatedFiles: number;
   erroredFiles: number;
@@ -188,6 +192,7 @@ export async function runTranscriptsIngest(
     imperatives: 0,
     partsDeleted: 0,
     driftFiles: 0,
+    subagentRollouts: 0,
     truncatedFiles: 0,
     erroredFiles: 0,
     slugsTouched: [],
@@ -557,6 +562,10 @@ function applyFileDiagnostics(diag: FileDiagnostics, fileOutcome: IngestFileOutc
     fileOutcome.userTurnsMissing = true;
     result.driftFiles++;
     result.cleanScan = false;
+  }
+  if (diag.subagentRollout) {
+    fileOutcome.subagentRollout = true;
+    result.subagentRollouts++;
   }
   if (diag.skippedLines > 0) {
     // Malformed lines can be DROPPED RECORDS (an actively-appended
