@@ -21,6 +21,7 @@ import { readBeliefState, readFactsById, type RawPage, type RawState } from './s
 import { keyedSubjects, keyFact, pageNeeds, type KeyContext, type Subject } from './subjects.ts';
 import { endLifetime, mintLifetime, readOpenLifetimes, renameLifetime, resolveLifetimes } from './lifetimes.ts';
 import { appendBeliefEvents, redactionReleasedDraft, type BeliefEventDraft, type BeliefOrigin, type RedactionRelease } from './append.ts';
+import { missingPreimages, preimageInvariantEnforced } from './preimages.ts';
 
 export type BeliefNote =
   | { kind: 'contested'; table: string; rowId: number; proposalId: number; guard: string }
@@ -432,6 +433,14 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
       const s = postSubjects.find(x => x.kind === (note.table === 'facts' ? 'fact' : 'take') && x.rowIds.includes(note.rowId));
       if (s) drafts.push(redactionReleasedDraft({ sourceId: opts.sourceId, incarnation: batch.incarnation, lifetime: lifetimeAt(s.stream), slug: s.stream, stream: s.stream,
         subjectKind: s.kind as BeliefEventDraft['subjectKind'], subjectKey: s.key, trustTier: s.tier, visibility: s.visibility, stateHash: streamHash(s.stream) }, note.releases, batch.publicationId));
+    }
+  }
+  if (preimageInvariantEnforced()) {
+    const needs = streams.flatMap(s => s.pre && s.post && s.pre.id === s.post.id && s.pre.revision !== s.post.revision && !s.pre.large && !s.post.large
+      ? [{ pageId: s.post.id, slug: s.pre.slug, revision: s.pre.revision }] : []);
+    const missing = await missingPreimages(tx, needs);
+    if (missing.length) {
+      throw new Error(`belief preimage invariant: ${missing.map(m => `${m.slug} moved off revision ${m.revision} with no page_versions row for it`).join('; ')} (op ${opts.op}; BELIEF_LEDGER.md section 14 item 8)`);
     }
   }
   return appendBeliefEvents(tx, drafts, { publicationId: batch.publicationId, origin: opts.origin ?? (batch.managed ? 'live' : 'unmanaged'),
