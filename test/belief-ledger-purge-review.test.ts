@@ -12,6 +12,7 @@ import { REDACTION_MARKER } from '../src/core/belief/keys.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { submitRememberMutation } from '../src/core/persistence/memory-mutations.ts';
 import { operations } from '../src/core/operations.ts';
+import { purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain, type BeliefEvent } from './helpers/belief-ledger.ts';
@@ -136,6 +137,48 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }));
       expect(r.status).toBe('out_of_scope');
       expect(r.items).toEqual([`fact@${r.key}`]);
+    }, 240_000);
+    test('#14: a hard delete (purge, managed and unmanaged retention) records every cascaded inbound link as link.retracted in its own stream', async () => {
+      const run = (managed: boolean, remove: (b: BeliefBrain, slug: string) => Promise<unknown>) => collect<string[]>(report => brain(async b => {
+        await b.put('people/target-example', beliefPage({ type: 'person', title: 'Target Example' }));
+        await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme sells widgets'], links: ['people/target-example'] }));
+        const mark = await b.lastId();
+        await remove(b, 'people/target-example');
+        report((await b.events(mark)).filter(e => e.subject_kind === 'link').map(e => `${e.slug}:${e.event_type}`));
+      }, managed));
+      const expire = async (b: BeliefBrain, slug: string) => {
+        const snapshot = await b.engine.readPageSnapshot(slug, { sourceId: b.sourceId });
+        await deleteOp.handler(b.ctx, { slug, expected_revision: snapshot!.revision, request_id: randomUUID() });
+        await purgeDeletedPagesCoordinated(b.engine, 0);
+      };
+      expect({ purge: await run(true, purgePage), managedRetention: await run(true, expire), unmanagedRetention: await run(false, expire) }).toEqual({
+        purge: ['companies/acme-example:link.retracted'], managedRetention: ['companies/acme-example:link.retracted'], unmanagedRetention: ['companies/acme-example:link.retracted'] });
+    }, 240_000);
+
+    test('#26: a retention removal does not take the source exclusively; an owner purge does', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        const exclusive: string[] = [];
+        const proto = Object.getPrototypeOf(b.engine) as { executeRaw: (sql: string, ...rest: unknown[]) => Promise<unknown> };
+        const original = proto.executeRaw;
+        proto.executeRaw = function (this: unknown, sql: string, ...rest: unknown[]) {
+          if (/^SELECT id FROM sources WHERE id=\$1 FOR UPDATE$/.test(sql)) exclusive.push(sql);
+          return original.call(this, sql, ...rest);
+        };
+        try {
+          await b.put('notes/old-example', beliefPage({ prose: 'Old.' }));
+          await b.put('notes/vault-example', beliefPage({ prose: 'Vault.' }));
+          const snapshot = await b.engine.readPageSnapshot('notes/old-example', { sourceId: b.sourceId });
+          await deleteOp.handler(b.ctx, { slug: 'notes/old-example', expected_revision: snapshot!.revision, request_id: randomUUID() });
+          exclusive.length = 0;
+          await purgeDeletedPagesCoordinated(b.engine, 0);
+          const retention = exclusive.length;
+          exclusive.length = 0;
+          await purgePage(b, 'notes/vault-example');
+          report({ retention, purge: exclusive.length });
+        } finally { proto.executeRaw = original; }
+      }));
+      expect(r).toEqual({ retention: 0, purge: 1 });
     }, 240_000);
   });
 }
