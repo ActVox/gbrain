@@ -17,8 +17,10 @@ import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retain
 import { writeHealth, type WriteHealthFacts } from './health.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
-import { claimOwner, claimPhaseStamp, startClaimPhase } from './claim-phase.ts';
-import { consumerIdentity } from './consumer-heartbeat.ts';
+import { hostname } from 'node:os';
+import { claimOwner, claimOwnerKind, claimPhaseStamp, startClaimPhase } from './claim-phase.ts';
+import { consumerIdentity, RESIDENT_CONSUMER_KINDS } from './consumer-heartbeat.ts';
+import { classifyHolderLiveness, syncLockId } from '../db-lock.ts';
 import { publicFailureDetail } from './publication-failure.ts';
 import { catalogueError } from '../error-catalogue.ts';
 import { ACTIVE_REFRESH_STATES_SQL, refreshFenceClear } from './worktree-refresh-schema.ts';
@@ -624,9 +626,21 @@ export async function hasClaimableWrite(engine: SqlEngine, hostId: string, exclu
  * `fifoRoots` (#5984 Phase 4.5) are roots where this consumer owes the sync side a turn: a foreground write it
  * claimed ahead of a queued sync row (`passed_sync`) committed since it last claimed a sync row, so there the claim is plain FIFO.
  */
+/**
+ * #6712 PR 2 (Garry, 2026-10-16, via GBRA-40): while a source's drain lease is live, only the lease holder publishes that
+ * source's managed-sync requests. A non-resident consumer (a short-lived command such as `put` or `remember`, waiting on its
+ * own write) ranks a sync row whose source's lease another process holds after every other row and claims it only when that
+ * holder is provably dead (a killed same-host sync whose TTL has not lapsed yet), so it never publishes a live drainer's pages
+ * or breaks up its lane groups. With no live lease nothing changes: a crashed drainer's rows still drain through any consumer.
+ * The holder is read only when the head row is a sync row, so a foreground write's claim costs no extra statement.
+ */
+const LEASE_HELD = `EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE ${SYNC_KIND('r')} AND l.id=$5::text||r.source_id
+  AND l.ttl_expires_at>now() AND NOT (l.holder_pid=$6::integer AND l.holder_host IS NOT DISTINCT FROM $7::text))`;
+
 export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseMs = 30_000, excludeRoots: string[] = [], fifoRoots: string[] = [],
   laneRoots: string[] = []): Promise<(WriteRequest & { passed_sync?: boolean }) | null> {
   const first = `(${foregroundPrioritySql()}) AND NOT (COALESCE(r.worktree_id::text,'db:'||r.source_incarnation::text)=ANY($3::text[]))`;
+  const holderOnly = !RESIDENT_CONSUMER_KINDS.includes(claimOwnerKind());
   return engine.transactionDirect(async tx => {
     // The protocol declaration and the FIFO head read are sent together.
     const [, [row]] = await pipelined(tx, [
@@ -636,9 +650,15 @@ export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseM
       WHERE ${claimableWriteSql(`(${first})`, '$4::text[]')}
         -- On a root whose lane groups run in this process only a foreground write is claimed (beside them).
         AND NOT (r.worktree_id::text=ANY($4::text[]) AND (${SYNC_KIND('r')} OR NOT (${first})))
-      ORDER BY ${CLAIM_ORDER(`(${first})`)} LIMIT 1 FOR UPDATE OF r SKIP LOCKED`, [hostId, excludeRoots, fifoRoots, laneRoots]),
+      ORDER BY ${holderOnly ? `${LEASE_HELD}, ` : ''}${CLAIM_ORDER(`(${first})`)} LIMIT 1 FOR UPDATE OF r SKIP LOCKED`,
+      [hostId, excludeRoots, fifoRoots, laneRoots, ...(holderOnly ? [syncLockId(''), process.pid, hostname()] : [])]),
     ]) as [unknown, WriteRequest[]];
     if (!row) return null;
+    if (holderOnly && String(row.intent?.kind ?? '').startsWith('managed_sync_')) {
+      const [lease] = await tx.executeRaw<{ holder_pid: number; holder_host: string | null }>(`SELECT holder_pid, holder_host FROM gbrain_cycle_locks
+        WHERE id=$1::text AND ttl_expires_at>now() AND NOT (holder_pid=$2::integer AND holder_host IS NOT DISTINCT FROM $3::text)`, [syncLockId(row.source_id), process.pid, hostname()]);
+      if (lease && classifyHolderLiveness(lease.holder_pid, lease.holder_host ?? '', 0, { graceMs: 0 }) !== 'dead_eligible') return null;
+    }
     // `passed_sync`: the claimed row went ahead of a queued sync row of its root.
     // #6278: the claim stamps its own `preparing` phase, so a kill before the first renewal is charged like any other.
     const token = randomUUID();

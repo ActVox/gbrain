@@ -24,10 +24,14 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 1: after a pass took the source's drain lease (before it reads the cursor); after each cursor the fan-in
   // superseded is retired (before the next one), and after a pass stamped its authority on a cursor another writer started.
   | 'sync:lease_acquired' | 'sync:cursor_adopted'
+  // #6712 PR 2 (L5): after the drain lease is released, before the owed tail (statistics, links) of a committed checkpoint runs.
+  | 'sync:tail_started'
   // #6511: the page purge's in-transaction journal lookups (page-purge.ts `journalLookup`); a hook that throws a 57014 models a statement timeout there.
   | 'purge:slug_lookup' | 'purge:tail_recheck' | 'purge:pending_recheck' | 'purge:redaction_read'
   // #6511: before each keyset chunk of the preparation-time journal sweep (a stalling hook models a slow chunk), and the fact purge's planning read.
   | 'purge:sweep_chunk' | 'purge:carrying_lookup'
+  // W1: before each keyset batch of the belief ledger's purge redaction (belief/purge.ts); a 57014 from the hook models its statement timeout.
+  | 'purge:ledger_redaction'
   // #6650: `gbrain repair stuck-recovery` (recovery-resolve.ts): after the backup is durable (before its journal step), after the prior
   // bytes are written (before their journal step), after a --keep disk write is abandoned (its journal step written), and after recoverPublication returns.
   | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered'
@@ -42,7 +46,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
  * a stalling hook can model both the reporter's cases: a preparer that honours
  * cancellation (settle on abort) and one that ignores it (hang on).
  */
-export interface FaultDetail { requestId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string }
+/** `writeId` is the write request row: rows of a caller-bound replay share one `requestId` (crash-robot per-request seams key on the row). */
+export interface FaultDetail { requestId?: string; writeId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string }
 /** Postgres returns `persistence_effects.id` (bigserial) as a BigInt; `faultPoint` hands hooks its decimal string (#6584). */
 export type FaultDetailInput = Omit<FaultDetail, 'effectId'> & { effectId?: string | number | bigint };
 type FaultHook = (point: FaultPoint, detail: FaultDetail) => Promise<void> | void;

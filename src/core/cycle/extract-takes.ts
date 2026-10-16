@@ -25,6 +25,8 @@
  * v0.22.12 classifier path (extension follow-up — not blocking v0.28).
  */
 
+import { withUnmanagedBeliefs } from '../belief/projection-point.ts';
+import { coveredSources } from '../belief/coverage-report.ts';
 import { isQuarantined, QUARANTINE_KEY } from '../quarantine.ts';
 import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -330,6 +332,7 @@ export async function extractTakesFromDb(
   const refs = (await engine.listAllPageRefs()).filter(ref => (!slugFilter || slugFilter.has(ref.slug)) && (!opts.sourceId || ref.source_id === opts.sourceId));
   const buffer: TakeBatchInput[] = [];
   const coordinated = !dryRun && await managedPersistenceEnabled(engine);
+  const covered = dryRun || coordinated ? new Set<string>() : new Set(await coveredSources(engine));
   const authorities = new Map<string, Promise<MaintenanceAuthority>>();
   const authorityFor = (sourceId: string) => {
     if (!authorities.has(sourceId)) authorities.set(sourceId, maintenancePreflight(engine, sourceId).then(a => a!));
@@ -347,6 +350,13 @@ export async function extractTakesFromDb(
       // A page with no takes marker at all yields no prune, no upsert and no
       // warning; near-miss and unbalanced markers still reach the parser.
       if (read.hasMarker) await reextractCoordinated(engine, authorityFor, slug, source_id, rebuild, result);
+      continue;
+    }
+    if (covered.has(source_id)) {
+      await withUnmanagedBeliefs(engine, source_id, [slug], 'takes_reextract', run => maintenanceTransaction(engine, tx => run(tx, async () => {
+        const takes = await reconcilePageTakes(tx, page.id, read, slug, rebuild, false, result);
+        result.takesUpserted += await upsertProjectedTakes(engine, takes.map(t => parsedTakeToBatchInput(page.id, t)), result, tx);
+      })));
       continue;
     }
     const takes = await reconcilePageTakes(engine, page.id, read, slug, rebuild, dryRun, result);

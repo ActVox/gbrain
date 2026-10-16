@@ -626,7 +626,8 @@
             "count": 0,
             "docs": "docs/guides/troubleshooting.md#managed-sync-not-moving",
             "parked": 0,
-            "sources": []
+            "sources": [],
+            "stranded": 0
           },
           "elapsed_ms": "<volatile>",
           "message": "No managed sync is pending.",
@@ -651,6 +652,33 @@
           "elapsed_ms": "<volatile>",
           "message": "Receipt compaction last ran 0 hour(s) ago (compacted 0, freed 0 bytes).",
           "name": "persistence_compaction",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "by_day": [],
+            "content_decisions": {
+              "file_drift_apply": 0,
+              "file_drift_hold": 0,
+              "total": 0
+            },
+            "docs": "docs/guides/sync-unblock-runbook.md#soak-counters",
+            "interventions": {
+              "needs_human": 0,
+              "repair_apply": 0,
+              "retry_held": 0,
+              "sync_non_plain": 0,
+              "total": 0,
+              "unblock_apply": 0
+            },
+            "since": "<ts>",
+            "window_days": 7
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Last 7 days: 0 managed-sync intervention(s), 0 content decision(s).",
+          "name": "sync_soak_counters",
+          "severity": "info",
           "status": "ok"
         },
         {
@@ -885,7 +913,7 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1206 column(s) verified against live schema",
+          "message": "1258 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
@@ -1396,7 +1424,7 @@
             "configured": "unset",
             "docs": "docs/guides/memory-boundaries.md#segmented-page-storage",
             "effective": "off",
-            "floor": "<version>",
+            "floor": "0.60.264.0",
             "max_bytes": 25165824,
             "truncated": false,
             "window_days": 7
@@ -2455,6 +2483,45 @@
         },
         {
           "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "fix": {
+            "actor": "agent",
+            "argv": [
+              "gbrain",
+              "beliefs",
+              "enable",
+              "--source",
+              "default",
+              "--brain",
+              "host"
+            ],
+            "command": "gbrain beliefs enable --source default --brain host",
+            "consent": [],
+            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/designs/BELIEF_LEDGER.md#73-the-doctor-coverage-check",
+            "next": "ask_user",
+            "requires_exclusive": false,
+            "user_message": "Do you want gbrain to keep a belief ledger (a recorded history of facts, takes and links) for this source?",
+            "verify": {
+              "argv": [
+                "gbrain",
+                "doctor",
+                "--only",
+                "belief_ledger_coverage",
+                "--json",
+                "--brain",
+                "host"
+              ]
+            },
+            "why": "Enabling baselines every page of the source and records each later change; only a managed source is certified."
+          },
+          "message": "The belief ledger is off: no source records what this brain had recorded, and when.",
+          "name": "belief_ledger_coverage",
+          "readiness_state": "disabled_by_choice",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
           "details": {
             "backfill": {
               "completed_at": "<ts>",
@@ -2671,6 +2738,17 @@
           "name": "missing_recorded_files",
           "readiness_state": "not_applicable",
           "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "meta",
+          "details": {
+            "rollback": [],
+            "unapplied": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No retired sync config key is stored on this brain.",
+          "name": "sync_config_keys",
           "status": "ok"
         },
         {

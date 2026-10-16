@@ -15,10 +15,10 @@ import { PAGE_BODY_STAGING_TEXTS_SQL } from '../page-body/schema.ts';
 //   staging opened before this migration records nothing and its write keeps
 //   the old behavior until it ends.
 // - content_chunks.retired_generation is re-added where an earlier build of
-//   v249 dropped it (test brains of that build only): the released binary's
-//   chunk readers still select it (v249). A no-op everywhere else.
-export const v252: Migration = {
-  version: 252,
+//   v250 dropped it (test brains of that build only): the released binary's
+//   chunk readers still select it (v250). A no-op everywhere else.
+export const v253: Migration = {
+  version: 253,
   name: 'page_body_staging_texts',
   idempotent: true,
   sql: `

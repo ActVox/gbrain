@@ -14,7 +14,7 @@ export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
  * switch on (the `since` of its BEHAVIOR_CHANGES row, pinned by test/large-pages/segmented-switch.test.ts). That
  * release must be above v0.60.252.0, the release that added segmented storage with the switch off. A version alone
  * cannot tell a build with segment readers from a release of the same version without them (every release from
- * v0.60.252.0 until the stamp has none), so the gate also requires the segment-reader mark (migration v251) on
+ * v0.60.252.0 until the stamp has none), so the gate also requires the segment-reader mark (migration v252) on
  * every write it sees: an unmarked writer blocks whatever its version, the floor included (`segmentedGateWriters`).
  */
 export const SEGMENTED_WRITER_FLOOR = '0.60.264.0';
@@ -41,7 +41,7 @@ export function writerVersionBelowFloor(version: string | null, floor = WRITER_V
 /**
  * This binary's stamp. An unavailable host identity stamps no host rather than failing the write; `mint: false` (the
  * ingest log, written by commands that never register a writer) reads an existing identity and never creates one.
- * Every write path that stamps it also sets the segment-reader mark (migration v251), which only binaries that read
+ * Every write path that stamps it also sets the segment-reader mark (migration v252), which only binaries that read
  * segmented pages write: a version string cannot tell a build with segment readers from a release of the same
  * version without them.
  */
@@ -107,14 +107,14 @@ export interface SegmentedGateWriter {
    */
   role: 'admitter' | 'consumer' | 'importer' | 'resident';
   host_id: string | null; principal: string; version: string | null; version_label: string;
-  /** The rows carried the segment-reader mark (migration v251), which only binaries that read segmented pages write. */
+  /** The rows carried the segment-reader mark (migration v252), which only binaries that read segmented pages write. */
   segment_reader: boolean;
   last_seen: string | null; requests: number;
 }
 
 /**
  * Writers seen in the last `days` that keep segmented storage off: evidence without the segment-reader mark (an
- * older binary inserts NULL into a column it does not know; rows from before v251 count too), or a managed write
+ * older binary inserts NULL into a column it does not know; rows from before v252 count too), or a managed write
  * stamped below `floor` (an unparsable or missing stamp counts as below). Admitters count in any state, so a
  * failed or still-queued request of an older binary is seen as well; ingest-log and consumer rows are read only
  * when unmarked (ingest_log_unmarked_idx). Not seen: an older binary that writes neither a request nor an

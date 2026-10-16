@@ -22,6 +22,7 @@ import { assertLargePageAdmission } from '../persistence/large-page-guard.ts';
 import { assertFullReadFits, bodyBytes, fetchWindowResult, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody, segmentedFullReadError, authorizedReadPin } from './get-page-body.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
+import { getPageKnownAsOf, KNOWN_AS_OF_PARAM } from './known-as-of.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
@@ -101,8 +102,10 @@ const get_page: Operation = {
     source_id: { type: 'string', description: "One source, or '__all__'." },
     include_quarantined: { type: 'boolean', description: 'Admin: quarantined body.' },
     min_trust: MIN_TRUST_PARAM,
+    known_as_of: KNOWN_AS_OF_PARAM,
   },
   handler: async (ctx, p) => {
+    if (p.known_as_of !== undefined) return getPageKnownAsOf(ctx, p);
     const slug = p.slug as string;
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;

@@ -2189,23 +2189,22 @@ export class PostgresEngine implements BrainEngine {
       const formatted = rows?.[0]?.formatted ?? null;
       // halfvec match first — halfvec contains "vec" so a /vector/i
       // regex would shadow it. See readFactsEmbeddingDim's identical
-      // ordering note.
-      if (formatted && /halfvec\(\d+\)/i.test(formatted)) {
-        this._factsEmbeddingCastSuffix = '::halfvec';
-      } else {
-        // Default to '::vector' (the pre-v0.41.15 behavior). On a brain
-        // without the facts.embedding column yet (pre-v40), the cast
-        // suffix is irrelevant — the INSERT would fail elsewhere
-        // anyway. Caching the default still saves the SELECT on
-        // subsequent inserts.
-        this._factsEmbeddingCastSuffix = '::vector';
-      }
+      // ordering note. Otherwise '::vector' (the pre-v0.41.15 behavior);
+      // on a brain without the facts.embedding column yet (pre-v40) the
+      // INSERT would fail elsewhere anyway.
+      const suffix = formatted && /halfvec\(\d+\)/i.test(formatted) ? '::halfvec' : '::vector';
+      // #6712 L6: a transaction engine is an Object.create clone of the engine it runs on, so a probe answered
+      // inside a transaction is cached on that root engine: one probe per process, not one per publication.
+      let root: PostgresEngine = this;
+      while (Object.getPrototypeOf(root) instanceof PostgresEngine) root = Object.getPrototypeOf(root) as PostgresEngine;
+      root._factsEmbeddingCastSuffix = suffix;
+      return suffix;
     } catch {
       // Probe failed — fall back to '::vector' default. Cache so we
       // don't re-probe on every insert.
       this._factsEmbeddingCastSuffix = '::vector';
+      return '::vector';
     }
-    return this._factsEmbeddingCastSuffix;
   }
 
   async insertFact(
@@ -2555,7 +2554,7 @@ export class PostgresEngine implements BrainEngine {
     // v0.31.2 (codex P1 #3): source_id threaded so multi-source brains can
     // scope ingest_log queries. Default 'default' matches the column DEFAULT.
     const sourceId = entry.source_id ?? 'default';
-    // v251: the writer's version, host and segment-reader mark (writer-versions.ts writerStamp).
+    // v252: the writer's version, host and segment-reader mark (writer-versions.ts writerStamp).
     const stamp = writerStamp({ mint: false });
     await sql`
       INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary, writer_version, writer_host_id, writer_segment_reader)

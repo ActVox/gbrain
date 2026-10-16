@@ -16,9 +16,20 @@ test/alias-source-cascade-5094.test.ts
 test/attribution-backfill-history.test.ts
 test/backstop-same-page-shadow-managed-6333.test.ts
 test/behavior-change-notice.test.ts
+test/belief-ledger-coverage.test.ts
+test/belief-ledger-group.test.ts
+test/belief-ledger-identity.test.ts
+test/belief-ledger-lifecycle.test.ts
+test/belief-ledger-page-at-time.test.ts
+test/belief-ledger-privacy.test.ts
+test/belief-ledger-purge-review.test.ts
+test/belief-ledger-purge.test.ts
+test/belief-ledger-restore.test.ts
+test/belief-ledger-trust.test.ts
 test/capture-consent-admission.test.ts
 test/capture-dispatch-provenance-6524.test.ts
 test/chronicle-backfill-max-usd.test.ts
+test/claim-lease-holder-only-6712.test.ts
 test/claude-cli-output-cap.test.ts
 test/colon-slug-windows-5032.test.ts
 test/company-brain-policy.test.ts
@@ -59,6 +70,7 @@ test/graduation-verify.test.ts
 test/grandfather-managed.test.ts
 test/harness-skills-epoch.test.ts
 test/held-read-signals.test.ts
+test/hold-action-chain-6712.test.ts
 test/import-frontmatter-key-order-5158.test.ts
 test/import-inline-chunk-keep.test.ts
 test/import-revision-concurrency.test.ts
@@ -146,7 +158,7 @@ test/large-pages/segmented-timeline-retract-versions.test.ts
 test/large-pages/segmented-versions.test.ts
 test/large-pages/segmented-withdrawn-fence-delete.test.ts
 test/large-pages/streamed-import-drift.test.ts
-test/large-pages/v249-master-reader-compat.test.ts
+test/large-pages/v250-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
 test/links-attendance-blocked.test.ts
@@ -162,6 +174,7 @@ test/managed-sync-bulk.test.ts
 test/managed-sync-checkpoint-replaced.test.ts
 test/managed-sync-chunker-version.test.ts
 test/managed-sync-concurrent-write-hold.test.ts
+test/managed-sync-connection-loss.test.ts
 test/managed-sync-drain.test.ts
 test/managed-sync-foreground-priority.test.ts
 test/managed-sync-group-completion.test.ts
@@ -248,9 +261,11 @@ test/stats-health-source-scope.test.ts
 test/sync-capacity-preflight.test.ts
 test/sync-checkpoint-moved-6834.test.ts
 test/sync-drain-claims.test.ts
+test/sync-drain-effect-recovery-blocked.test.ts
 test/sync-drain-head-blocked-6543.test.ts
 test/sync-drain-inpass-stall.test.ts
 test/sync-drain-write-capacity.test.ts
+test/sync-exits-l4-6712.test.ts
 test/sync-frontmatter-recovery.test.ts
 test/sync-frontmatter-slug-conflict.test.ts
 test/sync-full-cursor-slices-6349.test.ts
@@ -260,6 +275,7 @@ test/sync-handler-drain-6706.test.ts
 test/sync-import-provenance-disk.test.ts
 test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
+test/sync-legacy-slug-adoption-6727.test.ts
 test/sync-origin-live-wins-6517.test.ts
 test/sync-prescreen-drift-6712.test.ts
 test/sync-slug-root-mode-6694.test.ts

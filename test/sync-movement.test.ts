@@ -335,4 +335,49 @@ describe('doctor managed_sync_not_moving and the serve notice', () => {
       expect(ok).toMatchObject({ status: 'ok' });
     } finally { watch.stop(); await lock!.release(); }
   }), 60_000);
+
+  test('#6552 §2: parked with admitted requests, no consumer and no progress past the ceiling fails with the resume sync as its fix; recent progress or an empty queue stays informational', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const ctx = { engine } as unknown as Parameters<typeof managedSyncMovementEntry.run>[0];
+    const f = await managedSource();
+    try {
+      await cursor(f, 2, 415, { progress: { startedAt: Date.now() - 900_000, startIndex: 0, lastAt: Date.now() - 600_000, lastIndex: 2 } });
+      await request(f, 'committed', { completedAt: ago(600_000) });
+      const [empty] = await managedSyncMovementEntry.run(ctx) as unknown as Array<Record<string, unknown>>;
+      expect(empty).toMatchObject({ name: 'managed_sync_not_moving', status: 'ok', details: { stranded: 0 } });
+      await request(f, 'queued');
+      const before = (await readSourceMovement(engine, { sourceIds: [f.id] }))[0]!;
+      expect(before).toMatchObject({ movement_state: 'parked', admitted: 1, live: { consumer: null } });
+      const [fail] = await managedSyncMovementEntry.run(ctx) as unknown as Array<Record<string, unknown>>;
+      expect(fail).toMatchObject({ name: 'managed_sync_not_moving', status: 'fail', readiness_state: 'degraded', details: { stranded: 1 } });
+      expect(String(fail!.message)).toContain('non-empty write queue and no consumer');
+      expect(fail!.fix).toMatchObject({ argv: ['gbrain', 'sync', '--source', f.id, '--no-pull'], actor: 'agent', consent: [] });
+      // The same queue with progress inside the ceiling is a cursor between runs: informational.
+      await cursor(f, 3, 415, { progress: { startedAt: Date.now() - 60_000, startIndex: 0, lastAt: Date.now() - 1_000, lastIndex: 3 } });
+      const [recent] = await managedSyncMovementEntry.run(ctx) as unknown as Array<Record<string, unknown>>;
+      expect(recent).toMatchObject({ status: 'ok', details: { stranded: 0 } });
+    } finally {
+      await finish(f);
+      await engine.executeRaw("UPDATE persistence_requests SET state='cancelled', completed_at=now() WHERE source_id=$1 AND state IN ('queued','running')", [f.id]);
+    }
+  }), 60_000);
+
+  test('#6552 §2: a queue stranded before its first commit (fresh cursor, no progress stamp) ages from its oldest admitted request', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const ctx = { engine } as unknown as Parameters<typeof managedSyncMovementEntry.run>[0];
+    const f = await managedSource();
+    try {
+      await cursor(f, 0, 415);
+      const queued = await request(f, 'queued');
+      const [fresh] = await managedSyncMovementEntry.run(ctx) as unknown as Array<Record<string, unknown>>;
+      expect(fresh).toMatchObject({ status: 'ok', details: { stranded: 0 } });
+      await engine.executeRaw("UPDATE persistence_requests SET created_at=now()-interval '2 days' WHERE request_id=$1::uuid", [queued]);
+      const movement = (await readSourceMovement(engine, { sourceIds: [f.id] }))[0]!;
+      expect(movement).toMatchObject({ movement_state: 'parked', admitted: 1, last_progress_at: null });
+      expect(Date.now() - Date.parse(movement.admitted_since!)).toBeGreaterThan(86_400_000);
+      const [fail] = await managedSyncMovementEntry.run(ctx) as unknown as Array<Record<string, unknown>>;
+      expect(fail).toMatchObject({ status: 'fail', details: { stranded: 1 } });
+    } finally {
+      await finish(f);
+      await engine.executeRaw("UPDATE persistence_requests SET state='cancelled', completed_at=now() WHERE source_id=$1 AND state IN ('queued','running')", [f.id]);
+    }
+  }), 60_000);
 });

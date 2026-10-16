@@ -30,6 +30,11 @@ export const GRADUATION_INVENTORY: Inventory = {
   version: 1,
   entries: [
     carry('access_tokens', 'security', 'Legacy bearer tokens and their unified grant columns; token hashes keep authorizing on the target.'),
+    carry('belief_commit_marks', 'user_data', 'Belief ledger post-commit observations; without them carried events would read as unproven (W2 visibility).'),
+    carry('belief_events', 'user_data', 'The belief ledger: recorded history Markdown cannot rebuild; event keys carry no ids, and the id order and sequence carry verbatim.'),
+    carry('belief_page_lifetimes', 'user_data', 'Belief ledger page identities; event keys name these lifetimes.'),
+    carry('belief_redactions', 'user_data', 'Belief ledger purge suppressions; dropping them would let a later append write purged text back.'),
+    carry('belief_retier_manifest', 'user_data', 'Per-subject manifests behind bulk trust.retiered events.'),
     carry('budget_ledger', 'operational', 'Daily resolver spend totals; admission keeps counting today\'s spend.'),
     carry('calibration_profiles', 'user_data', 'Published calibration profiles per holder.'),
     carry('chat_usage_log', 'operational', 'Chat model usage and cost log.'),

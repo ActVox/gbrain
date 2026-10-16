@@ -350,7 +350,7 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- (segmented-page chunks; NULL for inline pages) and
   -- content_chunks_occurrence_idx are added the same way, and so is v248's
   -- retired_generation, which nothing writes or reads but released chunk readers
-  -- still select (v249 keeps it and adds content_chunks_generation_idx; v253
+  -- still select (v250 keeps it and adds content_chunks_generation_idx; v254
   -- adds content_chunks_occurrence_generation_idx for chunk retirement).
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
@@ -683,7 +683,7 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   pages_updated JSONB   NOT NULL DEFAULT '[]',
   summary       TEXT    NOT NULL DEFAULT '',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- Migration v251: the writing binary's version, host and segment-reader mark (NULL from a binary older than v251).
+  -- Migration v252: the writing binary's version, host and segment-reader mark (NULL from a binary older than v252).
   writer_version TEXT,
   writer_host_id UUID,
   writer_segment_reader BOOLEAN
@@ -2015,7 +2015,7 @@ CREATE TABLE IF NOT EXISTS page_extraction_state (
 );
 CREATE INDEX IF NOT EXISTS page_extraction_state_truncated_idx
   ON page_extraction_state (pipeline, page_id) WHERE input_truncated IS NOT NULL;
--- Wave B segmented pages (migration v250): get_page view sizes and digests per
+-- Wave B segmented pages (migration v251): get_page view sizes and digests per
 -- page revision and audience (src/core/page-window/segmented.ts).
 CREATE TABLE IF NOT EXISTS page_view_digests (
   page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -3225,4 +3225,106 @@ DO \$rls\$ BEGIN
   END IF;
 END \$rls\$;
 -- END GENERATED from src/core/questions/schema.ts (PINNED_QUESTIONS_SCHEMA_SQL)
+
+-- Belief ledger (W1, docs/designs/BELIEF_LEDGER.md): append-only canonical audit state.
+-- BEGIN GENERATED from src/core/belief/schema.ts (BELIEF_LEDGER_SCHEMA_SQL). Edit that file, then run: bun run build:schema
+CREATE TABLE IF NOT EXISTS belief_events (
+  id                 BIGSERIAL PRIMARY KEY,
+  event_key          BYTEA NOT NULL UNIQUE,
+  source_id          TEXT NOT NULL,
+  source_incarnation UUID NOT NULL,
+  page_lifetime      UUID,
+  slug               TEXT NOT NULL,
+  subject_kind       TEXT NOT NULL CHECK (subject_kind IN ('page','fact','take','link','link_transition','coverage')),
+  subject_key        TEXT NOT NULL,
+  event_type         TEXT NOT NULL,
+  origin             TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('live','unmanaged','baseline','backfill','reconcile')),
+  trust_tier         TEXT NOT NULL,
+  writer_tier        TEXT,
+  tier_basis         TEXT NOT NULL DEFAULT 'row' CHECK (tier_basis IN ('row','writer','unknown')),
+  visibility         TEXT NOT NULL,
+  publication_id     UUID NOT NULL,
+  ord                INTEGER NOT NULL,
+  recorded_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  source_time        TIMESTAMPTZ,
+  valid_from         TIMESTAMPTZ,
+  valid_until        TIMESTAMPTZ,
+  value              JSONB,
+  value_hash         TEXT,
+  prior_hash         TEXT,
+  state_hash         TEXT NOT NULL,
+  cause              JSONB NOT NULL,
+  claim_fp           TEXT,
+  purged             BOOLEAN NOT NULL DEFAULT false,
+  redacted_fields    TEXT[]
+);
+CREATE INDEX IF NOT EXISTS belief_events_page ON belief_events (source_id, slug, id);
+CREATE INDEX IF NOT EXISTS belief_events_subject ON belief_events (source_id, subject_kind, subject_key, id);
+CREATE INDEX IF NOT EXISTS belief_events_recorded ON belief_events (recorded_at);
+CREATE INDEX IF NOT EXISTS belief_events_claim_fp ON belief_events (source_id, claim_fp) WHERE claim_fp IS NOT NULL;
+CREATE INDEX IF NOT EXISTS belief_events_lifetime ON belief_events (page_lifetime, id) WHERE page_lifetime IS NOT NULL;
+CREATE INDEX IF NOT EXISTS belief_events_publication ON belief_events (publication_id);
+DO \$rls\$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    ALTER TABLE belief_events ENABLE ROW LEVEL SECURITY;
+  END IF;
+END \$rls\$;
+CREATE TABLE IF NOT EXISTS belief_page_lifetimes (
+  page_lifetime      UUID PRIMARY KEY,
+  source_id          TEXT NOT NULL,
+  source_incarnation UUID NOT NULL,
+  slug               TEXT NOT NULL,
+  page_id            INTEGER,
+  started_at         TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  ended_at           TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS belief_page_lifetimes_open ON belief_page_lifetimes (source_incarnation, slug) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS belief_page_lifetimes_slug ON belief_page_lifetimes (source_id, slug);
+DO \$rls\$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    ALTER TABLE belief_page_lifetimes ENABLE ROW LEVEL SECURITY;
+  END IF;
+END \$rls\$;
+CREATE TABLE IF NOT EXISTS belief_commit_marks (
+  publication_id UUID PRIMARY KEY,
+  observed_at    TIMESTAMPTZ NOT NULL
+);
+DO \$rls\$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    ALTER TABLE belief_commit_marks ENABLE ROW LEVEL SECURITY;
+  END IF;
+END \$rls\$;
+CREATE TABLE IF NOT EXISTS belief_retier_manifest (
+  summary_event BIGINT NOT NULL,
+  source_id     TEXT NOT NULL,
+  subject_kind  TEXT NOT NULL,
+  subject_key   TEXT NOT NULL,
+  from_tier     TEXT,
+  to_tier       TEXT NOT NULL,
+  PRIMARY KEY (summary_event, subject_kind, subject_key)
+);
+DO \$rls\$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    ALTER TABLE belief_retier_manifest ENABLE ROW LEVEL SECURITY;
+  END IF;
+END \$rls\$;
+CREATE TABLE IF NOT EXISTS belief_redactions (
+  id            BIGSERIAL PRIMARY KEY,
+  source_id     TEXT NOT NULL,
+  subject_key   TEXT NOT NULL,
+  field         TEXT NOT NULL,
+  purge_request UUID NOT NULL,
+  field_hash    TEXT NOT NULL,
+  released_by   UUID,
+  released_hash TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS belief_redactions_subject ON belief_redactions (source_id, subject_key, field);
+CREATE INDEX IF NOT EXISTS belief_redactions_field_hash ON belief_redactions (source_id, field_hash);
+DO \$rls\$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    ALTER TABLE belief_redactions ENABLE ROW LEVEL SECURITY;
+  END IF;
+END \$rls\$;
+-- END GENERATED from src/core/belief/schema.ts (BELIEF_LEDGER_SCHEMA_SQL)
 `;

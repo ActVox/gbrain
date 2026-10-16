@@ -105,6 +105,7 @@ import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
 import { plannerStatsEntry } from './checks/planner-stats.ts';
 import { revisionBackfillEntry } from './checks/revision-backfill.ts';
+import { beliefLedgerEntry } from './checks/belief-ledger.ts';
 import { trustTiersEntry } from './checks/trust-tiers.ts';
 import { trustScanEntry } from './checks/trust-scan.ts';
 import { trustSourcesUnclaimedEntry } from './checks/trust-sources-unclaimed.ts';
@@ -114,6 +115,7 @@ import { chatFallbackChainEntry } from './checks/chat-fallback.ts';
 import { providerConsentEntry } from './checks/provider-consent.ts';
 import { behaviorChangesEntry } from './checks/behavior-changes.ts';
 import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
+import { syncConfigKeysEntry } from './checks/sync-config-keys.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
@@ -123,6 +125,7 @@ import {
   persistenceCapacityEntry,
   terminalFailuresEntry,
   persistenceCompactionEntry,
+  soakCountersEntry,
   schemaPackConsistencyEntry,
 } from './checks/ops-sections.ts';
 import { STOP_DOCTOR, type DoctorContext, type DoctorEntry, type DoctorTier } from './context.ts';
@@ -163,6 +166,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   terminalFailuresEntry,
   managedSyncMovementEntry,
   persistenceCompactionEntry,
+  soakCountersEntry,
   serveBuildDriftEntry,
   schemaPackConsistencyEntry,
   embeddingStateEntry,
@@ -221,6 +225,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   retrievalFeedbackEntry,
   transcriptSecretExposureEntry,
   revisionBackfillEntry,
+  beliefLedgerEntry,
   trustTiersEntry,
   trustScanEntry,
   trustSourcesUnclaimedEntry,
@@ -230,6 +235,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   extractionInputTruncatedEntry,
   ghostPagesEntry,
   missingRecordedFilesEntry,
+  syncConfigKeysEntry,
   fenceIntegrityEntry,
   searchModeEntry,
 ];

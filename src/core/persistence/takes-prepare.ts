@@ -29,6 +29,7 @@ import { requestAttribution } from './attribution.ts';
 import { withWriteAttribution } from './context.ts';
 import { decideTakeWrite, recordFlaggedRow, recordWriteGateHold } from '../write-gate-store.ts';
 import { writeGateRejectedError } from '../write-gate.ts';
+import { beliefTransaction } from '../belief/writers.ts';
 
 /** Server-derived values are frozen after replay lookup, before admission. */
 export async function normalizeTakesIntent(ctx: OperationContext, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -79,8 +80,11 @@ function fail(error: unknown): never {
  * request) and returns the refusal carrying its ref; nothing was removed. A retry reuses the proposal.
  */
 async function takeRemovalRequiresOwner(engine: BrainEngine, row: WriteRequest, take: { id: number; tier: TrustTier; rowNum: number }, writer: TrustTier): Promise<OperationError> {
-  const [ref] = await engine.transaction(tx => withWriteAttribution(tx, requestAttribution(row), () => contestHeldRows(tx, { sourceId: row.source_id, slug: row.slug,
-    table: 'takes', proposer: 'takes_remove', writer, rows: [{ id: take.id, tier: take.tier, change: 'removed' }] })));
+  // W1 #6783 §6.2: the refusal's own transaction records trust.contested on the take.
+  const [ref] = await beliefTransaction(engine, { sourceId: row.source_id, slugs: [row.slug], publicationId: row.id, op: row.operation,
+    remote: row.authority.remote !== false, cause: { refused: 'forget_requires_owner' } }, tx => contestHeldRows(tx, { sourceId: row.source_id, slug: row.slug,
+    table: 'takes', proposer: 'takes_remove', writer, rows: [{ id: take.id, tier: take.tier, change: 'removed' }] }),
+  (tx, run) => withWriteAttribution(tx, { ...requestAttribution(row), trust: requestChannelTrust(row) ?? undefined }, run));
   const error = opError('forget_requires_owner', `Take row #${take.rowNum} on ${row.slug} is ${take.tier}; this write cannot remove it. Proposal ${ref} asks the owner.`,
     `Do not retry. Tell the user take row #${take.rowNum} on ${row.slug} needs their decision: they can remove it with gbrain trust confirm ${ref} on the brain host.`);
   error.fix = tierRaiseFix(['gbrain', 'trust', 'confirm', ref!], 'Removing a take the owner confirmed or curated is their decision; the confirm prompt applies the removal.',

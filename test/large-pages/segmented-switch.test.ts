@@ -7,7 +7,7 @@
  *    inline, even with an explicit `on`, and doctor `segmented_storage` names it with an upgrade fix; once that
  *    observation is gone the next write promotes; an explicit `off` keeps pages inline and reports it as a choice;
  *    (a stored segmented page over 32 MiB exporting while the switch is off is in segmented-real-size.slow.test.ts). Every write the gate sees must carry the
- *    segment-reader mark (v251): a release at exactly the floor version without it, an older binary's import or sync
+ *    segment-reader mark (v252): a release at exactly the floor version without it, an older binary's import or sync
  *    run (ingest_log), its resident heartbeat and its uncommitted requests all block; this build's do not. An
  *    unreadable gate blocks, an unparsable stamp blocks, the 7-day window ends between day 6 and day 8, and the gate is
  *    read once per TTL (work counter) while doctor reads through.
@@ -117,7 +117,7 @@ for (const kind of testBackends()) {
     /** The gate as a write reads it, after the per-engine cache is dropped. */
     const segmentedNow = async (e: BrainEngine = engine) => { _resetSegmentedWriterGateForTests(); return (await readPageBodyPolicy(e)).segmented; };
     const blockersNow = async () => (await segmentedStorageCheck(engine)).details!.blockers as Array<{ role: string; principal: string; version: string; segment_reader: boolean }>;
-    /** What a binary older than v251 leaves on a request it admitted and published: its version stamp, and no segment-reader mark. */
+    /** What a binary older than v252 leaves on a request it admitted and published: its version stamp, and no segment-reader mark. */
     const asOlderBinary = (id: string, version: string | null) =>
       editRequest(engine, id, 'admitter_version=$2,consumer_version=$2,admitter_segment_reader=NULL,consumer_segment_reader=NULL', [version]);
 

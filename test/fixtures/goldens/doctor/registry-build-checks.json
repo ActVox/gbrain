@@ -271,6 +271,10 @@
       },
       {
         "category": "ops",
+        "name": "sync_soak_counters"
+      },
+      {
+        "category": "ops",
         "name": "serve_build_drift"
       },
       {
@@ -799,6 +803,10 @@
       },
       {
         "category": "brain",
+        "name": "belief_ledger_coverage"
+      },
+      {
+        "category": "brain",
         "name": "trust_tiers"
       },
       {
@@ -840,6 +848,10 @@
       {
         "category": "brain",
         "name": "missing_recorded_files"
+      },
+      {
+        "category": "meta",
+        "name": "sync_config_keys"
       },
       {
         "category": "brain",

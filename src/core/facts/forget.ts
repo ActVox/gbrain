@@ -10,6 +10,7 @@
  * A Markdown-only clone does not carry DB-only withdrawal records.
  */
 
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 
 import type { BrainEngine } from '../engine.ts';
@@ -25,6 +26,7 @@ import { rewriteLiveSegmentedFences } from '../page-body/segment-rewrite.ts';
 import type { BodyRegion } from '../page-body/types.ts';
 import { recordFactWithdrawal } from './withdrawal.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 import { withdrawnFact } from './withdrawal-overlay.ts';
 
 export interface ForgetFactResult {
@@ -170,7 +172,11 @@ export async function forgetFactInFence(
     await maintenanceTransaction(engine, tx => tx.executeRaw(`UPDATE facts SET valid_until = LEAST(COALESCE(valid_until, now()), now()), expired_at = now()
       WHERE id = $1 AND expired_at IS NULL`, [factId]));
   } else {
-    await maintenanceTransaction(engine, tx => recordFactWithdrawal(tx, factId, row.source_id, opts.worldOnly === true));
+    // W1 #6783 §5.1: the withdrawal's ledger publication is marked committed once its transaction commits.
+    const publicationId = randomUUID();
+    const beliefReport = { appended: 0 };
+    await maintenanceTransaction(engine, tx => recordFactWithdrawal(tx, factId, row.source_id, opts.worldOnly === true, { publicationId, beliefReport }));
+    if (beliefReport.appended) await markBeliefCommits(engine, [publicationId]).catch(() => undefined);
   }
 
   if (row.expired_at !== null) {

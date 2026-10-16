@@ -22,7 +22,7 @@ import { automaticSyncSkip, isSyncDisabledConfig } from '../../core/sync-policy.
 import { composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { acknowledgeFailures, unacknowledgedSyncFailures } from '../../core/sync.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
-import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags } from './args.ts';
+import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags, noteRetryFailedDeprecated } from './args.ts';
 import { implyManagedNoPull, refuseManagedForbiddenFlags } from './managed-no-pull.ts';
 import { legacyLedgerRows } from '../../core/persistence/legacy-sync-failures.ts';
 import type { SyncFlags, SyncFanoutFlags } from './args.ts';
@@ -40,6 +40,7 @@ import { runSyncTrigger } from './trigger.ts';
 import { drainJsonFields, formatDrainSummary, syncOutcome } from '../../core/persistence/sync-drain.ts';
 import { readManagedMode } from '../../core/persistence/ownership.ts';
 import { writeJsonDocument } from '../../core/cli-force-exit.ts';
+import { cliRenderContext, renderNotice } from '../../core/agent-output.ts';
 
 /** D2: under the `--json` guard only writeStdoutFinal reaches fd 1 (writeJsonDocument). */
 const emitJson = (text: string): void => { void writeJsonDocument(text); };
@@ -60,12 +61,23 @@ type PerSourceResult = {
  * #6696 (A4): a sync receipt carries the capacity notices (60 s snapshot, at most once an hour per process per
  * scope): under `--json` as rendered `notices`, otherwise as stderr lines.
  */
-async function syncCapacityNotices(engine: BrainEngine, json: boolean): Promise<{ notices?: unknown[] }> {
+async function syncCapacityNotices(engine: BrainEngine, json: boolean, result?: SyncResult): Promise<{ notices?: unknown[] }> {
   const { capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
-  const { cliRenderContext, renderNotice } = await import('../../core/agent-output.ts');
-  const notices = (await capacityNotices(engine).catch(() => [])).map(notice => renderNotice(notice, cliRenderContext()));
+  // #6712 PR 2 (L5): a degraded post-checkpoint tail rides the same notices.
+  const notices = [...(result?.tail?.notice ? [result.tail.notice] : []), ...await capacityNotices(engine).catch(() => [])].map(notice => renderNotice(notice, cliRenderContext()));
   if (!json) for (const notice of notices) process.stderr.write(`[gbrain notice ${notice.code}] ${notice.why}\n`);
   return notices.length ? { notices } : {};
+}
+
+/** #6712 PR 2 (L5): one source's post-checkpoint tail in a `sync --all` receipt: its report and its rendered degraded notice. */
+function syncTailJsonFields(result: SyncResult): { tail?: Omit<NonNullable<SyncResult['tail']>, 'notice'>; notices?: unknown[] } {
+  if (!result.tail) return {};
+  const { notice, ...tail } = result.tail;
+  return { tail, ...(notice ? { notices: [renderNotice(notice, cliRenderContext())] } : {}) };
+}
+
+function printTailNotice(result: SyncResult): void {
+  if (result.tail?.notice) process.stderr.write(`[gbrain notice ${result.tail.notice.code}] ${result.tail.notice.why}\n`);
 }
 
 export async function runSyncInner(engine: BrainEngine, args: string[]) {
@@ -90,9 +102,13 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
     return;
   }
 
+  // #6712 PR 2: a run with a recovery flag is a soak intervention (soak-counters.ts); a scheduler's plain run is not.
+  const soak = await import('../../core/persistence/soak-counters.ts');
+  if (soak.nonPlainSyncFlags(args).length) await soak.recordSoakEvent(engine, 'sync_non_plain');
   if (args.includes('--acknowledge-managed')) return runAcknowledgeManaged(engine, args);
 
   const flags = parseSyncFlags(args);
+  noteRetryFailedDeprecated(args);
   const { repoPath, dryRun, skipFailed, syncAll, jsonOut, breakLock, forceBreakLock, maxAgeSeconds } = flags;
   let { noEmbed } = flags;
 
@@ -659,6 +675,7 @@ export async function dispatchSyncAll(input: {
         writeHuman(`  ${syncOutcome(r.value.result) === 'blocked' ? '✗' : '✓'} ${src.name}: ${r.value.result.status} (added=${r.value.result.added}, modified=${r.value.result.modified}, deleted=${r.value.result.deleted})`);
         if (syncOutcome(r.value.result) === 'blocked') printSyncResult(r.value.result, humanSink);
         else printHoldNotes(r.value.result, writeHuman);
+        printTailNotice(r.value.result);
         perSourceResults.push({
           sourceId: src.id,
           sourceName: src.name,
@@ -682,6 +699,7 @@ export async function dispatchSyncAll(input: {
       try {
         const result = await runOne(src);
         printSyncResult(result, humanSink);
+        printTailNotice(result);
         perSourceResults.push({
           sourceId: src.id,
           sourceName: src.name,
@@ -734,6 +752,7 @@ function emitSyncAllEnvelope(input: {
         ...(r.result.reason ? { reason: r.result.reason } : {}),
         ...(r.result.managedWrite ? { managed_write: r.result.managedWrite } : {}),
         ...drainJsonFields(r.result, resumeCommand, r.sourceId),
+        ...syncTailJsonFields(r.result),
         added: r.result.added,
         modified: r.result.modified,
         deleted: r.result.deleted,
@@ -942,10 +961,11 @@ async function runSingleSourceSync(
         process.stderr.write(`  → embed-backfill submission failed: ${e instanceof Error ? e.message : String(e)}\n`);
       }
     }
-    const capacity = await syncCapacityNotices(engine, jsonOut);
+    const capacity = await syncCapacityNotices(engine, jsonOut, result);
     if (jsonOut) {
       emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate),
-        ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId), ...capacity }));
+        ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId),
+        ...(result.tail ? { tail: syncTailJsonFields(result).tail } : {}), ...capacity }));
     }
     return;
   }

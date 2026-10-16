@@ -249,11 +249,12 @@ import { v245 } from './v245-page-search-vector-bounded-timeline.ts';
 import { v246 } from './v246-page-embedding-budget.ts';
 import { v247 } from './v247-page-extraction-state.ts';
 import { v248 } from './v248-segmented-page-storage.ts';
-import { v249 } from './v249-segmented-chunk-gc-index.ts';
-import { v250 } from './v250-page-view-digests.ts';
-import { v251 } from './v251-segment-reader-marks.ts';
-import { v252 } from './v252-page-body-staging-texts.ts';
-import { v253 } from './v253-chunk-retirement-index.ts';
+import { v249 } from './v249-belief-ledger.ts';
+import { v250 } from './v250-segmented-chunk-gc-index.ts';
+import { v251 } from './v251-page-view-digests.ts';
+import { v252 } from './v252-segment-reader-marks.ts';
+import { v253 } from './v253-page-body-staging-texts.ts';
+import { v254 } from './v254-chunk-retirement-index.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -506,4 +507,5 @@ export const MIGRATIONS: Migration[] = [
   v251,
   v252,
   v253,
+  v254,
 ];

@@ -96,6 +96,7 @@ also contain knowledge absent from canonical files and must be backed up.
 | `config` (some keys) | Site-local routing config (e.g. `sync.repo_path`). |
 | Withdrawal ledger and page overlays | Authoritative withdrawal decisions must survive stale imports and owner downtime. Markdown mirrors can lag. |
 | Mutation journal, receipts, outbox, ownership and local registrations | Durable replay identity, publication recovery and authorization cannot be rebuilt from Markdown. |
+| Belief ledger (`belief_events`, `belief_page_lifetimes`, `belief_commit_marks`, `belief_redactions`, `belief_retier_manifest`) | What the brain had recorded, and when. Markdown holds only the current state, so the history cannot be rebuilt from it; a rebuild from Markdown starts a new, empty history. See [BELIEF_LEDGER.md](../designs/BELIEF_LEDGER.md). |
 
 A new derived table that holds user-knowledge MUST land FS-first.
 If you're tempted to add one as "DB-only for now," the structural
@@ -197,6 +198,15 @@ start `unrecorded`; version history is not copied).
   (`local_cli`), else this host's identity (`application`, `host:<id>`), else
   `host:unregistered`: attribution never creates an identity file. No direct
   writer is left unattributed.
+- **Belief ledger on unmanaged brains:** three of these writers record their
+  belief changes as `unmanaged` events when their source has the ledger on
+  (`src/core/belief/projection-point.ts`): the legacy import, the cycle's
+  `extract_facts` fence reconcile and the takes reextract, plus the derived
+  link writers (extract, the remote auto-links effect and attendance repair)
+  on any brain. Every other writer above changes beliefs unrecorded, so an
+  unmanaged source's history is never certified; the drift check in
+  `gbrain doctor` and the cycle's extract phase find those changes and append
+  `reconcile` events.
 
 Agents: treat `NULL` attribution on an unmanaged brain as "written before
 attribution existed, or before `gbrain extract`, meeting timeline extraction
@@ -357,6 +367,14 @@ memory; history, source material and private backups may remain. Editing a fence
 does not erase the withdrawal ledger or promise physical erasure.
 
 ## Disaster recovery
+
+The belief ledger is DB-only (see the exceptions above). The rebuild below
+keeps it, but every fact, take and link it deletes and re-derives is recorded
+as a change by the next `gbrain doctor --fix` or cycle (`reconcile` events,
+and the slugs stay uncertified for that interval), and dropping the database
+loses the history for good. After a database backup restore, replay the
+purges made after the backup (`gbrain doctor --only belief_ledger_coverage`
+names any restore whose replay was partial, unavailable or unverified).
 
 This example is only for a database whose affected facts, takes, links and
 timeline entries have been verified to exist in canonical files. Before running

@@ -169,7 +169,7 @@ test('#5762 recovery journey: a checkpoint timeout with a dropped index is fixed
   const suggestion = result.managedWrite!.suggestion;
   expect(result.managedWrite).toMatchObject({ write_error: 'checkpoint_validation_timeout', detail: 'index_missing' });
   const commands = [...suggestion.matchAll(/gbrain [^—]+?(?= — |$)/g)].map(match => match[0].trim());
-  expect(commands).toEqual(['gbrain repair request-indexes --apply', `gbrain sync --source ${f.id} --no-pull --retry-failed --no-embed --no-extract`]);
+  expect(commands).toEqual(['gbrain repair request-indexes --apply', `gbrain sync --source ${f.id} --no-pull --no-embed --no-extract`]);
   // Command 1: the printed rebuild.
   expect(await runRepair(ctx(), requestIndexesRepair, await resolveRepairScope(engine), { apply: true })).toMatchObject({ applied: 1 });
   // Command 2: the printed retry.

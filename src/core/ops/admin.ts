@@ -14,6 +14,7 @@ import { sanitizeRemoteBody } from '../remote-body.ts';
  */
 
 import type { Operation, OperationContext } from './contract.ts';
+import { opError } from './contract.ts';
 import { enforceClientSlugFence, sourceScopeOpts } from './context.ts';
 import { VERSION } from '../../version.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../search/embedding-column.ts';
@@ -22,6 +23,7 @@ import { LARGE_PAGES_CAPABILITY } from './get-page-body.ts';
 import { isSegmentedPage, pageBodyBytes } from '../page-body/page-shape.ts';
 import { openSegmentedBody } from '../page-body/read-range.ts';
 import { segmentedReadDocument } from '../page-window/segmented.ts';
+import { getVersionsKnownAsOf, KNOWN_AS_OF_PARAM, VERSIONS_DIFF_PARAM } from './known-as-of.ts';
 
 // --- Admin ---
 
@@ -205,6 +207,9 @@ const get_versions: Operation = {
     slug: { type: 'string', required: true, description: 'Slug of the page whose version history to list.' },
     limit: { type: 'number', description: `Return only the newest N versions (a positive integer). Default ${GET_VERSIONS_DEFAULT_LIMIT}; MCP callers are capped at ${GET_VERSIONS_REMOTE_MAX_LIMIT}.` },
     include_body: { type: 'boolean', description: 'true adds compiled_truth and timeline to every version. Default false (metadata only).' },
+    known_as_of: { ...KNOWN_AS_OF_PARAM, description: 'Recorded time: the validity intervals this brain had recorded by this ISO 8601 instant, from the belief ledger. Not as_of, which is valid time (a date).' },
+    diff: VERSIONS_DIFF_PARAM,
+    source_id: { type: 'string', description: 'With known_as_of: the source.', fullSurfaceOnly: true },
   },
   handler: async (ctx, p) => {
     // #5234: the bound and the body projection run in SQL, after the scope and
@@ -213,6 +218,8 @@ const get_versions: Operation = {
     // Large pages: metadata only and the newest 20 by default (100 per MCP
     // call); one probe row past the limit says whether older versions exist.
     const { limit, clampedFrom } = pagingLimit(ctx, 'get_versions', p.limit, GET_VERSIONS_DEFAULT_LIMIT, GET_VERSIONS_REMOTE_MAX_LIMIT);
+    if (p.known_as_of !== undefined) return getVersionsKnownAsOf(ctx, p, limit);
+    if (p.diff !== undefined || p.source_id !== undefined) throw opError('invalid_params', 'get_versions: diff and source_id need known_as_of.', 'Pass known_as_of (an ISO 8601 instant) with them, or drop them for the snapshot list.');
     const opts = { ...(await readPolicyOpts(ctx)), limit: limit + 1 };
     const page = <T>(rows: T[]): T[] => {
       reportVersionPage(ctx, p, { limit, clampedFrom, truncated: rows.length > limit });

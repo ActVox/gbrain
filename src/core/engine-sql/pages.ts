@@ -32,6 +32,7 @@ import type { LegacyUnscopedRead, ScopedRead } from './brands.ts';
 import type { ScopedReadRunner } from './cjk-search.ts';
 import { compileRowNormalizer } from './normalize.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
+import { createPageVersion } from '../page-state/versions.ts';
 import { renderFragment, sqlFragment, trustedSql } from './fragment.ts';
 import { quoteIdentifier, resolveWriteColumnFromConfigRows } from '../search/embedding-column.ts';
 
@@ -1001,9 +1002,13 @@ export async function revertToVersion(
  * The rename statement plus its slug alias and bindings, run on the
  * transaction the engine opened (`exec` is that transaction's executor,
  * `tx` its engine clone). Source-qualified so a rename in source A doesn't
- * sweep up same-slug rows in sources B/C/D.
+ * sweep up same-slug rows in sources B/C/D. The move advances the page's
+ * knowledge revision, so it first versions the page as it stood: page-at-time
+ * (belief ledger W2) reads the body before the rename from that preimage.
  */
 export async function updateSlug(exec: SqlExecutor, tx: BrainEngine, oldSlug: string, newSlug: string, sourceId: string): Promise<number> {
+      const preimage = await tx.readPageSnapshot(oldSlug, { sourceId, includeDeleted: true });
+      if (preimage) await createPageVersion(tx, oldSlug, sourceId, preimage);
       const moved = await exec.executeRaw(
         `UPDATE pages SET slug = $1, updated_at = now() WHERE slug = $2 AND source_id = $3 RETURNING id`,
         [newSlug, oldSlug, sourceId],

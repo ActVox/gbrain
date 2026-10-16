@@ -1,5 +1,7 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 import { suffixedFrontmatterSlugHold } from './persistence/suffixed-slug.ts';
+import { maintenanceBeliefTransaction } from './belief/writers.ts';
+import { withUnmanagedBeliefs } from './belief/projection-point.ts';
 import { maintenanceTransaction, ownerSourceGateInput, suppliedTrustMarkerView, trustMarkerChanged, writeTrustOfGate } from './persistence/attribution.ts';
 import { assertImportBase, sameCanonicalImport, sameContentAnyKeyOrder } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
@@ -36,6 +38,7 @@ import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 import { embedBatchKeepingUsable, embedBatchWithBackoff } from './embed-retry.ts';
 import { isEmbeddingZeroNormError, type EmbeddingZeroNormError } from './ai/embedding-guard.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
+import { addCodeReferenceLinks } from './engine-sql/links.ts';
 import type { ChunkInput, Page, PageInput, PageType } from './types.ts';
 import type { PageSnapshot } from './page-state/types.ts';
 import { pipelined } from './page-state/transactions.ts';
@@ -577,7 +580,7 @@ export async function importFromContent(
     body: { title: parsed.title, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline || '' },
   });
   if (identity.kind === 'move' && !existing && !opts.prepare
-    && await maintenanceTransaction(engine, tx => tx.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' })) > 0) {
+    && await maintenanceBeliefTransaction(engine, { sourceId: sourceId ?? 'default', slugs: [identity.dupSlug, slug], op: 'import_move' }, tx => tx.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' })) > 0) {
     process.stderr.write(
       `[import] ${opts.sourcePath} carries frontmatter.id=${fmIdStr} from moved file ${identity.dupSourcePath}; ` +
       `renamed ${identity.dupSlug} -> ${slug} in source ${sourceId ?? 'default'}.\n`
@@ -831,39 +834,19 @@ export async function importFromContent(
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
     // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
-    // page. addLink throws when either endpoint is missing (master tightened
-    // this in v0.18.x), so we wrap each pair in try/catch — guides imported
-    // before their code repo syncs are common, and the missing edges land
-    // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
+    // page, all in one statement (addCodeReferenceLinks). An edge whose code
+    // page is missing is skipped — guides imported before their code repo
+    // syncs are common, and the missing edges land later via
+    // `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
     const codeRefs = extractCodeRefs(sanitizeRemoteBody(parsed.compiled_truth) + '\n' + sanitizeRemoteBody(parsed.timeline || ''));
     // For doc↔impl edges, both endpoints are within the same source as the
     // markdown page being imported. Cross-source edges (markdown in one
-    // source, code in another) currently fail with "page not found" — a
-    // faster failure mode than the pre-fix cross-product fan-out, which
-    // silently wired edges to whichever same-slug page Postgres returned
-    // first across sources.
-    const linkOpts = sourceId
-      ? { fromSourceId: sourceId, toSourceId: sourceId, originSourceId: sourceId }
-      : undefined;
-    for (const ref of codeRefs) {
-      const codeSlug = slugifyCodePath(ref.path);
-      // Forward: markdown guide → code page (this guide documents that code)
-      try {
-        await tx.transaction(savepoint => savepoint.addLink(
-          slug, codeSlug,
-          ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
-          'documents', 'markdown', slug, 'compiled_truth',
-          linkOpts,
-        ));
-      } catch { /* code page not yet imported — reconcile-links will catch it */ }
-      // Reverse: code page → markdown guide (this code is documented by the guide)
-      try {
-        await tx.transaction(savepoint => savepoint.addLink(
-          codeSlug, slug,
-          ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
-          linkOpts,
-        ));
-      } catch { /* same reason — silent skip */ }
+    // source, code in another) are skipped as missing — never the pre-fix
+    // cross-product fan-out, which silently wired edges to whichever
+    // same-slug page Postgres returned first across sources.
+    if (codeRefs.length) {
+      await tx.transaction(savepoint => addCodeReferenceLinks(savepoint, slug, sourceId || 'default',
+        codeRefs.map(ref => ({ codeSlug: slugifyCodePath(ref.path), path: ref.path, line: ref.line })))).catch(() => undefined);
     }
     if (!opts.coordinated) await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
     await opts.beforeCommit?.(tx, slug);
@@ -883,7 +866,7 @@ export async function importFromContent(
     validate: tx => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
     apply: applyPrepared, ...(segmented ? { afterCommit: async (target: BrainEngine) => { await segmented.afterCommit(target); }, segmented } : {}),
   });
-  await maintenanceTransaction(engine, applyPrepared, writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
+  await withUnmanagedBeliefs(engine, txOpts.sourceId, [slug], 'import', run => maintenanceTransaction(engine, tx => run(tx, () => applyPrepared(tx)), writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
     await abortSegmentedStaging(engine, segmented?.prepared);
     // #4287: name the dimension-mismatch rollback instead of letting the bare
     // pgvector message ("expected N dimensions, not M") surface with no code,
@@ -899,7 +882,7 @@ export async function importFromContent(
       } catch { /* keep the plane-agnostic wording */ }
     }
     throw decorateEmbeddingDimError(err, slug, activeColName);
-  });
+  }));
   const searchable = await segmented?.afterCommit(engine);
 
 

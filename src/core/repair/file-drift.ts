@@ -1,5 +1,5 @@
 /**
- * `gbrain repair file-drift --source <id> (--slug <s>... | --request <id>... | --all-drifted [--class <c>]) --prefer file|database`
+ * `gbrain repair file-drift --source <id> (--slug <s>... | --request <id>... | --all-drifted [--class <c>] [--since <ISO|7d>]) --prefer file|database`
  * (#6643 B2): resolve pages whose canonical file differs from their database row
  * (the `source_changed` / `file_database_drift` refusal) through canonical
  * reconciliation, preferring one side.
@@ -31,7 +31,9 @@
  * segments; `path-glob.ts`, file-drift being the only kind that takes globs),
  * narrow the selection before the class check, the bound and any preview
  * work; they are part of the selection digest (so of the plan hash) and of
- * every printed preview and apply command. Trusted local CLI only.
+ * every printed preview and apply command. #6712 PR 2: `--since` keeps the pages whose newest
+ * drift conflict is at or after one concrete instant (the CLI resolves an age once, `since.ts`), part of
+ * the selection digest and of every printed command. Trusted local CLI only.
  */
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -72,7 +74,7 @@ const artifactDirectory = () => join(canonicalFilesystemPath(configDir()), 'repa
 const escapePointer = (key: string) => key.replace(/~/g, '~0').replace(/\//g, '~1');
 
 function previewCommand(sourceId: string, opts: RepairPlanOptions): string {
-  const select = opts.allDrifted ? ` --all-drifted${opts.driftClass ? ` --class ${opts.driftClass}` : ''}`
+  const select = opts.allDrifted ? ` --all-drifted${opts.driftClass ? ` --class ${opts.driftClass}` : ''}${opts.since ? ` --since ${opts.since}` : ''}`
     : [...(opts.slugs ?? []).map(slug => ` --slug ${slug}`), ...(opts.requests ?? []).map(id => ` --request ${id}`)].join('');
   const globs = [...(opts.only ?? []).flatMap(glob => ['--only', glob]), ...(opts.skip ?? []).flatMap(glob => ['--skip', glob])];
   return `gbrain repair file-drift --source ${sourceId}${select}${globs.length ? ` ${shellQuote(globs)}` : ''} --prefer ${opts.prefer ?? '<file|database>'}`;
@@ -82,6 +84,9 @@ function previewCommand(sourceId: string, opts: RepairPlanOptions): string {
 const selectedByGlobs = (path: string | undefined, opts: Pick<RepairPlanOptions, 'only' | 'skip'>) =>
   path === undefined ? !opts.only?.length && !opts.skip?.length
     : (!opts.only?.length || matchesRepairPath(path, opts.only)) && !matchesRepairPath(path, opts.skip);
+
+/** #6712 PR 2: whether a page's newest drift conflict (`last_seen`) is at or after `--since` (no `--since`: every page). */
+const sinceSelects = (lastSeen: string, since: string | undefined) => !since || Date.parse(lastSeen) >= Date.parse(since);
 
 /** The reconcile decisions that make the preferred side win every field reconcile lets a decision choose. */
 export function preferSideDecisions(file: ParsedPage, database: ParsedPage, prefer: DriftSide): ReconcileDecision[] {
@@ -169,7 +174,7 @@ async function selectSlugs(engine: BrainEngine, sourceId: string, opts: RepairPl
       const page = await auditDriftConflicts(engine, sourceId, { trusted: true, excludePrivate: false }, { limit: 100, cursor });
       for (const row of page.conflicts) {
         if (row.still_present.value !== true) continue;
-        if (!selectedByGlobs(row.path, opts)) { notSelected++; continue; }
+        if (!selectedByGlobs(row.path, opts) || !sinceSelects(row.last_seen, opts.since)) { notSelected++; continue; }
         drifted.push(row.slug); classes.set(row.slug, row.class ?? 'error');
       }
       cursor = page.next ?? undefined;
@@ -200,13 +205,14 @@ async function selectSlugs(engine: BrainEngine, sourceId: string, opts: RepairPl
 
 function validateOptions(scope: RepairScope, opts: RepairPlanOptions | undefined): asserts opts is RepairPlanOptions & { prefer: DriftSide } {
   if (opts?.remote !== false) throw trustedCliRequired('gbrain repair file-drift runs only for the trusted local CLI on the brain host.');
-  const usage = 'gbrain repair file-drift --source <id> (--slug <slug>... | --request <id>... | --all-drifted [--class <name>]) [--only <glob>]... [--skip <glob>]... --prefer file|database';
+  const usage = 'gbrain repair file-drift --source <id> (--slug <slug>... | --request <id>... | --all-drifted [--class <name>] [--since <ISO-8601|7d>]) [--only <glob>]... [--skip <glob>]... --prefer file|database';
   if (scope.source_ids.length !== 1) throw opError('invalid_params', 'gbrain repair file-drift needs exactly one --source.', `Name the source: ${usage}`);
   if (opts.prefer !== 'file' && opts.prefer !== 'database') throw opError('invalid_params', 'gbrain repair file-drift needs --prefer file or --prefer database.',
     `Choose the side whose content wins (protected metadata, tags union, protected takes and private facts are kept either way): ${usage}`);
   const modes = [opts.slugs?.length ? 1 : 0, opts.requests?.length ? 1 : 0, opts.allDrifted ? 1 : 0].reduce((a, b) => a + b, 0);
   if (modes !== 1) throw opError('invalid_params', 'Select pages one way: --slug, --request or --all-drifted.', `Pick one selection: ${usage}`);
   if (opts.driftClass && !opts.allDrifted) throw opError('invalid_params', '--class only narrows --all-drifted.', `Drop --class, or use it with --all-drifted: ${usage}`);
+  if (opts.since && !opts.allDrifted) throw opError('invalid_params', '--since only narrows --all-drifted.', `Drop --since, or use it with --all-drifted: ${usage}`);
   if (opts.driftClass && !(DRIFT_CLASSES as readonly string[]).includes(opts.driftClass)) throw opError('invalid_params', `Unknown drift class '${opts.driftClass}'.`,
     `Pass one of ${DRIFT_CLASSES.join(', ')}; the conflict audit lists each drifted page's class.`);
   for (const slug of opts.slugs ?? []) {
@@ -227,7 +233,7 @@ function validateOptions(scope: RepairScope, opts: RepairPlanOptions | undefined
  * The bare `gbrain repair file-drift` (the explicit-only preview command doctor and `repair --all` print): a read-only
  * survey of the drifted pages per source with their drift class and the preview command for each class. Nothing to apply.
  */
-async function survey(engine: BrainEngine, scope: RepairScope): Promise<RepairPlan> {
+async function survey(engine: BrainEngine, scope: RepairScope, opts: Pick<RepairPlanOptions, 'since'>): Promise<RepairPlan> {
   const listing: NonNullable<RepairPlan['listing']> = [];
   const residuals: Record<string, number> = {};
   const next: string[] = [];
@@ -238,7 +244,7 @@ async function survey(engine: BrainEngine, scope: RepairScope): Promise<RepairPl
     do {
       const page = await auditDriftConflicts(engine, sourceId, { trusted: true, excludePrivate: false }, { limit: 100, cursor });
       for (const row of page.conflicts) {
-        if (row.still_present.value !== true) continue;
+        if (row.still_present.value !== true || !sinceSelects(row.last_seen, opts.since)) continue;
         const kind = row.class ?? 'error';
         counts.set(kind, (counts.get(kind) ?? 0) + 1);
         residuals[`drifted_${kind}`] = (residuals[`drifted_${kind}`] ?? 0) + 1;
@@ -247,7 +253,7 @@ async function survey(engine: BrainEngine, scope: RepairScope): Promise<RepairPl
       seen += page.conflicts.length;
       cursor = page.next ?? undefined;
     } while (cursor && seen < ALL_DRIFTED_LIMIT);
-    for (const kind of counts.keys()) next.push(previewCommand(sourceId, { apply: false, allDrifted: true, driftClass: kind, prefer: 'file' }));
+    for (const kind of counts.keys()) next.push(previewCommand(sourceId, { apply: false, allDrifted: true, driftClass: kind, ...(opts.since ? { since: opts.since } : {}), prefer: 'file' }));
   }
   return { items: [], residuals, listing, details: { survey: true,
     next_actions: next.length ? [...next.map(command => `Preview: ${command} (or --prefer database)`), 'Or preview single pages with --slug <slug>.'] : [] } };
@@ -283,14 +289,14 @@ export const fileDriftRepair: RepairHandler = {
   kind: 'file-drift',
   outcomeItemsLimit: 1000,
   async plan(engine, scope, after, opts): Promise<RepairPlan> {
-    if (opts?.remote === false && !opts.apply && !opts.prefer && !opts.slugs?.length && !opts.requests?.length && !opts.allDrifted && !opts.driftClass) return survey(engine, scope);
+    if (opts?.remote === false && !opts.apply && !opts.prefer && !opts.slugs?.length && !opts.requests?.length && !opts.allDrifted && !opts.driftClass) return survey(engine, scope, opts);
     validateOptions(scope, opts);
     const sourceId = scope.source_ids[0]!;
     const command = previewCommand(sourceId, opts);
     const only = [...new Set(opts.only ?? [])].sort();
     const skip = [...new Set(opts.skip ?? [])].sort();
     const selection = digest({ prefer: opts.prefer, slugs: opts.slugs ?? [], requests: opts.requests ?? [], all: opts.allDrifted === true, class: opts.driftClass ?? null,
-      ...(only.length ? { only } : {}), ...(skip.length ? { skip } : {}) });
+      ...(opts.since ? { since: opts.since } : {}), ...(only.length ? { only } : {}), ...(skip.length ? { skip } : {}) });
     if (opts.apply) {
       if (!opts.expect) throw new OperationError('invalid_params', 'gbrain repair file-drift --apply applies only the set a preview printed.',
         `Preview first: ${command} — then run the apply command it prints with --expect <preview-hash>.`, 'docs/guides/repair.md#explicit-only-repair-kinds');

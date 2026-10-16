@@ -446,7 +446,7 @@ test.each([false, true])('managed terminal receipts survive a missing ledger and
       expect(recorded[0].error).toContain(id);
       expect(recorded[0].error).toContain('source_changed');
       expect((await engine.executeRaw<{ last_commit: string }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
-      writeFileSync(path, pinned);
+      // #6712 PR 3 (L7): while the file keeps the bytes that refused, every sync replays the receipt; the fix below retries it.
       rmSync(syncFailuresPath(), { force: true });
       const replay = await performManagedSync(engine, opts);
       expect(replay.managedWrite?.write_request).toEqual(blocked.managedWrite!.write_request);
@@ -458,6 +458,7 @@ test.each([false, true])('managed terminal receipts survive a missing ledger and
           write_request: { request_id: id, state: 'conflict' } } });
       });
       await expect(performManagedSync(engine, { ...opts, skipFailed: true })).rejects.toMatchObject({ code: 'managed_sync_flag_refused', detail: '--skip-failed' });
+      writeFileSync(path, pinned);
       const corrected = await performManagedSync(engine, { ...opts, retryFailed: true });
       expect(corrected.status).toBe('synced');
       expect(loadSyncFailures().filter(row => row.source_id === f.id)).toHaveLength(0);
