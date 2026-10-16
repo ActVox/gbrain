@@ -923,7 +923,8 @@ from outside the home source renders as `slug` (source <id>) in `text`, and
 its newer-mention continuation names the source. Each card's activation
 verdict, newer mentions, records and `page_status` come from its own source,
 never from a same-slug page in another source, and cards are deduplicated by
-`(source_id, slug)`.
+`(source_id, slug)`. `pinned_questions` carries a published pin only when its
+source and `scope_entity` match an accepted card's `(source_id, slug)`.
 
 #### context_pack entity_facts (additive)
 
