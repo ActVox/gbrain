@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 247,
+    "count": 248,
     "gaps": [
       17,
       18,
@@ -12,6 +12,7 @@
       "BOUNDED_TIMELINE_CHECKPOINT": "385c4da3e28732343148795d6e9a86670813a7a7cfa1e52f8a5bb494680a3c0d",
       "CHECKPOINT": "3c6ff909363c4ba1c9d730e748654ab90aa07549ddf4bf36b8f93c5f4ea3680b",
       "CONTENT_CHUNKS_GENERATION_INDEX": "c434b3a4acdad499cf3b9f170d9f9967b8e3e8218c829db99f3ecba3b53c8b5d",
+      "CONTENT_CHUNKS_OCCURRENCE_GENERATION_INDEX": "b4f73db97ad878ef7256128ddef83fd11e2e08fd215e389d9e921a0daf04853d",
       "CONTENT_CHUNKS_OCCURRENCE_INDEX": "7b692ba777b30399ab5a3b100eb40b3b9d1b3fb2322dc4dc808ba8a4d667912c",
       "FACT_PURGES_ALL_SUBJECTS_INDEX": "99e2eb6c24134b539cb4cfd6e5ff66a724463525d09e9ba1fdde3c13f5787b6c",
       "FACT_PURGES_SUBJECT_INDEX": "f4fba07082f2e26da3fa51b0b689f3fe78a3d09afd20c1924dbc2fbe6b1560f1",
@@ -59,7 +60,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 252,
+    "latest": 253,
     "records": [
       {
         "handler": {
@@ -3871,6 +3872,29 @@
         "transaction": "absent",
         "verify": "absent",
         "version": 252
+      },
+      {
+        "handler": {
+          "form": "arrow",
+          "helpers": [
+            "CONTENT_CHUNKS_OCCURRENCE_GENERATION_INDEX",
+            "buildIndexOnline",
+            "dropInvalidConcurrentIndex",
+            "migrationNotice",
+            "quietMigrationNotices"
+          ],
+          "sha256": "9e2d0b4acff7a58c986f569e842abbb4272f34dd39721cf557cb223342b2c81d"
+        },
+        "idempotent": true,
+        "name": "chunk_retirement_index",
+        "sql": {
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "sqlFor": "absent",
+        "transaction": false,
+        "verify": "absent",
+        "version": 253
       }
     ],
     "versions": [
@@ -4120,7 +4144,8 @@
       249,
       250,
       251,
-      252
+      252,
+      253
     ]
   },
   "normalizer": "migrations-record-v1"
