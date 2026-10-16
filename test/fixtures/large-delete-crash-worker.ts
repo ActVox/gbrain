@@ -1,5 +1,5 @@
 /**
- * Child process for test/large-pages/segmented-delete-crash.serial.test.ts: one managed source whose page over the
+ * Child process for test/large-pages/segmented-delete-crash.slow.test.ts: one managed source whose page over the
  * single-string ceiling has a canonical file, a soft delete stopped (for SIGKILL) at a publication seam, and the
  * owner's recovery pass, stopped at a restoration seam or run to the end. Prints one JSON line per step.
  */
