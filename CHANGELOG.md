@@ -10,6 +10,38 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.254.0] - 2026-10-16
+
+**Accepting an agent's strike-through on a take you confirmed no longer deletes the take, and a repair brings back takes the last release deleted that way.** In v0.60.253.0, when an agent struck through a take you had confirmed, or changed its kind, gbrain held the change for you. Accepting it with `gbrain trust confirm` removed the whole take from the page and from search, instead of striking it through. This release applies exactly the change you accepted. If you accepted one of these on v0.60.253.0, one command finds and restores those takes from the page's own history.
+
+### How to check and repair
+
+```bash
+gbrain repair accepted-takes                                  # lists every take the records prove was removed this way; writes nothing
+gbrain repair accepted-takes --apply --expect <preview-hash>  # restores exactly that list
+```
+
+### What you'd see
+
+| Situation | v0.60.253.0 | Now |
+|---|---|---|
+| You accept an agent's strike-through of a confirmed take | the take was deleted from the page and the index | the take is struck through, as the agent wrote it |
+| You accept an agent's kind or holder change to a confirmed take | the take was deleted | the take gets the new kind or holder |
+| The take had a grade in its fence | the accept refused; nothing was lost | unchanged |
+| You accept a held change on a page stored in segments | refused with `page_body_segmented` | applied, as on any page |
+
+### Things to watch
+
+- **Only takes accepted on v0.60.253.0 can be affected,** and only a strike-through or a same-claim kind or holder change. A sync or a later publish does not bring them back: the page no longer carries the row, so run the repair.
+- **What the repair cannot restore:** a grade or resolution stored only in the database (none of the records hold it), the take's id and its embedding (re-embedded). The restored take carries the trust tier of the write you accepted, which is what a correct accept leaves.
+- A removal you asked for with `takes_remove` still refuses on a page stored in segments, as every takes command does.
+
+### Itemized changes
+
+- `src/core/trust/held-removals.ts`: only a proposal filed by `takes_remove` reruns as an owner `takes_remove`; every other held take change applies the page's fence row. A segmented page within the single-string ceiling is read from its segments (`materializeSegmentedBody`).
+- `src/core/repair/accepted-takes.ts` (new): `gbrain repair accepted-takes`, explicit-only and preview-bound. Evidence per take: the accepted `forget` proposal, the `takes_remove` receipt with its `trust_accept`, the page version that receipt archived and the live reservation row.
+- Tests: `test/trust-held-removals.test.ts` adds the strike-through and kind-change accept, the segmented-page accept and the repair (managed and unmanaged), on PGLite and Postgres.
+
 ## [0.60.253.0] - 2026-10-15
 
 **A note an agent writes can no longer quietly erase a take or timeline entry you confirmed. And when something an agent derived from is downgraded, everything derived from it is downgraded too.** Until now, an agent rewriting a page could drop or reword a take you had confirmed, or a dated timeline line, and the stored row went with it. The same happened when the takes cleanup or the timeline cleanup decided a row was gone. Now the row stays exactly as it was, and you get a proposal to approve or dismiss. Separately, when a page or fact loses trust (an agent edited it, or you lowered it), the facts, takes and pages computed from it now drop to match. Raising trust never lifts them back up on its own.
