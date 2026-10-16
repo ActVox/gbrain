@@ -176,13 +176,13 @@ describe('#6741 C: the managed purge spends no request ids it cannot use', () =>
 });
 
 describe('#6741 C: background admissions refuse before any receipt against a worktree in recovery', () => {
-  test('a background put_page is refused recovery_required and takes no request id', async () => {
+  test('a background put_page is refused owner_unavailable with the owner-status read fix and takes no request id', async () => {
     await setWorktree('recovering');
     const before = await lifetimeIds();
     const requests = (await engine.executeRaw('SELECT 1 FROM persistence_requests')).length;
     await expect(withEnv(env(), () => submitPageMutation(ctxFor('background'), { operation: 'put_page',
       params: { slug: 'notes/background', content: '---\ntitle: Background\ntype: note\n---\nMaintenance output.', request_id: randomUUID() } })))
-      .rejects.toMatchObject({ code: 'recovery_required' });
+      .rejects.toMatchObject({ code: 'owner_unavailable', fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', SOURCE, '--json'] } });
     expect(await lifetimeIds()).toBe(before);
     expect((await engine.executeRaw('SELECT 1 FROM persistence_requests')).length).toBe(requests);
   }, 120_000);

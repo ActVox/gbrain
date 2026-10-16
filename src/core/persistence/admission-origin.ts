@@ -16,13 +16,13 @@
  * background admission refuses `write_capacity_backpressure` before any
  * receipt exists, so the rest stays free for interactive writes. #6741 C: a
  * background admission bound to a worktree in recovery refuses
- * `recovery_required` the same way (backgroundWorktreeInactive), so a producer
+ * `owner_unavailable` the same way (backgroundWorktreeInactive), so a producer
  * retrying against it burns no permanent request ids. A draining (paused)
  * owner still admits: its receipts stay pending and its restart replays them.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { opError, type OperationError } from '../ops/contract.ts';
-import { readFix } from '../ops/op-fix.ts';
+import type { Action } from '../agent-output.ts';
 import type { SqlEngine } from './model.ts';
 import { CAPACITY_VERIFY } from './capacity-verify.ts';
 
@@ -79,10 +79,12 @@ export function backgroundPaused(scopeKey: string, resource: 'lifetime_ids' | 't
         verify: CAPACITY_VERIFY, docs: 'docs/guides/concurrent-writes.md#quota-near-exhaustion' } });
 }
 
-/** #6741 C: the refusal of a background admission to a worktree in recovery; nothing was submitted and no request id was used. */
-export function backgroundWorktreeInactive(sourceId: string, state: string): OperationError {
-  return opError('recovery_required', `Background writes to source ${sourceId} are paused: its worktree is ${state}.`,
-    `Nothing was submitted and no request id was used. Background work for source ${sourceId} resumes once its writer is active again; gbrain sources writer status --source ${sourceId} shows what it is waiting on.`,
-    { fix: readFix(`Shows source ${sourceId}'s worktree state and the recovery it is waiting on, read-only.`,
-      { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] }) });
+/**
+ * #6741 C: the refusal of a background admission to a worktree in recovery; nothing was submitted and no request id
+ * was used. `owner_unavailable` with the owner-status read fix, as facts-maintenance refuses a non-active fact writer.
+ */
+export function backgroundWorktreeInactive(sourceId: string, state: string, ownerStatusFix: Action): OperationError {
+  return opError('owner_unavailable', `Background writes to source ${sourceId} are paused: its worktree is ${state}.`,
+    `Nothing was submitted and no request id was used. Background work for source ${sourceId} resumes once its writer is active again; writer status shows what it is waiting on.`,
+    { fix: ownerStatusFix });
 }
