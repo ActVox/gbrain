@@ -566,8 +566,11 @@ async function assembleCard(
     // belongs to this card when its counterparty page is THIS (source, slug):
     // a Gmail-source loop whose person page lives in `default` shows on the
     // default card, a pre-v236 row (NULL counterparty source) on its own
-    // source's card (#5504).
-    const loopRows = await engine.executeRaw<{
+    // source's card (#5504). Loops carry no visibility or grant of their own
+    // (summaries derive from private mail, often another source), so a
+    // world-only card never reads them; open_loops serves remote callers
+    // inside their grant.
+    const loopRows = remote ? [] : await engine.executeRaw<{
       id: number;
       loop_type: string;
       summary: string;

@@ -10,6 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.267.0] - 2026-10-16
+
+**Security: remote entity cards and context packs no longer carry open loops.** Since v0.47.0.0, an `entity` card built for a remote caller (any MCP client, stdio or HTTP) listed the open loops whose counterparty is that entity: the loop summary, its due date and its `loop_id`. Loop rows have no visibility or source grant of their own, so the card showed them even when the loop's commitment fact was private, and since v0.60.167.0 (#5504) also when the loop lives in a source outside the caller's grant, such as a connected Google source. `context_pack` and `delta` build their threads from the same card, so they carried the same loops. Remote cards now skip loop-backed threads; their fact and timeline threads are unchanged.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote `entity`, `context_pack` or `delta` call for a person with open loops | `open_threads` listed each loop's summary, `due` and `loop_id`, whatever the loop's source | no loop-backed threads; eligible commitment facts and recent timeline events still appear |
+| A remote client needs its open loops | the card | `open_loops`, which reads only loops in sources the client is granted |
+| `gbrain entity <name>` on the brain host | loops on the card | unchanged |
+| `context_pack` / `delta` from the trusted local CLI | loops on the cards | loops only with `include_private`, the same switch that adds private facts (loop summaries come from private mail) |
+| Remote `open_loops` grouped by counterparty | groups were ranked partly by backlink counts that included pages outside the caller's grant | remote ranking leaves backlinks out; the trusted local CLI still uses them |
+
+### If you share brain access
+
+A brain without open loops (no Google source and no extracted commitments), or whose MCP clients are all your own agents, needs nothing. If you granted MCP read access to a client that should not see your mail-derived loops, run `gbrain auth clients --usage --days 60` on the brain host to see which clients called `entity`, `context_pack` or `delta` (stdio use is not logged), and revoke or rescope any you no longer trust (`gbrain auth revoke-client <client_id>`). No credentials were exposed, so no rotation is needed for this fix.
+
+### Itemized changes
+
+- `src/core/verbs/entity-card.ts`: a world-only card (`remote: true`) no longer reads `open_loops`.
+- `src/core/ops/loops.ts`: `open_loops` computes the backlink ranking boost for trusted local callers only.
+- Test: `test/entity-card-remote-loops.test.ts` drives the real `entity`, `context_pack`, `delta` and `open_loops` handlers with `remote: true` (fails on v0.60.266.0).
+- Docs: `docs/protocol/MEMORY_VERBS_v1.md` and `docs/guides/open-loops.md` say who gets loop-backed threads.
+
 ## [0.60.266.0] - 2026-10-16
 
 **Managed sync tells the truth about where it stands, and every held file has a way out (#6712 PR 2).** A managed `gbrain sync` returns `synced` the moment its checkpoint commits: link extraction and planner statistics run after the drain lease is released, and a crash between the two is made up by the next sync. `gbrain sync status` stays fast on large brains and never reads a timed-out probe as "nothing pending". Each of the 14 hold codes now leads an agent to a cleared hold or to one decision sentence for the user, and a hold asks a person only after its safe action failed three times over at least a day. Every `gbrain sync` flag lives in one table, and the `sync.*` config keys are split into tunables, rollback keys and retired keys (five retired keys become `GBRAIN_SYNC_*` environment variables, and doctor names any stored value that stopped applying).
