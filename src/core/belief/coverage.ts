@@ -79,6 +79,7 @@ async function pendingSlugs(engine: BrainEngine, sourceId: string, runId: string
   const rows = await engine.executeRaw<{ slug: string }>(`SELECT slug FROM (
       SELECT p.slug FROM pages p WHERE p.source_id = $1
       UNION SELECT f.entity_slug FROM facts f WHERE f.source_id = $1 AND f.source_markdown_slug IS NULL AND f.expired_at IS NULL AND f.entity_slug IS NOT NULL
+      UNION SELECT f.source_markdown_slug FROM facts f WHERE f.source_id = $1 AND f.dimension IS NOT NULL AND f.row_num IS NULL AND f.expired_at IS NULL AND f.source_markdown_slug IS NOT NULL
     ) s WHERE s.slug > $3 AND NOT EXISTS (SELECT 1 FROM belief_events e WHERE e.source_id = $1 AND e.slug = s.slug AND e.event_type = 'baseline' AND e.cause->>'run' = $2)
     ORDER BY s.slug LIMIT ${BASELINE_BATCH}`, [sourceId, runId, after]);
   return rows.map(r => r.slug);

@@ -35,6 +35,8 @@ import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { withTrustKeep } from '../persistence/context.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
+import { noteBelief } from '../belief/ledger.ts';
+import { beliefStreamSlugs, lockedBeliefBatch } from '../belief/writers.ts';
 
 export const DECIDE_PROPOSAL_OPERATION = 'decide_proposal';
 
@@ -171,6 +173,7 @@ async function expireOld(tx: BrainEngine, proposal: PairProposal): Promise<void>
       WHERE id = $1 AND source_id = $2 AND expired_at IS NULL RETURNING id`,
     [proposal.old_fact_id, proposal.source_id, proposal.new_fact_id]);
   if (rows.length !== 1) throw new ProposalConflictError('the old fact changed during accept');
+  noteBelief({ kind: 'superseded', oldId: proposal.old_fact_id, newId: proposal.new_fact_id });
 }
 
 /** Record the after state (read back inside the transaction) and move the proposal to accepted. */
@@ -200,6 +203,12 @@ function parseStates(p: PairProposal): { before: SupersedeState; after: Supersed
 // ---------------------------------------------------------------------------
 // Unmanaged path
 // ---------------------------------------------------------------------------
+
+/** W1 #6783 §6.4: an unmanaged accept or undo runs in a belief batch over both facts' streams (the managed path's publication has its own). */
+async function recordedPair(tx: BrainEngine, proposal: PairProposal, action: ProposalAction, fn: () => Promise<void>): Promise<void> {
+  const slugs = await beliefStreamSlugs(tx, 'facts', [proposal.old_fact_id, proposal.new_fact_id]);
+  await lockedBeliefBatch(tx, { sourceId: proposal.source_id, slugs, op: DECIDE_PROPOSAL_OPERATION, remote: false, cause: { proposal: proposal.id, action } }, fn);
+}
 
 function publishFile(filePath: string, body: string): void {
   const tmp = `${filePath}.tmp`;
@@ -254,12 +263,12 @@ async function acceptUnmanaged(engine: BrainEngine, proposal: PairProposal, stor
     let published = false;
     try {
       // The strike edits a managed fence without authoring the page: it keeps its trust tier (#5575 ENG-1).
-      await maintenanceTransaction(engine, (tx) => withTrustKeep(tx, ['pages'], async () => {
+      await maintenanceTransaction(engine, (tx) => withTrustKeep(tx, ['pages'], async () => recordedPair(tx, fresh, 'accept', async () => {
         const revision = plan ? await mirrorBody(tx, slug!, fresh.source_id, plan.body, fileBody !== null) : null;
         await expireOld(tx, fresh);
         await finishAccept(tx, fresh, before, plan ? fence(plan.after, revision) : null, store);
         if (plan && fileBody !== null) { publishFile(filePath!, plan.body); published = true; }
-      }));
+      })));
     } catch (err) {
       if (published) writeFileSync(filePath!, fileBody!, 'utf-8');
       throw err;
@@ -291,11 +300,11 @@ async function undoUnmanaged(engine: BrainEngine, proposal: PairProposal, store:
     }
     let published = false;
     try {
-      await maintenanceTransaction(engine, (tx) => withTrustKeep(tx, ['pages'], async () => {
+      await maintenanceTransaction(engine, (tx) => withTrustKeep(tx, ['pages'], async () => recordedPair(tx, fresh, 'undo', async () => {
         if (plan) await mirrorBody(tx, before.fence!.slug, fresh.source_id, plan.body, fileBody !== null);
         await applyUndoDb(tx, fresh, before, after, store);
         if (plan && fileBody !== null) { publishFile(filePath!, plan.body); published = true; }
-      }));
+      })));
     } catch (err) {
       if (published) writeFileSync(filePath!, fileBody!, 'utf-8');
       throw err;
@@ -328,6 +337,9 @@ export async function prepareProposalMutation(engine: BrainEngine, row: WriteReq
   if (!proposal || proposal.source_id !== row.source_id) return done({ id, action, status: 'refused', reason: 'not_found' });
   if (proposal.status !== (action === 'accept' ? 'pending' : 'accepted')) return done({ id, action, status: 'refused', reason: proposal.status });
   const [oldF, newF] = await Promise.all([loadPairFact(engine, proposal.old_fact_id), loadPairFact(engine, proposal.new_fact_id)]);
+  // The belief ledger records the new fact's tier change in its own stream, so that page key is held too.
+  const newStream = newF?.source_markdown_slug ?? newF?.entity_slug ?? null;
+  const pairKeys = newStream && newStream !== row.slug ? { additionalPageKeys: [{ sourceId: row.source_id, slug: newStream }] } : {};
   const unchanged = async (tx: BrainEngine) => {
     const current = await store.get(tx, id, true);
     const [o, n] = await Promise.all([loadPairFact(tx, proposal.old_fact_id, true), loadPairFact(tx, proposal.new_fact_id, true)]);
@@ -357,7 +369,7 @@ export async function prepareProposalMutation(engine: BrainEngine, row: WriteReq
     const page = plan ? await pageFor(plan.body) : undefined;
     const fence = (r: ParsedFact, revision: string | null): FenceState => ({ slug: row.slug, row_num: oldF!.row_num!, row: r, page_revision: revision, file: page?.file !== undefined });
     const before: SupersedeState = { old: factFields(oldF!), new: factFields(newF!), fence: plan ? fence(plan.before, observedRevision) : null };
-    return { observedRevision, file: page?.file, validate: async (tx) => { await unchanged(tx); await page?.validate?.(tx); }, apply: async (tx) => {
+    return { observedRevision, file: page?.file, ...pairKeys, validate: async (tx) => { await unchanged(tx); await page?.validate?.(tx); }, apply: async (tx) => {
       // The page projection re-stamps the struck row's expiry from the fence, so the after state is read once it ran.
       await expireOld(tx, proposal);
       await page?.apply(tx);
@@ -377,7 +389,7 @@ export async function prepareProposalMutation(engine: BrainEngine, row: WriteReq
     if (planned === 'changed') return done({ id, action, status: 'refused', reason: 'fence_changed' });
     page = await pageFor(planned.body);
   }
-  return { observedRevision, file: page?.file, validate: async (tx) => { await unchanged(tx); await page?.validate?.(tx); }, apply: async (tx) => {
+  return { observedRevision, file: page?.file, ...pairKeys, validate: async (tx) => { await unchanged(tx); await page?.validate?.(tx); }, apply: async (tx) => {
     await page?.apply(tx);
     await applyUndoDb(tx, proposal, before, after, store);
     return { id, action, status: 'undone' };

@@ -44,6 +44,8 @@ import {
 } from './proposals.ts';
 import { compareTrust, effectiveWriteTrust, storedTrustTier, type TrustTier, type WriteTrust } from './tier.ts';
 import { propagateTierLowering } from './propagation.ts';
+import { beliefStreamSlugs, lockedBeliefBatch } from '../belief/writers.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 
 /** The journaled operation that publishes an owner page action on a managed brain. */
 export const TRUST_OWNER_PAGE_OPERATION = 'trust_owner_page';
@@ -128,7 +130,9 @@ export async function setRowTier(engine: BrainEngine, input: {
 }): Promise<boolean> {
   const attribution = await attributionFor(engine, input.by);
   const enabled = await managed(engine);
-  return engine.transaction(async tx => {
+  const publicationId = randomUUID();
+  const report = { appended: 0 };
+  const changed = await engine.transaction(async tx => {
     const run = async () => {
       if (input.expect && !(await input.expect(tx))) return false;
       const [prior] = await tx.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM ${input.table} WHERE id = $1`, [input.id]);
@@ -144,8 +148,14 @@ export async function setRowTier(engine: BrainEngine, input: {
       await input.also?.(tx);
       return true;
     };
-    return enabled ? withCoordinatedWrite(tx, [input.sourceId], run, attribution) : withWriteAttribution(tx, attribution, run);
+    // W1 #6783 §6.4: the tier change is recorded as trust.retiered in the row's stream, under its page key.
+    const slugs = await beliefStreamSlugs(tx, input.table, [input.id]);
+    const recorded = () => lockedBeliefBatch(tx, { sourceId: input.sourceId, slugs, publicationId, op: 'trust_set_tier', report,
+      cause: { owner_decision: { tier: input.tier, ...input.note } } }, run);
+    return enabled ? withCoordinatedWrite(tx, [input.sourceId], recorded, attribution) : withWriteAttribution(tx, attribution, recorded);
   });
+  if (report.appended) await markBeliefCommits(engine, [publicationId]).catch(() => undefined);
+  return changed;
 }
 
 export interface PageActionInput {
