@@ -257,11 +257,10 @@ export async function readRestorePurgeReplay(engine: Pick<BrainEngine, 'executeR
 }
 
 /**
- * Postgres restores happen outside gbrain: `gbrain beliefs replay-purges --from-url-env <VAR> --archived-at <time>` runs this against the
- * restored database. The pre-restore database is complete by construction: every purge its tombstones (fact_purges, take_purges,
- * page_purges) record, grouped by request, that the restored database does not already hold is replayed, whatever its `purged_at`.
+ * The text-free intents of every purge a pre-restore database's tombstones (fact_purges, take_purges, page_purges) record,
+ * grouped by request, each with its committed line. The database is complete by construction, so `purged_at` bounds nothing.
  */
-export async function replayPurgesFromDatabase(restored: BrainEngine, preRestore: Pick<BrainEngine, 'executeRaw'>, archivedAt: string): Promise<PurgeReplayResult> {
+export async function purgeLinesFromDatabase(preRestore: Pick<BrainEngine, 'executeRaw'>): Promise<PurgeMirrorLine[]> {
   const facts = await preRestore.executeRaw<{ request: string; source_id: string; visibility: string; subject: string; fact_hash: string; at: string }>(`SELECT
       request_id::text AS request, source_id, visibility, subject, fact_hash, purged_at::text AS at FROM fact_purges WHERE request_id IS NOT NULL`);
   const takes = await preRestore.executeRaw<{ request: string; source_id: string; claim_hash: string; at: string }>(`SELECT request_id::text AS request, source_id, claim_hash,
@@ -282,7 +281,29 @@ export async function replayPurgesFromDatabase(restored: BrainEngine, preRestore
   for (const p of pages) { const i = intentFor(p.request, p.source_id, p.at); i.scope = 'page'; i.slug = p.slug; i.content_hashes = [...(i.content_hashes ?? []), p.content_hash]; }
   for (const f of facts) intentFor(f.request, f.source_id, f.at).facts.push({ fact_hash: f.fact_hash, visibility: f.visibility, subject: f.subject });
   for (const t of takes) intentFor(t.request, t.source_id, t.at).takes.push(t.claim_hash);
-  const lines: PurgeMirrorLine[] = [...intents.values()].sort((a, b) => a.recorded_at < b.recorded_at ? -1 : 1)
+  return [...intents.values()].sort((a, b) => a.recorded_at < b.recorded_at ? -1 : 1)
     .flatMap(i => [i, { kind: 'committed' as const, request: i.request, recorded_at: i.recorded_at }]);
-  return restored.transaction(tx => replayPurgesInRestore(tx, { lines, archivedAt: new Date(archivedAt).toISOString(), restoreId: randomUUID(), allTimes: true }));
+}
+
+/**
+ * Postgres restores happen outside gbrain: `gbrain beliefs replay-purges` replays `lines` (a purge mirror or a pre-restore
+ * database's tombstones) into the restored database, every purge the restored database does not already hold, whatever its
+ * time; `archivedAt` is the archive time `coverage.restored` names. Without `apply` the same replay runs in a transaction
+ * that rolls back, so the preview is exactly what `--apply` writes.
+ */
+export async function replayPurges(restored: BrainEngine, input: { lines: PurgeMirrorLine[] | null; archivedAt: string; apply: boolean }): Promise<PurgeReplayResult> {
+  const preview = new Error('replay preview rolled back');
+  let result: PurgeReplayResult | undefined;
+  try {
+    await restored.transaction(async tx => {
+      result = await replayPurgesInRestore(tx, { lines: input.lines, archivedAt: new Date(input.archivedAt).toISOString(), restoreId: randomUUID(), allTimes: true });
+      if (!input.apply) throw preview;
+    });
+  } catch (error) { if (error !== preview) throw error; }
+  return result!;
+}
+
+/** `replayPurges` from a pre-restore database, applied. */
+export async function replayPurgesFromDatabase(restored: BrainEngine, preRestore: Pick<BrainEngine, 'executeRaw'>, archivedAt: string): Promise<PurgeReplayResult> {
+  return replayPurges(restored, { lines: await purgeLinesFromDatabase(preRestore), archivedAt, apply: true });
 }
