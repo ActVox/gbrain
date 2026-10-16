@@ -43,6 +43,12 @@ export interface CodeEntry {
   /** CLI exit code; default derives from class (1). */
   exit?: number;
   retryable?: boolean;
+  /**
+   * The release that retired this code: nothing emits it any more, but receipts and ledger rows an older build wrote still
+   * carry it, so the entry stays and `gbrain errors <code>` still answers. Its fix names the current path, never a retired
+   * key or flag (`test/error-registry-retired.test.ts`).
+   */
+  retired_in?: string;
 }
 
 export const CODES = {
@@ -206,6 +212,7 @@ export const CODES = {
   feedback_not_authorized: { class: 'host_only', summary: "This caller may not change the brain's shared ranking for that source.", docs: 'docs/guides/retrieval-feedback.md#feedback_not_authorized' },
   fetch_failed: { class: 'retryable', summary: "Fetching the upstream failed." },
   fix_not_writable: { class: 'host_only', summary: "A gbrain lint fix was not applied because the file refused the write (EACCES, EPERM or EROFS); the file was left unchanged.", why: "Lint repairs files in place, and this file's permissions or a read-only mount stopped the write; lint reports it and continues with the remaining files.", docs: 'docs/guides/repair.md#fix-not-writable', suggestion: "Make the file writable by the user running gbrain, or pass its directory or file name to gbrain lint --exclude, then lint again." },
+  file_drift: { class: 'caller', summary: "A managed sync import would have overwritten a database version of the page that sync never saw (the page changed since its file was last imported), so the file is held and the page keeps the database version.", why: "Sync imports a file only when the page is still at the revision its last recorded import wrote, or when the import changes nothing. Here the page moved (a database-only write, or no import record to compare on an upgraded brain) and the file's content differs, so importing would silently replace the newer database copy. Pages under storage.keep_db prefixes are never held: the keep_db worker reconciles them from the database.", docs: 'docs/guides/write-refusals.md#file_drift', suggestion: 'Preview with gbrain repair file-drift --source <source> --slug <slug> --prefer database (keep the database copy and rewrite the file) or --prefer file (import the file), decide with the user, then apply it with the plan hash; the next gbrain sync --source <source> --no-pull re-screens the hold.' },
   file_removed_during_scan: { class: 'retryable', summary: "A file lint listed was removed before lint read it, so it was not linted.", why: "Another process deleted or renamed the file during the run; lint reports it and continues with the remaining files.", docs: 'docs/guides/repair.md#file-removed-during-scan', suggestion: "Re-run gbrain lint on the same target; it lints the files present now." },
   file_too_large: { class: 'caller', summary: "The file is over the page size limit (24 MiB for a Markdown page, 5 MB for a code file), so it was not imported.", why: "Every page under the limit is stored, chunked and searchable whatever its size; the limit bounds what one page may hold in this release. The same bytes refuse on every retry. A smaller page refused by an MCP or HTTP transport is a different refusal.", docs: 'docs/guides/write-refusals.md#file_too_large', suggestion: 'Leave the file out of the source (sync.exclude), or, if it must be in the brain, split it into files under the limit; then sync or import again. Never split a page under the limit.' },
   follow_approval_required: { class: 'caller', summary: "Following a brain's shared skills needs the user's explicit follow approval.", docs: 'docs/guides/shared-brain-skills.md#approve-publication-following-and-editing-separately' },
@@ -384,12 +391,13 @@ export const CODES = {
   preview_changed: { class: 'caller', summary: "The state changed since the approved preview." },
   profile_incompatible: { class: 'caller', summary: "The stored profile is incompatible with this operation." },
   projection_owner_resident: { class: 'host_only', summary: "A resident owner holds the projection." },
-  // #6643: a managed sync stopped re-freezing pages that only waited on another page of the same sync.
-  knock_on_exhausted: { class: 'server', summary: "A managed sync kept re-freezing a page that only waited on another page of the same sync, and stopped at its limit because that earlier page still did not commit.",
-    why: "A page cancelled or refused only because an earlier page of its sync did not commit published nothing, so the sync re-freezes it under a fresh request by itself; the limit stops a loop when the earlier page keeps failing.",
+  // #6643, retired by #6712 (one page, one fate): no page waits on another page's fate any more, so nothing re-freezes knock-ons.
+  knock_on_exhausted: { class: 'server', retired_in: '0.60.255.0',
+    summary: "Retired: an older gbrain stopped a managed sync that kept re-freezing a page cancelled only because another page of the same sync did not commit. This build never cancels a page for another page's failure, so the stop is superseded.",
+    why: "Since #6712 each page of a sync has its own fate: a page that does not commit is held or stops the run on its own, and the pages after it still publish. A ledger row or receipt with this code was written by an older build.",
     docs: 'docs/guides/sync-unblock-runbook.md#decision-table',
-    suggestion: 'Read gbrain sync status --source <id> --json: last_error.root_cause names the request that keeps failing. Fix that request, or raise sync.knock_on_refreeze_limit / sync.knock_on_run_limit, then rerun the same sync.',
-    fix: { argv: ['gbrain', 'sync', 'status', '--source', '{source_id}', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why: 'Names the root request, its page and error; read-only.' } },
+    suggestion: 'Rerun the same plain gbrain sync --source <id> --no-pull; it resumes the stopped entry under a fresh request. gbrain sync status --source <id> --json shows what remains.',
+    fix: { argv: ['gbrain', 'sync', 'status', '--source', '{source_id}', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why: 'Shows the cursor and the next step; read-only. A plain sync of the source resumes the stopped entry.' } },
   keyword_candidates_incomplete: { class: 'unavailable', summary: "Hybrid search's CJK keyword arm hit its deadline or candidate cap on a large corpus, so some keyword matches can be missing.", why: 'The CJK fallback is an unindexed LIKE scan; the arm is bounded so a large brain cannot stall every hybrid search. An incomplete keyword search is not evidence of absence.', docs: 'docs/guides/multi-language-fts.md#cjk-keyword-budget', suggestion: 'Narrow the search with --source-id (MCP source_id), or ask the user to raise search.cjk_keyword_deadline_ms.', fix: { argv: ['gbrain', 'config', 'get', 'search.cjk_keyword_deadline_ms'], consent: [], actor: 'agent', why: 'Shows the deadline in effect (unset means 3000 ms); read-only.', requires_exclusive: false } },
   projection_pending: { class: 'retryable', summary: "The current text projection is not ready." },
   provenance_required: { class: 'caller', summary: "provenance is required and must be non-empty." },
@@ -487,6 +495,12 @@ export const CODES = {
     why: "Usually a dropped connection or a failed statement; the same error after a rerun is not transient. `detail: persistence_mode_unknown` (#6482): the persistence_brain singleton is missing, duplicated or carries a non-boolean `enabled`, so gbrain cannot tell whether the brain is managed and refuses every write, sync, connector run and activation step that depends on it rather than route a managed brain through the unmanaged writer; only a well-formed `enabled: false` row selects the unmanaged path.",
     suggestion: 'For persistence_mode_unknown: run gbrain sources writer status --probe --json on the brain host (it reports the malformed state instead of refusing), fix the persistence_brain row it names, then gbrain doctor --json.' },
   sync_not_applicable: { class: 'caller', summary: "Sync does not apply to this source: its directory is not a Git checkout.", why: "Sync imports changes between Git commits. A gbrain-owned content directory (created by init) holds files gbrain manages itself and is not a Git repository, so there is nothing to sync; gbrain never initializes Git on its own.", reasons: ['content_directory'] },
+  // #6712 PR 1: the drain lease (src/core/persistence/sync-lease.ts).
+  sync_drain_lease_held: { class: 'retryable', actor: 'provider',
+    summary: "Another process holds the source's drain lease and is still committing pages; this run followed it until its own budget ended, or lost the lease mid-pass, and stopped `resumable`.",
+    why: "One managed drainer per source: two drainers on one cursor raced each other's checkpoints. A follower counts the holder's commits as its own progress, takes the lease when the holder releases it, and stops `drain_stalled` (cause `no_progress`) instead when the holder commits nothing for 5 minutes, so a wedged holder never reads as a clean exit.",
+    docs: 'docs/guides/write-refusals.md#sync_drain_lease_held',
+    suggestion: 'Rerun next.command after next.retry_after_ms (safe_to_loop), or let the holder finish; Ctrl-C while following leaves the holder running.' },
   sync_in_progress: { class: 'retryable', summary: "A sync is running on this source, or a write in flight or the sync's frozen manifest still names the file a repair would write.",
     why: "A repair that changed a file the running sync admits later would make that entry refuse on its raw hash, and a file a write in flight names would be written twice; so the one candidate waits while the rest of the source is repaired. `candidate_in_flight`: the file is named; `busy_set_unreadable`: the busy set could not be read, so every candidate waited.",
     reasons: ['candidate_in_flight', 'busy_set_unreadable'],

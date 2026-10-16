@@ -51,6 +51,8 @@ leaves a file out, and each refusal names the file, why, and its fix.
                         at HEAD now (still dirty: refused still_dirty)
   preparation_stalled   re-screened (the writer, not the file, stalled)
   concurrent_write      refused: a person reconciles the two versions
+  file_drift            refused: a person picks the database or the file
+                        (gbrain repair file-drift --prefer database|file)
   ${CONTENT_HOLD_CODES.padEnd(22)}repaired by the content-repair lane (gbrain repair content,
                         each file bound to the bytes its plan read, under the
                         fences.repair caps), then re-screened; per

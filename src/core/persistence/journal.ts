@@ -409,6 +409,10 @@ export function publicationGroupKey(row: Pick<WriteRequest, 'operation' | 'inten
 export function independentGroup(key: string | null): boolean {
   return key !== null && (key.startsWith('batch:') || key.startsWith('import:'));
 }
+/** #6712: a bulk managed-sync group key; such a group claims up to its admitted size (63 followers) and prepares four members at a time. */
+export function syncGroup(key: string | null): boolean {
+  return key !== null && key.startsWith('sync:');
+}
 const GROUP_KEY_SQL = `CASE WHEN intent ? 'group' THEN 'sync:'||(intent->>'group')
   WHEN operation='put_page' AND intent->>'kind'='managed_file_import' AND jsonb_typeof(intent->'import_batch')='string' THEN 'import:'||(intent->>'import_batch')
   WHEN operation='put_page' AND NOT (intent ? 'kind') AND jsonb_typeof(intent->'page_batch'->'id')='string' THEN 'batch:'||(intent->'page_batch'->>'id') END`;

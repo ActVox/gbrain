@@ -38,7 +38,8 @@ import type { BrainEngine } from '../engine.ts';
 import type { SqlEngine } from './model.ts';
 import { clearManagedSyncFailure, loadSyncFailures } from '../sync-failure-ledger.ts';
 
-export type ManagedSyncOrphanReason = 'no_cursor' | 'principal_unadoptable' | 'superseded' | 'incarnation_retired' | 'mirror_only';
+/** `superseded_by_adoption` (#6712 PR 1): an unfinished cursor of the incarnation that the drain's fan-in did not adopt (sync-cursor-key.ts). */
+export type ManagedSyncOrphanReason = 'no_cursor' | 'principal_unadoptable' | 'superseded' | 'incarnation_retired' | 'mirror_only' | 'superseded_by_adoption';
 export type ManagedSyncOrphanRetained = 'pending_request_live' | 'resumable';
 
 export interface ManagedSyncOrphan {
@@ -201,9 +202,15 @@ export async function pruneMirrorOnlyManagedFailures(engine: SqlEngine, sourceId
  * still active under a different incarnation at apply time; the live-writer
  * veto below is for a cursor the live writer could still resume, which no
  * retired key can be, so it does not apply. The live pending-request guard does.
+ *
+ * #6712 PR 1: a `superseded_by_adoption` cursor is one the drain's fan-in passed over for the incarnation's adopted
+ * cursor; it is deleted only while no request admitted under its key is still open or carries recovery, and `inTx`
+ * (the drain lease's fence) runs first in the same transaction.
  */
-export async function retireManagedSyncOrphan(engine: BrainEngine, orphan: Pick<ManagedSyncOrphan, 'kind' | 'cursor_key' | 'run_id' | 'source_id' | 'source_incarnation' | 'reason'>): Promise<{ cursor: boolean; failure: boolean; manifest: boolean; mirror: boolean }> {
+export async function retireManagedSyncOrphan(engine: BrainEngine, orphan: Pick<ManagedSyncOrphan, 'kind' | 'cursor_key' | 'run_id' | 'source_id' | 'source_incarnation' | 'reason'>,
+  inTx?: (tx: BrainEngine) => Promise<void>): Promise<{ cursor: boolean; failure: boolean; manifest: boolean; mirror: boolean }> {
   const retired = orphan.reason === 'incarnation_retired';
+  const mode = retired ? 'retired' : orphan.reason === 'superseded_by_adoption' ? 'adoption' : 'orphan';
   if (orphan.kind === 'mirror_row') {
     const durable = await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1", [orphan.cursor_key]);
     if (durable.length) return { cursor: false, failure: false, manifest: false, mirror: false };
@@ -211,6 +218,7 @@ export async function retireManagedSyncOrphan(engine: BrainEngine, orphan: Pick<
   }
   const removed = await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','2000ms',true)");
+    await inTx?.(tx);
     let cursor = false;
     if (orphan.kind === 'unfinished_cursor') {
       const rows = await tx.executeRaw(`
@@ -219,12 +227,14 @@ export async function retireManagedSyncOrphan(engine: BrainEngine, orphan: Pick<
           AND c.completed_keys->0->>'sourceId'=$2 AND c.completed_keys->0->>'incarnation'=$3
           AND NOT EXISTS(SELECT 1 FROM persistence_requests r WHERE r.request_id=(c.completed_keys->0->'pending'->>'requestId')::uuid
             AND r.source_id=$2 AND r.state NOT IN ('committed','failed','conflict','cancelled'))
-          AND ($4::boolean AND EXISTS(SELECT 1 FROM sources s WHERE s.id=$2 AND NOT COALESCE(s.archived,false) AND s.incarnation::text<>$3)
-            OR NOT $4::boolean AND NOT EXISTS(SELECT 1 FROM persistence_local_writers w WHERE w.revoked_at IS NULL
+          AND ($4::text='retired' AND EXISTS(SELECT 1 FROM sources s WHERE s.id=$2 AND NOT COALESCE(s.archived,false) AND s.incarnation::text<>$3)
+            OR $4::text='adoption' AND NOT EXISTS(SELECT 1 FROM persistence_requests r WHERE r.source_id=$2 AND r.intent->>'cursorKey'=$1
+              AND (r.state IN ('queued','running','recovering') OR r.recovery IS NOT NULL))
+            OR $4::text='orphan' AND NOT EXISTS(SELECT 1 FROM persistence_local_writers w WHERE w.revoked_at IS NULL
               AND w.id::text=c.completed_keys->0->'authority'->'writer'->'principal'->>'id'
               AND c.completed_keys->0->'authority'->'writer'->'principal'->>'kind' IN ('local_cli','local_stdio')
               AND (c.completed_keys->0 ? 'syncOptions')))
-        RETURNING fingerprint`, [orphan.cursor_key, orphan.source_id, orphan.source_incarnation, retired]);
+        RETURNING fingerprint`, [orphan.cursor_key, orphan.source_id, orphan.source_incarnation, mode]);
       cursor = rows.length > 0;
       if (!cursor) return { cursor: false, failure: false, manifest: false, mirror: false };
     }
