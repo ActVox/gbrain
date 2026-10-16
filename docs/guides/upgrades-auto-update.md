@@ -121,6 +121,56 @@ the newest published release if it is newer than yours (#6662). Windows
 PowerShell 5.1 has no `&&`, so on Windows the steps print one per line; run
 them in order and stop if the tag check fails.
 
+<a id="release-channel"></a>
+### Which version counts as available
+
+Every update surface (the startup marker, `gbrain check-update`,
+`gbrain self-upgrade`, doctor's `self_upgrade_health` and the `auto` channel)
+reads the `VERSION` file at the `latest-stable` tag: the release the canonical
+install (`github:garrytan/gbrain#latest-stable`) gets from `bun update`, moved
+only after the release checks pass and the assets publish. Master's `VERSION`
+is never offered: the next PR stamps it before release.yml tags it, and a
+superseded version never gets a tag (#6718, #6828).
+
+A swap is a swap only when the version changed. When `gbrain upgrade` finds
+the same version running after the install step (`bun update` on a tag whose
+head is already installed), it prints `No newer version was installed`, keeps
+`last_upgrade`, writes no `JUST_UPGRADED` breadcrumb and keeps the pending
+marker. The `auto` channel then stays up instead of exiting for a relaunch,
+clears its breadcrumb, records no known-bad version, audits the attempt as
+`skipped` (`nothing newer was installed`) and tries again after 24 hours
+(`self_upgrade.last_check_ts`). A version is recorded known-bad only when it
+was installed and then failed (the post-swap `gbrain --help` smoke, or a
+relaunch that did not come up on it), under the version actually installed.
+
+<a id="known-bad-never-installed"></a>
+### A known-bad version that was never installed
+
+Releases before this fix could record a version known-bad that was never
+installed: the swap installed nothing, reported `swapped`, the supervisor
+relaunched the same version, and the relaunch recorded the attempted version
+in `self_upgrade.failed_versions`, so `auto` skipped that release forever.
+doctor's `self_upgrade_health` warns about each such entry and names the
+preview as its fix:
+
+```bash
+gbrain self-upgrade --clear-never-installed            # preview: lists each entry and the swap that recorded it; writes nothing
+gbrain self-upgrade --clear-never-installed --apply    # removes exactly the listed entries
+gbrain doctor --only self_upgrade_health --json        # verify
+```
+
+An entry is listed only when the self-upgrade audit proves it was never
+installed: every failure recorded for it is a `swapped` row followed by a
+`crash-on-launch` row that ran the same version, no audit row ever ran the
+version, and `upgrade-state.json` does not name it as the last version
+installed. Anything else stays known-bad. Nothing is rewritten during an
+upgrade. `gbrain config set self_upgrade.failed_versions '["<version>"]'` puts
+an entry back. On a release that does not have this command, read the list
+with `gbrain config get self_upgrade.failed_versions`, confirm the entry was
+never installed (no `v<version>` tag existed when it was recorded, or the
+audit shows the `swapped` row and the relaunch on the same version), then set
+the list without it.
+
 Recovery when autopilot is holding an upgrade:
 
 ```bash

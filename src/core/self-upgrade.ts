@@ -457,6 +457,53 @@ export function releaseRefreshLock(lockPath: string): void {
   }
 }
 
+// ── Swap receipt (what `gbrain upgrade --swap-only` actually installed) ──────
+
+/**
+ * #6828: the autopilot channel names a file in this env var; `gbrain upgrade`
+ * writes what its swap installed there. Exit 0 alone cannot tell a swap from
+ * a no-op (`bun update` on a tag whose head is already installed exits 0 and
+ * changes nothing), and a no-op must never relaunch or record known-bad.
+ */
+export const SWAP_RECEIPT_ENV = 'GBRAIN_SWAP_RECEIPT';
+
+/**
+ * - `installed`: a newer version is on disk and passed the post-swap smoke.
+ * - `not_installed`: the version did not change (the install step failed, or
+ *   succeeded without installing anything newer).
+ * - `installed_broken`: a newer version is on disk and does not start.
+ */
+export interface SwapReceipt {
+  outcome: 'installed' | 'not_installed' | 'installed_broken';
+  from: string;
+  /** What `gbrain --version` reported after the swap; null when unreadable. */
+  installed: string | null;
+}
+
+/** Write the receipt when the caller asked for one. Best-effort. */
+export function writeSwapReceipt(receipt: SwapReceipt): void {
+  const path = process.env[SWAP_RECEIPT_ENV];
+  if (!path) return;
+  try {
+    atomicWrite(path, JSON.stringify(receipt) + '\n');
+  } catch {
+    /* the channel falls back to the exit status */
+  }
+}
+
+/** Read a receipt; null when missing or malformed (the channel then trusts the exit status). */
+export function readSwapReceipt(path: string): SwapReceipt | null {
+  try {
+    const r = JSON.parse(readFileSync(path, 'utf8')) as Partial<SwapReceipt>;
+    if (r.outcome !== 'installed' && r.outcome !== 'not_installed' && r.outcome !== 'installed_broken') return null;
+    if (typeof r.from !== 'string') return null;
+    const installed = typeof r.installed === 'string' && isValidVersionString(r.installed) ? r.installed : null;
+    return { outcome: r.outcome, from: r.from, installed };
+  } catch {
+    return null;
+  }
+}
+
 // ── Breadcrumb reconciliation (attribution for crash-on-launch) ──────────────
 
 /** The mutable slice of `config.self_upgrade` the autopilot channel manages. */
@@ -523,6 +570,11 @@ export function reconcileBreadcrumb(
   delete state.attempting_version;
   return { state, transition: 'failed' };
 }
+
+/** The audit reason the boot reconcile writes when it records a version known-bad (core/self-upgrade-recovery.ts matches on it, #6828). */
+export const CRASH_ON_LAUNCH_REASON_PREFIX = 'crash-on-launch:';
+/** The audit reason the channel writes when its swap installed a newer version and it exits for relaunch. */
+export const SWAPPED_REASON = 'swapped; exiting for supervisor relaunch';
 
 // ── Mode resolution (file plane; no DB on the hot path) ──────────────────────
 
