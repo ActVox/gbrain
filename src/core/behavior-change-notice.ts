@@ -722,6 +722,8 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText }
   // W2 belief ledger page-at-time. `since` is a placeholder equal to the branch's VERSION until the merge-slot stamp.
   { since: '0.60.267.0', text: 'A page rename (a sync that sees a file move, a frontmatter slug repair, a held-file or import move) now saves the page as it stood before the move as a version, as an edit does, so `get_versions` and `gbrain history` list one more snapshot per rename. The move advances the page\'s revision, and until now no version held the body from before it.' },
   { since: '0.60.267.0', text: '`purge_fact` now saves each page it rewrites as a version before dropping the purged fence row, and its version redaction then removes the claim from that version as from every other, so `get_versions` and `gbrain history` list one more snapshot per page a fact purge rewrites. The snapshot holds the page as it stood before the purge, without the purged claim.' },
+  // FIFO claim foreground guard (fgp-park-before-claim). `since` is a placeholder equal to the branch's VERSION until the merge-slot stamp.
+  { since: '0.60.267.0', text: 'A foreground write no longer loses to an idle drain\'s sync head. While a managed sync drains, a page write that may go ahead of the queued sync groups (none of them names its page) now holds back the next sync group even when the drain\'s lanes are idle and the write\'s own process is still claiming it; before, the drain could start a group in that moment and the write waited for it. The sync side still gets one group after each such write commits, so a stream of writes cannot stall it.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */
