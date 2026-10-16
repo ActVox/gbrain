@@ -1076,10 +1076,27 @@ slower: a round trip costs about 0.08 ms here, so server work, not round
 trips, sets the cost. A source with the ledger off pays one source read per
 publication.
 
+After section 13 item 15 (one-statement reads, indexed link, transition
+and fact selection, fingerprints reused by the post read), the ledger's own
+work inside the transaction (both reads, keying, diff, append and the commit
+mark), median over 10 runs per cell:
+
+| Page | PGLite | Postgres |
+|---|---|---|
+| typical edit | ≈3.0 ms (7–8% of 35–45 ms) | ≈3.1 ms (≈10% of ≈31 ms) |
+| large edit | ≈14 ms (8–9% of 160–175 ms) | ≈14 ms (11–12% of 120–130 ms) |
+
+Before item 15 the typical figure was about 6 ms on both engines: the
+transition read nested-looped pages against pages (about 2 ms with an empty
+table) and the facts read scanned every fact of the source. A grouped
+managed sync of 20 typical pages on Postgres costs about 4–5 ms per member.
+End-to-end on/off medians on the 4-core bench machine vary by ±10 ms between
+identical runs, so the in-transaction figure is the one to compare.
+
 Cheaper options, none in W1: skip the post-read of tables a publication did
-not write (projections would report what they touched), return to the
-prepare-time diff validated under the lock against `knowledge_revision`, or
-compute claim fingerprints in JS.
+not write (projections would report what they touched), keep each stream's
+subject snapshot on its lifetime row so the pre read is a key lookup, or
+force generic plans for the state read on Postgres (about 0.8 ms).
 
 **Storage** (section 12, question 7, decided). A second free bench inserted
 the creation events of 2,000 typical pages into a PGLite table with the full
@@ -1446,3 +1463,23 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
     glued to it; CJK, Thai, punctuation and markup still match as
     substrings. The inventory of claims stays exhaustive; only a short claim
     inside a longer word (`ceo` in `herbaceous`) no longer redacts.
+14. **Purge leaves unsalted digests (known limit).** `claim_fp`,
+    `belief_redactions.field_hash` and `state_hash` are plain sha256, as are
+    the purge tombstones that predate W1 (`fact_purges.fact_hash`,
+    `take_purges.claim_hash`, `page_purges.content_hash`). Anyone holding a
+    backup or a database export can confirm a guess of a purged claim's exact
+    normalized text. A per-source salt stored in the brain would not change
+    that (the salt is in the same backup), and `claim_fp` must equal the
+    tombstone digest for redaction to work. A keyed HMAC with the key outside
+    the database would protect a database-only copy, but the key would have
+    to travel with backups (defeating it) or be kept apart (a lost key stops
+    tombstones matching, so purged facts return on the next sync), and the
+    fingerprint is an immutable SQL function behind index expressions. Not
+    built in W1.
+15. **One-statement state read.** A batch's pre and post reads are one SQL
+    statement each (pages, facts, takes, links, transitions and link
+    endpoints as JSON). Link and transition rows are selected through their
+    origin and from-page indexes before any endpoint join, facts through a new
+    `idx_facts_belief_stream (source_id, source_markdown_slug) WHERE
+    expired_at IS NULL` (v249's handler builds it online), and the post read
+    reuses the pre read's claim fingerprints. Section 9 has the cost.
