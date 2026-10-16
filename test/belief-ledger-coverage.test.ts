@@ -407,6 +407,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const archivedAt = await dbNow(b);
         await pause();
         const inGap = await dbNow(b);
+        await pause();
         const restore = async (lines: PurgeMirrorLine[] | null) => {
           await b.engine.transaction(tx => replayPurgesInRestore(tx, { lines, archivedAt, restoreId: randomUUID() }));
           await fillCommitMarks(b.engine, b.sourceId);
@@ -414,6 +415,8 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         await restore([]);
         expect((await doctor(b)).status).toBe('ok');
         expect(await coverageAt(b.engine, b.sourceId, inGap)).toMatchObject({ ok: false, code: 'coverage_gap', reason: 'restore', from: archivedAt });
+        const [restored] = await b.engine.executeRaw<{ at: string }>(`SELECT max(recorded_at) AS at FROM belief_events WHERE source_id = $1 AND event_type = 'coverage.restored'`, [b.sourceId]);
+        expect(await coverageAt(b.engine, b.sourceId, new Date(Date.parse(new Date(restored!.at).toISOString()) + 1).toISOString())).toMatchObject({ ok: true });
         await restore([{ kind: 'intent', request: randomUUID(), request_id: 'req-purge-1', source_id: b.sourceId, source_incarnation: source.incarnation, scope: 'fact',
           recorded_at: new Date(Date.parse(archivedAt) + 1).toISOString(), purge_epoch: 1, facts: [], takes: [], lifetimes: [] }]);
         const asked = await doctor(b);
