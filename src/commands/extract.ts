@@ -43,7 +43,7 @@ import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
 import { join, relative, dirname } from 'path';
 import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from '../core/engine.ts';
-import { isUndefinedTableError } from '../core/utils.ts';
+import { isMissingSchemaObject } from '../core/utils.ts';
 import type { PageType } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
 import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetadata, capturedLinkEndpoints, fileLinkOwnership, replaceFileLinks, replacePageFileLinks, type LinkPageMetadata } from '../core/link-reconciliation.ts';
@@ -511,7 +511,7 @@ async function loadSlugAliasTargets(engine: BrainEngine, sourceId: string, allSl
   try {
     rows = await engine.executeRaw('SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id = $1', [sourceId]);
   } catch (error) {
-    if (!isUndefinedTableError(error)) throw error;
+    if (!isMissingSchemaObject(error, 'table', 'slug_aliases')) throw error;
   }
   const aliases = new Map(rows.filter(row => !allSlugs.has(row.alias_slug) && allSlugs.has(row.canonical_slug))
     .map(row => [row.alias_slug, row.canonical_slug]));

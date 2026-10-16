@@ -126,7 +126,10 @@ src/core/cycle/patterns.ts	gatherReflections	field	LEAD	bounded prefix row
 src/core/cycle/patterns.ts	gatherReflections	sql	LEAD	boundedBodyPrefixSql, truncated to a 600-byte excerpt
 src/core/cycle/patterns.ts	groundPatternPages	call:serializePageToMarkdown	SEGW	
 src/core/cycle/patterns.ts	groundPatternPages	field	LEAD	
-src/core/cycle/patterns.ts	groundPatternPages	sql	LEAD	
+src/core/cycle/patterns.ts	groundTimelineAppends	call:serializePageToMarkdown	SEGW	rewrite of a page read back by materializedSnapshot; the import or maintenance publish stores it by body policy; pages over the single-string ceiling are skipped before this
+src/core/cycle/patterns.ts	groundTimelineAppends	field	STREAM	materializedSnapshot reads a segmented page within the single-string ceiling back as strings; over it the page is skipped (timeline_appends.segmented_skipped, logged)
+src/core/cycle/patterns.ts	loadGroundingSources	field	STREAM	segmented reflection read through materializeSegmentedBody within PAGE_MAX_BYTES; over it not a grounding source (logged), so its quotes go to unverified_claims
+src/core/cycle/patterns.ts	loadGroundingSources	sql	STREAM	inline body columns plus body_storage/body_bytes; a segmented row's NULL columns are replaced by the segment reader
 src/core/cycle/patterns.ts	renderPageToMarkdown	call:serializeMarkdown	SEGW	
 src/core/cycle/patterns.ts	renderPageToMarkdown	field	LEAD	
 src/core/cycle/phantom-redirect-managed.ts	redirectManagedPhantom	call:serializePageToMarkdown	SEGW	spread of a segmented page throws
@@ -437,6 +440,9 @@ src/core/questions/refresh.ts	refreshPin	field	INLINE	owner claims of the questi
 src/core/questions/refresh.ts	retrieveEvidence	field	LEAD	inline candidates only
 src/core/questions/refresh.ts	retrieveEvidence	sql	LEAD	segmented candidate pages excluded in SQL (skip): their excerpt and laundering check need the body
 src/core/reindex-consent.ts	estimateReindexSpend	sql	META	
+src/core/repair/accepted-takes.ts	archivedRow	field	SEGW	inline versions only: a segmented archived version counts as version_missing (the v0.60.253.0 accept refused segmented pages, so none exists)
+src/core/repair/accepted-takes.ts	archivedRow	sql	SEGW	selects body_storage; a segmented archived version counts as version_missing
+src/core/repair/accepted-takes.ts	livePage	call:serializePageToMarkdown	SEGW	materializedSnapshot within the single-string ceiling; over it counts as fence_unreadable (no fences there)
 src/core/repair/captured-facts.ts	strikeFencedRows	call:serializePageToMarkdown	SEGW	
 src/core/repair/captured-facts.ts	strikeFencedRows	field	SEGW	
 src/core/repair/connector-fences.ts	candidates	sql	STREAM	
@@ -519,6 +525,8 @@ src/core/timeline-write-through.ts	writeTimelineEntryThrough	sql	SEGW	assertInli
 src/core/transcripts/recover.ts	userlessCodexSessions	sql	STREAM	
 src/core/transcripts/secret-audit.ts	auditTranscriptSecrets	field	STREAM	
 src/core/transcripts/secret-audit.ts	auditTranscriptSecrets	sql	STREAM	
+src/core/trust/held-removals.ts	heldRow	sql	SEGW	inline body only; acceptHeldRemoval reads a segmented page within the single-string ceiling with materializeSegmentedBody
+src/core/trust/held-removals.ts	acceptHeldRemoval	field	SEGW	materializeSegmentedBody within the single-string ceiling; over it assertInlineBody refuses (no fences there) and the proposal stays pending
 src/core/trust/page-handlers.ts	markdownWithoutMarker	call:serializeMarkdown	SEGW	
 src/core/trust/page-handlers.ts	markdownWithoutMarker	field	SEGW	
 src/core/trust/page-handlers.ts	versionMarkdown	call:serializePageToMarkdown	SEGW	

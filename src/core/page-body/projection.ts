@@ -14,7 +14,8 @@
  * chunk the whole body; a claim left by a dead process lapses after
  * SEGMENTED_PROJECTION_LEASE_SECONDS, and a build that throws releases it
  * at once (the resident's queue route then marks its own failures
- * `rebuild_failed`).
+ * `rebuild_failed`). Within a process, calls for one page also run one after
+ * another, and a page an earlier call sealed returns at once (#6143).
  *
  * Retirement runs in bounded statements and deletes, as the flip does: rows of
  * occurrences outside the live generation, inline rows a promotion deferred,
@@ -31,6 +32,7 @@ import { PROJECTION_RETRY_READY_SQL, SEGMENTED_JOB_PROBES, SEGMENTED_PROJECTION_
 import { occurrencesWithoutChunks, stageOccurrenceChunks } from './ingest.ts';
 import { DEFAULT_FLIP_RETIRE_MAX_ROWS } from './limits.ts';
 import type { JsonObject } from './types.ts';
+import { assertGenerationTiles } from './body-tiling.ts';
 
 export interface SegmentedProjectionResult { chunks: number; retired: number; sealed: boolean }
 
@@ -46,13 +48,27 @@ async function readProjectionPage(engine: Pick<BrainEngine, 'executeRaw'>, ref: 
   return page ?? null;
 }
 
-/** Chunk rows of page $1 that generation $2 (live occurrences $3) does not hold: other occurrences, inline rows, older duplicates. */
-const STALE_CHUNKS_SQL = `SELECT s.id FROM content_chunks s -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
-  WHERE s.page_id=$1
-  AND (s.body_generation IS NULL
-    OR (s.body_generation<=$2 AND NOT (s.occurrence_id=ANY($3::bigint[])))
-    OR (s.body_generation<=$2 AND EXISTS (SELECT 1 FROM content_chunks n WHERE n.page_id=s.page_id AND n.occurrence_id=s.occurrence_id
-      AND n.body_generation>s.body_generation AND n.body_generation<=$2)))`;
+/**
+ * Chunk rows of page $1 that generation $2 (live occurrences $3) does not hold: inline rows, rows of other occurrences,
+ * and older duplicates of a live occurrence (any row of it below its newest generation at or below $2). Walks the page's
+ * occurrences on content_chunks_occurrence_generation_idx (v253), one index probe per occurrence plus the stale rows it
+ * returns, so the work is the page's occurrence count and the rows it retires, never its chunk count times anything: the
+ * earlier form tested each row for a newer duplicate with a per-row subquery, which scanned every newer row of the page.
+ */
+export const STALE_CHUNKS_SQL = `WITH RECURSIVE occ(o) AS (
+    SELECT (SELECT c.occurrence_id FROM content_chunks c WHERE c.page_id=$1 AND c.occurrence_id IS NOT NULL ORDER BY c.occurrence_id LIMIT 1)
+    UNION ALL
+    SELECT (SELECT c.occurrence_id FROM content_chunks c WHERE c.page_id=$1 AND c.occurrence_id>occ.o ORDER BY c.occurrence_id LIMIT 1)
+    FROM occ WHERE occ.o IS NOT NULL)
+  SELECT s.id FROM occ CROSS JOIN LATERAL (SELECT CASE WHEN occ.o=ANY($3::bigint[])
+      THEN (SELECT max(n.body_generation) FROM content_chunks n WHERE n.page_id=$1 AND n.occurrence_id=occ.o AND n.body_generation<=$2::bigint)
+      ELSE $2::bigint+1 END AS bound) b
+    CROSS JOIN LATERAL (SELECT c.id FROM content_chunks c WHERE c.page_id=$1 AND c.occurrence_id=occ.o AND c.body_generation<b.bound
+      UNION ALL SELECT c.id FROM content_chunks c WHERE c.page_id=$1 AND c.occurrence_id=occ.o AND c.body_generation IS NULL) s
+  WHERE occ.o IS NOT NULL
+  UNION ALL
+  SELECT c.id FROM content_chunks c -- chunk-visibility-ok: retirement selects the rows the live generation does not hold
+  WHERE c.page_id=$1 AND c.occurrence_id IS NULL AND (c.body_generation IS NULL OR (cardinality($3::bigint[])=0 AND c.body_generation<=$2::bigint))`;
 
 /** The page still stores a chunk row its live generation does not hold (a deferred retirement): sealing it would show the row. */
 export async function hasStaleChunks(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, generation: number, live: readonly number[]): Promise<boolean> {
@@ -72,7 +88,7 @@ async function retireStaleChunks(engine: BrainEngine, ref: { sourceId: string; s
       await tx.lockPageKeys([ref]);
       const [page] = await tx.executeRaw<{ body_generation: number | string; body_storage: string }>('SELECT body_generation, body_storage FROM pages WHERE id=$1', [pageId]);
       if (page?.body_storage !== 'segmented' || Number(page.body_generation) !== generation) return null;
-      return (await tx.executeRaw<{ id: number }>(`DELETE FROM content_chunks c WHERE c.id IN (${STALE_CHUNKS_SQL} LIMIT $4) RETURNING c.id`,
+      return (await tx.executeRaw<{ id: number }>(`DELETE FROM content_chunks c WHERE c.id=ANY(ARRAY(${STALE_CHUNKS_SQL} LIMIT $4)) RETURNING c.id`,
         [pageId, generation, live, DEFAULT_FLIP_RETIRE_MAX_ROWS])).length;
     });
     if (deleted === null) return { retired, moved: true };
@@ -93,11 +109,34 @@ async function claimProjection(engine: Pick<BrainEngine, 'executeRaw'>, ref: { s
   return !job || job.claimed;
 }
 
+/** The projections of each engine's pages running in this process, by source and slug: the newest call of each page. */
+const projecting = new WeakMap<BrainEngine, Map<string, Promise<unknown>>>();
+
+/**
+ * #6143: one projection of a page at a time in this process. A segmented
+ * create's publication projects the page after commit while the resident
+ * drain picks up the job its unsealed commit queued; run side by side, both
+ * chunk the whole body and pin a pooled connection each, one waiting on the
+ * other's page guard, for every batch. A call for a page another call is
+ * projecting waits for it, and a page that call sealed has nothing left to project.
+ */
 export async function buildSegmentedProjection(engine: BrainEngine, ref: { sourceId: string; slug: string },
   opts: { expectedRevision?: string } = {}): Promise<SegmentedProjectionResult> {
+  let pages = projecting.get(engine);
+  if (!pages) projecting.set(engine, pages = new Map());
+  const key = JSON.stringify([ref.sourceId, ref.slug]);
+  const run = (pages.get(key) ?? Promise.resolve()).catch(() => undefined).then(() => projectSegmentedPage(engine, ref, opts));
+  pages.set(key, run);
+  try { return await run; }
+  finally { if (pages.get(key) === run) pages.delete(key); }
+}
+
+async function projectSegmentedPage(engine: BrainEngine, ref: { sourceId: string; slug: string },
+  opts: { expectedRevision?: string }): Promise<SegmentedProjectionResult> {
   const page = await readProjectionPage(engine, ref);
   if (!page || (opts.expectedRevision !== undefined && page.knowledge_revision !== opts.expectedRevision)) return { chunks: 0, retired: 0, sealed: false };
-  if (page.text_projection_revision !== page.knowledge_revision && !await claimProjection(engine, ref)) return { chunks: 0, retired: 0, sealed: false };
+  if (page.text_projection_revision === page.knowledge_revision) return { chunks: 0, retired: 0, sealed: true };
+  if (!await claimProjection(engine, ref)) return { chunks: 0, retired: 0, sealed: false };
   try {
     return await buildClaimedProjection(engine, ref, page);
   } catch (error) {
@@ -111,6 +150,7 @@ async function buildClaimedProjection(engine: BrainEngine, ref: { sourceId: stri
   const generation = Number(page.body_generation);
   const pageId = Number(page.id);
   const liveRows = await engine.readManifest(pageId);
+  await assertGenerationTiles(engine, pageId, generation, liveRows);
   const { retired, moved } = await retireStaleChunks(engine, ref, pageId, generation, liveRows.map(row => Number(row.occurrenceId)));
   if (moved) return { chunks: 0, retired, sealed: false };
   const frontmatter = page.frontmatter ?? {};
@@ -119,7 +159,7 @@ async function buildClaimedProjection(engine: BrainEngine, ref: { sourceId: stri
   const staged = await stageOccurrenceChunks(engine, { pageId, sourceId: ref.sourceId, slug: ref.slug, generation, occurrences: unchunked, title: page.title,
     frontmatter, flags: page.body_flags ?? {}, chunking: { quarantined, corpusGeneration: null, tier: 'none' }, retiredOccurrences: [], guarded: true,
     renew: tx => tx.executeRaw(`UPDATE page_projection_jobs SET updated_at=now() WHERE ${JOB_OF_PAGE} AND reason='${SEGMENTED_PROJECTION_CLAIM}'`, [ref.sourceId, ref.slug]) });
-  await faultPoint('segmented:projection_staged', { sourceId: ref.sourceId });
+  await faultPoint('segmented:projection_staged', { sourceId: ref.sourceId, slug: ref.slug });
   const sealed = await engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: ref.sourceId, slug: ref.slug }]);
     const current = await readProjectionPage(tx, ref);

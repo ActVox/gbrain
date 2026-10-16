@@ -25,6 +25,7 @@ import { PAGE_MAX_BYTES } from '../../src/core/page-size-policy.ts';
 import { BODY_STAGING_HARD_MS } from '../../src/core/page-body/limits.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { performManagedSync } from '../../src/core/persistence/sync-run.ts';
+import { syncLockId } from '../../src/core/db-lock.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { conversationPage } from '../helpers/conversation-page.ts';
@@ -87,6 +88,8 @@ test('an owner killed between preparation and publication: the next run re-prepa
 
   // The dead owner's claim lapses, as its lease would; the next run's owner reclaims the request and prepares it again.
   await engine.executeRaw("UPDATE persistence_requests SET claim_expires_at=now()-interval '1 second' WHERE source_id=$1 AND state='running'", [sourceId]);
+  // So does its drain lease (#6712): a dead same-host holder is taken over once its lease is older than the takeover grace.
+  await engine.executeRaw("UPDATE gbrain_cycle_locks SET acquired_at=now()-interval '2 minutes' WHERE id=$1 AND holder_pid=$2", [syncLockId(sourceId), child.pid]);
   let result = await performManagedSync(engine, { sourceId, noPull: true, noEmbed: true });
   for (let pass = 0; result.status === 'partial' && pass < 30; pass++) result = await performManagedSync(engine, { sourceId, noPull: true, noEmbed: true });
   expect(result.status).toBe('first_sync');

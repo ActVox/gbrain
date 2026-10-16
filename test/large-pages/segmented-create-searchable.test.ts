@@ -39,6 +39,7 @@ import { disposePersistenceConsumer } from '../../src/core/persistence/service.t
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { segmentChunkWork } from '../../src/core/page-body/ingest.ts';
 import { SEGMENTED_CREATE_SEAL_MAX_BYTES } from '../../src/core/page-body/limits.ts';
+import { buildSegmentedProjection } from '../../src/core/page-body/projection.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { drainProjections, projectionDrainWork, SEGMENTED_PROJECTION_CLAIM, SEGMENTED_PROJECTION_LEASE_SECONDS } from '../../src/core/page-state/projections.ts';
 import { checkProjectionReadiness } from '../../src/commands/doctor/checks/projection-readiness.ts';
@@ -112,6 +113,26 @@ for (const kind of testBackends()) {
       const retried = await importFromContent(engine, slug, content, { sourceId: 'default', noEmbed: true });
       expect(retried.searchable).toBe(true);
       expect(await found(needle, slug)).toBe(true);
+    }, 120_000);
+
+    test('two projections of one unsealed page in this process run one after the other: the second waits and finds it sealed (#6143)', async () => {
+      const slug = 'chats/single-flight';
+      installFaultHook(point => { if (point === 'segmented:projection_staged') throw new Error('post-commit build died'); });
+      const imported = await importFromContent(engine, slug, page(SEGMENTED_CREATE_SEAL_MAX_BYTES + 256 * 1024, `zzflight${kind}`), { sourceId: 'default', noEmbed: true });
+      installFaultHook(undefined);
+      expect(imported.searchable).toBe('pending');
+      let inside = 0, most = 0, staged = 0;
+      installFaultHook(async point => {
+        if (point !== 'segmented:projection_staged') return;
+        staged++; inside++; most = Math.max(most, inside);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        inside--;
+      });
+      const ref = { sourceId: 'default', slug };
+      const [first, second] = await Promise.all([buildSegmentedProjection(engine, ref), buildSegmentedProjection(engine, ref)]);
+      expect(first.sealed).toBe(true);
+      expect(second).toEqual({ chunks: 0, retired: 0, sealed: true });
+      expect({ staged, most }).toEqual({ staged: 1, most: 1 });
     }, 120_000);
 
     test('a larger create whose post-commit build died is built by projections drain once its claim lapses, exactly once', async () => {

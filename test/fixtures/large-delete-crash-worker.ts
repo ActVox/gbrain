@@ -1,7 +1,8 @@
 /**
- * Child process for test/large-pages/segmented-delete-crash.slow.test.ts: one managed source whose page over the
- * single-string ceiling has a canonical file, a soft delete stopped (for SIGKILL) at a publication seam, and the
- * owner's recovery pass, stopped at a restoration seam or run to the end. Prints one JSON line per step.
+ * Child process for test/large-pages/segmented-delete-crash.slow.test.ts and segmented-delete-stage-crash.slow.test.ts:
+ * one managed source whose page over the single-string ceiling has a canonical file, a soft delete stopped (for
+ * SIGKILL) at a publication or before-stage seam, the owner's recovery pass, stopped at a restoration seam or run to
+ * the end, and the `gbrain repair stuck-recovery` preview scan. Prints one JSON line per step.
  */
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -12,6 +13,7 @@ import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import type { OperationContext } from '../../src/core/operations.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { recoverPublication } from '../../src/core/persistence/coordinator.ts';
+import { scanStuckRecoveries } from '../../src/core/persistence/recovery-resolve.ts';
 import { localHostId, registerLocalWriter } from '../../src/core/persistence/identity.ts';
 import { importManagedFile } from '../../src/core/persistence/import-mutations.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
@@ -82,6 +84,9 @@ try {
       fileBoundary: point => { if (point === boundary) { emit({ boundary: point }); hang(); } },
     });
     emit({ recovered: recovered.state, recovery: recovered.recovery === null ? null : 'set', blocked_reason: recovered.blocked_reason ?? null });
+  } else if (mode === 'scan') {
+    const scan = await scanStuckRecoveries(engine, [config.sourceId]).catch((error: { code?: string }) => ({ error: error.code ?? String(error) }));
+    emit('error' in scan ? scan : { items: scan.items.length, refused: scan.refused.map(entry => entry.code), residuals: scan.residuals });
   }
 } finally {
   await disposePersistenceConsumer(engine).catch(() => undefined);

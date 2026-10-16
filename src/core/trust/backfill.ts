@@ -41,6 +41,7 @@ import { FACTS_BACKSTOP_SOURCES } from '../facts/capture-sources.ts';
 import { opError } from '../ops/contract.ts';
 import { CONNECTOR_SOURCE_KINDS } from '../persistence/connector-identity.ts';
 import { withCoordinatedWrite, withTrustBackfill } from '../persistence/context.ts';
+import { propagateTierLowering } from './propagation.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
 import { EXTRACT_ATOMS_EXTRACTOR_PREFIX, frontmatterTrustCapsSql } from './channel.ts';
@@ -389,6 +390,7 @@ export async function relowerClaimedRows(engine: BrainEngine, opts: { dryRun?: b
   const managedBrain = opts.dryRun ? false : await readManagedMode(engine);
   const attribution = opts.dryRun ? null : await maintenanceAttribution(engine);
   const origin = JSON.stringify({ channel: 'trust_relower' });
+  const lowered: Array<{ table: TrustTable; id: number }> = [];
   for (const table of BACKFILL_ORDER) {
     if (!cols.table(table) || !cols.has(table, 'write_origin')) continue;
     const { from, rule, src } = forTable(table);
@@ -412,11 +414,15 @@ export async function relowerClaimedRows(engine: BrainEngine, opts: { dryRun?: b
     if (opts.dryRun || rows.length === 0) continue;
     const ids = rows.map(r => Number(r.id));
     const sources = [...new Set(rows.map(r => r.source_id))];
-    const apply = (tx: BrainEngine) => withTrustBackfill(tx, () => tx.executeRaw(
+    const apply = async (tx: BrainEngine) => (await withTrustBackfill(tx, () => tx.executeRaw<{ id: number }>(
       `WITH b AS (${candidates} AND x.id = ANY($2::bigint[]))
-       UPDATE ${table} t SET trust_tier = b.to_tier, write_origin = $3::text::jsonb FROM b WHERE t.id = b.id`, [claimed, ids, origin]));
-    await engine.transaction(tx => managedBrain ? withCoordinatedWrite(tx, sources, () => apply(tx), attribution!) : apply(tx));
+       UPDATE ${table} t SET trust_tier = b.to_tier, write_origin = $3::text::jsonb FROM b WHERE t.id = b.id RETURNING t.id`, [claimed, ids, origin])))
+      .map(row => ({ table, id: Number(row.id) }));
+    lowered.push(...await engine.transaction(tx => managedBrain ? withCoordinatedWrite(tx, sources, () => apply(tx), attribution!) : apply(tx)));
   }
+  // W1 #6783 §12 (b): after every table is relowered (the dry run reports exactly these rows), what was derived from them follows.
+  if (lowered.length) await engine.transaction(tx => managedBrain
+    ? withCoordinatedWrite(tx, claimed, () => propagateTierLowering(tx, lowered), attribution!) : propagateTierLowering(tx, lowered));
   return report;
 }
 

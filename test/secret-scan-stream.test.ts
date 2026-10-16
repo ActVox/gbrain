@@ -86,6 +86,48 @@ describe('scanTextStream', () => {
     expect(streamScanWork.windows).toBeLessThanOrEqual(Math.ceil(buf.length / (W - O - 100)) + 1);
   });
 
+test('every pattern slid across a mid-line cut at every offset matches the whole-text scan', async () => {
+    const W2 = 2 * O;
+    const cut = O; // a newline-free window is cut mid-line at exactly the overlap before its end
+    const filler = rs(W2 + 6000, ALNUM.slice(0, 26) + ' ');
+    const b64 = (s: string): string => Buffer.from(s).toString('base64');
+    const hex = (n: number): string => rs(n, '0123456789abcdef');
+    const cases: Array<{ s: string; highEntropy?: boolean }> = [
+      { s: 'Bearer ' + rs(40) }, { s: 'BEARER ' + rs(40) }, { s: 'bearer\t\t' + rs(24) },
+      { s: 'Authorization: Basic ' + b64('alice:' + rs(10)) }, { s: 'authorization:basic  ' + b64('u:p') },
+      { s: 'Basic ' + b64('alice:' + rs(20)) },
+      { s: 'postgres' + '://alice:' + rs(16) + '@db.example:5432/app' }, { s: 'https' + '://alice:' + rs(16) + '@host.example/x' },
+      { s: 'eyJ' + rs(20) + '.' + rs(20) + '.' + rs(20) },
+      { s: 'sk-ant-' + rs(30) }, { s: 'sk-proj-' + rs(30) }, { s: 'sk-' + rs(40) }, { s: 'pa-' + rs(30) },
+      { s: 'github_pat_' + rs(30) }, { s: 'gh' + 'p_' + rs(36) }, { s: 'glpat-' + rs(24) }, { s: 'xox' + 'b-' + rs(20) },
+      { s: 'AKIA' + rs(16, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') }, { s: 'AIza' + rs(35) },
+      { s: 'sk_' + 'live_' + rs(24) }, { s: 'whsec_' + rs(30) }, { s: 'SG.' + rs(20) + '.' + rs(20) },
+      { s: 'AC' + hex(32) }, { s: 'sb_secret_' + rs(24) }, { s: 'sbp_' + hex(40) }, { s: 'npm_' + rs(36) },
+      { s: 'hf_' + rs(34) }, { s: 'dop_v1_' + hex(64) }, { s: 'gbrain_at_' + hex(64) },
+      { s: 'Bearer ' + 'sk-ant-' + rs(30) }, { s: 'Bearer ' + rs(12) + 'gh' + 'p_' + rs(36) },
+      { s: 'api_key = "' + rs(18) + '7Q"', highEntropy: true }, { s: 'SMTP_PASSWORD=' + rs(14) + '9z', highEntropy: true },
+      { s: 'token:   ' + rs(16) + '3x', highEntropy: true },
+    ];
+    let probes = 0;
+    let found = 0;
+    for (const { s, highEntropy } of cases) {
+      const opts = highEntropy ? { highEntropy: true } : {};
+      for (let into = -2; into <= Math.min(s.length, 32); into++) {
+        const at = cut - into;
+        const text = filler.slice(0, at - 1) + ' ' + s + ' ' + filler.slice(at + s.length + 1, W2 + 6000);
+        const buf = Buffer.from(text);
+        const whole = scanText(text, opts);
+        const streamed = await scanTextStream(chunks(buf, () => 1 + Math.floor(rnd() * 70_000)), opts, W2);
+        expect({ s: s.slice(0, 12), into, got: keys(streamed) }).toEqual({ s: s.slice(0, 12), into, got: keys(whole) });
+        expect(whole.length).toBeGreaterThan(0);
+        probes++;
+        found += streamed.length;
+      }
+    }
+    expect(probes).toBeGreaterThan(cases.length * 20);
+    expect(found).toBeGreaterThanOrEqual(probes);
+  });
+
   test('a window under twice the overlap is refused', async () => {
     await expect(scanTextStream(chunks(Buffer.from('x'), () => 1), {}, 2 * O - 1)).rejects.toThrow(RangeError);
   });

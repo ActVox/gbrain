@@ -16,6 +16,7 @@ import { isDatedTimelineLine, supersededInlineCitationEntries } from './timeline
 import type { BrainEngine } from './engine.ts';
 import { firstMaterializedMarkerIndex } from './timeline-marker.ts';
 import { BLOCK_MAX_BYTES, blockTooLargeError, bodyBlocks, detachedValue, segmentedPassWork } from './page-body/segment-blocks.ts';
+import { assertGenerationTiles } from './page-body/body-tiling.ts';
 
 export interface ExtractedTimelineEntry {
   slug: string;
@@ -166,9 +167,10 @@ export async function segmentedTimelineText(engine: Pick<BrainEngine, 'executeRa
  * read from the generation's manifest rows, so a page demoted inline since still yields its segmented versions.
  * Counts its bytes and units in segmentedPassWork.
  */
-async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'readManifest' | 'readSegmentTexts'>,
+async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'executeRaw' | 'readManifest' | 'readSegmentTexts'>,
   page: { id: number; slug: string; sourceId: string }, generation: number): AsyncIterable<string> {
   const rows = await engine.readManifest(page.id, { generation });
+  await assertGenerationTiles(engine, page.id, generation, rows);
   for (const [n, region] of (['truth', 'timeline'] as const).entries()) {
     if (n > 0) yield '\n';
     const own = rows.filter(row => row.region === region);
@@ -234,9 +236,20 @@ export async function retractRemovedTimelineEntries(
     if (version.body_storage !== 'segmented') { addText(`${version.compiled_truth}\n${version.timeline ?? ''}`); continue; }
     for await (const block of retainedGenerationBlocks(engine, { id: Number(version.page_id), slug, sourceId }, Number(version.generation))) addText(block);
   }
-  const orphans = extra.filter(row => produced.has(tupleKey(row)) || (superseded.has(tupleKey(row)) && hasExtractorDetail(row)))
+  const found = extra.filter(row => produced.has(tupleKey(row)) || (superseded.has(tupleKey(row)) && hasExtractorDetail(row)))
     .map(({ detail: _detail, ...row }) => row);
-  if (!orphans.length || opts.dryRun) return orphans;
+  if (!found.length) return [];
+  // W1 #6783 §12 (a): a row more trusted than the page's restatement, or held by an open contest, stays; the owner decides.
+  const [{ contestHeldRows, heldRows }, { derivedWriteTrust }, { storedTrustTier }] = await Promise.all([
+    import('./trust/fence-guard.ts'), import('./trust/taint.ts'), import('./trust/tier.ts')]);
+  const [page] = await engine.executeRaw<{ id: number; trust_tier: string | null }>('SELECT id, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
+  const writer = derivedWriteTrust({ channel: 'derive:timeline', inputs: page ? [{ table: 'pages', id: Number(page.id), tier: storedTrustTier(page.trust_tier) }] : [], projection: true }).tier;
+  const held = await heldRows(engine as BrainEngine, 'timeline_entries', found.map(row => Number(row.id)), { writer, pending: true });
+  const orphans = found.filter(row => !held.has(Number(row.id)));
+  if (opts.dryRun) return orphans;
+  await contestHeldRows(engine as BrainEngine, { sourceId, slug, table: 'timeline_entries', proposer: 'timeline_reconcile', writer,
+    rows: [...held].map(([id, tier]) => ({ id, tier, change: 'removed' as const })) });
+  if (!orphans.length) return orphans;
   await engine.executeRaw(
     `DELETE FROM timeline_entries WHERE id IN (SELECT jsonb_array_elements_text($1::text::jsonb)::int)`,
     [JSON.stringify(orphans.map(row => row.id))]);

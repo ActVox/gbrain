@@ -346,7 +346,8 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- (segmented-page chunks; NULL for inline pages) and
   -- content_chunks_occurrence_idx are added the same way, and so is v248's
   -- retired_generation, which nothing writes or reads but released chunk readers
-  -- still select (v249 keeps it and adds content_chunks_generation_idx).
+  -- still select (v249 keeps it and adds content_chunks_generation_idx; v253
+  -- adds content_chunks_occurrence_generation_idx for chunk retirement).
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
   embedded_text_hash    TEXT,

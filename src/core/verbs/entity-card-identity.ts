@@ -28,7 +28,6 @@ import { readIdentitySiblings, SIBLING_GROUP_CAP } from '../mentions/siblings.ts
 import type { MentionPolicy, PackTypes } from '../mentions/policy.ts';
 import type { Notice } from '../agent-output.ts';
 import type { RecordGroupView } from './entity-references.ts';
-import type { Page } from '../types.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { truthLead } from '../page-body/segment-blocks.ts';
 import { boundedRawPrefix } from '../page-window/bounded-lead.ts';
@@ -150,10 +149,14 @@ export async function readSiblingIdentity(engine: BrainEngine, sourceId: string,
   };
 }
 
-/** The body an excerpt is cut from: the compiled truth, or a segmented page's lead (EXCERPT_LEAD_BYTES, cut back to a whole line when the truth goes on). */
-async function excerptSource(engine: BrainEngine, page: Page): Promise<string> {
+/**
+ * The body an excerpt is cut from: the compiled truth, or a segmented page's lead (EXCERPT_LEAD_BYTES, cut back to a
+ * whole line when the truth goes on), read at the snapshot's revision.
+ */
+async function excerptSource(engine: BrainEngine, snapshot: PageSnapshot): Promise<string> {
+  const { page } = snapshot;
   if (!isSegmentedPage(page)) return page.compiled_truth ?? '';
-  const lead = await truthLead(engine, page.id, EXCERPT_LEAD_BYTES);
+  const lead = await truthLead(engine, page.id, EXCERPT_LEAD_BYTES, { revision: snapshot.revision, generation: snapshot.bodyGeneration });
   const bounded = boundedRawPrefix(lead, EXCERPT_LEAD_BYTES);
   if (bounded.length === lead.length && lead.length < EXCERPT_LEAD_BYTES) return lead;
   return bounded.slice(0, Math.max(0, bounded.lastIndexOf('\n')));
@@ -178,7 +181,7 @@ export async function readCardIdentity(engine: BrainEngine, sourceId: string,
   const bodies = new Map<string, { title: string; body: string }>();
   for (const slug of slugs) {
     const snapshot = snapshots.get(pageSnapshotKey(sourceId, slug));
-    if (snapshot) bodies.set(slug, { title: snapshot.page.title ?? slug, body: await excerptSource(engine, snapshot.page).catch(() => '') });
+    if (snapshot) bodies.set(slug, { title: snapshot.page.title ?? slug, body: await excerptSource(engine, snapshot).catch(() => '') });
   }
   const excerpt: IdentityExcerptLine[] = [];
   const omitted: string[] = [];
