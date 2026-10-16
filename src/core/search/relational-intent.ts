@@ -107,6 +107,8 @@ export interface CompiledPattern {
   direction: RelationDirection;
   /** Number of seed capture groups (1, or 2 for connects). */
   seedGroups: 1 | 2;
+  /** A seed this matches skips the pattern (RelationLexicon.rejectSeed). */
+  rejectSeed?: RegExp;
 }
 
 // Bounded seed capture: 1–80 chars, lazy, so the trailing anchor decides the
@@ -129,6 +131,8 @@ interface RelationLexicon {
   outVerbs?: string;
   outWho?: string;
   outNouns?: string;
+  /** A seed this matches is not this relation's anchor: the pattern is skipped and later patterns still try. */
+  rejectSeed?: RegExp;
 }
 
 const ROUND = '(?:the\\s+)?(?:[a-z0-9-]+\\s+)?(?:round|seed|series\\s+[a-z])';
@@ -168,9 +172,18 @@ const RELATIONS: RelationLexicon[] = [
   },
   {
     linkTypes: ['attended'],
-    inVerbs: 'attended',
+    inVerbs: 'attended|were present at|was present at|were in the room for|was in the room for|sat in on',
     agentNouns: 'attendees',
     nounPreps: 'of|at',
+  },
+  {
+    // "took part in", "participated in" and "participants" also name the investors of a round
+    // (the invested_in row above claims "participated in the seed round of X" first).
+    linkTypes: ['attended'],
+    inVerbs: 'took part in|participated in',
+    agentNouns: 'participants',
+    nounPreps: 'of|at|in',
+    rejectSeed: /\b(?:round|series\s+[a-z]|financing|fundraise|raise)\b/i,
   },
 ];
 
@@ -236,9 +249,9 @@ function buildPatterns(vocab?: RelationVocab): CompiledPattern[] {
 
   for (const r of RELATIONS) {
     // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- sources are this module's constant RELATIONS lexicon (default patterns are memoized); query text is only matched against them, never compiled
-    const out = (re: string) => patterns.push({ re: new RegExp(re, 'i'), kind: 'who_rel', linkTypes: r.linkTypes, direction: 'out', seedGroups: 1 });
+    const out = (re: string) => patterns.push({ re: new RegExp(re, 'i'), kind: 'who_rel', linkTypes: r.linkTypes, direction: 'out', seedGroups: 1, rejectSeed: r.rejectSeed });
     // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- same constant vocabulary as `out` above
-    const inc = (re: string) => patterns.push({ re: new RegExp(re, 'i'), kind: 'who_rel', linkTypes: r.linkTypes, direction: 'in', seedGroups: 1 });
+    const inc = (re: string) => patterns.push({ re: new RegExp(re, 'i'), kind: 'who_rel', linkTypes: r.linkTypes, direction: 'in', seedGroups: 1, rejectSeed: r.rejectSeed });
     // Outgoing first: "which companies has X backed" must not read as incoming.
     if (r.outVerbs) out(`^(?:what|which)\\s+(?:companies|startups|deals|businesses|firms|organizations)?\\s*(?:has|have|did|does|do)\\s+${SEED}\\s+(?:${r.outVerbs})${END}`);
     if (r.outWho) out(`^who\\s+(?:does|did|has)\\s+${SEED}\\s+(?:${r.outWho})${END}`);
@@ -354,7 +367,7 @@ export function parseRelationalQuery(query: string, vocab?: RelationVocab): Rela
     }
 
     const seed = cleanSeed(m[1] ?? '');
-    if (!validSeed(seed)) continue;
+    if (!validSeed(seed) || p.rejectSeed?.test(seed)) continue;
     return { kind: p.kind, seeds: [seed], linkTypes: p.linkTypes, direction: p.direction, relationPhrase: m[0].trim(), edgeStatus: relationQueryStatus(query) };
   }
 

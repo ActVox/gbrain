@@ -56,6 +56,15 @@ The existing query surface can read the resulting relationship:
 gbrain call query '{"query":"Who attended meetings/planning?","expand":false,"relational":true}'
 ```
 
+Search reads the same relationship for "who attended X", "attendees of X",
+"who was (or were) present at X", "who was in the room for X", "who took part
+in X", "who participated in X", "who sat in on X" and "participants of X".
+Broad verbs such as "joined", "was at" or "went to" are not read as
+attendance, and "took part in", "participated in" and "participants" are not
+when the anchor names a funding round, series or financing. If a question is
+read as attendance when it should not be, pass `relational: false` on the call
+or turn the arm off with `gbrain config set search.relational_retrieval false`.
+
 The meeting owns the derived claim. Re-extracting the person does not delete
 it; removing the attendance evidence and re-extracting the meeting does.
 Manual claims and claims from other origins remain separate. Remote writes
