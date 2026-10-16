@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 243,
+    "count": 244,
     "gaps": [
       17,
       18,
@@ -57,7 +57,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 248,
+    "latest": 249,
     "records": [
       {
         "handler": {
@@ -3797,6 +3797,19 @@
         "transaction": false,
         "verify": "absent",
         "version": 248
+      },
+      {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "belief_ledger",
+        "sql": {
+          "length": 4645,
+          "sha256": "8a5992e82eebda6cc28a91dd588d2b0e9d58fd2d5207ddb1b83e771e50519048"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 249
       }
     ],
     "versions": [
@@ -4042,7 +4055,8 @@
       245,
       246,
       247,
-      248
+      248,
+      249
     ]
   },
   "normalizer": "migrations-record-v1"

@@ -32,7 +32,7 @@ export const GUARDED_TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> 
   timeline_entries: ['created_at', 'date', 'detail', 'event_page_id', 'id', 'last_write_principal_id', 'last_write_principal_kind', 'last_write_request_id',
     'last_written_at', 'page_id', 'source', 'summary', 'trust_tier', 'write_origin', 'write_principal_id', 'write_principal_kind', 'write_request_id'],
   sources: ['archive_expires_at', 'archived', 'archived_at', 'chunker_version', 'config', 'contextual_retrieval_mode', 'created_at', 'id', 'incarnation',
-    'last_commit', 'last_sync_at', 'local_path', 'name', 'newest_content_at', 'trust_frontmatter_overrides', 'upstream_behind', 'upstream_checked_at',
+    'last_commit', 'last_sync_at', 'local_path', 'name', 'newest_content_at', 'purge_epoch', 'trust_frontmatter_overrides', 'upstream_behind', 'upstream_checked_at',
     'upstream_commit'],
   page_segment_texts: ['body', 'byte_len', 'created_at', 'line_count', 'sha256', 'source_id'],
   page_body_manifest: ['byte_len', 'byte_start', 'cut_kind', 'date_max', 'date_min', 'entry_state', 'facts_slots', 'gen_from', 'gen_to', 'hash_state',
