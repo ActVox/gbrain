@@ -23,5 +23,8 @@ export const RELINK_REASONS = {
   revision_conflict: { memoized: false, fix: 'The fact or the entity page changed while relink ran. Rerun.' },
 } as const satisfies Record<string, { memoized: boolean; fix: string }>;
 
+/** #6764: the `fact_relink_attempts` outcome `gbrain facts relink --conversation` records for a derived row it could not resolve. */
+export const CONVERSATION_UNRESOLVED = 'conversation_unresolved';
+
 export type RelinkReason = keyof typeof RELINK_REASONS;
 export const RELINK_REASON_CODES = Object.keys(RELINK_REASONS) as RelinkReason[];

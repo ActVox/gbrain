@@ -35,14 +35,13 @@ import { waitForWrite, writeResponse } from '../persistence/service.ts';
 import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { writeDerivedFacts } from '../persistence/derived-facts.ts';
 import { AUDIT_ROW_SOURCES } from './audit-sources.ts';
+import { CONVERSATION_UNRESOLVED } from './relink-reasons.ts';
 import { appendContextNote } from './subject-infer.ts';
 import { inferConversationSubject } from './conversation-subject-infer.ts';
 
 export const CONVERSATION_RELINK_INTENT = 'managed_maintenance_conversation_relink';
 /** The request slug: a dot-led segment no page can hold; the page's own key is locked with it. */
 export const CONVERSATION_RELINK_ANCHOR = '.maintenance/conversation-relink';
-/** The `fact_relink_attempts` outcome of a derived row this relink could not resolve. */
-export const CONVERSATION_UNRESOLVED = 'conversation_unresolved';
 /** Pages one run relinks when no `--slugs` are named. */
 export const CONVERSATION_RELINK_PAGES = 50;
 /** The SQL predicate (on alias `f`, audit sources as `$audit`) of a conversation extractor's derived fact row. */

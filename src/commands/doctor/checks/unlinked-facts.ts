@@ -27,7 +27,7 @@ import { AUDIT_ROW_SOURCES } from '../../../core/facts/audit-sources.ts';
 import type { Check } from '../../doctor.ts';
 import type { Action } from '../../../core/agent-output.ts';
 import { doctorVerify } from '../check-fix.ts';
-import { CONVERSATION_UNRESOLVED } from '../../../core/facts/conversation-relink.ts';
+import { CONVERSATION_UNRESOLVED } from '../../../core/facts/relink-reasons.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
 export const UNLINKED_NEW_SHARE_WARN = 0.25;
