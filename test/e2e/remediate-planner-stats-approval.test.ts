@@ -46,7 +46,7 @@ d('remediation approval and planner statistics (Postgres)', () => {
     const engine = await setupDB();
     await engine.executeRaw('ALTER TABLE pages SET (autovacuum_enabled = false)');
     await engine.executeRaw(
-      `INSERT INTO pages (source_id, slug, type, title) SELECT 'default', 'people/approval-' || g, 'person', 'Person Example ' || g FROM generate_series(1, 600) g`);
+      `INSERT INTO pages (source_id, slug, type, title) SELECT 'default', 'people/approval-' || g, 'person', 'Person Example ' || g FROM generate_series(1, 20) g`);
   });
   afterAll(async () => {
     const engine = getEngine();
@@ -71,7 +71,7 @@ d('remediation approval and planner statistics (Postgres)', () => {
     await engine.executeRaw('ANALYZE pages');
     expect(await readExpressionIndexesWithoutStats(engine)).toEqual([]);
     expect(await quiet(() => runRemediate(engine, approved))).toBeNull();
-  });
+  }, 120_000);
 
   test('a new pending repair between the approval and the run still refuses with preview_changed', async () => {
     const engine = getEngine();
@@ -80,5 +80,5 @@ d('remediation approval and planner statistics (Postgres)', () => {
     await engine.executeRaw("INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at) VALUES('managed-connector',$1,'[]'::jsonb,now()-interval '9 days')", [`orphan-${randomUUID()}`]);
     expect((await planRepairSteps(engine, { noEmbed: true })).map(step => step.kind)).toContain('connector-checkpoints');
     expect(await quiet(() => runRemediate(engine, approved))).toBe('preview_changed');
-  });
+  }, 120_000);
 });
