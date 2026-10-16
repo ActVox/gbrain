@@ -103,6 +103,20 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       expect(sorted(brief(remote.changes))).toEqual(sorted([['fact', 'removed', 'Acme sells widgets'], ['fact', 'added', 'Acme sells gadgets']]));
       expect(JSON.stringify(remote)).not.toContain('Fund A');
       expect(JSON.stringify(remote)).not.toContain('Secret');
+      // Takes follow the takes surfaces' holder rule: a remote caller reads world-held takes only, both a revised take and the takes of
+      // a page created in the window (N6 found the held take leaking through both paths before the rule was applied).
+      const t2 = await at(b);
+      await b.put(slug, beliefPage({ facts: ['Acme sells gadgets', { claim: 'Acme signed with Fund A', visibility: 'private' }],
+        takes: [{ claim: 'Acme is the public favorite', who: 'world', weight: '0.6' }, { claim: 'Acme is privately doubted', who: 'garry-example', weight: '0.3' }] }));
+      await b.put('companies/newco-example', beliefPage({ title: 'Newco', takes: [{ claim: 'Newco looks public', who: 'world' }, { claim: 'Newco is privately loved', who: 'garry-example' }] }));
+      const t3 = await at(b);
+      const takesLocal = (await changes(b, t2, t3)).changes.filter(c => c.kind === 'take').map(c => c.subject.claim);
+      expect(takesLocal.sort()).toEqual(['Acme is privately doubted', 'Acme is the public favorite', 'Newco is privately loved', 'Newco looks public']);
+      const takesRemote = await changes(b, t2, t3, { remote: true });
+      expect(takesRemote.changes.filter(c => c.kind === 'take').map(c => c.subject.claim).sort()).toEqual(['Acme is the public favorite', 'Newco looks public']);
+      expect(JSON.stringify(takesRemote)).not.toContain('privately');
+      const granted = await beliefChanges(b.engine, { sourceId: b.sourceId, since: t2, until: t3, remote: true, takesHolders: ['world', 'garry-example'] });
+      expect(granted.changes.filter(c => c.kind === 'take')).toHaveLength(4);
       const before = await b.engine.executeRaw<{ t: string }>(`SELECT min(recorded_at) AS t FROM belief_events WHERE source_id = $1`, [b.sourceId]);
       const old = new Date(Date.parse(before[0]!.t) - 86_400_000).toISOString();
       expect((await changes(b, old, early)).coverage_from).toEqual(expect.any(String));

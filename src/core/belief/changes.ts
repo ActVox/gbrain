@@ -55,7 +55,11 @@ export interface BeliefChanges {
   /** The source has no ledger coverage at all. */
   not_recorded?: true;
 }
-export interface BeliefChangesQuery { sourceId: string; since: string; until: string; remote: boolean; entities?: readonly string[]; limit?: number }
+export interface BeliefChangesQuery {
+  sourceId: string; since: string; until: string; remote: boolean; entities?: readonly string[]; limit?: number;
+  /** Remote callers: the take holders they may read (`readHolders`); `['world']` when absent. */
+  takesHolders?: readonly string[];
+}
 
 const SUBJECT_EVENTS = new Set(['fact.asserted', 'fact.revised', 'fact.retracted', 'fact.withdrawn', 'fact.superseded', 'fact.transferred', 'fact.purged',
   'take.asserted', 'take.revised', 'take.resolved', 'take.unresolved', 'take.retracted', 'take.transferred', 'take.purged',
@@ -113,7 +117,7 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
   if (!coverage.ok && coverage.code === 'coverage_from' && coverage.from == null) return { ...out, not_recorded: true };
   const startCov = await coverageAt(engine, q.sourceId, q.since);
   if (!startCov.ok && startCov.code === 'coverage_from') out.coverage_from = startCov.from;
-  const read = await readAll(engine, { sourceId: q.sourceId, remote: q.remote, recordedAfter: out.since, recordedUntil: out.until });
+  const read = await readAll(engine, { sourceId: q.sourceId, remote: q.remote, takesHolders: q.takesHolders, recordedAfter: out.since, recordedUntil: out.until });
   out.truncated = read.truncated;
   const events = read.rows.filter(e => e.origin !== 'backfill' && e.origin !== 'baseline');
 
@@ -144,7 +148,7 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
   const keys = [...new Set([...byKey.values()].map(rows => rows[0]!.subject_key))];
   const prior = new Map<string, BeliefHistoryRow>();
   if (keys.length) {
-    for (const e of (await readAll(engine, { sourceId: q.sourceId, remote: q.remote, subjectKeys: keys, recordedUntil: out.since })).rows) {
+    for (const e of (await readAll(engine, { sourceId: q.sourceId, remote: q.remote, takesHolders: q.takesHolders, subjectKeys: keys, recordedUntil: out.since })).rows) {
       if (e.origin === 'backfill' || !SUBJECT_EVENTS.has(e.event_type) && e.event_type !== 'fact.adopted' && e.event_type !== 'link.adopted') continue;
       prior.set(`${e.subject_kind}\u0000${e.subject_key}`, e);
     }
@@ -199,12 +203,14 @@ export async function beliefChanges(engine: BrainEngine, q: BeliefChangesQuery):
   return out;
 }
 
-/** Fence subjects of a page body, keyed `kind\u0000subject_key`; a remote caller gets them only where it may read the interval, and only world facts. */
+/** Fence subjects of a page body, keyed `kind\u0000subject_key`; a remote caller gets them only where it may read the interval, and only world facts and takes of holders it may read. */
 async function subjectsOf(engine: BrainEngine, q: BeliefChangesQuery, at: Awaited<ReturnType<typeof readPageAtTime>>, interval: NonNullable<Awaited<ReturnType<typeof readPageAtTime>>['current']>) {
   if (!interval.page || interval.body === 'unavailable' || interval.body === 'segmented' || interval.page.compiled_truth == null) return null;
   if (q.remote && !await remoteMayRead(engine, at.page_id, interval)) return null;
   const { subjects } = await bodySubjects(engine, interval.lifetime, `${interval.page.compiled_truth}\n${interval.page.timeline ?? ''}`, interval.event.visibility);
-  return new Map(subjects.filter(s => !q.remote || s.visibility === 'world').map(s => [`${s.kind}\u0000${s.key}`, s.value]));
+  const holders = new Set(q.takesHolders ?? ['world']);
+  return new Map(subjects.filter(s => !q.remote || s.visibility === 'world' && (s.kind !== 'take' || holders.has(String(s.value.holder))))
+    .map(s => [`${s.kind}\u0000${s.key}`, s.value]));
 }
 
 /** The page's fence subjects as recorded at `at`, or null when no body answers (coverage, proof, pruned or purged bodies). */

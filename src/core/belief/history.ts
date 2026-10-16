@@ -8,7 +8,9 @@
  *     private: making a claim private hides its earlier world history;
  *   - the stream page's current lifetime is visible now (a page made private
  *     later hides its earlier events; an ended lifetime hides them too);
- *   - for links, every page-backed endpoint and the origin are visible now.
+ *   - for links, every page-backed endpoint and the origin are visible now;
+ *   - for takes, the take's holder is one the caller may read (`takesHolders`, default `['world']`, the takes
+ *     surfaces' rule); a take event with no holder (purged or redacted) is hidden.
  * For every caller, a key with a `derived.hidden` (a purge hid the row it
  * describes, section 6.5) hides its events below that marker and its backfill
  * events at any id; the marker itself stays visible as the disclosure. Only
@@ -31,6 +33,8 @@ export interface BeliefHistoryQuery {
   recordedAfter?: string; recordedUntil?: string;
   /** Only these subject keys, below this event id (the history of keys before a window). */
   subjectKeys?: readonly string[]; beforeId?: number;
+  /** Remote callers: the take holders they may read (the takes surfaces' allow-list); `['world']` when absent. */
+  takesHolders?: readonly string[];
 }
 
 /** Lifetimes a link key names (`L:<uuid>` components), for the endpoint visibility rule. */
@@ -64,7 +68,9 @@ export async function readBeliefHistory(engine: BrainEngine, q: BeliefHistoryQue
   const visibleLifetimes = new Set(linkIds.length ? (await engine.executeRaw<{ page_lifetime: string }>(`SELECT l.page_lifetime::text AS page_lifetime
     FROM belief_page_lifetimes l JOIN pages p ON p.source_id = l.source_id AND p.slug = l.slug AND p.deleted_at IS NULL AND (l.page_id IS NULL OR p.id = l.page_id)
     WHERE l.page_lifetime = ANY($1::uuid[]) AND l.ended_at IS NULL AND ${privatePagesFilterFragment('p')}`, [linkIds])).map(r => r.page_lifetime) : []);
+  const holders = new Set(q.takesHolders ?? ['world']);
   return out.filter(r => r.visibility === 'world' && r.later_private !== true
+    && (r.subject_kind !== 'take' || typeof r.value?.holder === 'string' && holders.has(r.value.holder))
     && (r.page_lifetime == null ? r.subject_kind === 'fact' : r.stream_visible === true)
     && (r.subject_kind !== 'link' && r.subject_kind !== 'link_transition' || linkLifetimes(r.subject_key).every(id => visibleLifetimes.has(id))))
     .map(({ stream_visible: _, later_private: __, ...row }) => row);
