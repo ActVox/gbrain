@@ -53,6 +53,7 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     mkdirSync(root, { recursive: true }); git(root, 'init', '-q', '-b', 'main');
     for (const [path, body] of Object.entries(files)) write(root, path, body);
     commit(root, 'initial');
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     await engine.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,'{}')", [id, root]);
     const sync = (extra: Record<string, unknown> = {}) => performSync(engine, { repoPath: root, sourceId: id, noPull: true, noEmbed: true, noExtract: true, concurrency: 1, ...extra });
     await sync();
