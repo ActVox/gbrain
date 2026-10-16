@@ -116,9 +116,8 @@ export interface ModeBundle {
   /**
    * LLM multi-query expansion (one chat call per expanded search). The
    * `query` op's default when a call leaves `expand` unset; `search` and the
-   * memory verbs never expand. Off in every bundle: on `tokenmax` it cut
-   * `query` p50 from 2,022 to 227 ms with retrieval unchanged (gbrain-evals
-   * GBRA-94, 2026-10-14). Override: per-call `expand` → `search.expansion` → bundle.
+   * memory verbs never expand. Off in every bundle (gbrain-evals GBRA-94).
+   * Override: per-call `expand` → `search.expansion` → bundle.
    */
   expansion: boolean;
   /**
@@ -603,12 +602,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     intentWeighting: true,
     keywordOrFallback: true,
     tokenBudget: undefined,
-    // Expansion OFF (gbrain-evals 2026-10-14 expansion latency, GBRA-94): on
-    // 300 LongMemEval-S questions with the reranker, no expansion kept strict
-    // recall@10 within the noise floor (298 vs 299; the reference's own re-run
-    // also scored 298) and cut `query` p50 from 2,022 to 227 ms.
-    // `search.expansion true` or per-call `expand: true` turns it back on.
-    expansion: false,
+    expansion: false, // GBRA-94 (2026-10-14): strict recall@10 298 vs 299 with the reranker, `query` p50 2,022 -> 227 ms
     expansion_variant_budget: null,
     searchLimit: 50,
     // tokenmax is the high-cost-tolerant tier that already pays for
