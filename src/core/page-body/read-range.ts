@@ -184,7 +184,7 @@ export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: num
     WHERE m.page_id=$1 AND m.staging_id IS NULL AND m.gen_from<=$2 AND (m.gen_to IS NULL OR m.gen_to>$2) ORDER BY m.seq`, [opts.pageId, generation]);
   const slug = String(page.slug);
   const sourceId = String(page.source_id);
-  assertRowsTile(rows, slug, sourceId, generation === Number(page.body_generation) ? Number(page.body_bytes ?? 0) : null);
+  assertRowsTile(rows, slug, sourceId, opts.pin && generation === Number(page.body_generation) ? Number(page.body_bytes ?? 0) : null);
   const ledger = opts.ledger ?? await readBodyLedger(engine, sourceId, slug);
   return {
     pageId: opts.pageId, sourceId, slug, generation, bodyBytes: Number(page.body_bytes ?? 0), bodyLines: Number(page.body_lines ?? 0), truthBytes: Number(page.truth_bytes ?? 0),
@@ -198,8 +198,10 @@ export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: num
 }
 
 /**
- * The generation's rows must run from byte 0 without a gap, to body_bytes when it is the live generation (`total`): a
- * role that sees the page row but not its manifest rows, or rows missing, would otherwise read as a short or empty body.
+ * The generation's rows must run from byte 0 without a gap, and for a pinned (authorized) read of the live generation to
+ * its body_bytes (`total`): a role that sees the page row but not its manifest rows, or rows missing, would otherwise
+ * read as a short or empty body. A trusted unpinned reader sees every row, so it checks only that they start at 0 and
+ * leave no gap.
  */
 function assertRowsTile(rows: Array<Record<string, unknown>>, slug: string, sourceId: string, total: number | null): void {
   let end = 0;
