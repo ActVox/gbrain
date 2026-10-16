@@ -1049,9 +1049,34 @@ appends one snapshot event, under 0.2 ms. As per-subject events it would have
 appended 19 (about 0.6 ms) typical and 246 (about 5 ms, 3–4%) large; a page
 over 1 MiB still does (section 4).
 
-Not yet measured: the cost of computing the canonical diff. It runs in
-prepare, outside the lock, over data the projection already reads. W1's
-probe must time it.
+**Measured on W1 as built.** W1 computes the diff inside the publication
+transaction instead of in prepare (section 13, item 1), so its cost is two
+logical-state reads under the page keys plus keying and hashing, not only the
+append. A no-change batch over 50 runs, median, isolated (scratch probe in
+`~/.capy/work/belief/`):
+
+| Page | PGLite | Postgres |
+|---|---|---|
+| typical (10 facts, 5 takes, 3 links) | 2.3–2.5 ms | 2.2–2.8 ms |
+| large (200 facts, 25 takes, 20 links) | 10.7–13 ms | 9.9–13.5 ms |
+
+On the large page each state read costs about 3 ms, the diff 2.5–4 ms,
+lifetimes about 0.5 ms and the ledger probe about 0.2 ms. That is roughly
+6–9% of `put_page` time, spent while the page keys are held. End to end (the
+same `submitPageMutation` bench, ledger off against on, interleaved, 16 runs
+per cell) the typical-page delta was +6 to +14 ms on Postgres and +1 to +6 ms
+on PGLite, and an identical re-put still paid +6 to +9 ms on Postgres with no
+event appended, because the batch reads before it can tell nothing changed.
+Large-page deltas were within the bench's noise on both engines. One pipeline
+for all five state reads and one merged lifetime read were both tried and were
+slower: a round trip costs about 0.08 ms here, so server work, not round
+trips, sets the cost. A source with the ledger off pays one source read per
+publication.
+
+Cheaper options, none in W1: skip the post-read of tables a publication did
+not write (projections would report what they touched), return to the
+prepare-time diff validated under the lock against `knowledge_revision`, or
+compute claim fingerprints in JS.
 
 **Storage** (section 12, question 7, decided). A second free bench inserted
 the creation events of 2,000 typical pages into a PGLite table with the full
@@ -1117,6 +1142,10 @@ wrong side of an edit, because versions are preimages,
 4. **Purge and retention markers:** `page.purged` events and the large-page
    five-version cap, so W2 discloses rather than fabricates a body that was
    pruned or redacted.
+   A segmented page's versions (#6787) are pruned by
+   `pruneSegmentedVersions` on its own policy, so a publication event of a
+   segmented page can name a `revision_after` whose body no version row holds
+   any more. W2 must disclose that body as pruned, never pick a neighbour.
 
 W2's interval tests map onto these directly:
 
@@ -1338,3 +1367,42 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    withdrawal and materialization, so page-at-time can show the pre-forget
    body. *Recommendation:* accept; the alternative is reconstructing
    historical overlays from withdrawal events, which W2 would then own.
+
+## 13. W1 as built: deviations from this design
+
+1. **The canonical diff is computed in the publication transaction** from
+   logical state reads before and after the projections, under the held page
+   keys (`withBeliefBatch`), not per preparer in prepare. The logical keys are
+   the same; contested, held, withdrawn, transferred and purged rows are made
+   explicit through batch notes. An in-transaction append cannot carry
+   pre-purge state (a purge holds the same keys), so the `purge_epoch` stale
+   preparation check applies only to payloads prepared outside the
+   transaction (backfill, refresh proposals). Section 9 measures the cost.
+2. **Link `context` is carried text:** it is in the event value (purge redacts
+   it) but excluded from the diff hash, so prose edits near a link append
+   nothing (probe 2).
+3. **Added event types:** `link.revised`, `link.transition_revised` and
+   `coverage.complete`; a held write's key is `["h", kind, hold fingerprint]`.
+4. **Commit marks** are a follow-up statement after commit by every appender
+   (group members share one statement); readers fill missing marks. There is
+   no effects-queue row.
+5. **Take ordinal** is the rank among identical claims (claim, kind, holder) by
+   `(since_date, row_num)` in each state. Identical claims are
+   interchangeable, so removing one copy retracts the highest ordinal; the
+   ordinal is not fixed at first sight.
+6. **`belief_page_lifetimes.page_id` is a hint:** it ends a lifetime whose page
+   an untracked writer replaced.
+7. **The ledger is off per source** until `gbrain beliefs enable` baselines it;
+   a publication on a source without coverage pays one source read.
+8. **Segmented pages (#6787):** a page over 1 MiB takes the per-subject
+   creation path; segmented pages project no fence facts, takes or links, so
+   their snapshot and baseline carry no fact or take subjects; state hashes
+   and the purge inventory never read segmented bodies; see section 10, item
+   4, for pruned versions.
+9. **Retention cleanup on a managed brain** removes the page without purge
+   tombstones and appends `page.expired` (section 6.5). Before W1 it went
+   through the page purge path and tombstoned the page's facts and takes; a
+   BEHAVIOR_CHANGES row discloses the change.
+10. **Ontology rows** are keyed into their provenance stream (the
+    observation's `source_markdown_slug`) as database-only subjects, not into
+    the entity's stream.
