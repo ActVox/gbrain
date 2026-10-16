@@ -1560,3 +1560,32 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    only on marks and recorded times, so the cell deletes and re-adds a mark
    (and stamps one at `recorded_at` as its forced probe) rather than holding
    a transaction past ceiling plus grace; W1's probe 13 holds a real one.
+8. **The preimage invariant, enforced.** Every publication that moves a
+   page's knowledge revision leaves a `page_versions` row of the revision it
+   started from (`revision_before`), written in the same transaction before
+   the write that advances it. Revisions a transaction only passes through
+   (a rename then an edit in one publication) are never a ledger state, since
+   events record only the publication's start and end, so they need no
+   version. Large and segmented pages are exempt, because their versions are
+   pruned on their own policy and page-at-time discloses those bodies as
+   `pruned`. Enforcement has two parts:
+   - **In tests**, `finalizeBeliefEvents` checks every stream whose
+     revision moved and fails the transaction when no version of
+     `revision_before` exists (`preimages.ts`, `missingPreimages`), so a
+     writer that breaks the rule fails its own tests. It runs only under
+     `NODE_ENV=test` (`GBRAIN_BELIEF_PREIMAGE_CHECK=0` turns it off for a
+     probe that breaks the rule on purpose): in production it would add one
+     indexed lookup per revision-moving publication to the write path the
+     W1 overhead work is cutting.
+   - **In production**, doctor `belief_ledger_coverage` lists page events
+     from `live` or `unmanaged` publications whose `revision_before` no
+     version of the live page holds (`preimageGaps`: last 30 days, complete
+     under `--tier deep`) and warns, naming the slugs and events. The body
+     is not recoverable; the finding names the writer to fix.
+
+   Turning the check on found a second writer that broke the rule:
+   `purge_fact` rewrote each affected page body (dropping the purged fence
+   row) with no version. It now versions each page before the rewrite, and
+   its version redaction pass then redacts that version like every other
+   one, so the interval before a purge reads the body as it stood, minus the
+   purged claim.

@@ -16,6 +16,12 @@ import { replayPurgesInRestore } from '../src/core/belief/purge-mirror.ts';
 import { renamePageOntoSlug } from '../src/commands/sync/rename-collision.ts';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { withEnv } from './helpers/with-env.ts';
+import { enableBeliefLedger } from '../src/core/belief/coverage.ts';
+import { preimageGaps } from '../src/core/belief/preimages.ts';
+import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
+import type { DoctorContext } from '../src/commands/doctor/context.ts';
+import type { Check } from '../src/commands/doctor.ts';
 import { waitForValue } from './helpers/wait-for.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain } from './helpers/belief-ledger.ts';
 
@@ -30,6 +36,7 @@ const read = (b: BeliefBrain, params: Record<string, unknown>) => operationsByNa
 const versions = (b: BeliefBrain, params: Record<string, unknown>) => operationsByName.get_versions!.handler(b.ctx, params) as Promise<Record<string, any>>;
 const refusal = (p: Promise<unknown>) => p.then(() => null, (e: { code?: string; reason?: string; retryable?: boolean; message: string }) => e);
 const draft = (prose: string) => beliefPage({ prose, facts: ['Acme sells widgets'] });
+const doctor = async (b: BeliefBrain): Promise<Check> => (await beliefLedgerEntry.run({ engine: b.engine, tier: 'standard', doFix: false, dryRun: false, orphanRatioSourceId: b.sourceId } as DoctorContext) as Check[])[0]!;
 const pageEvents = async (b: BeliefBrain, slug: string) => (await b.events()).filter(e => e.subject_kind === 'page' && e.slug === slug && e.origin !== 'backfill');
 
 for (const engineCase of testBackends().map(beliefEngineCase)) {
@@ -293,5 +300,53 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       await b.engine.executeRaw(`UPDATE belief_events SET visibility = 'world' WHERE source_id = $1 AND slug = 'companies/opening-example'`, [b.sourceId]);
       expect(JSON.stringify(await rversions({ slug: 'companies/opening-example', known_as_of: t2, include_body: true }))).toContain('Private at first.');
     }), 120_000);
+
+    test('remote callers over several sources: a private page and a never-written slug refuse the same way (no existence oracle through source choice or coverage)', () => brain(async b => {
+      const other = `${b.sourceId}-two`;
+      await b.engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1)', [other]);
+      await enableBeliefLedger(b.engine, other);
+      await b.put('companies/hidden-example', beliefPage({ prose: 'Hidden plans.', frontmatter: { visibility: 'private' } }));
+      await b.put('companies/shown-example', draft('Shown profile.'));
+      const t = await at(b);
+      const remote = { ...b.ctx, remote: true, transport: 'http', takesHoldersAllowList: ['world'], sourceId: b.sourceId,
+        auth: { token: '', clientId: 'probe', scopes: ['read'], sourceId: b.sourceId, allowedSources: [b.sourceId, other] } } as unknown as typeof b.ctx;
+      const outcome = (op: string, slug: string) => operationsByName[op]!.handler(remote, { slug, known_as_of: t, ...(op === 'get_versions' ? { include_body: true, diff: true } : {}) })
+        .then(r => ({ ok: true, body: JSON.stringify(r) }), (e: { code?: string; message: string }) => ({ ok: false, code: e.code, message: e.message.replace(slug, '<slug>') }));
+      for (const op of ['get_page', 'get_versions']) {
+        const hidden = await outcome(op, 'companies/hidden-example');
+        expect(hidden).toEqual(await outcome(op, 'companies/never-written-example'));
+        expect(hidden).toMatchObject({ ok: false, code: 'page_not_found' });
+        expect(await outcome(op, 'companies/shown-example')).toMatchObject({ ok: true });
+      }
+    }, { managed: false }), 120_000);
+
+    test('the preimage invariant: a publication that moves a page off a revision with no version of it is refused in tests and reported by doctor', () => brain(async b => {
+      await b.put('notes/move-example', beliefPage({ type: 'note', title: 'Move', prose: 'Before the move.' }));
+      const rawRename = (from: string, to: string) => b.engine.transaction(async tx => {
+        await tx.lockPageKeys([from, to].map(s => ({ sourceId: b.sourceId, slug: s })));
+        await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [from, to], op: 'probe_rename' }, () =>
+          tx.executeRaw('UPDATE pages SET slug = $1 WHERE source_id = $2 AND slug = $3', [to, b.sourceId, from]));
+      });
+      const before = await b.lastId();
+      // Forced probe: a rename that skips its preimage is refused in the batch, and nothing commits.
+      const refused = await rawRename('notes/move-example', 'notes/moved-example').then(() => null, (e: Error) => e.message);
+      expect(refused).toContain('belief preimage invariant: notes/move-example moved off revision');
+      expect(await b.lastId()).toBe(before);
+      expect((await b.engine.executeRaw('SELECT 1 FROM pages WHERE source_id = $1 AND slug = $2', [b.sourceId, 'notes/move-example'])).length).toBe(1);
+      // The production rename versions first and passes.
+      await renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'notes/move-example', newSlug: 'notes/moved-example', to: 'notes/moved-example.md' });
+      expect(await preimageGaps(b.engine, b.sourceId)).toEqual([]);
+      expect((await doctor(b)).status).toBe('ok');
+      // With the test-only check off, the same skipped preimage commits, and doctor names it.
+      await withEnv({ GBRAIN_BELIEF_PREIMAGE_CHECK: '0' }, () => rawRename('notes/moved-example', 'notes/moved-again-example'));
+      await fillCommitMarks(b.engine, b.sourceId);
+      const moved = (await b.events(before)).filter(e => e.subject_kind === 'page' && e.slug === 'notes/moved-again-example' && e.value?.revision_before).at(-1)!;
+      const gaps = await preimageGaps(b.engine, b.sourceId);
+      expect(gaps.map(g => [g.slug, g.event_id, g.revision])).toEqual([['notes/moved-again-example', moved.id, String(moved.value!.revision_before)]]);
+      const check = await doctor(b);
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain(`${b.sourceId}: 1 page transition(s) left no version of the revision they moved off (e.g. notes/moved-again-example at event ${moved.id})`);
+      expect(await read(b, { slug: 'notes/moved-example', known_as_of: await at(b) }).catch(() => null)).toBeNull();
+    }, { managed: false }), 120_000);
   });
 }
