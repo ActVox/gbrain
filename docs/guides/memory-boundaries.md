@@ -180,6 +180,17 @@ pages wait. A quarantined page says
 `searchable: false`. `gbrain import` waits for the build and reports
 `searchable` in its result the same way.
 
+Deleting and restoring a segmented page on a source backed by files works up
+to the page ceiling. A restore reserves room for its file twice (the staging
+file and the file) in the worktree recovery budget, so with the switch on
+`persistence.limits.worktree_recovery_bytes` defaults to twice `pages.max_bytes`
+plus 2 MiB, never less than 256 MiB (514 MiB on Postgres and 258 MiB on PGLite
+at the default ceilings). A value you set is kept; a page that does not fit it
+is refused with `request_too_large` before anything is touched. A restored
+page is searchable when the restore commits, or, when its chunks were never
+built, right after it (`gbrain projections drain` builds it if that build
+dies).
+
 While the switch is off (unset in this release, set to `off`, or held by an
 older writer), new pages are stored inline up to 24 MiB as before.
 Pages already stored in segments stay readable and exportable; a write that

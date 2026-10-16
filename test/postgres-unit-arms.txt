@@ -87,10 +87,13 @@ test/large-pages/purge-inflight-create.test.ts
 test/large-pages/purge-segment-residue.test.ts
 test/large-pages/purge-segmented-versions-batch.test.ts
 test/large-pages/purge-segments.test.ts
+test/large-pages/recovery-budget-ceiling.slow.test.ts
+test/large-pages/recovery-budget-default.test.ts
 test/large-pages/remote-get-page-privacy.test.ts
 test/large-pages/remote-versions-storage-change.test.ts
 test/large-pages/remote-window-privacy.test.ts
 test/large-pages/restore-deferred-retire.test.ts
+test/large-pages/restore-segmented-reprojects.test.ts
 test/large-pages/sealed-segmented-search.test.ts
 test/large-pages/second-write-deferred-retire.test.ts
 test/large-pages/segment-rewrite-cr-tier.test.ts
