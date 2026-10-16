@@ -344,13 +344,16 @@ and two template-shaped files moved in one commit can be paired the wrong way
 round (#6729). So sync keeps the page identity across an inexact rename only
 when the files confirm it: both carry the same `frontmatter.id` and no other
 file or page shares it, or neither carries an id and they share a `slug:` line
-or title that no other file in the source uses. An exact move (`R100`) needs no
-signal. Any other pair is imported as a delete plus an add: the new file
+or title that no other file in the source uses. The title is the one the page
+row gets: the frontmatter `title:`, else the body's first `# Heading` (never
+the filename), and the old side counts as the title the brain stores for that
+page now. An exact move (`R100`) needs no signal. Any other pair is imported as a delete plus an add: the new file
 starts a fresh page, and the old page keeps its facts, links and aliases on
 its soft-deleted slug. The sync report prints each such pair, `gbrain sync
 status --source <id> --json` lists it under `identity_downgrades`, doctor
 `rename_identity_downgrades` names it, and the purge leaves the old page alone
-for 72 hours. To keep an old page, restore it before the window ends with
+until the pair gets a disposition; there is no time limit, so a pair can still
+be repaired later. Restoring the old page settles it: run
 `gbrain restore <old-slug> --source-id <id> --force` (it then lives beside the
 new page; where the old file cannot be re-created the restore names
 `--detach`). To move and rewrite a page so it keeps its identity, give it a

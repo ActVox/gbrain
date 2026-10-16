@@ -1,8 +1,8 @@
 /**
  * #6729: an inexact Git rename (R<100) is a similarity guess, so it keeps the old page's identity only when the files
  * confirm it (a shared frontmatter id, or a unique slug: line or title). Every other pair is a delete plus an add, the
- * old page keeps its facts, links and aliases on its soft-deleted slug for 72 h, the run records it, the purge leaves it
- * alone, doctor names it, and a restore keeps the old page when a person asks for it.
+ * old page keeps its facts, links and aliases on its soft-deleted slug, the run records it, the purge leaves it alone
+ * until the pair is settled (no time window), doctor names it, and a restore keeps the old page when a person asks for it.
  * Classic sync, managed sync and the dirty-tree manifest each keep an R<100 fixture; R100 variants sit beside them.
  * New modules are imported lazily so this file loads (and fails by behavior) on a master without them.
  */
@@ -135,8 +135,18 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     const [after] = await doctor();
     expect(mine(after!)).toBe(1);
     expect((await pageRow(s.id, other.slug))!.deleted_at).not.toBeNull();
-    // A record whose window ended no longer holds its old page from the purge.
-    await engine.executeRaw("UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,expires_at}', to_jsonb((now() - interval '1 hour')::text)) WHERE op = 'sync-identity-downgrade' AND fingerprint = $1", [String(other.id)]);
+    // No time window: a month-old open record survives the checkpoint sweep and still holds its old page, and doctor
+    // still names it; only a disposition releases it. A restored page deleted again later is not held by its old record.
+    await engine.executeRaw("UPDATE op_checkpoints SET updated_at = now() - interval '30 days' WHERE op = 'sync-identity-downgrade' AND fingerprint = ANY($1::text[])", [[String(a.id), String(b.id)]]);
+    const { purgeStaleCheckpoints } = await import('../src/core/op-checkpoint.ts');
+    await purgeStaleCheckpoints(engine);
+    expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).not.toContain(other.slug);
+    expect(mine((await doctor())[0]!)).toBe(1);
+    await engine.softDeletePage(slug!, { sourceId: s.id });
+    expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain(slug);
+    expect((await engine.executeRaw('SELECT fingerprint FROM op_checkpoints WHERE op = $1 AND fingerprint = ANY($2::text[])', ['sync-identity-downgrade', [String(a.id), String(b.id)]])).map(row => (row as { fingerprint: string }).fingerprint)).toEqual([String(other.id)]);
+    await engine.executeRaw("UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,disposition}', jsonb_build_object('kind', 'closed', 'at', now()::text)) WHERE op = 'sync-identity-downgrade' AND fingerprint = $1", [String(other.id)]);
+    expect(mine((await doctor())[0]!)).toBe(0);
     expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toContain(other.slug);
   }), 180_000);
 

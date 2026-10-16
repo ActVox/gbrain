@@ -1,18 +1,19 @@
 /**
  * #6729: inexact Git renames a sync could not confirm (see sync-rename-identity.ts) were split into a delete plus an
- * add, so the old page's facts, links and aliases stay on its soft-deleted slug. Each one is recorded here for the
- * 72-hour recovery window: `gbrain sync status --json` lists it, doctor `rename_identity_downgrades` names it, the
- * purge leaves its old page alone while the record is open, and the report names the detached restore of the old page.
+ * add, so the old page's facts, links and aliases stay on its soft-deleted slug. Each one is recorded here until the
+ * pair gets a disposition: `gbrain sync status --json` lists it, doctor `rename_identity_downgrades` names it, the purge
+ * leaves its old page alone and the checkpoint sweep keeps the record while it is open, and the report names the
+ * restore of the old page. There is no time window: a pair recorded before its remedy exists can still be repaired.
  *
  * One `op_checkpoints` row per old page (op `sync-identity-downgrade`, fingerprint = the old page id);
- * `completed_keys[0]` holds the record. A record closes when its window ends, or when its old page is restored or
- * purged (the readers join the soft-deleted page).
+ * `completed_keys[0]` holds the record. A record is open while it has no `disposition` (set when the pair is remedied
+ * or closed without merging) and its old page is still soft-deleted from that sync (`deleted_at` = `old_deleted_at`);
+ * a restore, a purge or a later delete of the restored page closes it.
  */
 import type { BrainEngine } from './engine.ts';
 import { resolveSlugForPath, type DowngradedRename, type RenameDowngradeReason } from './sync.ts';
 
 export const IDENTITY_DOWNGRADE_OP = 'sync-identity-downgrade';
-export const IDENTITY_DOWNGRADE_WINDOW_HOURS = 72;
 
 export interface IdentityDowngrade extends DowngradedRename {
   source_id: string;
@@ -20,13 +21,20 @@ export interface IdentityDowngrade extends DowngradedRename {
   old_slug: string; old_page_id: number; new_slug: string | null;
   /** What stays on the old slug: facts keyed to it, links from or to it, and its free-text aliases. */
   facts: number; links: number; aliases: number;
-  recorded_at: string; expires_at: string;
+  /** When the old page was soft-deleted (ISO), and that `deleted_at` exactly as Postgres printed it (the open test). */
+  recorded_at: string; old_deleted_at: string;
+  /** Set when the pair is remedied or closed without merging; the record is then closed. */
+  disposition?: { kind: 'remedied' | 'closed'; at: string };
 }
+
+/** SQL: the downgrade record `dg` is open for the page aliased `alias` (no disposition, old page still soft-deleted by that sync). */
+export const identityDowngradeOpen = (alias: string): string =>
+  `dg.completed_keys->0->>'disposition' IS NULL AND ${alias}.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz`;
 
 /** SQL predicate for a purge scan over `pages` aliased `alias`: the page has no open downgrade record. */
 export function identityDowngradePurgeHold(alias: string): string {
   return `NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = '${IDENTITY_DOWNGRADE_OP}' AND dg.fingerprint = ${alias}.id::text
-    AND (dg.completed_keys->0->>'expires_at')::timestamptz > now())`;
+    AND ${identityDowngradeOpen(alias)})`;
 }
 
 const REASON_TEXT: Record<RenameDowngradeReason, string> = {
@@ -61,7 +69,7 @@ export async function recordIdentityDowngrades(engine: BrainEngine, sourceId: st
     const record: IdentityDowngrade = { source_id: sourceId, from: pair.from, to: pair.to, similarity: pair.similarity, reason: pair.reason, ...(pair.read ? { read: pair.read } : {}),
       old_slug: old.slug, old_page_id: Number(old.id), new_slug: fresh?.slug ?? null,
       facts: Number(counts?.facts ?? 0), links: Number(counts?.links ?? 0), aliases: Number(counts?.aliases ?? 0),
-      recorded_at: recorded.toISOString(), expires_at: new Date(recorded.getTime() + IDENTITY_DOWNGRADE_WINDOW_HOURS * 3600_000).toISOString() };
+      recorded_at: recorded.toISOString(), old_deleted_at: old.deleted_at };
     await engine.executeRaw(`INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at) VALUES ($1, $2, $3::text::jsonb, now())
       ON CONFLICT (op, fingerprint) DO UPDATE SET completed_keys = EXCLUDED.completed_keys, updated_at = now()`,
       [IDENTITY_DOWNGRADE_OP, String(record.old_page_id), JSON.stringify([record])]);
@@ -71,14 +79,14 @@ export async function recordIdentityDowngrades(engine: BrainEngine, sourceId: st
 }
 
 /**
- * Open records (inside the window, old page still soft-deleted), oldest first; every source when `sourceIds` is omitted.
+ * Open records (no disposition, old page still soft-deleted by that sync), oldest first; every source when `sourceIds` is omitted.
  * `new_slug` is read live: the live page at the new path now (a held new file that was fixed later counts once it imports).
  */
 export async function listIdentityDowngrades(engine: Pick<BrainEngine, 'executeRaw'>, sourceIds?: readonly string[]): Promise<IdentityDowngrade[]> {
   const rows = await engine.executeRaw<{ record: IdentityDowngrade | string; new_slug: string | null }>(
     `SELECT dg.completed_keys->0 AS record, np.slug AS new_slug FROM op_checkpoints dg JOIN pages p ON p.id::text = dg.fingerprint
       LEFT JOIN LATERAL (SELECT slug FROM pages WHERE source_id = p.source_id AND deleted_at IS NULL AND source_path = dg.completed_keys->0->>'to' LIMIT 1) np ON true
-      WHERE dg.op = $1 AND p.deleted_at IS NOT NULL AND (dg.completed_keys->0->>'expires_at')::timestamptz > now()
+      WHERE dg.op = $1 AND p.deleted_at IS NOT NULL AND ${identityDowngradeOpen('p')}
         AND p.source_id = dg.completed_keys->0->>'source_id' AND ($2::text[] IS NULL OR p.source_id = ANY($2::text[]))
       ORDER BY dg.completed_keys->0->>'recorded_at', dg.fingerprint`, [IDENTITY_DOWNGRADE_OP, sourceIds ? [...sourceIds] : null]);
   return rows.map(row => ({ ...(typeof row.record === 'string' ? JSON.parse(row.record) as IdentityDowngrade : row.record), new_slug: row.new_slug }));
@@ -120,8 +128,8 @@ export function identityDowngradeLines(records: readonly IdentityDowngrade[]): s
   if (!records.length) return [];
   return [
     ...records.map(record => `  Identity not kept: ${record.from} -> ${record.to} (git similarity ${record.similarity}%; ${REASON_TEXT[record.reason]}). `
-      + `${record.facts} fact(s), ${record.links} link(s) and ${record.aliases} alias(es) stay on the soft-deleted ${record.old_slug} until ${record.expires_at} (72 h); `
-      + `${record.new_slug ? `${record.new_slug} starts fresh.` : 'the new file did not import.'} To keep the old page, restore it before then: ${identityRestoreArgv(record).join(' ')}`),
+      + `${record.facts} fact(s), ${record.links} link(s) and ${record.aliases} alias(es) stay on the soft-deleted ${record.old_slug}, which the purge keeps until the pair is settled; `
+      + `${record.new_slug ? `${record.new_slug} starts fresh.` : 'the new file did not import.'} To keep the old page, restore it: ${identityRestoreArgv(record).join(' ')}`),
     '  A move keeps its page when the files share a frontmatter id: (or a unique slug: line or title); to move and rewrite a page, move, commit and sync, then edit.',
   ];
 }

@@ -1,9 +1,9 @@
 /**
  * #6729 `rename_identity_downgrades`: inexact Git renames a sync split into a delete plus an add because their identity
  * could not be confirmed (sync-rename-identity.ts). Each old page keeps its facts, links and aliases on its soft-deleted
- * slug for the 72-hour recovery window, and the purge leaves it alone while the record is open. The finding names every
- * open pair; its fix restores the first old page (with its facts, links and aliases, beside the new page)
- * once the user asks to keep it. Outside the window the check is ok: the pairs are history.
+ * slug, and the purge leaves it alone until the pair gets a disposition (restored, remedied or closed without merging);
+ * there is no time window. The finding names every open pair until then; its fix restores the first old page (with its
+ * facts, links and aliases, beside the new page) once the user asks to keep it.
  */
 import type { Check } from '../../doctor.ts';
 import { agentFix, checkError } from '../check-fix.ts';
@@ -19,18 +19,18 @@ async function runRenameIdentityDowngrades(ctx: DoctorContext): Promise<Check[]>
     const open = await listIdentityDowngrades(connectedEngine(ctx));
     const bySource = [...new Set(open.map(record => record.source_id))].map(source_id => ({ source_id, count: open.filter(record => record.source_id === source_id).length }));
     const samples = open.slice(0, SAMPLE).map(record => ({ source_id: record.source_id, from: record.from, to: record.to, old_slug: record.old_slug, new_slug: record.new_slug,
-      reason: record.reason, facts: record.facts, links: record.links, aliases: record.aliases, expires_at: record.expires_at }));
+      reason: record.reason, facts: record.facts, links: record.links, aliases: record.aliases, recorded_at: record.recorded_at }));
     const details = { count: open.length, by_source: bySource, samples, docs: DOCS };
     if (!open.length) {
-      checks.push({ name: 'rename_identity_downgrades', status: 'ok', details, message: 'No rename in the last 72 h lost its page identity.' });
+      checks.push({ name: 'rename_identity_downgrades', status: 'ok', details, message: 'No rename that lost its page identity is waiting for a disposition.' });
       return checks;
     }
     const first = open[0]!;
     checks.push({ name: 'rename_identity_downgrades', status: 'warn', details,
-      message: `${open.length} rename(s) synced in the last 72 h did not keep their page identity, so each old page's facts, links and aliases stay on its soft-deleted slug until its window ends `
+      message: `${open.length} rename(s) did not keep their page identity, so each old page's facts, links and aliases stay on its soft-deleted slug, held from the purge until the pair is settled `
         + `(e.g. ${samples.map(record => `${record.source_id}:${record.from} -> ${record.to}, ${record.facts} fact(s) and ${record.links} link(s) on ${record.old_slug}`).join('; ')}; `
-        + `first: ${identityDowngradeReasonText(first.reason)}). ${identityStatusArgv(first.source_id).join(' ')} lists every pair. To keep an old page, restore it before its window ends; `
-        + 'otherwise nothing is needed and the old pages purge after their window.',
+        + `first: ${identityDowngradeReasonText(first.reason)}). ${identityStatusArgv(first.source_id).join(' ')} lists every pair. To keep an old page, restore it; `
+        + 'until a pair is restored or settled, its old page stays and this check names it.',
       fix: agentFix(identityRestoreArgv(first),
         `Restores ${first.old_slug} with its facts, links and aliases, beside ${first.new_slug ?? 'the new file'}; the record closes and the purge no longer waits for it.`,
         'rename_identity_downgrades', { docs: DOCS, ask_user: true,
