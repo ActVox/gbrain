@@ -530,6 +530,18 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
+### clock_mismatch
+
+<a id="clock_mismatch"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A time parameter got a value on the wrong clock: `known_as_of` (recorded time) needs an instant with a zone, not a calendar date. | Recorded time (`known_as_of`) is when the brain had recorded something; valid time (`as_of`) is when a fact held in the world, as a date. A bare date is ambiguous as a recorded-time instant, so it is refused instead of guessed. | Pass a full instant such as 2026-10-01T12:00:00Z to known_as_of, or use as_of where the tool takes a valid-time date. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `date_for_instant`.
+
+More: [docs/guides/repair.md#clock-mismatch](../../docs/guides/repair.md#clock-mismatch)
+
 ### code_callees_requires_symbol
 
 <a id="code_callees_requires_symbol"></a>
@@ -820,9 +832,11 @@ More: [docs/guides/core-memory.md#remote-edits](../../docs/guides/core-memory.md
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| The belief ledger does not cover that time for this page or source: it starts at the page's baseline cut or the source's watermark. | Recorded history exists only from a page's baseline (or creation) after the ledger was enabled; earlier times are unknown, not empty. | Ask about a time at or after the `from` time, or run `gbrain beliefs backfill --source <id>` for best-effort history before it. | agent | `repeat the read that failed` | 1 | no |
+| The belief ledger does not cover that time for this page or source: it starts at the page's baseline cut or the source's watermark. | Recorded history exists only from a page's baseline (or creation) after the ledger was enabled; earlier times are unknown, not empty. A best-effort backfill from retained versions carries source times only, so it never answers a recorded-time read. | Ask about a time at or after the time the message names; `gbrain beliefs status --source <id>` lists the coverage intervals. | agent | `repeat the read that failed` | 1 | no |
 
-More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](../../docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark)
+Reasons: `not_recorded`, `backfill_only`, `backfill_incomplete`.
+
+More: [docs/guides/repair.md#coverage-from](../../docs/guides/repair.md#coverage-from)
 
 ### coverage_gap
 
@@ -830,9 +844,11 @@ More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](.
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| The belief ledger was not recording at that time: coverage was stopped, or a backup restore left a gap between the archive's time and the restore. | The request itself was wrong or no longer matches the brain; nothing was changed. | Ask about a time outside the gap; `gbrain beliefs status --source <id>` lists the intervals and gaps. | agent | `repeat the read that failed` | 1 | no |
+| The belief ledger was not recording at that time: coverage was stopped, or a backup restore left a gap between the archive's time and the restore. | Nothing proves what happened to the page inside the gap, so the read refuses instead of answering from either side. | Ask about a time outside the gap; `gbrain beliefs status --source <id>` lists the intervals and gaps. | agent | `repeat the read that failed` | 1 | no |
 
-More: [docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark](../../docs/designs/BELIEF_LEDGER.md#71-activation-baseline-and-the-watermark)
+Reasons: `not_covered`, `restore`.
+
+More: [docs/guides/repair.md#coverage-gap](../../docs/guides/repair.md#coverage-gap)
 
 ### cursor_incarnation_retired
 
@@ -1967,6 +1983,16 @@ More: [docs/guides/troubleshooting.md#keyword-search-times-out-on-a-large-postgr
 | Retired: an older gbrain stopped a managed sync that kept re-freezing a page cancelled only because another page of the same sync did not commit. This build never cancels a page for another page's failure, so the stop is superseded. | Since #6712 each page of a sync has its own fate: a page that does not commit is held or stops the run on its own, and the pages after it still publish. A ledger row or receipt with this code was written by an older build. | Rerun the same plain gbrain sync --source <id> --no-pull; it resumes the stopped entry under a fresh request. gbrain sync status --source <id> --json shows what remains. Run: gbrain sync status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
 
 More: [docs/guides/sync-unblock-runbook.md#decision-table](../../docs/guides/sync-unblock-runbook.md#decision-table)
+
+### known_as_of_unproven
+
+<a id="known_as_of_unproven"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A change to the page was recorded before the requested instant but was not yet proven committed at it, so the page at that instant cannot be stated. | A write's recorded time is a lower bound on when it became visible; until its commit mark (or a later write to the same page) proves it committed by the instant, the page then may or may not have included it. | Ask about an instant before the write was recorded, or after it was observed committed (the message names both). | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#known-as-of-unproven](../../docs/guides/repair.md#known-as-of-unproven)
 
 ### legacy_job_selection_invalid
 
