@@ -93,10 +93,10 @@ async function expired(slug: string, hours = 100): Promise<void> {
   await engine.executeRaw(`UPDATE pages SET deleted_at=now() - ($3 || ' hours')::interval WHERE source_id=$1 AND slug=$2`, [SOURCE, slug, String(hours)]);
   await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
 }
-/** An open #6729 rename-identity downgrade record on the page: the purge must leave it for its recovery window. */
+/** An open #6729 rename-identity downgrade record on the soft-deleted page (no disposition yet): the purge must leave it. */
 async function holdRename(slug: string): Promise<void> {
   const [page] = await engine.executeRaw<{ id: number | string }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [SOURCE, slug]);
-  await engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2,jsonb_build_array(jsonb_build_object('source_id',$3::text,'old_slug',$4::text,'expires_at',(now() + interval '48 hours')::text)))`,
+  await engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2::text,jsonb_build_array(jsonb_build_object('source_id',$3::text,'old_slug',$4::text,'old_deleted_at',(SELECT deleted_at::text FROM pages WHERE id::text=$2::text))))`,
     [IDENTITY_DOWNGRADE_OP, String(page!.id), SOURCE, slug]);
 }
 async function refuse(slug: string): Promise<void> {

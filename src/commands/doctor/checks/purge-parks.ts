@@ -41,4 +41,4 @@ async function runPurgeParkedPages(ctx: DoctorContext): Promise<Check[]> {
   return checks;
 }
 
-export const purgeParkedPagesEntry: DoctorEntry = { name: 'purge_parked_pages', emits: [NAME], run: runPurgeParkedPages };
+export const purgeParkedPagesEntry: DoctorEntry = { name: 'purge_parked_pages', emits: ['purge_parked_pages'], run: runPurgeParkedPages };
