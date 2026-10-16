@@ -27,7 +27,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { readManagedSyncFailures, type ManagedSyncFailure } from './sync-failures.ts';
-import { fenceAutoRepairFor, gitHoldFix, readGitSourceHolds, requestGitHoldRetry, type GitHoldRecord } from './sync-holds.ts';
+import { fenceAutoRepairFor, gitHoldFix, holdEscalation, noteHoldEdit, readGitSourceHolds, recordHoldAttempt, requestGitHoldRetry, type GitHoldRecord } from './sync-holds.ts';
 import type { FenceAutoRepair } from '../fence-repair/hold-fix.ts';
 import { classifySyncFault, HOLD_ATTEMPTS_NEEDS_HUMAN, type SyncFaultVerdict } from './sync-fault-class.ts';
 import { CONTENT_REPAIR_KINDS, contentHoldDisposition, runContentLane, type ContentHoldDisposition } from '../repair/content-lane.ts';
@@ -40,7 +40,8 @@ import { listIncompleteSyncReceipts, type SyncSettledIndexes } from './checkpoin
 import { drainEstimate, engineStallProbe } from './sync-drain.ts';
 import { classifyRecordedFault, classifyTerminal, type TerminalCategory } from './terminal-classify.ts';
 import type { PublicCategory } from './public-category.ts';
-import { resolveManagedSyncContext } from './sync-discovery.ts';
+import { readSyncFile, resolveManagedSyncContext } from './sync-discovery.ts';
+import { sha256 } from './digest.ts';
 
 export interface SyncStatusHold extends SyncFaultVerdict {
   code: string;
@@ -186,12 +187,12 @@ async function retiredCursorStands(engine: BrainEngine, sourceId: string, incarn
  * is `needs_human`: the lane will not act on it again until the file changes. `detail` lets the fault table name the
  * paragraph for the lane's codes when it knows them; otherwise the hold's own code decides.
  */
-function holdVerdict(record: GitHoldRecord, auto: FenceAutoRepair | undefined): SyncFaultVerdict {
-  const attempts = record.meta.attempts ?? 1;
+export function holdVerdict(record: GitHoldRecord, auto: FenceAutoRepair | undefined, now = Date.now()): SyncFaultVerdict {
+  const escalation = holdEscalation(record, now);
   const content = record.meta.content_repair ? { content_repair: { ...record.meta.content_repair, path: record.path, slug: record.slug } } : {};
   const disposition = contentHoldDisposition(record, auto);
-  if (disposition.action !== 'listed' || disposition.state === 'owner') return classifySyncFault({ code: record.code, attempts, ...content });
-  const verdict = classifySyncFault({ code: record.code, attempts, detail: disposition.reason, ...content });
+  if (disposition.action !== 'listed' || disposition.state === 'owner') return classifySyncFault({ code: record.code, ...escalation, ...content });
+  const verdict = classifySyncFault({ code: record.code, ...escalation, detail: disposition.reason, ...content });
   if (verdict.needs_human) return verdict;
   const reason = disposition.state === 'paid'
     ? `Model repair of ${record.path} waits on a setting only the user changes (${disposition.reason}); the hold's fix names it.`
@@ -203,8 +204,11 @@ function holdStatus(record: GitHoldRecord, auto?: FenceAutoRepair): SyncStatusHo
   const attempts = record.meta.attempts ?? 1;
   const verdict = holdVerdict(record, auto);
   const terminal = classifyRecordedFault({ source_id: record.source_id, code: record.code, slug: record.slug });
+  const fix = gitHoldFix(record, auto);
+  // #6712 PR 2: an abandoned edit is the person's to commit or restore; unblock then finds the file clean and schedules it.
   return { code: record.code, category: terminal.category, public_category: terminal.public_category, slug: record.slug, path: record.path, attempts, held_since: record.held_at, ...verdict,
-    retry_after: verdict.safe_actions[0] === 'retry' || verdict.safe_actions[0] === 'retry_when_clean' ? null : 'after the named step', fix: gitHoldFix(record, auto) };
+    retry_after: verdict.safe_actions[0] === 'retry' || verdict.safe_actions[0] === 'retry_when_clean' ? null : 'after the named step',
+    fix: verdict.needs_human && record.code === 'worktree_dirty' ? { ...fix, ask_user: true, user_message: verdict.human_reason } : fix };
 }
 
 /**
@@ -221,7 +225,8 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const header = selected?.header ?? null;
   const [committed] = await engine.executeRaw<{ n: number | string }>(`SELECT count(*) AS n FROM persistence_requests WHERE source_id=$1 AND state='committed'
     AND intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND completed_at > now() - interval '10 minutes'`, [sourceId]);
-  const records = ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.incarnation === source.incarnation);
+  const records = await observeDirtyEditors(engine, sourceId, source.incarnation,
+    ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.incarnation === source.incarnation));
   const auto = await fenceAutoRepairFor(engine, records);
   const holds = records.map(record => holdStatus(record, auto));
   const repairable = records.filter(record => contentHoldDisposition(record, auto).action === 'repair').length;
@@ -453,14 +458,40 @@ function receiptOf(detail: Record<string, unknown> | undefined): Record<string, 
   return Object.keys(rest).length ? rest : undefined;
 }
 
+/** The sha256 of a held file's uncommitted bytes, when they can be read. */
+function workingHashOf(root: string, path: string): { workingHash?: string } {
+  try { const bytes = readSyncFile(root, path); return bytes ? { workingHash: sha256(bytes) } : {}; } catch { return {}; }
+}
+
+/**
+ * #6712 PR 2 (L4): before a `worktree_dirty` hold is called abandoned, its uncommitted bytes are read from the checkout
+ * now; bytes that changed since the hold last looked are a live editor (`edited_at` refreshed, no attempt counted), so a
+ * hold escalates only when nobody touched the edit for a day. Holds that would not escalate are not read. Status, unblock
+ * and the soak sweep all look through this.
+ */
+export async function observeDirtyEditors(engine: BrainEngine, sourceId: string, incarnation: string, holds: GitHoldRecord[], now = Date.now()): Promise<GitHoldRecord[]> {
+  const due = holds.filter(hold => hold.code === 'worktree_dirty' && classifySyncFault({ code: hold.code, ...holdEscalation(hold, now) }).needs_human);
+  if (!due.length) return holds;
+  const context = await resolveManagedSyncContext(engine, { sourceId, noPull: true }).catch(() => null);
+  if (!context) return holds;
+  const fresh = new Map<string, GitHoldRecord>();
+  for (const hold of due) {
+    const { workingHash } = workingHashOf(context.root, hold.path);
+    const updated = workingHash === undefined ? null : await noteHoldEdit(engine, { sourceId, incarnation, path: hold.path, workingHash });
+    if (updated) fresh.set(hold.path, updated);
+  }
+  return holds.map(hold => fresh.get(hold.path) ?? hold);
+}
+
 /**
  * Performs the safe action for every hold that has one. `retry_when_clean` (`worktree_dirty`): the file is re-screened only
  * when its working-tree bytes are committed at HEAD now; still-dirty files are refused `still_dirty`. `retry`
  * (`preparation_stalled`): scheduled for a re-screen. `repair` (#6377; a hold whose code `CONTENT_REPAIR_HOLD_KINDS` maps to
  * a lane kind, unless `noRepair`): the kind runs on exactly those paths as one bounded apply under its caps (each item bound
  * to the bytes the kind's plan read), each path reports `repaired | held | needs_human | skipped` with the
- * kind's receipt or reason, and repaired paths are scheduled for the re-screen. A hold whose attempts reached
- * `HOLD_ATTEMPTS_NEEDS_HUMAN`, a `concurrent_write` hold, a repair-class hold whose stored state waits on a person, the
+ * kind's receipt or reason, and repaired paths are scheduled for the re-screen. #6712 PR 2: an applied action that leaves
+ * the hold standing (still dirty, a repair that held) counts one failed attempt on the hold. A hold whose attempts reached
+ * `HOLD_ATTEMPTS_NEEDS_HUMAN` over `HOLD_ESCALATE_MS`, a `concurrent_write` hold, a repair-class hold whose stored state waits on a person, the
  * user's spend decision or the owner host, and a repair-class hold no lane kind clears yet are refused by name with their
  * fix. Idempotent: scheduling twice is one re-screen, a repaired file is `already_clean` on the next pass, and a preview
  * writes nothing.
@@ -468,7 +499,8 @@ function receiptOf(detail: Record<string, unknown> | undefined): Record<string, 
 export async function unblockSync(engine: BrainEngine, sourceId: string, opts: UnblockOptions): Promise<UnblockOutcome> {
   const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1 AND archived IS NOT TRUE', [sourceId]);
   if (!source) throw Object.assign(new Error(`Source ${sourceId} does not exist.`), { code: 'not_found' });
-  const holds = ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.incarnation === source.incarnation);
+  const holds = await observeDirtyEditors(engine, sourceId, source.incarnation,
+    ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.incarnation === source.incarnation));
   const [failed] = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const header = (await cursorHeader(engine, sourceId, source.incarnation, failed?.cursor_key ?? null))?.header;
   const resume = managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
@@ -482,10 +514,15 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
   for (const hold of holds) {
     const status = holdStatus(hold, auto);
     const refuse = (reason: string) => refused.push({ path: hold.path, slug: hold.slug, code: hold.code, reason, needs_human: status.needs_human, fix: status.fix });
-    if (status.needs_human) { refuse(status.human_reason ?? 'needs a person'); continue; }
+    if (status.needs_human && hold.code !== 'worktree_dirty') { refuse(status.human_reason ?? 'needs a person'); continue; }
     if (hold.code === 'worktree_dirty') {
       const committed = context ? headCommittedBytes(context, hold.path) : null;
-      if (!committed) { refuse(context ? 'still_dirty: the working-tree bytes are not committed at HEAD yet' : 'checkout_unreadable: the source checkout could not be resolved'); continue; }
+      if (!committed && status.needs_human) { refuse(status.human_reason ?? 'needs a person'); continue; }
+      if (!committed) {
+        refuse(context ? 'still_dirty: the working-tree bytes are not committed at HEAD yet' : 'checkout_unreadable: the source checkout could not be resolved');
+        if (opts.apply && context) await recordHoldAttempt(engine, { sourceId, incarnation: source.incarnation, path: hold.path, code: hold.code, ...workingHashOf(context.root, hold.path) });
+        continue;
+      }
       applied.push({ path: hold.path, slug: hold.slug, code: hold.code, action: 'retry_when_clean', detail: `committed at HEAD as blob ${committed.oid.slice(0, 12)}; scheduled for a re-screen` });
       continue;
     }
@@ -529,6 +566,7 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
         const message = typeof detail?.message === 'string' ? detail.message : undefined;
         const llmUsd = item?.llm_usd;
         if (outcome === 'repaired') retry.push(hold.path);
+        else if (outcome === 'held') await recordHoldAttempt(engine, { sourceId, incarnation: source.incarnation, path: hold.path, code: hold.code });
         applied.push({ path: hold.path, slug: hold.slug, code: hold.code, action: 'repair',
           detail: outcome === 'repaired' ? `repaired by gbrain repair ${kind}${typeof detail?.tier === 'string' ? ` (${detail.tier})` : ''}; scheduled for a re-screen`
             : `${outcome} (${reason})${message ? `: ${message}` : !item && stop ? `: ${stop.message}` : ''}`,

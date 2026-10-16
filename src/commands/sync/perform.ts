@@ -138,6 +138,10 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
     if (!opts.dryRun) {
       const replayed = await replayImportedRemembers(engine, opts.sourceId ?? 'default');
       if (replayed) result = { ...result, replayedRemembers: replayed };
+      const ghosts = await reportSyncGhosts(engine, opts.sourceId ?? 'default');
+      if (ghosts) result = { ...result, ghostPages: ghosts };
+      // #6712 PR 2: holds that turned needs_human (or file_drift content decisions) since the last count, for the soak counters.
+      await (await import('../../core/persistence/soak-counters.ts')).sweepNeedsHumanHolds(engine, opts.sourceId ?? 'default').catch(() => undefined);
     }
     return result;
   };
@@ -201,6 +205,14 @@ async function replayImportedRemembers(engine: BrainEngine, sourceId: string): P
     serr(`[sync] could not replay remembers refused while their page's file awaited import: ${error instanceof Error ? error.message : String(error)} (gbrain repair failed-writes --source ${sourceId} replays them).`);
     return null;
   }
+}
+
+/** #6712 PR 2 (L4): the source's ghost pages (live pages whose file is gone), counted and named, never deleted by sync. */
+async function reportSyncGhosts(engine: BrainEngine, sourceId: string): Promise<SyncResult['ghostPages'] | null> {
+  const ghosts = await (await import('../../core/persistence/sync-ghosts.ts')).countSyncGhosts(engine, sourceId).catch(() => null);
+  if (ghosts) serr(`[sync] ${ghosts.count}${ghosts.truncated ? '+' : ''} live page(s) of ${sourceId} have no canonical file (ghost pages${ghosts.samples.length ? `, e.g. ${ghosts.samples.join(', ')}` : ''}); `
+    + `sync leaves them in place. Preview with ${ghosts.fix.argv!.join(' ')} (read-only), or restore the files and sync.`);
+  return ghosts;
 }
 
 /** #6288: a successful managed sync clears this source's recorded failures its imported commit already settles (#6543 D5: legacy ledger rows too); best effort. */

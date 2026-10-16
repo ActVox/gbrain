@@ -102,6 +102,9 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
     return;
   }
 
+  // #6712 PR 2: a run with a recovery flag is a soak intervention (soak-counters.ts); a scheduler's plain run is not.
+  const soak = await import('../../core/persistence/soak-counters.ts');
+  if (soak.nonPlainSyncFlags(args).length) await soak.recordSoakEvent(engine, 'sync_non_plain');
   if (args.includes('--acknowledge-managed')) return runAcknowledgeManaged(engine, args);
 
   const flags = parseSyncFlags(args);

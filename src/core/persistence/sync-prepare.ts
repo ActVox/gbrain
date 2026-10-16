@@ -10,7 +10,8 @@ import { OperationError, opError, type OpErrorOpts } from '../ops/contract.ts';
 import type { Action } from '../agent-output.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { RegistryCode } from '../error-registry.ts';
-import { ownerGateInput, ownerImportTrust } from '../trust/channel.ts';
+import { ownerGateInput, ownerImportTrust, ownerPageTrust } from '../trust/channel.ts';
+import { matchTrustAllowRule, type TrustAllowRule } from '../trust/allow-rules.ts';
 import { importFromContent, importCodeFile, verifyPageReadable } from '../import-file.ts';
 import { screenImportContent, screenNormalized, type ContentRefusal, type ImportScreenResult, type ImportSanityConfig } from '../import-screen.ts';
 import { ContentSanityBlockError } from '../content-sanity.ts';
@@ -234,6 +235,13 @@ export interface SyncImportScreenInput {
   normalize?: boolean;
   /** #5575: page purge tombstones of the source; a matching file is held as `purged_content`. */
   purgedPages?: ReadonlyMap<string, string>;
+  /**
+   * #6712 PR 2: the source's config and trust allow rules. With them the screen applies the write gate as preparation
+   * does (the tier is the source default lowered by the file's trust markers; an owner allow rule for the source and the
+   * file's path admits it), so a file `write_gate.external_mode=reject` refuses is held as `write_gate_rejected` instead
+   * of failing its receipt and blocking the run.
+   */
+  writeGateSource?: { sourceId: string; config: Record<string, unknown> | null; allowRules: readonly TrustAllowRule[] };
 }
 
 /**
@@ -256,12 +264,17 @@ export function screenSyncImport(input: SyncImportScreenInput): { screen: Import
   // refusal, so a file already repaired and published is never refused for its pinned bytes.
   // The checkpoint may advance past the pinned commit's bytes because the working tree wins, as for any local edit.
   const newerWorkingTree = !input.companyApproval && !!base && !input.lineEndingOnly && input.rawHash !== sha256(content) && !sameCanonicalImport(base, parsedInput);
+  const gateSource = input.writeGateSource;
+  const gateTrust = gateSource ? ownerPageTrust({ frontmatter: parsedInput.frontmatter, sourceConfig: gateSource.config, channel: 'managed_sync_import', sourceUri: sourcePath }) : null;
   const screen = screenImportContent({ content, path: `${slug}.md`, activePack, expectedSlug: resolveSlugForPath(sourcePath), fences: 'coordinated',
     ...(input.normalize === false ? { normalize: false } : {}),
     slugExempt: declared => snapshot?.page.source_path != null && syncOriginPath(snapshot.page.source_path) === syncOriginPath(sourcePath) && declared === snapshot.page.slug,
     slugConflictMessage: (found, expected) => frontmatterSlugConflictMessage(sourcePath, found, expected),
     ...(input.sanity ? { sanity: input.sanity } : {}),
     ...(input.purgedPages ? { purgedPages: input.purgedPages } : {}),
+    ...(gateSource ? { writeGate: { tier: gateTrust!.tier, origin: { channel: gateTrust!.origin?.channel ?? null, source_uri: gateTrust!.origin?.source_uri ?? null } },
+      gateAllowed: gate => !gate.detectorError
+        && !!matchTrustAllowRule(gateSource.allowRules, { sourceId: gateSource.sourceId, sourceUri: gateTrust!.origin?.source_uri ?? null, families: gate.families as never }) } : {}),
     ...(newerWorkingTree ? { published: () => {
       const working = input.renamed ? null : readSyncFile(input.root, input.path);
       return !!working && sha256(working) === input.rawHash && sameCanonicalImport(base!, parseMarkdown(working.toString('utf8'), `${slug}.md`, { activePack }));

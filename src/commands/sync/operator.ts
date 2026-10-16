@@ -13,7 +13,7 @@ import { cliRenderContext, renderAction } from '../../core/agent-output.ts';
 import { writeJsonDocument } from '../../core/cli-force-exit.ts';
 import { opError } from '../../core/ops/contract.ts';
 import { readSyncStatus, unblockSync, type SyncStatus } from '../../core/persistence/sync-status.ts';
-import { HOLD_ATTEMPTS_NEEDS_HUMAN } from '../../core/persistence/sync-fault-class.ts';
+import { HOLD_ATTEMPTS_NEEDS_HUMAN, HOLD_ESCALATE_MS } from '../../core/persistence/sync-fault-class.ts';
 import { CONTENT_REPAIR_HOLD_KINDS } from '../../core/repair/content-lane.ts';
 import { resolveSourceIdEngineFree } from '../../core/source-resolver.ts';
 
@@ -72,7 +72,8 @@ leaves a file out, and each refusal names the file, why, and its fix.
                         on a person, the user's spend decision or the owner host is
                         listed, not retried.
   other repair holds    refused with the repair preview to run
-  held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times          refused: the page keeps moving; needs a person
+  ${HOLD_ATTEMPTS_NEEDS_HUMAN} failed attempts     refused once also held ${HOLD_ESCALATE_MS / 3_600_000} h: the page keeps moving; needs a
+                        person (never a file still being edited, never an image)
 
   --no-llm              repairs keep to their free tiers (model-tier files stay held)
   --no-repair           refuse every repair-class hold instead (the pre-#6377 behaviour)
@@ -154,6 +155,8 @@ export async function runSyncUnblock(engine: BrainEngine, args: string[]): Promi
   if (args.includes('--help') || args.includes('-h')) return printSyncUnblockHelp();
   const sourceId = sourceOf(args);
   const outcome = await unblockSync(engine, sourceId, { apply: args.includes('--apply'), noLlm: args.includes('--no-llm'), noRepair: args.includes('--no-repair') });
+  // #6712 PR 2: a soak intervention (soak-counters.ts).
+  if (outcome.apply) await (await import('../../core/persistence/soak-counters.ts')).recordSoakEvent(engine, 'unblock_apply');
   const ctx = cliRenderContext();
   const rendered = { ...outcome,
     applied: outcome.applied.map(entry => entry.action === 'repair' ? { ...entry, repair: { ...entry.repair, next: renderAction(entry.repair.next, ctx) } } : entry),

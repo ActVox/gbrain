@@ -25,7 +25,7 @@ import type { Action } from '../agent-output.ts';
 import { isStatementTimeout } from './bounded-reads.ts';
 import { readReceiptRetentionDays, DEFAULT_RECEIPT_RETENTION_DAYS } from './limits.ts';
 import type { PublicCategory } from './public-category.ts';
-import { classifyTerminal, dispositionOf, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
+import { classifyTerminal, dispositionOf, driftSinceAction, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
   type TerminalDisposition, type TerminalVerdict, CONNECTION_MESSAGE_PATTERN, LEGACY_PUBLICATION_PREFIX } from './terminal-classify.ts';
 
 export const TERMINAL_WINDOW_KEY = 'persistence.terminal_failures.window_days';
@@ -291,14 +291,17 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   const limit = Math.min(100, Math.max(1, q.limit ?? 20));
   const state = q.state ?? 'unresolved';
   const out: TerminalFailureRow[] = [];
+  // #6712 PR 2: the oldest admission per drift group, so the group's file-drift fix selects every page in it with one concrete --since.
+  const driftSince = new Map<string, string>();
   let cursor = q.before ?? null, scanned = 0, exhausted = false;
   const want = q.groupBy ? MAX_SCAN : limit + 1;
   while (out.length < want && scanned < MAX_SCAN && !exhausted) {
-    const batch = await bounded<KeyColumns & { request_id: string; sequence: string; slug: string; error_detail: Record<string, unknown> | null; ended_at: string; later_state: string | null; same_intent: boolean | null }>(engine,
+    const batch = await bounded<KeyColumns & { request_id: string; sequence: string; slug: string; error_detail: Record<string, unknown> | null; ended_at: string; admitted_at: string; later_state: string | null; same_intent: boolean | null }>(engine,
       `SELECT r.request_id::text AS request_id, r.sequence::text AS sequence, r.source_id, r.slug, r.operation, r.state, r.error_code, r.error_detail,
           r.error_detail->>'origin' AS origin, r.error_detail->>'reason' AS reason, r.error_detail->>'cause' AS cause,
           r.recovery IS NOT NULL AS has_recovery, r.blocked_reason, r.compacted, ${terminalKnockOnSql('r')} AS knock_on, ${ROUTED_MESSAGE('r')} AS routed_message, ${BUILD('r')} AS build,
-          to_char(${ENDED('r')} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ended_at, later.state AS later_state, later.same_intent
+          to_char(${ENDED('r')} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ended_at, to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS admitted_at,
+          later.state AS later_state, later.same_intent
         FROM persistence_requests r
         LEFT JOIN LATERAL (SELECT c.state, c.digest=r.digest AS same_intent FROM persistence_requests c WHERE ${supersessionSql('r', 'c')}
           ORDER BY ${supersessionOrderSql('r', 'c')} LIMIT 1) later ON r.recovery IS NULL
@@ -320,6 +323,9 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
         compacted: row.compacted, ended_at: row.ended_at, cursor: row.sequence, ...(v.root_request_id ? { root_request_id: v.root_request_id } : {}),
         inspect: { argv: terminalInspectArgv(row.request_id), consent: [], actor: 'agent', requires_exclusive: false, why: 'The receipt with its diagnosis and structured fix, read-only.' },
         fix: v.action });
+      const driftKey = `${v.code}\0${v.origin ?? ''}\0${v.category}`;
+      const seen = driftSince.get(driftKey);
+      if (matches && v.category === 'file_conflict' && (!seen || row.admitted_at < seen)) driftSince.set(driftKey, row.admitted_at);
       if (out.length >= want || scanned >= MAX_SCAN) { exhausted = exhausted && row === batch.at(-1); break; }
     }
   }
@@ -343,6 +349,10 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
     }
     g.rows++;
     if (g.samples.length < 3) g.samples.push({ request_id: row.request_id, slug: row.slug, state: row.state, ended_at: row.ended_at, inspect: row.inspect });
+  }
+  for (const [key, since] of driftSince) {
+    const g = groups.get(key);
+    if (g && new Set(out.filter(row => row.category === 'file_conflict' && `${row.code}\0${row.origin ?? ''}\0${row.category}` === key).map(row => row.slug)).size > 1) g.fix = driftSinceAction(q.sourceId, since);
   }
   const sorted = [...groups.values()].sort((a, b) => b.rows - a.rows || a.category.localeCompare(b.category) || a.code.localeCompare(b.code) || (a.origin ?? '').localeCompare(b.origin ?? ''));
   // Groups count the receipts this call scanned; a scan that stopped at its bound continues from where it stopped.
