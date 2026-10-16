@@ -8,7 +8,8 @@ import { TAKES_FENCE_BEGIN, TAKES_FENCE_END, parseTakesFence } from '../takes-fe
 import { extractFactsFromFenceText } from '../facts/extract-from-fence.ts';
 import { takesPreparation } from '../takes-write.ts';
 import { parseTimelineEntries } from '../link-extraction.ts';
-import { extractTimelineFromContent, hasExtractorDetail, supersededCitationTimeline, type ExtractedTimelineEntry } from '../timeline-extract.ts';
+import { eachStoredTimelineRow, extractTimelineFromContent, hasExtractorDetail, supersededCitationTimeline, TimelineKeySet,
+  type ExtractedTimelineEntry } from '../timeline-extract.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
 import { bodyUnread } from '../page-body/page-shape.ts';
@@ -246,16 +247,35 @@ export function segmentedCanonicalCollector(slug: string, recorded?: { has(key: 
   };
 }
 
-/** The canonical timeline of a stored segmented page whose body is unread, block by block (segmentedCanonicalCollector). */
+/**
+ * @internal Work of the managed timeline extraction over a page (`storedRows`: stored rows walked by
+ * unrecordedCanonicalTimeline and segmentedCanonicalTimeline; `kept`: canonical entries a segmented body's read kept).
+ * Counts, not time.
+ */
+export const canonicalTimelineWork = { storedRows: 0, kept: 0 };
+
+/**
+ * The canonical timeline of a stored segmented page whose body is unread, block by block (segmentedCanonicalCollector),
+ * less the entries a stored row of the page records: the rows are walked in pages and held as key digests
+ * (TimelineKeySet), so the read keeps what an insert-only caller may add, never every entry the body yields.
+ */
 async function segmentedCanonicalTimeline(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, slug: string): Promise<Map<string, ExtractedTimelineEntry>> {
-  const collector = segmentedCanonicalCollector(slug);
+  const recorded = new TimelineKeySet();
+  await eachStoredTimelineRow(engine, Number(page.id), row => {
+    canonicalTimelineWork.storedRows++;
+    recorded.add(timelineKey({ date: row.date_text, source: row.source, summary: row.summary }));
+  });
+  const collector = segmentedCanonicalCollector(slug, recorded);
   for await (const block of bodyBlocks(engine, page)) collector.add(block.text);
-  return collector.result();
+  const kept = collector.result();
+  canonicalTimelineWork.kept += kept.size;
+  return kept;
 }
 
 /**
- * The canonical timeline of a stored page (a snapshot's page): a segmented body is read block by block. Read it
- * before a transaction; unrecordedCanonicalTimeline filters it inside one.
+ * The canonical timeline of a stored page (a snapshot's page) for an insert-only caller: a segmented body is read
+ * block by block and keeps only entries no stored row records. Read it before a transaction; unrecordedCanonicalTimeline
+ * filters it inside one.
  */
 export async function storedCanonicalTimeline(engine: BrainEngine, page: PageSnapshot['page'], slug: string): Promise<Map<string, ExtractedTimelineEntry>> {
   return bodyUnread(page) ? segmentedCanonicalTimeline(engine, page, slug) : canonicalTimeline(page, slug);
@@ -296,12 +316,22 @@ function storedTimeline(engine: BrainEngine, pageId: number): Promise<StoredTime
  * have no stored row on the page under the same normalized key. Insert-only
  * callers (managed `extract --stale`) add exactly these, so a stored row that
  * differs only by whitespace is not duplicated. `storedRows` is the caller's
- * own read of the page's non-event rows (a batched walk).
+ * own read of the page's non-event rows (a batched walk); without it the rows
+ * are walked in pages (eachStoredTimelineRow), never held as one array.
  */
 export async function unrecordedCanonicalTimeline(engine: BrainEngine, pageId: number, body: CanonicalBody | ReadonlyMap<string, ExtractedTimelineEntry>,
   slug: string, storedRows?: ReadonlyArray<Pick<StoredTimelineRow, 'date' | 'source' | 'summary'>>): Promise<ExtractedTimelineEntry[]> {
-  const stored = new Set((storedRows ?? await storedTimeline(engine, pageId)).map(row => timelineKey(row)));
-  return [...(body instanceof Map ? body : canonicalTimeline(body as CanonicalBody, slug))].filter(([key]) => !stored.has(key)).map(([, entry]) => entry);
+  const entries = body instanceof Map ? body : canonicalTimeline(body as CanonicalBody, slug);
+  if (storedRows) {
+    const stored = new Set(storedRows.map(row => timelineKey(row)));
+    return [...entries].filter(([key]) => !stored.has(key)).map(([, entry]) => entry);
+  }
+  const unrecorded = new Map(entries);
+  await eachStoredTimelineRow(engine, pageId, row => {
+    canonicalTimelineWork.storedRows++;
+    unrecorded.delete(timelineKey({ date: row.date_text, source: row.source, summary: row.summary }));
+  });
+  return [...unrecorded.values()];
 }
 
 /** Classify stored rows against a new body and the writer's prior snapshot's view. */
