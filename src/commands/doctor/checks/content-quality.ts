@@ -244,16 +244,18 @@ export const contentSanityEntry: DoctorEntry = {
  */
 async function runPartialEmbedding(ctx: DoctorContext): Promise<Check[]> {
   const engine = connectedEngine(ctx);
+  const checks: Check[] = [];
   ctx.progress.heartbeat('partial_embedding');
   try {
     const { budgetLimitedFinding } = await import('../../../core/held-embedding.ts');
     const { currentEmbeddingSignature } = await import('../../../core/embedding.ts');
     const found = await budgetLimitedFinding(engine, currentEmbeddingSignature());
-    if (!found) return [{ name: 'partial_embedding', status: 'ok', message: 'No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).' }];
-    return [{ name: 'partial_embedding', status: 'warn', message: found.message, fix: found.fix, details: found.details }];
+    if (!found) checks.push({ name: 'partial_embedding', status: 'ok', message: 'No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).' });
+    else checks.push({ name: 'partial_embedding', status: 'warn', message: found.message, fix: found.fix, details: found.details });
   } catch (err) {
-    return [checkError('partial_embedding', 'read the per-page embedding budget', err)];
+    checks.push(checkError('partial_embedding', 'read the per-page embedding budget', err));
   }
+  return checks;
 }
 
 export const partialEmbeddingEntry: DoctorEntry = {
