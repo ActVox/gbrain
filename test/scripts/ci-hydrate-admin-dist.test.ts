@@ -4,7 +4,8 @@
  * `bun run build` failed on the hashed admin bundles src/admin-embedded.ts
  * imports. The runner now copies the worktree's admin/dist (mounted read-only
  * at /ci-src/admin-dist) into the volume before the build: an exact copy of
- * the current worktree bytes, stale hashed files removed.
+ * the current worktree bytes, stale hashed files removed. It refuses only
+ * when a tracked admin/dist file cannot be read, naming it and the admin build.
  */
 import { afterAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
@@ -17,14 +18,28 @@ const SCRIPT = join(ROOT, 'scripts/ci-hydrate-admin-dist.sh');
 const homes: string[] = [];
 afterAll(() => { for (const h of homes) rmSync(h, { recursive: true, force: true }); });
 
-function tree(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'gbrain-admin-dist-'));
-  homes.push(dir);
+function write(dir: string, files: Record<string, string>): string {
   for (const [rel, body] of Object.entries(files)) {
     mkdirSync(join(dir, rel, '..'), { recursive: true });
     writeFileSync(join(dir, rel), body);
   }
   return dir;
+}
+
+function tree(files: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-admin-dist-'));
+  homes.push(dir);
+  return write(dir, files);
+}
+
+/** A checkout whose admin/dist holds `files`, all tracked by git (index only). */
+function checkout(files: Record<string, string>): string {
+  const repo = tree({});
+  write(join(repo, 'admin', 'dist'), files);
+  const git = (...args: string[]) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+  expect(git('init', '-q').status).toBe(0);
+  expect(git('add', 'admin/dist').status).toBe(0);
+  return repo;
 }
 
 function listing(dir: string): Record<string, string> {
@@ -39,42 +54,52 @@ function listing(dir: string): Record<string, string> {
   return out;
 }
 
-const hydrate = (src: string, dest: string) => spawnSync('bash', [SCRIPT, src, dest], { encoding: 'utf8' });
+const hydrate = (repo: string, dest: string) => spawnSync('bash', [SCRIPT, join(repo, 'admin', 'dist'), dest], { cwd: repo, encoding: 'utf8' });
 const WORKTREE = { 'index.html': '<script src="/assets/index-NEW.js">', 'assets/index-NEW.js': 'new bundle', 'assets/logo.svg': '<svg/>' };
 
 describe('#6756 ci:local hydrates the admin/dist volume from the worktree', () => {
   test('cold: an empty volume gets the worktree bytes', () => {
-    const src = tree(WORKTREE), dest = join(tree({}), 'dist');
-    const r = hydrate(src, dest);
+    const repo = checkout(WORKTREE), dest = join(tree({}), 'dist');
+    const r = hydrate(repo, dest);
     expect(r.status, r.stderr).toBe(0);
     expect(listing(dest)).toEqual(WORKTREE);
   });
 
   test('warm: a volume already matching stays identical', () => {
-    const src = tree(WORKTREE), dest = tree(WORKTREE);
-    expect(hydrate(src, dest).status).toBe(0);
+    const repo = checkout(WORKTREE), dest = tree(WORKTREE);
+    expect(hydrate(repo, dest).status).toBe(0);
     expect(listing(dest)).toEqual(WORKTREE);
   });
 
-  test('changed bundle: a file whose bytes changed in the worktree is replaced', () => {
-    const src = tree(WORKTREE), dest = tree({ ...WORKTREE, 'assets/logo.svg': '<svg old/>' });
-    expect(hydrate(src, dest).status).toBe(0);
-    expect(listing(dest)).toEqual(WORKTREE);
+  test('changed bundle: uncommitted worktree bytes win over the volume', () => {
+    const repo = checkout(WORKTREE), dest = tree(WORKTREE);
+    writeFileSync(join(repo, 'admin', 'dist', 'assets', 'logo.svg'), '<svg edited/>');
+    expect(hydrate(repo, dest).status).toBe(0);
+    expect(listing(dest)).toEqual({ ...WORKTREE, 'assets/logo.svg': '<svg edited/>' });
   });
 
   test('deleted bundle: stale hashed files from an older build are removed', () => {
-    const src = tree(WORKTREE);
+    const repo = checkout(WORKTREE);
     const dest = tree({ 'index.html': '<script src="/assets/index-OLD.js">', 'assets/index-OLD.js': 'old bundle', '.vite/manifest.json': '{}' });
-    expect(hydrate(src, dest).status).toBe(0);
+    expect(hydrate(repo, dest).status).toBe(0);
     expect(listing(dest)).toEqual(WORKTREE);
   });
 
-  test('a worktree without admin/dist/index.html refuses with the remedy and leaves the volume alone', () => {
-    const src = tree({}), dest = tree({ 'index.html': 'kept' });
-    const r = hydrate(src, dest);
+  test('a tracked file missing from the worktree refuses, naming the file and the admin build, and leaves the volume alone', () => {
+    const repo = checkout(WORKTREE), dest = tree({ 'index.html': 'kept' });
+    rmSync(join(repo, 'admin', 'dist', 'assets', 'index-NEW.js'));
+    const r = hydrate(repo, dest);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('git checkout -- admin/dist');
+    expect(r.stderr).toContain('admin/dist/assets/index-NEW.js is tracked but cannot be read');
+    expect(r.stderr).toContain('bun run build:admin');
     expect(listing(dest)).toEqual({ 'index.html': 'kept' });
+  });
+
+  test('an untracked file in the worktree is copied too; only tracked files gate the refusal', () => {
+    const repo = checkout(WORKTREE), dest = tree({});
+    writeFileSync(join(repo, 'admin', 'dist', 'local-only.txt'), 'untracked');
+    expect(hydrate(repo, dest).status).toBe(0);
+    expect(listing(dest)).toEqual({ ...WORKTREE, 'local-only.txt': 'untracked' });
   });
 
   test('the runner mounts the worktree admin/dist read-only and hydrates after git setup, before the build', () => {

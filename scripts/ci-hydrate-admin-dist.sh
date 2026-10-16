@@ -6,14 +6,24 @@
 # this before the build to make the volume an exact copy of the worktree's
 # admin/dist (mounted read-only at /ci-src/admin-dist): the current worktree
 # bytes, uncommitted changes included, with stale hashed files from an older
-# build removed. Usage: ci-hydrate-admin-dist.sh <worktree admin/dist> <volume admin/dist>
+# build removed. It refuses only when a file git tracks under admin/dist
+# cannot be read from the worktree, naming the file and the admin build.
+# Run from the repository root (the tracked list comes from git ls-files).
+# Usage: ci-hydrate-admin-dist.sh <worktree admin/dist> <volume admin/dist>
 set -euo pipefail
 src="${1:?usage: ci-hydrate-admin-dist.sh <worktree admin/dist> <volume admin/dist>}"
 dest="${2:?usage: ci-hydrate-admin-dist.sh <worktree admin/dist> <volume admin/dist>}"
-if [ ! -f "$src/index.html" ]; then
-  echo "[runner] ERROR: $src/index.html is missing, so the worktree's committed admin/dist is absent and the CLI build cannot embed it. Restore it with git checkout -- admin/dist (or rebuild it with bun run build:admin) and rerun ci:local." >&2
+tracked=$(git ls-files admin/dist)
+if [ -z "$tracked" ]; then
+  echo "[runner] ERROR: git tracks no files under admin/dist, so there is nothing to hydrate the admin/dist volume from. Build it with bun run build:admin, or restore it with git checkout -- admin/dist, and rerun ci:local." >&2
   exit 1
 fi
+while IFS= read -r path; do
+  if [ ! -r "$src/${path#admin/dist/}" ]; then
+    echo "[runner] ERROR: $path is tracked but cannot be read from the worktree ($src/${path#admin/dist/}), so the admin/dist volume was not hydrated. Restore it with git checkout -- $path, or rebuild the bundle with bun run build:admin, and rerun ci:local." >&2
+    exit 1
+  fi
+done <<< "$tracked"
 mkdir -p "$dest"
 find "$dest" -mindepth 1 -delete
 cp -R "$src/." "$dest/"
