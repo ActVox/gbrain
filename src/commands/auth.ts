@@ -26,7 +26,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { assertAllowedScopes } from '../core/scope.ts';
 import { isTrustTier, TRUST_TIERS, type TrustTier } from '../core/trust/tier.ts';
 import { setMinTrust, setTokenMinTrust } from '../core/trust/min-trust.ts';
-import { generateToken, isUndefinedColumnError, isUndefinedTableError } from '../core/utils.ts';
+import { generateToken, isMissingSchemaObject } from '../core/utils.ts';
 import { TOKEN_ID_RE, insertUnifiedToken } from '../core/token-mint.ts';
 import { normalizeTokenScopes } from '../core/legacy-token-scope.ts';
 import { sqlQueryForEngine, type SqlQuery } from '../core/sql-query.ts';
@@ -1026,12 +1026,10 @@ export function clientOperationsLines(row: ClientRow): string[] {
  * for the unit suite.
  */
 export async function listClientRows(engine: BrainEngine): Promise<ClientRow[]> {
-  // The columns each degrade tier drops. isUndefinedColumnError matches any
-  // 42703 by code; the column list covers message-only (code-less) variants.
+  // The columns each degrade tier drops; any other missing object rethrows.
   const isSchemaShapeError = (e: unknown): boolean =>
-    isUndefinedTableError(e) ||
-    ['allowed_operations', 'deleted_at', 'surface', 'surface_set_by', 'source_id', 'federated_read']
-      .some(col => isUndefinedColumnError(e, col));
+    isMissingSchemaObject(e, 'table', 'oauth_clients') ||
+    isMissingSchemaObject(e, 'column', ['allowed_operations', 'deleted_at', 'surface', 'surface_set_by', 'source_id', 'federated_read']);
   try {
     return await engine.executeRaw<ClientRow>(
       `SELECT client_id, client_name, scope, surface, surface_set_by, source_id, federated_read, allowed_operations, deleted_at
@@ -1074,7 +1072,7 @@ export async function tokenLifetimeClampedClients(engine: BrainEngine): Promise<
     );
     return new Set(rows.map(r => r.client_id));
   } catch (e) {
-    if (isUndefinedTableError(e)) return new Set();
+    if (isMissingSchemaObject(e, 'table', 'oauth_grant_audit')) return new Set();
     throw e;
   }
 }

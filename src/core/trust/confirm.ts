@@ -65,7 +65,8 @@ export function tierRaiseFix(argv: string[], why: string, userMessage?: string):
   return { argv, consent: [], actor: 'user', why, requires_exclusive: false, ...(userMessage ? { user_message: userMessage } : {}) };
 }
 
-export type OwnerConfirmation = { via: 'memory_confirm_scope' } | { via: 'tty' };
+/** `preview_hash`: the operator named the page and the preview hash on the local CLI (#6550 marker repair, never remote). */
+export type OwnerConfirmation = { via: 'memory_confirm_scope' } | { via: 'tty' } | { via: 'preview_hash' };
 
 /**
  * Establishes the owner's confirmation for one tier-raising action, or throws.

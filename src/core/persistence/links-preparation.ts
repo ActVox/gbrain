@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
-import { isUndefinedTableError } from '../utils.ts';
+import { isMissingSchemaObject } from '../utils.ts';
 import type { ParsedPage } from '../import-file.ts';
 import { buildBasenameIndex, extractPageLinks, isGlobalBasenameEnabled, makeResolver } from '../link-extraction.ts';
 import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
@@ -20,7 +20,7 @@ async function liveSlugAliases(engine: BrainEngine, sourceId: string, targets: s
         AND EXISTS (SELECT 1 FROM pages c WHERE c.source_id=a.source_id AND c.slug=a.canonical_slug AND c.deleted_at IS NULL)`, [sourceId, [...new Set(targets)]]);
     return new Map(rows.map(row => [row.alias_slug, row.canonical_slug]));
   } catch (error) {
-    if (isUndefinedTableError(error)) return new Map();
+    if (isMissingSchemaObject(error, 'table', 'slug_aliases')) return new Map();
     throw error;
   }
 }
