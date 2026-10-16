@@ -1218,12 +1218,16 @@
               {
                 "name": "persistence_requests_slug_intent",
                 "state": "valid"
+              },
+              {
+                "name": "persistence_requests_request_id",
+                "state": "valid"
               }
             ],
             "repair": "request-indexes"
           },
           "elapsed_ms": "<volatile>",
-          "message": "Managed sync request indexes are valid.",
+          "message": "Request-table indexes are valid.",
           "name": "persistence_request_indexes",
           "status": "ok"
         },
