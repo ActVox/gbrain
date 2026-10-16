@@ -131,8 +131,7 @@ function subjectOf(kind: BeliefChangeKind, key: string, label: Record<string, un
   const parsed = JSON.parse(key) as unknown[];
   const link = (kind === 'link_transition' ? parsed[1] : parsed) as unknown[];
   const out: Record<string, unknown> = { link_type: link[3], from: slugOf(label.from), to: slugOf(label.to) };
-  if (kind === 'link_transition') Object.assign(out, { transition: parsed[2], date: parsed[3], producer: parsed[4] });
-  return out;
+  return kind === 'link_transition' ? { ...out, transition: parsed[2], date: parsed[3], producer: parsed[4] } : out;
 }
 
 function causeOf(e: BeliefHistoryRow): BeliefChange['cause'] {
