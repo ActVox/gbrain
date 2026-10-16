@@ -188,6 +188,7 @@ export const GRADUATION_INVENTORY: Inventory = {
 
     entry('query_cache', 'rebuild', 'operational', 'Query result cache; regenerated on the target.'),
     entry('code_traversal_cache', 'rebuild', 'operational', 'Code traversal cache; regenerated on the target.'),
+    entry('page_view_digests', 'rebuild', 'operational', 'get_page view sizes and sha256 of segmented pages per revision; recomputed by the next read on the target.'),
 
     entry('planner_stats_deltas', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false } }),
     entry('planner_stats_state', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false } }),

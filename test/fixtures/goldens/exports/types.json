@@ -4909,6 +4909,15 @@
       {
         "kind": "interface",
         "members": [
+          "candidate: LinkCandidate",
+          "index: number",
+          "pass: number"
+        ],
+        "name": "BodyLinkCandidate"
+      },
+      {
+        "kind": "interface",
+        "members": [
           "index: number",
           "line?: number | undefined",
           "path: string"
@@ -4944,8 +4953,11 @@
           "lineGrammar?: { enabled?: boolean; allowUndeclaredTypes?: boolean; } | undefined",
           "onResolvedFrontmatterTarget?: ((slug: string) => void) | undefined",
           "pack?: LinkExtractionPack | null | undefined",
+          "regexBudget?: PageRegexBudget | undefined",
+          "roleText?: string | undefined",
           "skipFrontmatter?: boolean | undefined",
-          "targetType?: ((slug: string, sourceId?: string) => string | undefined) | undefined"
+          "targetType?: ((slug: string, sourceId?: string) => string | undefined) | undefined",
+          "window?: { start: number; end: number; offset: number; } | undefined"
         ],
         "name": "ExtractPageLinksOptions"
       },
@@ -5148,9 +5160,30 @@
       },
       {
         "kind": "function",
+        "name": "candidateKey",
+        "signature": [
+          "(c: LinkCandidate) => string"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "dedupeCandidates",
+        "signature": [
+          "(candidates: LinkCandidate[]) => LinkCandidate[]"
+        ]
+      },
+      {
+        "kind": "function",
         "name": "deriveTimelineAnchor",
         "signature": [
           "(input: TimelineAnchorInput) => TimelineCandidate | null"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "entityRefPasses",
+        "signature": [
+          "(content: string) => EntityRef[][]"
         ]
       },
       {
@@ -5165,6 +5198,13 @@
         "name": "explainLinkType",
         "signature": [
           "(input: { slug: string; content: string; pageType: PageType; target: string; frontmatter?: Record<string, unknown>; lineGrammar?: ExtractPageLinksOptions[\"lineGrammar\"]; pack?: LinkExtractionPack | null; }) => Promise<LinkExplanation>"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "extractBodyLinks",
+        "signature": [
+          "(slug: string, content: string, pageType: PageType, resolver: SlugResolver, opts?: ExtractPageLinksOptions) => Promise<{ links: BodyLinkCandidate[]; attendanceComplete: boolean; }>"
         ]
       },
       {
@@ -5207,6 +5247,13 @@
         "name": "findTimelineSourceDelimiter",
         "signature": [
           "(text: string) => number"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "frontmatterLinks",
+        "signature": [
+          "(slug: string, frontmatter: Record<string, unknown>, pageType: PageType, resolver: SlugResolver, opts?: ExtractPageLinksOptions) => Promise<Pick<PageLinksResult, \"candidates\" | \"unresolved\" | \"attendanceComplete\">>"
         ]
       },
       {
@@ -5312,6 +5359,13 @@
         "name": "resolvedLinkCandidate",
         "signature": [
           "(candidate: LinkCandidate, originSlug: string, originSourceId: string, resolved: { fromSlug: string; fromSourceId: string; toSourceId: string; }) => LinkBatchInput"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "rolePriorPhrases",
+        "signature": [
+          "(text: string) => Array<string | null>"
         ]
       },
       {
