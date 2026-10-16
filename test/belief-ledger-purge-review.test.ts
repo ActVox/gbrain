@@ -25,6 +25,11 @@ import { operations } from '../src/core/operations.ts';
 import { purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { waitFor } from './helpers/wait-for.ts';
+import { tryAcquirePublicationCapacity } from '../src/core/persistence/pool-capacity.ts';
+import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
+import { readHeadBlockers } from '../src/core/persistence/head-blocker.ts';
+import { localHostId } from '../src/core/persistence/identity.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain, type BeliefEvent } from './helpers/belief-ledger.ts';
 
 afterEach(() => { __setBeliefEmitterFaultForTests(null); __dropOwnerEditAllowlistForTests(false); __dropRedactionReleaseEventsForTests(false); });
@@ -57,6 +62,24 @@ async function collect<T>(run: (report: (value: T) => void) => Promise<void>): P
   await run(value => { out = value; });
   return out as T;
 }
+
+/**
+ * Edits a canonical file the way a user does (write, git commit) and runs the managed sync to completion. The deadline sits
+ * well inside the test timeout, so a blocked drain ends as a reported stop and the brain tears down; it never outlives the test.
+ */
+async function editAndSync(b: BeliefBrain, slug: string, content: string, deadlineMs = 90_000) {
+  writeFileSync(join(b.root, `${slug}.md`), content);
+  git(b.root, 'add', '-A'); git(b.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'edit');
+  const result = await performSync(b.engine, { sourceId: b.sourceId, noPull: true, noEmbed: true, noExtract: true, drain: true, deadlineAtMs: Date.now() + deadlineMs } as never);
+  return { outcome: result.drain?.outcome ?? null, stop: result.drain?.stop_reason ?? null };
+}
+
+const mirrorEffects = (b: BeliefBrain) => b.engine.executeRaw<{ id: string; state: string; recovering: boolean; error_code: string | null }>(
+  `SELECT id::text AS id, state, recovery IS NOT NULL AS recovering, error_code FROM persistence_effects WHERE source_id = $1 AND kind = 'withdrawal-mirror' ORDER BY id`, [b.sourceId]);
+
+/** A purge commits first and mirrors the canonical file after; a user edits the file only once that mirror has finished. */
+const mirrorSettled = (b: BeliefBrain) => waitFor(async () => (await mirrorEffects(b)).every(e => !e.recovering && !['queued', 'running'].includes(e.state)),
+  { timeoutMs: 30_000, intervalMs: 50, label: 'withdrawal mirror settled' });
 
 /** An owner-tier, trusted local write in its own batch: the shape of sync, reconcile and file repair (or, with ownerEdit, an explicit owner edit). */
 const ownerTierWrite = (b: BeliefBrain, slug: string, op: string, sql: string, ownerEdit = false) => b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
@@ -97,17 +120,16 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const released = async () => (await b.engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM belief_redactions WHERE source_id = $1 AND released_hash IS NOT NULL', [b.sourceId]))[0]!.n;
         git(b.root, 'init', '-q');
         mkdirSync(join(b.root, 'companies'), { recursive: true });
-        const sync = async (content: string) => {
-          writeFileSync(join(b.root, `${slug}.md`), content);
-          git(b.root, 'add', '-A'); git(b.root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'edit');
-          await performSync(b.engine, { sourceId: b.sourceId, noPull: true, noEmbed: true, noExtract: true, drain: true } as never);
-        };
+        const syncs: unknown[] = [];
+        const sync = async (content: string) => { syncs.push(await editAndSync(b, slug, content)); };
         await sync(beliefPage({ facts: [X, { claim: 'Acme sells widgets', context: `notes say ${X}` }] }));
         const request = await requestOf(b, String((await purgeFact(b, X)).request_id));
+        await mirrorSettled(b);
         __dropOwnerEditAllowlistForTests(forced);
-        const out: Record<string, unknown> = { marker: REDACTION_MARKER(request) };
+        const out: Record<string, unknown> = { marker: REDACTION_MARKER(request), mirrored: !readFileSync(join(b.root, `${slug}.md`), 'utf8').includes(`| ${X} |`) };
         out.sync = await contexts(() => sync(page('sync rewrote it')));
         out.afterSync = await released();
+        out.syncs = syncs;
         if (forced) { report(out); return; }
         out.agentTierPut = await contexts(() => b.put(slug, page('agent rewrote it')));
         const fact = `source_id = $1 AND fact = 'Acme sells widgets' AND expired_at IS NULL`;
@@ -126,10 +148,41 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }));
       const r = await run(false);
       const m = r.marker;
-      expect(r).toEqual({ marker: m, sync: [m], afterSync: 0, agentTierPut: [m], import: [m], syncRow: [m], revert: [m], beforeOwner: 0, ownerPut: ['owner rewrote it'], afterOwner: 1 });
+      const synced = [{ outcome: 'synced', stop: null }, { outcome: 'synced', stop: null }];
+      expect(r).toEqual({ marker: m, mirrored: true, sync: [m], afterSync: 0, syncs: synced, agentTierPut: [m], import: [m], syncRow: [m], revert: [m], beforeOwner: 0, ownerPut: ['owner rewrote it'], afterOwner: 1 });
       // Forced probe: without the allowlist the owner-tier managed sync releases the redaction and writes the new value.
       const forced = await run(true);
-      expect(forced).toEqual({ marker: forced.marker, sync: ['sync rewrote it'], afterSync: 1 });
+      expect(forced).toEqual({ marker: forced.marker, mirrored: true, sync: ['sync rewrote it'], afterSync: 1, syncs: synced });
+    }, 240_000);
+
+    test('#1 (CI stall): a canonical edit that lands inside the purge mirror\'s reserve-to-verify window leaves its recovery record blocking the root, so the next sync cannot finish', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        const slug = 'companies/acme-example';
+        const edited = beliefPage({ facts: [{ claim: 'Acme sells widgets', context: 'sync rewrote it' }] });
+        git(b.root, 'init', '-q');
+        mkdirSync(join(b.root, 'companies'), { recursive: true });
+        const first = await editAndSync(b, slug, beliefPage({ facts: [X, { claim: 'Acme sells widgets', context: `notes say ${X}` }] }));
+        // Forced interleaving: the mirror is queued but not yet run when the purge returns, then it reserves its recovery
+        // record and waits for publication capacity the test holds; the user's edit lands in that window.
+        await b.engine.executeRaw("ALTER TABLE persistence_effects ALTER COLUMN next_attempt_at SET DEFAULT (now()+interval '1 hour')");
+        try { await purgeFact(b, X); } finally { await b.engine.executeRaw('ALTER TABLE persistence_effects ALTER COLUMN next_attempt_at SET DEFAULT now()'); }
+        const held: Array<() => void> = [];
+        try {
+          for (let release = tryAcquirePublicationCapacity(b.engine); release; release = tryAcquirePublicationCapacity(b.engine)) held.push(release);
+          await b.engine.transaction(async tx => { await declarePersistenceProtocol(tx);
+            await tx.executeRaw("UPDATE persistence_effects SET next_attempt_at = now() WHERE source_id = $1 AND kind = 'withdrawal-mirror'", [b.sourceId]); });
+          await waitFor(async () => (await mirrorEffects(b)).some(e => e.recovering), { timeoutMs: 30_000, intervalMs: 20, label: 'mirror reserved its recovery record' });
+          writeFileSync(join(b.root, `${slug}.md`), edited);
+        } finally { for (const release of held) release(); }
+        await waitFor(async () => (await mirrorEffects(b)).some(e => e.error_code === 'unexpected_file_bytes'), { timeoutMs: 30_000, intervalMs: 50, label: 'mirror refused the edited bytes' });
+        const raced = await editAndSync(b, slug, edited, 20_000);
+        const queued = (await b.engine.executeRaw<{ id: string }>("SELECT id::text AS id FROM persistence_requests WHERE source_id = $1 AND state = 'queued'", [b.sourceId])).map(row => row.id);
+        const blocked = [...(await readHeadBlockers(b.engine, queued, localHostId())).values()].map(read => read.status === 'blocked' ? read.blocker.predicate : read.status);
+        report({ first, mirror: (await mirrorEffects(b)).map(e => ({ recovering: e.recovering, error_code: e.error_code })), raced, blocked });
+      }));
+      // The CI signature: `0/1 processed · stalled on queued · blocked_by=effect_recovery(1)` until the test timed out.
+      expect(r).toEqual({ first: { outcome: 'synced', stop: null }, mirror: [{ recovering: true, error_code: 'unexpected_file_bytes' }], raced: { outcome: 'resumable', stop: 'deadline' },
+        blocked: ['effect_recovery'] });
     }, 240_000);
 
     test('#43/#5: every redaction release appends one redaction.released in the publication released_by names, also when the confirm leaves the tier unchanged', async () => {
