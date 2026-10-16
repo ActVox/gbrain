@@ -110,10 +110,9 @@ Options:
                        index up to it.
   --no-bulk            Managed Postgres sync: publish one page per transaction
                        instead of bulk groups (each page keeps its own write
-                       request either way). Persist with
-                       'gbrain config set sync.bulk false' or
-                       GBRAIN_SYNC_BULK=0; tune with sync.bulk_size and
-                       sync.bulk_max_txn_ms.
+                       request either way). GBRAIN_SYNC_BULK=0 does the
+                       same for every run of a process; tune the group size
+                       with 'gbrain config set sync.bulk_size N'.
   --lanes N            Managed Postgres sync: publish at most N bulk groups at
                        once (1-16, default 16, capped by the connection pool:
                        GBRAIN_POOL_SIZE minus 4). Pages still commit in file

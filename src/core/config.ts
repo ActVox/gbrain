@@ -1725,8 +1725,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // #5984: managed Postgres sync publishes pages in bulk groups (on by default; each page keeps its own request).
   'sync.bulk',
   'sync.bulk_size',
-  'sync.bulk_max_txn_ms', 'sync.job_drain', // the last: #6706, `false` keeps a managed `sync` job single-pass
-  'sync.lanes', 'sync.waive_batch', 'persistence.single_write_group', 'persistence.preadmit_cache', // the last three: write-path kill switches (persistence/switches.ts)
+  // #6712 PR 2: rollback keys (src/core/sync-config-keys.ts; windows in wire-skew.ts): readable and honored, not tunables.
+  'sync.job_drain', 'sync.waive_batch', 'sync.foreground_priority',
+  'sync.lanes', 'persistence.single_write_group', 'persistence.preadmit_cache', // the last two: write-path kill switches (persistence/switches.ts)
   // Persisted indexing scope (comma/newline-separated glob list; trailing '/'
   // normalizes to a '/**' subtree glob). Read best-effort at the top of
   // performSyncInner and UNIONED with any per-call --exclude so internal
@@ -1738,13 +1739,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // include-hidden flag, which bulk sync refuses); registered so `config set` accepts it.
   'sync.include_hidden',
   // #5988: Git sync holds (read by readSyncHoldPolicy). `sync.holds=fail`
-  // restores fail-closed blocking; the rest tune detail, escalation and the
-  // parser-regression stop. Registered so the documented `config set` works.
+  // restores fail-closed blocking. Detail, escalation and the parser-regression
+  // stop are tuned by GBRAIN_SYNC_* env since #6712 PR 2 (RETIRED_SYNC_KEYS).
   'sync.holds',
-  'sync.hold_cap',
-  'sync.hold_escalate_count',
-  'sync.hold_escalate_pct',
-  'sync.parser_regression',
   'fences.normalize', // #6188: inline Tier 1 fence normalization (fence-repair/config.ts); default on
   'fences.repair.enabled', 'fences.repair.llm', // #6188: the fence_repair cycle phase and its Tier 3 model step (fence-repair/config.ts); default on
   'fences.repair.max_usd_per_page', 'fences.repair.max_usd_per_day', // #6188: Tier 3 fence repair caps; 0 = no model spend
