@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.271.0] - 2026-10-16
 
-**A page write no longer waits behind a sync group that an idle managed sync started in the moment it was being claimed.** While a managed sync drains with lanes, the lanes can sit idle between groups. If an agent's page write arrived just then and its own process was still claiming it, the drain skipped the write and started the next sync group, so the write waited for that group: about 730 ms instead of about 60 ms in the test traces. The FIFO claim now holds that group back, as the lane-head claim already did. The sync still gets one group after each such write commits, so a stream of writes cannot stall it. Two flaky tests on master are fixed with it.
+**A page write no longer waits behind a sync group that an idle managed sync started in the moment it was being claimed.** While a managed sync drains with lanes, the lanes can sit idle between groups. If an agent's page write arrived just then and its own process was still claiming it, the drain skipped the write and started the next sync group, so the write waited for that group: about 730 ms instead of about 60 ms in the test traces. The FIFO claim now holds that group back, as the lane-head claim already did. The sync still gets one group after each such write commits, so a stream of writes cannot stall it. Three flaky tests on master are fixed with it.
 
 ### What you'd see
 
@@ -32,6 +32,7 @@ Nothing. Nothing is rewritten on upgrade and there is no migration.
 - New no-op fault point `consumer:claiming` before each FIFO and lane-head claim. `test/managed-sync-foreground-priority.test.ts` parks the drain's claims there instead of parking lanes at `lane:applied`, which let each lane take one more group first (the lanes-2 flake); a forced probe covers that race.
 - `test/claim-fifo-foreground-waiting.test.ts` (PGLite, and Postgres through `test/postgres-unit-arms.txt`): a write row-locked by its own process's claim is not overtaken by a sync head, and a stream of such writes still lets the sync side claim a head after every second write.
 - `SyncOpts.governMs` test seam (the drain governor's tick). `test/belief-ledger-purge-review.test.ts` "#1 (CI stall)" sets it instead of racing the governor's 10 s confirmation against its deadline's 10 s cooperative stop (master red at v0.60.268.0): it asserts `blocked` / `drain_stalled` with the governor first and, as a forced probe, `resumable` / `deadline` with the deadline first.
+- `test/sync-managed-help-l7-6712.test.ts` "--retry-failed is a deprecated alias" failed whenever an earlier test file in the same `bun test` process had already run `sync --retry-failed`, because the coaching notice prints once per process. It now resets that flag first (`resetRetryFailedNoticeForTests`, `src/commands/sync/args.ts`); the once-per-process assertion is unchanged.
 
 ## [0.60.270.0] - 2026-10-16
 
