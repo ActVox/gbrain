@@ -218,19 +218,38 @@ async function priorView(engine: BrainEngine, page: PageSnapshot['page'], slug: 
 }
 
 /**
- * The canonical timeline of a stored segmented page whose body is unread, block by block, extractTimeline's two passes
- * merged in its order (every bullet and heading entry, then parseTimelineEntries' readings over them).
+ * The canonical timeline of a segmented body fed one block at a time (`add`), extractTimeline's two passes merged in its
+ * order (every bullet and heading entry, then parseTimelineEntries' readings over them). An entry whose timelineKey is in
+ * `recorded` (the page's stored rows) is not kept: unrecordedCanonicalTimeline drops it, and once a page is extracted
+ * its recorded entries are nearly all of it.
  */
-async function segmentedCanonicalTimeline(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, slug: string): Promise<Map<string, ExtractedTimelineEntry>> {
+export function segmentedCanonicalCollector(slug: string, recorded?: { has(key: string): boolean }): { add(text: string): void; result(): Map<string, ExtractedTimelineEntry> } {
   const extracted = new Map<string, ExtractedTimelineEntry>();
   const parsed = new Map<string, ExtractedTimelineEntry>();
-  for await (const block of bodyBlocks(engine, page)) {
-    const safe = sanitizeRemoteBody(block.text, { keepMaterializedMarkers: true });
-    for (const t of extractTimelineFromContent(safe, slug)) extracted.set(timelineKey(t), detachedValue(t));
-    for (const t of parseTimelineEntries(safe)) parsed.set(timelineKey({ ...t, source: t.source ?? 'markdown' }), detachedValue({ ...t, source: t.source ?? 'markdown', slug }));
-  }
-  for (const [key, entry] of parsed) extracted.set(key, entry);
-  return extracted;
+  return {
+    add(text) {
+      const safe = sanitizeRemoteBody(text, { keepMaterializedMarkers: true });
+      for (const t of extractTimelineFromContent(safe, slug)) {
+        const key = timelineKey(t);
+        if (!recorded?.has(key)) extracted.set(key, detachedValue(t));
+      }
+      for (const t of parseTimelineEntries(safe)) {
+        const key = timelineKey({ ...t, source: t.source ?? 'markdown' });
+        if (!recorded?.has(key)) parsed.set(key, detachedValue({ ...t, source: t.source ?? 'markdown', slug }));
+      }
+    },
+    result() {
+      for (const [key, entry] of parsed) extracted.set(key, entry);
+      return extracted;
+    },
+  };
+}
+
+/** The canonical timeline of a stored segmented page whose body is unread, block by block (segmentedCanonicalCollector). */
+async function segmentedCanonicalTimeline(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, slug: string): Promise<Map<string, ExtractedTimelineEntry>> {
+  const collector = segmentedCanonicalCollector(slug);
+  for await (const block of bodyBlocks(engine, page)) collector.add(block.text);
+  return collector.result();
 }
 
 /**

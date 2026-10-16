@@ -180,6 +180,7 @@ export async function runMaintenanceSweep(
     else report.skipped.push({ reason, count });
   };
   const overBudget = () => now() >= deadline;
+  const budgetLeft = () => budgetMs > 0 ? Math.max(0, deadline - now()) / budgetMs : 0;
 
   // Budget abort signal: threads into the fence pass's per-page loop so a
   // long item can be interrupted at its own checkpoints. unref'd — the sweep must never hold the
@@ -248,6 +249,7 @@ export async function runMaintenanceSweep(
           batchLimit,
           cutoffIso,
           overBudget,
+          budgetLeft,
           report,
           skip,
           log,
@@ -304,10 +306,14 @@ interface PassCtx {
   skip: (reason: string, count?: number) => void;
 }
 
+/** The share of the sweep's budget still left (1 at its start, 0 once it is spent). */
+type FreshBudget = { budgetLeft: () => number };
+
 /**
- * Segmented pages whose links/timeline pass did not fit a sweep's budget, `source\0slug` to the page's updated_at then:
- * later sweeps in this process skip them until the page changes, so one page too large for any budget cannot take
- * every sweep's budget. `gbrain extract --stale` extracts them.
+ * Segmented pages whose links/timeline pass did not fit a whole sweep budget, `source\0slug` to the page's updated_at
+ * then: later sweeps in this process leave them out of the pass's page query until the page changes, so one page too
+ * large for any budget cannot take every sweep's budget, nor the batch slots of the pages behind it.
+ * `gbrain extract --stale` extracts them.
  */
 const deferredSegmentedPages = new Map<string, string>();
 
@@ -326,7 +332,7 @@ export function _resetDeferredSegmentedPagesForTests(): void {
  */
 async function runLinksTimelinePass(
   engine: BrainEngine,
-  ctx: PassCtx & { cutoffIso: string; log: (msg: string) => void },
+  ctx: PassCtx & FreshBudget & { cutoffIso: string; log: (msg: string) => void },
 ): Promise<void> {
   const { sourceId, batchLimit, cutoffIso, overBudget, report, skip, log } = ctx;
 
@@ -356,7 +362,9 @@ async function runLinksTimelinePass(
   // (no versionTs branch — extractor-version catch-up is `extract --stale`'s
   // job; the sweep is a recency back-stop). The µs to_char projection is the
   // #1768 stamp discipline: stamp the row's READ updated_at, not now(), so an
-  // edit between SELECT and stamp stays stale and re-sweeps.
+  // edit between SELECT and stamp stays stale and re-sweeps. Deferred pages are left out in SQL, before the LIMIT.
+  const deferred = await liveDeferredPages(engine, sourceId, cutoffIso);
+  skip('segmented_page_deferred', deferred.length);
   const recent = await engine.executeRaw<{ slug: string; updated_at_iso: string; body_storage: string | null; body_bytes: number | null }>(
     `SELECT slug,
             to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso,
@@ -366,9 +374,10 @@ async function runLinksTimelinePass(
         AND deleted_at IS NULL
         AND updated_at >= $2::timestamptz
         AND (links_extracted_at IS NULL OR updated_at > links_extracted_at)
+        AND NOT (slug = ANY($4::text[]))
       ORDER BY updated_at DESC
       LIMIT $3`,
-    [sourceId, cutoffIso, batchLimit],
+    [sourceId, cutoffIso, batchLimit, deferred],
   );
   if (recent.length === 0) return;
 
@@ -388,7 +397,7 @@ async function runLinksTimelinePass(
   type Extracted = Awaited<ReturnType<typeof extractPageLinks>>;
   type Snapshot = NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>;
   const { extractSegmentedPageLinks, segmentedRoleText } = await import('./page-body/segment-links.ts');
-  const { bodyBlocks, detachedValue } = await import('./page-body/segment-blocks.ts');
+  const { BodyReadStopped, bodyBlocks, detachedValue } = await import('./page-body/segment-blocks.ts');
 
   /**
    * One batch through every phase. A segmented page's reads ask `stop` before each segment, so one that does not fit
@@ -550,12 +559,14 @@ async function runLinksTimelinePass(
     if (tlBatch.length > 0 && await managedPersistenceEnabled(engine)) {
       const { publishManagedPageTimeline } = await import('../commands/extract-timeline-db.ts');
       for (const slug of new Set(tlBatch.map(row => row.slug))) {
+        if (overBudget() && stop) throw new BodyReadStopped(slug); // a segmented page's batch is that page alone
         if (overBudget()) { skip('budget_exhausted:timeline'); timelineUnsettled.add(slug); continue; }
         try {
-          const added = await publishManagedPageTimeline(engine, slug, sourceId);
+          const added = await publishManagedPageTimeline(engine, slug, sourceId, stop);
           if (added === 'unsettled') timelineUnsettled.add(slug);
           else report.timelineExtracted += added;
-        } catch {
+        } catch (e) {
+          if (e instanceof BodyReadStopped) throw e;
           skip('timeline_publish_failed');
           timelineUnsettled.add(slug);
         }
@@ -621,25 +632,47 @@ async function runLinksTimelinePass(
 }
 
 /**
+ * The slugs of this source's deferred segmented pages that are still stale and unchanged since they were deferred;
+ * an entry whose page changed, was stamped or left the recency window is forgotten.
+ */
+async function liveDeferredPages(engine: BrainEngine, sourceId: string, cutoffIso: string): Promise<string[]> {
+  const prefix = `${sourceId}\0`;
+  const entries = [...deferredSegmentedPages].filter(([key]) => key.startsWith(prefix));
+  if (entries.length === 0) return [];
+  const rows = await engine.executeRaw<{ slug: string; updated_at_iso: string }>(
+    `SELECT slug, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
+       FROM pages
+      WHERE source_id = $1
+        AND deleted_at IS NULL
+        AND updated_at >= $2::timestamptz
+        AND (links_extracted_at IS NULL OR updated_at > links_extracted_at)
+        AND slug = ANY($3::text[])`,
+    [sourceId, cutoffIso, entries.map(([key]) => key.slice(prefix.length))],
+  );
+  const live = new Set(rows.filter(row => deferredSegmentedPages.get(prefix + row.slug) === row.updated_at_iso).map(row => row.slug));
+  for (const [key] of entries) if (!live.has(key.slice(prefix.length))) deferredSegmentedPages.delete(key);
+  return [...live];
+}
+
+/** A segmented page that does not fit is deferred only when it started with at least this share of the sweep's budget. */
+const FRESH_BUDGET_SHARE = 0.5;
+
+/**
  * #C5: a segmented page is read several times per pass and can outlast any budget, so it never shares a batch: the
  * inline pages run first as one batch, then each segmented page alone, smallest first, while budget remains. One
- * that does not fit stops at a segment bound (BodyReadStopped) and is deferred (left unstamped) until its page
- * changes, so it cannot take the budget of the rest of this sweep, or of later sweeps in this process.
+ * that does not fit stops at a segment bound (BodyReadStopped) and is left unstamped. It is deferred until its page
+ * changes only when it started with at least FRESH_BUDGET_SHARE of the sweep's budget, so it cannot take the budget of
+ * later sweeps in this process; one that started after other work spent more is left for the next sweep.
  */
 async function runLinksTimelineBatches(
   recent: Array<{ slug: string; updated_at_iso: string; body_storage: string | null; body_bytes: number | null }>,
-  ctx: Pick<PassCtx, 'sourceId' | 'overBudget' | 'skip'> & { log: (msg: string) => void },
+  ctx: Pick<PassCtx, 'sourceId' | 'overBudget' | 'skip'> & FreshBudget & { log: (msg: string) => void },
   runBatch: (recent: Array<{ slug: string; updated_at_iso: string }>, stop?: () => boolean) => Promise<void>,
 ): Promise<void> {
   const { sourceId, overBudget, skip, log } = ctx;
   const { BodyReadStopped } = await import('./page-body/segment-blocks.ts');
-  const pending = recent.filter(row => {
-    if (deferredSegmentedPages.get(`${sourceId}\0${row.slug}`) !== row.updated_at_iso) return true;
-    skip('segmented_page_deferred');
-    return false;
-  });
-  const inline = pending.filter(row => row.body_storage !== 'segmented');
-  const segmented = pending.filter(row => row.body_storage === 'segmented').sort((a, b) => Number(a.body_bytes ?? 0) - Number(b.body_bytes ?? 0));
+  const inline = recent.filter(row => row.body_storage !== 'segmented');
+  const segmented = recent.filter(row => row.body_storage === 'segmented').sort((a, b) => Number(a.body_bytes ?? 0) - Number(b.body_bytes ?? 0));
   if (inline.length > 0) await runBatch(inline);
   for (let i = 0; i < segmented.length; i++) {
     if (overBudget()) {
@@ -647,10 +680,15 @@ async function runLinksTimelineBatches(
       break;
     }
     const row = segmented[i]!;
+    const whole = ctx.budgetLeft() >= FRESH_BUDGET_SHARE;
     try {
       await runBatch([row], overBudget);
     } catch (e) {
       if (!(e instanceof BodyReadStopped)) throw e;
+      if (!whole) {
+        skip('budget_exhausted:links_timeline');
+        continue;
+      }
       deferredSegmentedPages.set(`${sourceId}\0${row.slug}`, row.updated_at_iso);
       skip('budget_deferred:segmented_page');
       log(`[sweep] links/timeline: ${row.slug} (${row.body_bytes ?? '?'} bytes, segmented) does not fit the sweep budget; deferred until it changes. \`gbrain extract --stale --source-id ${sourceId}\` extracts it.`);

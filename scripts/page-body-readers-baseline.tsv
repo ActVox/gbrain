@@ -507,12 +507,11 @@ src/core/think/index.ts	composeExtractiveFallback	field	LEAD
 src/core/think/index.ts	persistSynthesis	call:putPage	SEGW	
 src/core/timeline-dedup-repair.ts	repairLegacyTimelineSourceRows	field	STREAM	
 src/core/timeline-dedup-repair.ts	repairLegacyTimelineSourceRows	sql	STREAM	
-src/core/timeline-extract.ts	pruneTimelineOrphans	field	STREAM	
 src/core/timeline-extract.ts	pruneTimelineOrphans	sql	STREAM	
-src/core/timeline-extract.ts	retractCoordinated	field	STREAM	
 src/core/timeline-extract.ts	retractCoordinated	sql	STREAM	
 src/core/timeline-extract.ts	retractRemovedTimelineEntries	field	STREAM	
 src/core/timeline-extract.ts	retractRemovedTimelineEntries	sql	STREAM	
+src/core/timeline-extract.ts	retractStoredPage	field	STREAM	
 src/core/timeline-write-through.ts	writeTimelineEntryThrough	field	SEGW	assertInlineBody before the file or row is touched
 src/core/timeline-write-through.ts	writeTimelineEntryThrough	sql	SEGW	assertInlineBody before the file or row is touched
 src/core/transcripts/recover.ts	userlessCodexSessions	sql	STREAM	
