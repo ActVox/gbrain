@@ -14,9 +14,10 @@
  *    an edit (a new version). The provisional page is retired: re-keyed purge-style (`<slug>~purged-<id>`) and
  *    soft-deleted, its history, timeline and edges moved onto the carried page, nothing hard-deleted. An old -> new
  *    slug redirect is recorded, the old page's slug-keyed facts, aliases and withdrawals move, and the record settles `remedied`.
- *    Facts: every fence row of the old page must be in the new file's fence with the same claim, and the provisional
- *    page's stored row there must carry that claim too. A matching pair is one fact: the old row (id, created_at,
- *    valid_from) survives with the new row's fence fields. Anything else (a different claim at a row number, or an old
+ *    Facts: every fence row of the old page must be in the new file's fence (read from the checkout, the bytes the carry
+ *    imports) with the same claim, and the provisional page's stored row there must carry that claim too. A matching
+ *    pair is one fact: the old row (id, created_at and its validity window, valid_from and valid_until) survives with
+ *    the new row's other fence fields; the carry never writes valid_until. Anything else (a different claim at a row number, or an old
  *    row the new file does not hold) refuses `fact_rows_collide` before anything is written, naming the rows.
  *    Classic sources only: on a managed brain page tables take writes only through coordinated publications, so carrying
  *    is unavailable there (`managed_remedy_unavailable`): the preview says so and names `--close`, and an apply refuses.
@@ -26,7 +27,7 @@
  * run it (`explicit_kind_required`).
  */
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
@@ -75,22 +76,22 @@ const refuse = (code: string, message: string, suggestion: string, fix: Action, 
   return error;
 };
 
-/** Claims the facts fences of a page hold, by row number (body and timeline). */
-function fenceClaims(page: { compiled_truth: string; timeline: string | null }): Map<number, string> {
-  const claims = new Map<number, string>();
-  for (const field of [page.compiled_truth, page.timeline ?? '']) for (const fact of parseFactsFence(field).facts) if (!claims.has(fact.rowNum)) claims.set(fact.rowNum, fact.claim);
-  return claims;
+/** The new file as the carry imports it, from the source checkout; a missing file refuses: there is nothing to carry onto. */
+async function readNewFile(engine: Pick<BrainEngine, 'executeRaw'>, record: IdentityDowngrade): Promise<{ path: string; text: string }> {
+  const [source] = await engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id = $1', [record.source_id]);
+  const path = source?.local_path ? join(source.local_path, record.to) : null;
+  if (!path || !existsSync(path)) throw changedSincePreview(record, `the new file ${record.to} is not in the source checkout`);
+  return { path, text: readFileSync(path, 'utf8') };
 }
 
-/** Each fence row of the old page against the new file's fence (the provisional page's stored body) and the provisional's stored row. */
-export async function fenceRowChecks(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, oldSlug: string, newPageId: number): Promise<FenceRowCheck[]> {
-  const [fresh] = await engine.executeRaw<{ slug: string; compiled_truth: string; timeline: string | null }>('SELECT slug, compiled_truth, timeline FROM pages WHERE id = $1', [newPageId]);
-  if (!fresh) return [];
-  const file = fenceClaims(fresh);
+/** Each fence row of the old page against the new file's facts fence and the provisional page's stored row at that row number. */
+export async function fenceRowChecks(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, oldSlug: string, newSlug: string, newFile: string): Promise<FenceRowCheck[]> {
+  const file = new Map<number, string>();
+  for (const fact of parseFactsFence(newFile).facts) if (!file.has(fact.rowNum)) file.set(fact.rowNum, fact.claim);
   const rows = await engine.executeRaw<{ row_num: number; old_id: number | string; old_fact: string; new_id: number | string | null; new_fact: string | null }>(
     `SELECT o.row_num, o.id AS old_id, o.fact AS old_fact, n.id AS new_id, n.fact AS new_fact FROM facts o
       LEFT JOIN facts n ON n.source_id = o.source_id AND n.source_markdown_slug = $3 AND n.row_num = o.row_num
-      WHERE o.source_id = $1 AND o.source_markdown_slug = $2 AND o.row_num IS NOT NULL ORDER BY o.row_num`, [sourceId, oldSlug, fresh.slug]);
+      WHERE o.source_id = $1 AND o.source_markdown_slug = $2 AND o.row_num IS NOT NULL ORDER BY o.row_num`, [sourceId, oldSlug, newSlug]);
   return rows.map(row => ({ row: Number(row.row_num), old_id: Number(row.old_id), old_claim: row.old_fact, file_claim: file.get(Number(row.row_num)) ?? null,
     new_id: row.new_id == null ? null : Number(row.new_id), new_claim: row.new_fact }));
 }
@@ -222,7 +223,7 @@ export const renameIdentityRepair = {
 /** A carry must be possible before a preview hash is printed: both pages as recorded, and no fence row that would drop a fact. */
 async function assertCarryable(engine: BrainEngine, record: IdentityDowngrade, parts: IdentityRemedyParts): Promise<void> {
   if (!parts.old?.deleted || !parts.new) throw changedSincePreview(record, 'the old page is no longer soft-deleted or the new page is gone');
-  const checks = await fenceRowChecks(engine, record.source_id, parts.old.slug, parts.new.page_id);
+  const checks = await fenceRowChecks(engine, record.source_id, parts.old.slug, parts.new.slug, (await readNewFile(engine, record)).text);
   if (checks.some(collides)) throw factRowsCollide(record, checks);
 }
 
@@ -233,9 +234,7 @@ async function assertCarryable(engine: BrainEngine, record: IdentityDowngrade, p
  */
 async function carryIdentity(engine: BrainEngine, record: IdentityDowngrade, hash: string): Promise<RepairItemOutcome> {
   if (await managedPersistenceEnabled(engine)) throw managedRemedyRefusal(record);
-  const [source] = await engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id = $1', [record.source_id]);
-  const file = source?.local_path ? join(source.local_path, record.to) : null;
-  if (!file || !existsSync(file)) throw changedSincePreview(record, `the new file ${record.to} is not in the source checkout`);
+  const file = await readNewFile(engine, record);
   const sourceId = record.source_id, oldSlug = record.old_slug, newSlug = record.new_slug!;
   const publicationId = randomUUID();
   const report = { appended: 0 };
@@ -244,14 +243,14 @@ async function carryIdentity(engine: BrainEngine, record: IdentityDowngrade, has
     const live = await identityRemedyParts(tx, record, 'carry');
     const [open] = await tx.executeRaw(`SELECT 1 FROM op_checkpoints WHERE op = $1 AND fingerprint = $2 AND completed_keys->0->>'disposition' IS NULL`, [IDENTITY_DOWNGRADE_OP, String(record.old_page_id)]);
     if (previewHash(live) !== hash || !open || !live.old || !live.new) throw changedSincePreview(record, 'a page of the pair changed or its record closed');
-    const checks = await fenceRowChecks(tx, sourceId, oldSlug, live.new.page_id);
+    const checks = await fenceRowChecks(tx, sourceId, oldSlug, live.new.slug, file.text);
     if (checks.some(collides)) throw factRowsCollide(record, checks);
     const oldId = live.old.page_id, provisionalId = live.new.page_id, retired = purgedSlug(newSlug, provisionalId);
     const merged = checks.filter(check => check.new_id !== null);
     await lockedBeliefBatch(tx, { sourceId, slugs: [oldSlug, newSlug], publicationId, op: 'rename_identity', remote: false, report }, async () => {
       for (const check of merged) {
         await tx.executeRaw('UPDATE facts SET superseded_by = $1 WHERE superseded_by = $2', [check.old_id, check.new_id]);
-        await tx.executeRaw(`UPDATE facts o SET kind = n.kind, visibility = n.visibility, notability = n.notability, context = n.context, valid_until = n.valid_until,
+        await tx.executeRaw(`UPDATE facts o SET kind = n.kind, visibility = n.visibility, notability = n.notability, context = n.context,
             expired_at = n.expired_at, source = n.source, confidence = n.confidence, claim_metric = n.claim_metric, claim_value = n.claim_value, claim_unit = n.claim_unit,
             claim_period = n.claim_period, event_type = n.event_type, attributed_to = n.attributed_to FROM facts n WHERE o.id = $1 AND n.id = $2`, [check.old_id, check.new_id]);
       }
@@ -260,7 +259,7 @@ async function carryIdentity(engine: BrainEngine, record: IdentityDowngrade, has
       await tx.executeRaw('UPDATE pages SET deleted_at = NULL, source_path = $1, updated_at = now() WHERE id = $2', [record.to, oldId]);
       await movePageIdReferences(tx, provisionalId, oldId);
     });
-    const imported = await importFile(tx, file, record.to, { noEmbed: true, sourceId });
+    const imported = await importFile(tx, file.path, record.to, { noEmbed: true, sourceId });
     if (imported.slug !== newSlug || imported.error) throw changedSincePreview(record, `the new file did not import onto ${newSlug} (${imported.error ?? imported.slug})`);
     if (!await settleIdentityDowngrade(tx, oldId, 'remedied')) throw changedSincePreview(record, 'its record was settled since the preview');
     return { applied: true, outcome: 'carried', detail: { old_page_id: oldId, from: oldSlug, to: newSlug, retired_page_id: provisionalId, retired_slug: retired,
