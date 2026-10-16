@@ -3,7 +3,9 @@
  *
  * Protects:
  * - Round trip at 2 and 20 MiB, both engines: a page stored inline (switch off)
- *   and the same page stored segmented (switch on) export the same bytes; that
+ *   and the same page stored segmented (switch on) export the same bytes, the
+ *   segmented one streamed (exportStreamWork: the pieces add up to the file and
+ *   none is over one segment, so a whole-body join fails at 2 MiB); that
  *   file F is canonical (sha256(F) == sha256(serializePageToMarkdown) of the
  *   inline page) and export(import(F)) == F for both storage classes. With a
  *   withdrawn fact both classes export the same struck file.
@@ -38,9 +40,9 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromFile } from '../../src/core/import-file.ts';
 import { runExport } from '../../src/commands/export.ts';
 import { serializeMarkdown, serializePageToMarkdown } from '../../src/core/markdown.ts';
-import { EXPORT_SNAPSHOT_MS } from '../../src/core/export-stage.ts';
+import { EXPORT_SNAPSHOT_MS, exportStreamWork } from '../../src/core/export-stage.ts';
 import { PAGE_MAX_BYTES } from '../../src/core/page-size-policy.ts';
-import { readPageBodyPolicy } from '../../src/core/page-body/limits.ts';
+import { readPageBodyPolicy, SEGMENT_MAX_BYTES } from '../../src/core/page-body/limits.ts';
 import { createPgliteBackup, restorePgliteBackup } from '../../src/core/backup/snapshot.ts';
 import { bigPage } from '../helpers/segment-bodies.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
@@ -81,9 +83,17 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
 let exports = 0;
 async function exportPage(engine: BrainEngine, args: string[] = []): Promise<Buffer> {
   const out = join(dir, `out-${++exports}`);
+  Object.assign(exportStreamWork, { files: 0, pieces: 0, bytes: 0, largestPiece: 0 });
   await quietly(() => runExport(engine, ['--dir', out, ...args]));
   expect(readFileSync(join(out, '.gbrain-export-status'), 'utf8')).toEndWith('COMPLETE\n');
   return readFileSync(join(out, `${SLUG}.md`));
+}
+
+/** The export streamed the segmented page as one file: its pieces add up to the file and none is over one segment. */
+function expectStreamed(file: Buffer): void {
+  expect(exportStreamWork.files).toBe(1);
+  expect(exportStreamWork.bytes).toBe(file.length);
+  expect(exportStreamWork.largestPiece).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
 }
 
 async function importAs(engine: BrainEngine, storage: 'on' | 'off', file: string): Promise<string> {
@@ -123,6 +133,7 @@ for (const backend of testBackends()) describe(`large-page export: ${backend}`, 
 
     expect(await importAs(engine, 'on', file)).toBe('segmented');
     const segmented = await exportPage(engine);
+    expectStreamed(segmented);
     expect(sha(segmented)).toBe(sha(canonical));
     expect(await importAs(engine, 'off', file)).toBe('inline');
     expect(sha(await exportPage(engine))).toBe(sha(canonical));
@@ -132,7 +143,9 @@ for (const backend of testBackends()) describe(`large-page export: ${backend}`, 
       const struck = await exportPage(engine);
       expect(struck.equals(canonical)).toBe(false);
       expect(await importAs(engine, 'on', file)).toBe('segmented');
-      expect(sha(await exportPage(engine))).toBe(sha(struck));
+      const segmentedStruck = await exportPage(engine);
+      expectStreamed(segmentedStruck);
+      expect(sha(segmentedStruck)).toBe(sha(struck));
     } finally { await engine.executeRaw("DELETE FROM fact_withdrawals WHERE source_id='default'"); }
   }, 600_000);
 
@@ -155,7 +168,9 @@ for (const backend of testBackends()) describe(`large-page export: ${backend}`, 
       return query.call(this, sql, params, options) as never;
     };
     try {
-      expect((await exportPage(engine)).length).toBeGreaterThan(2 * MiB);
+      const extended = await exportPage(engine);
+      expectStreamed(extended);
+      expect(extended.length).toBeGreaterThan(2 * MiB);
     } finally { engine.executeRaw = query; Date.now = now; }
   }, 300_000);
 
@@ -167,6 +182,7 @@ for (const backend of testBackends()) describe(`large-page export: ${backend}`, 
     writeFileSync(padded, `${head}\n  \n\t\n${body} \t\n\n  \n\n<!-- timeline -->\n\n${TIMELINE}\n\n \n`);
     expect(await importAs(engine, 'on', padded)).toBe('segmented');
     const exported = await exportPage(engine);
+    expectStreamed(exported);
     expect(sha(bodyOf(exported))).toBe(sha(bodyOf(Buffer.from(canonical))));
   }, 600_000);
 });
@@ -187,7 +203,9 @@ describe.skipIf(testBackends().includes('postgres') && !testBackends().includes(
     const before = await withBrain(database, async engine => {
       await engine.initSchema();
       expect(await importAs(engine, 'on', file)).toBe('segmented');
-      return exportPage(engine);
+      const exported = await exportPage(engine);
+      expectStreamed(exported);
+      return exported;
     });
     const archive = join(dir, 'segmented.gbrain-backup');
     await createPgliteBackup({ root, output: archive });
@@ -196,7 +214,9 @@ describe.skipIf(testBackends().includes('postgres') && !testBackends().includes(
     const after = await withBrain(join(restored, '.gbrain', 'brain.pglite'), async engine => {
       const [row] = await engine.executeRaw<{ body_storage: string }>('SELECT body_storage FROM pages WHERE slug=$1', [SLUG]);
       expect(row?.body_storage).toBe('segmented');
-      return exportPage(engine);
+      const exported = await exportPage(engine);
+      expectStreamed(exported);
+      return exported;
     });
     expect(sha(after)).toBe(sha(before));
   }, 600_000);

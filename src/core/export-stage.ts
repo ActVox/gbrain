@@ -13,6 +13,12 @@ export const EXPORT_STREAM_BYTES_PER_MS = 1024 * 1024 / 1000;
 /** Free space a streamed stage file must leave on the staging filesystem. */
 export const EXPORT_STAGE_FREE_RESERVE = 512 * 1024 * 1024;
 
+/**
+ * @internal Work addStream does, for the export memory tests: streamed files staged (`files`), pieces and bytes
+ * written, and the largest piece (the most page bytes the stream handed over at once). Counts, not time.
+ */
+export const exportStreamWork = { files: 0, pieces: 0, bytes: 0, largestPiece: 0 };
+
 /** A page's payload limit: the page ceiling plus the metadata headroom the 32 MiB limit gives a 24 MiB page. */
 export function exportPayloadLimit(maxBytes: number): number {
   return Math.max(maxBytes, PAGE_MAX_BYTES) + EXPORT_PAYLOAD_LIMIT - PAGE_MAX_BYTES;
@@ -64,9 +70,13 @@ export class ExportStage {
     mkdirSync(join(this.directory, 'files'), { recursive: true });
     const fd = openSync(join(this.directory, 'files', name), 'wx', 0o600);
     let size = 0;
+    exportStreamWork.files++;
     try {
       for await (const piece of pieces) {
         const bytes = typeof piece === 'string' ? Buffer.from(piece, 'utf8') : piece;
+        exportStreamWork.pieces++;
+        exportStreamWork.bytes += bytes.length;
+        exportStreamWork.largestPiece = Math.max(exportStreamWork.largestPiece, bytes.length);
         size += bytes.length;
         if (size > limit) throw stageCapacityError();
         for (let at = 0; at < bytes.length;) at += writeSync(fd, bytes, at, bytes.length - at);
