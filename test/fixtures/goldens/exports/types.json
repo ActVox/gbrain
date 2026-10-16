@@ -83,7 +83,7 @@
           "deletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "disconnect: () => Promise<void>",
           "discoverOntologyDimensions: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<OntologyDimensionStat[]>",
-          "executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; }) => Promise<T[]>",
+          "executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; jitOff?: boolean; prepare?: boolean; }) => Promise<T[]>",
           "executeRawDirect: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; }) => Promise<T[]>",
           "expireFact: (id: number, opts?: { supersededBy?: number; at?: Date; }) => Promise<boolean>",
           "findAnomalies: (opts: AnomaliesOpts) => Promise<AnomalyResult[]>",
@@ -745,6 +745,7 @@
           "answerability?: AnswerabilityVerdict | undefined",
           "autocut?: AutocutDecision | undefined",
           "cache?: { status: \"hit\" | \"miss\" | \"disabled\"; similarity?: number; age_seconds?: number; } | undefined",
+          "cosine_rescore?: \"js_fallback\" | undefined",
           "decide?: Partial<Record<\"rerank\" | \"intent\" | \"evidence\" | \"answerable\" | \"injection\" | \"recall_needed\" | \"triage\" | \"grounding\" | \"conflict\", DecideSlotMeta>> | undefined",
           "degraded?: DegradedStageEntry[] | undefined",
           "detail_resolved: \"low\" | \"medium\" | \"high\" | null",
@@ -1079,7 +1080,7 @@
           "deletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "disconnect: () => Promise<void>",
           "discoverOntologyDimensions: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<OntologyDimensionStat[]>",
-          "executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; }) => Promise<T[]>",
+          "executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; jitOff?: boolean; prepare?: boolean; }) => Promise<T[]>",
           "executeRawDirect: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; }) => Promise<T[]>",
           "expireFact: (id: number, opts?: { supersededBy?: number; at?: Date; }) => Promise<boolean>",
           "explainVectorSearch: (embedding: Float32Array, opts?: SearchOpts) => Promise<Record<string, unknown>>",
@@ -3365,7 +3366,7 @@
           "deletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "disconnect: () => Promise<void>",
           "discoverOntologyDimensions: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<OntologyDimensionStat[]>",
-          "executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; }) => Promise<T[]>",
+          "executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; jitOff?: boolean; prepare?: boolean; }) => Promise<T[]>",
           "executeRawDirect: <T = Record<string, unknown>>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal; }) => Promise<T[]>",
           "expireFact: (id: number, opts?: { supersededBy?: number; at?: Date; }) => Promise<boolean>",
           "findAnomalies: (opts: AnomaliesOpts) => Promise<AnomalyResult[]>",
@@ -7923,7 +7924,7 @@
         "kind": "function",
         "name": "cosineReScore",
         "signature": [
-          "(engine: BrainEngine, results: SearchResult[], queryEmbedding: Float32Array, column?: string, imageSpace?: { queryEmbedding: Float32Array; column: string; }, attribute?: boolean) => Promise<SearchResult[]>"
+          "(engine: BrainEngine, results: SearchResult[], queryEmbedding: Float32Array, column?: string, imageSpace?: { queryEmbedding: Float32Array; column: string; }, attribute?: boolean, onFallback?: () => void) => Promise<SearchResult[]>"
         ]
       },
       {
@@ -8807,6 +8808,7 @@
           "answerability?: AnswerabilityVerdict | undefined",
           "autocut?: AutocutDecision | undefined",
           "cache?: { status: \"hit\" | \"miss\" | \"disabled\"; similarity?: number; age_seconds?: number; } | undefined",
+          "cosine_rescore?: \"js_fallback\" | undefined",
           "decide?: Partial<Record<\"rerank\" | \"intent\" | \"evidence\" | \"answerable\" | \"injection\" | \"recall_needed\" | \"triage\" | \"grounding\" | \"conflict\", DecideSlotMeta>> | undefined",
           "degraded?: DegradedStageEntry[] | undefined",
           "detail_resolved: \"low\" | \"medium\" | \"high\" | null",
