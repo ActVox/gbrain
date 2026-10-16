@@ -19,7 +19,8 @@ import { PageSnapshotAmbiguousError, type PageSnapshot } from '../page-state/typ
 import { serializePageToMarkdown } from '../markdown.ts';
 import { pageTrustForRead, projectFetchText, projectGetPage, readQuarantined } from './get-page-projection.ts';
 import { assertLargePageAdmission } from '../persistence/large-page-guard.ts';
-import { assertFullReadFits, bodyBytes, fetchWindowResult, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody } from './get-page-body.ts';
+import { assertFullReadFits, bodyBytes, fetchWindowResult, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody, segmentedFullReadError } from './get-page-body.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
@@ -220,14 +221,16 @@ const get_page: Operation = {
     const lineGrammar = p.grammar_diagnostics === true ? await (await import('../line-grammar-report.ts')).lineGrammarReport(ctx.engine, { slug: page.slug, sourceId: page.source_id, body: visibleBody.compiled_truth }) : undefined;
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true); // #6259
     const fileHeld = held ? { file_held: fileHeldField(held, isUntrustedReader) } : {};
+    const segmented = isSegmentedPage(page);
     const whole = bodyRequest.mode === 'full'
-      || (bodyRequest.mode === 'auto' && bodyBytes(visibleBody) <= await inlineBodyBytes(ctx));
+      || (bodyRequest.mode === 'auto' && !segmented && bodyBytes(visibleBody) <= await inlineBodyBytes(ctx));
     if (!whole) {
       const partial = await readPartialBody(ctx, { page, visibleBody, revision: snapshot!.revision, tags, quarantined, trust: readable.trust,
         extras: { ...(quarantined ? { quarantined } : {}), ...(timelineEntries ? { timeline_entries: timelineEntries } : {}), ...fileHeld,
           ...(resolved_slug ? { resolved_slug } : {}), ...(content_flag ? { content_flag } : {}) } }, bodyRequest);
       return lineGrammar ? { ...partial, line_grammar: lineGrammar } : partial;
     }
+    if (segmented) throw segmentedFullReadError(ctx, page, bodyRequest);
     const projected = projectGetPage(visibleBody, {
       revision: snapshot!.revision, tags, includeContent, contentOnly, resolved_slug, content_flag, quarantined, trust: readable.trust,
       ...(timelineEntries ? { timeline_entries: timelineEntries } : {}),
@@ -292,9 +295,10 @@ const fetch_page: Operation = {
     bumpLastRetrievedAt(ctx.engine, [page.id]);
     const tags = snapshot!.tags;
     // Same boundaries as get_page: untrusted readers never see takes or private facts fences, nor a quarantined body (#6259).
-    const visibleBody = ctx.remote === false ? page : stripPrivacyFencesForRemoteReader(page);
+    const segmented = isSegmentedPage(page);
+    const visibleBody = ctx.remote === false || segmented ? page : stripPrivacyFencesForRemoteReader(page);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true);
-    if (ctx.remote !== false && !quarantined?.body_omitted && bodyBytes(visibleBody) > await inlineBodyBytes(ctx)) {
+    if (!quarantined?.body_omitted && (segmented || (ctx.remote !== false && bodyBytes(visibleBody) > await inlineBodyBytes(ctx)))) {
       return fetchWindowResult(ctx, { page, visibleBody: visibleBody as Page, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, extras: {} }, id, identity ? decodeDeepResearchAnchor(id) : null);
     }
     return {

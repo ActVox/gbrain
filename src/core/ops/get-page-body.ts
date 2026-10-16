@@ -33,15 +33,19 @@ import type { OperationContext, ParamDef } from './contract.ts';
 import { opError, OperationError } from './contract.ts';
 import { invalidParam, readFix } from './op-fix.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
-import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { isSegmentedPage, pageBodyBytes } from '../page-body/page-shape.ts';
 import { deepResearchPageUrl, encodeDeepResearchId } from '../deep-research-id.ts';
 import { encodedFrameBytes, EGRESS_CAP_CONFIG_KEYS, egressTransport, FRAME_RESERVE_BYTES, resultByteCap } from '../egress-budget.ts';
 import { DEFAULT_INLINE_BODY_BYTES, chunkDocumentSpan, readPageDocument, spanHoldsChunk, type PageDocument } from '../page-window/document.ts';
 import {
   DEFAULT_CONTEXT_LINES, DEFAULT_OUTLINE_LIMIT, DEFAULT_WINDOW_BYTES, MAX_CONTEXT_LINES, MAX_OUTLINE_LIMIT, MAX_WINDOW_BYTES,
   decodeCursor, encodeCursor, pageOutline, sha256Hex, totalLines, windowAround, windowForBytes, windowForLines, windowFrom,
-  type WindowSlice, type WindowView,
+  type PageOutline, type WindowSlice, type WindowView,
 } from '../page-window/window.ts';
+import {
+  markdownDigest, markdownHead, readViewLines, segmentedMarkdownDocument, segmentedOutline, segmentedReadDocument, tailDigest, type SegmentedDocument,
+} from '../page-window/segmented.ts';
+import { openSegmentedBody } from '../page-body/read-range.ts';
 import { renderTrustedText, type TrustFields } from '../eligibility/labels.ts';
 import type { QuarantinedView } from './get-page-projection.ts';
 import { chunkGenerationProbe } from '../search/safe-chunks.ts';
@@ -208,6 +212,29 @@ export async function assertFullReadFits(ctx: OperationContext, page: Pick<Page,
       fix: sizeFix(page.slug, page.source_id, "Returns the page's size, revision and outline; each entry names the lines to read with body: 'window'.") });
 }
 
+/**
+ * A segmented page is never built whole (spec 7.2). Over a transport the refusal comes from body_bytes before any
+ * body is read: page_too_large_for_inline, which the thin client answers by paging view: 'markdown'. A trusted local
+ * read refuses with page_body_segmented, which `gbrain get` answers by streaming the page.
+ */
+export function segmentedFullReadError(ctx: OperationContext, page: Page, req: BodyRequest): OperationError {
+  const total = pageBodyBytes(page);
+  const windows = "Read it in windows: get_page body: 'outline' lists the sections, then body: 'window' with lines, bytes, around_chunk_id or next_cursor.";
+  if (ctx.remote === false) {
+    return opError('page_body_segmented', `get_page: page ${page.slug} (source ${page.source_id}) stores its ${total}-byte body in segments; it is not returned as one string.`,
+      `${windows} gbrain get prints it whole, streamed.`,
+      { fix: readFix('Prints the page whole, streamed segment by segment.', { argv: ['gbrain', 'get', '--source', page.source_id, '--', page.slug],
+        mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'outline' } } }) });
+  }
+  const transport = egressTransport(ctx)!;
+  return opError('page_too_large_for_inline', `Page ${page.slug} is stored in segments (${total} bytes) and is never returned whole on this connection.`,
+    req.legacyThin
+      ? 'This gbrain CLI is older than the host and reads pages whole. Upgrade it (gbrain upgrade) to page through large pages, or read windows over MCP with get_page body: \'window\'.'
+      : `${windows} Edit with edit_page (revision from body: 'none').`,
+    { legacy_error: 'invalid_params', detail: JSON.stringify({ total_bytes: total, body_storage: 'segmented', transport }),
+      fix: sizeFix(page.slug, page.source_id, "Returns the page's size, revision and outline; each entry names the lines to read with body: 'window'.") });
+}
+
 /** The largest window this caller may receive: the request, the per-window ceiling and the egress cap minus metadata room. */
 async function windowBudget(ctx: OperationContext, requested: number | undefined, fallback: number): Promise<number> {
   const cap = await resultByteCap({ remote: ctx.remote, transport: ctx.transport, engine: ctx.engine, config: ctx.config });
@@ -232,14 +259,18 @@ function envelopeText(text: string, quarantined: QuarantinedView | null, trust?:
   return quarantined?.body_enveloped && text ? renderTrustedText(text, { trust_tier: 'external_untrusted', origin: trust?.origin ?? 'quarantined' }) : text;
 }
 
-/** Resolve a chunk-centered window: stored span first, then an unambiguous text match, else the chunk itself. */
-async function aroundChunk(ctx: OperationContext, page: Page, doc: PageDocument, chunkId: number, contextLines: number, maxBytes: number, revision: string):
+/**
+ * Resolve a chunk-centered window: stored span first, then an unambiguous text match, else the chunk itself. A
+ * segmented page has no text match: its chunk's occurrence must be live (else revision_changed) and its
+ * segment-relative span must still hold the chunk.
+ */
+async function aroundChunk(ctx: OperationContext, page: Page, doc: WindowDocument, chunkId: number, contextLines: number, maxBytes: number, revision: string):
   Promise<{ window: WindowSlice | null; chunkText: string; anchor: 'stored_span' | 'located' | 'chunk_only'; span?: { byte_start: number; byte_end: number } }> {
-  const rows = await ctx.engine.executeRaw<{ chunk_text: string; chunk_source: string; projected_byte_start: unknown; projected_byte_end: unknown }>(
-    `SELECT chunk_text, chunk_source, projected_byte_start, projected_byte_end FROM content_chunks
+  const rows = await ctx.engine.executeRaw<{ chunk_text: string; chunk_source: string; occurrence_id: unknown; projected_byte_start: unknown; projected_byte_end: unknown }>(
+    `SELECT chunk_text, chunk_source, occurrence_id, projected_byte_start, projected_byte_end FROM content_chunks
       WHERE id = $1 AND page_id = $2 AND COALESCE(modality, 'text') = 'text' AND ${chunkGenerationProbe('content_chunks')}`, [chunkId, page.id]);
   const row = rows[0];
-  if (!row) {
+  if (!row || (doc.segments && !doc.segments.body.rows.some(r => r.occurrenceId === Number(row.occurrence_id)))) {
     throw opError('revision_changed', `Chunk ${chunkId} is not part of page ${page.slug} at its current revision.`,
       "The page was re-chunked or edited since that search. Search again for a current chunk_id, or read the page's outline.",
       { legacy_error: 'invalid_params', detail: JSON.stringify({ revision, chunk_id: chunkId }),
@@ -248,20 +279,78 @@ async function aroundChunk(ctx: OperationContext, page: Page, doc: PageDocument,
   const chunk = { chunk_source: row.chunk_source,
     projected_byte_start: row.projected_byte_start == null ? null : Number(row.projected_byte_start),
     projected_byte_end: row.projected_byte_end == null ? null : Number(row.projected_byte_end) };
-  const stored = chunkDocumentSpan(doc, chunk);
-  if (stored && spanHoldsChunk(doc, stored, row.chunk_text)) {
-    return { window: windowAround(doc.bytes, stored, contextLines, maxBytes), chunkText: row.chunk_text, anchor: 'stored_span', span: { byte_start: stored.start, byte_end: stored.end } };
+  if (doc.segments) {
+    const found = await doc.segments.aroundChunk({ ...chunk, occurrence_id: Number(row.occurrence_id), chunk_text: row.chunk_text }, contextLines, maxBytes);
+    return found
+      ? { window: found.window, chunkText: row.chunk_text, anchor: 'stored_span', span: { byte_start: found.span.start, byte_end: found.span.end } }
+      : { window: null, chunkText: row.chunk_text, anchor: 'chunk_only' };
+  }
+  const inline = doc.inline!;
+  const stored = chunkDocumentSpan(inline, chunk);
+  if (stored && spanHoldsChunk(inline, stored, row.chunk_text)) {
+    return { window: windowAround(inline.bytes, stored, contextLines, maxBytes), chunkText: row.chunk_text, anchor: 'stored_span', span: { byte_start: stored.start, byte_end: stored.end } };
   }
   // No stored span (a chunk written before spans were recorded) or a stale one: accept a text match only when it is unique.
   const needle = Buffer.from(row.chunk_text.trim(), 'utf8');
   if (needle.length >= 16) {
-    const at = doc.bytes.indexOf(needle);
-    if (at !== -1 && doc.bytes.indexOf(needle, at + 1) === -1) {
+    const at = inline.bytes.indexOf(needle);
+    if (at !== -1 && inline.bytes.indexOf(needle, at + 1) === -1) {
       const span = { start: at, end: at + needle.length };
-      return { window: windowAround(doc.bytes, span, contextLines, maxBytes), chunkText: row.chunk_text, anchor: 'located', span: { byte_start: span.start, byte_end: span.end } };
+      return { window: windowAround(inline.bytes, span, contextLines, maxBytes), chunkText: row.chunk_text, anchor: 'located', span: { byte_start: span.start, byte_end: span.end } };
     }
   }
   return { window: null, chunkText: row.chunk_text, anchor: 'chunk_only' };
+}
+
+/** What a partial read cuts: an inline page's document bytes, or a segmented page's stored sums and segments. */
+interface WindowDocument {
+  total: number;
+  segmented: boolean;
+  outline(from: number, limit: number): Promise<PageOutline>;
+  from(offset: number, maxBytes: number): Promise<WindowSlice>;
+  lines(from: number, count: number, maxBytes: number): Promise<WindowSlice>;
+  bytes(offset: number, length: number): Promise<WindowSlice>;
+  /** around_chunk_id's text: the inline document, or the segmented read view. */
+  inline?: PageDocument;
+  segments?: SegmentedDocument;
+}
+
+function inlineDocument(doc: PageDocument): WindowDocument {
+  return {
+    total: doc.bytes.length, segmented: false, inline: doc,
+    outline: async (from, limit) => pageOutline(doc.bytes, from, limit),
+    from: async (offset, maxBytes) => windowFrom(doc.bytes, offset, maxBytes),
+    lines: async (from, count, maxBytes) => windowForLines(doc.bytes, from, count, maxBytes),
+    bytes: async (offset, length) => windowForBytes(doc.bytes, offset, length),
+  };
+}
+
+/**
+ * A segmented page's document and size (spec 7.2): read-view totals from the stored sums (the line count cached
+ * per revision), the stored body size, and for `none` the tail digest; a markdown view's size is its cached digest.
+ */
+async function segmentedWindows(ctx: OperationContext, input: PartialReadInput, req: BodyRequest, mode: BodyMode): Promise<{ doc: WindowDocument; size: Record<string, unknown> }> {
+  const { page, revision, tags } = input;
+  const body = await openSegmentedBody(ctx.engine, { pageId: page.id });
+  const audience = ctx.remote === false ? 'trusted' : 'remote';
+  const stored = { body_bytes: body.bodyBytes, body_lines: body.bodyLines };
+  let seg: SegmentedDocument;
+  let size: Record<string, unknown>;
+  if (req.view === 'markdown') {
+    seg = await segmentedMarkdownDocument(ctx.engine, body, markdownHead(page, tags), audience);
+    size = { ...await markdownDigest(seg, revision, audience), ...stored };
+  } else {
+    seg = await segmentedReadDocument(ctx.engine, body);
+    size = { total_bytes: seg.total, total_lines: await readViewLines(seg, revision), ...(seg.timelineByte >= 0 ? { timeline_byte_start: seg.timelineByte } : {}),
+      ...stored, ...(mode === 'none' ? await tailDigest(ctx.engine, body, ctx.remote !== false) : {}) };
+  }
+  return { size, doc: {
+    total: seg.total, segmented: true, segments: seg,
+    outline: (from, limit) => segmentedOutline(seg, from, limit, Number(size.total_lines)),
+    from: (offset, maxBytes) => seg.from(offset, maxBytes),
+    lines: (from, count, maxBytes) => seg.lines(from, count, maxBytes),
+    bytes: (offset, length) => seg.bytes(offset, length),
+  } };
 }
 
 /** next_cursor plus `next`, the exact call that reads on (the starter surface does not advertise `cursor`; dispatch accepts it). */
@@ -270,12 +359,16 @@ function setNext(out: Record<string, unknown>, page: Page, cursor: string, markd
   out.next = { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, cursor, ...(markdown ? { view: 'markdown' } : {}) } };
 }
 
-/** The `body: 'none'` response: `out` plus chunk and embedding counts, no text. */
+/**
+ * The `body: 'none'` response: `out` plus chunk and embedding counts, no text. A segmented page reports no counts:
+ * counting its chunks is O(page), and its `none` stays O(1) in the page size (spec 7.2).
+ */
 async function noneResult(ctx: OperationContext, page: Page, out: Record<string, unknown>, truncated: boolean): Promise<Record<string, unknown>> {
+  const fm = (page.frontmatter ?? {}) as Record<string, unknown>;
+  if (isSegmentedPage(page)) return { ...out, ...(fm.embed_skip ? { embed_skip: true } : {}), truncated };
   const [counts] = await ctx.engine.executeRaw<{ total: unknown; embedded: unknown }>(
     `SELECT count(*) AS total, count(*) FILTER (WHERE embedded_at IS NOT NULL) AS embedded FROM content_chunks
       WHERE page_id = $1 AND ${chunkGenerationProbe('content_chunks')}`, [page.id]);
-  const fm = (page.frontmatter ?? {}) as Record<string, unknown>;
   return { ...out, chunks: { total: Number(counts?.total ?? 0), embedded: Number(counts?.embedded ?? 0) },
     ...(fm.embed_skip ? { embed_skip: true } : {}), truncated };
 }
@@ -294,32 +387,34 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
   const omitted = quarantined?.body_omitted === true;
   const mode = req.mode === 'auto' ? 'outline' : req.mode;
   if (omitted) return { ...base, body: mode, truncated: true, body_omitted: true };
-  // Wave B PR 1: a segmented body is never loaded; `none` reports its stored size (windows arrive with the segment reader).
-  if (mode === 'none' && isSegmentedPage(page)) {
-    return noneResult(ctx, page, { ...base, body: mode, view: req.view, body_storage: 'segmented', size: { body_bytes: Number(page.body_bytes ?? 0) } }, true);
-  }
 
   const markdown = req.view === 'markdown';
-  const doc: PageDocument = markdown
-    ? { bytes: Buffer.from(serializePageToMarkdown(input.visibleBody, tags), 'utf8'), timelineByte: -1 }
-    : await readPageDocument(ctx.engine, page);
-  const size: Record<string, unknown> = {
-    total_bytes: doc.bytes.length, total_lines: totalLines(doc.bytes),
-    ...(doc.timelineByte >= 0 ? { timeline_byte_start: doc.timelineByte } : {}),
-    ...(markdown ? { sha256: sha256Hex(doc.bytes) } : {}),
-  };
-  const out: Record<string, unknown> = { ...base, body: mode, view: req.view, size };
+  let doc: WindowDocument;
+  let size: Record<string, unknown>;
+  if (isSegmentedPage(page)) ({ doc, size } = await segmentedWindows(ctx, input, req, mode));
+  else {
+    const whole: PageDocument = markdown
+      ? { bytes: Buffer.from(serializePageToMarkdown(input.visibleBody, tags), 'utf8'), timelineByte: -1 }
+      : await readPageDocument(ctx.engine, page);
+    size = {
+      total_bytes: whole.bytes.length, total_lines: totalLines(whole.bytes),
+      ...(whole.timelineByte >= 0 ? { timeline_byte_start: whole.timelineByte } : {}),
+      ...(markdown ? { sha256: sha256Hex(whole.bytes) } : {}),
+    };
+    doc = inlineDocument(whole);
+  }
+  const out: Record<string, unknown> = { ...base, body: mode, view: req.view, ...(doc.segmented ? { body_storage: 'segmented' } : {}), size };
 
-  if (mode === 'none') return noneResult(ctx, page, out, doc.bytes.length > 0);
+  if (mode === 'none') return noneResult(ctx, page, out, doc.total > 0);
 
   if (mode === 'outline') {
     const limit = Math.min(MAX_OUTLINE_LIMIT, DEFAULT_OUTLINE_LIMIT);
-    out.outline = pageOutline(doc.bytes, req.outlineFrom, limit);
+    out.outline = await doc.outline(req.outlineFrom, limit);
     if (req.mode === 'auto') {
-      const first = windowFrom(doc.bytes, 0, await windowBudget(ctx, req.maxBytes, AUTO_WINDOW_BYTES));
+      const first = await doc.from(0, await windowBudget(ctx, req.maxBytes, AUTO_WINDOW_BYTES));
       out.window = { ...first, text: envelopeText(first.text, quarantined, trust) };
       out.truncated = true;
-      if (first.byte_end < doc.bytes.length) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: 'read', offset: first.byte_end, max_bytes: req.maxBytes ?? DEFAULT_WINDOW_BYTES }), false);
+      if (first.byte_end < doc.total) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: 'read', offset: first.byte_end, max_bytes: req.maxBytes ?? DEFAULT_WINDOW_BYTES }), false);
       out.auto_reason = 'over_inline_bytes';
       return out;
     }
@@ -330,9 +425,9 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
   const sel = req.selector;
   let cursorMax = req.maxBytes ?? DEFAULT_WINDOW_BYTES;
   const select = async (maxBytes: number): Promise<WindowSlice | null> => {
-    if (!sel) return windowFrom(doc.bytes, 0, maxBytes);
-    if (sel.kind === 'lines') return windowForLines(doc.bytes, sel.from, sel.count, maxBytes);
-    if (sel.kind === 'bytes') return windowForBytes(doc.bytes, sel.offset, Math.min(sel.length, maxBytes));
+    if (!sel) return doc.from(0, maxBytes);
+    if (sel.kind === 'lines') return doc.lines(sel.from, sel.count, maxBytes);
+    if (sel.kind === 'bytes') return doc.bytes(sel.offset, Math.min(sel.length, maxBytes));
     if (sel.kind === 'cursor') {
       const c = decodeCursor(sel.raw);
       if (!c || c.page_id !== page.id) {
@@ -342,7 +437,7 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
         throw invalidParam(ctx, 'get_page', 'view', `get_page: this cursor pages view '${c.view}'; pass view: '${c.view}' with it.`, { choices: ['read', 'markdown'], example: c.view });
       }
       if (c.revision !== revision) {
-        const position = Math.min(c.offset, doc.bytes.length);
+        const position = Math.min(c.offset, doc.total);
         throw opError('revision_changed', `Page ${page.slug} changed since this cursor was issued (revision ${c.revision}, now ${revision}).`,
           `Continue from the same byte offset at the current revision (bytes: { offset: ${position}, length: ${c.max_bytes} }), or start over from the outline.`,
           { legacy_error: 'invalid_params', detail: JSON.stringify({ revision, cursor_revision: c.revision, offset: position }),
@@ -350,7 +445,7 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
               mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'window', ...(markdown ? { view: 'markdown' } : {}), bytes: { offset: position, length: c.max_bytes } } } }) });
       }
       cursorMax = c.max_bytes;
-      return windowFrom(doc.bytes, c.offset, Math.min(c.max_bytes, maxBytes));
+      return doc.from(c.offset, Math.min(c.max_bytes, maxBytes));
     }
     const around = await aroundChunk(ctx, page, doc, sel.chunkId, req.contextLines, maxBytes, revision);
     out.anchor = around.anchor;
@@ -365,8 +460,8 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
     const win = await select(maxBytes);
     if (!win) return { ...out, truncated: true };
     out.window = { ...win, text: envelopeText(win.text, quarantined, trust) };
-    out.truncated = win.byte_start > 0 || win.byte_end < doc.bytes.length;
-    if (win.byte_end < doc.bytes.length) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax }), markdown);
+    out.truncated = win.byte_start > 0 || win.byte_end < doc.total;
+    if (win.byte_end < doc.total) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax }), markdown);
     else { delete out.next_cursor; delete out.next; }
     if (!Number.isFinite(cap) || attempt >= 6) return out;
     const frame = encodedFrameBytes({ content: [{ type: 'text', text: JSON.stringify(out) }] }) + ENVELOPE_RESERVE_BYTES - FRAME_RESERVE_BYTES;
