@@ -608,6 +608,8 @@ export interface CycleOpts {
    * one-shot escape hatch (`--drain` for extract_atoms).
    */
   onceForPhase?: CyclePhase;
+  /** #6297: the operator named the phases (`gbrain dream --phase`); patterns then skips its in-cycle cadence. */
+  directPhases?: boolean;
   /**
    * Absolute wall-clock deadline (epoch ms) of the enclosing minion job,
    * from `MinionJobContext.deadlineAtMs` (the claim-time `timeout_at`
@@ -2536,7 +2538,7 @@ async function runCycleUnscoped(
           // the cycle lock (pre-fix these sites passed the raw — in production
           // always-undefined — hook, so long phases never refreshed).
           yieldDuringPhase: buildYieldDuringPhase(lock, opts.yieldDuringPhase, onStolen),
-          once: opts.onceForPhase === 'patterns',
+          once: opts.onceForPhase === 'patterns', direct: opts.directPhases === true,
           cycleDate,
           deadlineAtMs: opts.deadlineAtMs ?? null,
           privateQueueOwnerJobId: opts.privateQueueOwnerJobId ?? null,

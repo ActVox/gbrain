@@ -869,6 +869,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     dryRun: opts.dryRun,
     pull: opts.pull,
     phases,
+    directPhases: phases !== undefined,
     // Undefined for legacy unscoped runs; set for explicit source cycles,
     // path-derived cycles, and bare default-like non-default source cycles.
     sourceId: resolvedSourceId,

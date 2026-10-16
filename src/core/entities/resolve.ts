@@ -29,7 +29,7 @@ import { slugifySegment } from '../sync.ts';
 /** Lazy: the mentions graph stays out of the OpenClaw plugin's static import graph. */
 const siblingCanonical: typeof import('../mentions/siblings.ts').siblingCanonical = async (...args) =>
   (await import('../mentions/siblings.ts')).siblingCanonical(...args);
-import { isUndefinedTableError } from '../utils.ts';
+import { isMissingSchemaObject } from '../utils.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import { rankingLinkSql } from '../link-ranking-policy.ts';
 
@@ -189,7 +189,7 @@ async function tryAliasExact(engine: BrainEngine, source_id: string, raw: string
     const live = [...new Set(rows.map((r) => r.slug))];
     return live.length === 1 ? live[0] : await siblingCanonical(engine, source_id, live);
   } catch (err) {
-    if (!isUndefinedTableError(err) && !aliasExactWarned) {
+    if (!isMissingSchemaObject(err, 'table', 'page_aliases') && !aliasExactWarned) {
       aliasExactWarned = true;
       console.error(`[gbrain] alias-exact resolution degraded (falling through to fuzzy): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -384,7 +384,7 @@ export async function resolveStrictEntityReference(
       const aliased = await pick(await live(hits.map(h => h.slug)), 'alias_exact');
       if (aliased) return aliased;
     } catch (err) {
-      if (!isUndefinedTableError(err)) throw err;
+      if (!isMissingSchemaObject(err, 'table', 'page_aliases')) throw err;
     }
   }
   if (opts.sameName && !isBareName(trimmed)) {

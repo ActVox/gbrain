@@ -33,12 +33,123 @@ identifiers and attribution are available in the pre-removal Git revision
 - Readers: `readSyncHoldPolicy` reads the hold cap, the escalation thresholds and the parser-regression policy from `GBRAIN_SYNC_*`; `resolveBulkSettings` reads only `GBRAIN_SYNC_BULK_MAX_TXN_MS`.
 - Doctor: `sync_config_keys` (meta) reports stored retired keys as unapplied and lists stored rollback keys with their windows.
 - Help and printed fixes name only live keys: `--no-bulk` help, the `git_held_files` escalation line, the parser-regression hold and stop messages, the `parser_regression` registry entry.
-- Docs: `docs/guides/live-sync.md#sync-config-keys`, `docs/guides/repair.md`, `docs/guides/write-refusals.md`, `docs/guides/troubleshooting.md`; migration note `skills/migrations/v0.60.256.0.md`.
+- Docs: `docs/guides/live-sync.md#sync-config-keys`, `docs/guides/repair.md`, `docs/guides/write-refusals.md`, `docs/guides/troubleshooting.md`; migration note `skills/migrations/v0.60.258.0.md`.
 
 ### For contributors
 
 - Retire a sync config key in `RETIRED_SYNC_KEYS`; `test/error-registry-retired.test.ts` then fails on any source line, help text or registered fix that still names it.
 - Tests: `test/sync-flag-table-6712.test.ts`, `test/sync-config-keys-6712.test.ts`, `test/sync-managed-cron-flags-6712.test.ts`.
+
+## [0.60.257.0] - 2026-10-16
+
+**Doctor stops reading real errors as "not migrated yet", recall and think use your query prefix everywhere, `gbrain waiting` stops listing bank alerts as people, and a surviving `gbrain serve` takes back hook IPC.** This is fix wave 18b: the older backlog nobody else had picked up, plus what wave 17 deferred. Doctor checks and four write paths used to swallow any missing column as a pre-migration brain; they now tolerate only the exact object they need and fail with the real error otherwise. `think`, `synthesize` and six more query paths embedded questions without the brain's `embedding_query_prefix`, so their retrieval drifted from hybrid search. Gmail bulk and no-reply mail opened reply-owed loops, and muting a sender left its old loops open. On Postgres, an aborted transaction left its statement running on the server.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A doctor check hits a missing column it doesn't depend on | `ok` or `skipped` ("not migrated yet") | fails with the real database error |
+| A source's first sync is still running | `sync_freshness` reads fresh | `warn` with `sync_first_run_in_progress` |
+| A source never synced successfully | "never been synced" | fails `sync_no_successful_sync` with the last attempt and a fix for its state |
+| An adopted read-only skill pack | fails `sync_freshness` as never synced | counted under `read_only_pack_count` |
+| `gbrain sources writer activate` on a source whose Git effects stay skipped | silent | one `git_durability_not_enabled` warning per source with the enable command |
+| `think`, MCP `think`, `synthesize`, CRAG, dream auto-think, `takes search --semantic`, `search diagnose`, eval baselines, `brainstorm` on a prefix brain | query embedded without the prefix | embedded with the brain's `embedding_query_prefix`, like hybrid search |
+| A broad keyword search times out on Postgres, then runs again in the same `gbrain serve` | waits for the timeout again | answers from the vector arm with `keyword_arm_failed: skipped_after_timeout` for 10 minutes |
+| `recall --question` on a model with unmeasured fact admission floors | nothing says so | `facts_calibration: {status: "unmeasured"}` plus one info notice per session |
+| A patterns child appends a timeline entry quoting text that isn't in this run's reflections | kept as written | moved to `unverified_claims`; appended pages count in `patterns_written` |
+| Autopilot runs dream patterns again an hour later | runs | waits `dream.patterns.min_interval_hours` (default 6) and skips with `patterns_min_interval` |
+| Pages an old agent edit stamped `trust_tier: unknown` | no repair | `gbrain trust backfill --repair-unknown-markers` previews and repairs the pages you name |
+| The `embedding_model` config row has no provider prefix | managed fact extraction stops silently | doctor `embedding_identity_unqualified` names the migrate preview |
+| A bank, payment or shipping alert (`Precedence: bulk`, `List-Id`, no-reply `Reply-To`) | `gbrain waiting` lists it as a person waiting on you | no loop opens; old ones get a `gbrain loops drop sender ... --dry-run` line |
+| `gbrain loops mute sender <email>` | stops new loops only | also closes that sender's open reply-owed loops and prints the `Undo:` command |
+| The source's calendar id is one the account can't read | looks like an empty calendar | `calendar_unreadable` in the sync log, `gbrain google status` and doctor |
+| A Postgres transaction aborts while a statement waits on a lock | the statement kept running on the server | the statement is cancelled before the connection is released |
+| The first `gbrain serve` exits while a second one is running | hooks lose per-turn context until a restart | the second serve takes the IPC socket within about 30 seconds |
+| A Windows PGLite brain with a long data-dir path | IPC sockets fail to bind | sockets move under `%USERPROFILE%\.gbrain\run` |
+| `gbrain backup create` on a symlinked or over-8-GiB PGLite brain | late failure ("Out of memory") or a generic refusal | refuses up front with `unmanaged_database_path` or `backup_too_large` and a physical-copy runbook |
+| `bootstrap harness --token` on PGLite before the serve runs | exit 1, nothing wired | wires every target, exits 13 `pending_verify`; re-run once the serve is up |
+
+### Things to watch
+
+- **Errors that used to pass now surface.** A brain with an unrelated missing column used to see doctor `ok`; it now sees the database error. Page writes, rename aliases, links preparation and Google counterparty resolution propagate any undefined table or column other than their own instead of treating it as a pre-migration brain.
+- **Prefix brains move.** On a brain with `embedding_query_prefix` set, `think`, `synthesize`, takes search and saved `gbrain eval` vector baselines return different neighbours than before.
+- **The keyword skip is per process.** `gbrain serve` and MCP benefit; one-shot CLI searches still wait for the timeout. `search.keyword_timeout_negative_cache_seconds 0` turns it off.
+- **Dropping loops by sender can't be undone.** Preview with `--dry-run` first. Muting closes loops; unmuting re-checks them on the next Gmail sync and reopens one only when nothing answered its thread since.
+- `gbrain google status` now reads each calendar once (`--no-probe` skips it) and exits 1 when one is unreadable.
+- `appended_unverified` in the dream patterns result is a deprecated alias of `quote_verify.timeline_appends` and goes away two releases from now.
+- No schema change.
+
+### Itemized changes
+
+**Doctor and schema errors**
+- `isMissingSchemaObject` takes the exact table or column each caller needs across doctor checks (extraction sync, knowledge health, routing and federation, OAuth confidential clients, stale locks, trust scan, unclaimed sources, trust tiers) and 20+ readers. `bun run check:schema-error-predicates` blocks bare `isUndefinedTableError` / `isUndefinedColumnError` / raw `42P01` / `42703` checks outside a reasoned allowlist (#6599 follow-up).
+- `sync_freshness` separates sync outcome from freshness: `sync_first_run_in_progress`, `sync_no_successful_sync` with states `no_attempt`, `attempt_queued`, `holds_pending` and `last_attempt_unsuccessful` (#4960); read-only skill-pack catalogs are counted under `read_only_pack_count` (#6076).
+- Onboarding coverage, the MCP onboarding counts and `extract-ner` typed edges count the types the active pack declares as entities, per source; a pack that doesn't load warns `entity_types_unavailable` and `extract-ner` reports `pack_unavailable` (#4772).
+- `gbrain sources writer activate` returns `warnings[]` with `git_durability_not_enabled` per non-durable filesystem source (#5182).
+- New doctor check `embedding_identity_unqualified` (#6113).
+- New error codes: `sync_first_run_in_progress`, `sync_no_successful_sync`, `entity_types_unavailable`, `git_durability_not_enabled`, `keyword_skipped_after_timeout`, `calendar_unreadable`, `ipc_path_too_long`, `unmanaged_database_path`, `backup_too_large`.
+
+**Search and recall**
+- `src/core/search/query-prefix.ts`: `embedQueryWithPrefix` is used by CRAG, `synthesize`, `think` (CLI and MCP), takes search, dream auto-think, `search diagnose`, eval and `brainstorm`; `test/query-embed-call-sites.test.ts` allowlists the remaining direct `embedQuery` calls with reasons (#3783).
+- `src/core/postgres-engine/keyword-timeout-cache.ts`: a per-engine negative cache keyed on statement, parameters, source scope and timeout. Only a statement timeout (57014) records an entry, never a user cancel. New config key `search.keyword_timeout_negative_cache_seconds` (default 600, 0 off); doctor `keyword_plan` reports `details.negative_cache` (#6495).
+- `recall` reports `facts_calibration` and one `facts_calibration_unmeasured` notice per brain per session; `FACT_ADMISSION_FLOOR_EVIDENCE` moves to `search/fact-relevance.ts` (#6590).
+
+**Dream patterns and trust**
+- Patterns quote-verifies the timeline entries it newly published, selected by write receipt, and reports `details.timeline_appends` (#6302).
+- In-cycle cadence `dream.patterns.min_interval_hours` and a child read budget `dream.patterns.child_read_budget_kb` (default 200 KB) counted from the job's tool-execution ledger (#6297).
+- Patterns grounding and the read budget read segmented page bodies through `materializeSegmentedBody`.
+- `gbrain trust backfill --repair-unknown-markers` previews by default and applies only with `--slug` and `--expect <preview hash>`; `gbrain trust review` adds a `repair` command to the `lower_page` items the marker caused (#6550).
+- Docs: CJK fact subjects need a literal slug or a delimiter (`docs/guides/facts-relink.md`, #6620).
+
+**Gmail loops and calendar**
+- `Precedence`, `List-Id` and `Reply-To` are captured; positively automated mail withholds the reply-owed open with reason `automated_mail` (#5012 item 8). `gbrain loops drop sender`, mute closes and unmute re-checks, and the opt-in key `loops.updates_require_reciprocity` (default `false`).
+- `GoogleForbiddenError`, `CalendarClient.probeCalendar`, doctor `google_calendar_readable` and `gbrain sources set-calendar` (#5012 item 9).
+- `config set search.contextual_retrieval` and `sources set-cr-mode` say that existing pages keep their mode and name `gbrain repair contextual-mode` (#5012 item 6).
+
+**Serve, Windows, backup and harness**
+- `vendor/postgres` and `patches/postgres@3.4.9.patch` gain `own()` cancel-and-discard; `transaction-abort.ts` cancels the running statement with a settle window, keeps the driver error as `cause` and reports a failed cancel as `cancelFailure`. Proven on direct Postgres and PgBouncer (#6598). Contributed by @Kkkkkuro (the cancel hunk of #6790).
+- Each IPC socket a serve could not bind retries every 30 seconds plus jitter through the single-owner probe (#6647).
+- Windows sockets over the 107-byte limit move to `%USERPROFILE%\.gbrain\run\<kind>-<hash12>.sock`; new doctor check `ipc_socket_path` (#6573).
+- 71 more files launch processes through `src/core/spawn.ts`, which hides the console window on Windows; 13 remain on the ratchet (#4992).
+- `gbrain backup create` checks the data-dir layout and the estimated archive size before the lock; doctor `pglite_data_dir` warns from 75% of the 8 GiB cap (#6649, which stays open for larger archives).
+- `bootstrap harness --token` on PGLite ends `pending_verify` (exit 13) when no serve answers and none holds the brain (#6661).
+
+**Tests**
+- Every item has a probe that fails on master and passes here. `test/e2e/persistence-chaos.test.ts` no longer races a late cancel against the commit (from GBRA-110).
+
+## [0.60.256.0] - 2026-10-15
+
+**Session transcripts are no longer marked done with zero facts, and a write that fails after extraction stops being paid for forever.** Two corpus-sweep bugs. `gbrain bootstrap verify` ran the corpus pass in a process that could not reach the extraction model, so every pending transcript came back `chat_unavailable`, got an `.ingested` marker with zero facts, and was deleted by retention a month later (#6786). Separately, when the fact write after extraction was refused (a canonical worktree claimed but not activated), nothing recorded the window, so the `serve --http` drain paid for the same extraction every 10 minutes, for hours, and threw the error away (#6785).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain bootstrap verify` with pending transcripts | each one marked `.ingested` with `skipped: chat_unavailable` and 0 facts | verify skips the corpus pass; the transcripts stay pending |
+| The sweep or a harvest has no usable extraction model | the file was marked done with 0 facts | the file stays pending (`corpus_chat_unavailable`) and is extracted once a model works |
+| A file an earlier build marked `skipped: chat_unavailable` | never extracted; deleted after 30 days | extracted again by the next sweeps, with its source binding and retired turns kept; kept until then (90 days by default) |
+| A source whose canonical worktree is claimed but not activated | paid for the extraction, then the write was refused, every sweep | held before any model call (`writer_coordinator_required`), naming `gbrain sources writer status <source>` |
+| A window keeps failing after its model call | paid again on every sweep, without limit | retried on the next sweep, then after 10, 20 and 40 minutes, then stopped (`corpus_window_dead_lettered`); one model or provider change retries it once |
+| Retrying stopped windows | no supported way | `gbrain sweep --retry-failed` previews, `--apply` retries (paid); `gbrain doctor` names it as the fix |
+| `serve --http` drain errors | discarded | skip reasons and failures go to serve's stderr |
+
+After upgrading, transcripts an earlier verify marked this way are extracted again. That is a one-time paid catch-up, bounded by the sweep's window caps (8 windows per file, 32 per sweep; `GBRAIN_CORPUS_WINDOWS_PER_SWEEP` lowers the total). `GBRAIN_SWEEP=0` or `gbrain config set facts.extraction_enabled false` pauses it. The upgrade itself rewrites nothing.
+
+### Until you upgrade
+
+- **Stop paying for a failing extraction (#6785):** start `gbrain serve --http` with `GBRAIN_SWEEP=0` to turn its corpus drain off, or run `gbrain config set facts.extraction_enabled false` to stop all fact extraction. Turn it back on after upgrading.
+- **Keep transcripts a verify marked done (#6786):** raise `dream.synthesize.corpus_retention_days` in `~/.gbrain/config.json` (for example to 365) so retention doesn't delete them before this release extracts them. Avoid `gbrain bootstrap verify` while transcripts are pending.
+
+### Itemized changes
+
+- `src/core/context/corpus-segments.ts`: `corpusFileCompletion` is the one completion classifier for sweep selection, the under-claim re-check, retention GC, the HTTP drain and the doctor backlog, so a rewritten file counts as pending everywhere. A sidecar whose `skipped` is `chat_unavailable` is pending, and only finished files get the plain retention; unavailable, partial and rewritten files keep the un-ingested ceiling. The failure record format (`<file>.failures.json`, `CORPUS_WINDOW_FAILURE_CAP` 5) lives here too, and the session-end hook reaps it with its `.txt`.
+- `src/core/context/corpus-windows.ts`: `runCorpusWindows` returns `unavailable` without recording the window, and rewinds a progress an earlier build finished as `chat_unavailable` to its retired turns under the same compare-and-set that takes the lease. A failure thrown after an admitted chat call counts against the window's start and the source incarnation, and so does a paid window whose progress could not be committed; an extraction refused by the spend guard before any chat call was admitted, or replayed without a model call, does not count. Neither tail growth, an edit to an earlier turn nor the error label resets the count; a commit of that window, or a rewrite that removes it, clears it. Selection serves backing-off and stopped files after every other candidate, so they never take a whole batch. One change of the extraction-config fingerprint (model, provider, key presence; no values) re-arms a stopped window once.
+- `src/core/sweep.ts`: the corpus pass runs the facts-absorb owner-readiness preflight (#5362) per source before any model call, applies the failure cap to writeback turn files as well, stops the pass on `chat_unavailable`, charges every attempted window (a thrown one included) against the per-sweep total, and logs thrown errors with their code. `corpus: false` skips the pass. `armCorpusDrain` logs the sweep's diagnostics (each distinct line once) and its skip reasons whenever they change.
+- `src/core/context/checkpoint-harvest.ts`: the compact and writeback lanes run the same preflight and the same failure cap; neither writes a receipt or sidecar for an `unavailable`, backing-off or stopped window.
+- `src/core/context-engine.ts`: the OpenClaw `compact()` inline harvest on Postgres (rung 3) runs the same preflight, records a failed paid attempt where the sweep's cap reads it and then leaves that segment to the sweep, keeps a `chat_unavailable` segment pending, and records any other skip reason in its sidecar.
+- `src/core/bootstrap/verify.ts`: the in-process sweep runs passes 1 and 2 only.
+- `gbrain sweep --retry-failed [--apply] [--json]` (`src/commands/sweep.ts`); doctor `memory_writeback` warns about stopped windows and names `gbrain sweep --retry-failed --apply` (paid) as its fix. `corpus_chat_unavailable`, `corpus_window_backoff` and `corpus_window_dead_lettered` are registered, so `gbrain errors <code>` explains them.
+- Tests: `test/sweep-corpus-chat-unavailable-6786.test.ts` (unservable model in the sweep and the compact harvest; legacy sidecars with and without `.progress`, asserting the facts exist; GC then sweep and sweep then GC with an aged file), `test/sweep-corpus-failure-cap-6785.test.ts` (a claim landing mid-call, the harvest preflight, the drain log, the retry schedule, the re-arm, doctor's fix and the operator retry, stopped files ahead of a healthy one, the window total under thrown windows, an uncommitted paid window, a refused call, a chat call followed by a refused one, an unpaid replay, the writeback harvest cap, and the drain and backlog classifier with a stale record) and two rung-3 cases in `test/e2e/context-engine-rung3-extraction.test.ts`. A new `bootstrap-verify.serial.test.ts` case runs the real verify with a keyed report and no gateway. The new behavior cases fail on the previous tree.
 
 ## [0.60.255.0] - 2026-10-16
 
