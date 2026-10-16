@@ -51,7 +51,7 @@ export function reviewWithdrawOn(raw: string | null | undefined): boolean {
 
 export async function recordFactWithdrawal(
   engine: BrainEngine, id: number, sourceId: string, worldOnly = false,
-  opts: { requestId?: string; semanticReview?: boolean; excludePrivate?: boolean; beliefReport?: { appended: number } } = {},
+  opts: { requestId?: string; publicationId?: string; semanticReview?: boolean; excludePrivate?: boolean; beliefReport?: { appended: number } } = {},
 ): Promise<WithdrawalCommit> {
   return engine.transaction(async tx => {
     // A managed caller takes this EXCLUSIVE source lock before authority,
@@ -89,7 +89,7 @@ export async function recordFactWithdrawal(
         if (preimage) await createPageVersion(tx, page.slug, sourceId, preimage);
       }
     }
-    return withBeliefBatch(tx, { sourceId, slugs, publicationId: opts.requestId ?? null, op: 'forget', pageEventType: 'page.view_changed',
+    return withBeliefBatch(tx, { sourceId, slugs, publicationId: opts.requestId ?? opts.publicationId ?? null, op: 'forget', pageEventType: 'page.view_changed',
       remote: worldOnly, ...(opts.beliefReport ? { report: opts.beliefReport } : {}) }, async () => {
       // Scoped to the forgotten row's entity: the same claim about another
       // entity stays active and rememberable. A subjectless fact withdraws

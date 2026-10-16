@@ -18,8 +18,6 @@ import { opError, OperationError, type OperationContext } from '../ops/contract.
 import { databaseRefusal } from '../persistence/publication-failure.ts';
 import { hasScope } from '../scope.ts';
 import type { BrainEngine } from '../engine.ts';
-import { randomUUID } from 'node:crypto';
-import { releaseSuppressedFields, suppressedFields } from '../belief/purge.ts';
 
 export const MEMORY_CONFIRM_SCOPE = 'memory_confirm';
 
@@ -90,19 +88,6 @@ export async function requireOwnerConfirmation(ctx: OperationContext, target: Co
     : 'This needs the owner to confirm in an interactive terminal; nothing was changed.',
   'Do not retry with --yes (it never confirms). Tell the user to run the command in fix in an interactive terminal on the brain host.',
   { why: 'Raising trust is the owner\'s decision, so it needs a person at a terminal typing the confirmation token; piped input, agents and --yes cannot confirm.', fix });
-}
-
-/**
- * BELIEF_LEDGER.md 6.5: a carrying field a purge redacted (a fact's context, a take's resolution evidence) stays
- * redacted in recorded history until the owner releases it. Confirming the row is that release, bound to the field's
- * current value, so it needs the same owner confirmation as a raise. `pendingRedactionRelease` says whether a confirm
- * has one to make; `releaseConfirmedRedactions` makes it after the owner confirmed.
- */
-export async function pendingRedactionRelease(engine: BrainEngine, table: 'facts' | 'takes', id: number): Promise<string[]> {
-  return suppressedFields(engine, table, id);
-}
-export async function releaseConfirmedRedactions(engine: BrainEngine, table: 'facts' | 'takes', id: number): Promise<string[]> {
-  return releaseSuppressedFields(engine, table, id, randomUUID());
 }
 
 /**
