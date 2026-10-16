@@ -2728,6 +2728,7 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "deepseek_api_key?: string | undefined",
+          "doctor?: { default_budget_ms?: number | string; } | undefined",
           "dream?: { synthesize?: { session_corpus_dir?: string; meeting_transcripts_dir?: string; verdict_model?: string; max_prompt_tokens?: number; max_chunks_per_transcript?: number; subagent_timeout_ms?: number; subagent_wait_timeout_ms?: number; }; patterns?: { lookback_days?: number; min_evidence?: number; }; } | undefined",
           "embedding_columns?: Record<string, EmbeddingColumnConfig> | undefined",
           "embedding_dimensions?: number | undefined",

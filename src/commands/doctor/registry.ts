@@ -173,7 +173,6 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   embeddingStateEntry,
   // #6803 C2: then the cheap incident checks, before any full scan (CHEAP_INCIDENT_CHECKS, pinned by name in test/doctor-entry-deadline-6803.test.ts).
   linksExtractionLagEntry,
-  contentSanityEntry,
   partialEmbeddingEntry,
   pgvectorEntry,
   rlsEntry,
@@ -200,6 +199,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   whoknowsEntry,
   crossModalEntry,
   markdownBodyEntry,
+  contentSanityEntry,
   quarantineEntry,
   frontmatterEntry,
   evalCaptureEntry,

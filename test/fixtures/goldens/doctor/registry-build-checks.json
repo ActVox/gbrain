@@ -291,18 +291,6 @@
       },
       {
         "category": "brain",
-        "name": "oversized_pages"
-      },
-      {
-        "category": "brain",
-        "name": "scraper_junk_pages"
-      },
-      {
-        "category": "brain",
-        "name": "content_sanity_audit_recent"
-      },
-      {
-        "category": "brain",
         "name": "partial_embedding"
       },
       {
@@ -600,6 +588,18 @@
       {
         "category": "brain",
         "name": "markdown_body_completeness"
+      },
+      {
+        "category": "brain",
+        "name": "oversized_pages"
+      },
+      {
+        "category": "brain",
+        "name": "scraper_junk_pages"
+      },
+      {
+        "category": "brain",
+        "name": "content_sanity_audit_recent"
       },
       {
         "category": "brain",
