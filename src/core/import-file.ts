@@ -1,6 +1,6 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 import { suffixedFrontmatterSlugHold } from './persistence/suffixed-slug.ts';
-import { unmanagedBeliefPoint } from './belief/projection-point.ts';
+import { withUnmanagedBeliefs } from './belief/projection-point.ts';
 import { maintenanceTransaction, ownerSourceGateInput, suppliedTrustMarkerView, trustMarkerChanged, writeTrustOfGate } from './persistence/attribution.ts';
 import { assertImportBase, sameCanonicalImport, sameContentAnyKeyOrder } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
@@ -882,8 +882,7 @@ export async function importFromContent(
     validate: tx => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
     apply: applyPrepared, ...(segmented ? { afterCommit: segmented.afterCommit, segmented } : {}),
   });
-  const beliefs = unmanagedBeliefPoint(txOpts.sourceId, [slug], 'import');
-  await maintenanceTransaction(engine, tx => beliefs.run(tx, () => applyPrepared(tx)), writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
+  await withUnmanagedBeliefs(engine, txOpts.sourceId, [slug], 'import', run => maintenanceTransaction(engine, tx => run(tx, () => applyPrepared(tx)), writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
     await abortSegmentedStaging(engine, segmented?.prepared);
     // #4287: name the dimension-mismatch rollback instead of letting the bare
     // pgvector message ("expected N dimensions, not M") surface with no code,
@@ -899,8 +898,7 @@ export async function importFromContent(
       } catch { /* keep the plane-agnostic wording */ }
     }
     throw decorateEmbeddingDimError(err, slug, activeColName);
-  });
-  await beliefs.commit(engine);
+  }));
   await segmented?.afterCommit(engine);
 
 

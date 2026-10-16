@@ -25,7 +25,7 @@
  * v0.22.12 classifier path (extension follow-up — not blocking v0.28).
  */
 
-import { unmanagedBeliefPoint } from '../belief/projection-point.ts';
+import { withUnmanagedBeliefs } from '../belief/projection-point.ts';
 import { coveredSources } from '../belief/coverage-report.ts';
 import { isQuarantined, QUARANTINE_KEY } from '../quarantine.ts';
 import { readFileSync } from 'node:fs';
@@ -350,12 +350,10 @@ export async function extractTakesFromDb(
       continue;
     }
     if (covered.has(source_id)) {
-      const beliefs = unmanagedBeliefPoint(source_id, [slug], 'takes_reextract');
-      await maintenanceTransaction(engine, tx => beliefs.run(tx, async () => {
+      await withUnmanagedBeliefs(engine, source_id, [slug], 'takes_reextract', run => maintenanceTransaction(engine, tx => run(tx, async () => {
         const takes = await reconcilePageTakes(tx, page, slug, rebuild, false, result);
         result.takesUpserted += await upsertProjectedTakes(engine, takes.map(t => parsedTakeToBatchInput(page.id, t)), result, tx);
-      }));
-      await beliefs.commit(engine);
+      })));
       continue;
     }
     const takes = await reconcilePageTakes(engine, page, slug, rebuild, dryRun, result);

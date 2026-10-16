@@ -104,7 +104,7 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   const text = (v: { segmented: boolean; compiled_truth: string | null; timeline: string | null }) => v.segmented || v.compiled_truth == null ? null : `${v.compiled_truth}\n${v.timeline ?? ''}`;
   const bodies: Body[] = before.map((v, i) => ({ revision: v.revision, source_time: i === 0 ? iso(page.created_at)! : iso(before[i - 1]!.snapshot_at)!, text: text(v) }));
   const atStart: Body = { revision: closing ? closing.revision : page.revision, source_time: before.length ? iso(before.at(-1)!.snapshot_at)! : iso(page.created_at)!,
-    text: closing ? text(closing) : `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}` };
+    text: closing ? text(closing) : page.large ? null : `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}` };
   const chain = [...bodies, atStart];
   const hidden = new Set((await engine.executeRaw<{ subject_key: string }>(`SELECT DISTINCT subject_key FROM belief_events WHERE source_id = $1 AND event_type = 'derived.hidden'`,
     [sourceId])).map(r => r.subject_key));

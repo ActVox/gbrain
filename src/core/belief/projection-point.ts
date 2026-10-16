@@ -32,6 +32,15 @@ export function unmanagedBeliefPoint(sourceId: string, slugs: readonly string[],
   };
 }
 
+/** One projection-point transaction: `transaction` runs its writes through `run`, and the commit is marked after it returns. */
+export async function withUnmanagedBeliefs<T>(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, slugs: readonly string[], op: string,
+  transaction: (run: <U>(tx: BrainEngine, fn: () => Promise<U>) => Promise<U>) => Promise<T>): Promise<T> {
+  const point = unmanagedBeliefPoint(sourceId, slugs, op);
+  const result = await transaction((tx, fn) => point.run(tx, fn));
+  await point.commit(engine);
+  return result;
+}
+
 /** The given sources whose ledger records now: a bulk writer wraps only their items. */
 export async function beliefCoveredSources(tx: Pick<BrainEngine, 'executeRaw'>, sourceIds: readonly string[]): Promise<Set<string>> {
   const covered = new Set<string>();
