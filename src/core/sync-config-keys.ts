@@ -25,15 +25,15 @@ export interface RetiredSyncKey {
 }
 
 export const RETIRED_SYNC_KEYS = {
-  'sync.bulk_max_txn_ms': { key: 'sync.bulk_max_txn_ms', retired_in: '0.60.265.0', tuned: 'the target time of one bulk group without lanes, in ms',
+  'sync.bulk_max_txn_ms': { key: 'sync.bulk_max_txn_ms', retired_in: '0.60.266.0', tuned: 'the target time of one bulk group without lanes, in ms',
     replacement: { env: 'GBRAIN_SYNC_BULK_MAX_TXN_MS', default: '15000' } },
-  'sync.hold_cap': { key: 'sync.hold_cap', retired_in: '0.60.265.0', tuned: 'how many held files a sync result lists in detail',
+  'sync.hold_cap': { key: 'sync.hold_cap', retired_in: '0.60.266.0', tuned: 'how many held files a sync result lists in detail',
     replacement: { env: 'GBRAIN_SYNC_HOLD_CAP', default: '500' } },
-  'sync.hold_escalate_count': { key: 'sync.hold_escalate_count', retired_in: '0.60.265.0', tuned: 'the held-file count above which a source escalates',
+  'sync.hold_escalate_count': { key: 'sync.hold_escalate_count', retired_in: '0.60.266.0', tuned: 'the held-file count above which a source escalates',
     replacement: { env: 'GBRAIN_SYNC_HOLD_ESCALATE_COUNT', default: '50' } },
-  'sync.hold_escalate_pct': { key: 'sync.hold_escalate_pct', retired_in: '0.60.265.0', tuned: 'the share of a run\'s screened imports above which it escalates, in percent',
+  'sync.hold_escalate_pct': { key: 'sync.hold_escalate_pct', retired_in: '0.60.266.0', tuned: 'the share of a run\'s screened imports above which it escalates, in percent',
     replacement: { env: 'GBRAIN_SYNC_HOLD_ESCALATE_PCT', default: '5' } },
-  'sync.parser_regression': { key: 'sync.parser_regression', retired_in: '0.60.265.0', tuned: 'whether sync stops (stop) or holds the file (hold) when bytes that imported before are refused',
+  'sync.parser_regression': { key: 'sync.parser_regression', retired_in: '0.60.266.0', tuned: 'whether sync stops (stop) or holds the file (hold) when bytes that imported before are refused',
     replacement: { env: 'GBRAIN_SYNC_PARSER_REGRESSION', default: 'stop' } },
   'sync.knock_on_refreeze_limit': { key: 'sync.knock_on_refreeze_limit', retired_in: '0.60.255.0', tuned: 'the knock-on re-freeze budget', replacement: null },
   'sync.knock_on_run_limit': { key: 'sync.knock_on_run_limit', retired_in: '0.60.255.0', tuned: 'the knock-on re-freeze budget per run', replacement: null },
