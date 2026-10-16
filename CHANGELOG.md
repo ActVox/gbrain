@@ -10,6 +10,64 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.267.0] - 2026-10-16
+
+**You can ask the brain what a page said at an earlier moment, as the brain knew it then, and it tells you when it can't know.** With the belief ledger on, `get_page` and `get_versions` take `known_as_of`, an exact instant. The answer is the page as the brain had recorded it at that instant: which version was current, whether it was deleted, and how long it stayed that way. When the brain can't vouch for the answer, it says so. The ledger may not have been on yet at that instant, it may not have been recording, or a write may still have been in flight. In those cases you get a refusal with a reason instead of a guess. Purged content never comes back through a past read. A rename and a fact purge now keep the page as it stood before the change, so the history has no holes. A sync stuck behind a recovery only you can fix now stops at once and names the file.
+
+### How to use it
+
+```bash
+gbrain beliefs status --source <id> --json   # what the ledger covers
+```
+
+Through MCP or the CLI op surface:
+
+- `get_page {slug, known_as_of: "2026-10-01T12:00:00Z"}`: the page as recorded at that instant, with `certified` and the interval it was in.
+- `get_versions {slug, known_as_of, diff: true}`: every interval recorded by that instant, newest first, each with a unified diff from the one before.
+
+`known_as_of` is recorded time (when the brain knew it). It is not `as_of` on `get_links`, which is valid time (when it was true in the world, as a date).
+
+### What you'd see
+
+| You ask about | Before | Now |
+|---|---|---|
+| a page at an instant the ledger covers | no way to ask | the page as recorded then, its revision, whether it was deleted, `recorded_at` and `until`, and `certified` |
+| an instant before the ledger was on for the source | n/a | `coverage_from`: earlier times are unknown, not empty |
+| an instant while coverage was stopped, or across a backup restore | n/a | `coverage_gap` with the gap's bounds |
+| an instant when a write to the page was recorded but not yet provably committed | n/a | `known_as_of_unproven` (retryable), naming the write |
+| `known_as_of: "2026-10-01"` | n/a | `clock_mismatch`: a date is valid time; pass an instant |
+| a page whose body was later purged | n/a | the interval with `body: unavailable`, `body_reason: purged`; the purged text never returns |
+| a body no retained version holds | n/a | `body: unavailable` with its reason; never the neighboring version's body |
+| a remote client asking about a page it can't see | n/a | `page_not_found`, the same as for a slug that was never written |
+| a page rename or a `purge_fact` rewrite | no version kept the page as it stood before | one more version per rename and per page a fact purge rewrites (the purged claim is stripped from it) |
+| a sync queued behind a recovery waiting on you (a page file edited mid-publish) | waited out the 5-minute no-progress window | stops after one governor tick with `drain_stalled`, `cause: head_blocked`, naming the file and the fix |
+
+### Things to watch
+
+- `get_versions` and `gbrain history` list one more snapshot per page rename and per page a `purge_fact` rewrites.
+- History is certified only on managed sources. On other sources a read answers with `certified: false` and an `uncertified_reason`.
+- Doctor `belief_ledger_coverage` now warns when a page moved to a new revision without a version of the one it left. Such a body shows as `version_missing` in a past read and can't be recovered. `--tier deep` lists every case beyond the last 30 days.
+- Scripts that match `drain_stalled` should expect `cause: head_blocked` sooner on a recovery that needs a person.
+
+### Itemized changes
+
+#### Recorded-time reads
+
+- `src/core/belief/page-at-time.ts`: the page-at-time reader. It finds the interval an instant falls in from the ledger's page events, checks coverage (`coverage_from`, `coverage_gap`) and the commit proof (`known_as_of_unproven`), resolves the body (`live`, `version`, `segmented` through `body_ref`, or `unavailable` with `purged`, `expired`, `hard_deleted`, `pruned` or `version_missing`), and collapses a purged lifetime's intervals.
+- `src/core/ops/known-as-of.ts`: `get_page {known_as_of}` and `get_versions {known_as_of, diff}` (`src/core/ops/pages.ts`, `src/core/ops/admin.ts`). `diff` and `source_id` on `get_versions` need `known_as_of`. For a remote caller, the source lookup counts only pages it can see now, and a coverage or proof refusal about a page it cannot see becomes `page_not_found`.
+- New error codes `coverage_from`, `coverage_gap`, `clock_mismatch` and `known_as_of_unproven` (`src/core/error-registry.ts`, `src/core/error-catalogue.ts`), documented in `docs/guides/repair.md#recorded-time-reads`.
+
+#### History without holes
+
+- `updateSlug` (`src/core/engine-sql/pages.ts`) saves a version of the page before the rename.
+- `purge_fact` (`src/core/facts/purge.ts`) saves a version of each page before rewriting it; version redaction then removes the purged claim from that version too.
+- `src/core/belief/preimages.ts`: every publication that moves a page's revision must leave a version of the revision it moved off. Test runs enforce it in `finalizeBeliefEvents`. Doctor `belief_ledger_coverage` reports violations from the last 30 days (all of them under `--tier deep`).
+- `docs/designs/BELIEF_LEDGER.md` section 14 records the page-at-time rules.
+
+#### Sync behind a recovery that needs you
+
+- `src/core/persistence/head-blocker.ts`, `sync-drain.ts`: a sync queued behind a fact-withdrawal mirror or page write whose file was edited while it was publishing stops after one governor tick with `drain_stalled`, `cause: head_blocked`, naming the file. A recovery that can still finish keeps the wait. A recovery stuck on `unexpected_staging_bytes` still waits out the window.
+
 ## [0.60.266.0] - 2026-10-16
 
 **Managed sync tells the truth about where it stands, and every held file has a way out (#6712 PR 2).** A managed `gbrain sync` returns `synced` the moment its checkpoint commits: link extraction and planner statistics run after the drain lease is released, and a crash between the two is made up by the next sync. `gbrain sync status` stays fast on large brains and never reads a timed-out probe as "nothing pending". Each of the 14 hold codes now leads an agent to a cleared hold or to one decision sentence for the user, and a hold asks a person only after its safe action failed three times over at least a day. Every `gbrain sync` flag lives in one table, and the `sync.*` config keys are split into tunables, rollback keys and retired keys (five retired keys become `GBRAIN_SYNC_*` environment variables, and doctor names any stored value that stopped applying).
