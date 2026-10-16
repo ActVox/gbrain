@@ -134,13 +134,14 @@ export async function readConversationBodyForParsing(
  * readConversationBodyForParsing with the window it read: a segmented page's summary body is read through ranged
  * reads, and one over CONVERSATION_WINDOW_BYTES is its newest window (page-body/segment-conversation.ts). With
  * `priorFacts`, a page over the window that has conversation facts is not read at all: its input is empty and the
- * window carries the count (the run keeps those facts and skips the page).
+ * window carries the count (the run keeps those facts and skips the page). `sidecar` marks an input read from the
+ * `raw_transcript` file rather than the page.
  */
 export async function readConversationInput(
   engine: BrainEngine,
   page: Page,
   opts: { priorFacts?: () => Promise<number> } = {},
-): Promise<SegmentedConversationInput> {
+): Promise<SegmentedConversationInput & { sidecar?: true }> {
   const rawTranscript = extractRawTranscriptPath(page);
   if (rawTranscript) {
     const resolved = await resolveTranscriptPath(engine, page, rawTranscript);
@@ -148,7 +149,7 @@ export async function readConversationInput(
       const { size, mtimeMs } = statSync(resolved);
       if (size > CONVERSATION_BODY_MAX_BYTES) throw new ConversationBodyTooLargeError(size, mtimeMs);
       const rawBody = readFileSync(resolved, 'utf8').trim();
-      if (rawBody.length > 0) return { body: rawBody };
+      if (rawBody.length > 0) return { body: rawBody, sidecar: true };
     }
     if (!resolved) {
       // Refusal is loud but class-only: never echo the attempted path

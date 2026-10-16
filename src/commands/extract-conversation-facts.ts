@@ -761,15 +761,15 @@ function regularPageVersionToken(page: Page): string {
   return `page-${hash}-${effectiveDate}`;
 }
 
-function snapshotVersionToken(page: Page, body: string): string {
+function snapshotVersionToken(page: Page, input: { body: string; sidecar?: true }): string {
   if (!hasRawTranscriptSidecar(page)) return regularPageVersionToken(page);
-  // Sidecar contents can change without touching pages.updated_at. Hash the
-  // exact parser input plus parser-relevant page metadata so those edits reopen
-  // the page without a schema migration.
+  // Sidecar contents can change without touching pages.updated_at. Hash the exact parser input plus parser-relevant page metadata so those
+  // edits reopen the page without a schema migration. A segmented page parsing its own body hashes content_hash, never the input the prior-fact guard empties.
+  const parserInput = page.body_storage === 'segmented' && !input.sidecar ? { page: regularPageVersionToken(page) } : { body: input.body };
   return `sidecar-${createHash('sha256')
     .update(
       JSON.stringify({
-        body,
+        ...parserInput,
         title: page.title,
         type: page.type,
         frontmatter: page.frontmatter,
@@ -784,8 +784,8 @@ async function preparePageSnapshot(
   page: Page,
 ): Promise<ConversationPageSnapshot> {
   try {
-    const { body, window } = await readConversationInput(engine, page, { priorFacts: () => countConversationFacts(engine, page.source_id, page.slug) });
-    return { page, body, ...(window ? { window } : {}), versionToken: snapshotVersionToken(page, body) };
+    const input = await readConversationInput(engine, page, { priorFacts: () => countConversationFacts(engine, page.source_id, page.slug) });
+    return { page, body: input.body, ...(input.window ? { window: input.window } : {}), versionToken: snapshotVersionToken(page, input) };
   } catch (error) {
     if (!(error instanceof ConversationBodyTooLargeError)) throw error;
     return { page, body: '', versionToken: `sidecar-oversized-${error.bytes}-${error.mtimeMs}`, oversizedSidecarBytes: error.bytes };

@@ -85,8 +85,6 @@ src/core/company-brain/profile.ts	importCompanyBrainFile	field	META
 src/core/company-brain/verification.ts	verifyCompanyBrain	field	STREAM	
 src/core/content-repair/judgment.ts	judgmentParticipant	field	STREAM	
 src/core/content-sanity.ts	assessContentSanity	field	STREAM	
-src/core/context/compile-view.ts	compileView	field	LEAD	
-src/core/context/compile-view.ts	renderEntry	field	LEAD	
 src/core/context/proactive-brief.ts	editItem	field	INLINE	reads the body only at or under 64 KiB, below the segmented threshold; a segmented page's NULL body skips the edit arm
 src/core/context/proactive-brief.ts	editItem	sql	INLINE	reads the body only at or under 64 KiB, below the segmented threshold; a segmented page's NULL body skips the edit arm
 src/core/context/retrieval-reflex.ts	resolveEntitiesToPointers	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
