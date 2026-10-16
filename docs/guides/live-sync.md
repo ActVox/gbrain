@@ -373,7 +373,13 @@ pair are a rename only when they share such an id and also show continuity:
 the same file name, the same title, or the same bytes. So a note moved to
 another folder and rewritten keeps its page, while a new note that reuses a
 deleted note's template id starts a fresh page, even when no live page holds
-that id. A managed sync refuses `page_identity_changed`
+that id.
+
+With `--working-tree`, the decision reads the files on disk and holds only for
+the bytes it read. A renamed file edited before its page moves keeps nothing:
+classic sync fails that file and the next sync decides again, and a managed
+sync refuses `source_changed` and names
+`gbrain sync --no-pull --retry-failed --working-tree --source <id>`. A managed sync refuses `page_identity_changed`
 (`rename_identity_conflict`) when a file would take over a page whose
 `frontmatter.id` differs from the file's own.
 

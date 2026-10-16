@@ -105,6 +105,15 @@ export async function catFileHeads(repo: string, objects: string[]): Promise<Arr
 }
 
 /** The first 64 KiB of a regular file inside `root`; null for a missing, escaping or non-regular path. */
+/** The digest a dirty-tree rename verdict is bound to: sha256 of the first 64 KiB the verdict read. */
+export const identityHeadDigest = (bytes: Buffer): string => createHash('sha256').update(bytes.subarray(0, HEAD_BYTES)).digest('hex');
+
+/** `identityHeadDigest` of a working-tree file now; null when it is gone, not a regular file, or outside `root`. */
+export function workingTreeIdentityHead(root: string, path: string): string | null {
+  const head = workingTreeHead(root, path);
+  return head === null ? null : identityHeadDigest(head);
+}
+
 function workingTreeHead(root: string, path: string): Buffer | null {
   const base = resolve(root);
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- a git-reported repo-relative path, accepted only when it stays inside the repo root (checked on the next line) and is a regular file, never a symlink
@@ -255,8 +264,8 @@ export async function confirmRenameIdentities(engine: Pick<BrainEngine, 'execute
   const objects = [...basePaths.map(path => `${base}:${path}`), ...(target === null ? [] : targetPaths.map(path => `${target}:${path}`))];
   const heads = await catFileHeads(repo, objects);
   const baseIdentity = new Map(basePaths.map((path, index) => [path, frontmatterIdentity(heads[index] ?? null)]));
-  const targetIdentity = new Map(targetPaths.map((path, index) => [path,
-    frontmatterIdentity(target === null ? workingTreeHead(repo, path) : heads[basePaths.length + index] ?? null)]));
+  const targetHeads = new Map(targetPaths.map((path, index) => [path, target === null ? workingTreeHead(repo, path) : heads[basePaths.length + index] ?? null]));
+  const targetIdentity = new Map(targetPaths.map(path => [path, frontmatterIdentity(targetHeads.get(path) ?? null)]));
   // The old side's title is the one its page row stores: a page whose title changed in the brain is compared as it is now.
   const titled = basePaths.filter(path => baseIdentity.get(path)!.title);
   const sourcePathOf = opts.sourcePathOf ?? ((path: string) => path);
@@ -275,11 +284,19 @@ export async function confirmRenameIdentities(engine: Pick<BrainEngine, 'execute
     `SELECT slug, source_path, frontmatter->>'id' AS fm_id, title FROM pages
       WHERE source_id = $1 AND deleted_at IS NULL AND (frontmatter->>'id' = ANY($2::text[]) OR title = ANY($3::text[]))`,
     [opts.sourceId, ids, titles]) : [];
-  return decideRenameIdentities(manifest, {
+  const decided = decideRenameIdentities(manifest, {
     base: path => baseIdentity.get(path) ?? NO_IDENTITY,
     target: path => targetIdentity.get(path) ?? NO_IDENTITY,
     live, sourcePathOf: opts.sourcePathOf, targetSource: target === null ? 'working_tree' : 'commit',
   });
+  if (target !== null) return decided;
+  // A dirty-tree verdict holds only for the bytes it read: each kept rename carries their digest, and the identity move
+  // re-checks it against the bytes it imports (classic applyRename, managed readSyncContent).
+  const stamp = (rename: SyncManifest['renamed'][number]) => {
+    const head = targetHeads.get(rename.to);
+    return head ? { ...rename, identityHead: identityHeadDigest(head) } : rename;
+  };
+  return { ...decided, renamed: decided.renamed.map(stamp) };
 }
 
 /** `computeSyncDelta` of a commit range with its renames confirmed (the commit-range half of every incremental sync). */

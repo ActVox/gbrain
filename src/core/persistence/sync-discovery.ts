@@ -9,7 +9,7 @@ import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-fla
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
-import { confirmedSyncDelta, confirmRenameIdentities, explicitIdVeto, frontmatterIdentity } from '../sync-rename-identity.ts';
+import { confirmedSyncDelta, confirmRenameIdentities, explicitIdVeto, frontmatterIdentity, identityHeadDigest } from '../sync-rename-identity.ts';
 import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath, type DowngradedRename, type SyncManifest } from '../sync.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
@@ -34,6 +34,8 @@ import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, t
 export interface SyncRename { sourcePath: string; slug: string; pageId: number; revision: string; }
 export interface SyncEntry { path: string; sourcePath: string; action: 'import' | 'delete'; working: boolean; slug?: string; pageId?: number | null; revision?: string | null;
   renameFrom?: SyncRename;
+  /** #6729: a dirty-tree rename's verdict digest (see `SyncManifest.renamed`); readSyncContent refuses bytes that differ. */
+  identityHead?: string;
   /** #5565: a deleted file no page records as its origin; its slug's page keeps another origin, so the deletion is a fenced no-op. */
   unownedDeletion?: boolean;
   /** #5988: a held rename destination whose source page changed since the rename was recorded; the freeze screen holds it as `rename_held`. */
@@ -299,7 +301,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const dirty = working ? await confirmRenameIdentities(engine, gitRoot, 'HEAD', null, built, confirm) : built;
   const delta = !opts.full && !walk && source.last_commit ? await confirmedSyncDelta(engine, gitRoot, source.last_commit, target, confirm) : null;
   const entries = new Map<string, SyncEntry>();
-  const renamedFrom = new Map<string, string>();
+  const renamedFrom = new Map<string, { from: string; identityHead?: string }>();
   let workingTreeKept: string[] | undefined;
   let treeAbsent: Array<{ id: number; gitPath: string }> = [];
   const discoveredAt = new Date().toISOString();
@@ -333,14 +335,14 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     if (refuse(path, action)) return;
     if (eligible(path)) entries.set(path, { path: relative(nativeRoot, join(nativeGitRoot, path)).split(sep).join('/'), sourcePath: sourcePath(path), action, working });
   };
-  const putRename = (rename: { from: string; to: string }, working = false) => {
+  const putRename = (rename: SyncManifest['renamed'][number], working = false) => {
     if (isWindowsColonTarget(rename.from) || isWindowsColonTarget(rename.to)) {
       for (const path of [rename.from, rename.to]) {
         record(path, `${path} is one side of the rename ${rename.from} -> ${rename.to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.`);
       }
       return;
     }
-    put(rename.from, 'delete', working); put(rename.to, 'import', working); renamedFrom.set(rename.to, rename.from);
+    put(rename.from, 'delete', working); put(rename.to, 'import', working); renamedFrom.set(rename.to, { from: rename.from, ...(working && rename.identityHead ? { identityHead: rename.identityHead } : {}) });
   };
   if (delta?.status === 'ok') {
     for (const path of [...delta.manifest.added, ...delta.manifest.modified]) put(path, 'import');
@@ -535,12 +537,12 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       continue;
     }
     Object.assign(winner, { pageId: null, revision: null });
-    const from = renamedFrom.get(gitPath(winner));
+    const { from, identityHead } = renamedFrom.get(gitPath(winner)) ?? {};
     const deletion = from === undefined ? undefined : [...deletions.values()].find(entry => gitPath(entry) === from);
     const moved = deletion?.pageId == null ? undefined : identities.find(page => page.id === deletion.pageId);
     if (deletion && moved && !deleted.has(moved.id) && moved.source_path != null) {
       // A Git rename moves the page to its new slug, like the library path's updateSlug: same page id, inbound links and an alias.
-      winner.renameFrom = { sourcePath: moved.source_path, slug: moved.slug, pageId: moved.id, revision: moved.knowledge_revision };
+      Object.assign(winner, { renameFrom: { sourcePath: moved.source_path, slug: moved.slug, pageId: moved.id, revision: moved.knowledge_revision }, ...(identityHead ? { identityHead } : {}) });
       retired.add(deletion);
       continue;
     }
@@ -602,6 +604,10 @@ export function readSyncContent(discovery: SyncDiscovery, entry: SyncEntry): str
     if (bytes === null) throw opError('source_changed', 'The discovered working-tree file disappeared.',
       `${entry.path} left the working tree of ${discovery.sourceId} between discovery and import, so nothing was imported from it. Run gbrain sync --no-pull --source ${discovery.sourceId} to rediscover the tree.`,
       { fix: managedSyncFix(discovery.sourceId, 'A new discovery reads the working tree as it is now.') });
+    if (entry.identityHead && identityHeadDigest(bytes) !== entry.identityHead) throw opError('source_changed', 'A renamed working-tree file changed after its page identity was confirmed.',
+      `${entry.path} changed in the working tree of ${discovery.sourceId} after sync confirmed it keeps the page of its rename, so nothing was imported from it and no identity moved. Run gbrain sync --no-pull --retry-failed --working-tree --source ${discovery.sourceId} to re-check it.`,
+      { fix: { ...managedSyncFix(discovery.sourceId, 'A retry rediscovers the tree and re-checks the rename against the file as it is now.'),
+        argv: ['gbrain', 'sync', '--no-pull', '--retry-failed', '--working-tree', '--source', discovery.sourceId] } });
     return bytes.toString('utf8');
   }
   return syncGit(discovery.gitRoot, ['show', `${discovery.target}:${syncGitPath(discovery, entry.path)}`]);

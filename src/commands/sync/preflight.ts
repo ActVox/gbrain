@@ -1075,7 +1075,7 @@ async function computeFilteredDelta(
     filtered.added = filtered.added.map(scopeRel);
     filtered.modified = filtered.modified.map(scopeRel);
     filtered.deleted = filtered.deleted.map(scopeRel);
-    filtered.renamed = filtered.renamed.map(r => ({ from: scopeRel(r.from), to: scopeRel(r.to) }));
+    filtered.renamed = filtered.renamed.map(r => ({ ...r, from: scopeRel(r.from), to: scopeRel(r.to) }));
   }
 
   // Working-tree mass-delete valve: merged working-tree deletes bypass the

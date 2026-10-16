@@ -24,7 +24,9 @@ export interface SyncManifest {
   modified: string[];
   deleted: string[];
   /** `similarity`: Git's rename score (100 = byte-identical); absent for a pairing that did not come from Git's similarity guess. */
-  renamed: Array<{ from: string; to: string; similarity?: number }>;
+  renamed: Array<{ from: string; to: string; similarity?: number;
+    /** #6729: sha256 of the first 64 KiB of the working-tree `to` file the identity verdict read (dirty-tree renames only); identity moves only for those bytes. */
+    identityHead?: string }>;
   /** #6729: inexact Git renames whose identity could not be confirmed; each was split into a delete of `from` plus an add of `to`. */
   downgradedRenames?: DowngradedRename[];
 }

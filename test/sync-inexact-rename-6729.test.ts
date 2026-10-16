@@ -256,6 +256,53 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     }
   }), 240_000);
 
+  test('dirty tree: a rename verdict is bound to the bytes it read; a file edited between the verdict and the identity move moves nothing, and the next sync re-checks it (classic and managed)', () => withEnv(env, async () => {
+    for (const mode of ['classic', 'managed'] as const) {
+      const s = await (mode === 'classic' ? classic : managed)({ 'notes/spec.md': doc(`title: Drift spec 6729 ${mode}`) });
+      const spec = (await pageRow(s.id, 'notes/spec'))!;
+      git(s.root, 'mv', 'notes/spec.md', 'notes/spec-2.md'); write(s.root, 'notes/spec-2.md', doc(`title: Drift spec 6729 ${mode}`, 'Edited.\n'));
+      git(s.root, 'add', '-A');
+      expect(git(s.root, 'diff', '--cached', '--name-status', '-M')).toMatch(/^R0\d\d\tnotes\/spec.md\tnotes\/spec-2.md$/);
+      // The edit lands after the verdict read the file (on its stored-title lookup) and before the identity move.
+      let drifted = false;
+      const racing = new Proxy(engine, { get(target, key) {
+        if (key === 'executeRaw') return async (sql: string, params?: unknown[]) => {
+          const rows = await target.executeRaw(sql, params);
+          if (!drifted && sql.startsWith('SELECT slug, source_path, title FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND (source_path')) {
+            drifted = true; write(s.root, 'notes/spec-2.md', doc('id: drifted-6729\ntitle: A different document', 'Edited.\n'));
+          }
+          return rows;
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } }) as BrainEngine;
+      if (mode === 'classic') {
+        const result = await performSync(racing, { repoPath: s.root, sourceId: s.id, noPull: true, noEmbed: true, noExtract: true, concurrency: 1, workingTree: true });
+        expect(result).toMatchObject({ status: 'blocked_by_failures', failedFiles: 1 });
+      } else {
+        await expect(performManagedSync(racing, { sourceId: s.id, noPull: true, workingTree: true })).rejects.toMatchObject({ code: 'source_changed' });
+      }
+      expect(drifted).toBe(true);
+      expect(await pageRow(s.id, 'notes/spec')).toMatchObject({ id: spec.id, deleted_at: null });
+      expect(await pageRow(s.id, 'notes/spec-2')).toBeUndefined();
+      // Classic re-checks on the next sync; managed rediscovers through the --retry-failed its refusal names.
+      const again = await s.sync({ workingTree: true, ...(mode === 'managed' ? { retryFailed: true } : {}) });
+      expect(again.identityDowngrades?.map(entry => [entry.from, entry.reason])).toEqual([['notes/spec.md', 'id_one_side']]);
+      expect((await pageRow(s.id, 'notes/spec-2'))!.id).not.toBe(spec.id);
+    }
+  }), 240_000);
+
+  test('dirty tree: an untracked move (plain mv) keeps its page through its id and file name; an untracked note reusing a deleted note\'s id under another name does not', () => withEnv(env, async () => {
+    const s = await classic({ 'notes/keep.md': doc('id: untracked-6729-keep\ntitle: Keep me'), 'notes/old.md': doc('id: untracked-6729-tmpl\ntitle: Old note') });
+    const keep = (await pageRow(s.id, 'notes/keep'))!, old = (await pageRow(s.id, 'notes/old'))!;
+    rmSync(join(s.root, 'notes/keep.md')); write(s.root, 'archive/keep.md', `---\nid: untracked-6729-keep\ntitle: Keep me, archived\n---\n\nShort now.\n`);
+    rmSync(join(s.root, 'notes/old.md')); write(s.root, 'notes/new.md', `---\nid: untracked-6729-tmpl\ntitle: New note\n---\n\nUnrelated.\n`);
+    expect(git(s.root, 'status', '--porcelain').split('\n').map(line => line.trim()).sort()).toEqual(['?? archive/', '?? notes/new.md', 'D notes/keep.md', 'D notes/old.md']);
+    expect((await s.sync({ workingTree: true })).status).toBe('synced');
+    expect((await pageRow(s.id, 'archive/keep'))!.id).toBe(keep.id);
+    expect((await pageRow(s.id, 'notes/new'))!.id).not.toBe(old.id);
+  }), 180_000);
+
   test('three pages sharing one title: an inexact move of one of them is a delete plus an add', () => withEnv(env, async () => {
     const s = await classic({ 'notes/a.md': doc('title: Weekly sync'), 'notes/b.md': doc('title: Weekly sync', 'B.\n'), 'notes/c.md': doc('title: Weekly sync', 'C.\n') });
     const a = (await pageRow(s.id, 'notes/a'))!;
