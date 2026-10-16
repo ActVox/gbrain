@@ -118,7 +118,7 @@ export async function* bodyBlocks(engine: BrainEngine, page: { id: number; slug:
 export async function truthLead(engine: BrainEngine, pageId: number, chars: number): Promise<string> {
   const parts: Buffer[] = [];
   for await (const piece of readBodyRange(engine, { pageId, space: 'stored', start: 0, end: 4 * chars + 4, audience: 'trusted', region: 'truth' })) parts.push(piece.bytes);
-  return new TextDecoder().decode(Buffer.concat(parts)).slice(0, chars);
+  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(Buffer.concat(parts)).slice(0, chars);
 }
 
 /**

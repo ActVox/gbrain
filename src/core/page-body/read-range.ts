@@ -124,7 +124,7 @@ export interface BodyRangePiece {
   projectedStart: number;
 }
 
-const utf8 = new TextDecoder('utf-8', { fatal: true });
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const HEAVY_BATCH = 64;
 const toJson = (v: unknown) => typeof v === 'string' ? JSON.parse(v) as unknown : v;
 const bytesOf = (v: unknown): Uint8Array => { const b = v as Uint8Array; return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); };

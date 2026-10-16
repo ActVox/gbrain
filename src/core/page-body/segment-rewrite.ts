@@ -30,7 +30,7 @@ export type FenceTransform = (fence: string, at: { region: BodyRegion }) => Prom
 /** Rows `from..to` of a generation, replaced by `bytes`. */
 interface FenceUnit { from: number; to: number; bytes: Uint8Array }
 
-const utf8 = new TextDecoder('utf-8', { fatal: true });
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const fenceRegions = (row: ManifestRow) => (row.protectedRegions as StoredRegion[]).filter(r => r.kind === 'facts' || r.kind === 'takes');
 /** The region runs on into the next segment (it crosses a forced cut there). */

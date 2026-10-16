@@ -30,7 +30,7 @@ import { utf8Len } from './region-scan.ts';
 import { segmentProjectionParts, segmentString, type StoredRegion } from './segmenter.ts';
 import type { BodyRegion } from './types.ts';
 
-const utf8 = new TextDecoder('utf-8', { fatal: true });
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** The stored parts of one segment the projection reads (a manifest row and its text). */
 export interface ProjectableSegment {

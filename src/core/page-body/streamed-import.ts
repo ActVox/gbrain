@@ -158,7 +158,7 @@ async function bodyWindow(pieces: readonly BodyPiece[], read: (start: number, en
 class CodeRefLines {
   readonly refs = new Map<string, { path: string; line?: number }>();
   private carry = '';
-  private readonly decoder = new TextDecoder();
+  private readonly decoder = new TextDecoder('utf-8', { ignoreBOM: true });
 
   push(bytes: Uint8Array): void {
     const text = this.carry + this.decoder.decode(bytes, { stream: true });

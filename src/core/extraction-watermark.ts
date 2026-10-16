@@ -119,8 +119,8 @@ export async function planSegmentedExtraction(engine: BrainEngine, pageId: numbe
   const offset = stored && stored.pipelineVersion === EXTRACTION_PIPELINE_VERSION[pipeline] ? stored.bytes : null;
   const whole = createHash('sha256');
   const prefix = createHash('sha256');
-  const decoder = new TextDecoder();
-  const tailDecoder = new TextDecoder();
+  const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
+  const tailDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
   let bytes = 0, chars = 0, tailChars = 0, head = '', tail = '', tailText = false;
   let boundary: number | undefined;
   const collect = readGarbageCollector();
