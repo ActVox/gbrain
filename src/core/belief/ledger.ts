@@ -482,11 +482,25 @@ async function peekLifetimes(tx: BrainEngine, needs: ReturnType<typeof pageNeeds
 
 export { stateHashOf };
 
+/**
+ * The journaled operations that are a direct edit of a page's facts or takes (design 6.5: a trusted local write that
+ * sets the field). Only these, from a local caller and with no internal intent `kind` (the `put_page` rows of
+ * import, file repair, quarantine clear, reconcile and managed maintenance carry one), can release a purge
+ * redaction; sync (`submit_job`), gate release, held accept, backfill, revert, restore and retention never do.
+ * append.ts still requires the writer tier at or above OWNER_TIER_FLOOR, and the trust channel records these verbs
+ * as agent_written even from the local CLI, so today `trust confirm` is the release that reaches it.
+ */
+const OWNER_EDIT_OPERATIONS: ReadonlySet<string> = new Set(['put_page', 'edit_page', 'takes_update', 'takes_resolve']);
+let allowlistDropped = false;
+/** Tests: the forced probe that drops the allowlist, so every local publication counts as an owner edit. */
+export function __dropOwnerEditAllowlistForTests(dropped: boolean): void { allowlistDropped = dropped; }
+
 /** The batch options of one journaled page publication (single or group member). */
 export function publicationBeliefOptions(row: { id: string; source_id: string; slug: string; operation: string; authority: { remote?: boolean }; intent?: Record<string, unknown> | null },
   additionalKeys: readonly { sourceId: string; slug: string }[] = [], report?: { appended: number }): BeliefBatchOptions {
   return { sourceId: row.source_id, slugs: [...new Set([row.slug, ...additionalKeys.filter(k => k.sourceId === row.source_id).map(k => k.slug)])],
     publicationId: row.id, op: row.operation, remote: row.authority.remote !== false,
+    ...(row.authority.remote === false && (allowlistDropped || OWNER_EDIT_OPERATIONS.has(row.operation) && row.intent?.kind == null) ? { ownerEdit: true } : {}),
     ...(row.operation === 'revert_version' ? { pageEventType: 'page.reverted' as const } : {}),
     ...(row.operation === 'delete_page' && row.intent?.retention === true ? { hardDeleteEvent: 'page.expired' as const } : {}), ...(report ? { report } : {}) };
 }

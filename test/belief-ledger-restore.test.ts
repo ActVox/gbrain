@@ -12,7 +12,8 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import postgres from '#postgres';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
-import { __setPurgeReplayFaultForTests, PURGE_MIRROR_FILE, readRestorePurgeReplay, replayPurgesFromDatabase, type PurgeReplayFault } from '../src/core/belief/purge-mirror.ts';
+import { __setPurgeReplayFaultForTests, PURGE_MIRROR_FILE, purgeMirrorPath, readRestorePurgeReplay, replayPurgesFromDatabase, type PurgeReplayFault } from '../src/core/belief/purge-mirror.ts';
+import { replayPurgesCli } from '../src/commands/beliefs-replay-purges.ts';
 import { createPgliteBackup, restorePgliteBackup } from '../src/core/backup/snapshot.ts';
 import { runBackupCli } from '../src/commands/backup.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -26,6 +27,7 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, openFileBeliefBrain, withFileBeliefBrain, type BeliefBrain, type FileBeliefBrain } from './helpers/belief-ledger.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 afterEach(() => { __setPurgeReplayFaultForTests(null); __setBeliefEmitterFaultForTests(null); __setPurgeRedactionFaultForTests(null); });
 
@@ -338,6 +340,16 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         () => __setBeliefEmitterFaultForTests(drafts => drafts.map(d => d.eventType === 'page.expired' ? { ...d, eventType: 'page.purged', purged: true } : d)));
     }, 240_000);
 
+    test('#9: beliefs replay-purges refuses on PGLite (the restore replays itself) and refuses without one replay source', async () => {
+      const r = await collect<string[]>(resolve => beliefBrain(async b => {
+        const codes: string[] = [];
+        for (const args of [['replay-purges', '--archived-at', '2026-01-01T00:00:00Z'], ['replay-purges', '--archived-at', '2026-01-01T00:00:00Z', '--purge-mirror', 'relative.jsonl']])
+          codes.push(await replayPurgesCli(b.engine, args).then(() => 'ok', (e: { code?: string; message: string }) => `${e.code}:${/PGLite|exactly one|absolute/.exec(e.message)?.[0]}`));
+        resolve(codes);
+      }, { databaseUrl: engineCase.databaseUrl }));
+      expect(r).toEqual(engineCase.name === 'postgres' ? ['invalid_params:exactly one', 'invalid_params:absolute'] : ['invalid_params:PGLite', 'invalid_params:PGLite']);
+    }, 120_000);
+
     if (engineCase.name !== 'postgres') return;
     test('#10 (postgres): a purge that started before the dump and committed after it is replayed; one already in the archive is not', async () => {
       const r = await collect<Record<string, unknown>>(resolve => beliefBrain(async b => {
@@ -372,6 +384,44 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }, { databaseUrl: engineCase.databaseUrl }));
       expect(r).toEqual({ replays: [[true, 'complete']], left: [] });
     }, 300_000);
+    test('#9 (postgres): beliefs replay-purges previews without writing, then --apply replays from the pre-restore database or the purge mirror', async () => {
+      const r = await collect<Record<string, unknown>>(resolve => beliefBrain(async b => {
+        await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
+        await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme has two offices'] }));
+        const url = new URL(engineCase.databaseUrl!);
+        const [{ db }] = await b.engine.executeRaw<{ db: string }>('SELECT current_database() AS db');
+        const admin = postgres(engineCase.databaseUrl!, { max: 1, prepare: false });
+        await disposePersistenceConsumer(b.engine);
+        await admin.unsafe(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${db}' AND pid <> pg_backend_pid()`);
+        const clones = [0, 1].map(() => `gbrain_test_restore_${randomUUID().replace(/-/g, "").slice(0, 16)}`);
+        for (const clone of clones) await admin.unsafe(`CREATE DATABASE ${clone} TEMPLATE ${db}`);
+        const archivedAt = new Date().toISOString();
+        const engines = clones.map(() => new PostgresEngine());
+        const env = `GBRAIN_TEST_PRE_RESTORE_URL_${randomUUID().slice(0, 8).toUpperCase()}`;
+        try {
+          await purgeFact(b, X);
+          url.pathname = `/${db}`;
+          const preRestoreUrl = url.toString();
+          for (const [i, clone] of clones.entries()) { url.pathname = `/${clone}`; await engines[i]!.connect({ database_url: url.toString(), poolSize: 2 }); }
+          const [fromDb, fromMirror] = engines.map(e => ({ ...b, engine: e }));
+          const dbArgs = ['replay-purges', '--archived-at', archivedAt, '--from-url-env', env];
+          const viaDb = (args: string[]) => withEnv({ [env]: preRestoreUrl }, () => replayPurgesCli(fromDb!.engine, args));
+          const dry = await viaDb(dbArgs);
+          const afterDry = (await carriers(fromDb!, X)).length;
+          const applied = await viaDb([...dbArgs, '--apply']);
+          const mirror = await replayPurgesCli(fromMirror!.engine, ['replay-purges', '--archived-at', archivedAt, '--purge-mirror', purgeMirrorPath(), '--apply']);
+          resolve({ dry: [dry.value.applied, dry.value.replays.length, dry.value.apply_argv?.at(-1)], afterDry: afterDry > 0,
+            applied: [applied.value.applied, applied.value.state], leftDb: await carriers(fromDb!, X),
+            mirror: [mirror.value.from, mirror.value.state], leftMirror: await carriers(fromMirror!, X) });
+        } finally {
+          for (const e of engines) await e.disconnect().catch(() => undefined);
+          for (const clone of clones) await admin.unsafe(`DROP DATABASE IF EXISTS ${clone} WITH (FORCE)`);
+          await admin.end();
+        }
+      }, { databaseUrl: engineCase.databaseUrl }));
+      expect(r).toEqual({ dry: [false, 1, '--apply'], afterDry: true, applied: [true, 'complete'], leftDb: [], mirror: ['purge_mirror', 'complete'], leftMirror: [] });
+    }, 300_000);
+
     test('#3 (postgres): replayPurgesFromDatabase hides the purge\'s derived rows again and appends derived.hidden', async () => {
       const scenario = () => collect<Record<string, unknown>>(resolve => beliefBrain(async b => {
         await seedDerived(b);
