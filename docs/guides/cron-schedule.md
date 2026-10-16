@@ -179,8 +179,9 @@ per-transcript synthesis subagents. The dials:
   explanation after it) gets a "no gradeable claims" tombstone and is not
   sent again while its content is unchanged; a reply that is truncated,
   prose only, or empty and then followed by takes is retried next cycle.
-  To extract a tombstoned page again, edit the page: the tombstone is keyed
-  by its content hash, so the next cycle sends the changed page.
+  There is no per-page force flag: the tombstone is keyed by a hash of the
+  page body, so any edit to the body re-extracts the page on the next cycle,
+  and that is the only way to send one tombstoned page again.
 - `dream.synthesize.attribution_rules` and `dream.propose_takes.attribution_rules`
   (default off) — extra prompt rules from #5425: keep who proposed what and
   later corrections explicit; an assistant-authored judgment is not the
