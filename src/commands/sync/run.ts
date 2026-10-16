@@ -22,7 +22,7 @@ import { automaticSyncSkip, isSyncDisabledConfig } from '../../core/sync-policy.
 import { composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { acknowledgeFailures, unacknowledgedSyncFailures } from '../../core/sync.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
-import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags } from './args.ts';
+import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags, noteRetryFailedDeprecated } from './args.ts';
 import { implyManagedNoPull, refuseManagedForbiddenFlags } from './managed-no-pull.ts';
 import { legacyLedgerRows } from '../../core/persistence/legacy-sync-failures.ts';
 import type { SyncFlags, SyncFanoutFlags } from './args.ts';
@@ -108,6 +108,7 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
   if (args.includes('--acknowledge-managed')) return runAcknowledgeManaged(engine, args);
 
   const flags = parseSyncFlags(args);
+  noteRetryFailedDeprecated(args);
   const { repoPath, dryRun, skipFailed, syncAll, jsonOut, breakLock, forceBreakLock, maxAgeSeconds } = flags;
   let { noEmbed } = flags;
 

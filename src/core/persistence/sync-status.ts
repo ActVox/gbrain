@@ -281,9 +281,9 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
           + ' and names the sync to run; it refuses the rest by name and drops nothing.' }
       : retired ? { ...repairPreview, verify }
       : unfinished || lastError
-        ? { argv: ['gbrain', 'sync', ...resume, ...(lastError ? ['--retry-failed'] : [])], consent: [], actor: 'agent', requires_exclusive: false, verify,
-          why: lastError && selfHealing ? `The last run stopped on a page that only waited on another page of the same sync (${lastError.detail}); --retry-failed (or the same sync) re-freezes it under a fresh request${lastError.root_cause?.request_id ? `, and request ${lastError.root_cause.request_id} is what it waited on` : ''}.`
-            : lastError ? `The last run recorded ${lastError.code} (${lastError.class}); this release holds or retries it, and --retry-failed converts the stopped entry in place without re-freezing the manifest.`
+        ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
+          why: lastError && selfHealing ? `The last run stopped on a page that only waited on another page of the same sync (${lastError.detail}); the same sync re-freezes it under a fresh request${lastError.root_cause?.request_id ? `, and request ${lastError.root_cause.request_id} is what it waited on` : ''}.`
+            : lastError ? `The last run recorded ${lastError.code} (${lastError.class}); the same sync retries it: it holds or re-freezes the stopped entry in place, or rediscovers the source from HEAD.`
             : `The cursor stands at ${header!.index}/${header!.total}; the same command resumes it against the frozen manifest.` }
         : null;
   const [oldest, recovery] = await Promise.all([oldestBlocker(engine, sourceId), recoveryProbe(engine, sourceId)]);

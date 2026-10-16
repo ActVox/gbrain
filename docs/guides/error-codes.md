@@ -2086,7 +2086,7 @@ More: [docs/guides/write-refusals.md#managed_pull_skipped](../../docs/guides/wri
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A managed source refuses --skip-failed and --include-gitignored: managed sync keeps every failed-receipt and ignored-file guard, so the run was refused before anything ran. | --skip-failed would acknowledge a failed receipt instead of retrying it, and --include-gitignored would import files Git ignores; neither has a managed meaning. `detail` names the flag. | Rerun the same gbrain sync command without the named flag; fix a failed file and retry it with --retry-failed, or commit an ignored file to sync it. Run: gbrain sources status --json | agent | `gbrain sources status --json` | 1 | no |
+| A managed source refuses --skip-failed and --include-gitignored: managed sync keeps every failed-receipt and ignored-file guard, so the run was refused before anything ran. | --skip-failed would acknowledge a failed receipt instead of retrying it, and --include-gitignored would import files Git ignores; neither has a managed meaning. `detail` names the flag. | Rerun the same gbrain sync command without the named flag; fix a failed file and the plain sync retries it, or commit an ignored file to sync it. Run: gbrain sources status --json | agent | `gbrain sources status --json` | 1 | no |
 
 More: [docs/guides/write-refusals.md#managed_sync_flag_refused](../../docs/guides/write-refusals.md#managed_sync_flag_refused)
 
@@ -2404,7 +2404,7 @@ More: [docs/guides/windowed-reads.md#page_too_large_for_inline](../../docs/guide
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A file whose exact bytes imported before is now refused by gbrain's frontmatter reader. | The same bytes imported under an earlier gbrain version, so only gbrain changed; with `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, such a file is held and the rest of the sync continues. | Report it as a gbrain bug with the gbrain version, the file and the code; upgrade or pin the last good version, then sync again with --retry-failed. | host_admin | `gbrain doctor --json` | 1 | no |
+| A file whose exact bytes imported before is now refused by gbrain's frontmatter reader. | The same bytes imported under an earlier gbrain version, so only gbrain changed; with `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, such a file is held and the rest of the sync continues. | Report it as a gbrain bug with the gbrain version, the file and the code; upgrade or pin the last good version, then sync again. | host_admin | `gbrain doctor --json` | 1 | no |
 
 ### pasted_wrong_url
 
@@ -3254,7 +3254,7 @@ More: [docs/guides/write-refusals.md#slug_page_mismatch](../../docs/guides/write
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A managed sync of a subdirectory source ran under one slug-root mode while the source pins the other (sources.config.slug_root_mode), so its checkpoint did not advance. | At a subdirectory the two modes give different slugs (git-root keeps the subdirectory prefix, source-root does not), and the pin exists so a later sync never re-namespaces the source; the pages this run wrote already carry its mode. The pin changed after the run was discovered. A source rooted at its repository root never gets this code: both modes give it identical slugs, and its checkpoint keeps the pin it has. Older releases reported this refusal as revision_conflict. | Ask the user which mode the source keeps. To keep the mode the run used, set sources.config.slug_root_mode back to it and run gbrain sync --no-pull --source <id>; the refused checkpoint is retried by itself. To keep the new pin, run gbrain sync --no-pull --source <id> --retry-failed, which discovers the source again under it; the pages the refused run wrote keep their old slugs beside the new ones. Run: gbrain sync status --source '{source_id}' --json | user | `repeat the read that failed` | 1 | no |
+| A managed sync of a subdirectory source ran under one slug-root mode while the source pins the other (sources.config.slug_root_mode), so its checkpoint did not advance. | At a subdirectory the two modes give different slugs (git-root keeps the subdirectory prefix, source-root does not), and the pin exists so a later sync never re-namespaces the source; the pages this run wrote already carry its mode. The pin changed after the run was discovered. A source rooted at its repository root never gets this code: both modes give it identical slugs, and its checkpoint keeps the pin it has. Older releases reported this refusal as revision_conflict. | Ask the user which mode the source keeps. To keep the mode the run used, set sources.config.slug_root_mode back to it and run gbrain sync --no-pull --source <id>; the refused checkpoint is retried by itself. To keep the new pin, preview gbrain repair managed-sync-orphans --source <id> (it lists the refused cursor as slug_mode_refused), apply it with the hash it prints, and run gbrain sync --no-pull --source <id>, which discovers the source again under the pin; the pages the refused run wrote keep their old slugs beside the new ones. Run: gbrain sync status --source '{source_id}' --json | user | `repeat the read that failed` | 1 | no |
 
 ### source_binding_required
 
@@ -3378,7 +3378,7 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Another sync run of the source replaced the managed-sync cursor before this checkpoint published, so the checkpoint had nothing left to publish. | The replacing run (a --retry-failed rediscovery or a newer sync of the source) covers the source from its own discovery; the superseded checkpoint's receipt is a conflict, no managed-sync failure is recorded for it, and the run that awaited it goes on with the winning cursor. A same-run index lag still reports revision_conflict. | Nothing to repair: let the current sync finish. gbrain sync status --source <id> --json shows the cursor that now covers the source. | agent | `repeat the read that failed` | 1 | no |
+| Another sync run of the source replaced the managed-sync cursor before this checkpoint published, so the checkpoint had nothing left to publish. | The replacing run (a rediscovery that retried a recorded failure, or a newer sync of the source) covers the source from its own discovery; the superseded checkpoint's receipt is a conflict, no managed-sync failure is recorded for it, and the run that awaited it goes on with the winning cursor. A same-run index lag still reports revision_conflict. | Nothing to repair: let the current sync finish. gbrain sync status --source <id> --json shows the cursor that now covers the source. | agent | `repeat the read that failed` | 1 | no |
 
 ### sync_drain_lease_held
 
@@ -3440,7 +3440,7 @@ Reasons: `content_directory`.
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported, so the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade or pin the last good version, then run gbrain sync --source <id> --no-pull --retry-failed. | host_admin | `gbrain doctor --json` | 1 | no |
+| Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported, so the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade or pin the last good version, then run gbrain sync --source <id> --no-pull. | host_admin | `gbrain doctor --json` | 1 | no |
 
 ### tail_exposure_approval
 

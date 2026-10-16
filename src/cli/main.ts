@@ -2438,6 +2438,7 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
   // #6340: `sync status` / `sync unblock` read and schedule on the brain's own engine: no watchdog, no serve delegation (a delegate would refuse the subcommand).
   const syncOperator = command === 'sync' && (args[0] === 'status' || args[0] === 'unblock');
   if (command === 'sync' && !syncOperator) {
+    (await import('../commands/sync/args.ts')).noteRetryFailedDeprecated(args);
     try {
       const { resolveSyncHardDeadline } = await import('../commands/sync.ts');
       const res = resolveSyncHardDeadline(args, {

@@ -451,14 +451,17 @@ vars — incident-time escape hatches, not everyday knobs.
    sync only, `gbrain sync --skip-failed` acknowledges a known-bad set.
    **Managed sync never acknowledges or auto-skips failed cursors.** Its
    durable failed receipt remains immutable on ordinary replay. Correct the
-   cause, inspect local `gbrain doctor`, then explicitly retry an idle
-   ordinary-source cursor with the same full/working-tree/filter options:
+   cause, inspect local `gbrain doctor`, then rerun the plain
+   sync for that source with the same full/working-tree/filter options; it
+   retries what the previous invocation recorded:
 
    ```bash
-   gbrain sync --source <source-id> --no-pull --retry-failed
+   gbrain sync --source <source-id> --no-pull
    ```
 
-   This retries with fresh admission; do not add `--skip-failed`. A successful
+   This retries with fresh admission; do not add `--skip-failed`
+   (`--retry-failed` is a deprecated alias of the plain sync on a managed
+   brain). A successful
    full run does not clear a separate failed incremental cursor. Doctor reports
    the remaining run; CLI blocked results exit nonzero and local diagnostics
    include source/path/code/request/run/target. Counts are cumulative for the

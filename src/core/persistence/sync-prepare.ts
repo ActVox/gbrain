@@ -170,7 +170,7 @@ function syncPublicationRefusal(code: RegistryCode, message: string, row: WriteR
 
 /**
  * #6643: the refusal of a request whose run another run replaced: not a failure of its page. Its next step is the
- * status read, never a `--retry-failed` rerun: the replacing run covers the page.
+ * status read, never a retry: the replacing run covers the page.
  */
 function supersededRefusal(message: string, row: WriteRequest, cause: string): OperationError {
   const status = ['gbrain', 'sync', 'status', '--source', row.source_id, '--json'];
@@ -526,7 +526,7 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   if (p.kind !== 'managed_sync_delete' && (!p.processingOptions ||
       ['noEmbed', 'noExtract', 'noSchemaPack'].some(key => typeof p.processingOptions?.[key as keyof SyncProcessingOptions] !== 'boolean'))) {
     throw new OperationError('invalid_params', 'The legacy sync request has no durable processing options.',
-      'Inspect this unchanged request, then use --retry-failed with explicit sync options to rediscover. Unknown embedding and schema consent cannot be inferred from a retry.');
+      'Inspect this unchanged request, then rerun the sync with explicit sync options: it retries the recorded failure by rediscovering. Unknown embedding and schema consent cannot be inferred from a retry.');
   }
   enterClaimStep(clock, 'authority', undefined, 'db');
   await validateSyncAuthority(engine, p.syncAuthority, row.slug);
