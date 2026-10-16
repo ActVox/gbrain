@@ -12,74 +12,48 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.259.0] - 2026-10-16
 
-**Managed sync tells the truth about where it stands, and every held file has a way out (#6712 PR 2).** A managed `gbrain sync` returns `synced` the moment its checkpoint commits: link extraction and planner statistics run after the drain lease is released, and a crash between the two is made up by the next sync. `gbrain sync status` stays fast on large brains and never reads a timed-out probe as "nothing pending". Each of the 14 hold codes now leads an agent to a cleared hold or to one decision sentence for the user, and a hold asks a person only after its safe action failed three times over at least a day. Every `gbrain sync` flag lives in one table, and the `sync.*` config keys are split into tunables, rollback keys and retired keys (five retired keys become `GBRAIN_SYNC_*` environment variables, and doctor names any stored value that stopped applying).
+**Remote Postgres searches take about half the time, typed searches stop paying for JIT compilation, `tokenmax` `query` stops expanding by default, and a new harness proves a performance change leaves every answer the same.** This is LHF wave 2 (GBRA-107), the second low-hanging-fruit wave on search latency, retrieval and cost. Every performance item below was checked against master with the new contract-parity harness: on PGLite and Postgres, every remote response block, `_meta` field and database write is identical; only timings differ.
 
 ### What you'd see
 
 | Situation | Before | Now |
 |---|---|---|
-| a managed sync's checkpoint commits, then link extraction runs for minutes | the drain lease and the governed pass stayed held through the tail | the run returns `synced` at the commit; the tail runs after the lease is released, bounded, and a second sync can take the lease at once |
-| the process dies between the checkpoint commit and the tail | statistics and links for that run were never redone | the checkpoint recorded the tail as owed; the next sync of the source runs it |
-| the tail fails, is cut short or the deadline left no time | silent | the run stays `synced` with one `[gbrain notice sync_tail_degraded]` and its fix (`gbrain extract --stale --source <id>`, or doctor for statistics); `sync --all` prints it per source and puts `tail` and `notices` in each source's JSON entry |
-| a pass admits nothing with no unfinished request | `drain_stalled` / `no_admission`, a pooler warning, and a delegated run's one-time fallback | `drain_stalled` / `no_progress` with the same step and statement; `no_admission` is a retired reason |
-| `gbrain sync status` on a large brain | every heavy read on every call | a plain status skips the terminal summary, blocker list and cursor join (`*_read: not_read`, fix `--detail`); `state`, `reason` and bounded oldest-blocker / recovery probes always run (an unfinished write is `resumable` / `request_pending`, never synced); under 30 ms on a 61k-request fixture |
-| a status whose probe timed out | could read as nothing pending | `state: resumable`, `reason: status_unknown`, never `synced` |
-| a hold, `last_error`, a receipt, `managedWrite` or doctor `sync_failures` | internal codes only | `public_category` (drift, conflict, content_refused, file_missing, permission, storage, config, superseded, transient, defect) beside the unchanged `category` |
-| a managed-sync file `write_gate.external_mode=reject` refuses | its receipt failed at preparation and the whole source stopped `blocked_by_failures` | the file is held `write_gate_rejected` (needs a person) and the rest syncs |
-| `sync status` shows a `purged_content` or `write_gate_rejected` hold | `Unknown code` (systemic, needs a person) | a page hold with its own sentence (unpurge or edit; switch the gate or edit) |
-| you exclude a held file with `sync.exclude` (its printed fix), or multimodal is off for a held image | the hold stayed until some unrelated commit | the next `gbrain sync` releases it, even with nothing new committed |
-| you switch `write_gate.external_mode` or `junk_disposition` back, add `gbrain trust allow` for the file, or `gbrain pages unpurge` its content | n/a | the next `gbrain sync` re-screens the held file and imports it |
-| a hold is re-held three times within an hour | `needs_human` | still the agent's: `needs_human` needs 3 failed attempts and 24 h since it was first held; a file still being edited (`worktree_dirty`) and an image never escalate |
-| `unblock --apply` finds a dirty file still uncommitted, or a repair holds the file again | not counted | counts as a failed attempt toward that rule |
-| a `worktree_dirty` edit nobody touched for a day | n/a | `needs_human`: the fix (`sync unblock --apply` behind `ask_user`) runs once the person commits or restores the file; new bytes in the file hand it back to the agent |
-| a `source_changed` receipt (`sources writer failures`, `write-request`) | `sources reconcile … --preview` for every reason | by recorded reason: two-sided drift → `repair file-drift --slug … --prefer database`; missing file → `repair ghost-pages`; admission race → retry; binding or unsafe target → writer status |
-| many drift receipts | one command per page | `repair file-drift --all-drifted --since <oldest receipt instant>` |
-| `gbrain repair file-drift --since 7d` | unknown flag | narrows `--all-drifted` to recent drift; the preview and apply carry one concrete instant |
-| a managed sync with live pages whose files are gone | silent | `[sync] N live page(s) … have no canonical file`, with the `repair ghost-pages` preview; sync never deletes them |
-| a parked cursor with a non-empty queue and no consumer (#6552) | doctor listed it as parked (info) | doctor `managed_sync_not_moving` fails with the resume sync as its fix |
-| `gbrain doctor --json` | no intervention counts | `sync_soak_counters`: interventions and content decisions per day for 7 days |
-| `gbrain config set sync.hold_cap 200` | Stored and applied | Warns that the key is retired, names `GBRAIN_SYNC_HOLD_CAP`, writes nothing (exit 0) |
-| A brain with `sync.parser_regression=hold` stored | Holds the file | Stops with `sync_parser_regression` until `GBRAIN_SYNC_PARSER_REGRESSION=hold` is set; `gbrain doctor --only sync_config_keys` reports the stored value as unapplied |
-| `gbrain config get sync.bulk` with nothing stored | `Config key not found` (exit 1) | `true`, with `default: sync.bulk is a rollback key ...` on stderr |
-| `gbrain config set sync.foreground_priority false` | Refused as an unknown key without `--force` | Written, with a note that it is a rollback key honored until at least 2027-01-14 |
-| `gbrain sync --no-lanes` while a PGLite serve holds the brain | `Unsupported owner-delegated sync option: --no-lanes` | Runs (PGLite publishes without lanes, so the flag is accepted and not sent) |
-| An older sync CLI sends `explicitProcessing` to a newer serve | Silently dropped | Dropped, with one `[gbrain notice]` naming the field and its window in the serve log and the delegated run's progress lines |
+| A remote MCP `search` against Postgres 30 ms away | p50 1.72 s, about 75 database round trips | p50 0.88 s, about 44 (`query`: 1.88 s to 0.97 s) |
+| A `types: ['email']` search on a 20k-page Postgres brain with JIT on (gbrain's Docker image) | 729 ms, mostly LLVM compile of the type check | 154 ms |
+| `gbrain query` on `tokenmax` | one LLM expansion call per query, p50 about 2 s | no expansion, p50 about 230 ms; retrieval within noise (298 vs 299 of 300) |
+| Search re-scores about 100 candidates by cosine | full embeddings shipped to JavaScript | computed in SQL; scores within 1e-6 of before |
+| An index migration finishes on a PGLite brain | planner statistics left stale (no autovacuum) | the table is analyzed after the build; an existing expression index without statistics gets them at the next maintenance pass |
+| A search run inside a caller's transaction | its `statement_timeout`, `jit` and `enable_seqscan` could leak back | the caller's values are restored |
+
+### Things to watch
+
+- **One disclosed behavior change:** `tokenmax` `query` no longer expands. `gbrain config set search.expansion true` restores it for a brain, `--expand` / `expand: true` per call.
+- **Migrations analyze after index builds.** On a 55k-page brain that adds about 0.3 s (PGLite) to 0.8 s (Postgres) per built index, bounded by a 60 s statement timeout and a 2 s lock timeout on Postgres; a failed ANALYZE warns with the repair and never fails the migration. On Postgres, an expression index already present without statistics is reported by doctor and repaired by `gbrain repair planner-stats --apply`.
+- **Cosine re-scoring falls back to JavaScript** if the SQL statement fails; the response then carries `retrieval.cosine_rescore: "js_fallback"` and the process logs one warning.
+- No schema change.
 
 ### Itemized changes
 
-#### Truthful receipts and fast status
+**Search latency**
+- Typed-search type check (`src/core/ops/search-type-filter.ts`): one statement of per-type `EXISTS` probes over each type's schema-expanded set, with the "Page types in this brain" list only on a miss; runs with JIT off on servers where JIT is on (the engine reads `jit` once) and unprepared, inside the caller's deadline.
+- Cosine re-score in SQL (`src/core/search/cosine-rescore.ts`, `engine-sql/chunks.ts`): JavaScript edge semantics kept (zero-norm and mismatched-dimension vectors score 0, missing rows stay unhydrated); the image space keeps the JavaScript path.
+- Remote round trips (from #6734): one whole-table config read per MCP request (`withRequestConfigSnapshot`; writes read live and drop the snapshot), one settings statement per search transaction with nested restore, concurrent response-meta reads and concurrent entity resolve. Contributed by @troyhoffman-oss.
+- Vector index walk probes chunks and pages by key per ANN row instead of letting the planner materialize the scope's join (from #6747); PGLite and Postgres plan tests. Contributed by @troyhoffman-oss.
+- `tokenmax` expansion off (`MODE_BUNDLES.tokenmax.expansion = false`), with docs, skills, init picker and troubleshooting advice updated and a phrasing guard.
 
-- **Post-checkpoint tail** (`src/core/persistence/sync-tail.ts`, `sync-tail-record.ts`): `recordSyncTail` runs inside the checkpoint's publication transaction; `withSyncTail` runs the owed tail after the outermost drain lease is released (`performManagedBranch`, and `performManagedSync` when it took the lease). The failure clear and the retry-held `writer_yield` check stay in the pass. New fault point `sync:tail_started`, added to the convergence kill loop.
-- **`no_admission` retired**: the stall cause, its `drainNext` / `formatDrainSummary` branches, the transaction-pooler warning, the governor's `finish` window and the delegated `serve_no_admission` fallback are gone; `drain_stalled` keeps a `retired_reasons` tombstone. `drain-step.ts` stays: it still fences an abandoned pass at its next step and labels the `no_progress` stop.
-- **`sync status`** (`sync-status.ts`, `commands/sync/operator.ts`): `state`, `reason` (`SYNC_STATUS_REASONS`), `oldest_blocker`, `recovery`, `checkpoint_blockers_read`, `cursors_read`, `terminal_failures_read`, `--detail`; every existing field keeps its type. One text headline per state; the drain summary says `resumed run <id> and converged` when a drain finishes a run an earlier invocation started.
-- **`public_category`** (`public-category.ts`): a total mapping from `classifyTerminal`'s category and the fault code; `classifyRecordedFault` reads holds, failure rows and run stops as the failed receipt they stand for.
-- AGENTS.md and the sync-unblock runbook: the operator loop checks `*_read` and never reads a `not_read` field as "none".
+**Planner statistics**
+- `buildIndexOnline` prints `building <idx> on ~N rows, then analyzing <table>` and runs a best-effort ANALYZE; an invalid concurrent build names its own rebuild command. `planner-stats.ts` finds expression indexes with no `pg_stats` row; doctor reports `expression_indexes_without_statistics`.
 
-#### Hold exits and escalation
+**Measurement**
+- `bun run bench:parity <base-ref>` (`scripts/bench/contract-parity.ts`): fixture brain built once from the base tree, a clone per pass, stdio-MCP dispatch, side-effect diff, interleaved latency rounds through toxiproxy (`--latency --rtt-ms`) and a pool-contention mode. The refactor-wave-1 bench digest is order-only with scores beside it.
+- Interactive scale ceilings now apply at 20k pages as well as 10k (`scripts/scale/gates.ts`).
 
-- Fault table: `purged_content` and `write_gate_rejected` rows; `source_changed` reasons (`file_database_drift`, `canonical_file_missing`, `pending_import`, `raw_file_changed`, `source_binding_changed`, `unsafe_file_target`) each get their own row. The runbook table is regenerated.
-- Hold escalation: `HOLD_ESCALATE_MS` (24 h) beside `HOLD_ATTEMPTS_NEEDS_HUMAN`; holds record `first_held_at`, `edited_at` and `needs_human_at`. Attempt and edit stamps are guarded on the record they read, so they never overwrite a newer hold.
-- Doctor `managed_sync_not_moving` ages a stranded queue from its oldest admitted request when the cursor has never moved (`SourceMovement.admitted_since`).
-- `src/core/since.ts`: one `--since` parser for `agent logs` and `repair file-drift`.
-- `src/core/persistence/sync-ghosts.ts`: the bounded post-sync ghost count (`SyncResult.ghostPages`).
-- `src/core/persistence/soak-counters.ts`: the counters and doctor's `sync_soak_counters`.
-- Managed sync's freeze screen applies the write gate as preparation does, owner trust allow rules included (`SyncImportScreenInput.writeGateSource`); a discovery with nothing to write releases holds that left the source (`releaseDiscoveredHolds`).
+**Dropped by their own gates (filed in TODOS)**
+- Saved-facts trigram index (from #6734): 5-7x faster lookups, but every index configuration broke the insert-cost gate (batch throughput down 11-45% or 15-30 ms flush stalls).
+- Paraphrased attendance questions: the development split went from 0 to 150 of 150, but 30 independently written held-out questions fired 18 of 90 runs against the preregistered 80% floor.
 
-#### Sync flags and config keys
-
-- `src/core/sync-flags.ts` (new): `SYNC_FLAGS`, every sync flag with its route on the serve and owner hand-offs. `WIRE_BOOL_FLAGS`, `VALUE_FLAGS`, `IGNORED_FLAGS`, the managed pick list (`sync-delegate.ts`), `DELEGATED_SYNC_OPTION_FIELDS` (`sync-ipc.ts`), `SYNC_BOOLEAN_FLAGS` and `SYNC_VALUE_FLAGS` (`sync-wire.ts`) are views of it.
-- `src/core/wire-skew.ts`: a retired wire field names the hand-offs that accept it and its shape; both validators accept, drop and report it, and the resident prints `retiredWireNotice`. `CONFIG_ROLLBACK_WINDOWS` records each rollback key's window (calendar date plus version floor).
-- `src/core/sync-config-keys.ts` (new): `SYNC_TUNABLE_KEYS`, the rollback keys, `RETIRED_SYNC_KEYS` with replacements, `effectiveSyncKey` (for `config get`) and `syncKeySetNotice` (for `config set`).
-- Readers: `readSyncHoldPolicy` reads the hold cap, the escalation thresholds and the parser-regression policy from `GBRAIN_SYNC_*`; `resolveBulkSettings` reads only `GBRAIN_SYNC_BULK_MAX_TXN_MS`.
-- Doctor: `sync_config_keys` (meta) reports stored retired keys as unapplied and lists stored rollback keys with their windows.
-- Help and printed fixes name only live keys: `--no-bulk` help, the `git_held_files` escalation line, the parser-regression hold and stop messages, the `parser_regression` registry entry.
-- Docs: `docs/guides/live-sync.md#sync-config-keys`, `docs/guides/repair.md`, `docs/guides/write-refusals.md`, `docs/guides/troubleshooting.md`; migration note `skills/migrations/v0.60.259.0.md`.
-
-### For contributors
-
-- Crash robot: `consumer:prepared` now counts once per write request, like `consumer:preparing`, and both key on the request row (`FaultDetail.writeId`) rather than the shared request id. A prepared request whose publication was requeued used to count twice, so `caller_bound_replay` counted 4 or 5 and a crash at `#5` could go unreached. Keying on the request id would also have collapsed that schedule's rows, which share one id, from 4 to 2. `test/persistence-crash-robot.test.ts` fails under both the old counting and request-id keying.
-- Retire a sync config key in `RETIRED_SYNC_KEYS`; `test/error-registry-retired.test.ts` then fails on any source line, help text or registered fix that still names it.
-- Tests: `test/sync-flag-table-6712.test.ts`, `test/sync-config-keys-6712.test.ts`, `test/sync-managed-cron-flags-6712.test.ts`.
+Supersedes #6734
+Supersedes #6747
 
 ## [0.60.258.0] - 2026-10-16
 

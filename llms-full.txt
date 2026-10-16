@@ -2283,8 +2283,8 @@ from recurring:
 Confirm the user's mode choice during installation; relay the matrix in
 `INSTALL_FOR_AGENTS.md` Step 3.5. The current command-level expansion and cost
 contract lives in [search modes](docs/guides/search-modes.md), not a second knob
-table here. `query` expands only when the mode says so (on in `tokenmax`;
-`--expand` / `--no-expand` win); `search` and memory verbs never do. Semantic result reuse is disabled.
+table here. `query` never expands by default (`search.expansion true` turns it
+on; `--expand` / `--no-expand` win); `search` and memory verbs never do. Semantic result reuse is disabled.
 
 Read `docs/eval/SEARCH_MODE_METHODOLOGY.md` for eval methodology and
 `docs/eval/METRIC_GLOSSARY.md` for metric definitions. Eval audit records stay in
@@ -2899,13 +2899,13 @@ Estimated downstream input cost of the retrieved payload @ 10K queries/mo:
 >
 >   2) balanced — 12K budget, 25 chunks, reranked.
 >
->   3) tokenmax (recommended with a chat key) — no budget, 50 chunks, reranked,
->      `gbrain query` expands by default. The widest retrieval.
+>   3) tokenmax (recommended with a chat key) — no budget, 50 chunks, reranked.
+>      The widest retrieval.
 >
-> Expansion follows the mode for `gbrain query` only: on in `tokenmax`, off in
-> `balanced` and `conservative`; `--expand` (`expand: true` over MCP) forces it
-> and `--no-expand` (`expand: false`) skips it. `gbrain config set search.expansion false`
-> turns the default off for the brain in any mode. `gbrain search` and the memory
+> `gbrain query` does not expand by default in any mode; `--expand`
+> (`expand: true` over MCP) forces it and `--no-expand` (`expand: false`) skips
+> it. `gbrain config set search.expansion true` turns the default on for the
+> brain in any mode. `gbrain search` and the memory
 > verbs never expand. See [search modes](docs/guides/search-modes.md) for the
 > current contract.
 >
