@@ -27,7 +27,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { readManagedSyncFailures, type ManagedSyncFailure } from './sync-failures.ts';
-import { fenceAutoRepairFor, gitHoldFix, readGitSourceHolds, requestGitHoldRetry, type GitHoldRecord } from './sync-holds.ts';
+import { fenceAutoRepairFor, gitHoldFix, holdEscalation, readGitSourceHolds, recordHoldAttempt, requestGitHoldRetry, type GitHoldRecord } from './sync-holds.ts';
 import type { FenceAutoRepair } from '../fence-repair/hold-fix.ts';
 import { classifySyncFault, HOLD_ATTEMPTS_NEEDS_HUMAN, type SyncFaultVerdict } from './sync-fault-class.ts';
 import { CONTENT_REPAIR_KINDS, contentHoldDisposition, runContentLane, type ContentHoldDisposition } from '../repair/content-lane.ts';
@@ -38,7 +38,8 @@ import { laneFaultInMessage } from './sync-window.ts';
 import { cursorFenceCause, syncKnockOnSql } from './sync-knock-on.ts';
 import { listIncompleteSyncReceipts, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { drainEstimate } from './sync-drain.ts';
-import { resolveManagedSyncContext } from './sync-discovery.ts';
+import { readSyncFile, resolveManagedSyncContext } from './sync-discovery.ts';
+import { sha256 } from './digest.ts';
 
 export interface SyncStatusHold extends SyncFaultVerdict {
   code: string;
@@ -152,11 +153,11 @@ async function retiredCursorStands(engine: BrainEngine, sourceId: string, incarn
  * paragraph for the lane's codes when it knows them; otherwise the hold's own code decides.
  */
 function holdVerdict(record: GitHoldRecord, auto: FenceAutoRepair | undefined): SyncFaultVerdict {
-  const attempts = record.meta.attempts ?? 1;
+  const escalation = holdEscalation(record);
   const content = record.meta.content_repair ? { content_repair: { ...record.meta.content_repair, path: record.path, slug: record.slug } } : {};
   const disposition = contentHoldDisposition(record, auto);
-  if (disposition.action !== 'listed' || disposition.state === 'owner') return classifySyncFault({ code: record.code, attempts, ...content });
-  const verdict = classifySyncFault({ code: record.code, attempts, detail: disposition.reason, ...content });
+  if (disposition.action !== 'listed' || disposition.state === 'owner') return classifySyncFault({ code: record.code, ...escalation, ...content });
+  const verdict = classifySyncFault({ code: record.code, ...escalation, detail: disposition.reason, ...content });
   if (verdict.needs_human) return verdict;
   const reason = disposition.state === 'paid'
     ? `Model repair of ${record.path} waits on a setting only the user changes (${disposition.reason}); the hold's fix names it.`
@@ -348,14 +349,20 @@ function receiptOf(detail: Record<string, unknown> | undefined): Record<string, 
   return Object.keys(rest).length ? rest : undefined;
 }
 
+/** The sha256 of a held file's uncommitted bytes, when they can be read. */
+function workingHashOf(root: string, path: string): { workingHash?: string } {
+  try { const bytes = readSyncFile(root, path); return bytes ? { workingHash: sha256(bytes) } : {}; } catch { return {}; }
+}
+
 /**
  * Performs the safe action for every hold that has one. `retry_when_clean` (`worktree_dirty`): the file is re-screened only
  * when its working-tree bytes are committed at HEAD now; still-dirty files are refused `still_dirty`. `retry`
  * (`preparation_stalled`): scheduled for a re-screen. `repair` (#6377; a hold whose code `CONTENT_REPAIR_HOLD_KINDS` maps to
  * a lane kind, unless `noRepair`): the kind runs on exactly those paths as one bounded apply under its caps (each item bound
  * to the bytes the kind's plan read), each path reports `repaired | held | needs_human | skipped` with the
- * kind's receipt or reason, and repaired paths are scheduled for the re-screen. A hold whose attempts reached
- * `HOLD_ATTEMPTS_NEEDS_HUMAN`, a `concurrent_write` hold, a repair-class hold whose stored state waits on a person, the
+ * kind's receipt or reason, and repaired paths are scheduled for the re-screen. #6712 PR 2: an applied action that leaves
+ * the hold standing (still dirty, a repair that held) counts one failed attempt on the hold. A hold whose attempts reached
+ * `HOLD_ATTEMPTS_NEEDS_HUMAN` over `HOLD_ESCALATE_MS`, a `concurrent_write` hold, a repair-class hold whose stored state waits on a person, the
  * user's spend decision or the owner host, and a repair-class hold no lane kind clears yet are refused by name with their
  * fix. Idempotent: scheduling twice is one re-screen, a repaired file is `already_clean` on the next pass, and a preview
  * writes nothing.
@@ -380,7 +387,11 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
     if (status.needs_human) { refuse(status.human_reason ?? 'needs a person'); continue; }
     if (hold.code === 'worktree_dirty') {
       const committed = context ? headCommittedBytes(context, hold.path) : null;
-      if (!committed) { refuse(context ? 'still_dirty: the working-tree bytes are not committed at HEAD yet' : 'checkout_unreadable: the source checkout could not be resolved'); continue; }
+      if (!committed) {
+        refuse(context ? 'still_dirty: the working-tree bytes are not committed at HEAD yet' : 'checkout_unreadable: the source checkout could not be resolved');
+        if (opts.apply && context) await recordHoldAttempt(engine, { sourceId, incarnation: source.incarnation, path: hold.path, code: hold.code, ...workingHashOf(context.root, hold.path) });
+        continue;
+      }
       applied.push({ path: hold.path, slug: hold.slug, code: hold.code, action: 'retry_when_clean', detail: `committed at HEAD as blob ${committed.oid.slice(0, 12)}; scheduled for a re-screen` });
       continue;
     }
@@ -424,6 +435,7 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
         const message = typeof detail?.message === 'string' ? detail.message : undefined;
         const llmUsd = item?.llm_usd;
         if (outcome === 'repaired') retry.push(hold.path);
+        else if (outcome === 'held') await recordHoldAttempt(engine, { sourceId, incarnation: source.incarnation, path: hold.path, code: hold.code });
         applied.push({ path: hold.path, slug: hold.slug, code: hold.code, action: 'repair',
           detail: outcome === 'repaired' ? `repaired by gbrain repair ${kind}${typeof detail?.tier === 'string' ? ` (${detail.tier})` : ''}; scheduled for a re-screen`
             : `${outcome} (${reason})${message ? `: ${message}` : !item && stop ? `: ${stop.message}` : ''}`,

@@ -110,6 +110,16 @@ function inspect(sourceId: string, why: string, userMessage?: string): Action {
     ...(userMessage ? { user_message: userMessage } : {}), verify: { argv: failuresArgv(sourceId) }, docs: 'docs/guides/troubleshooting.md#terminal-write-failures' };
 }
 
+/**
+ * #6712 PR 2 (L4): the file-drift preview over every page still drifted since `since` (a concrete instant, never an age),
+ * the fix of a group of drift conflicts on several pages; a single page keeps its `--slug` preview.
+ */
+export function driftSinceAction(sourceId: string, since: string): Action {
+  return { argv: ['gbrain', 'repair', 'file-drift', '--source', sourceId, '--all-drifted', '--since', since, '--prefer', 'database'], consent: [], actor: 'agent', requires_exclusive: false,
+    why: `Previews keeping the database copy of every page still drifted since ${since} and writes nothing (it refuses a mix of drift classes and names --class for each); --prefer file previews importing the files instead. Decide with the user, then apply with the printed plan hash.`,
+    verify: { argv: failuresArgv(sourceId) }, docs: 'docs/guides/write-refusals.md#file_database_drift' };
+}
+
 function build(input: TerminalInput): string | null {
   const attempt = (input.error_detail as { attempt?: { consumer_version?: unknown } } | null | undefined)?.attempt?.consumer_version;
   const value = typeof attempt === 'string' ? attempt : input.build ?? null;
@@ -230,22 +240,25 @@ function route(input: TerminalInput): Partial_ {
   if (code === 'source_changed') {
     const known = stringField(detail, 'reason') ?? (input.error_message ? writeFailureDiagnostic(code, input.error_message).reason : null);
     if (!known || known === 'source_changed') return diagnosis(input, code, origin, `The write was refused source_changed with no recorded cause${input.compacted ? ' (its receipt was compacted)' : ''}.`);
+    // #6712 PR 2 (L4): the recorded reason picks the exit; the verdict text is the fault table's row for it.
+    const row = (key: string) => { const v = classifySyncFault({ code, detail: key }); return { class: v.class, safe_actions: v.safe_actions, needs_human: v.needs_human, human_reason: v.human_reason, escalate: escalateOf(key) }; };
     if (known === 'file_database_drift' || known === 'canonical_path_occupied' || known === 'unbound_source') {
-      return { category: 'file_conflict', code, origin: origin ?? known, class: 'page', safe_actions: ['reconcile'], needs_human: true,
-        human_reason: 'The page\'s Git file and its database copy differ; a person chooses which version wins.', escalate: 'always: the file and the database page diverge',
-        action: { argv: ['gbrain', 'sources', 'reconcile', source, input.slug, '--preview'], consent: [], actor: 'agent', requires_exclusive: false,
-          why: 'Previews both versions of the page and writes nothing; apply the resolved preview, then resubmit the write with a new request id.',
+      return { category: 'file_conflict', code, origin: origin ?? known, ...row('file_database_drift'),
+        action: { argv: ['gbrain', 'repair', 'file-drift', '--source', source, '--slug', input.slug, '--prefer', 'database'], consent: [], actor: 'agent', requires_exclusive: false,
+          why: `Previews keeping the database copy of ${input.slug} and rewriting its file, and writes nothing; --prefer file previews importing the file instead. Decide with the user, apply with the printed plan hash, then resubmit the write with a new request id.`,
           verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#file_database_drift' } };
     }
     if (known === 'canonical_file_missing') {
-      return { category: 'canonical_file_missing', code, origin: origin ?? known, class: 'page', safe_actions: ['repair'], needs_human: true,
-        human_reason: 'The page\'s canonical file is gone but the database page is still live (a ghost page); a person chooses to restore the file or remove the page.',
-        escalate: 'always: no sync can import a file that is not there',
+      return { category: 'canonical_file_missing', code, origin: origin ?? known, ...row('canonical_file_missing'),
         action: { argv: ['gbrain', 'repair', 'ghost-pages', '--source', source], consent: [], actor: 'agent', requires_exclusive: false,
           why: 'Previews the live pages whose canonical file is missing and writes nothing; apply only after the user agrees, or restore the file and sync.',
           verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#canonical_file_missing' } };
     }
-    if (known === 'source_binding_changed' || known === 'unsafe_file_target') return diagnosis(input, code, known, `The write was refused source_changed (${known}).`);
+    if (known === 'source_binding_changed' || known === 'unsafe_file_target') {
+      const v = row(known);
+      return { category: 'diagnosis_required', code, origin: known, ...v,
+        action: inspect(source, `The write was refused source_changed (${known}). Writer status shows the source binding and its checkout, read-only.`, v.human_reason) };
+    }
     return fromTable('sync_fault', code, origin ?? known, syncRetry(source, `The file changed under the write (${known}); a sync imports the current bytes.`), known === 'pinned_git_worktree_conflict' ? known : 'source_changed');
   }
   if (code === 'revision_conflict' || code === 'page_identity_changed') {

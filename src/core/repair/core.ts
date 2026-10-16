@@ -91,6 +91,8 @@ export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmb
   remote?: boolean;
   /** `file-drift` (#6643): the side that wins, conflict receipt ids, every still-drifted page, and the one drift class kept. */
   prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string;
+  /** #6712 PR 2 `file-drift`: only pages whose newest drift conflict is at or after this concrete instant (ISO; `--since`, parsed by `since.ts`). */
+  since?: string;
   /** `stuck-recovery`: the version an apply keeps, and the one request a run selects. */
   keep?: 'prior' | 'disk'; requestId?: string;
   /** `receipt-compaction` (#6696 A9): the age (`72h`, `30d`), failures too, and compaction inside the retention window. */
@@ -273,7 +275,7 @@ function writerHeld(error: unknown): error is OperationError {
 export async function runRepair(ctx: OperationContext, handler: RepairHandler, scope: RepairScope,
   opts: { apply: boolean; limit?: number; embeddingModel?: string; sourceFlag?: string; embed?: boolean; applyArgs?: string[];
     explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[]; slugs?: string[]; noLlm?: boolean;
-    prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string;
+    prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string;
     keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean;
     spec?: Pick<RepairKindSpec, 'explicit_only' | 'consent' | 'spends'>; maxLlmUsd?: number; deadline?: number; now?: () => number;
     /** Test seam: who publishes this run's admissions (default: this process's consumer, else a live full one on this host). */
@@ -294,7 +296,7 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
     ...(opts.slugs?.length ? { slugs: opts.slugs } : {}), ...(opts.noLlm ? { noLlm: true } : {}), ...(opts.maxLlmUsd !== undefined ? { maxLlmUsd: opts.maxLlmUsd } : {}),
     ...(opts.deadline !== undefined ? { deadline: opts.deadline } : {}), remote: ctx.remote !== false,
     ...(opts.prefer ? { prefer: opts.prefer } : {}), ...(opts.requests?.length ? { requests: opts.requests } : {}),
-    ...(opts.allDrifted ? { allDrifted: true } : {}), ...(opts.driftClass ? { driftClass: opts.driftClass } : {}),
+    ...(opts.allDrifted ? { allDrifted: true } : {}), ...(opts.driftClass ? { driftClass: opts.driftClass } : {}), ...(opts.since ? { since: opts.since } : {}),
     ...(opts.keep ? { keep: opts.keep } : {}), ...(opts.requestId ? { requestId: opts.requestId } : {}),
     ...(opts.olderThan ? { olderThan: opts.olderThan } : {}), ...(opts.includeFailures ? { includeFailures: true } : {}), ...(opts.force ? { force: true } : {}) };
   const plan = await handler.plan(ctx.engine, scope, resumed, planOpts);
@@ -320,7 +322,7 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
       + `${opts.requestId ? ` --request-id ${opts.requestId}` : ''}${opts.keep ? ` --keep ${opts.keep}` : ''}`
       + `${[...(opts.only ?? []).flatMap(path => ['--only', path]), ...(opts.skip ?? []).flatMap(path => ['--skip', path]),
         ...(opts.slugs ?? []).flatMap(slug => ['--slug', slug]), ...(opts.requests ?? []).flatMap(id => ['--request', id]),
-        ...(opts.allDrifted ? ['--all-drifted'] : []), ...(opts.driftClass ? ['--class', opts.driftClass] : []),
+        ...(opts.allDrifted ? ['--all-drifted'] : []), ...(opts.driftClass ? ['--class', opts.driftClass] : []), ...(opts.since ? ['--since', opts.since] : []),
         ...(opts.prefer ? ['--prefer', opts.prefer] : [])].map(arg => ` ${shellQuote([arg])}`).join('')}`
       + `${opts.includeAmbiguous ? ' --include-ambiguous' : ''}${llm && opts.noLlm ? ' --no-llm' : ''}${llm && opts.maxLlmUsd !== undefined ? ` --max-usd ${opts.maxLlmUsd}` : ''}`
       + ` --apply${plan.preview_hash ? ` --expect ${plan.preview_hash}` : ''}${spec?.consent === 'destructive' ? ' --yes' : ''}`,

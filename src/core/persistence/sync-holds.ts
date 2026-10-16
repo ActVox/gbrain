@@ -42,13 +42,13 @@ import { FENCE_VERSION } from '../fence-repair/refusal.ts';
 import { fenceHoldFix, fenceHoldLocation, fencePreviewArgv, readFenceAutoRepair, type FenceAutoRepair, type FenceHoldLocation } from '../fence-repair/hold-fix.ts';
 import { contentHoldDocs, contentHoldFix } from '../content-repair/hold-fix.ts';
 import { STRUCTURED_WRITE_ADVICE, type FencesNormalized } from '../fence-repair/report.ts';
-import type { SyncRename } from './sync-discovery.ts';
+import type { SyncDiscovery, SyncRename } from './sync-discovery.ts';
 import { isCodeFilePath, isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { VERSION } from '../../version.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../chunkers/recursive.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
-import { HOLD_ATTEMPTS_NEEDS_HUMAN } from './sync-fault-class.ts';
+import { HOLD_ATTEMPTS_NEEDS_HUMAN, HOLD_ESCALATE_MS } from './sync-fault-class.ts';
 
 export const GIT_HOLD_OP = 'sync-hold';
 export const GIT_HOLD_SUMMARY_OP = 'sync-hold-summary';
@@ -110,8 +110,14 @@ export interface GitHoldMeta {
   expected_revision?: string;
   /** #6340 `worktree_dirty`: sha256 of the uncommitted working-tree bytes the hold protected (`blob_oid` is the pinned blob). */
   working_hash?: string;
-  /** #6340: how many times this path was held again with the same code since the hold was first written; at `HOLD_ATTEMPTS_NEEDS_HUMAN` the page keeps moving. */
+  /** #6340: how many times this path was held again with the same code since the hold was first written, plus (#6712 PR 2) the hold's safe actions that ran and failed; at `HOLD_ATTEMPTS_NEEDS_HUMAN` over `HOLD_ESCALATE_MS` the page keeps moving. */
   attempts?: number;
+  /** #6712 PR 2: when this path was first held with its code (attempts count from it); `held_at` resets when the held bytes change. */
+  first_held_at?: string;
+  /** #6712 PR 2 `worktree_dirty`: when the uncommitted bytes last changed (`working_hash` moved); a recent edit is a live editor, never escalated. */
+  edited_at?: string;
+  /** #6712 PR 2: when the soak sweep counted this hold as needing a person (`soak-counters.ts`); kept across re-holds with the same code, so it counts once. */
+  needs_human_at?: string;
   /** #6188: the last fence repair attempt (repair kind or maintenance phase) that left this hold in place; location and reason only. */
   fence_repair?: FenceHoldRepairState;
   /** #6377 `frontmatter_slug_conflict`: the content-repair lane's last verdict or attempt on this hold; codes and slugs only. */
@@ -268,7 +274,7 @@ export async function writeGitHold(tx: Exec, input: Omit<GitHoldRecord, 'version
   const sameBytes = existing && existing.code === input.code && existing.upstream_version === input.upstream_version;
   const kept = sameBytes ? { ...(existing.meta.fence_repair && !input.meta.fence_repair ? { fence_repair: existing.meta.fence_repair } : {}),
     ...(existing.meta.content_repair && !input.meta.content_repair ? { content_repair: existing.meta.content_repair } : {}) } : {};
-  const record: GitHoldRecord = { version: 1, ...input, meta: { ...kept, ...input.meta, attempts },
+  const record: GitHoldRecord = { version: 1, ...input, meta: { ...kept, ...input.meta, attempts, ...escalationStamps(existing, input, now) },
     held_at: existing && existing.upstream_version === input.upstream_version && existing.code === input.code ? existing.held_at : now, updated_at: now };
   await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2,$3::text::jsonb)
     ON CONFLICT(op,fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys,updated_at=now()`,
@@ -282,6 +288,41 @@ export async function writeGitHold(tx: Exec, input: Omit<GitHoldRecord, 'version
   }
   await adjustSummary(tx, input.source_id, input.incarnation, 1, weightsOf(input));
   return 'inserted';
+}
+
+/** #6712 PR 2: the first-held time of the code's attempt count, the soak count's stamp, and a `worktree_dirty` hold's last edit (a changed `working_hash`). */
+function escalationStamps(existing: GitHoldRecord | null, input: Pick<GitHoldRecord, 'code' | 'meta'>, now: string): Pick<GitHoldMeta, 'first_held_at' | 'edited_at' | 'needs_human_at'> {
+  const same = existing?.code === input.code ? existing : null;
+  const kept = { first_held_at: same ? same.meta.first_held_at ?? same.held_at : now, ...(same?.meta.needs_human_at ? { needs_human_at: same.meta.needs_human_at } : {}) };
+  if (input.code !== 'worktree_dirty') return kept;
+  return { ...kept, edited_at: same && same.meta.working_hash === input.meta.working_hash ? same.meta.edited_at ?? same.held_at : now };
+}
+
+/**
+ * #6712 PR 2 (L4): what escalation reads from a hold: its failed attempts, how long since it was first held with its code,
+ * and whether a `worktree_dirty` hold's uncommitted bytes changed within `HOLD_ESCALATE_MS` (someone is still editing).
+ */
+export function holdEscalation(record: Pick<GitHoldRecord, 'code' | 'meta' | 'held_at'>, now = Date.now()): { attempts: number; held_for_ms: number; live_editor: boolean } {
+  const since = (at: string | undefined) => Math.max(0, now - Date.parse(at ?? record.held_at));
+  return { attempts: record.meta.attempts ?? 1, held_for_ms: since(record.meta.first_held_at),
+    live_editor: record.code === 'worktree_dirty' && since(record.meta.edited_at) < HOLD_ESCALATE_MS };
+}
+
+/**
+ * #6712 PR 2 (L4): a hold's safe action ran and the hold stands (`sync unblock --apply` found the edit still uncommitted, or
+ * its repair left the file held): one more failed attempt, and for `worktree_dirty` the uncommitted bytes it saw now
+ * (`workingHash`), so a changed edit restarts the live-editor clock. A no-op when the path holds another code by now.
+ */
+export async function recordHoldAttempt(tx: Exec, input: { sourceId: string; incarnation: string; path: string; code: GitHoldCode; workingHash?: string }): Promise<boolean> {
+  await lockSummary(tx, input.sourceId, input.incarnation);
+  const existing = await readRow(tx, input.sourceId, input.incarnation, input.path);
+  if (!existing || existing.code !== input.code) return false;
+  const now = new Date().toISOString();
+  const edited = input.workingHash !== undefined && input.workingHash !== existing.meta.working_hash ? { working_hash: input.workingHash, edited_at: now } : {};
+  const record: GitHoldRecord = { ...existing, meta: { ...existing.meta, ...escalationStamps(existing, existing, now), ...edited, attempts: (existing.meta.attempts ?? 1) + 1 }, updated_at: now };
+  await tx.executeRaw('UPDATE op_checkpoints SET completed_keys=$3::text::jsonb, updated_at=now() WHERE op=$1 AND fingerprint=$2',
+    [GIT_HOLD_OP, gitHoldFingerprint(input.sourceId, input.incarnation, input.path), JSON.stringify([record])]);
+  return true;
 }
 
 /**
@@ -689,6 +730,18 @@ export async function clearGitHoldRetryPaths(engine: Exec, sourceId: string, inc
       (SELECT COALESCE(jsonb_agg(p),'[]'::jsonb) FROM jsonb_array_elements_text(completed_keys->0->'paths') p WHERE NOT (p = ANY($3::text[])))),
       updated_at=now() WHERE op=$1 AND fingerprint=$2`, [GIT_HOLD_RETRY_OP, fingerprint, taken]);
   await engine.executeRaw(`DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 AND jsonb_array_length(completed_keys->0->'paths')=0`, [GIT_HOLD_RETRY_OP, fingerprint]);
+}
+
+/**
+ * #6712 PR 2: a discovery that found nothing to write still releases the held paths that left the source (excluded by
+ * sync.exclude, an image while multimodal embedding is off) and consumes the re-screens it took, inside the run's
+ * freshness write. Before, those waited for the next commit, so a printed exit (exclude the file, then sync) did not
+ * clear its hold.
+ */
+export async function releaseDiscoveredHolds(tx: Exec, discovery: Pick<SyncDiscovery, 'sourceId' | 'incarnation' | 'discoveredAt' | 'releasedHolds' | 'retryTaken'>): Promise<void> {
+  const observedAt = discovery.discoveredAt ?? new Date().toISOString();
+  for (const path of discovery.releasedHolds ?? []) await clearGitHold(tx, { sourceId: discovery.sourceId, incarnation: discovery.incarnation, path, observedAt });
+  await clearGitHoldRetryPaths(tx, discovery.sourceId, discovery.incarnation, discovery.retryTaken ?? []);
 }
 
 export interface SyncHoldPolicy {
