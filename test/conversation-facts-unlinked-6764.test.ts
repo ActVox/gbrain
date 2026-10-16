@@ -8,9 +8,10 @@
  * `facts.entity_inference` kill switch stops it, an extractor-named entity is
  * never overridden, and a private entity page never links a world fact.
  * (2) doctor `unlinked_facts` labels those rows origin `conversation`,
- * counts them apart from fence rows, and for them prescribes a bounded,
- * source-qualified, capped re-extraction (preview first) instead of
- * `gbrain facts relink`, which never examines derived rows. (3) a
+ * counts them apart from fence rows, and for rows the free conversation
+ * relink could not resolve prescribes a bounded, source-qualified, capped
+ * re-extraction (preview first) instead of plain `gbrain facts relink`,
+ * which never examines derived rows. (3) a
  * `remember --replaces` aimed at a conversation-derived fact names
  * re-extraction instead of forget-then-remember.
  * Regression: the bulk path skipping inference; the doctor mislabeling the
@@ -114,19 +115,26 @@ describe('#6764 unlinked_facts names conversation rows and their real fix', () =
          FROM generate_series(1, $3::int) AS g`, [sourceId, slug, count]);
   }
 
-  test('origin conversation, counted apart from fence rows, with a capped re-extraction preview for this source only', async () => {
+  /** #6764 d1b: free relink tried every derived row and could not resolve it. */
+  async function memoUnresolved() {
+    await engine.executeRaw(`INSERT INTO fact_relink_attempts (source_id, fact_id, outcome, reason, tier)
+      SELECT source_id, id, 'conversation_unresolved', 'no_mention', 'mention' FROM facts WHERE source LIKE 'cli:extract-conversation-facts%'`);
+  }
+
+  test('origin conversation, counted apart from fence rows; rows free relink could not resolve get a capped re-extraction for this source only', async () => {
     await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('other', 'other') ON CONFLICT DO NOTHING`);
     await seedDerived('meetings/a', 6);
     await seedDerived('meetings/b', 3);
     await seedDerived('meetings/elsewhere', 4, 'other');
     await engine.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, source, row_num, source_markdown_slug, created_at, valid_from)
       VALUES ('default', NULL, 'fence fact', 'mcp:put_page', 1, 'notes/n1', now(), now())`);
+    await memoUnresolved();
     const stats = await unlinkedFactsStats(engine, ['default']);
     expect(stats!.window).toMatchObject({ unlinked: 10, fence_owned: 1, conversation: 9 });
     expect(stats!.origins).toEqual([{ origin: 'conversation', unlinked: 9 }, { origin: 'mcp:put_page', unlinked: 1 }]);
     const verdict = unlinkedFactsVerdict(stats);
     expect(verdict.message).toContain('9 from conversation extraction');
-    expect(verdict.details).toMatchObject({ conversation: { source_id: 'default', pages: 2, slugs: ['meetings/a', 'meetings/b'] } });
+    expect(verdict.details).toMatchObject({ conversation: { source_id: 'default', fix: 'reextract', pages: 2, slugs: ['meetings/a', 'meetings/b'] } });
     const fix = verdict.fix!;
     expect(fix).toMatchObject({ consent: ['paid', 'egress'], actor: 'agent', ask_user: true, verify: { argv: ['gbrain', 'doctor', '--only', 'unlinked_facts', '--json'] } });
     expect(fix.argv).toEqual(['gbrain', 'extract-conversation-facts', '--source-id', 'default', '--slugs', 'meetings/a,meetings/b', '--force', '--max-cost-usd', '1']);
@@ -136,6 +144,7 @@ describe('#6764 unlinked_facts names conversation rows and their real fix', () =
   });
 
   test('at most 50 slugs in the argv; the total stays in details', async () => {
+    // Untried rows: the free relink names the pages (test/conversation-relink-6764.test.ts covers that envelope).
     for (let i = 0; i < 55; i++) await seedDerived(`meetings/m${String(i).padStart(2, '0')}`, 1);
     const verdict = unlinkedFactsVerdict(await unlinkedFactsStats(engine, ['default']));
     const slugs = verdict.fix!.argv![verdict.fix!.argv!.indexOf('--slugs') + 1]!.split(',');
@@ -171,9 +180,10 @@ describe('#6764 fixture: the conversation fix envelope clears the finding', () =
   beforeEach(async () => { await resetPgliteState(engine); await seedPages(engine); });
 
   test('render, run the free preview, run the capped argv with the extractor stubbed, verify cleared', async () => {
-    // An older run stored the fact with no entity (no hints, no inference).
-    await engine.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, source, context, row_num, source_markdown_slug, created_at, valid_from)
-      VALUES ('default', NULL, 'Alice Example signed the lease renewal', 'cli:extract-conversation-facts', 'from ${MEETING}', 0, $1, now(), now())`, [MEETING]);
+    // An older run stored the fact with no entity (no hints, no inference), and free relink could not resolve it then.
+    const [old] = await engine.executeRaw<{ id: string }>(`INSERT INTO facts (source_id, entity_slug, fact, source, context, row_num, source_markdown_slug, created_at, valid_from)
+      VALUES ('default', NULL, 'Alice Example signed the lease renewal', 'cli:extract-conversation-facts', 'from ${MEETING}', 0, $1, now(), now()) RETURNING id`, [MEETING]);
+    await engine.executeRaw(`INSERT INTO fact_relink_attempts (source_id, fact_id, outcome, reason, tier) VALUES ('default', $1, 'conversation_unresolved', 'no_mention', 'mention')`, [old!.id]);
     const before = unlinkedFactsVerdict(await unlinkedFactsStats(engine, ['default']));
     const fix = before.fix!;
     expect(renderAction(fix as never, cliRenderContext())).toMatchObject({ next: 'ask_user', preview_argv: fix.preview_argv });

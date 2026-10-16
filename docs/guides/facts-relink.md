@@ -115,6 +115,25 @@ gbrain forget <fact-id>
 gbrain remember "<the fact>" --provenance "<source>" --entity <slug>
 ```
 
+## Conversation facts
+
+Facts `gbrain extract-conversation-facts` stored without an entity belong to
+their conversation page, so plain `gbrain facts relink` never examines them.
+Link them for free, with the same rule as write-time inference (exactly one
+entity page named in full, no competing name, no model call):
+
+```bash
+gbrain facts relink --conversation --dry-run          # what would link; writes nothing
+gbrain facts relink --conversation                    # the 50 pages with the most untried unlinked facts
+gbrain facts relink --conversation --slugs a,b        # exactly these pages
+```
+
+A linked fact stays on its conversation page with the entity set and the note
+`entity relinked from mention`. A fact no entity can be proven for is recorded,
+so doctor `unlinked_facts` then offers a paid re-extraction of its page
+(`gbrain extract-conversation-facts --slugs … --force`, previewed with
+`--dry-run`, capped with `--max-cost-usd`) instead of this relink again.
+
 ## Why a fact was not linked
 
 | Reason | Remembered | What to do |

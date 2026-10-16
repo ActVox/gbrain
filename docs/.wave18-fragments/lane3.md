@@ -95,3 +95,21 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### Notes
 
 - New exported symbols (no registry rows needed): `CONVERSATION_FIX_SLUGS` (doctor/checks/unlinked-facts.ts), `inferConversationSubjects` (core/facts/conversation-subject-infer.ts). The `replaces_cross_page_derived` suggestion lives in core/persistence/verb-errors.ts beside the existing `replaces_cross_page` text; no error-registry code was added.
+
+## #6764 (d1b, own commit: drop it if Garry picks d1a) free conversation relink as the doctor's primary fix
+
+### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
+
+```ts
+  { since: '<WAVE>', text: 'New `gbrain facts relink --conversation` links the conversation extractor\'s facts that were stored without an entity, for free: a fact naming exactly one entity page in full is linked (context note `entity relinked from mention`), one write per page (a receipted coordinator request on a managed brain), no model call (#6764). Doctor `unlinked_facts` now prescribes it first for those rows (consent none, the agent runs it, preview `--dry-run`); a fact it cannot resolve is recorded (`fact_relink_attempts` outcome `conversation_unresolved`), and only then does the doctor offer the paid, capped re-extraction of its page.' },
+```
+
+### CHANGELOG.md (wave entry, Fixed; same bullet as the #6764 line above, extended)
+
+- `gbrain facts relink --conversation` links existing conversation facts to the people and companies they name, for free; doctor offers it before any paid re-extraction (#6764).
+
+### Notes
+
+- New maintenance intent kind `managed_maintenance_conversation_relink`, dispatched in `src/core/persistence/prepared-maintenance.ts` (one line, not a listed registry). New canonical-writer census row for `src/core/facts/conversation-relink.ts` in `docs/architecture/canonical-writers.tsv` (ceiling 1, boundary coordinator).
+- Module sizes: `src/commands/facts.ts` 201 lines, `src/core/facts/conversation-relink.ts` 187 (new), `src/core/persistence/prepared-maintenance.ts` 590; none is listed in the TSV and all are under the new-file cap. No TSV change.
+- Dropping this commit (d1a) restores the commit before it exactly: doctor prescribes the paid re-extraction for every unlinked conversation row. The commit also edits that commit's own tests (seeding a `conversation_unresolved` memo so they still exercise the paid envelope).
