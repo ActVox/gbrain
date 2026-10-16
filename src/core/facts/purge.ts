@@ -46,7 +46,7 @@ import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { carriesClaimSql, claimNeedles, purgeCompletion, verifyFactPurge, type PurgeReceipt, type StoreCount } from './purge-verify.ts';
 import { noteBelief, withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
-import { appendPurgeMirror } from '../belief/purge-mirror.ts';
+import { appendPurgeCommitted, appendPurgeIntent } from '../belief/purge-mirror.ts';
 import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, redactCarryingFields, redactPurgedKeys, registerLiveCarriers, sourceHasBeliefEvents,
   type LedgerPurgeReport } from '../belief/purge.ts';
 
@@ -397,7 +397,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
           targets: derivedTargets, truncated: walk === 'truncated' }),
         derived_walk: walk }), current.id, p.sourceId) : null;
       counts.belief_events = ledger ? ledger.purged_events + ledger.redacted_fields.length : 0;
-      appendPurgeMirror({ kind: 'intent', request: admitted.id, request_id: p.requestId, source_id: p.sourceId, source_incarnation: source.incarnation, scope: 'fact',
+      appendPurgeIntent({ request: admitted.id, request_id: p.requestId, source_id: p.sourceId, source_incarnation: source.incarnation, scope: 'fact',
         purge_epoch: epoch, facts: [{ fact_hash: current.fact_hash, visibility: current.visibility, subject: plan.subject }], takes: [], lifetimes: [] });
       return completeWrite(tx, admitted, 'committed', { purge: { fact_id: p.id, hash8: token, fact_hash: current.fact_hash, subject: plan.subject,
         visibility: current.visibility, removed: counts, derived: { ...derivedHidden, truncated: plan.derived.truncated }, pages: rewritten.length,
@@ -411,7 +411,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
     await rebuildPendingPageProjections(ctx.engine, 100, { pages: { sourceId: p.sourceId, slugs: slugs.slice(start, start + 100) } }).catch(() => undefined);
   }
   if (row.state !== 'committed') return { ...(row.outcome ?? {}), request_id: row.request_id, state: row.state, error: row.error_code };
-  appendPurgeMirror({ kind: 'committed', request: row.id });
+  appendPurgeCommitted(row.id);
   if (beliefReport.appended || ledger?.derived_hidden) await markBeliefCommits(ctx.engine, [row.id]).catch(() => undefined);
   const receipt: PurgeReceipt = await verifyFactPurge(ctx.engine, { target, plan: committedPlan, dryRun: false, removed: counts, prose,
     vacuum: params.vacuum === true, ledger });

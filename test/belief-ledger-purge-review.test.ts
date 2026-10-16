@@ -5,6 +5,9 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { purgeMirrorPath } from '../src/core/belief/purge-mirror.ts';
+import { CODES } from '../src/core/error-registry.ts';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
@@ -179,6 +182,29 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         } finally { proto.executeRaw = original; }
       }));
       expect(r).toEqual({ retention: 0, purge: 1 });
+    }, 240_000);
+    test('#22: an unwritable purge mirror refuses the purge with a typed error, with or without a ledger', async () => {
+      const run = (enable: boolean) => collect<Record<string, unknown>>(report => beliefBrain(async b => {
+        await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme sells widgets'] }));
+        mkdirSync(purgeMirrorPath(), { recursive: true });
+        const error = await purgeFact(b, X).then(() => null, (e: { code?: string }) => e.code ?? 'untyped');
+        const live = (await b.engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM facts WHERE source_id = $1 AND fact = $2 AND expired_at IS NULL', [b.sourceId, X]))[0]!.n;
+        report({ error, live, registered: 'purge_mirror_unwritable' in CODES });
+      }, { managed: true, enable, databaseUrl: engineCase.databaseUrl }));
+      expect({ ledger: await run(true), none: await run(false) }).toEqual({
+        ledger: { error: 'purge_mirror_unwritable', live: 1, registered: true }, none: { error: 'purge_mirror_unwritable', live: 1, registered: true } });
+    }, 240_000);
+
+    test('#23: a page purge\'s committed mirror line is written after the commit even when no op handler finishes the reply', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        await b.put('notes/vault-example', beliefPage({ facts: [X] }));
+        const snapshot = await b.engine.readPageSnapshot('notes/vault-example', { sourceId: b.sourceId });
+        const done = await b.op('delete_page', { slug: 'notes/vault-example', purge: true, expected_revision: snapshot!.revision });
+        const request = await requestOf(b, String(done.request_id));
+        const lines = readFileSync(purgeMirrorPath(), 'utf8').trim().split('\n').map(l => JSON.parse(l) as { kind: string; request: string });
+        report({ state: done.state, kinds: lines.filter(l => l.request === request).map(l => l.kind) });
+      }));
+      expect(r).toEqual({ state: 'committed', kinds: ['intent', 'committed'] });
     }, 240_000);
   });
 }

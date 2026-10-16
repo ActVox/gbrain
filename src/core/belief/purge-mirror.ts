@@ -26,6 +26,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { configDir } from '../config.ts';
+import { opError } from '../ops/contract.ts';
 import { COVERAGE_KEY, factKey, pageKey, slugRef } from './keys.ts';
 import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
 import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, pageLifetimesOf, pagePurgeClaims, redactCarryingFields, redactPurgedKeys, registerLiveCarriers } from './purge.ts';
@@ -47,8 +48,7 @@ export type PurgeMirrorLine = PurgeMirrorIntent | { kind: 'committed'; request: 
 
 export const purgeMirrorPath = (home = configDir()) => join(home, PURGE_MIRROR_FILE);
 
-/** Appends one line and fsyncs it (file 0600). Called before the purge commits (intent) and after (committed). */
-export function appendPurgeMirror(line: Omit<PurgeMirrorIntent, 'recorded_at'> | { kind: 'committed'; request: string }, home = configDir()): void {
+function writeMirrorLine(line: Record<string, unknown>, home: string): void {
   const path = purgeMirrorPath(home);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const fd = openSync(path, 'a', 0o600);
@@ -57,6 +57,24 @@ export function appendPurgeMirror(line: Omit<PurgeMirrorIntent, 'recorded_at'> |
     fsyncSync(fd);
   } finally { closeSync(fd); }
   chmodSync(path, 0o600);
+}
+
+/**
+ * Appends and fsyncs the `intent` line inside the purge transaction, before it commits. A mirror that cannot be
+ * written refuses the purge with the typed `purge_mirror_unwritable` (review #22): committing without the line would
+ * let a later restore bring the content back silently.
+ */
+export function appendPurgeIntent(line: Omit<PurgeMirrorIntent, 'recorded_at' | 'kind'>, home = configDir()): void {
+  try { writeMirrorLine({ kind: 'intent', ...line }, home); }
+  catch (error) {
+    throw opError('purge_mirror_unwritable', 'This purge could not record itself in the purge mirror, so nothing was purged.',
+      `${purgeMirrorPath(home)} could not be written (${(error as NodeJS.ErrnoException).code ?? (error as Error).message}). Make it a writable file owned by the brain's user (mode 0600), then run the purge again with a new request_id.`);
+  }
+}
+
+/** Appends the `committed` line after the purge committed (the coordinator's after-commit step for a page purge). Best effort: a missing line reads as `unverified` at restore. */
+export function appendPurgeCommitted(request: string, home = configDir()): boolean {
+  try { writeMirrorLine({ kind: 'committed', request }, home); return true; } catch { return false; }
 }
 
 /**

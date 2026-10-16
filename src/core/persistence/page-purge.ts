@@ -42,7 +42,7 @@ import { derivedRowsFrom, hideDerivedRows } from '../facts/derivation-inputs.ts'
 import { contentHash } from '../utils.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
 import { noteBelief } from '../belief/ledger.ts';
-import { appendPurgeMirror } from '../belief/purge-mirror.ts';
+import { appendPurgeIntent } from '../belief/purge-mirror.ts';
 import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, pageLifetimesOf, pagePurgeClaims, redactCarryingFields, redactPurgedKeys, registerLiveCarriers,
   sourceHasBeliefEvents, type LedgerPurgeReport } from '../belief/purge.ts';
 
@@ -246,14 +246,14 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     derived_walk: walk })) : null;
   if (ledger) removed.belief_events = ledger.purged_events + ledger.redacted_fields.length;
   await tx.deletePage(slug, { sourceId });
-  if (!retention) appendPurgeMirror({ kind: 'intent', request: row.id, request_id: row.request_id, source_id: sourceId, source_incarnation: row.source_incarnation,
+  if (!retention) appendPurgeIntent({ request: row.id, request_id: row.request_id, source_id: sourceId, source_incarnation: row.source_incarnation,
     scope: 'page', slug, purge_epoch: epoch, content_hashes: [...hashes], facts: mirrorFacts, takes: mirrorTakes, lifetimes });
   const key = `${sourceId}:${row.request_id}`;
   purgeContext.delete(key);
   purgeContext.set(key, { needles, factIds, pageId: page.id, paths, ledgerClaims: inventory.claims, ledger });
   while (purgeContext.size > PURGE_CONTEXT_LIMIT) purgeContext.delete(purgeContext.keys().next().value!);
   return { status: 'purged', slug, source_id: sourceId, residuals: PURGE_RESIDUALS, journal_sweep: journalSweep, ...(retention ? { retention: true } : {}),
-    purge: { content_hash8: storedHash?.slice(0, 8) ?? null, tombstoned: hashes.size > 0, content_hashes_tombstoned: hashes.size, removed, ...(retention ? {} : { mirror_request: row.id }),
+    purge: { content_hash8: storedHash?.slice(0, 8) ?? null, tombstoned: hashes.size > 0, content_hashes_tombstoned: hashes.size, removed,
       ...(ledger ? { ledger: { purged_events: ledger.purged_events, redacted_fields: ledger.redacted_fields.length, live_carriers: ledger.live_carriers.length, derived_hidden: ledger.derived_hidden, derived_walk: ledger.derived_walk } } : {}),
       derived: { ...derived, truncated: derivedFrom.truncated },
       blobs: files.map(f => f.storage_path).filter(Boolean) } };
@@ -269,8 +269,7 @@ export async function finishPagePurge(ctx: Pick<OperationContext, 'engine' | 'co
   // A same-id replay in this process returns what the purge call returned (blobs and verification are not re-run).
   const finished = purgeReceipts.get(key);
   if (finished) return { ...result, ...finished };
-  const purge = (result.purge ?? {}) as { blobs?: string[]; removed?: Record<string, number>; mirror_request?: string };
-  if (purge.mirror_request) appendPurgeMirror({ kind: 'committed', request: purge.mirror_request });
+  const purge = (result.purge ?? {}) as { blobs?: string[]; removed?: Record<string, number> };
   const remaining: string[] = [];
   if (purge.blobs?.length) {
     try {
