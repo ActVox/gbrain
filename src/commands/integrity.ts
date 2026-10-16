@@ -30,7 +30,6 @@ import { dirname } from 'path';
 import { loadConfig, toEngineConfig, gbrainPath } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
 import type { BrainEngine } from '../core/engine.ts';
-import * as db from '../core/db.ts';
 import { BrainWriter } from '../core/output/writer.ts';
 import {
   getDefaultRegistry,
@@ -170,7 +169,7 @@ export interface IntegritySkippedPage { slug: string; source_id: string; reason:
  * with fence state and line numbers carried across blocks, so it gets the
  * hits the same text held as one string gets.
  */
-export async function integrityHitsOf(engine: BrainEngine,
+async function integrityHitsOf(engine: BrainEngine,
   page: { id: number; slug: string; source_id: string; body_storage?: BodyStorage | null; compiled_truth?: string | null }): Promise<{ bare: BareTweetHit[]; external: ExternalLinkHit[] }> {
   if (!isSegmentedPage(page)) {
     const text = page.compiled_truth ?? '';
@@ -388,9 +387,8 @@ export async function scanIntegrity(
 
   // Fast path: single SQL query instead of N sequential getPage() calls.
   // Eliminates ~500 round-trips through PgBouncer that caused doctor to
-  // timeout on transaction-mode pooling. Postgres-only: PGLite has no
-  // postgres.js connection, so the gate keeps the GBRAIN_DEBUG fallback
-  // log clean for real Postgres errors instead of expected PGLite skips.
+  // timeout on transaction-mode pooling. Postgres-only: PGLite runs in
+  // process, where the sequential walk costs no network round-trips.
   if (batchLoad && limit !== Infinity && engine.kind === 'postgres') {
     try {
       return await scanIntegrityBatch(engine, limit, typeFilter);
@@ -450,18 +448,19 @@ export async function scanIntegrity(
 /**
  * Batch-load integrity scan: fetches all candidate pages in a single SQL
  * query, then scans in-memory. Reduces PgBouncer round-trips from ~500 to 1.
+ * A segmented page's body is read block by block from the same engine.
  */
 async function scanIntegrityBatch(
   engine: BrainEngine,
   limit: number,
   typeFilter?: string,
 ): Promise<IntegrityScanResult> {
-  const sql = db.getConnection();
-  const typeCondition = typeFilter ? sql`AND slug LIKE ${typeFilter + '/%'}` : sql``;
+  const params: unknown[] = [limit];
+  const typeCondition = typeFilter ? `AND slug LIKE $${params.push(`${typeFilter}/%`)}` : '';
   // Boolean validate is the documented contract; stringly-typed 'false' (quoted
   // YAML) diverges from the sequential path's strict === false check. Intentional
   // — gbrain lint should reject stringly-typed validate at write time.
-  const validateCondition = sql`AND (frontmatter->>'validate' IS NULL OR frontmatter->>'validate' != 'false')`;
+  const validateCondition = `AND (frontmatter->>'validate' IS NULL OR frontmatter->>'validate' != 'false')`;
 
   // v0.32.8: scan ONE row per (source_id, slug) pair, not one per slug.
   // Pre-fix used DISTINCT ON (slug) which collapsed multi-source rows into
@@ -472,13 +471,13 @@ async function scanIntegrityBatch(
   // sees a soft-deleted page, so the batch must not either — otherwise the
   // sampled doctor check reports hits from tombstones and, once they
   // outnumber `limit`, stops reaching live pages.
-  const rows = await sql`
+  const rows = await engine.executeRaw<Record<string, unknown>>(`
     SELECT id, source_id, slug, compiled_truth, body_storage
     FROM pages
     WHERE deleted_at IS NULL ${typeCondition} ${validateCondition}
     ORDER BY source_id, slug
-    LIMIT ${limit}
-  `;
+    LIMIT $1
+  `, params);
 
   const bareHits: BareTweetHit[] = [];
   const externalHits: ExternalLinkHit[] = [];

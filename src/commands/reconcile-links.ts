@@ -50,7 +50,7 @@ export interface ReconcileLinksResult {
  * Code refs of a page's `${compiled_truth}\n${timeline}`, first occurrence of each path, in text order. A segmented
  * page is read a block of lines at a time; `index` stays an offset into the joined text.
  */
-export async function pageCodeRefs(engine: BrainEngine, page: Page): Promise<CodeRef[]> {
+async function pageCodeRefs(engine: BrainEngine, page: Page): Promise<CodeRef[]> {
   if (!isSegmentedPage(page)) return extractCodeRefs((page.compiled_truth || '') + '\n' + (page.timeline || ''));
   const seen = new Set<string>();
   const refs: CodeRef[] = [];
