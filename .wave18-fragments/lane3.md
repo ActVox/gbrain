@@ -114,7 +114,7 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 - New maintenance intent kind `managed_maintenance_conversation_relink`, dispatched in `src/core/persistence/prepared-maintenance.ts` (one line, not a listed registry). New canonical-writer census row for `src/core/facts/conversation-relink.ts` in `docs/architecture/canonical-writers.tsv` (ceiling 1, boundary coordinator).
 - Module sizes: `src/commands/facts.ts` 201 lines, `src/core/facts/conversation-relink.ts` 187 (new), `src/core/persistence/prepared-maintenance.ts` 590; none is listed in the TSV and all are under the new-file cap. No TSV change.
 
-## Gate follow-ups (all items)
+## [S2] Gate follow-ups (all items)
 
 - `src/core/cli-flag-registry.generated.ts`: regenerated with `bun run build:flag-registry` in the separate final commit "INTEGRATOR-ROW: regenerate cli-flag-registry for lane 3" (tests docs-cli-commands, remediation-command-resolution, cli-flag-validation and conversation-facts-type-allowlist-drift need it). Additive only: facts +`--conversation --force --slugs --source-id`, doctor +`--conversation --entity --retry-model`, lint +`--max-cost-usd --slugs`, maintain and sync +`--conversation`. Drop it and rerun the generator after the lanes merge.
 - New exemption in `scripts/check-core-guard-coverage.mjs` (conversation-relink.ts: database-only fact rows, page text unchanged) and a write-attribution row in `docs/architecture/system-of-record.md`.
@@ -136,8 +136,8 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ## [S2] #6764 follow-up (final v3 Eng review)
 
 - Paid-fix envelope fixture: test/conversation-reextract-envelope-6764.test.ts runs the free pass, takes doctor's paid fix, runs its preview_argv through the CLI (output names the target page, no model call, facts unchanged), then the real argv with N=1 against a zero-price stubbed provider (pricing.overrides 0/0), and asserts unlinked_facts clears.
-- \`extract-conversation-facts --dry-run --slugs ...\` now prints \`Targets: <slugs>\` (one line; src/commands/extract-conversation-facts.ts is 2080 of its 2087 ceiling, no TSV change).
+- `extract-conversation-facts --dry-run --slugs ...` now prints `Targets: <slugs>` (one line; src/commands/extract-conversation-facts.ts is 2080 of its 2087 ceiling, no TSV change).
 - test/trust-write-gate-drift.test.ts gains an EXEMPT row for src/core/facts/conversation-relink.ts (it writes entity_slug and a context note on existing rows, never claim text). The RELINK_REASONS.fence_owned text avoids a hand-built gbrain command (check:agent-contract).
-- The free relink is the trusted-local intent \`managed_maintenance_conversation_relink\` (database-only, no files, no model) on a managed brain; an unmanaged brain has no maintenance coordinator, so it uses the same writeDerivedFacts maintenance transaction as the extractor itself.
+- The free relink is the trusted-local intent `managed_maintenance_conversation_relink` (database-only, no files, no model) on a managed brain; an unmanaged brain has no maintenance coordinator, so it uses the same writeDerivedFacts maintenance transaction as the extractor itself.
 - All Lane 3 rows in this file are S2.
 
