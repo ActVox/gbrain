@@ -5,6 +5,8 @@
  * isolation. Synthetic data only.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import {
@@ -226,6 +228,23 @@ describe('literal Unicode subject slugs (#6620)', () => {
 
   test('does not promote natural-language weak CJK names', async () => {
     expect((await inferFactSubject(engine, 'default', { fact: '例子负责项目。', mode: 'write' })).slug).toBeNull();
+  });
+});
+
+describe('#6620: the facts guide documents CJK subject inference as it behaves', () => {
+  test('every row of the guide\'s CJK table has the stated outcome', async () => {
+    const guide = readFileSync(join(import.meta.dir, '..', 'docs', 'guides', 'facts-relink.md'), 'utf8');
+    const section = guide.slice(guide.indexOf('### CJK subjects'));
+    const rows = [...section.matchAll(/^\| `([^`]+)` \| (?:links `([^`]+)`|no link) \|$/gm)];
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    await page('people/王小明', 'Literal CJK Example', 'person');
+    try {
+      for (const [, fact, slug] of rows) {
+        expect({ fact, slug: (await inferFactSubject(engine, 'default', { fact: fact!, mode: 'write' })).slug }).toEqual({ fact, slug: slug ?? null });
+      }
+    } finally {
+      await engine.executeRaw(`DELETE FROM pages WHERE slug = 'people/王小明'`);
+    }
   });
 });
 

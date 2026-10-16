@@ -27,7 +27,12 @@ import { renamePageOntoSlug } from '../src/commands/sync/rename-collision.ts';
 import { carryRenameIdentity } from '../src/commands/sync/renames.ts';
 import { enableBeliefLedger } from '../src/core/belief/coverage.ts';
 import { lifetimeAtSlug, lifetimeSlugAt } from '../src/core/belief/identity.ts';
-import { currentStateHash } from '../src/core/belief/ledger.ts';
+import { currentStateHash, noteBelief, withBeliefBatch } from '../src/core/belief/ledger.ts';
+import { renameLifetime, resolveLifetimes } from '../src/core/belief/lifetimes.ts';
+import { maintenanceTransaction } from '../src/core/persistence/attribution.ts';
+import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
+import { propagateTierLowering } from '../src/core/trust/propagation.ts';
+import { keyedSubjects } from '../src/core/belief/subjects.ts';
 import { lifetimeRef, pageKey } from '../src/core/belief/keys.ts';
 import { __setBeliefEmitterFaultForTests, type BeliefEventDraft } from '../src/core/belief/append.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -140,6 +145,142 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       fault(retype('page.renamed', 'page.published'));
       const forced = await since(b, () => renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'notes/forced-example', newSlug: 'notes/forced-moved-example', to: 'notes/forced-moved-example.md' }));
       await expect(check(forced, 'notes/forced-example', 'notes/forced-moved-example', forcedLifetime)).rejects.toThrow();
+    }), 120_000);
+
+    test('review #5: a cheap rename of a page with a database-only fact moves no fact key and leaves the fact live', () => brain(async b => {
+      await operationsByName.remember!.handler(b.ctx as OperationContext, { fact: 'Zeta example prefers tea', provenance: 'notes', entity: 'people/zeta-example', request_id: randomUUID() });
+      await b.put('people/zeta-example', beliefPage({ type: 'person', title: 'Zeta Example' }));
+      const factKey = (await b.events()).find(e => e.event_type === 'fact.adopted')!.subject_key;
+      const [{ incarnation }] = await b.engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [b.sourceId]);
+      const check = async (events: BeliefEvent[], slug: string) => {
+        expect(events.filter(e => e.subject_kind === 'fact' && e.event_type !== 'trust.retiered')).toEqual([]);
+        const last = (await b.events()).filter(e => e.subject_key === factKey).at(-1)!;
+        expect(last.event_type).toMatch(/^fact\.(asserted|adopted|revised|transferred)$|^trust\.retiered$/);
+        const now = await b.engine.transaction(tx => currentStateHash(tx, b.sourceId, incarnation!, slug));
+        const [newest] = await b.engine.executeRaw<{ state_hash: string }>('SELECT state_hash FROM belief_events WHERE source_id=$1 AND slug=$2 ORDER BY id DESC LIMIT 1', [b.sourceId, slug]);
+        expect(newest!.state_hash).toBe(now.hash);
+      };
+      // The new slug sorts before the old one, so a per-slug diff would append the retraction last.
+      renameSync(join(b.root, 'people/zeta-example.md'), join(b.root, 'people/alpha-example.md'));
+      const renamed = await since(b, () => renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'people/zeta-example', newSlug: 'people/alpha-example', to: 'people/alpha-example.md' }));
+      expect(renamed.filter(e => e.event_type === 'page.renamed')).toHaveLength(1);
+      await check(renamed, 'people/alpha-example');
+      // Forced probe: an emitter that records the fact as retracted on the rename is caught.
+      fault(drafts => [...drafts, ...drafts.filter(d => d.eventType === 'page.renamed').map(d => ({ ...d, subjectKind: 'fact' as const, subjectKey: factKey, eventType: 'fact.retracted', value: null }))]);
+      renameSync(join(b.root, 'people/alpha-example.md'), join(b.root, 'people/aardvark-example.md'));
+      const forced = await since(b, () => renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'people/alpha-example', newSlug: 'people/aardvark-example', to: 'people/aardvark-example.md' }));
+      await expect(check(forced, 'people/aardvark-example')).rejects.toThrow();
+    }), 120_000);
+
+    test('review #18: after a fallback rename the surviving lifetime describes the destination page, and the ended lifetime keeps no belief', () => brain(async b => {
+      const [{ incarnation }] = await b.engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [b.sourceId]);
+      const currentKeys = async (slug: string) => {
+        const { state, lifetimes } = await b.engine.transaction(tx => currentStateHash(tx, b.sourceId, incarnation!, slug));
+        const page = state.pages.find(p => p.slug === slug)!;
+        return keyedSubjects({ incarnation: incarnation!, lifetimes, pagesBySlug: new Map([[slug, page]]) }, state, () => 'world')
+          .filter(s => s.stream === slug && s.kind !== 'link_transition').map(s => s.key);
+      };
+      const run = async (stale: string, dest: string) => {
+        await b.put(stale, beliefPage({ type: 'note', title: 'Stale', takes: ['Stale take survives'], facts: ['Both pages hold this'] }));
+        await b.put(dest, beliefPage({ type: 'note', title: 'Dest', takes: ['Dest take is new'], facts: ['Both pages hold this', 'Only the destination holds this'] }));
+        const staleKeys = await currentKeys(stale), destKeys = await currentKeys(dest);
+        const absorbed = await lifetimeOf(b, dest);
+        const events = await since(b, () => carryRenameIdentity(b.engine, b.sourceId, stale, dest));
+        return { staleKeys, destKeys, absorbed, events, after: await currentKeys(dest) };
+      };
+      const asserting = /\.(asserted|revised|adopted|transferred)$/;
+      const check = (r: Awaited<ReturnType<typeof run>>) => {
+        expect(r.events.filter(e => e.subject_kind === 'page').map(e => e.event_type)).toEqual(['page.renamed']);
+        const last = new Map(r.events.filter(e => e.subject_kind !== 'page' && !e.event_type.startsWith('trust.')).map(e => [e.subject_key, e]));
+        // A destination belief the stale lifetime did not hold is recorded on it; a stale belief the destination lacks is retracted.
+        for (const key of r.after.filter(k => !r.staleKeys.includes(k))) expect(last.get(key)?.event_type).toMatch(asserting);
+        for (const key of r.staleKeys.filter(k => !r.after.includes(k))) expect(last.get(key)?.event_type).toMatch(/\.retracted$/);
+        // Every belief of the ended lifetime is named by a transfer onto the surviving one.
+        const from = new Set(r.events.filter(e => e.event_type.endsWith('.transferred')).map(e => e.cause.from_key));
+        expect(r.destKeys.every(k => from.has(k))).toBe(true);
+        expect(r.events.filter(e => e.event_type.endsWith('.transferred')).every(e => e.cause.from_lifetime === r.absorbed)).toBe(true);
+        expect(r.events.filter(e => e.event_type === 'take.retracted').map(e => e.value)).toEqual([null]);
+      };
+      check(await run('notes/stale-example', 'notes/dest-example'));
+      // Forced probe: an emitter that records the destination's beliefs as fresh assertions, leaving the ended lifetime's beliefs live, is caught.
+      fault(drafts => drafts.map(d => d.eventType.endsWith('.transferred') ? { ...d, eventType: d.eventType.replace('.transferred', '.asserted') } : d));
+      const forced = await run('notes/stale-two-example', 'notes/dest-two-example');
+      expect(() => check(forced)).toThrow();
+    }), 120_000);
+
+    test('review #31: a contested fact outside the batch\'s streams is keyed by its page\'s lifetime and hashed as its own stream', () => brain(async b => {
+      await b.put('companies/acme-example', beliefPage({ facts: ['Acme raised a seed round'] }));
+      await b.put('notes/other-example', beliefPage({ type: 'note', title: 'Other' }));
+      const acme = await lifetimeOf(b, 'companies/acme-example');
+      const [fact] = await b.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND fact=$2', [b.sourceId, 'Acme raised a seed round']);
+      const [{ incarnation }] = await b.engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [b.sourceId]);
+      const events = await since(b, () => b.engine.transaction(async tx => {
+        await tx.lockPageKeys([{ sourceId: b.sourceId, slug: 'notes/other-example' }]);
+        await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: ['notes/other-example'], op: 'review_probe' },
+          async () => noteBelief({ kind: 'contested', table: 'facts', rowId: Number(fact!.id), proposalId: 1, guard: 'review_probe' }));
+      }));
+      const hash = (await b.engine.transaction(tx => currentStateHash(tx, b.sourceId, incarnation!, 'companies/acme-example'))).hash;
+      expect(events.map(e => [e.event_type, e.slug, e.page_lifetime, (JSON.parse(e.subject_key) as unknown[]).slice(0, 2), e.state_hash]))
+        .toEqual([['trust.contested', 'companies/acme-example', acme, ['f', lifetimeRef(acme)], hash]]);
+    }), 120_000);
+
+    test('review #40: a lifetime renamed after the caller read the page is resolved by page id, not minted again at the old slug', () => brain(async b => {
+      await b.put('notes/p-example', beliefPage({ type: 'note', title: 'P' }));
+      const lifetime = await lifetimeOf(b, 'notes/p-example');
+      const [{ id, incarnation }] = await b.engine.executeRaw<{ id: number; incarnation: string }>(
+        'SELECT p.id, s.incarnation::text AS incarnation FROM pages p JOIN sources s ON s.id=p.source_id WHERE p.source_id=$1 AND p.slug=$2', [b.sourceId, 'notes/p-example']);
+      // A concurrent rename commits between this caller's page read (slug notes/p-example) and its lifetime read.
+      await b.engine.transaction(async tx => {
+        await tx.executeRaw('UPDATE pages SET slug=$1 WHERE id=$2', ['notes/q-example', id]);
+        await renameLifetime(tx, lifetime, 'notes/q-example', Number(id));
+      });
+      const resolved = await b.engine.transaction(tx => resolveLifetimes(tx, [{ sourceId: b.sourceId, incarnation: incarnation!, slug: 'notes/p-example', pageId: Number(id) }]));
+      expect(resolved.get(Number(id))).toBe(lifetime);
+      const open = await b.engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM belief_page_lifetimes WHERE page_id=$1 AND ended_at IS NULL', [id]);
+      expect(Number(open[0]!.n)).toBe(1);
+    }), 120_000);
+
+    test('review #32: a dependent lowered inside the batch\'s own stream is recorded once by the batch, with its final state hash and the input as cause', () => brain(async b => {
+      const slug = 'notes/lab-example';
+      await b.put(slug, beliefPage({ type: 'note', title: 'Lab', facts: ['The lab opened in 2020', 'The lab has ten benches'] }));
+      const ids = await b.engine.executeRaw<{ id: number; fact: string }>('SELECT id, fact FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 ORDER BY row_num', [b.sourceId, slug]);
+      const [input, dependent] = ids.map(r => Number(r.id));
+      await maintenanceTransaction(b.engine, tx => recordDerivationInputs(tx, { table: 'facts', id: dependent!, sourceId: b.sourceId }, [{ table: 'facts', id: input! }]));
+      const [{ incarnation }] = await b.engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [b.sourceId]);
+      const events = await since(b, () => maintenanceTransaction(b.engine, async tx => {
+        await tx.lockPageKeys([{ sourceId: b.sourceId, slug }]);
+        await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [slug], op: 'review_probe' }, async () => {
+          await tx.executeRaw(`UPDATE facts SET trust_tier='external_untrusted' WHERE id=$1`, [input]);
+          await propagateTierLowering(tx, [{ table: 'facts', id: input! }]);
+          // A later write in the same stream, after the propagation.
+          await tx.executeRaw('UPDATE facts SET confidence=0.5 WHERE id=$1', [dependent]);
+        });
+      }));
+      const final = (await b.engine.transaction(tx => currentStateHash(tx, b.sourceId, incarnation!, slug))).hash;
+      const retiered = events.filter(e => e.event_type === 'trust.retiered' && e.subject_kind === 'fact');
+      expect(retiered).toHaveLength(2);
+      expect(new Set(retiered.map(e => e.state_hash))).toEqual(new Set([final]));
+      const inputKey = retiered.find(e => !e.cause.inputs)!.subject_key;
+      expect(retiered.find(e => e.cause.inputs)!.cause).toMatchObject({ op: 'review_probe', inputs: [{ subject_key: inputKey }] });
+    }), 120_000);
+
+    test('review #34: two pages that swap slugs in one transaction each keep their own lifetime, both open', () => brain(async b => {
+      await b.put('notes/a-example', beliefPage({ type: 'note', title: 'A' }));
+      await b.put('notes/b-example', beliefPage({ type: 'note', title: 'B' }));
+      const a = await lifetimeOf(b, 'notes/a-example'), bb = await lifetimeOf(b, 'notes/b-example');
+      const events = await since(b, () => maintenanceTransaction(b.engine, async tx => {
+        await tx.lockPageKeys(['notes/a-example', 'notes/b-example'].map(slug => ({ sourceId: b.sourceId, slug })));
+        await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: ['notes/a-example', 'notes/b-example'], op: 'review_probe' }, async () => {
+          await tx.executeRaw('UPDATE pages SET slug=$1 WHERE source_id=$2 AND slug=$3', ['notes/swap-example', b.sourceId, 'notes/a-example']);
+          await tx.executeRaw('UPDATE pages SET slug=$1 WHERE source_id=$2 AND slug=$3', ['notes/a-example', b.sourceId, 'notes/b-example']);
+          await tx.executeRaw('UPDATE pages SET slug=$1 WHERE source_id=$2 AND slug=$3', ['notes/b-example', b.sourceId, 'notes/swap-example']);
+        });
+      }));
+      expect(events.filter(e => e.event_type === 'page.renamed').map(e => [e.page_lifetime, e.value]).sort()).toEqual([
+        [a, { old_slug: 'notes/a-example', new_slug: 'notes/b-example' }], [bb, { old_slug: 'notes/b-example', new_slug: 'notes/a-example' }]].sort());
+      const open = await b.engine.executeRaw<{ page_lifetime: string; slug: string }>(
+        'SELECT page_lifetime::text AS page_lifetime, slug FROM belief_page_lifetimes WHERE page_lifetime = ANY($1::uuid[]) AND ended_at IS NULL ORDER BY slug', [[a, bb]]);
+      expect(open.map(r => [r.slug, r.page_lifetime])).toEqual([['notes/a-example', bb], ['notes/b-example', a]]);
     }), 120_000);
 
     test('probe 29: a renamed link endpoint changes no key, a reused slug starts a new lifetime, and a database-only fact is adopted by its later page', () => brain(async b => {

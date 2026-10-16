@@ -39,7 +39,9 @@ import { withEnv } from './helpers/with-env.ts';
 import { waitForValue } from './helpers/wait-for.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { testBackends } from './helpers/test-backends.ts';
-import { beliefEngineCase, beliefPage, readEvents, shape, type BeliefEvent } from './helpers/belief-ledger.ts';
+import { beliefBrain, beliefEngineCase, beliefPage, readEvents, shape, type BeliefEvent } from './helpers/belief-ledger.ts';
+import { unmarkedPublications } from '../src/core/belief/coverage-report.ts';
+import { forgetFactInFence } from '../src/core/facts/forget.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-belief-trust-'));
 const quiet = { info() {}, warn() {}, error() {} };
@@ -150,6 +152,27 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       const forced = await since(b, () => run(b.local, 'forget', { id: String(seed) }));
       expect(() => check(forced, current)).toThrow();
     }), 120_000);
+
+    test('review #25: the withdrawal, its materialization and an unmanaged forget each leave a commit mark', withHome(async () => {
+      const b = await brain();
+      const slug = 'companies/acme-example';
+      await run(b.local, 'put_page', { slug, content: beliefPage({ facts: ['Acme raised a seed round', 'Acme has ten staff'] }) });
+      const mark = await lastId(b);
+      await run(b.local, 'forget', { id: String(await factId(b, 'Acme has ten staff')) });
+      await waitForValue(async () => (await readEvents(b.engine, b.sourceId, mark)).find(e => e.cause.op === 'withdrawal_materialize'), { timeoutMs: 30_000, label: 'withdrawal materialization' });
+      const ops = new Set((await readEvents(b.engine, b.sourceId, mark)).map(e => e.cause.op));
+      expect([...ops].sort()).toEqual(['forget', 'withdrawal_materialize']);
+      expect(await unmarkedPublications(b.engine, b.sourceId)).toEqual([]);
+      await beliefBrain(async u => {
+        const remembered = await operationsByName.remember!.handler(u.ctx, { fact: 'Dana example likes tea', provenance: 'notes', entity: 'people/dana-example', request_id: randomUUID() }) as Record<string, any>;
+        const row = { id: Number(remembered.id) };
+        const before = await u.lastId();
+        // The legacy fence path (`forgetFactInFence`), which records the withdrawal in its own maintenance transaction.
+        expect((await forgetFactInFence(u.engine, Number(row!.id), { sourceId: u.sourceId })).ok).toBe(true);
+        expect((await u.events(before)).filter(e => e.event_type === 'fact.withdrawn')).toHaveLength(1);
+        expect(await unmarkedPublications(u.engine, u.sourceId)).toEqual([]);
+      }, { databaseUrl: engineCase.databaseUrl });
+    }), 180_000);
 
     test('probe 8: a lower-tier fence rewrite, remember.replaces, takes_supersede and a refused remote forget each append trust.contested with the proposal', withHome(async () => {
       const b = await brain();

@@ -8,8 +8,10 @@
  *   `trust.retiered` per source and stream page, plus one
  *   `belief_retier_manifest` row (subject key, from, to) per changed subject,
  *   keyed by the summary event, so replay can say which belief's trust changed;
- * - derived propagation appends one `trust.retiered` per lowered dependent,
- *   whose cause names each input and the event that recorded its change.
+ * - derived propagation appends one `trust.retiered` per lowered dependent
+ *   outside the enclosing batch's streams, whose cause names each input and
+ *   the event that recorded its change; a dependent inside them is recorded
+ *   by the batch's diff, at its final state hash, with that cause.
  *
  * Neither holds its dependents' page keys (a lock taken late can deadlock), so
  * these events order within a stream by the row locks the tier UPDATE took.
@@ -19,7 +21,7 @@ import type { BrainEngine } from '../engine.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
 import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
 import { eventKeyHex, pageKey, slugRef } from './keys.ts';
-import { coverageActive, currentBeliefBatch, readLedgerSource, stateHashOf } from './ledger.ts';
+import { coverageActive, currentBeliefBatch, noteBelief, readLedgerSource, stateHashOf } from './ledger.ts';
 import { resolveLifetimes } from './lifetimes.ts';
 import { readBeliefState, type RawPage } from './state.ts';
 import { keyedSubjects, pageNeeds } from './subjects.ts';
@@ -81,9 +83,14 @@ const draftOf = (r: Resolved, cause: Record<string, unknown>): BeliefEventDraft 
  * one, else under `publicationId`. Returns the publication id when it appended.
  */
 export async function appendRetierEvents(tx: BrainEngine, rows: readonly RetierRow[], cause: Record<string, unknown>, publicationId?: string): Promise<string | null> {
-  const resolved = await resolveSubjects(tx, rows);
+  const batch = currentBeliefBatch();
+  const all = await resolveSubjects(tx, rows);
+  // A dependent in the enclosing batch's own streams is recorded by its finalization (after every write, with the final state hash); the batch carries the cause.
+  const inBatch = (r: Resolved) => !!batch && batch.sourceId === r.sourceId && batch.slugs.includes(r.stream);
+  for (const r of all.filter(inBatch)) noteBelief({ kind: 'retier_cause', table: r.row.table as 'facts' | 'takes' | 'pages', rowId: r.row.id, cause });
+  const resolved = all.filter(r => !inBatch(r));
   if (!resolved.length) return null;
-  const pub = currentBeliefBatch()?.publicationId ?? publicationId ?? randomUUID();
+  const pub = batch?.publicationId ?? publicationId ?? randomUUID();
   let appended = 0;
   for (const sourceId of new Set(resolved.map(r => r.sourceId))) {
     const source = (await readLedgerSource(tx, sourceId))!;

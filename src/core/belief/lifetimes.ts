@@ -51,9 +51,18 @@ export async function resolveLifetimes(tx: BrainEngine, needs: readonly PageRefN
   const unique = [...new Map(needs.map(n => [n.pageId, n])).values()];
   const open = await readOpenLifetimes(tx, unique);
   const out = new Map<number, string>();
+  const misses = unique.filter(need => { const row = open.get(pairKey(need.incarnation, need.slug)); return !row || (row.page_id != null && row.page_id !== need.pageId); });
+  // A page whose key the caller does not hold can be renamed between its read and this one (READ COMMITTED): an open lifetime of that page
+  // at the slug the page has now is still its own, so it is used rather than minting a second one at the slug the caller read.
+  const byPage = misses.length ? new Map((await tx.executeRaw<{ page_id: number; source_incarnation: string; page_lifetime: string }>(`SELECT l.page_id, l.source_incarnation::text AS source_incarnation,
+      l.page_lifetime::text AS page_lifetime FROM belief_page_lifetimes l JOIN pages p ON p.id = l.page_id AND p.slug = l.slug
+      WHERE l.page_id = ANY($1::int[]) AND l.ended_at IS NULL`, [misses.map(n => n.pageId)]))
+    .map(r => [`${r.source_incarnation}\u0000${Number(r.page_id)}`, r.page_lifetime])) : new Map<string, string>();
   for (const need of unique) {
     const row = open.get(pairKey(need.incarnation, need.slug));
     if (row && (row.page_id == null || row.page_id === need.pageId)) { out.set(need.pageId, row.page_lifetime); continue; }
+    const moved = byPage.get(`${need.incarnation}\u0000${need.pageId}`);
+    if (moved) { out.set(need.pageId, moved); continue; }
     if (row) await endLifetime(tx, row.page_lifetime);
     out.set(need.pageId, await mintLifetime(tx, need));
   }

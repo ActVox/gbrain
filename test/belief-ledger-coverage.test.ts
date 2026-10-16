@@ -36,6 +36,7 @@ import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
 import { extractTakes } from '../src/core/cycle/extract-takes.ts';
 import { extractStaleFromDB } from '../src/commands/extract.ts';
 import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
+import { endLifetime, mintLifetime } from '../src/core/belief/lifetimes.ts';
 import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
@@ -631,6 +632,44 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         expect((await latestCoverage(b.engine, b.sourceId))?.type).toBe('coverage.complete');
       }, { managed: false, enable: false });
     }, 120_000);
+
+    test('review #35: a backfill rerun after versions were pruned appends nothing, and a page whose lifetime turned over after preparation is not backfilled onto the ended lifetime', async () => {
+      await brain(async b => {
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme raised a seed round'] }));
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme raised a seed round', 'Acme has ten staff'] }));
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme has ten staff'] }));
+        await b.enable();
+        expect((await backfillBeliefHistory(b.engine, b.sourceId)).events).toBe(7);
+        const after = await b.lastId();
+        await b.engine.executeRaw(`DELETE FROM page_versions WHERE id = (SELECT min(v.id) FROM page_versions v JOIN pages p ON p.id = v.page_id
+          WHERE p.source_id = $1 AND p.slug = 'companies/acme-example')`, [b.sourceId]);
+        expect((await backfillBeliefHistory(b.engine, b.sourceId)).events).toBe(0);
+        expect(await b.lastId()).toBe(after);
+        const keyed = await b.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM belief_events WHERE source_id = $1 AND origin = 'backfill'
+          AND subject_kind = 'fact' AND event_type = 'fact.asserted' GROUP BY subject_key HAVING count(*) > 1`, [b.sourceId]);
+        expect(keyed).toEqual([]);
+        await b.put('companies/beta-example', beliefPage({ title: 'Beta Example', facts: ['Beta ships late'] }));
+        await b.put('companies/beta-example', beliefPage({ title: 'Beta Example', facts: ['Beta ships early'] }));
+        const since = (await coverageIntervals(b.engine, b.sourceId))[0]!.started_at;
+        await b.engine.executeRaw(`UPDATE pages SET created_at = $2::timestamptz - interval '1 hour' WHERE source_id = $1 AND slug = 'companies/beta-example'`, [b.sourceId, since]);
+        await b.engine.executeRaw(`UPDATE page_versions SET snapshot_at = $2::timestamptz - interval '1 minute' WHERE page_id = (SELECT id FROM pages
+          WHERE source_id = $1 AND slug = 'companies/beta-example')`, [b.sourceId, since]);
+        const [{ page_lifetime: old }] = await b.engine.executeRaw<{ page_lifetime: string }>(`SELECT l.page_lifetime::text AS page_lifetime FROM belief_page_lifetimes l
+          WHERE l.source_id = $1 AND l.slug = 'companies/beta-example' AND l.ended_at IS NULL`, [b.sourceId]);
+        const report = await backfillBeliefHistory(b.engine, b.sourceId, { slugs: ['companies/beta-example'], prepareHook: async (_slug, attempt) => {
+          if (attempt > 0) return;
+          const source = (await readLedgerSource(b.engine, b.sourceId))!;
+          const [{ id }] = await b.engine.executeRaw<{ id: number }>(`SELECT id FROM pages WHERE source_id = $1 AND slug = 'companies/beta-example'`, [b.sourceId]);
+          await b.engine.transaction(async tx => {
+            await tx.lockPageKeys([{ sourceId: b.sourceId, slug: 'companies/beta-example' }]);
+            await endLifetime(tx, old);
+            await mintLifetime(tx, { sourceId: b.sourceId, incarnation: source.incarnation, slug: 'companies/beta-example', pageId: Number(id) });
+          });
+        } });
+        expect(report).toMatchObject({ events: 6, retried: 1, pages: [{ slug: 'companies/beta-example', events: 6 }] });
+        expect(await b.engine.executeRaw(`SELECT id FROM belief_events WHERE page_lifetime = $1::uuid AND origin = 'backfill'`, [old])).toEqual([]);
+      }, { enable: false });
+    }, 180_000);
 
     test('probe 9: graduation PGLite -> ' + engineCase.name + ' carries an identical ledger: equal event_key sets, digests and replay', async () => {
       await beliefBrain(async b => {

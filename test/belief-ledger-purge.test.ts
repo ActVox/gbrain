@@ -192,6 +192,29 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }, redactionFault('skip_live_carriers'));
     }, 240_000);
 
+    test('review #43: a confirm releases the purge redaction in its own publication, which released_by names and the row records', async () => {
+      await brain(async b => {
+        const slug = 'companies/acme-example';
+        const page = (context: string, confidence = '1.0') => beliefPage({ facts: [X, { claim: 'Acme sells widgets', context, confidence }] });
+        await b.put(slug, page(`notes say ${X}`));
+        await purgeFact(b, X);
+        await b.put(slug, page('agent rewrote this', '0.5'));
+        const [fact] = await b.engine.executeRaw<{ id: number }>(`SELECT id FROM facts WHERE source_id = $1 AND fact = 'Acme sells widgets' AND expired_at IS NULL`, [b.sourceId]);
+        const preview = await previewOwnerAction(b.engine, { action: 'confirm', ref: `f${fact!.id}` });
+        const mark = await b.lastId();
+        const result = await applyOwnerAction(b.engine, { action: 'confirm', ref: `f${fact!.id}` }, { binding: preview.binding, confirmation: { via: 'tty' } });
+        expect(result).toMatchObject({ status: 'confirmed', detail: { released_redactions: ['context'] } });
+        const [register] = await b.engine.executeRaw<{ released_by: string }>(`SELECT released_by::text AS released_by FROM belief_redactions
+          WHERE source_id = $1 AND field = 'context' AND released_hash IS NOT NULL`, [b.sourceId]);
+        const confirm = (await b.events(mark)).filter(e => e.publication_id === register!.released_by);
+        expect(confirm.map(e => [`${e.subject_kind}:${e.event_type}`, e.trust_tier])).toEqual([['fact:trust.retiered', 'user_confirmed']]);
+        const [row] = await b.engine.executeRaw<{ publication: string; marked: boolean }>(`SELECT f.write_origin->'owner_decision'->>'publication_id' AS publication,
+            EXISTS (SELECT 1 FROM belief_commit_marks m WHERE m.publication_id::text = f.write_origin->'owner_decision'->>'publication_id') AS marked
+          FROM facts f WHERE f.id = $1`, [fact!.id]);
+        expect(row).toEqual({ publication: register!.released_by, marked: true });
+      });
+    }, 240_000);
+
     test('probe 38: the suppression follows replacement, adoption, transfer and a verbatim copy into an unlinked fact', async () => {
       const scenario = () => collect<Record<string, unknown>>(resolve => brain(async b => {
         const slug = 'companies/acme-example', quote = `notes say ${X}`;

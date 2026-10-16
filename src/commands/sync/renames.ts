@@ -361,10 +361,11 @@ export async function carryRenameIdentity(engine: BrainEngine, sourceId: string,
   if (!from || !to || from.id === to.id) return;
   const publication = await maintenanceTransaction(engine, async tx => {
     await tx.lockPageKeys([{ sourceId, slug: staleSlug }, { sourceId, slug: newSlug }]);
-    await recordRenameAlias(tx, sourceId, staleSlug, newSlug);
-    await moveSlugBindings(tx, sourceId, staleSlug, newSlug);
-    await movePageIdReferences(tx, Number(from.id), Number(to.id));
-    return recordFallbackRename(tx, { sourceId, staleSlug, newSlug, fromPageId: Number(from.id), toPageId: Number(to.id) });
+    return recordFallbackRename(tx, { sourceId, staleSlug, newSlug, fromPageId: Number(from.id), toPageId: Number(to.id) }, async () => {
+      await recordRenameAlias(tx, sourceId, staleSlug, newSlug);
+      await moveSlugBindings(tx, sourceId, staleSlug, newSlug);
+      await movePageIdReferences(tx, Number(from.id), Number(to.id));
+    });
   });
   if (publication) await markBeliefCommits(engine, [publication]).catch(() => undefined);
 }

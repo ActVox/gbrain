@@ -15,7 +15,7 @@ import { resolveEnvNumber, resolveHoursEnv, warnOnceForEnv } from '../../../core
 import { chunkerStamp } from '../../../core/chunkers/code.ts';
 import { effectiveLinkExtractorWatermark, smallBrainBacklogNote } from '../../../core/link-extraction-watermark.ts';
 import { previewMentionPass } from '../../../core/mentions/stale.ts';
-import { isMissingSchemaObject, isUndefinedColumnError } from '../../../core/utils.ts';
+import { isMissingSchemaObject } from '../../../core/utils.ts';
 import {
   loadStorageConfig,
   effectiveDbOnlyDirs,
@@ -31,9 +31,11 @@ import { persistenceEnabledForHealth } from '../../../core/persistence/ownership
 import { upstreamFreshness } from '../../../core/sync-upstream.ts';
 import type { Check } from '../../doctor.ts';
 import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../core/shared-skills/content-freshness.ts';
+import { readOnlyCatalogPackSourceIds } from '../../../core/shared-skills/adopted-packs.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
 import { checkError } from '../check-fix.ts';
+import { firstSyncRunning, noSuccessfulSync, type SyncOutcomeEntry } from '../sync-outcome.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
@@ -94,7 +96,8 @@ export const EXTRACTION_LAG_MIN_PAGES = 100;
  * would break a CI/cron pipeline gating on `gbrain doctor`.
  *
  * Vacuous-skip on tiny brains (<100 pages, no --source) like orphan_ratio.
- * Pre-v112 brains (column missing) degrade to OK via isUndefinedColumnError.
+ * Pre-v112 brains (links_extracted_at missing) degrade to OK; any other missing
+ * column is a real failure.
  * Strictly SQL — no filesystem/git access — so it's safe to wire into the
  * thin-client doctorReportRemote path (CDX-5 trust boundary).
  *
@@ -135,7 +138,7 @@ export async function checkLinksExtractionLag(
       stale = await engine.countStalePagesForExtraction({ sourceId, versionTs, attendance: 'exclude' });
       attendanceBlocked = await engine.countStalePagesForExtraction({ sourceId, versionTs, attendance: 'blocked' });
     } catch (e) {
-      if (!isUndefinedColumnError(e, 'links_attendance_blocked_revision')) throw e;
+      if (!isMissingSchemaObject(e, 'column', 'links_attendance_blocked_revision')) throw e;
       stale = await engine.countStalePagesForExtraction({ sourceId, versionTs });
     }
     const pct = (stale / total) * 100;
@@ -177,7 +180,7 @@ export async function checkLinksExtractionLag(
   } catch (e) {
     // Pre-v112 brain: links_extracted_at column doesn't exist yet. Graceful OK
     // (migration/bootstrap adds it; nothing to assess until then).
-    if (isUndefinedColumnError(e, 'links_extracted_at')) {
+    if (isMissingSchemaObject(e, 'column', 'links_extracted_at')) {
       return { name, status: 'ok', message: 'links_extracted_at not present (pre-v112 brain)' };
     }
     return checkError(name, 'check links_extraction_lag', e);
@@ -1249,13 +1252,18 @@ export async function checkSyncFreshness(
     const currentChunkerVersion = chunkerStamp();
 
     const issues: string[] = [];
+    // #4960: sources with no successful sync carry their own state, fix and wording (no generic "run sync" suffix).
+    const outcomes: SyncOutcomeEntry[] = [];
     let ownedContent = new Set<string>();
     try { ownedContent = new Set((await ownedContentFreshness(engine)).map(source => source.sourceId)); }
     catch (error) { if (!isOwnedContentSchemaMissing(error)) throw error; }
+    // #6076: an adopted read-only catalog pack (no commit history) has nothing to sync.
+    const catalogPacks = await readOnlyCatalogPackSourceIds(engine, sources, localOnly);
     let writer_owned_count = 0;
+    let read_only_pack_count = 0;
     // v0.41.27.0: D6 count math. Every source falls into
     // EXACTLY ONE bucket per iteration. Invariant pinned by unit test:
-    //   unchanged_count + synced_recently_count + stale_count + writer_owned_count === sources.length
+    //   unchanged + synced_recently + stale + writer_owned + read_only_pack counts === sources.length
     // Stale subsumes warn + fail + never-synced + future-timestamp; we keep
     // hasWarnings/hasFailures for the existing return-status logic.
     let unchanged_count = 0;
@@ -1308,6 +1316,7 @@ export async function checkSyncFreshness(
     let upstream_behind_count = 0;
     for (const source of sources) {
       if (ownedContent.has(source.id)) { writer_owned_count++; continue; }
+      if (catalogPacks.ids.has(source.id)) { read_only_pack_count++; continue; }
       // Embed source.id in user-visible messages so `gbrain sync --source <id>`
       // matches what the user copy-pastes. Show display name in parens when set.
       const display = source.name && source.name !== source.id
@@ -1323,7 +1332,7 @@ export async function checkSyncFreshness(
       }
 
       // BUG 4: actively syncing (live lock) → healthy, count as synced_recently
-      // and skip the staleness checks. Keeps the 3-bucket invariant intact.
+      // and skip the staleness checks (#4960: a first sync, no success yet, is warn).
       //
       // ...but ONLY up to the staleness ceiling. `withRefreshingLock` bumps the
       // heartbeat on its own timer regardless of whether the import is making
@@ -1336,6 +1345,11 @@ export async function checkSyncFreshness(
       const liveSnap = await liveSyncSnap(source.id);
       if (liveSnap) {
         const ceilingMs = stalenessCeilingSeconds * 1000;
+        if (liveSnap.age_ms <= ceilingMs && !source.last_sync_at) {
+          const first = firstSyncRunning(source.id, display, liveSnap);
+          issues.push(first.issue); outcomes.push(first.entry); hasWarnings = true; stale_count++;
+          continue;
+        }
         if (liveSnap.age_ms <= ceilingMs) {
           inProgress.push(`${display} sync in progress (pid ${liveSnap.holder_pid} on ${liveSnap.holder_host})`);
           synced_recently_count++;
@@ -1357,7 +1371,8 @@ export async function checkSyncFreshness(
       }
 
       if (!source.last_sync_at) {
-        issues.push(`Source ${display} has never been synced`);
+        const never = await noSuccessfulSync(engine, source.id, display, managed);
+        issues.push(never.issue); outcomes.push(never.entry);
         hasFailures = true;
         stale_count++;
         continue;
@@ -1464,33 +1479,39 @@ export async function checkSyncFreshness(
 
     // D6 invariant: every source incremented exactly one bucket.
     const details = { unchanged_count, synced_recently_count, stale_count, ...(writer_owned_count ? { writer_owned_count } : {}),
+      ...(read_only_pack_count ? { read_only_pack_count } : {}), ...(catalogPacks.note ? { read_only_pack_note: catalogPacks.note } : {}),
+      ...(outcomes.length ? { code: outcomes[0]!.code, no_successful_sync: outcomes } : {}),
       ...(upstream_unknown_count ? { upstream_unknown_count } : {}), ...(upstream_behind_count ? { upstream_behind_count } : {}) };
     // BUG 4: append in-progress context when any source is actively syncing.
     // Empty otherwise, so steady-state messages are byte-for-byte unchanged.
     const inProgressNote = (inProgress.length ? `. ${inProgress.join('; ')}` : '')
-      + (writer_owned_count ? `. ${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status` : '');
+      + (writer_owned_count ? `. ${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status` : '')
+      + (read_only_pack_count ? `. ${read_only_pack_count} read-only skill-pack source(s): no commits to sync` : '') + (catalogPacks.note ? `. ${catalogPacks.note}` : '');
 
+    const remedy = issues.length > outcomes.length;
+    const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix;
     if (hasFailures) {
       return {
         name: 'sync_freshness',
         status: 'fail',
-        message: `${issues.join('; ')}. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source${inProgressNote}`,
-        details,
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source` : ''}${inProgressNote}`,
+        details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }
     if (hasWarnings) {
       return {
         name: 'sync_freshness',
         status: 'warn',
-        message: `${issues.join('; ')}. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh${inProgressNote}`,
-        details,
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh` : ''}${inProgressNote}`,
+        details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }
     if (writer_owned_count === sources.length) return {
       name: 'sync_freshness', status: 'ok',
       message: `${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status.`, details,
     };
-    const upstreamCount = sources.length - writer_owned_count;
+    const upstreamCount = sources.length - writer_owned_count - read_only_pack_count;
+    if (upstreamCount === 0) return { name: 'sync_freshness', status: 'ok', message: `No upstream-synced sources${inProgressNote}.`, details };
     // v0.41.27.0: D2 ok-message reshape. Three branches surface what the
     // git short-circuit actually did so operators understand "unchanged
     // since last sync" vs "synced recently".
