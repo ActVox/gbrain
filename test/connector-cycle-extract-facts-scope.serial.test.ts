@@ -66,6 +66,18 @@ describe('#6803 connector cycle extract_facts scope', () => {
     }
   }), 180_000);
 
+  test('with managed persistence (no watermark drain) the cycle still reconciles the source\'s changed pages', async () => withEnv(env, async () => {
+    for (const engine of engines) {
+      const { connector } = await seed(engine);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      const out = await makeAutopilotCycleHandler(engine)({ id: 4, data: { source_id: connector } } as never) as {
+        report: { phases: Array<{ phase: string; status: string; details: Record<string, unknown> }> };
+      };
+      expect(Number(out.report.phases.find(p => p.phase === 'extract_facts')!.details.pagesScanned)).toBe(1);
+      await disposePersistenceConsumer(engine);
+    }
+  }), 180_000);
+
   test('a full walk for one source never visits another source\'s slugs', async () => withEnv(env, async () => {
     for (const engine of engines) {
       const { connector } = await seed(engine);

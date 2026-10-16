@@ -584,8 +584,7 @@ export interface CycleOpts {
    * #6803: set by the autopilot-cycle handler for a connector source, whose
    * cycle has no sync phase. The source's pages changed after this instant
    * (null: never cycled, so every page of the source) are the cycle's
-   * incremental set; extract_facts reconciles through its bounded watermark
-   * drain. Without it a checkout-less source cycle took the full-walk mode and
+   * incremental set for extract_facts and recompute_emotional_weight. Without it a checkout-less source cycle took the full-walk mode and
    * walked every page of the brain on every cycle.
    */
   sourceChangedSince?: string | null;
@@ -2425,7 +2424,7 @@ async function runCycleUnscoped(
         // (#1928, codex: keying off phases.includes('sync') wrongly suppressed
         // the skipped-sync full reconcile).
         const syncRanButFailed = syncAttempted && syncPagesAffected === undefined;
-        const xfSlugs = syncRanButFailed || sourceChangedSlugs ? [] : syncPagesAffected;
+        const xfSlugs = syncRanButFailed ? [] : (sourceChangedSlugs ?? syncPagesAffected);
         const { result, duration_ms } = await timePhase(() =>
           runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, xfSlugs, cycleSignal), 'extract_facts');
         result.duration_ms = duration_ms;
@@ -3174,8 +3173,13 @@ async function runCycleUnscoped(
       await engine.updateSourceConfig(opts.sourceId, {
         last_source_cycle_at: nowIso,
         last_full_cycle_at: nowIso,
-        // #6803: where the next connector cycle's changed-page window starts (read before this cycle listed its pages).
-        ...(sourceWindowAt ? { last_source_cycle_window_at: sourceWindowAt } : {}),
+        // #6803: where the next connector cycle's changed-page window starts: when this cycle listed its pages,
+        // or, when a phase that consumed the window failed, the same window again ('' = every page of the source).
+        ...(sourceWindowAt ? {
+          last_source_cycle_window_at: phaseResults.some(r => (r.phase === 'extract_facts' || r.phase === 'recompute_emotional_weight') && r.status === 'fail')
+            ? (opts.sourceChangedSince ?? '')
+            : sourceWindowAt,
+        } : {}),
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

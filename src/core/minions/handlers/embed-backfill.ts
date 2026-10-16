@@ -271,6 +271,7 @@ export function makeEmbedBackfillHandler(
     if (job.signal?.aborted) drainAbort.abort();
     job.signal?.addEventListener('abort', onJobAbort, { once: true });
     let progressCounter = 0;
+    const progressWrites = new Set<Promise<unknown>>();
     const watchdog = stallSeconds > 0
       ? createEmbedStallWatchdog({ thresholdSeconds: stallSeconds, readProgress: () => progressCounter })
       : undefined;
@@ -308,13 +309,15 @@ export function makeEmbedBackfillHandler(
             // Banked forward progress feeds the stall watchdog's clock.
             progressCounter = embedded + chunksProcessed;
             // Fire-and-forget; updateProgress returns a Promise but the
-            // handler is sync inside the loop.
-            void job.updateProgress({
+            // handler is sync inside the loop. Tracked so the #6803 stall
+            // record below is written after every in-flight update.
+            const write: Promise<unknown> = job.updateProgress({
               embedded,
               chunksProcessed,
               cursor,
               spentUsd: tracker.totalSpent,
-            });
+            }).catch(() => undefined).finally(() => progressWrites.delete(write));
+            progressWrites.add(write);
           },
         }),
       );
@@ -355,6 +358,7 @@ export function makeEmbedBackfillHandler(
         let repeated = false;
         if (result.embedded === 0) {
           try {
+            await Promise.all(progressWrites);
             const { fingerprint, remaining, blocked, signature } = await readEmbedBackfillBlockers(engine, sourceId, currentEmbeddingSignature());
             const [prior] = job.attempts_made > 0
               ? await engine.executeRaw<{ fingerprint: string | null }>("SELECT progress->'stall'->>'fingerprint' AS fingerprint FROM minion_jobs WHERE id=$1", [job.id])

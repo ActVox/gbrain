@@ -298,12 +298,13 @@ To drain now:
 gbrain projections drain            # until every page queued at the start was tried once
 gbrain projections drain --limit 5000
 gbrain projections drain --json     # {rebuilt, superseded, failed: [{source_id, slug, reason}], remaining}
-gbrain projections drain --dry-run  # rebuild nothing: list the queued rows, rows that last failed first
+gbrain projections drain --dry-run  # rebuild nothing: list the queued rows in the order a drain tries them
 ```
 
-`--dry-run` is the preview: it reads the queue only and prints each row it
-would try with its queue reason (`rebuild_failed` rows first), up to `--limit`
-(default 50); `--json` gives `{pending, failed, rows}`.
+`--dry-run` is the preview: it reads the queue only and prints the rows a
+drain with the same `--limit` (default 50) would try, in that order, each with
+its queue reason (`rebuild_failed` for a row whose last rebuild failed);
+`--json` gives `{pending, failed, rows}`.
 
 <a id="embed-backfill-stalled"></a>
 **An automatic embed-backfill that keeps failing the same way.** A page whose

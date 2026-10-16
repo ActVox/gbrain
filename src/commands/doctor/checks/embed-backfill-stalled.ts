@@ -24,8 +24,7 @@ export async function embedBackfillStalledCheck(engine: BrainEngine): Promise<Ch
   try {
     const sources = await engine.executeRaw<{ source_id: string }>(
       `SELECT DISTINCT data->>'sourceId' AS source_id FROM minion_jobs
-        WHERE name = 'embed-backfill' AND status IN ('failed', 'dead') AND progress ? 'stall'
-          AND finished_at > now() - interval '7 days'`);
+        WHERE name = 'embed-backfill' AND status IN ('failed', 'dead') AND progress ? 'stall'`);
     const stalled = [];
     for (const { source_id } of sources) {
       const stall = source_id ? await readEmbedBackfillStall(engine, source_id) : null;
