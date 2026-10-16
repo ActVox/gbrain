@@ -394,9 +394,10 @@ export const REMOTE_HOST_ACTION = 'host operator action required: on the brain h
  */
 export async function remoteWaveHandoff(engine: BrainEngine, sourceIds?: string[]): Promise<Check[]> {
   const findings = await runWaveChecks(engine, { sourceIds, remote: true });
-  return findings.map(({ spec, state }) => {
+  return findings.map(({ spec, check, state }) => {
     const host_action = { check_id: spec.id, state: state === 'finding' ? 'action_required' : state, preview_command: 'gbrain doctor --remediation-plan' };
-    if (state === 'ok') return { name: spec.id, status: 'ok' as const, message: 'No host action needed.', details: { host_action } };
+    if (state === 'ok') return { name: spec.id, status: 'ok' as const, message: 'No host action needed.', details: { host_action },
+      ...(check.severity ? { severity: check.severity } : {}), ...(check.readiness_state ? { readiness_state: check.readiness_state } : {}) };
     if (state === 'unknown') return { name: spec.id, status: 'warn' as const, details: { host_action },
       message: `Unknown: this check could not run for the remote caller; ${REMOTE_HOST_ACTION}.` };
     return { name: spec.id, status: 'warn' as const, details: { host_action }, message: `${spec.impact}; ${REMOTE_HOST_ACTION}.` };
