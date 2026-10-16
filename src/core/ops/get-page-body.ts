@@ -66,7 +66,7 @@ export const LARGE_PAGES_CAPABILITY = 'large_pages_v1';
 export const GET_PAGE_BODY_PARAMS: Record<string, ParamDef> = {
   body: { type: 'string', enum: [...BODY_MODES], description: 'auto: whole up to 256 KB, else outline + window. none: revision + size.', fullSurfaceOnly: true },
   lines: { type: 'object', description: 'Window: 1-based lines.', properties: { from: { type: 'number', required: true }, count: { type: 'number', required: true } }, fullSurfaceOnly: true },
-  bytes: { type: 'object', description: 'Window: UTF-8 bytes (snapped to a line start).', properties: { offset: { type: 'number', required: true }, length: { type: 'number', required: true } }, fullSurfaceOnly: true },
+  bytes: { type: 'object', description: 'Window: UTF-8 bytes of size.total_bytes, not body_bytes (snapped to a line start).', properties: { offset: { type: 'number', required: true }, length: { type: 'number', required: true } }, fullSurfaceOnly: true },
   around_chunk_id: { type: 'number', description: 'Window around a search hit chunk_id.', fullSurfaceOnly: true },
   context_lines: { type: 'number', description: 'Lines around around_chunk_id (20).', fullSurfaceOnly: true },
   cursor: { type: 'string', description: 'next_cursor: read on.', fullSurfaceOnly: true },
@@ -213,26 +213,37 @@ export async function assertFullReadFits(ctx: OperationContext, page: Pick<Page,
 }
 
 /**
- * A segmented page is never built whole (spec 7.2). Over a transport the refusal comes from body_bytes before any
- * body is read: page_too_large_for_inline, which the thin client answers by paging view: 'markdown'. A trusted local
- * read refuses with page_body_segmented, which `gbrain get` answers by streaming the page.
+ * A segmented page is never built whole (spec 7.2). Every caller gets page_body_segmented with a fix that reads it in
+ * pieces (body: 'auto' gives the outline and the first window), and a trusted local `gbrain get` answers it by
+ * streaming the page. The thin client's whole-page read keeps page_too_large_for_inline: that is its paging signal
+ * (it pages view: 'markdown' to the end), refused from body_bytes before any body is read.
  */
 export function segmentedFullReadError(ctx: OperationContext, page: Page, req: BodyRequest): OperationError {
   const total = pageBodyBytes(page);
-  const windows = "Read it in windows: get_page body: 'outline' lists the sections, then body: 'window' with lines, bytes, around_chunk_id or next_cursor.";
+  const windows = "Read it in pieces: get_page body: 'auto' returns the outline and the first window, then body: 'window' with lines, bytes, around_chunk_id or next_cursor reads on.";
+  const fix = segmentedReadFix(page.slug, page.source_id);
   if (ctx.remote === false) {
     return opError('page_body_segmented', `get_page: page ${page.slug} (source ${page.source_id}) stores its ${total}-byte body in segments; it is not returned as one string.`,
-      `${windows} gbrain get prints it whole, streamed.`,
-      { fix: readFix('Prints the page whole, streamed segment by segment.', { argv: ['gbrain', 'get', '--source', page.source_id, '--', page.slug],
-        mcp: { tool: 'get_page', arguments: { slug: page.slug, source_id: page.source_id, body: 'outline' } } }) });
+      `${windows} gbrain get (no --body) prints it whole, streamed.`, { fix });
   }
   const transport = egressTransport(ctx)!;
+  const detail = JSON.stringify({ total_bytes: total, body_storage: 'segmented', transport });
+  if (ctx.thinClient !== true) {
+    return opError('page_body_segmented', `get_page: page ${page.slug} (source ${page.source_id}) stores its ${total}-byte body in segments; it is never returned as one string.`,
+      `${windows} Edit with edit_page (revision from body: 'none').`, { detail, fix });
+  }
   return opError('page_too_large_for_inline', `Page ${page.slug} is stored in segments (${total} bytes) and is never returned whole on this connection.`,
     req.legacyThin
       ? 'This gbrain CLI is older than the host and reads pages whole. Upgrade it (gbrain upgrade) to page through large pages, or read windows over MCP with get_page body: \'window\'.'
       : `${windows} Edit with edit_page (revision from body: 'none').`,
-    { legacy_error: 'invalid_params', detail: JSON.stringify({ total_bytes: total, body_storage: 'segmented', transport }),
+    { legacy_error: 'invalid_params', detail,
       fix: sizeFix(page.slug, page.source_id, "Returns the page's size, revision and outline; each entry names the lines to read with body: 'window'.") });
+}
+
+/** The read a segmented page's whole-body refusal names: body 'auto' (outline plus the first window, with a cursor to read on). */
+export function segmentedReadFix(slug: string, sourceId: string) {
+  return readFix("Returns the page's outline and its first window, with next_cursor to read on; body: 'window' reads any lines or bytes.",
+    { argv: ['gbrain', 'get', '--source', sourceId, '--body', 'auto', '--', slug], mcp: { tool: 'get_page', arguments: { slug, source_id: sourceId, body: 'auto' } } });
 }
 
 /** The largest window this caller may receive: the request, the per-window ceiling and the egress cap minus metadata room. */

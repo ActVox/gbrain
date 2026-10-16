@@ -67,6 +67,7 @@ test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
 test/large-pages/forget-scope.test.ts
+test/large-pages/managed-import-outside-root.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
 test/large-pages/managed-sync-streamed.test.ts
@@ -90,9 +91,14 @@ test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-evidence-read-cost.test.ts
 test/large-pages/segmented-evidence.test.ts
 test/large-pages/segmented-facts-reconcile.test.ts
+test/large-pages/segmented-file-drift.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
 test/large-pages/segmented-leads.test.ts
+test/large-pages/segmented-maintenance-commands.test.ts
+test/large-pages/segmented-read-refusals.test.ts
+test/large-pages/segmented-remember-refusal.test.ts
+test/large-pages/segmented-repair-scans.test.ts
 test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts

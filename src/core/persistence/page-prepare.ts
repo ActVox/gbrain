@@ -11,7 +11,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { Page, PageVersion } from '../types.ts';
 import { importFromContent, verifyPageReadable, type ParsedPage } from '../import-file.ts';
-import { comparableFrontmatter, frontmatterHoldMessageWithoutKeys, parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, resolveSourceLocalFilePath, type ParseOpts } from '../markdown.ts';
+import { comparableFrontmatter, frontmatterHoldMessageWithoutKeys, parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, resolveSourceLocalFilePath, type ParsedMarkdown, type ParseOpts } from '../markdown.ts';
 import { assertLargePageReplacement } from './large-page-guard.ts';
 import { applyInference } from '../frontmatter-inference.ts';
 import { OperationError, opError } from '../ops/contract.ts';
@@ -45,7 +45,16 @@ import { materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
-import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { bodyUnread, isSegmentedPage, pageBodySegmentedError, withoutBody } from '../page-body/page-shape.ts';
+import { fileBodyDigests, storedBodyDigests, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
+import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
+import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
+import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
+import { occurrencesWithoutChunks } from '../page-body/ingest.ts';
+import { buildSegmentedProjection } from '../page-body/projection.ts';
+import { segmentedExportMarkdown } from '../export-snapshot.ts';
+import { loadImportSanityConfig } from '../import-screen.ts';
+import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
 import { materializeTimeline, prepareCanonicalProjections, type TimelineRowsRemoved } from './canonical-projections.ts';
 import { assertTimelineNotOmitted, timelineWritePolicy } from './timeline-omission.ts';
 import { preserveProtectedTakes } from './protected-takes.ts';
@@ -166,17 +175,7 @@ export async function fileMatchesSnapshot(engine: BrainEngine, slug: string, byt
   const expected = digest(canonical(snapshot.page, snapshot.tags));
   const matches = async (content: string, inferred: boolean) => {
     const parsed = parseMarkdown(content, slug, { activePack });
-    // #5521 parity for subtype (#5928): a pack rule is not part of the file's bytes, so a file
-    // without an explicit `subtype:` keeps the stored subtype (or none); the import still stamps it.
-    delete parsed.inferredSubtype;
-    resolveParsedSubtype(parsed, snapshot.page);
-    // #6429: the v0.13.1 grandfather stamped `validate: false` into the database; on an unmanaged brain that path
-    // never wrote the file, so the file lacks a key the database carries. The mechanical stamp authors nothing
-    // (grandfather.ts): a file without a `validate:` key keeps the stored stamp, and the next coordinated write publishes it.
-    if (!Object.hasOwn(parsed.frontmatter, 'validate') && snapshot.page.frontmatter?.validate === false) parsed.frontmatter.validate = false;
-    // #1035 parity (#5521): a file without an explicit `type:` keeps the stored type on import. An inferred
-    // type is not one the file declared (#6605): inference only applies to a file with no frontmatter.
-    const type = parsed.typeExplicit && !inferred ? parsed.type : snapshot.page.type;
+    const type = importedFileType(parsed, snapshot.page, inferred);
     // Withdrawal overlays intentionally precede physical mirroring. The ledger
     // is applied by the import preparation and cannot be undone by this check.
     const actual = canonical({ ...parsed, type, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
@@ -187,8 +186,54 @@ export async function fileMatchesSnapshot(engine: BrainEngine, slug: string, byt
   const reading = readCanonicalAsImported(bytes, typeof sourcePath === 'string' ? sourcePath : await sourcePath());
   return reading.inferred && await matches(reading.content, true);
 }
+/** The type a file's parse compares with (`fileMatchesSnapshot`), after aligning the parse with what its import over `page` stores. */
+function importedFileType(parsed: ParsedMarkdown, page: Pick<Page, 'type' | 'frontmatter'>, inferred: boolean): Page['type'] {
+  // #5521 parity for subtype (#5928): a pack rule is not part of the file's bytes, so a file
+  // without an explicit `subtype:` keeps the stored subtype (or none); the import still stamps it.
+  delete parsed.inferredSubtype;
+  resolveParsedSubtype(parsed, page);
+  // #6429: the v0.13.1 grandfather stamped `validate: false` into the database; on an unmanaged brain that path
+  // never wrote the file, so the file lacks a key the database carries. The mechanical stamp authors nothing
+  // (grandfather.ts): a file without a `validate:` key keeps the stored stamp, and the next coordinated write publishes it.
+  if (!Object.hasOwn(parsed.frontmatter, 'validate') && page.frontmatter?.validate === false) parsed.frontmatter.validate = false;
+  // #1035 parity (#5521): a file without an explicit `type:` keeps the stored type on import. An inferred
+  // type is not one the file declared (#6605): inference only applies to a file with no frontmatter.
+  return parsed.typeExplicit && !inferred ? parsed.type : page.type;
+}
+/** The withdrawal ledger readPageSnapshot overlaid the snapshot's body with, for a segmented body read under it. */
+function snapshotLedger(snapshot: PageSnapshot): BodyLedger {
+  return { withdrawals: snapshot.withdrawals, ...(snapshot.globalPurges ? { globalPurges: snapshot.globalPurges } : {}) };
+}
+/**
+ * Wave B: `fileMatchesSnapshot` for a segmented page whose body was not read back (over the single-string ceiling).
+ * The same comparison with each body region replaced by its SHA-256 on both sides: the file's regions as the streamed
+ * importer's scan splits them, the stored ones from the trusted stored body (body-digests.ts), one segment at a time.
+ * The withdrawal overlay leaves a body without a facts fence unchanged; a file whose body has one under a ledger
+ * that applies cannot be overlaid streamed, so it refuses (`page_body_segmented`) instead of reading as drift.
+ */
+async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: Buffer, snapshot: PageSnapshot,
+  sourcePath: () => Promise<string>, activePack?: ParseOpts['activePack']): Promise<boolean> {
+  const ledger = snapshotLedger(snapshot);
+  let stored: RegionDigests | undefined;
+  const matches = async (reading: FileReading, inferred: boolean) => {
+    const file = fileBodyDigests(bytes, reading, slug, { activePack });
+    if (file.kind !== 'ok') return file.reason;
+    if (file.factsFence && ledgerApplies(ledger)) throw pageBodySegmentedError(snapshot.page, 'fileMatchesSnapshot (a facts fence under withdrawals)');
+    const parsed = { ...file.parsed, compiled_truth: file.digests.truth, timeline: file.digests.timeline };
+    const type = importedFileType(parsed, snapshot.page, inferred);
+    stored ??= await storedBodyDigests(engine, Number(snapshot.page.id), ledger);
+    return digest(canonical({ ...parsed, type }, parsed.tags))
+      === digest(canonical({ ...withoutBody(snapshot.page), compiled_truth: stored.truth, timeline: stored.timeline }, snapshot.tags));
+  };
+  const raw = await matches({ prefix: new Uint8Array(0), skip: 0 }, false);
+  if (raw === true) return true;
+  if (raw === 'invalid_utf8') return false;
+  const skip = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+  const prefix = await inferredHeadPrefix(bytes.subarray(skip, skip + FRONTMATTER_HEAD_MAX_BYTES), await sourcePath());
+  return !!prefix?.length && await matches({ prefix, skip }, true) === true;
+}
 export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'> & { operation?: string }, snapshot: PageSnapshot | null,
-  content: string | null, hostId?: string, options: { allowMissing?: boolean; deleting?: boolean; capture?: { path: string; hash: string }; activePack?: ParseOpts['activePack']; remote?: boolean;
+  content: string | Uint8Array | null, hostId?: string, options: { allowMissing?: boolean; deleting?: boolean; capture?: { path: string; hash: string }; activePack?: ParseOpts['activePack']; remote?: boolean;
     /** #6368: a tombstone purge whose file matches these sync.exclude globs (relative to the source root) owns no file. */
     excludeTombstone?: { patterns: string[]; onExcluded: (path: string) => void };
     /** #6517: a delete whose file another live page of the source records owns no file; the census target and claimants are reported. */
@@ -254,7 +299,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   // Unknown local edits require explicit import/recovery, even for force writes.
   if (before && snapshot) {
     const importPath = async () => scannerSourcePath(root, path, mode ?? await scannerSlugRootMode(engine, row.source_id, root));
-    if (!await fileMatchesSnapshot(engine, row.slug, before.toString('utf8'), snapshot, importPath, options.activePack)) {
+    const matches = bodyUnread(snapshot.page) ? await segmentedFileMatches(engine, row.slug, before, snapshot, importPath, options.activePack)
+      : await fileMatchesSnapshot(engine, row.slug, before.toString('utf8'), snapshot, importPath, options.activePack);
+    if (!matches) {
       const held = await heldFileRefusal(engine, row, root, path, 'drift', options.remote === true);
       if (held) throw held;
       // #6394: a page that never recorded its file reconciles against the file at its slug path only when adopted explicitly.
@@ -411,6 +458,59 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
 }
 
 /**
+ * Wave B: `restore_page` of a segmented page whose body was not read back (over the single-string ceiling). Soft
+ * delete only set `deleted_at` (its body, chunks, links and projections stay), so the restore clears it without
+ * re-serializing or re-importing the body: version, clear, reseal (or queue the projection when chunks are missing).
+ * The canonical file is serializePageToMarkdown's bytes streamed from the segments by export's serializer into one
+ * buffer, never one string. The restore adds no text, so an agent-tier writer's advisory gate scan (flag only) is not
+ * re-run over the stored body; a step that needs the whole body refuses (`page_body_segmented`): a core page's budget
+ * render, and an external_untrusted writer, whose gate may quarantine or reject.
+ */
+async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot,
+  options: { activePack?: ParseOpts['activePack']; clock?: ClaimPhaseClock; allowMissingFile?: boolean }): Promise<PreparedMutation> {
+  const source = { sourceId: row.source_id };
+  const noop = snapshot.page.deleted_at == null;
+  const storedTier = await storedPageTier(engine, row.source_id, row.slug);
+  const trust = pageWriteTrust(row, snapshot.page.frontmatter);
+  const gateTrust = pageGateTrust(row, trust, storedTier);
+  if (!noop && gateTrust?.tier === 'external_untrusted' && writeGateApplies(gateTrust.tier, (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) {
+    throw pageBodySegmentedError(snapshot.page, 'restore_page (the write gate scans the whole body of an external_untrusted write)');
+  }
+  enterClaimStep(options.clock, 'core_guard', undefined, 'db');
+  const core = noop ? null : await prepareCoreGuard(engine, { row, snapshot, incoming: snapshot.page });
+  enterClaimStep(options.clock, 'file_target', undefined, 'fs');
+  const file = await prepareFileTarget(engine, row, snapshot, await unreadPageFile(engine, snapshot), undefined,
+    { allowMissing: options.allowMissingFile, activePack: options.activePack, remote: row.authority.remote });
+  const pageId = Number(snapshot.page.id);
+  let complete = true;
+  const prepared: PreparedMutation = { observedRevision: snapshot.revision, noop, file, ...await pageDatabaseOnlyPublication(engine, row, file),
+    ...(core ? { exclusiveSources: core.exclusiveSources } : {}), ...(trust ? { trust } : {}),
+    validate: async tx => { await core?.validate(tx); },
+    apply: async tx => {
+      if (noop) return { ...pageNoopAdvisories(row), status: 'skipped', slug: row.slug, source_id: row.source_id, noop: true, chunks: 0, chunk_skip_reason: 'write_skipped' };
+      await tx.createVersion(row.slug, source);
+      await tx.restorePage(row.slug, source);
+      const lowered = storedTier ? await recordAgentPageLowering(tx, row, { tier: storedTier, revision: snapshot.revision }) : null;
+      const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1', [pageId]);
+      complete = !(await occurrencesWithoutChunks(tx, pageId, Number(page!.body_generation), await tx.readManifest(pageId))).length;
+      if (complete) await sealSegmentedPage(tx, pageId);
+      if (core) await core.record(tx, (await tx.readPageSnapshot(row.slug, source))?.revision ?? null);
+      return { ...pageNoopAdvisories(row), status: 'restored', slug: row.slug, source_id: row.source_id, chunks: 0, noop: false,
+        ...(complete ? {} : { projection: 'pending' }), ...await sizeStateField(tx, row.source_id, row.slug, snapshot.page),
+        ...(lowered ? { trust_lowered: lowered } : {}) };
+    },
+    afterCommit: async target => { if (!complete) await buildSegmentedProjection(target, { sourceId: row.source_id, slug: row.slug }).catch(() => undefined); } };
+  return prepared;
+}
+/** serializePageToMarkdown's bytes for a page whose body was not read back, streamed from its segments into one buffer. */
+async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<Buffer> {
+  const head = serializePageToMarkdown({ ...withoutBody(snapshot.page), compiled_truth: '', timeline: '' }, snapshot.tags).slice(0, -1);
+  const parts: Uint8Array[] = [];
+  for await (const piece of segmentedExportMarkdown(engine, snapshot.page, snapshotLedger(snapshot), head)) parts.push(typeof piece === 'string' ? Buffer.from(piece, 'utf8') : piece);
+  return Buffer.concat(parts);
+}
+
+/**
  * Providers and parsing run before the OS lock and before any publication transaction.
  * `coordinated`: the caller publishes this mutation itself through the coordinator, whose
  * page guard and revision check on `row.slug` cover this import (the put_page apply diet).
@@ -469,6 +569,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
     if (!snapshot) throw pageRefusal('page_not_found', 'Page not found.', row,
       `Page ${row.slug} does not exist in source ${row.source_id} (it was purged or never written), so nothing was ${row.operation === 'restore_page' ? 'restored' : 'reverted'}. Check the slug and the source.`,
       pageFix(row.source_id, row.slug));
+    if (row.operation === 'restore_page' && bodyUnread(snapshot.page)) return prepareUnreadRestore(engine, row, snapshot, { activePack, clock, allowMissingFile: options.allowMissingFile });
     let page = snapshot.page;
     let tags = snapshot.tags;
     if (row.operation === 'revert_version') {

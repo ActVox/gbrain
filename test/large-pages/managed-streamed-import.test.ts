@@ -199,7 +199,8 @@ describe('managed import over the single-string ceiling', () => {
       const outside = join(home, `${f.sourceId}-outside.md`);
       writeFileSync(outside, content);
       await expect(importManagedFile(engine, outside, 'notes/outside.md', { sourceId: f.sourceId, noEmbed: true }))
-        .rejects.toMatchObject({ code: 'invalid_params', message: `File too large (max ${PAGE_MAX_BYTES} bytes).` });
+        .rejects.toMatchObject({ code: 'invalid_params', message: `File too large (${Buffer.byteLength(content)} bytes, max ${PAGE_MAX_BYTES}): a file over the single-string import limit `
+          + `imports only from its place inside the source root. Move it to ${join(f.root, 'notes/outside.md')} and import it there.` });
       expect(await engine.getPage('notes/outside', { sourceId: f.sourceId })).toBeNull();
 
       const file = join(f.root, 'notes/inside.md');

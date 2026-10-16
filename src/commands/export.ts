@@ -11,7 +11,7 @@ import { resolveRestoreTarget, restoreFilePath } from '../core/restore-target.ts
 import { ExportStage, EXPORT_PAYLOAD_LIMIT, EXPORT_SNAPSHOT_MS, EXPORT_STREAM_BYTES_PER_MS, exportPathKey, exportPayloadLimit } from '../core/export-stage.ts';
 import { publishExport } from '../core/export-publish.ts';
 import { nativeFileTarget } from '../core/persistence/native-file-target.ts';
-import { readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../core/export-snapshot.ts';
+import { exportBodyLedger, readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../core/export-snapshot.ts';
 import { segmentedPageCeiling } from '../core/page-body/limits.ts';
 import { isSegmentedPage } from '../core/page-body/page-shape.ts';
 
@@ -105,7 +105,7 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
             if (isSegmentedPage(page)) {
               streamedBytes += Number(key.bytes);
               const head = serializeMarkdown(frontmatter, '', '', meta).slice(0, -1);
-              await staged.addStream(page.slug + '.md', Number(key.bytes), segmentedLimit, segmentedExportMarkdown(tx, page, withdrawals, head));
+              await staged.addStream(page.slug + '.md', Number(key.bytes), segmentedLimit, segmentedExportMarkdown(tx, page, exportBodyLedger(page.slug, withdrawals), head));
             } else staged.add(page.slug + '.md', 'file', serializeMarkdown(frontmatter, page.compiled_truth, page.timeline, meta));
             const raw = Number(key.raw_count) ? await tx.getRawData(page.slug, undefined, { sourceId: page.source_id, includeDeleted: true }) : [];
             if (raw.length) {
