@@ -14,10 +14,15 @@
  * Near a cumulative cap (`persistence.capacity.background_pause_pct`, default
  * 80 percent, of a principal's or the brain's request ids or receipt bytes) a
  * background admission refuses `write_capacity_backpressure` before any
- * receipt exists, so the rest stays free for interactive writes.
+ * receipt exists, so the rest stays free for interactive writes. #6741 C: a
+ * background admission bound to a worktree in recovery refuses
+ * `recovery_required` the same way (backgroundWorktreeInactive), so a producer
+ * retrying against it burns no permanent request ids. A draining (paused)
+ * owner still admits: its receipts stay pending and its restart replays them.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { opError, type OperationError } from '../ops/contract.ts';
+import { readFix } from '../ops/op-fix.ts';
 import type { SqlEngine } from './model.ts';
 import { CAPACITY_VERIFY } from './capacity-verify.ts';
 
@@ -72,4 +77,12 @@ export function backgroundPaused(scopeKey: string, resource: 'lifetime_ids' | 't
         why: resource === 'lifetime_ids' ? 'Request ids are permanent, so only a larger cap moves the pause line; the raise is reversible.'
           : 'The raise moves the pause line at once and is reversible; compaction frees reserved bytes only as receipts age out of the retention window.',
         verify: CAPACITY_VERIFY, docs: 'docs/guides/concurrent-writes.md#quota-near-exhaustion' } });
+}
+
+/** #6741 C: the refusal of a background admission to a worktree in recovery; nothing was submitted and no request id was used. */
+export function backgroundWorktreeInactive(sourceId: string, state: string): OperationError {
+  return opError('recovery_required', `Background writes to source ${sourceId} are paused: its worktree is ${state}.`,
+    `Nothing was submitted and no request id was used. Background work for source ${sourceId} resumes once its writer is active again; gbrain sources writer status --source ${sourceId} shows what it is waiting on.`,
+    { fix: readFix(`Shows source ${sourceId}'s worktree state and the recovery it is waiting on, read-only.`,
+      { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] }) });
 }

@@ -500,11 +500,15 @@ async function submitTranscriptPart(
   return { slug, status: receipt.noop === true || receipt.status === 'skipped' ? 'skipped' : 'imported' };
 }
 
-/** A stale higher-numbered part on a managed brain: a revision-bound `delete_page` write request (soft delete, recoverable). */
+/**
+ * A stale higher-numbered part on a managed brain: a revision-bound `delete_page` write request (soft delete, recoverable).
+ * #6741 C: an internal reconciliation, so it is admitted as background work: against a worktree in recovery it is
+ * refused before any receipt (admission-origin.ts) and the session errors, instead of each run taking a new request id.
+ */
 async function deleteStaleTranscriptPart(ctx: OperationContext, engine: BrainEngine, sourceId: string, slug: string): Promise<void> {
   const snapshot = await engine.readPageSnapshot(slug, { sourceId });
   if (!snapshot) return;
-  const receipt = await submitPageMutation(ctx, { operation: 'delete_page', params: { slug, source_id: sourceId, expected_revision: snapshot.revision, request_id: randomUUID() } });
+  const receipt = await submitPageMutation({ ...ctx, admissionOrigin: 'background' }, { operation: 'delete_page', params: { slug, source_id: sourceId, expected_revision: snapshot.revision, request_id: randomUUID() } });
   if (receipt.state !== 'committed') {
     throw new Error(`stale part ${slug} was not deleted: the coordinator returned ${String(receipt.state)}${receipt.error_code ? ` (${String(receipt.error_code)})` : ''}`);
   }

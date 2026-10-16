@@ -1,7 +1,7 @@
 /**
  * gbrain pages — page-level operator commands. v0.26.5+.
  *
- * The first subcommand: `pages purge-deleted [--older-than HOURS|Nh|Nd] [--dry-run] [--json] [--yes]`.
+ * The first subcommand: `pages purge-deleted [--older-than HOURS|Nh|Nd] [--retry-parked] [--dry-run] [--json] [--yes]`.
  * `pages unsearchable` (#6696 B3) lists embedding-state rows; its body is pages-unsearchable.ts.
  * `pages ghosts [--source <id>] [--json]` (#6696 B5, pages-ghosts.ts) lists ghost pages, read-only.
  * Manual escape hatch alongside the autopilot purge phase. Hard-deletes pages
@@ -10,6 +10,7 @@
  */
 import type { BrainEngine } from '../core/engine.ts';
 import { purgeConsentRequest, purgeDeletedPagesCoordinated } from '../core/persistence/purge-deleted.ts';
+import { PURGE_PARK_LIMIT, readPurgeParks } from '../core/persistence/purge-parks.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { consentGate } from '../core/consent-cli.ts';
 import { strictArgsRefusal } from '../cli/strict-args.ts';
@@ -19,11 +20,11 @@ const SOFT_DELETE_TTL_HOURS_DEFAULT = 72;
 
 export { PAGES_SUBCOMMANDS as SUBCOMMANDS } from '../cli/subcommands.ts';
 
-export interface PurgeArgs { olderThanHours: number; dryRun: boolean; json: boolean }
+export interface PurgeArgs { olderThanHours: number; dryRun: boolean; json: boolean; retryParked: boolean }
 
 /**
  * Strict `purge-deleted` arguments (#6114): exactly `--dry-run`, `--json`,
- * `--yes` (read by the consent gate) and one `--older-than <HOURS|Nh|Nd>` (also `--older-than=N`).
+ * `--retry-parked` (#6741), `--yes` (read by the consent gate) and one `--older-than <HOURS|Nh|Nd>` (also `--older-than=N`).
  * Anything else throws `invalid_params` before the engine is touched; cli.ts
  * refuses the same tokens earlier through the same table.
  */
@@ -38,24 +39,29 @@ export function parsePurgeArgs(args: readonly string[]): PurgeArgs {
     const n = parseInt(raw, 10);
     olderThanHours = raw.endsWith('d') ? n * 24 : n;
   }
-  return { olderThanHours, dryRun: args.includes('--dry-run'), json: args.includes('--json') };
+  return { olderThanHours, dryRun: args.includes('--dry-run'), json: args.includes('--json'), retryParked: args.includes('--retry-parked') };
 }
 
 async function runPurgeDeleted(engine: BrainEngine, args: string[]): Promise<void> {
-  const { olderThanHours, dryRun, json } = parsePurgeArgs(args);
+  const { olderThanHours, dryRun, json, retryParked } = parsePurgeArgs(args);
 
   if (dryRun) {
+    // #6741: the tombstones a managed purge has parked; the real run skips them unless --retry-parked.
+    const parked = [...(await readPurgeParks(engine)).values()].filter(park => park.failures >= PURGE_PARK_LIMIT)
+      .map(park => ({ source_id: park.source_id, slug: park.slug, failures: park.failures, code: park.code }));
     // Same engine method, same WHERE predicate, same DB now() clock as the
     // real purge — only the verb differs (SELECT, stays read-only). The old
     // listPages enumeration capped at 10000 rows (live pages included), so
     // brains past the cap under-reported the purge set.
     const preview = await engine.purgeDeletedPages(olderThanHours, { dryRun: true });
     if (json) {
-      console.log(JSON.stringify({ dry_run: true, older_than_hours: olderThanHours, count: preview.count, slugs: preview.slugs }, null, 2));
+      console.log(JSON.stringify({ dry_run: true, older_than_hours: olderThanHours, count: preview.count, slugs: preview.slugs,
+        ...(parked.length ? { parked, retry_parked: retryParked } : {}) }, null, 2));
       return;
     }
     console.log(`(dry-run) Would purge ${preview.count} page(s) soft-deleted more than ${olderThanHours}h ago.`);
     for (const p of preview.pages ?? []) console.log(`  ${p.slug}  deleted_at=${p.deleted_at.toISOString()}`);
+    for (const p of parked) console.log(`  parked: ${p.source_id}/${p.slug} after ${p.failures} failures (${p.code ?? 'error'})${retryParked ? '; --retry-parked tries it once more' : '; skipped unless --retry-parked'}`);
     return;
   }
 
@@ -68,10 +74,10 @@ async function runPurgeDeleted(engine: BrainEngine, args: string[]): Promise<voi
     else console.log(`No pages to purge (older than ${olderThanHours}h).`);
     return;
   }
-  const authorized = await consentGate(purgeConsentRequest(preview.count, olderThanHours, json, args), { json });
+  const authorized = await consentGate(purgeConsentRequest(preview.count, olderThanHours, json, args, retryParked), { json });
   if (!authorized) return;
 
-  const result = await purgeDeletedPagesCoordinated(engine, olderThanHours);
+  const result = await purgeDeletedPagesCoordinated(engine, olderThanHours, { retryParked });
   if (json) {
     console.log(JSON.stringify({ older_than_hours: olderThanHours, count: result.count, slugs: result.slugs,
       ...(result.blocked.length ? { blocked: result.blocked } : {}) }, null, 2));
@@ -100,13 +106,15 @@ Subcommands:
   unpurge <slug> [--source <id>] [--json]
                                     Clear a page's purge tombstones so its old content can be
                                     imported again. Restores nothing.
-  purge-deleted [--older-than HOURS|Nh|Nd] [--dry-run] [--json] [--yes]
+  purge-deleted [--older-than HOURS|Nh|Nd] [--retry-parked] [--dry-run] [--json] [--yes]
                                     Hard-delete soft-deleted pages older than the cutoff
                                     (default 72h) in every source of the brain (per-source
                                     purge is not supported). Cascades to chunks/links/edges.
                                     Asks first: a TTY prompt, --yes, or exit 3 with the
                                     consent payload. Preview with --dry-run --json.
-                                    Mirror of the autopilot purge phase.
+                                    Mirror of the autopilot purge phase. On a managed brain a
+                                    page whose purge failed ${PURGE_PARK_LIMIT} times is parked;
+                                    --retry-parked tries each parked page once more.
   unsearchable --source <id> [--state <state>] [--limit N] [--json]
                                     Read-only: pages search cannot fully see, one row per
                                     page and embedding state (pending, keyword_only,
