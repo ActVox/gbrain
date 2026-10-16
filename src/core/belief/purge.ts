@@ -34,8 +34,8 @@ import { CARRYING_FIELDS, REDACTION_MARKER, canonicalJson, fieldHash, pageKey, v
 import { readBeliefState } from './state.ts';
 import { keyedSubjects, pageNeeds } from './subjects.ts';
 import { resolveLifetimes } from './lifetimes.ts';
-import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
-import { coverageActive, readLedgerSource } from './ledger.ts';
+import { appendBeliefEvents, type BeliefEventDraft, type RedactionRelease } from './append.ts';
+import { coverageActive, noteBelief, readLedgerSource } from './ledger.ts';
 import { bodySubjects } from './backfill.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 
@@ -375,12 +375,16 @@ export async function releaseSuppressedFields(engine: BrainEngine, table: 'facts
   const subject = await rowSubject(engine, table, id);
   if (!subject) return [];
   const released: string[] = [];
+  const releases: RedactionRelease[] = [];
   for (const field of CARRYING_FIELDS[table === 'facts' ? 'fact' : 'take'] ?? []) {
     const text = subject.value[field];
     if (typeof text !== 'string') continue;
-    const rows = await engine.executeRaw(`UPDATE belief_redactions SET released_by = $4::uuid, released_hash = $5 WHERE source_id = $1 AND subject_key = $2 AND field = $3
-      AND released_hash IS DISTINCT FROM $5 AND field_hash <> $5 RETURNING id`, [subject.sourceId, subject.key, field, releasedBy, fieldHash(text)]);
+    const hash = fieldHash(text);
+    const rows = await engine.executeRaw<{ purge_request: string }>(`UPDATE belief_redactions SET released_by = $4::uuid, released_hash = $5 WHERE source_id = $1 AND subject_key = $2
+      AND field = $3 AND released_hash IS DISTINCT FROM $5 AND field_hash <> $5 RETURNING purge_request::text AS purge_request`, [subject.sourceId, subject.key, field, releasedBy, hash]);
     if (rows.length) released.push(field);
+    releases.push(...rows.map(r => ({ field, purge_request: r.purge_request, released_hash: hash })));
   }
+  if (releases.length) noteBelief({ kind: 'released', table, rowId: id, releases });
   return released;
 }

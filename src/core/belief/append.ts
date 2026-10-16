@@ -41,6 +41,27 @@ export interface AppendContext {
   preparedEpoch?: number;
 }
 
+/** One suppression an owner release bound to a new value: never the value itself, only its hash. */
+export interface RedactionRelease { field: string; purge_request: string; released_hash: string }
+export const REDACTION_RELEASED = 'redaction.released';
+
+/**
+ * The `redaction.released` event of one subject (section 6.5): on the redacted key and its stream, in the publication
+ * that `belief_redactions.released_by` names, carrying the released fields, their purge requests and the hashes the
+ * release bound (never the released text).
+ */
+export function redactionReleasedDraft(base: Pick<BeliefEventDraft, 'sourceId' | 'incarnation' | 'lifetime' | 'slug' | 'stream' | 'subjectKind' | 'subjectKey'
+  | 'trustTier' | 'visibility' | 'stateHash'>, releases: readonly RedactionRelease[], releasedBy: string): BeliefEventDraft {
+  const sorted = [...releases].sort((a, b) => a.field.localeCompare(b.field) || a.purge_request.localeCompare(b.purge_request));
+  return { sourceId: base.sourceId, incarnation: base.incarnation, lifetime: base.lifetime, slug: base.slug, stream: base.stream, subjectKind: base.subjectKind,
+    subjectKey: base.subjectKey, eventType: REDACTION_RELEASED, trustTier: base.trustTier, tierBasis: 'row', visibility: base.visibility,
+    value: { releases: sorted }, stateHash: base.stateHash, cause: { op: 'redaction.release', released_by: releasedBy } };
+}
+
+let dropReleaseEvents = false;
+/** Tests: the forced probe that drops every `redaction.released` event before the insert. */
+export function __dropRedactionReleaseEventsForTests(dropped: boolean): void { dropReleaseEvents = dropped; }
+
 const KIND_RANK: Record<string, number> = { coverage: 0, page: 1, fact: 2, take: 3, link: 4, link_transition: 5 };
 const ASSERTING = /\.(asserted|revised|resolved|unresolved|adopted|transferred)$|^baseline$|^reconcile$/;
 
@@ -69,18 +90,20 @@ interface Suppression { id: number; subject_key: string; field: string; purge_re
  * Applies the redaction register to the drafts' carrying fields and records
  * releases and successor copies. Returns each draft's redacted field list.
  */
-async function applyRedactions(tx: BrainEngine, sourceId: string, drafts: BeliefEventDraft[], ctx: AppendContext): Promise<Map<BeliefEventDraft, string[]>> {
+async function applyRedactions(tx: BrainEngine, sourceId: string, drafts: BeliefEventDraft[], ctx: AppendContext): Promise<{ redacted: Map<BeliefEventDraft, string[]>; released: BeliefEventDraft[] }> {
   const redacted = new Map<BeliefEventDraft, string[]>();
+  const released: BeliefEventDraft[] = [];
   const carrying = drafts.filter(d => d.value && CARRYING_FIELDS[d.subjectKind]?.some(f => typeof d.value![f] === 'string' && d.value![f] !== ''));
-  if (!carrying.length) return redacted;
+  if (!carrying.length) return { redacted, released };
   const predecessors = carrying.map(d => (d.cause.replaces ?? d.cause.from_key) as string | undefined).filter((k): k is string => !!k);
   const hashes = carrying.flatMap(d => CARRYING_FIELDS[d.subjectKind]!.map(f => d.value![f]).filter((v): v is string => typeof v === 'string' && v !== '').map(fieldHash));
   const rows = await tx.executeRaw<Suppression>(`SELECT id, subject_key, field, purge_request::text AS purge_request, field_hash, released_hash
     FROM belief_redactions WHERE source_id = $1 AND (subject_key = ANY($2::text[]) OR field_hash = ANY($3::text[]))`,
   [sourceId, [...carrying.map(d => d.subjectKey), ...predecessors], hashes]);
-  if (!rows.length) return redacted;
+  if (!rows.length) return { redacted, released };
   const owner = isOwnerWrite(ctx);
   for (const draft of carrying) {
+    const releases: RedactionRelease[] = [];
     const predecessor = (draft.cause.replaces ?? draft.cause.from_key) as string | undefined;
     for (const field of CARRYING_FIELDS[draft.subjectKind]!) {
       const text = draft.value![field];
@@ -100,13 +123,15 @@ async function applyRedactions(tx: BrainEngine, sourceId: string, drafts: Belief
       if (owner && own.every(s => s.field_hash !== hash)) {
         await tx.executeRaw('UPDATE belief_redactions SET released_by = $2::uuid, released_hash = $3 WHERE id = ANY($1::bigint[])',
           [own.map(s => Number(s.id)), ctx.publicationId, hash]);
+        releases.push(...own.map(s => ({ field, purge_request: s.purge_request, released_hash: hash })));
         continue;
       }
       draft.value = { ...draft.value!, [field]: REDACTION_MARKER(own[0]!.purge_request) };
       redacted.set(draft, [...redacted.get(draft) ?? [], field]);
     }
+    if (releases.length) released.push(redactionReleasedDraft({ ...draft, stream: draft.stream ?? draft.slug }, releases, ctx.publicationId));
   }
-  return redacted;
+  return { redacted, released };
 }
 
 let emitterFault: ((drafts: BeliefEventDraft[]) => BeliefEventDraft[]) | null = null;
@@ -120,7 +145,7 @@ export function __setBeliefEmitterFaultForTests(fault: ((drafts: BeliefEventDraf
 }
 
 export async function appendBeliefEvents(tx: BrainEngine, input: BeliefEventDraft[], ctx: AppendContext): Promise<number> {
-  const drafts = emitterFault ? emitterFault(input) : input;
+  const drafts = (emitterFault ? emitterFault(input) : input).filter(d => !(dropReleaseEvents && d.eventType === REDACTION_RELEASED));
   if (!drafts.length) return 0;
   const ordered = orderDrafts(drafts);
   const sourceId = ordered[0]!.sourceId;
@@ -132,8 +157,9 @@ export async function appendBeliefEvents(tx: BrainEngine, input: BeliefEventDraf
     }
   }
   const purgedFps = ctx.purgesPossible === false ? new Set<string>() : await tombstoned(tx, sourceId, ordered);
-  const redactions = ctx.purgesPossible === false ? new Map<BeliefEventDraft, string[]>() : await applyRedactions(tx, sourceId, ordered, ctx);
-  const rows = ordered.map((d, ord) => {
+  const { redacted: redactions, released } = ctx.purgesPossible === false ? { redacted: new Map<BeliefEventDraft, string[]>(), released: [] }
+    : await applyRedactions(tx, sourceId, ordered, ctx);
+  const rows = [...ordered, ...(dropReleaseEvents ? [] : released)].map((d, ord) => {
     const purged = d.purged === true || (!!d.claimFp && purgedFps.has(d.claimFp) && ASSERTING.test(d.eventType));
     const value = purged ? null : d.value;
     return {

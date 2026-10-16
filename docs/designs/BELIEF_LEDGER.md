@@ -217,8 +217,11 @@ Link: `link.asserted`, `link.retracted`, `link.transition_added`,
 Trust and gating (section 6): `trust.contested`, `trust.held`,
 `trust.retiered`.
 
-Purge (section 6.5): `fact.purged` and `page.purged` (above), and
-`derived.hidden` for a key whose row a purge hid through the derivation walk.
+Purge (section 6.5): `fact.purged` and `page.purged` (above),
+`derived.hidden` for a key whose row a purge hid through the derivation walk,
+and `redaction.released` when an owner release binds a redacted field to a new
+value (value `{releases: [{field, purge_request, released_hash}]}`, never the
+released text; cause `released_by`, the publication the event belongs to).
 Retention removal of an old soft-deleted page is `page.expired`, never
 `page.purged`.
 
@@ -1390,8 +1393,12 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
 2. **Link `context` is carried text:** it is in the event value (purge redacts
    it) but excluded from the diff hash, so prose edits near a link append
    nothing (probe 2).
-3. **Added event types:** `link.revised`, `link.transition_revised` and
-   `coverage.complete`; a held write's key is
+3. **Added event types:** `link.revised`, `link.transition_revised`,
+   `coverage.complete` and `redaction.released` (review #43/#5: every write of
+   `belief_redactions.released_by` appends one on the redacted key and its
+   stream in the same transaction and publication, from the owner-edit append
+   path and from `trust confirm`; a confirm that leaves the tier unchanged
+   publishes only this event); a held write's key is
    `["h", <stream lifetime or slug ref>, kind, hold fingerprint]`, so two
    holds with one fingerprint in one publication stay two keys.
 4. **Commit marks** are a follow-up statement after commit by every appender
@@ -1423,7 +1430,9 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
     claim) and may mint their open lifetime without that page's key. Taking
     those keys inside the purge transaction would break the global lock
     order, so a concurrent rename of such a page can mint a second lifetime.
-12. **Owner release reach (6.5).** A publication is an owner edit only when a
+12. **Owner release reach (6.5). W1-later: local CLI writes as owner tier
+    needs Garry's trust-posture decision; in W1 only `trust confirm`
+    releases.** A publication is an owner edit only when a
     local caller journals a direct edit (`put_page`, `edit_page`,
     `takes_update`, `takes_resolve`) with no internal intent kind; append
     still requires the writer tier at or above `OWNER_TIER_FLOOR`. The trust

@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { purgeMirrorPath } from '../src/core/belief/purge-mirror.ts';
 import { CODES } from '../src/core/error-registry.ts';
-import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
+import { __dropRedactionReleaseEventsForTests, __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
+import { applyOwnerAction, previewOwnerAction } from '../src/core/trust/owner-actions.ts';
 import { __dropOwnerEditAllowlistForTests, publicationBeliefOptions, withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { performSync } from '../src/commands/sync/perform.ts';
 import { execFileSync } from 'node:child_process';
@@ -18,7 +19,7 @@ import { coverageAt, coverageIntervals } from '../src/core/belief/coverage-repor
 import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
 import { claimForms, quotes, redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
 import { REDACTION_MARKER } from '../src/core/belief/keys.ts';
-import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { withCoordinatedWrite, withTrustPromotion } from '../src/core/persistence/context.ts';
 import { submitRememberMutation } from '../src/core/persistence/memory-mutations.ts';
 import { operations } from '../src/core/operations.ts';
 import { purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
@@ -26,7 +27,7 @@ import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain, type BeliefEvent } from './helpers/belief-ledger.ts';
 
-afterEach(() => { __setBeliefEmitterFaultForTests(null); __dropOwnerEditAllowlistForTests(false); });
+afterEach(() => { __setBeliefEmitterFaultForTests(null); __dropOwnerEditAllowlistForTests(false); __dropRedactionReleaseEventsForTests(false); });
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -129,6 +130,60 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       // Forced probe: without the allowlist the owner-tier managed sync releases the redaction and writes the new value.
       const forced = await run(true);
       expect(forced).toEqual({ marker: forced.marker, sync: ['sync rewrote it'], afterSync: 1 });
+    }, 240_000);
+
+    test('#43/#5: every redaction release appends one redaction.released in the publication released_by names, also when the confirm leaves the tier unchanged', async () => {
+      const run = (dropped: boolean) => collect<Record<string, unknown>>(report => brain(async b => {
+        const slug = 'companies/acme-example';
+        const page = (context: string, confidence = '1.0') => beliefPage({ facts: [X, { claim: 'Acme sells widgets', context, confidence },
+          { claim: 'Acme has a board', context: `minutes say ${X}`, confidence }] });
+        await b.put(slug, page(`notes say ${X}`));
+        await b.put(slug, page(`notes say ${X}`, '0.9'));
+        const factId = async (claim: string) => Number((await b.engine.executeRaw<{ id: number }>(`SELECT id FROM facts WHERE source_id = $1 AND fact = $2 AND expired_at IS NULL`, [b.sourceId, claim]))[0]!.id);
+        const confirm = async (claim: string) => {
+          const ref = `f${await factId(claim)}`;
+          const preview = await previewOwnerAction(b.engine, { action: 'confirm', ref });
+          return applyOwnerAction(b.engine, { action: 'confirm', ref }, { binding: preview.binding, confirmation: { via: 'tty' } });
+        };
+        await confirm('Acme has a board');
+        const request = await requestOf(b, String((await purgeFact(b, X)).request_id));
+        __dropRedactionReleaseEventsForTests(dropped);
+        const fact = (claim: string) => `source_id = $1 AND fact = '${claim}' AND expired_at IS NULL`;
+        const publications = async (claim: string) => (await b.engine.executeRaw<{ released_by: string; released_hash: string }>(`SELECT DISTINCT r.released_by::text AS released_by, r.released_hash
+          FROM belief_redactions r WHERE r.source_id = $1 AND r.released_by IS NOT NULL AND r.subject_key = (SELECT subject_key FROM belief_events e
+            WHERE e.source_id = $1 AND e.value->>'fact' = $2 ORDER BY e.id DESC LIMIT 1)`, [b.sourceId, claim]));
+        const shapeOf = async (publication: string) => (await b.events()).filter(e => e.publication_id === publication)
+          .map(e => [e.event_type, e.event_type === 'redaction.released' ? [(e.cause as any).released_by === publication, e.value] : e.value?.context ?? null]);
+        // The append path: an owner-tier direct edit that sets a different value.
+        await b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
+          await tx.lockPageKeys([{ sourceId: b.sourceId, slug }]);
+          await withBeliefBatch(tx, publicationBeliefOptions({ id: randomUUID(), source_id: b.sourceId, slug, operation: 'put_page', authority: { remote: false }, intent: {} }),
+            () => tx.executeRaw(`UPDATE facts SET context = 'owner rewrote it' WHERE ${fact('Acme sells widgets')}`, [b.sourceId]));
+        }, { ...TEST_WRITE_ATTRIBUTION, trust: { tier: 'operator_curated', origin: { channel: 'put_page' } } }));
+        const [edit] = await publications('Acme sells widgets');
+        // The confirm path on a row already confirmed: a write that keeps its tier changes the field (redacted, nothing released),
+        // then the confirm leaves the tier as it is, so the release is the publication's only event.
+        await b.engine.transaction(tx => withCoordinatedWrite(tx, [b.sourceId], async () => {
+          await tx.lockPageKeys([{ sourceId: b.sourceId, slug }]);
+          await withBeliefBatch(tx, { sourceId: b.sourceId, slugs: [slug], op: 'managed_file_import', remote: false },
+            () => withTrustPromotion(tx, 'user_confirmed', () => tx.executeRaw(`UPDATE facts SET context = 'minutes rewritten' WHERE ${fact('Acme has a board')}`, [b.sourceId])));
+        }, { ...TEST_WRITE_ATTRIBUTION, trust: { tier: 'user_confirmed', origin: { channel: 'managed_file_import' } } }));
+        const tier = (await b.engine.executeRaw<{ t: string }>(`SELECT trust_tier AS t FROM facts WHERE ${fact('Acme has a board')}`, [b.sourceId]))[0]!.t;
+        const unchanged = await confirm('Acme has a board');
+        const [confirmed] = await publications('Acme has a board');
+        const all = await b.events();
+        report({ tier, edit: (await shapeOf(edit!.released_by)).filter(([type]) => type !== 'trust.retiered'), confirmed: await shapeOf(confirmed!.released_by), status: unchanged.status, request,
+          hashes: [edit!.released_hash, confirmed!.released_hash], text: all.filter(e => e.event_type === 'redaction.released' && /rewr/.test(JSON.stringify(e.value))).length });
+      }));
+      const r = await run(false);
+      const [editHash, confirmHash] = r.hashes as string[];
+      expect(r).toEqual({ tier: 'user_confirmed', request: r.request, status: 'confirmed', hashes: r.hashes, text: 0,
+        edit: [['fact.revised', 'owner rewrote it'], ['redaction.released', [true, { releases: [{ field: 'context', purge_request: r.request, released_hash: editHash }] }]]],
+        confirmed: [['redaction.released', [true, { releases: [{ field: 'context', purge_request: r.request, released_hash: confirmHash }] }]]] });
+      // Forced probe: with the event dropped, the release leaves the publication released_by names without any event.
+      const forced = await run(true);
+      expect(forced.edit).toEqual([['fact.revised', 'owner rewrote it']]);
+      expect(forced.confirmed).toEqual([]);
     }, 240_000);
 
     test('#2: the first page purge in a source writes no purged text into the ledger', async () => {

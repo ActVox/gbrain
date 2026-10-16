@@ -20,7 +20,7 @@ import { COVERAGE_KEY, heldKey, lifetimeRef, pageKey, sha256Hex, canonicalJson, 
 import { readBeliefState, readFactsById, type RawPage, type RawState } from './state.ts';
 import { keyedSubjects, keyFact, pageNeeds, type KeyContext, type Subject } from './subjects.ts';
 import { endLifetime, mintLifetime, readOpenLifetimes, renameLifetime, resolveLifetimes } from './lifetimes.ts';
-import { appendBeliefEvents, type BeliefEventDraft, type BeliefOrigin } from './append.ts';
+import { appendBeliefEvents, redactionReleasedDraft, type BeliefEventDraft, type BeliefOrigin, type RedactionRelease } from './append.ts';
 
 export type BeliefNote =
   | { kind: 'contested'; table: string; rowId: number; proposalId: number; guard: string }
@@ -30,7 +30,9 @@ export type BeliefNote =
   | { kind: 'purged'; table: 'facts' | 'takes' | 'pages'; ids: number[]; request: string; derivedWalk?: 'truncated' }
   | { kind: 'transferred'; fromSlug: string; table: 'facts' | 'takes' | 'links'; ids: number[] }
   /** A tier change another writer caused (derived propagation): the batch's own `trust.retiered` for the row carries this cause. */
-  | { kind: 'retier_cause'; table: 'facts' | 'takes' | 'pages'; rowId: number; cause: Record<string, unknown> };
+  | { kind: 'retier_cause'; table: 'facts' | 'takes' | 'pages'; rowId: number; cause: Record<string, unknown> }
+  /** The owner confirm released redactions on the row's key (`releaseSuppressedFields`): the batch appends its `redaction.released`. */
+  | { kind: 'released'; table: 'facts' | 'takes'; rowId: number; releases: RedactionRelease[] };
 
 export interface BeliefBatchOptions {
   sourceId: string;
@@ -426,6 +428,10 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
         subjectKind: note.holdKind === 'take' ? 'take' : 'fact', subjectKey: heldKey(lifetime ? lifetimeRef(lifetime) : slugRef(batch.incarnation, note.slug), note.holdKind, note.fingerprint), eventType: 'trust.held',
         trustTier: note.tier, tierBasis: 'writer', visibility: page && !page.visible ? 'private' : 'world', value: { value_hash: note.valueHash },
         stateHash: streamHash(note.slug), cause: d.cause({ hold: `wh${note.holdId}` }) });
+    } else if (note.kind === 'released') {
+      const s = postSubjects.find(x => x.kind === (note.table === 'facts' ? 'fact' : 'take') && x.rowIds.includes(note.rowId));
+      if (s) drafts.push(redactionReleasedDraft({ sourceId: opts.sourceId, incarnation: batch.incarnation, lifetime: lifetimeAt(s.stream), slug: s.stream, stream: s.stream,
+        subjectKind: s.kind as BeliefEventDraft['subjectKind'], subjectKey: s.key, trustTier: s.tier, visibility: s.visibility, stateHash: streamHash(s.stream) }, note.releases, batch.publicationId));
     }
   }
   return appendBeliefEvents(tx, drafts, { publicationId: batch.publicationId, origin: opts.origin ?? (batch.managed ? 'live' : 'unmanaged'),

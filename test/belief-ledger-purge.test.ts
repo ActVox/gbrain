@@ -207,7 +207,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const [register] = await b.engine.executeRaw<{ released_by: string }>(`SELECT released_by::text AS released_by FROM belief_redactions
           WHERE source_id = $1 AND field = 'context' AND released_hash IS NOT NULL`, [b.sourceId]);
         const confirm = (await b.events(mark)).filter(e => e.publication_id === register!.released_by);
-        expect(confirm.map(e => [`${e.subject_kind}:${e.event_type}`, e.trust_tier])).toEqual([['fact:trust.retiered', 'user_confirmed']]);
+        expect(confirm.map(e => [`${e.subject_kind}:${e.event_type}`, e.trust_tier])).toEqual([['fact:redaction.released', 'user_confirmed'], ['fact:trust.retiered', 'user_confirmed']]);
         const [row] = await b.engine.executeRaw<{ publication: string; marked: boolean }>(`SELECT f.write_origin->'owner_decision'->>'publication_id' AS publication,
             EXISTS (SELECT 1 FROM belief_commit_marks m WHERE m.publication_id::text = f.write_origin->'owner_decision'->>'publication_id') AS marked
           FROM facts f WHERE f.id = $1`, [fact!.id]);
