@@ -604,7 +604,7 @@
             "unresolved": {
               "distinct_intents": 0,
               "distinct_slugs": 0,
-              "oldest_age_seconds": null,
+              "oldest_age_seconds": "<volatile>",
               "rows": 0
             },
             "window_days": 7
@@ -814,8 +814,18 @@
         {
           "category": "brain",
           "details": {
+            "archived": 0,
+            "as_of": "<ts>+00",
+            "failed": 0,
+            "ocr_required": 0,
+            "oldest_age_seconds": "<volatile>",
+            "pending": 0,
+            "protected": 0,
             "readiness": "ready",
-            "ready": true
+            "ready": true,
+            "reimport": 0,
+            "sealable": 0,
+            "sealable_with_visual": 0
           },
           "elapsed_ms": "<volatile>",
           "message": "Visible text projections match their canonical revisions.",
@@ -1807,7 +1817,7 @@
           "category": "ops",
           "details": {
             "depth": 0,
-            "oldest_age_seconds": null,
+            "oldest_age_seconds": "<volatile>",
             "worker_alive": true
           },
           "elapsed_ms": "<volatile>",
