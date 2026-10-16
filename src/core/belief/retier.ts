@@ -16,6 +16,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
 import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
 import { eventKeyHex, pageKey, slugRef } from './keys.ts';
 import { coverageActive, currentBeliefBatch, readLedgerSource, stateHashOf } from './ledger.ts';
@@ -87,7 +88,7 @@ export async function appendRetierEvents(tx: BrainEngine, rows: readonly RetierR
   for (const sourceId of new Set(resolved.map(r => r.sourceId))) {
     const source = (await readLedgerSource(tx, sourceId))!;
     appended += await appendBeliefEvents(tx, resolved.filter(r => r.sourceId === sourceId).map(r => draftOf(r, cause)),
-      { publicationId: pub, origin: source.managed ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
+      { publicationId: pub, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
   }
   return appended ? pub : null;
 }
@@ -117,7 +118,7 @@ export async function appendBulkRetier(tx: BrainEngine, rows: readonly RetierRow
         cause: { op, manifest: true } };
       return { draft, members };
     });
-    appended += await appendBeliefEvents(tx, summaries.map(s => s.draft), { publicationId, origin: source.managed ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
+    appended += await appendBeliefEvents(tx, summaries.map(s => s.draft), { publicationId, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
     const manifest = summaries.flatMap(({ draft, members }) => members.map(m => ({ event_key: eventKeyHex(publicationId, draft.subjectKey, draft.eventType),
       subject_kind: m.kind, subject_key: m.key, from_tier: m.row.from, to_tier: m.row.to })));
     await tx.executeRaw(`INSERT INTO belief_retier_manifest (summary_event, source_id, subject_kind, subject_key, from_tier, to_tier)

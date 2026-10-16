@@ -121,10 +121,10 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       const lifetime = published.page_lifetime!;
       const before = String((await content(b, slug)).revision);
       const staff = await factId(b, 'Acme has ten staff');
-      const check = (events: BeliefEvent[]) => {
+      const check = (events: BeliefEvent[], revisionBefore: string) => {
         const forget = events.filter(e => e.cause.op === 'forget');
         expect(shape(forget)).toEqual(['page:page.view_changed', 'fact:fact.withdrawn']);
-        expect(forget[0]!.value).toMatchObject({ revision_before: before });
+        expect(forget[0]!.value).toMatchObject({ revision_before: revisionBefore });
         expect(forget[0]!.subject_key).toBe(pageKey(lifetime));
         expect(parts(forget[1]!).slice(0, 3)).toEqual(['f', lifetimeRef(lifetime), 2]);
         expect(forget[1]!).toMatchObject({ value: null, trust_tier: 'agent_written', page_lifetime: lifetime });
@@ -132,7 +132,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       };
       const mark = await lastId(b);
       await run(b.local, 'forget', { id: String(staff) });
-      const forget = check(await readEvents(b.engine, b.sourceId, mark));
+      const forget = check(await readEvents(b.engine, b.sourceId, mark), before);
       const after = String(forget[0]!.value!.revision_after);
       expect(after).not.toBe(before);
       // The effect worker materializes the body at the withdrawal's revision: one more view change, and its preimage version.
@@ -146,8 +146,9 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       // Forced probe: an emitter that records the withdrawal as a plain retraction is caught.
       fault(retype('fact.withdrawn', 'fact.retracted'));
       const seed = await factId(b, 'Acme raised a seed round');
+      const current = String((await content(b, slug)).revision);
       const forced = await since(b, () => run(b.local, 'forget', { id: String(seed) }));
-      expect(() => check(forced)).toThrow();
+      expect(() => check(forced, current)).toThrow();
     }), 120_000);
 
     test('probe 8: a lower-tier fence rewrite, remember.replaces, takes_supersede and a refused remote forget each append trust.contested with the proposal', withHome(async () => {
@@ -392,16 +393,16 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         await observe(b.local, 'founder', '2025-01-01');
         await observe(b.local, 'advisor', '2023-01-01');
       });
-      const check = (events: BeliefEvent[]) => {
+      const check = (events: BeliefEvent[], starts: string[]) => {
         const advisor = events.filter(e => e.event_type === 'fact.asserted' && e.value?.value === 'advisor');
         expect(advisor).toHaveLength(2);
         const [a, c] = advisor.map(parts);
         expect(a!.slice(0, 5)).toEqual(c!.slice(0, 5));
         expect(a![0]).toBe('o');
-        expect([a![5], c![5]].sort()).toEqual(['2023-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z']);
+        expect([a![5], c![5]].sort()).toEqual(starts);
         expect(advisor[0]!.value!.fact).toBe(advisor[1]!.value!.fact);
       };
-      check(asserted);
+      check(asserted, ['2023-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z']);
       const founder = asserted.find(e => e.value?.value === 'founder')!;
       const [stint] = await b.engine.executeRaw<{ id: number }>(`SELECT id::int AS id FROM facts WHERE source_id=$1 AND entity_slug=$2 AND value='founder'`, [b.sourceId, entity]);
       await confirm(b, 'facts', stint!.id);
@@ -418,7 +419,35 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         await observe(b.local, 'advisor', '2019-01-01');
         await observe(b.local, 'advisor', '2018-01-01');
       });
-      expect(() => check(forced)).toThrow();
+      expect(() => check(forced, ['2018-01-01T00:00:00.000Z', '2019-01-01T00:00:00.000Z'])).toThrow();
     }), 180_000);
+
+    test('owner decisions: accepting a contested supersession supersedes the old belief and confirms the new one; undo reverses both', withHome(async () => {
+      const b = await brain();
+      const old = await run(b.local, 'remember', { fact: 'Bob example likes tea', provenance: 'owner', entity: 'people/bob-example' });
+      await confirm(b, 'facts', Number(old.id));
+      const agent = await run(b.remote, 'remember', { fact: 'Bob example likes coffee', provenance: 'web', entity: 'people/bob-example', replaces: String(old.id) });
+      const ref = Number(String(agent.contested.proposal_ref).slice(2));
+      const keys = (await readEvents(b.engine, b.sourceId)).filter(e => e.event_type === 'fact.asserted' && e.slug === 'people/bob-example').map(e => e.subject_key);
+      const [oldKey, newKey] = keys;
+      const checkAccept = (events: BeliefEvent[], replacement: string) => {
+        expect(events.map(e => [e.subject_key, e.event_type, e.trust_tier, e.value])).toEqual([
+          [oldKey, 'fact.superseded', 'user_confirmed', null],
+          [replacement, 'trust.retiered', 'user_confirmed', { from: 'agent_written', to: 'user_confirmed' }]]);
+        expect(events[0]!.cause).toMatchObject({ op: 'decide_proposal', replaced_by: replacement });
+      };
+      const accepted = await since(b, async () => { expect((await decideTrustProposal(b.engine, ref, 'accept', owner)).status).toBe('accepted'); });
+      checkAccept(accepted, newKey!);
+      const undone = await since(b, async () => { expect((await decideTrustProposal(b.engine, ref, 'undo', owner)).status).toBe('undone'); });
+      expect(undone.map(e => [e.subject_key, e.event_type, e.trust_tier, e.value?.fact ?? e.value])).toEqual([
+        [oldKey, 'fact.asserted', 'user_confirmed', 'Bob example likes tea'],
+        [newKey, 'trust.retiered', 'agent_written', { from: 'user_confirmed', to: 'agent_written' }]]);
+      // Forced probe: an emitter that records the accepted supersession as a plain retraction is caught.
+      const again = await run(b.remote, 'remember', { fact: 'Bob example likes cocoa', provenance: 'web', entity: 'people/bob-example', replaces: String(old.id) });
+      const cocoa = (await readEvents(b.engine, b.sourceId)).find(e => e.event_type === 'fact.asserted' && e.value?.fact === 'Bob example likes cocoa')!.subject_key;
+      fault(retype('fact.superseded', 'fact.retracted'));
+      const forced = await since(b, async () => { await decideTrustProposal(b.engine, Number(String(again.contested.proposal_ref).slice(2)), 'accept', owner); });
+      expect(() => checkAccept(forced, cocoa)).toThrow();
+    }), 120_000);
   });
 }

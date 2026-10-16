@@ -11,6 +11,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
 import { appendBeliefEvents } from './append.ts';
 import { pageKey } from './keys.ts';
@@ -41,7 +42,7 @@ export async function recordFallbackRename(tx: BrainEngine, input: { sourceId: s
   const appended = await appendBeliefEvents(tx, [{ sourceId: input.sourceId, incarnation: source.incarnation, lifetime, slug: input.newSlug, stream: input.newSlug,
     subjectKind: 'page', subjectKey: pageKey(lifetime), eventType: 'page.renamed', trustTier: page?.trust_tier || 'unknown',
     visibility: visible ? 'world' : 'private', value: { old_slug: input.staleSlug, new_slug: input.newSlug, ...(absorbed && absorbed !== lifetime ? { absorbed_lifetime: absorbed } : {}) },
-    stateHash: hash, cause: { op: 'rename_fallback' } }], { publicationId, origin: source.managed ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
+    stateHash: hash, cause: { op: 'rename_fallback' } }], { publicationId, origin: await readManagedMode(tx) ? 'live' : 'unmanaged', purgesPossible: source.purgesPossible });
   return appended ? publicationId : null;
 }
 

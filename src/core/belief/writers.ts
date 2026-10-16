@@ -6,7 +6,10 @@
  * (so the batch's reads and appends happen under them), runs its writes in a
  * belief batch and writes the commit mark after commit.
  */
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { maintenanceAttribution } from '../persistence/attribution.ts';
+import { withWriteAttribution } from '../persistence/context.ts';
 import { validateSlug } from '../utils.ts';
 import { normalizeDimension } from '../chronicle/ontology.ts';
 import { markBeliefCommits } from './append.ts';
@@ -66,4 +69,11 @@ export async function beliefTransaction<T>(engine: BrainEngine, opts: Omit<Belie
   });
   if (report.appended) await markBeliefCommits(engine, [opts.publicationId]).catch(() => undefined);
   return result;
+}
+
+/** A maintenance transaction (sync or import housekeeping) whose page writes the ledger records, e.g. a cheap rename that keeps the row. */
+export async function maintenanceBeliefTransaction<T>(engine: BrainEngine, opts: { sourceId: string; slugs: readonly string[]; op: string },
+  fn: (tx: BrainEngine) => Promise<T>): Promise<T> {
+  const attribution = await maintenanceAttribution(engine);
+  return beliefTransaction(engine, { ...opts, publicationId: randomUUID(), remote: false }, fn, (tx, run) => withWriteAttribution(tx, attribution, run));
 }
