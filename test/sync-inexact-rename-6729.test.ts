@@ -195,6 +195,40 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
     expect((await pageRow(s.id, 'notes/storage-spec'))!.id).toBe(spec.id);
   }), 180_000);
 
+  test('H1-only pages: a unique H1 keeps a moved and edited page in classic, managed and dirty-tree sync; a shared H1 or a title changed in the brain does not', () => withEnv(env, async () => {
+    const h1 = (title: string, tail = '') => `# ${title}\n\n${BODY}\n${tail}`;
+    for (const mode of ['classic', 'managed'] as const) {
+      const s = await (mode === 'classic' ? classic : managed)({
+        'notes/plan.md': h1(`Roadmap ${mode} h1 6729`), 'notes/spec.md': h1(`Spec ${mode} h1 6729`), 'notes/draft.md': h1(`Draft ${mode} h1 6729`),
+        'people/a.md': h1('Colleague', 'Works on payments.\n'), 'people/b.md': h1('Colleague', 'Works on search.\n'),
+      });
+      const plan = (await pageRow(s.id, 'notes/plan'))!, spec = (await pageRow(s.id, 'notes/spec'))!, draft = (await pageRow(s.id, 'notes/draft'))!;
+      const a = (await pageRow(s.id, 'people/a'))!, b = (await pageRow(s.id, 'people/b'))!;
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      await engine.executeRaw('UPDATE pages SET title=$3 WHERE source_id=$1 AND slug=$2', [s.id, 'notes/spec', 'Retitled in the brain']);
+      if (mode === 'managed') await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      git(s.root, 'mv', 'notes/plan.md', 'notes/roadmap.md'); write(s.root, 'notes/roadmap.md', h1(`Roadmap ${mode} h1 6729`, 'Edited.\n'));
+      git(s.root, 'mv', 'notes/spec.md', 'notes/spec-2.md'); write(s.root, 'notes/spec-2.md', h1(`Spec ${mode} h1 6729`, 'Edited.\n'));
+      git(s.root, 'mv', 'people/a.md', 'people/bob.md'); git(s.root, 'mv', 'people/b.md', 'people/alice.md');
+      write(s.root, 'people/bob.md', h1('Colleague', 'Works on search.\nNow Bob.\n')); write(s.root, 'people/alice.md', h1('Colleague', 'Works on payments.\nNow Alice.\n'));
+      commit(s.root, 'move and edit');
+      for (const line of diffStatus(s.root)) expect(line).toMatch(/^R0\d\d\t/);
+      const result = await s.sync();
+      expect(result.status).toBe('synced');
+      expect((await pageRow(s.id, 'notes/roadmap'))!.id).toBe(plan.id);
+      expect((await pageRow(s.id, 'notes/spec-2'))!.id).not.toBe(spec.id);
+      expect([(await pageRow(s.id, 'people/alice'))!.id, (await pageRow(s.id, 'people/bob'))!.id]).not.toContain(a.id);
+      expect([(await pageRow(s.id, 'people/alice'))!.id, (await pageRow(s.id, 'people/bob'))!.id]).not.toContain(b.id);
+      expect(result.identityDowngrades?.map(entry => [entry.from, entry.reason]).sort()).toEqual([
+        ['notes/spec.md', 'no_identity_signal'], ['people/a.md', 'title_not_unique'], ['people/b.md', 'title_not_unique']]);
+      git(s.root, 'mv', 'notes/draft.md', 'notes/draft-2.md'); write(s.root, 'notes/draft-2.md', h1(`Draft ${mode} h1 6729`, 'Edited.\n'));
+      git(s.root, 'add', '-A');
+      expect(git(s.root, 'diff', '--cached', '--name-status', '-M')).toMatch(/^R0\d\d\tnotes\/draft.md\tnotes\/draft-2.md$/);
+      expect((await s.sync({ workingTree: true })).status).toBe('synced');
+      expect((await pageRow(s.id, 'notes/draft-2'))!.id).toBe(draft.id);
+    }
+  }), 240_000);
+
   test('three pages sharing one title: an inexact move of one of them is a delete plus an add', () => withEnv(env, async () => {
     const s = await classic({ 'notes/a.md': doc('title: Weekly sync'), 'notes/b.md': doc('title: Weekly sync', 'B.\n'), 'notes/c.md': doc('title: Weekly sync', 'C.\n') });
     const a = (await pageRow(s.id, 'notes/a'))!;

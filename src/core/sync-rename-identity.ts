@@ -12,8 +12,10 @@
  *   - an inexact pair keeps its identity only when (a) both sides carry the
  *     same frontmatter id and no other file in the range or live page
  *     carries it, or (b) neither side has an id and the frontmatter slug:
- *     or title matches, that value is unique across every deleted and added
- *     path of the range, and (for a title) no other live page has it.
+ *     or the title (parseMarkdown's: frontmatter title:, then the first H1;
+ *     the old side as its page row stores it) matches, that value is unique
+ *     across every deleted and added path of the range, and (for a title) no
+ *     other live page has it.
  *     Conflicting ids veto;
  *   - an added file whose id uniquely matches a file deleted in the same
  *     range is a rename (a move and an edit in separate commits, or a pair
@@ -30,6 +32,7 @@ import { JSON_SCHEMA, load as yamlLoad } from 'js-yaml';
 import type { BrainEngine } from './engine.ts';
 import { spawn } from './spawn.ts';
 import { gitChildEnv } from './git-env.ts';
+import { explicitMarkdownTitle } from './markdown.ts';
 import { isMarkdownFilePath, resolveSlugForPath, type DowngradedRename, type RenameDowngradeReason, type RenameSideSource, type SyncManifest } from './sync.ts';
 import { computeSyncDelta, type SyncDeltaResult } from './sync-delta.ts';
 
@@ -38,21 +41,27 @@ const HEAD_BYTES = 64 * 1024;
 export interface FrontmatterIdentity { id: string | null; slug: string | null; title: string | null }
 const NO_IDENTITY: FrontmatterIdentity = { id: null, slug: null, title: null };
 
-/** The identity fields of a file's leading frontmatter block; unparseable or absent frontmatter carries none. */
+/**
+ * The identity fields of a file: `id` and `slug` from its leading frontmatter block (unparseable or absent frontmatter
+ * carries none), and the title parseMarkdown gives it (frontmatter `title:`, then the body's first H1) without the
+ * filename fallback, so an H1-only page has the title its page row stores.
+ */
 export function frontmatterIdentity(head: Buffer | string | null): FrontmatterIdentity {
   if (head === null) return NO_IDENTITY;
   const text = (typeof head === 'string' ? head : head.toString('utf8')).replace(/^\uFEFF/, '');
+  let title: string | null;
+  try { title = explicitMarkdownTitle(text) || null; } catch { title = null; }
   const block = /^---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(text);
-  if (!block) return NO_IDENTITY;
+  if (!block) return { ...NO_IDENTITY, title };
   let data: unknown;
-  try { data = yamlLoad(block[1]!, { schema: JSON_SCHEMA }); } catch { return NO_IDENTITY; }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return NO_IDENTITY;
+  try { data = yamlLoad(block[1]!, { schema: JSON_SCHEMA }); } catch { return { ...NO_IDENTITY, title }; }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ...NO_IDENTITY, title };
   const field = (key: string, numeric = false): string | null => {
     const value = (data as Record<string, unknown>)[key];
     const text = typeof value === 'string' ? value.trim() : numeric && typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
     return text === '' ? null : text;
   };
-  return { id: field('id', true), slug: field('slug'), title: field('title') };
+  return { id: field('id', true), slug: field('slug'), title };
 }
 
 /** The first 64 KiB of each `<rev>:<path>` object through one `git cat-file --batch` stream; null for a missing object or a non-blob. */
@@ -238,6 +247,17 @@ export async function confirmRenameIdentities(engine: Pick<BrainEngine, 'execute
   const baseIdentity = new Map(basePaths.map((path, index) => [path, frontmatterIdentity(heads[index] ?? null)]));
   const targetIdentity = new Map(targetPaths.map((path, index) => [path,
     frontmatterIdentity(target === null ? workingTreeHead(repo, path) : heads[basePaths.length + index] ?? null)]));
+  // The old side's title is the one its page row stores: a page whose title changed in the brain is compared as it is now.
+  const titled = basePaths.filter(path => baseIdentity.get(path)!.title);
+  const sourcePathOf = opts.sourcePathOf ?? ((path: string) => path);
+  const stored = titled.length ? await engine.executeRaw<{ slug: string; source_path: string | null; title: string | null }>(
+    `SELECT slug, source_path, title FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND (source_path = ANY($2::text[]) OR slug = ANY($3::text[]))`,
+    [opts.sourceId, [...new Set(titled.flatMap(path => [path, sourcePathOf(path)]))], titled.map(path => resolveSlugForPath(sourcePathOf(path)))]) : [];
+  for (const path of titled) {
+    const row = stored.find(page => page.source_path === path || page.source_path === sourcePathOf(path))
+      ?? stored.find(page => page.source_path === null && page.slug === resolveSlugForPath(sourcePathOf(path)));
+    if (row) baseIdentity.set(path, { ...baseIdentity.get(path)!, title: row.title?.trim() || null });
+  }
   const identities = [...baseIdentity.values(), ...targetIdentity.values()];
   const ids = [...new Set(identities.flatMap(identity => identity.id ? [identity.id] : []))];
   const titles = [...new Set(identities.flatMap(identity => identity.title ? [identity.title] : []))];
