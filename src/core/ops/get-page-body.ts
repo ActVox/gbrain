@@ -48,7 +48,7 @@ import {
 import { confirmBodyPin, openSegmentedBody, type BodyPin } from '../page-body/read-range.ts';
 import { renderTrustedText, type TrustFields } from '../eligibility/labels.ts';
 import { pageTrustForRead, type QuarantinedView } from './get-page-projection.ts';
-import { chunkGenerationProbe } from '../search/safe-chunks.ts';
+import { chunkGenerationProbe, chunkManifestReads } from '../search/safe-chunks.ts';
 
 export const BODY_MODES = ['auto', 'full', 'none', 'outline', 'window'] as const;
 export type BodyMode = typeof BODY_MODES[number];
@@ -293,7 +293,7 @@ async function aroundChunk(ctx: OperationContext, page: Page, doc: WindowDocumen
   Promise<{ window: WindowSlice | null; chunkText: string; anchor: 'stored_span' | 'located' | 'chunk_only'; span?: { byte_start: number; byte_end: number } }> {
   const rows = await ctx.engine.executeRaw<{ chunk_text: string; chunk_source: string; occurrence_id: unknown; projected_byte_start: unknown; projected_byte_end: unknown }>(
     `SELECT chunk_text, chunk_source, occurrence_id, projected_byte_start, projected_byte_end FROM content_chunks
-      WHERE id = $1 AND page_id = $2 AND COALESCE(modality, 'text') = 'text' AND ${chunkGenerationProbe('content_chunks')}`, [chunkId, page.id]);
+      WHERE id = $1 AND page_id = $2 AND COALESCE(modality, 'text') = 'text' AND ${chunkGenerationProbe('content_chunks', await chunkManifestReads(ctx.engine))}`, [chunkId, page.id]);
   const row = rows[0];
   if (!row || (doc.segments && !doc.segments.body.rows.some(r => r.occurrenceId === Number(row.occurrence_id)))) {
     throw opError('revision_changed', `Chunk ${chunkId} is not part of page ${page.slug} at its current revision.`,
@@ -394,7 +394,7 @@ async function noneResult(ctx: OperationContext, page: Page, out: Record<string,
   if (isSegmentedPage(page)) return { ...out, ...(fm.embed_skip ? { embed_skip: true } : {}), truncated };
   const [counts] = await ctx.engine.executeRaw<{ total: unknown; embedded: unknown }>(
     `SELECT count(*) AS total, count(*) FILTER (WHERE embedded_at IS NOT NULL) AS embedded FROM content_chunks
-      WHERE page_id = $1 AND ${chunkGenerationProbe('content_chunks')}`, [page.id]);
+      WHERE page_id = $1 AND ${chunkGenerationProbe('content_chunks', await chunkManifestReads(ctx.engine))}`, [page.id]);
   return { ...out, chunks: { total: Number(counts?.total ?? 0), embedded: Number(counts?.embedded ?? 0) },
     ...(fm.embed_skip ? { embed_skip: true } : {}), truncated };
 }

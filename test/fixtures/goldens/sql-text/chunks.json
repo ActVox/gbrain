@@ -94,6 +94,12 @@
           },
           {
             "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
+          {
+            "lane": "pool",
             "params": [
               "string",
               "string"
@@ -122,6 +128,12 @@
           },
           {
             "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
+          {
+            "lane": "pool",
             "params": [
               "string",
               "array<string>"
@@ -146,6 +158,12 @@
         "default": [
           {
             "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
+          {
+            "lane": "pool",
             "params": [
               "array<number>",
               "array<number>",
@@ -161,6 +179,12 @@
           }
         ],
         "scopedPrivateSafe": [
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
           {
             "lane": "pool",
             "params": [
@@ -189,6 +213,12 @@
           },
           {
             "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
+          {
+            "lane": "pool",
             "params": [
               "string",
               "string"
@@ -203,6 +233,12 @@
             "params": [],
             "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
             "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
           },
           {
             "lane": "pool",
@@ -223,6 +259,12 @@
           },
           {
             "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
+          {
+            "lane": "pool",
             "params": [
               "string",
               "string"
@@ -237,6 +279,12 @@
             "params": [],
             "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
             "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
           },
           {
             "lane": "pool",
@@ -257,6 +305,12 @@
           },
           {
             "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
+          },
+          {
+            "lane": "pool",
             "params": [
               "string",
               "string"
@@ -271,6 +325,12 @@
             "params": [],
             "sql": "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')",
             "textSha256": "0c97097b286eb3415cffbfa812bc301187d88bc7a5266678332b0f4c8c571371"
+          },
+          {
+            "lane": "pool",
+            "params": [],
+            "sql": "-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable, NOT has_table_privilege('page_body_manifest', 'SELECT') AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL) OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented",
+            "textSha256": "75ecb41b752625a4285cb1565fca93fb129e937f20a857bd5cea5c49e9df970b"
           },
           {
             "lane": "pool",

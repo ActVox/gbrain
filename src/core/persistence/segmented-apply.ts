@@ -87,10 +87,18 @@ export function segmentedOverCeiling(page: { body_storage?: string | null; body_
   return page.body_storage === 'segmented' && Number(page.body_bytes ?? 0) > PAGE_MAX_BYTES;
 }
 
-/** `materializedPage` over a snapshot (null passes through). */
+/**
+ * `materializedPage` over a snapshot (null passes through), with the read-back body under the snapshot's withdrawal
+ * ledger, as readPageSnapshot gives an inline page's body: a facts row the ledger withdraws is struck (or, purged,
+ * dropped), so the body a write merges into or the drift check compares a file with is the one an inline page has.
+ */
 export async function materializedSnapshot(engine: BrainEngine, snapshot: PageSnapshot | null): Promise<PageSnapshot | null> {
   if (!snapshot || bodyStorageOf(snapshot.page) !== 'segmented') return snapshot;
-  return { ...snapshot, page: await materializedPage(engine, snapshot.page) };
+  const page = await materializedPage(engine, snapshot.page);
+  if (page === snapshot.page) return snapshot;
+  Object.assign(page, await overlayCanonicalBodies(engine.executeRaw.bind(engine), page.compiled_truth, page.timeline ?? '', snapshot.withdrawals,
+    { sourceId: page.source_id, marker: snapshot.globalPurges }));
+  return { ...snapshot, page };
 }
 
 /**
