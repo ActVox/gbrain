@@ -28,6 +28,8 @@ import type { LanguageModelV2CallOptions } from '@ai-sdk/provider';
 import { ClaudeCliLanguageModel } from '../src/core/ai/providers/claude-cli-language-model.ts';
 import { chat, configureGateway, resetGateway, toolLoop } from '../src/core/ai/gateway.ts';
 import { isValidProposal, parseJudgeJson } from '../src/core/chronicle/extract-events.ts';
+import { defaultExtractor } from '../src/core/cycle/propose-takes.ts';
+import { generatePerChunkSynopsis } from '../src/core/page-summary.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 // The issue's minimized reconstruction of the cut (content values replaced).
@@ -278,5 +280,38 @@ describe('an unprovable continuation is a length outcome with no text and no too
       expect(notices).toHaveLength(1);
       expect(notices[0]).toContain('events_missing');
     });
+  }, 30_000);
+});
+
+describe('#6791 an unprovable continuation takes each caller family\'s length path', () => {
+  afterEach(() => resetGateway());
+  const caps = (argv: string[]) => argv.filter(a => a.includes('CLAUDE_CODE_MAX_OUTPUT_TOKENS'))
+    .map(a => Number((JSON.parse(a) as { env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: string } }).env.CLAUDE_CODE_MAX_OUTPUT_TOKENS));
+
+  test('propose_takes escalates once to its retry cap, then refuses the page without a tombstone', async () => {
+    await withCli({ verbose: envelope(CONTINUATION), bare: envelope(CONTINUATION) }, async stub => {
+      configureGateway({ chat_model: 'claude-cli:claude-sonnet-5', env: {} });
+      const run = defaultExtractor({ pagePath: 'notes/tail', pageBody: 'Some prose.', existingTakes: [], maxTokens: 2000, retryMaxTokens: 8000 } as Parameters<typeof defaultExtractor>[0]);
+      await expect(run).rejects.toThrow('output truncated (stopReason=length) even at maxTokens=8000');
+      expect(stub.argv().filter(a => a === '--print')).toHaveLength(2);
+      expect(caps(stub.argv())).toEqual([2000, 8000]);
+    });
+  }, 30_000);
+
+  test('page summary classifies it malformed (title-only fall-back) instead of embedding an empty synopsis', async () => {
+    const auditDir = mkdtempSync(join(tmpdir(), 'claude-continuation-audit-'));
+    try {
+      await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, () => withCli({ verbose: envelope(CONTINUATION), bare: envelope(CONTINUATION) }, async stub => {
+        configureGateway({ chat_model: 'claude-cli:claude-sonnet-5', env: {} });
+        const result = await generatePerChunkSynopsis({ documentText: 'Doc.', chunkText: 'Chunk.', pageTitle: 'Tail', pageSlug: 'notes/tail',
+          sourceId: 'default', chunkIndex: 0, model: 'claude-cli:claude-sonnet-5', maxTokens: 4000 });
+        expect(result.kind).toBe('malformed');
+        expect('synopsis' in result).toBe(false);
+        expect((result as { detail?: string }).detail).toContain('stop_reason=length');
+        expect(stub.argv().filter(a => a === '--print')).toHaveLength(1);
+      }));
+    } finally {
+      rmSync(auditDir, { recursive: true, force: true });
+    }
   }, 30_000);
 });
