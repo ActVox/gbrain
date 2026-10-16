@@ -1465,7 +1465,7 @@ reference: [`preparation_stalled`](write-refusals.md#preparation_stalled).
 
 Settings, all read by every sync (`sync.holds` is a brain config key; the `GBRAIN_SYNC_*` variables are read from the
 environment of the process that syncs and replace the `sync.hold_*` and `sync.parser_regression` keys retired in
-0.60.262.0, see [sync config keys](live-sync.md#sync-config-keys)):
+0.60.263.0, see [sync config keys](live-sync.md#sync-config-keys)):
 
 | Setting | Default | Effect |
 | --- | --- | --- |
