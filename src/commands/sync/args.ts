@@ -237,6 +237,11 @@ export function noteRetryFailedDeprecated(args: string[]): void {
   process.stderr.write(`[gbrain notice sync_retry_failed_deprecated] ${RETRY_FAILED_DEPRECATED}\n`);
 }
 
+/** Tests share one process across files: forget that an earlier file already printed the notice. */
+export function resetRetryFailedNoticeForTests(): void {
+  retryFailedNoted = false;
+}
+
 /** Flags read before the `--break-lock` branch. */
 /** setTimeout treats delays above 2^31-1 ms as ~1 ms; --interval stays within that bound. */
 const MAX_WATCH_INTERVAL_SECONDS = Math.floor(2_147_483_647 / 1000);

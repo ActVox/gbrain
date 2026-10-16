@@ -630,6 +630,13 @@
         },
         {
           "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "No managed sync run is blocked.",
+          "name": "managed_sync_blocked",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
           "details": {
             "docs": "docs/guides/repair.md#receipt-compaction",
             "last_compaction": {
