@@ -75,3 +75,23 @@ Lane 3 branch: capy/wave18-lane3. Each section names the target file, the place 
 ### scripts/module-size-limits.tsv
 
 - `src/commands/extract-conversation-facts.ts` shrinks from 2087 to 2078 in this commit (the two extractor call sites share one input object). Lower its ceiling when the integrator settles the TSV after the later lane 3 commits (the #6764 commit adds a few lines back; see that section).
+
+## #6764 conversation facts: write-time subject inference and a doctor fix that can act on them
+
+### src/core/behavior-change-notice.ts (append to BEHAVIOR_CHANGES)
+
+```ts
+  { since: '<WAVE>', text: '`gbrain extract-conversation-facts` (and the `conversation_facts_backfill` cycle phase) now runs the free write-time subject inference on facts the extractor returns without an entity, so a fact naming exactly one entity page in full is stored on that entity (context note `entity inferred from mention`; off with `facts.entity_inference false`) (#6764). Doctor `unlinked_facts` counts the conversation extractor\'s unlinked rows on their own (origin `conversation`, no longer inside fence-owned) and, because `gbrain facts relink` never examines them, its fix is a bounded, source-qualified re-extraction of the pages with the most (`--slugs`, up to 50, `--force --max-cost-usd 1`, preview `--dry-run`; paid, asks the user first). A `replaces` naming a conversation-derived fact now says to re-extract its page instead of hinting at a fence edit.' },
+```
+
+### CHANGELOG.md (wave entry, Fixed)
+
+- Facts extracted from conversations now link to the person or company they name when only one entity page matches, and doctor's `unlinked_facts` gives conversation facts a fix that can act on them (a capped re-extraction of the named pages, previewed first) instead of `gbrain facts relink`, which never touched them (#6764).
+
+### scripts/module-size-limits.tsv
+
+- `src/commands/extract-conversation-facts.ts` is 2079 of its 2087 ceiling after this commit (the inference logic lives in the new `src/core/facts/conversation-subject-infer.ts`). The integrator can lower the ceiling to 2079 when settling the TSV.
+
+### Notes
+
+- New exported symbols (no registry rows needed): `CONVERSATION_FIX_SLUGS` (doctor/checks/unlinked-facts.ts), `inferConversationSubjects` (core/facts/conversation-subject-infer.ts). The `replaces_cross_page_derived` suggestion lives in core/persistence/verb-errors.ts beside the existing `replaces_cross_page` text; no error-registry code was added.

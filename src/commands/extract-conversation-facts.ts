@@ -112,6 +112,7 @@ import {
   resolveExtractedEntitiesForSave,
 } from '../core/entities/resolve-on-save.ts';
 import { CONVERSATION_ENTITY_HINTS_CAP, conversationEntityHints } from '../core/facts/conversation-entity-hints.ts';
+import { inferConversationSubjects } from '../core/facts/conversation-subject-infer.ts';
 
 // Re-exported verbatim so existing importers (this file's own helpers below
 // and this file's tests) keep working unchanged; doctor.ts, jobs.ts,
@@ -1086,7 +1087,7 @@ async function processPage(
       // (above) ran every fact through the shipped resolver cascade (#3729/#4052),
       // so master's per-row resolveEntitySlug mapper (#4567's independent fix for
       // the same issue) is superseded rather than layered on top.
-      const rows = extracted.map((fact, i) => ({
+      const rows = await inferConversationSubjects(state.engine, state.sourceId, state.factVisibility, extracted.map((fact, i) => ({ // #6764
         ...fact, visibility: state.factVisibility,
         row_num: rowNum + i,
         source_markdown_slug: page.slug,
@@ -1098,7 +1099,7 @@ async function processPage(
         ...segmentValidFrom(fact.valid_from, seg.startIso),
         context:
           fact.context ?? `from ${page.slug} segment ${seg.startIso}..${seg.endIso}`,
-      }));
+      })));
       if (state.managed) {
         managedRows.push(...rows);
       } else {
