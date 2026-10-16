@@ -134,6 +134,8 @@ export async function runRetryHeld(engine: BrainEngine, args: string[]): Promise
   if (unknown) throw new OperationError('invalid_params', `Unknown option: ${unknown}.`, 'Usage: gbrain sources retry-held <id> [--dry-run] [--json]');
   if (positional.length !== 1) throw new OperationError('invalid_params', 'Name one source.', 'Usage: gbrain sources retry-held <id> [--dry-run] [--json]');
   const receipt = await retryHeld(engine, positional[0], { dryRun: args.includes('--dry-run') });
+  // #6712 PR 2: a soak intervention (soak-counters.ts).
+  if (!args.includes('--dry-run')) await (await import('../core/persistence/soak-counters.ts')).recordSoakEvent(engine, 'retry_held');
   if (json) { console.log(JSON.stringify(receipt, null, 2)); return; }
   for (const item of receipt.items) console.log(`  ${item.key} (${item.code}${item.reason ? `, ${item.reason}` : ''}): ${item.action}`);
   console.log(receipt.next_action);

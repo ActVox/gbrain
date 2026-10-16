@@ -1203,6 +1203,7 @@ gbrain repair file-drift --source <id> --slug notes/a --prefer file        # pre
 gbrain repair file-drift --source <id> --all-drifted --class structurally_additive --prefer file
 gbrain repair file-drift --source <id> --all-drifted --class structurally_additive --prefer file --apply --expect <hash>
 gbrain repair file-drift --source <id> --all-drifted --only 'concepts/**' --prefer database   # preview every drifted page filed under concepts/
+gbrain repair file-drift --source <id> --all-drifted --since 7d --prefer database             # only pages that drifted in the last 7 days
 ```
 
 Select pages with `--slug` (repeatable), `--request <id>` (a conflict receipt,
@@ -1232,6 +1233,17 @@ run on the selected pages only, and the globs are bound into the preview hash
 and printed in the apply command, so running that exact command applies
 exactly the previewed pages (an apply under other globs refuses
 `preview_changed`). Quote a glob so the shell does not expand it.
+
+<a id="file-drift-since"></a>`--since <ISO-8601 | age>` narrows `--all-drifted` to the pages whose newest
+drift receipt was recorded at or after that instant (#6712 PR 2). An age
+(`90s`, `30m`, `12h`, `7d`) is converted to one concrete UTC instant when the
+command runs, and the preview hash and the printed apply command carry that
+instant, not the age, so the apply selects the same pages the preview did.
+Any other value refuses before anything is read. `--since` with `--slug` or
+`--request` refuses: it only narrows `--all-drifted`. The fix that
+`gbrain sources writer failures` prints for a group of drift receipts already
+carries `--since` with the oldest receipt's time. One parser serves this flag
+and `gbrain agent logs --since`.
 
 `--keep` belongs to `stuck-recovery`; file-drift refuses it and names the
 equivalent: `--prefer database` keeps the database copy, `--prefer file`
@@ -1423,7 +1435,7 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    ```
 
 Doctor reports the same state: `git_held_files` (warn per source with counts,
-the first paths and the commands; `fail` above `sync.hold_escalate_count`,
+the first paths and the commands; `fail` above `GBRAIN_SYNC_HOLD_ESCALATE_COUNT`,
 default 50) and `frontmatter_repairable` (files the repair can fix, including
 ones that import only after quoting). Both are explicit-only findings:
 `gbrain doctor --remediation-plan --json` lists them as `explicit_kind_required`
@@ -1452,14 +1464,16 @@ gbrain sync --source notes --no-pull --no-embed     # the option-preserving comm
 Runbook: [catch-up stuck / held N files](troubleshooting.md#catch-up-stuck);
 reference: [`preparation_stalled`](write-refusals.md#preparation_stalled).
 
-Settings, all read by every sync:
+Settings, all read by every sync (`sync.holds` is a brain config key; the `GBRAIN_SYNC_*` variables are read from the
+environment of the process that syncs and replace the `sync.hold_*` and `sync.parser_regression` keys retired in
+0.60.266.0, see [sync config keys](live-sync.md#sync-config-keys)):
 
-| Key | Default | Effect |
+| Setting | Default | Effect |
 | --- | --- | --- |
 | `sync.holds` | `hold` | `fail` makes sync fail closed: a content refusal blocks the sync. |
-| `sync.hold_cap` | `500` | How many holds a sync result lists in detail; storage is never capped and valid files always import. |
-| `sync.hold_escalate_count` / `sync.hold_escalate_pct` | `50` / `5` | A source holding more files, or a run holding more than that share of at least 40 screened imports, reports `holds_escalated` and doctor `git_held_files` fails. A run whose `preparation_stalled` holds would cross it stops as `preparation_systemic` instead of holding them. |
-| `sync.parser_regression` | `stop` | `hold` holds a file whose exact bytes imported under an earlier gbrain (`parser_regression`) instead of stopping the run with `sync_parser_regression`. |
+| `GBRAIN_SYNC_HOLD_CAP` | `500` | How many holds a sync result lists in detail; storage is never capped and valid files always import. |
+| `GBRAIN_SYNC_HOLD_ESCALATE_COUNT` / `GBRAIN_SYNC_HOLD_ESCALATE_PCT` | `50` / `5` | A source holding more files, or a run holding more than that share of at least 40 screened imports, reports `holds_escalated` and doctor `git_held_files` fails. A run whose `preparation_stalled` holds would cross it stops as `preparation_systemic` instead of holding them. |
+| `GBRAIN_SYNC_PARSER_REGRESSION` | `stop` | `hold` holds a file whose exact bytes imported under an earlier gbrain (`parser_regression`) instead of stopping the run with `sync_parser_regression`. |
 
 To prevent new broken files, write brain files through `put_page`/`capture`
 or a YAML serializer, check generated content with

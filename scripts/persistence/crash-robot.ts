@@ -168,17 +168,22 @@ function freeze(event: Record<string, unknown>): never {
 /**
  * Seams one request can reach more than once by design: a preparation runs
  * again after a revision conflict or a group cut, as often as timing
- * dictates (7 to 10 preparations for the same 8-op schedule). Counting every
- * pass made the count run and the run role disagree on nth, so a fault could
- * go unreached. These seams count each request once (its first pass).
+ * dictates (7 to 10 preparations for the same 8-op schedule), and a prepared
+ * request whose publication is requeued (`writer_lock_unavailable`) is
+ * prepared again (caller_bound_replay counted 4 or 5 `consumer:prepared`).
+ * Counting every pass made the count run and the run role disagree on nth,
+ * so a fault could go unreached. These seams count each write request row
+ * once (its first pass), keyed on `writeId`: a caller-bound replay's rows
+ * share one `requestId`.
  */
-const PER_REQUEST_SEAMS: ReadonlySet<FaultPoint> = new Set<FaultPoint>(['consumer:preparing']);
+const PER_REQUEST_SEAMS: ReadonlySet<FaultPoint> = new Set<FaultPoint>(['consumer:preparing', 'consumer:prepared']);
 /** True when this pass counts toward the seam's nth: always, except a repeat of the same request at a per-request seam. */
 export function seamCounter(): (point: FaultPoint, detail: FaultDetail) => boolean {
   const seen = new Set<string>();
   return (point, detail) => {
-    if (!PER_REQUEST_SEAMS.has(point) || !detail.requestId) return true;
-    const key = `${point}\u0000${detail.requestId}`;
+    const request = detail.writeId ?? detail.requestId;
+    if (!PER_REQUEST_SEAMS.has(point) || !request) return true;
+    const key = `${point}\u0000${request}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

@@ -274,6 +274,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_clones',
   'persistence_capacity',
   'persistence_compaction',
+  // #6712 PR 2: the managed-sync soak counters (interventions, content decisions), informational.
+  'sync_soak_counters',
   'persistence_counter_drift',
   'worktree_refresh_stuck',
   'managed_guard_schema_drift',
@@ -378,6 +380,8 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'schema_pack_source_drift',
   'schema_version',
   'slug_fallback_audit',
+  // #6712 PR 2: retired sync.* keys stored on the brain and no longer applied.
+  'sync_config_keys',
   'timeline_dedup_index',
   'type_proliferation',
   'upgrade_errors',

@@ -41,17 +41,23 @@ export interface SyncFaultRule {
 
 /** #6340: a hold earned at or after this many re-holds of one path says the page keeps moving under the sync. */
 export const HOLD_ATTEMPTS_NEEDS_HUMAN = 3;
+/**
+ * #6712 PR 2 (L4): and only once this long has passed since the path was first held with its code, so a burst of re-holds
+ * (three syncs in ten minutes) never pages a person; a live `worktree_dirty` editor and image holds never escalate.
+ */
+export const HOLD_ESCALATE_MS = 24 * 60 * 60 * 1000;
+const ESCALATE_AFTER = `${HOLD_ATTEMPTS_NEEDS_HUMAN} failed attempts over ${HOLD_ESCALATE_MS / 3_600_000} h`;
 
 export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // Page class: one entry, held; the run finished.
   { code: 'worktree_dirty', class: 'page', safe_actions: ['retry_when_clean'], needs_human: false,
-    escalate: `held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times: the file keeps changing without being committed`, human_reason: 'Someone (or an agent) keeps editing the file without committing it; find out who and commit or restore it.' },
+    escalate: `${ESCALATE_AFTER} with no edit in the last ${HOLD_ESCALATE_MS / 3_600_000} h: the uncommitted edit is abandoned`, human_reason: 'An uncommitted edit of the file has sat in the checkout for a day without being committed; find out who made it and commit or restore it.' },
   { code: 'concurrent_write', class: 'page', safe_actions: ['reconcile'], needs_human: true, escalate: 'always: the file and the database page diverge',
     human_reason: 'The Git file and the database page both changed; a person chooses which version wins (gbrain sources reconcile <source> <slug> --preview shows both and writes nothing).' },
   { code: 'file_drift', class: 'page', safe_actions: ['reconcile'], needs_human: true, escalate: 'always: the page changed in the database since its file was last imported',
     human_reason: 'The database page moved since sync last imported its file, and importing would replace it; a person chooses which version wins (gbrain repair file-drift --source <source> --slug <slug> --prefer database|file previews it and writes nothing until applied).' },
   { code: 'preparation_stalled', class: 'page', safe_actions: ['retry', 'upgrade'], needs_human: false,
-    escalate: `held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times, or writer status names a step that never finishes`, human_reason: 'The write owner cannot finish preparing this file; writer status names the step, fix or report it.' },
+    escalate: `${ESCALATE_AFTER}, or writer status names a step that never finishes`, human_reason: 'The write owner cannot finish preparing this file; writer status names the step, fix or report it.' },
   { code: 'invalid_fence', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the fence repair preview offers no plan (a manual reason)', human_reason: 'Edit the facts or takes table the hold names and commit.' },
   { code: 'invalid_frontmatter', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the repair preview needs an interpretation (--include-ambiguous)', human_reason: 'Approve the proposed frontmatter fix or edit the file.' },
   { code: 'frontmatter_slug_conflict', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the repair preview needs an interpretation', human_reason: 'Decide which page keeps the slug.' },
@@ -60,11 +66,28 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   { code: 'content_rejected', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always', human_reason: 'The content-sanity gate rejected the file; remove the junk or change junk_disposition.' },
   { code: 'parser_regression', class: 'page', safe_actions: ['upgrade'], needs_human: true, escalate: 'always: a gbrain bug', human_reason: 'Report the file and gbrain version, then upgrade or pin the last good release.' },
   { code: 'managed_image_sync_unsupported', class: 'page', safe_actions: ['none'], needs_human: false, escalate: 'never: images stay held while multimodal embedding is off', human_reason: 'Leave images held, exclude them with sync.exclude, or set GBRAIN_EMBEDDING_MULTIMODAL=true so the next sync imports them.' },
+  // #6712 PR 2 (L4): two content refusals that hold the file; only the owner or the user changes the outcome.
+  { code: 'purged_content', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only the owner clears a purge tombstone',
+    human_reason: 'The file carries content the owner purged; delete or edit the file and commit, or (only if the purge was a mistake) the owner clears it with gbrain pages unpurge <slug> --source <source> on the brain host.' },
+  { code: 'write_gate_rejected', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: write_gate.external_mode=reject is the user\'s setting',
+    human_reason: 'The write gate refuses the file\'s external instruction-like content under write_gate.external_mode=reject; the user decides whether to edit the file or switch the setting back to quarantine.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'pinned_git_worktree_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'source_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
+  // #6712 PR 2 (L4): `source_changed` refined by its recorded reason (`detail`); an admission race (`pending_import`, a file that moved
+  // between freeze and publication) keeps the retry above, two-sided drift and a missing file need a decision, a binding change an inspection.
+  { code: 'pending_import', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path refuses again after a sync imported its file' },
+  { code: 'raw_file_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun re-freezes it' },
+  { code: 'file_database_drift', class: 'page', safe_actions: ['reconcile'], needs_human: true, escalate: 'always: the file and the database page diverge',
+    human_reason: 'The canonical file and the database page both changed; a person chooses which version wins (gbrain repair file-drift --source <source> --slug <slug> --prefer database|file previews it and writes nothing until applied).' },
+  { code: 'canonical_file_missing', class: 'page', safe_actions: ['repair'], needs_human: true, escalate: 'always: no sync can import a file that is not there',
+    human_reason: 'The page is live but its canonical file is gone (a ghost page); a person restores the file and syncs, or removes the page (gbrain repair ghost-pages --source <source> previews it and writes nothing).' },
+  { code: 'source_binding_changed', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always: the source or its checkout binding moved',
+    human_reason: 'The source was replaced, archived or re-bound under the write; inspect it with gbrain sources writer status --source <source> --json before anything is resubmitted.' },
+  { code: 'unsafe_file_target', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always: the file target resolves outside its source',
+    human_reason: 'The canonical file target resolves outside its source (a symlink or a moved checkout); inspect the checkout with gbrain sources writer status --source <source> --json, then the user decides how to repair it.' },
   { code: 'cancelled', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same group is cancelled again after a rerun' },
   // #6643: refinements of `cancelled` / `revision_conflict` by the receipt's recorded cause; they take precedence over the code.
   // #6712 retired both producers (one page, one fate); the rows render what older builds wrote as superseded.
@@ -149,20 +172,26 @@ export function contentRepairHumanReason(input: ContentRepairHoldInput): string 
 export interface SyncFaultVerdict { class: SyncFaultClass; safe_actions: SyncSafeAction[]; needs_human: boolean; human_reason?: string }
 
 /**
- * The verdict for one fault. `attempts` is a hold's re-hold count: a page held `HOLD_ATTEMPTS_NEEDS_HUMAN` times with the
- * same code keeps moving under the sync, so its own safe action is exhausted and a person is named. `detail` is a receipt's
+ * The verdict for one fault. `attempts` is a hold's failed-attempt count (re-holds plus failed safe actions): a page held
+ * `HOLD_ATTEMPTS_NEEDS_HUMAN` times with the same code for at least `HOLD_ESCALATE_MS` (`held_for_ms`) keeps moving under the
+ * sync, so its own safe action is exhausted and a person is named; a live editor (`live_editor`) is never escalated. `detail` is a receipt's
  * `reason` (for example `pinned_git_worktree_conflict` under `source_changed`) or a drain stop's `cause`; it refines the code
  * when the table knows it. `content_repair` is a slug-conflict hold's recorded verdict: a recommended merge or an
  * undecidable pair names a person. An unknown code is systemic and human: an agent must not guess at it.
  */
-export function classifySyncFault(input: { code: string; detail?: string | null; attempts?: number | null; message?: string | null; content_repair?: ContentRepairHoldInput | null }): SyncFaultVerdict {
+export function classifySyncFault(input: { code: string; detail?: string | null; attempts?: number | null; message?: string | null; content_repair?: ContentRepairHoldInput | null;
+  /** #6712 PR 2: how long ago the path was first held with this code (`holdEscalation`); escalation needs `HOLD_ESCALATE_MS`. */
+  held_for_ms?: number | null;
+  /** #6712 PR 2: a `worktree_dirty` hold whose uncommitted bytes changed within `HOLD_ESCALATE_MS`: someone is still editing. */
+  live_editor?: boolean }): SyncFaultVerdict {
   const judged = input.content_repair && input.code === 'frontmatter_slug_conflict' ? contentRepairHumanReason(input.content_repair) : undefined;
   if (judged) return { class: 'page', safe_actions: ['none'], needs_human: true, human_reason: judged };
   const rule = (input.detail ? BY_CODE.get(input.detail) : undefined) ?? BY_CODE.get(input.code)
     ?? (/ECONN|ETIMEDOUT|EPIPE|connection.*closed|CONNECTION_ENDED/i.test(input.message ?? '') ? BY_CODE.get('connection_lost') : undefined);
   if (!rule) return { class: 'systemic', safe_actions: ['none'], needs_human: true, human_reason: `Unknown code ${input.code}; run gbrain doctor --json and read gbrain errors ${input.code}.` };
-  const exhausted = !rule.needs_human && (input.attempts ?? 0) >= HOLD_ATTEMPTS_NEEDS_HUMAN && rule.safe_actions[0] !== 'none' && rule.class === 'page';
+  const exhausted = !rule.needs_human && (input.attempts ?? 0) >= HOLD_ATTEMPTS_NEEDS_HUMAN && (input.held_for_ms ?? 0) >= HOLD_ESCALATE_MS && !input.live_editor
+    && rule.safe_actions[0] !== 'none' && rule.class === 'page';
   if (!exhausted) return { class: rule.class, safe_actions: rule.safe_actions, needs_human: rule.needs_human, ...(rule.needs_human && rule.human_reason ? { human_reason: rule.human_reason } : {}) };
   return { class: rule.class, safe_actions: ['none'], needs_human: true,
-    human_reason: `${rule.human_reason ?? 'The page keeps moving under the sync.'} (held ${input.attempts} times with code ${rule.code})` };
+    human_reason: `${(rule.human_reason ?? 'The page keeps moving under the sync.').replace(/\.$/, '')} (held ${input.attempts} times over ${Math.floor(input.held_for_ms! / 3_600_000)} h with code ${rule.code}).` };
 }

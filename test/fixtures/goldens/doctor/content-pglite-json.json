@@ -641,7 +641,8 @@
             "count": 0,
             "docs": "docs/guides/troubleshooting.md#managed-sync-not-moving",
             "parked": 0,
-            "sources": []
+            "sources": [],
+            "stranded": 0
           },
           "elapsed_ms": "<volatile>",
           "message": "No managed sync is pending.",
@@ -666,6 +667,33 @@
           "elapsed_ms": "<volatile>",
           "message": "Receipt compaction last ran 0 hour(s) ago (compacted 0, freed 0 bytes).",
           "name": "persistence_compaction",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "by_day": [],
+            "content_decisions": {
+              "file_drift_apply": 0,
+              "file_drift_hold": 0,
+              "total": 0
+            },
+            "docs": "docs/guides/sync-unblock-runbook.md#soak-counters",
+            "interventions": {
+              "needs_human": 0,
+              "repair_apply": 0,
+              "retry_held": 0,
+              "sync_non_plain": 0,
+              "total": 0,
+              "unblock_apply": 0
+            },
+            "since": "<ts>",
+            "window_days": 7
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Last 7 days: 0 managed-sync intervention(s), 0 content decision(s).",
+          "name": "sync_soak_counters",
+          "severity": "info",
           "status": "ok"
         },
         {
@@ -2860,6 +2888,17 @@
           "name": "missing_recorded_files",
           "readiness_state": "not_applicable",
           "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "meta",
+          "details": {
+            "rollback": [],
+            "unapplied": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No retired sync config key is stored on this brain.",
+          "name": "sync_config_keys",
           "status": "ok"
         },
         {

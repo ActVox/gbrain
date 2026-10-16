@@ -102,7 +102,6 @@ const PGBOUNCER_CONTAINER = process.env.GBRAIN_TEST_CONVERGENCE_PGBOUNCER_CONTAI
 const LOG_DIR = process.env.GBRAIN_TEST_CONVERGENCE_LOG_DIR;
 
 /** The chaos modes. `skip` names the PR that turns a mode master fails on; the mode stays written and runs when named in GBRAIN_TEST_CONVERGENCE_MODES. */
-const PR1 = 'PR 1 of #6712 (L1 content-addressed resume + L2 one page, one fate + the drain lease)';
 const MODES = {
   a: { title: 'client kills', skip: null },
   b: { title: 'serve kills mid-publish', skip: null },
@@ -110,9 +109,7 @@ const MODES = {
   'c-db': { title: 'a DB-only competitor', skip: null },
   d: { title: 'out-of-band git mv/git rm of committed files and deletion of uncommitted files', skip: null },
   e: { title: 'a deterministic mid-run edit after freezeEntry', skip: null },
-  // #6712 lane C: the page that loses its pooled connection mid-publication keeps its live owner's publication claim until
-  // that lease lapses (~366 s, "claim lapsed: owner missing"); one page's fate converges, the stall is the owner's (the drain lease).
-  f: { title: 'a pooler drop mid-bulk', skip: PR1 },
+  f: { title: 'a pooler drop mid-bulk', skip: null },
   g: { title: 'two concurrent drainers: a --all run beside a serve', skip: null },
   lease: { title: 'the drain-lease holder killed with two followers queued behind it', skip: null },
   'knock-on': { title: 'one page failure inside a bulk group', skip: null },
@@ -143,6 +140,8 @@ const KILL_POINTS = [
   { point: 'sync:held_settled', per: 'held' }, { point: 'sync:retry_deferred', per: 'deferred' },
   // #6712 PR 1: inside the guarded kernel run of prescreened entries (its round also commits mode-only changes, so it has some).
   { point: 'sync:prescreened', per: 'group' },
+  // #6712 PR 2 (L5): after the checkpoint committed and the lease was released, before the owed tail runs (the next sync runs it).
+  { point: 'sync:tail_started', per: 'group' },
 ] as const satisfies ReadonlyArray<{ point: FaultPoint; per: 'page' | 'group' | 'save' | 'held' | 'deferred' }>;
 const MAX_RECOVERY_RUNS = 2;
 /** Oracle tests are named by the persistence gate's violation class (scripts/persistence/model.ts) they would report. */
@@ -176,9 +175,18 @@ interface StatusExpectation { holds?: Array<{ code: string; path: string }>; nee
 /**
  * What a converged source's status must say. Field-present assertions first: a renderer that drops a field fails
  * here, not in an agent's loop. `checkpoint_blockers` and `cursors` are arrays on every status (#6712 PR 0 made
- * `checkpoint_blockers` always present). TODO(PR 2 of #6712): read `sync status --json --detail` once it exists,
- * with the heavy reads it moves behind the flag.
+ * `checkpoint_blockers` always present). The harness reads `sync status --json --detail`: since #6712 PR 2 the
+ * terminal summary, blocker list and cursor join run only behind the flag.
  */
+/** The default (no `--detail`) status after the chaos: every skipped heavy read says so and names the `--detail` command (#6712 PR 2, DX F1). */
+function fastStatusProblems(status: Record<string, unknown> | null): string[] {
+  if (!status) return ['sync status --json printed no JSON document'];
+  return (['checkpoint_blockers_read', 'cursors_read', 'terminal_failures_read'] as const).flatMap(field => {
+    const read = status[field] as { status?: string; fix?: { argv?: string[] } } | undefined;
+    return read?.status === 'not_read' && read.fix?.argv?.includes('--detail') ? [] : [`sync status --json: ${field} is ${JSON.stringify(read)}, expected not_read with a --detail fix`];
+  });
+}
+
 function statusProblems(status: Record<string, unknown> | null, expected: StatusExpectation = {}): string[] {
   if (!status) return ['sync status --json printed no JSON document'];
   const out = STATUS_FIELDS.filter(field => !(field in status)).map(field => `sync status --json: field ${field} missing`);
@@ -571,9 +579,9 @@ class Brain {
     const head = this.git('rev-parse', 'HEAD');
     return source.last_commit === head ? [] : [`sources.last_commit ${source.last_commit} is not HEAD ${head}`];
   }
-  async status(): Promise<Record<string, unknown> | null> {
-    const r = await this.spawnCli(['sync', 'status', '--source', SOURCE, '--json']).result;
-    this.keepLog('status.json', `${r.out}\n${r.err}`);
+  async status(detail = true): Promise<Record<string, unknown> | null> {
+    const r = await this.spawnCli(['sync', 'status', '--source', SOURCE, '--json', ...(detail ? ['--detail'] : [])]).result;
+    this.keepLog(detail ? 'status.json' : 'status-fast.json', `${r.out}\n${r.err}`);
     return lastJson(r.out);
   }
   recoveryProblems(): string[] {
@@ -749,6 +757,7 @@ function oracleTests(b: Brain, end: () => EndState): void {
     b.verdict(await b.ledgerProblems());
   });
   test(as('wedge', 'sync status --json reports the converged state with every field present'), async () => b.verdict(statusProblems(await b.status(), end().status)));
+  test(as('wedge', 'plain sync status --json names every heavy read it skipped instead of reading as all-clear'), async () => b.verdict(fastStatusProblems(await b.status(false))));
   if (end().bigPage !== false) test(as('lost_write', 'the large page keeps every fence fact exactly once and loses no timeline entry'), async () => {
     const { problems, timelineDuplicates, timelineStrays } = await b.childRowProblems();
     b.note(`large page timeline (measured, not asserted): ${timelineDuplicates} duplicate rows, ${timelineStrays} rows not in the file`);
@@ -781,6 +790,13 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
   test('the status oracle accepts a converged status, with the finished cursor done or retired', () => {
     expect(statusProblems(converged())).toEqual([]);
     expect(statusProblems({ ...converged(), cursor: null, run_id: null })).toEqual([]);
+  });
+  test('the fast-status oracle accepts named skipped reads and fails a skipped read that looks read', () => {
+    const notRead = { status: 'not_read', fix: { argv: ['gbrain', 'sync', 'status', '--source', SOURCE, '--detail', '--json'] } };
+    const fast = { checkpoint_blockers_read: notRead, cursors_read: notRead, terminal_failures_read: notRead };
+    expect(fastStatusProblems(fast)).toEqual([]);
+    expect(fastStatusProblems({ ...fast, terminal_failures_read: { status: 'read' } })).toEqual(['sync status --json: terminal_failures_read is {"status":"read"}, expected not_read with a --detail fix']);
+    expect(fastStatusProblems({ ...fast, cursors_read: undefined })).toHaveLength(1);
   });
   // Forced probe: every field the oracle requires fails it when missing, so a renderer that drops one cannot pass.
   test('the status oracle fails when any required field is missing or not an array', () => {
@@ -820,9 +836,8 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
       expect(b.git('ls-files', '--others', '--exclude-standard')).toBe('stray.md');
     } finally { rmSync(b.repo, { recursive: true, force: true }); }
   });
-  test('modes master fails stay written and name the PR that turns them on', () => {
-    expect(MODES.f.skip).toContain('PR 1 of #6712');
-    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'g', 'lease', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
+  test('every mode runs: #6712 PR 2 turned on the last skipped one (f, a pooler drop mid-bulk)', () => {
+    for (const mode of ['a', 'b', 'c', 'c-db', 'd', 'e', 'f', 'g', 'lease', 'knock-on', 'systemic'] as const) expect(MODES[mode].skip).toBeNull();
   });
 });
 
