@@ -10,6 +10,77 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.271.0] - 2026-10-16
+
+**Notes hidden by a stray `slug:` line come back on the next sync, and gbrain now tells you about committed files it never indexed (#6865).** A note can carry a leftover `slug:` line in its frontmatter that names a page that does not exist, often copied from a template or left behind by an import. Sync held those files, and nothing put them back in search on its own. Now the sync itself removes that one line when the slug it names has no page and no file, imports the note under the name its path gives, commits the edit and keeps the old slug as an alias so existing links still work. A line that names a real page is still left for you to decide.
+
+Some files went missing longer ago, before gbrain kept a record of refused files, so incremental sync never looked at them again. A new maintenance check finds committed files with no page and no hold, schedules them for another look, and `gbrain doctor` reports them. It also lists titled folder `index.md` files, which sync skips on purpose; most of the 572 files in the original report were of that kind, and renaming one to a normal note brings it in.
+
+Hold messages now say what gbrain actually found: "decide which page keeps the slug" only appears when the line names a live page, and a hold gbrain has not judged yet never asks a person.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| a held note's `slug:` line names no page and no file | held until the maintenance run or a manual repair | the next managed sync removes the line, imports the note, commits `gbrain: repair frontmatter slug in <path>`; the result's `slug_lines_removed` counts it |
+| the line names an existing page (with a file, or database-only) | "decide which page keeps the slug" | the same, now naming the page and labelling a database-only one |
+| a held note edited since sync held it, an unfinished sync, or a sync started by a remote job or agent | n/a | left held for the next pass, with the reason in `slug_lines_removed` |
+| a committed file an older gbrain refused before refusals became holds | invisible: no page, no hold, no warning | doctor `unindexed_files` names it; `gbrain sources retry-held <id> --unindexed` and the sync it prints import or hold it |
+| a titled `investors/fund-a/index.md` | skipped silently | listed as `metafile_skipped` (info only); rename it to `investors/fund-a.md` to import it |
+| a slug-conflict verdict an older gbrain recorded | listed for a person | rechecked once by the next sync or maintenance run |
+
+### Things to watch
+
+- The sync edits at most 200 files and spends at most 60 seconds per run; the rest wait for the next sync. Nothing runs at upgrade.
+- To see what it would do first: `gbrain repair content --source <id> --no-llm` (read-only). To turn it off: `gbrain config set sync.slug_conflicts.auto_remove false` (or pause the whole content-repair lane with `fences.repair.enabled false`). To undo one edit: `git revert` its commit and sync, which holds the file again.
+- Before you upgrade, `gbrain sync unblock --source <id> --apply` or `gbrain repair content --source <id>` removes the same lines by hand.
+
+## To take advantage of v0.60.271.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Run a sync** (`gbrain sync --source <id> --no-pull`). It removes the stray lines it can and re-reads older verdicts; there is no schema step.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor --only git_held_files,unindexed_files
+   gbrain stats
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
+### Itemized changes
+
+#### Sync-time removal of stray `slug:` lines
+
+- `src/core/repair/slug-autoheal.ts` `healAfterManagedSync` runs once per managed sync from `commands/sync/perform.ts` `performManagedBranch`, after the drain lease is released. It applies only the content-repair lane's deterministic `absent_page` rule (`healAbsentSlugLine` in `repair/slug-conflicts.ts`), bound to the held bytes (`changed_since_hold`) and skipped for a busy path, through the same coordinated `submitManagedFileRepair` write the maintenance run uses.
+- The declared slug is recorded as a `slug_aliases` row inside that write (`recordSlugLineAlias`, `page-state/rename-alias.ts`); the receipt carries `declared_alias`.
+- Skip reasons on `SyncResult.slug_lines_removed`: `disabled`, `lane_paused`, `remote_authority`, `sync_unfinished`, `not_writable`. Budget: `SLUG_HEAL_MAX_FILES` 200, `SLUG_HEAL_BUDGET_MS` 60 000.
+- `sync.slug_conflicts.auto_remove` (default on) is registered in `KNOWN_CONFIG_KEYS`; `gbrain config set` rejects values other than true/false.
+
+#### Unindexed files
+
+- `src/core/persistence/unindexed-files.ts` streams the last synced commit's tree (`git ls-tree`), filters it through discovery's own eligibility (`loadSyncEligibility`, now exported from `sync-discovery.ts`) and compares in batches against pages, holds and scheduled re-screens. Bounded by time and count with a resume cursor; an incomplete scan is never reported clean. Results live in `op_checkpoints` (op `unindexed-files`).
+- The maintenance cycle phase `unindexed_files` runs one bounded pass per managed Git source and schedules found files with `requestGitHoldRetry`; doctor `unindexed_files` judges the stored result without scanning; `gbrain sources retry-held <id> --unindexed` runs a pass now (`--dry-run` lists only). The scan never runs on the per-sync path.
+- `metafile_skipped` counts titled `isSyncMetafile` names (`index.md`, `README.md`, ...) that sync skips by design; read-only, never scheduled.
+
+#### Truthful hold messages and the lane recheck
+
+- `ContentHoldRepairState` gains `lane_version`, `other_codes` and `named_db_only`. `CONTENT_REPAIR_LANE_VERSION` is 2; a verdict without it is re-judged by the lane (`contentHoldDisposition` in `repair/content-lane.ts`) instead of being escalated.
+- `slugConflictEscalation` (`persistence/sync-fault-class.ts`) asks a person only for a current-lane verdict that names a live page; `hold-fix.ts` messages name the page and label a database-only one.
+
+### For contributors
+
+- New tests: `test/slug-autoheal-6865.test.ts` (PGLite) and `test/e2e/slug-autoheal-6865-postgres.test.ts` share `test/helpers/slug-autoheal-scenarios.ts`; `test/slug-conflict-verdict-6865.test.ts`; `test/unindexed-files.test.ts`.
+
 ## [0.60.270.0] - 2026-10-16
 
 **Sync stops handing one page's history to another when Git guesses a rename, and background work on a managed brain stops spending write ids it can never use (fix wave 18a).** When you move a note and edit it in the same commit, Git only guesses that it was a move. Two notes made from the same template and moved together could be paired the wrong way round, and sync then carried one page's facts, links and aliases onto the other. Now sync keeps a page across a guessed move only when the files agree: the same `id`, or the same unique `slug:` line or title. Anything else becomes a new page, and the old one stays restorable, with the exact restore command printed and the purge holding it until someone decides. Contributed by @javieraldape (PR #6732, rewritten).
