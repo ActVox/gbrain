@@ -60,6 +60,24 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }, { databaseUrl: engineCase.databaseUrl });
     }, 120_000);
 
+    test('probe 14: a fact made private hides its earlier world history; a re-added source reads none of the old history', async () => {
+      await beliefBrain(async b => {
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme sells widgets'] }));
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme sells widgets', 'Acme payroll is late'] }));
+        expect((await remote(b, 'companies/acme-example')).some(e => JSON.stringify(e.value ?? {}).includes('payroll'))).toBe(true);
+        await b.put('companies/acme-example', beliefPage({ facts: ['Acme sells widgets', { claim: 'Acme payroll is late', visibility: 'private' }] }));
+        const leaked = (await remote(b, 'companies/acme-example')).filter(e => JSON.stringify(e.value ?? {}).includes('payroll'));
+        expect(leaked).toEqual([]);
+        expect((await remote(b, 'companies/acme-example')).length).toBeGreaterThan(0);
+        // Forced probe: the recorded-visibility rule alone still shows the world assertion of the claim made private.
+        expect((await local(b, 'companies/acme-example')).some(e => e.visibility === 'world' && JSON.stringify(e.value ?? {}).includes('payroll'))).toBe(true);
+        // A re-added source is a new incarnation of the same id (probe 17).
+        await b.engine.executeRaw('DELETE FROM page_write_guards WHERE source_incarnation = (SELECT incarnation FROM sources WHERE id = $1)', [b.sourceId]);
+        await b.engine.executeRaw('UPDATE sources SET incarnation = gen_random_uuid() WHERE id = $1', [b.sourceId]);
+        expect(await local(b, 'companies/acme-example')).toEqual([]);
+      }, { databaseUrl: engineCase.databaseUrl });
+    }, 120_000);
+
     test('probe 14: a link with a private endpoint is hidden until the endpoint is public', async () => {
       await beliefBrain(async b => {
         await b.put('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example', frontmatter: priv }));

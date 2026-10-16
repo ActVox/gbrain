@@ -66,6 +66,13 @@ export const RESERVE_COSINE_MIN = 0.5;
 const RESERVE_TERM_SHARE_MIN = 0.34;
 /** The facts-arm floor; `query`'s facts arm (facts-arm.ts) and the `facts_arm` admission rule share it. */
 export const FACTS_ARM_COSINE_MIN = 0.6;
+/**
+ * Embedding models whose admission floors an eval measured, keyed
+ * `provider:model@dims` (facts/supersession-threshold.ts calibrationKey). Add
+ * a row only with an eval behind it. Doctor `fact_admission_floors` and
+ * recall's `facts_calibration` (#6590) read it.
+ */
+export const FACT_ADMISSION_FLOOR_EVIDENCE: Readonly<Record<string, string>> = {};
 
 export interface FactPoolScope {
   sourceId?: string; sourceIds?: string[]; remote: boolean;

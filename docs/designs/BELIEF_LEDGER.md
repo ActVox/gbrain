@@ -1382,7 +1382,9 @@ Garry accepted those answers. Questions 5, 6, 7 and 8 are decided.
    it) but excluded from the diff hash, so prose edits near a link append
    nothing (probe 2).
 3. **Added event types:** `link.revised`, `link.transition_revised` and
-   `coverage.complete`; a held write's key is `["h", kind, hold fingerprint]`.
+   `coverage.complete`; a held write's key is
+   `["h", <stream lifetime or slug ref>, kind, hold fingerprint]`, so two
+   holds with one fingerprint in one publication stay two keys.
 4. **Commit marks** are a follow-up statement after commit by every appender
    (group members share one statement); readers fill missing marks. There is
    no effects-queue row.

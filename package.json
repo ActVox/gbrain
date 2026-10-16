@@ -156,6 +156,7 @@
     "check:layering": "bun scripts/check-layering.ts",
     "check:ai-sdk-importers": "bun scripts/check-ai-sdk-importers.ts",
     "check:durable-flush": "bun scripts/check-durable-flush.ts",
+    "check:schema-error-predicates": "bun scripts/check-schema-error-predicates.ts",
     "check:windows-hide": "bun scripts/check-windows-hide.ts",
     "check:engine-sql-ratchet": "bun scripts/check-engine-sql-ratchet.ts",
     "check:chunk-visibility": "bun scripts/check-chunk-visibility.ts",
@@ -236,7 +237,7 @@
     "bun": ">=1.4.0"
   },
   "license": "MIT",
-  "version": "0.60.256.0",
+  "version": "0.60.257.0",
   "overrides": {
     "@ai-sdk/provider-utils": "4.0.56",
     "@hono/node-server": "^2.0.5",

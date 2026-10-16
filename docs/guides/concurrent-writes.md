@@ -672,6 +672,25 @@ its writer stopped. A failed activation leaves managed mode disabled. Status
 reports `enabled: false` until activation commits. Run an ordinary write and
 read its receipt and revision before resuming writers on the upgraded hosts.
 
+### Git durability at activation
+
+Activation does not turn on Git durability. A filesystem source whose owner
+will not commit or push page writes (durability off, or not recorded with no
+harden post-commit hook) gets one `git_durability_not_enabled` entry in the
+report's `warnings[]` (on stderr as well without `--json`), in the dry run and
+in the real run. Activation still proceeds; the source's Git effects complete
+as skipped (`durability_not_enabled`) until it is enabled. `sources harden` is
+refused once the brain is managed, so enable it with the recorded setting:
+
+```bash
+gbrain sources writer git-durability <source> --enable --dry-run --json
+gbrain sources writer git-durability <source> --enable \
+  --admin-intent writer_git_durability --expected-state <reviewed-admin-state> --json
+```
+
+The preview lists the skipped Git effects; enabling re-queues them, one per
+file, so the pages written while durability was off get committed and pushed.
+
 CLI and stdio registrations are durable, separate principals. The CLI lane is
 trusted local administration; stdio remains an untrusted memory caller.
 Revocation survives restart. Losing a credential file or receiving a denied

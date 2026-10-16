@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
-import { COVERAGE_KEY, heldKey, pageKey, sha256Hex, canonicalJson, factKeySubject, slugRef } from './keys.ts';
+import { COVERAGE_KEY, heldKey, lifetimeRef, pageKey, sha256Hex, canonicalJson, factKeySubject, slugRef } from './keys.ts';
 import { readBeliefState, readFactsById, type RawPage, type RawState } from './state.ts';
 import { keyedSubjects, keyFact, pageNeeds, type KeyContext, type Subject } from './subjects.ts';
 import { endLifetime, mintLifetime, readOpenLifetimes, renameLifetime, resolveLifetimes } from './lifetimes.ts';
@@ -373,7 +373,21 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
   const postSubjects = keyedSubjects(ctx('post'), post, visibilityIn(post));
   const postPageAt = (slug: string) => streams.find(s => s.post?.slug === slug)?.post ?? null;
   const lifetimeAt = (slug: string) => { const page = postPageAt(slug); return page ? lifetimes.get(page.id) ?? null : null; };
-  const streamHash = (slug: string) => { const page = postPageAt(slug); return stateHashOf(page, page ? lifetimes.get(page.id)! : null, postSubjects.filter(s => s.stream === slug)); };
+  const subjectsByStream = new Map<string, Subject[]>();
+  for (const subject of postSubjects) {
+    const list = subjectsByStream.get(subject.stream);
+    if (list) list.push(subject); else subjectsByStream.set(subject.stream, [subject]);
+  }
+  const hashes = new Map<string, string>();
+  const streamHash = (slug: string) => {
+    let hash = hashes.get(slug);
+    if (hash === undefined) {
+      const page = postPageAt(slug);
+      hash = stateHashOf(page, page ? lifetimes.get(page.id)! : null, subjectsByStream.get(slug) ?? []);
+      hashes.set(slug, hash);
+    }
+    return hash;
+  };
   const preLifetimeAt = (slug: string) => { const page = streams.find(s => s.pre?.slug === slug)?.pre; return page ? lifetimes.get(page.id) ?? null : null; };
   const d: DiffContext = { opts, batch, writerTier, lifetimeAt, streamHash, postSubjects, transfers: transferSources(batch.notes, preSubjects, preLifetimeAt),
     cause: (extra = {}) => ({ op: opts.op, ...(opts.publicationId ? { request: opts.publicationId } : {}), ...opts.cause, ...extra }) };
@@ -405,8 +419,9 @@ export async function finalizeBeliefEvents(tx: BrainEngine, batch: Batch): Promi
     if (note.kind === 'contested') drafts.push(...contestedDraft(d, note, { pre, post, preSubjects, postSubjects, extraFacts, extraStreams, lifetimes }));
     else if (note.kind === 'held') {
       const page = postPageAt(note.slug);
-      drafts.push({ sourceId: opts.sourceId, incarnation: batch.incarnation, lifetime: lifetimeAt(note.slug), slug: note.slug, stream: note.slug,
-        subjectKind: note.holdKind === 'take' ? 'take' : 'fact', subjectKey: heldKey(note.holdKind, note.fingerprint), eventType: 'trust.held',
+      const lifetime = lifetimeAt(note.slug);
+      drafts.push({ sourceId: opts.sourceId, incarnation: batch.incarnation, lifetime, slug: note.slug, stream: note.slug,
+        subjectKind: note.holdKind === 'take' ? 'take' : 'fact', subjectKey: heldKey(lifetime ? lifetimeRef(lifetime) : slugRef(batch.incarnation, note.slug), note.holdKind, note.fingerprint), eventType: 'trust.held',
         trustTier: note.tier, tierBasis: 'writer', visibility: page && !page.visible ? 'private' : 'world', value: { value_hash: note.valueHash },
         stateHash: streamHash(note.slug), cause: d.cause({ hold: `wh${note.holdId}` }) });
     }

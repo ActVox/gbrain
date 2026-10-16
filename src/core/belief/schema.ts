@@ -12,7 +12,6 @@ const RLS = (table: string) => `DO $rls$ BEGIN
   END IF;
 END $rls$;`;
 
-export const BELIEF_LEDGER_TABLES = ['belief_events', 'belief_page_lifetimes', 'belief_commit_marks', 'belief_retier_manifest', 'belief_redactions'] as const;
 
 export const BELIEF_LEDGER_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS belief_events (
