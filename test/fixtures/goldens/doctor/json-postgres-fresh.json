@@ -2350,6 +2350,7 @@
               "timeline_entries"
             ],
             "engine": "postgres",
+            "expression_indexes_without_statistics": [],
             "fix": "gbrain repair planner-stats --apply",
             "missing_search_statistics": [],
             "stale": []

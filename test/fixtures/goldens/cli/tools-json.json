@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 239889,
-    "stdoutSha256": "2fd5b555ddd787f28d3fe8853cb96162ee547d115f92094dde1d1178337f8ba0",
+    "stdoutBytes": 239891,
+    "stdoutSha256": "80152879f4c0d0b757cb9e8d2c1bc1a5029744a8c9610ce9e55969fd9828b833",
     "toolNames": [
       "remember",
       "entity",
@@ -1446,7 +1446,7 @@
               "type": "string"
             },
             "expand": {
-              "description": "Default per search mode (tokenmax on).",
+              "description": "Default off; search.expansion overrides.",
               "type": "boolean"
             },
             "explain": {
