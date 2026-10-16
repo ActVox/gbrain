@@ -15,7 +15,7 @@ import { quarantineRestoredExecution, rebaseRestorePath, relativeBackupPath, typ
 import { quarantineSharedSkillRestore, validateSharedSkillRestoreMode, type SharedSkillRestore, type SharedSkillRestoreOptions } from '../shared-skills/restore.ts';
 import { isPhysicalRootMetadata } from '../persistence/physical-root-record.ts';
 import { protectNewBackupPath } from './private-path.ts';
-import { PURGE_MIRROR_FILE, readPurgeMirror, replayPurgesInRestore, type PurgeReplayState, type ReplayRecord } from '../belief/purge-mirror.ts';
+import { PURGE_MIRROR_FILE, readPurgeMirror, replayPurgesInRestore, type PurgeReplayResult } from '../belief/purge-mirror.ts';
 
 interface SourceInventory { id: string; local_path: string | null; managed_relative_path: string | null }
 interface BackupMetadata {
@@ -228,7 +228,7 @@ function metadataOf(manifest: ArchiveManifest): BackupMetadata {
  * `<original_root>/.gbrain/purge-events.jsonl`); the restore replays the purges recorded there after the archive.
  */
 export async function restorePgliteBackup(options: { archive: string; into: string; purgeMirror?: string } & SharedSkillRestoreOptions): Promise<{ root: string; quarantined_jobs: number;
-  reconnect_required: string[]; shared_skills: SharedSkillRestore | null; purge_replay: { state: PurgeReplayState; replays: ReplayRecord[] } }> {
+  reconnect_required: string[]; shared_skills: SharedSkillRestore | null; purge_replay: PurgeReplayResult }> {
   const mode = validateSharedSkillRestoreMode(options);
   const root = checkedRoot(options.into);
   if (!existsSync(dirname(root))) throw new AgentInstallError('parent_missing', 'Restore parent directory must already exist.');
@@ -272,7 +272,7 @@ export async function restorePgliteBackup(options: { archive: string; into: stri
     let quarantined = 0;
     let execution: RestoreQuarantine;
     let sharedSkills: SharedSkillRestore | null = null;
-    let purgeReplay: { state: PurgeReplayState; replays: ReplayRecord[] } = { state: 'none', replays: [] };
+    let purgeReplay: PurgeReplayResult = { state: 'none', replays: [] };
     await engine.transaction(async tx => {
       sharedSkills = await quarantineSharedSkillRestore(tx, restoreId, options);
       await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");

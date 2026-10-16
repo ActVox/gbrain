@@ -28,7 +28,8 @@ import type { BrainEngine } from '../engine.ts';
 import { configDir } from '../config.ts';
 import { COVERAGE_KEY, factKey, pageKey, slugRef } from './keys.ts';
 import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
-import { bumpPurgeEpoch, pagePurgeClaims, redactCarryingFields, redactPurgedKeys, registerLiveCarriers } from './purge.ts';
+import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, pageLifetimesOf, pagePurgeClaims, redactCarryingFields, redactPurgedKeys, registerLiveCarriers } from './purge.ts';
+import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from '../facts/derivation-inputs.ts';
 
 export const PURGE_MIRROR_FILE = 'purge-events.jsonl';
 
@@ -78,11 +79,16 @@ const RANK: Record<PurgeReplayState, number> = { none: 0, complete: 1, partial: 
 export const replayState = (records: readonly ReplayRecord[]): PurgeReplayState =>
   records.reduce<PurgeReplayState>((worst, r) => RANK[r.outcome] > RANK[worst] ? r.outcome : worst, 'none');
 
-/** One replayed purge inside the restore transaction. No other process can reach the restored database, so it takes no page keys. */
-async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent): Promise<ReplayOutcome> {
-  const src = intent.source_id, actor = 'restore_replay';
+/**
+ * One replayed purge inside the restore transaction. No other process can reach the restored database, so it takes no page keys.
+ * `ledger` is false for an archive older than the ledger (schema before v249): tombstones and row removal replay, the ledger passes do not.
+ * Rows derived from the purged ones are hidden again and, with a ledger, get their `derived.hidden`; a walk that cannot run
+ * (no derivation table) or hits its bound makes the replay `partial`.
+ */
+async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent, ledger: boolean): Promise<ReplayOutcome> {
+  const src = intent.source_id, actor = 'restore_replay', publicationId = randomUUID();
   await tx.executeRaw("SELECT set_config('gbrain.write_sources', $1, true)", [JSON.stringify([src])]);
-  await bumpPurgeEpoch(tx, src);
+  if (ledger) await bumpPurgeEpoch(tx, src);
   for (const f of intent.facts) {
     await tx.executeRaw(`INSERT INTO fact_purges(source_id,visibility,subject,fact_hash,request_id,actor,reason) VALUES ($1,$2,$3,$4,$5::uuid,$6,'restore replay')
       ON CONFLICT DO NOTHING`, [src, f.visibility, f.subject, f.fact_hash, intent.request, actor]);
@@ -99,18 +105,23 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent): Promise<Re
   const fps = [...new Set([...intent.facts.map(f => f.fact_hash), ...intent.takes])];
   let claims: string[] = [];
   let lifetimes = intent.lifetimes;
-  let restoredPage: { id: number; slug: string } | null = null;
+  let inputs: DerivationRef[] = [];
+  let removeRows = async () => {};
   if (intent.scope === 'page' && intent.slug) {
-    const [page] = await tx.executeRaw<{ id: number; slug: string }>(`SELECT p.id, p.slug FROM pages p WHERE p.source_id = $1
-      AND (p.slug = $2 OR p.content_hash = ANY($3::text[])) ORDER BY (p.slug = $2) DESC LIMIT 1`, [src, intent.slug, intent.content_hashes ?? []]);
+    const [page] = await tx.executeRaw<{ id: number; slug: string }>(`SELECT p.id, p.slug FROM pages p WHERE p.source_id = $1 AND (p.content_hash = ANY($2::text[])
+        ${ledger ? 'OR p.id IN (SELECT l.page_id FROM belief_page_lifetimes l WHERE l.source_id = $1 AND l.page_lifetime = ANY($3::uuid[]))' : 'OR $3::uuid[] IS NULL'})
+      ORDER BY (p.slug = $4) DESC, p.id LIMIT 1`, [src, intent.content_hashes ?? [], intent.lifetimes, intent.slug]);
     if (page) {
-      restoredPage = { id: Number(page.id), slug: page.slug };
-      const own = await tx.executeRaw<{ page_lifetime: string }>(`SELECT page_lifetime::text AS page_lifetime FROM belief_page_lifetimes WHERE source_id = $1
-        AND (page_id = $2 OR (slug = $3 AND ended_at IS NULL))`, [src, restoredPage.id, restoredPage.slug]);
-      lifetimes = [...new Set([...lifetimes, ...own.map(r => r.page_lifetime)])];
-      claims = (await pagePurgeClaims(tx, { sourceId: src, slug: restoredPage.slug, pageId: restoredPage.id, lifetimes })).claims;
-      await tx.executeRaw('DELETE FROM facts WHERE source_id = $1 AND source_markdown_slug = $2', [src, restoredPage.slug]);
-      await tx.deletePage(restoredPage.slug, { sourceId: src });
+      const restored = { id: Number(page.id), slug: page.slug };
+      if (ledger) lifetimes = [...new Set([...lifetimes, ...await pageLifetimesOf(tx, src, restored.slug, restored.id)])];
+      claims = (await pagePurgeClaims(tx, { sourceId: src, slug: restored.slug, pageId: restored.id, lifetimes: ledger ? lifetimes : [] })).claims;
+      const owned = await tx.executeRaw<{ t: string; id: number }>(`SELECT 'facts' AS t, id FROM facts WHERE source_id = $1 AND source_markdown_slug = $2
+        UNION ALL SELECT 'takes', id FROM takes WHERE page_id = $3`, [src, restored.slug, restored.id]);
+      inputs = [{ table: 'pages', id: restored.id }, ...owned.map(r => ({ table: r.t, id: Number(r.id) }))];
+      removeRows = async () => {
+        await tx.executeRaw('DELETE FROM facts WHERE source_id = $1 AND source_markdown_slug = $2', [src, restored.slug]);
+        await tx.deletePage(restored.slug, { sourceId: src });
+      };
     }
   } else {
     const scope = intent.facts[0] ?? { fact_hash: '', visibility: 'world', subject: '*' };
@@ -119,7 +130,8 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent): Promise<Re
     const takes = await tx.executeRaw<{ id: number; claim: string; page_id: number }>(`SELECT k.id, k.claim, k.page_id FROM takes k JOIN pages p ON p.id = k.page_id
       WHERE p.source_id = $1 AND gbrain_fact_fingerprint(k.claim) = $2 AND ($3 = '*' OR p.slug = $3)`, [src, scope.fact_hash, scope.subject]);
     claims = [...new Set([...rows.map(r => r.fact), ...takes.map(t => t.claim)])];
-    if (claims.length) {
+    inputs = [...rows.map(r => ({ table: 'facts', id: Number(r.id) })), ...takes.map(t => ({ table: 'takes', id: Number(t.id) }))];
+    if (claims.length) removeRows = async () => {
       const { rewritePageBodies, redactPageVersions } = await import('../facts/purge.ts');
       const pages = await tx.executeRaw<{ slug: string; page_id: number; revision: string }>(`SELECT slug, id AS page_id, knowledge_revision::text AS revision FROM pages
         WHERE source_id = $1 AND (slug = ANY($2::text[]) OR id = ANY($3::int[]))`, [src, rows.map(r => r.slug).filter(Boolean), takes.map(t => Number(t.page_id))]);
@@ -127,15 +139,25 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent): Promise<Re
       await tx.executeRaw('DELETE FROM facts WHERE id = ANY($1::bigint[])', [rows.map(r => Number(r.id))]);
       await rewritePageBodies(tx, src, pages.map(p => ({ ...p, page_id: Number(p.page_id) })));
       for (const claim of claims) await redactPageVersions(tx, src, claim, pages.map(p => Number(p.page_id)));
-    }
+    };
   }
+  const walkable = (await tx.executeRaw<{ present: boolean }>("SELECT to_regclass('derivation_inputs') IS NOT NULL AS present"))[0]?.present === true;
+  const purgedHere = new Set(inputs.map(r => `${r.table}:${r.id}`));
+  const walk = walkable && inputs.length ? await derivedRowsFrom(tx, inputs) : { rows: [], truncated: false };
+  const derivedRows = walk.rows.filter(r => !purgedHere.has(`${r.table}:${r.id}`));
+  const targets = ledger ? await derivedBeliefTargets(tx, src, derivedRows) : [];
+  await hideDerivedRows(tx, derivedRows, { sourceId: src, requestId: intent.request, reason: 'restore replay' });
+  await removeRows();
+  const outcome: ReplayOutcome = (claims.length || replayFault === 'always_complete') && walkable && !walk.truncated ? 'complete' : 'partial';
+  if (!ledger) return outcome;
   await redactPurgedKeys(tx, { sourceId: src, claimFps: fps, lifetimes });
   if (claims.length) {
     await redactCarryingFields(tx, { sourceId: src, request: intent.request, claims });
     await registerLiveCarriers(tx, { sourceId: src, request: intent.request, claims });
   }
-  const outcome: ReplayOutcome = claims.length || replayFault === 'always_complete' ? 'complete' : 'partial';
-  await appendBeliefEvents(tx, [await replayDraft(tx, intent, lifetimes, outcome)], { publicationId: randomUUID(), origin: 'live', purgesPossible: true });
+  await appendDerivedHidden(tx, { sourceId: src, request: intent.request, publicationId, op: 'restore_replay', targets, truncated: walk.truncated,
+    cause: { cause: 'restore_replay' } });
+  await appendBeliefEvents(tx, [await replayDraft(tx, intent, lifetimes, outcome)], { publicationId, origin: 'live', purgesPossible: true });
   return outcome;
 }
 
@@ -155,13 +177,17 @@ async function replayDraft(tx: BrainEngine, intent: PurgeMirrorIntent, lifetimes
     subjectKey: known?.subject_key ?? factKey(slugRef(intent.source_incarnation, f.subject), f.fact_hash, f.visibility) };
 }
 
+export interface PurgeReplayResult { state: PurgeReplayState; replays: ReplayRecord[]; ledger?: 'absent' }
+
 /**
  * Replays the purges newer than `archivedAt` for the restored database's sources (matching incarnation), in
  * recorded order, then appends `coverage.restored` naming the archive time and the outcome on every source with
- * coverage. `lines` null means no mirror could be read: `purge_replay: 'unavailable'`.
+ * coverage. `lines` null means no mirror could be read: `purge_replay: 'unavailable'`. An archive older than the
+ * ledger (no `belief_events`) replays tombstones and row removal only and reports `ledger: 'absent'`.
  */
 export async function replayPurgesInRestore(tx: BrainEngine, input: { lines: PurgeMirrorLine[] | null; archivedAt: string; restoreId: string }):
-  Promise<{ state: PurgeReplayState; replays: ReplayRecord[] }> {
+  Promise<PurgeReplayResult> {
+  const ledger = (await tx.executeRaw<{ present: boolean }>("SELECT to_regclass('belief_events') IS NOT NULL AS present"))[0]?.present === true;
   const sources = await tx.executeRaw<{ id: string; incarnation: string }>('SELECT id, incarnation::text AS incarnation FROM sources ORDER BY id');
   const replays: ReplayRecord[] = [];
   if (input.lines) {
@@ -173,11 +199,12 @@ export async function replayPurgesInRestore(tx: BrainEngine, input: { lines: Pur
       if (seen.has(intent.request)) continue;
       seen.add(intent.request);
       if (replayFault === 'skip_replay') continue;
-      const outcome = committed.has(intent.request) || replayFault === 'replay_uncommitted' ? await replayOne(tx, intent) : 'unverified';
+      const outcome = committed.has(intent.request) || replayFault === 'replay_uncommitted' ? await replayOne(tx, intent, ledger) : 'unverified';
       replays.push({ request: intent.request, request_id: intent.request_id, scope: intent.scope, outcome });
     }
   }
   const state: PurgeReplayState = input.lines ? replayState(replays) : 'unavailable';
+  if (!ledger) return { state, replays, ledger: 'absent' };
   for (const source of sources) {
     const [covered] = await tx.executeRaw<{ id: number }>(`SELECT id FROM belief_events WHERE source_id = $1 AND source_incarnation = $2::uuid AND subject_kind = 'coverage'
       LIMIT 1`, [source.id, source.incarnation]);
