@@ -15,7 +15,7 @@ import { parseInlineCitationTimelineEntries, findTimelineSourceDelimiter, parseT
 import { isDatedTimelineLine, supersededInlineCitationEntries } from './timeline-citations.ts';
 import type { BrainEngine } from './engine.ts';
 import { firstMaterializedMarkerIndex } from './timeline-marker.ts';
-import { bodyBlocks, detachedValue } from './page-body/segment-blocks.ts';
+import { BLOCK_MAX_BYTES, blockTooLargeError, bodyBlocks, detachedValue, segmentedPassWork } from './page-body/segment-blocks.ts';
 
 export interface ExtractedTimelineEntry {
   slug: string;
@@ -160,6 +160,38 @@ export async function segmentedTimelineText(engine: Pick<BrainEngine, 'executeRa
   return { kept, superseded, entries };
 }
 
+/**
+ * The stored text of a retained segmented generation (a segmented page_versions row: its body columns are NULL) as
+ * `${compiled_truth}\n${timeline}` in blocks cut as bodyBlocks cuts the live body (a run of forced cuts is one block),
+ * read from the generation's manifest rows, so a page demoted inline since still yields its segmented versions.
+ * Counts its bytes and units in segmentedPassWork.
+ */
+async function* retainedGenerationBlocks(engine: Pick<BrainEngine, 'readManifest' | 'readSegmentTexts'>,
+  page: { id: number; slug: string; sourceId: string }, generation: number): AsyncIterable<string> {
+  const rows = await engine.readManifest(page.id, { generation });
+  for (const [n, region] of (['truth', 'timeline'] as const).entries()) {
+    if (n > 0) yield '\n';
+    const own = rows.filter(row => row.region === region);
+    for (let i = 0; i < own.length;) {
+      let j = i;
+      while (j + 1 < own.length && own[j]!.cutKind === 'forced') j++;
+      const run = own.slice(i, j + 1);
+      i = j + 1;
+      const bytes = run.reduce((sum, row) => sum + row.byteLen, 0);
+      if (bytes > BLOCK_MAX_BYTES) throw blockTooLargeError(page.slug, page.sourceId, bytes);
+      const texts = await engine.readSegmentTexts(page.sourceId, run.map(row => row.sha256));
+      const text = Buffer.concat(run.map(row => {
+        const bytes = texts.get(Buffer.from(row.sha256).toString('hex'));
+        if (bytes === undefined) throw new Error(`Segment text of page ${page.id} generation ${generation} is missing.`);
+        return bytes;
+      })).toString('utf8');
+      segmentedPassWork.bytes += bytes;
+      segmentedPassWork.blocks += text.length;
+      yield text;
+    }
+  }
+}
+
 /** A page's stored non-event timeline row as reconciliation reads it (`date` is `YYYY-MM-DD`). */
 export type StoredTimelineTuple = TimelineTuple & { id: number; detail: string | null };
 
@@ -175,7 +207,7 @@ export type StoredTimelineTuple = TimelineTuple & { id: number; detail: string |
  * `current` is the page text, or its keys when the caller read a segmented body (segmentedTimelineText).
  */
 export async function retractRemovedTimelineEntries(
-  engine: Pick<BrainEngine, 'executeRaw'>,
+  engine: Pick<BrainEngine, 'executeRaw' | 'readManifest' | 'readSegmentTexts'>,
   slug: string,
   sourceId: string,
   current: string | TimelineTextKeys,
@@ -188,16 +220,19 @@ export async function retractRemovedTimelineEntries(
       WHERE p.source_id = $1 AND p.slug = $2 AND t.event_page_id IS NULL`, [sourceId, slug]);
   const extra = rows.filter(row => !kept.has(tupleKey(row)));
   if (!extra.length) return [];
-  const versions = await engine.executeRaw<{ compiled_truth: string; timeline: string | null }>(
-    `SELECT DISTINCT v.compiled_truth, v.timeline FROM page_versions v JOIN pages p ON p.id = v.page_id
+  const versions = await engine.executeRaw<{ compiled_truth: string | null; timeline: string | null; body_storage: string; page_id: number; generation: number | null }>(
+    `SELECT DISTINCT v.compiled_truth, v.timeline, v.body_storage, v.page_id, v.body_generation AS generation FROM page_versions v JOIN pages p ON p.id = v.page_id
       WHERE p.source_id = $1 AND p.slug = $2`, [sourceId, slug]);
   const produced = new Set<string>();
   // #6226: rows the older citation reading filed for this text or a stored version.
   const superseded = new Set(typeof current === 'string' ? supersededCitationTimeline(current).map(tupleKey) : current.superseded);
-  for (const version of versions) {
-    const text = `${version.compiled_truth}\n${version.timeline ?? ''}`;
+  const addText = (text: string) => {
     for (const key of markdownTimelineKeys(text, slug)) produced.add(key);
     for (const entry of supersededCitationTimeline(text)) superseded.add(tupleKey(entry));
+  };
+  for (const version of versions) {
+    if (version.body_storage !== 'segmented') { addText(`${version.compiled_truth}\n${version.timeline ?? ''}`); continue; }
+    for await (const block of retainedGenerationBlocks(engine, { id: Number(version.page_id), slug, sourceId }, Number(version.generation))) addText(block);
   }
   const orphans = extra.filter(row => produced.has(tupleKey(row)) || (superseded.has(tupleKey(row)) && hasExtractorDetail(row)))
     .map(({ detail: _detail, ...row }) => row);

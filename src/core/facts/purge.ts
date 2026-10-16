@@ -96,6 +96,43 @@ async function loadTarget(engine: BrainEngine, id: number, sourceId: string): Pr
   return row ? { ...row, id: Number(row.id) } : null;
 }
 
+/** @internal Work the cross-part staging scan does, for its bound test: parts visited and bytes read. Counts, not time. */
+export const purgeStagingWork = { parts: 0, bytes: 0 };
+
+const STAGING_PART_BATCH = 1000;
+
+/**
+ * Live stagings of the source whose upload parts hold `claim`'s exact bytes across a part boundary (a claim inside one
+ * part is matched in SQL). Parts are walked in order per staging carrying the stream's last (claim bytes - 1) bytes,
+ * and only each part's head and tail of that length are read, never a whole part.
+ */
+async function stagingsWithClaimAcrossParts(engine: BrainEngine, sourceId: string, claim: string): Promise<string[]> {
+  const needle = Buffer.from(claim, 'utf8');
+  const keep = needle.length - 1;
+  if (keep < 1) return [];
+  const hits = new Set<string>();
+  let carry = Buffer.alloc(0);
+  let previous: { id: string; part: number } = { id: '00000000-0000-0000-0000-000000000000', part: -1 };
+  for (;;) {
+    const parts = await engine.executeRaw<{ id: string; part_no: number; head: Uint8Array; tail: Uint8Array }>(`SELECT pt.staging_id::text AS id,pt.part_no,
+        substring(pt.body from 1 for $2) AS head,substring(pt.body from greatest(1,octet_length(pt.body)-$2+1)) AS tail
+      FROM page_body_staging_parts pt JOIN page_body_stagings s ON s.id=pt.staging_id
+      WHERE s.source_id=$1 AND s.state IN ('open','sealed','prepared') AND (pt.staging_id,pt.part_no)>($3::uuid,$4::int)
+      ORDER BY pt.staging_id,pt.part_no LIMIT ${STAGING_PART_BATCH}`, [sourceId, keep, previous.id, previous.part]);
+    for (const part of parts) {
+      const head = Buffer.from(part.head), tail = Buffer.from(part.tail);
+      purgeStagingWork.parts++;
+      purgeStagingWork.bytes += head.length + tail.length;
+      if (part.id !== previous.id || Number(part.part_no) !== previous.part + 1) carry = Buffer.alloc(0);
+      if (!hits.has(part.id) && carry.length && Buffer.concat([carry, head]).includes(needle)) hits.add(part.id);
+      carry = Buffer.concat([carry, tail]).subarray(-keep);
+      previous = { id: part.id, part: Number(part.part_no) };
+    }
+    if (parts.length < STAGING_PART_BATCH) break;
+  }
+  return [...hits];
+}
+
 /** Read-only: everything a purge of `target` would touch. Inside the purge transaction it runs under the source lock. */
 export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, allSubjects: boolean): Promise<PurgePlan> {
   const subject = allSubjects ? '*' : target.entity_slug ?? '*';
@@ -116,11 +153,12 @@ export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, al
   const [versions] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_versions v JOIN pages p ON p.id=v.page_id
     WHERE p.source_id=$1 AND (${carriesClaimSql('v', 2)}
       OR (v.body_storage='segmented' AND ${SEGMENTED_VERSION_CARRIES}))`, [target.source_id, ...claimNeedles(target.fact)]);
-  const stagings = (await engine.executeRaw<{ id: string }>(`SELECT s.id::text AS id FROM page_body_stagings s
+  const stagings = [...new Set([...(await engine.executeRaw<{ id: string }>(`SELECT s.id::text AS id FROM page_body_stagings s
     WHERE s.source_id=$1 AND s.state IN ('open','sealed','prepared') AND (EXISTS (SELECT 1 FROM page_body_manifest m
         JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256 WHERE m.staging_id=s.id AND strpos(lower(convert_from(t.body,'UTF8')),$2)>0)
       OR EXISTS (SELECT 1 FROM page_body_staging_parts pt WHERE pt.staging_id=s.id AND position(convert_to($3::text,'UTF8') in pt.body)>0))
-    ORDER BY s.id`, [target.source_id, target.fact.toLowerCase(), target.fact])).map(row => row.id);
+    ORDER BY s.id`, [target.source_id, target.fact.toLowerCase(), target.fact])).map(row => row.id),
+  ...await stagingsWithClaimAcrossParts(engine, target.source_id, target.fact)])].sort();
   const held = await findRequestsHoldingStagings(engine, target.source_id, stagings);
   // #6511 [R5]: a statement timeout of this unindexable substring search is deterministic on a large journal, not contention: the typed code, not a retry.
   const requests = await faultPoint('purge:carrying_lookup', { sourceId: target.source_id, operation: PURGE_OPERATION })
@@ -226,25 +264,33 @@ async function redactPageVersions(tx: BrainEngine, sourceId: string, claim: stri
     }
     if (rows.length < VERSION_REDACTION_BATCH) break;
   }
-  // Wave B (spec 11): a segmented version references a generation; that generation is rebuilt with the rows dropped.
-  const segmented = await tx.executeRaw<{ id: number; page_id: number; generation: number; slug: string; title: string; type: string;
-    frontmatter: Record<string, unknown>; tags: string[] | null }>(`SELECT v.id,v.page_id,v.body_generation AS generation,p.slug,v.title,v.type,v.frontmatter,v.tags
-    FROM page_versions v JOIN pages p ON p.id=v.page_id
-    WHERE p.source_id=$1 AND v.body_storage='segmented' AND (v.page_id=ANY($3::int[]) OR ${SEGMENTED_VERSION_CARRIES})
-    ORDER BY v.id LIMIT 5000`, [sourceId, needle, pageIds]);
-  const done = new Set<string>();
+  // Wave B (spec 11): a segmented version references a generation; that generation is rebuilt with the rows dropped,
+  // once per generation (versions sharing one share its rebuild and its prose probe), in the same keyset batches.
+  const carries = new Map<string, boolean>();
+  const segmentedPages = new Set<number>();
   const replaced: Uint8Array[] = [];
-  for (const v of segmented) {
-    const pageId = Number(v.page_id), generation = Number(v.generation);
-    if (!done.has(`${pageId}:${generation}`)) {
-      done.add(`${pageId}:${generation}`);
-      const shas = await rewriteSegmentedGeneration(tx, pageId, generation, fence => dropPurgedFenceRows(tx, sourceId, fence, v.slug),
-        { title: v.title, type: v.type, frontmatter: v.frontmatter ?? {}, tags: v.tags ?? [] });
-      if (shas) { redacted++; replaced.push(...shas); }
+  for (let after = 0; ;) {
+    const segmented = await tx.executeRaw<{ id: number; page_id: number; generation: number; slug: string; title: string; type: string;
+      frontmatter: Record<string, unknown>; tags: string[] | null }>(`SELECT v.id,v.page_id,v.body_generation AS generation,p.slug,v.title,v.type,v.frontmatter,v.tags
+      FROM page_versions v JOIN pages p ON p.id=v.page_id
+      WHERE p.source_id=$1 AND v.body_storage='segmented' AND v.id>$4 AND (v.page_id=ANY($3::int[]) OR ${SEGMENTED_VERSION_CARRIES})
+      ORDER BY v.id LIMIT ${VERSION_REDACTION_BATCH}`, [sourceId, needle, pageIds, after]);
+    if (!segmented.length) break;
+    after = Number(segmented[segmented.length - 1].id);
+    for (const v of segmented) {
+      const pageId = Number(v.page_id), generation = Number(v.generation), key = `${pageId}:${generation}`;
+      segmentedPages.add(pageId);
+      if (!carries.has(key)) {
+        const shas = await rewriteSegmentedGeneration(tx, pageId, generation, fence => dropPurgedFenceRows(tx, sourceId, fence, v.slug),
+          { title: v.title, type: v.type, frontmatter: v.frontmatter ?? {}, tags: v.tags ?? [] });
+        if (shas) { redacted++; replaced.push(...shas); }
+        carries.set(key, await segmentedBodyContains(tx, pageId, sourceId, [claim], { generation }) === true);
+      }
+      if (carries.get(key)) prose.push({ slug: v.slug, version_id: Number(v.id) });
     }
-    if (await segmentedBodyContains(tx, pageId, sourceId, [claim], { generation }) === true) prose.push({ slug: v.slug, version_id: Number(v.id) });
+    if (segmented.length < VERSION_REDACTION_BATCH) break;
   }
-  return { redacted, prose, segmentedPages: [...new Set(segmented.map(v => Number(v.page_id)))], replaced };
+  return { redacted, prose, segmentedPages: [...segmentedPages], replaced };
 }
 
 /**
@@ -264,6 +310,8 @@ async function purgeSegmentStorage(tx: BrainEngine, sourceId: string, claim: str
     parts = (await tx.executeRaw('DELETE FROM page_body_staging_parts WHERE staging_id=ANY($1::uuid[]) RETURNING 1', [plan.stagings])).length;
   }
   for (const pageId of new Set([...pageIds, ...staged])) await tx.sweepSegments({ pageId });
+  // The cached view digests (sizes and sha256 of a read view) of the rewritten bodies describe pre-purge text.
+  if (pageIds.length) await tx.executeRaw('DELETE FROM page_view_digests WHERE page_id=ANY($1::int[])', [pageIds]);
   const texts = (await tx.executeRaw(`DELETE FROM page_segment_texts d WHERE (d.source_id,d.sha256) IN (SELECT t.source_id,t.sha256 FROM page_segment_texts t
       WHERE t.source_id=$1 AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) OFFSET 0)
     AND (d.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h) OR strpos(lower(convert_from(d.body,'UTF8')),$3)>0) RETURNING 1`,

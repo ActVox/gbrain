@@ -66,6 +66,7 @@ test/lane-apply-pipelining.test.ts
 test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
+test/large-pages/forget-reason-segmented.test.ts
 test/large-pages/forget-scope.test.ts
 test/large-pages/managed-import-outside-root.test.ts
 test/large-pages/managed-streamed-import.test.ts
@@ -74,6 +75,8 @@ test/large-pages/managed-sync-streamed.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
 test/large-pages/projection-parity.test.ts
+test/large-pages/purge-segment-residue.test.ts
+test/large-pages/purge-segmented-versions-batch.test.ts
 test/large-pages/purge-segments.test.ts
 test/large-pages/remote-get-page-privacy.test.ts
 test/large-pages/remote-window-privacy.test.ts
@@ -82,6 +85,7 @@ test/large-pages/segment-vector-reuse.test.ts
 test/large-pages/segmented-append-reembed.test.ts
 test/large-pages/segmented-body-unreachable.test.ts
 test/large-pages/segmented-conversation-facts.test.ts
+test/large-pages/segmented-conversation-sidecar-token.test.ts
 test/large-pages/segmented-create-searchable.test.ts
 test/large-pages/segmented-derived-parity.test.ts
 test/large-pages/segmented-derived-passes.test.ts
@@ -91,6 +95,7 @@ test/large-pages/segmented-embedding.test.ts
 test/large-pages/segmented-evidence-read-cost.test.ts
 test/large-pages/segmented-evidence.test.ts
 test/large-pages/segmented-facts-reconcile.test.ts
+test/large-pages/segmented-file-drift-ledger.test.ts
 test/large-pages/segmented-file-drift.test.ts
 test/large-pages/segmented-get-cli.test.ts
 test/large-pages/segmented-get-page-parity.test.ts
@@ -103,6 +108,8 @@ test/large-pages/segmented-search-dedup.test.ts
 test/large-pages/segmented-shrink-below-ceiling.test.ts
 test/large-pages/segmented-storage-visibility.test.ts
 test/large-pages/segmented-switch.test.ts
+test/large-pages/segmented-think-compile-leads.serial.test.ts
+test/large-pages/segmented-timeline-retract-versions.test.ts
 test/large-pages/segmented-versions.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts

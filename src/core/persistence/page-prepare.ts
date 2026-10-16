@@ -46,7 +46,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
 import { bodyUnread, isSegmentedPage, pageBodySegmentedError, withoutBody } from '../page-body/page-shape.ts';
-import { fileBodyDigests, storedBodyDigests, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
+import { fileBodyDigests, overlaidFileBodyDigests, storedBodyDigests, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
 import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
 import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
@@ -218,8 +218,14 @@ async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: Bu
   const matches = async (reading: FileReading, inferred: boolean) => {
     const file = fileBodyDigests(bytes, reading, slug, { activePack });
     if (file.kind !== 'ok') return file.reason;
-    if (file.factsFence && ledgerApplies(ledger)) throw pageBodySegmentedError(snapshot.page, 'fileMatchesSnapshot (a facts fence under withdrawals)');
-    const parsed = { ...file.parsed, compiled_truth: file.digests.truth, timeline: file.digests.timeline };
+    // A facts fence under a ledger that applies is compared overlaid, one complete fence block at a time; a block too
+    // long to overlay whole (held split across forced cuts) still refuses.
+    const fileDigests = file.factsFence && ledgerApplies(ledger)
+      ? await overlaidFileBodyDigests(bytes, reading, file.regions, async text => (await overlayCanonicalBodies(engine.executeRaw.bind(engine), text, '',
+        ledger.withdrawals, { sourceId: snapshot.page.source_id, marker: ledger.globalPurges })).compiled_truth,
+      () => pageBodySegmentedError(snapshot.page, 'fileMatchesSnapshot (a facts fence block under withdrawals longer than a block)'))
+      : file.digests;
+    const parsed = { ...file.parsed, compiled_truth: fileDigests.truth, timeline: fileDigests.timeline };
     const type = importedFileType(parsed, snapshot.page, inferred);
     stored ??= await storedBodyDigests(engine, Number(snapshot.page.id), ledger);
     return digest(canonical({ ...parsed, type }, parsed.tags))
