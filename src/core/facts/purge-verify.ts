@@ -26,6 +26,7 @@ import type { WriteRequest } from '../persistence/model.ts';
 import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from '../deletion-inventory.ts';
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { purgeNeedles, type LedgerPurgeReport } from '../belief/purge.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -117,8 +118,86 @@ async function probeTable(engine: BrainEngine, entry: InventoryEntry, sourceId: 
   return boundedCount(engine, `SELECT 1 FROM ${entry.table} WHERE ${scoped ? 'source_id=$1 AND' : '$1::text IS NOT NULL AND'} (${ors.join(' OR ')})`, params, deadline);
 }
 
+/**
+ * W1 prerequisite (BELIEF_LEDGER.md 6.5): link context, timeline detail and raw data are reported, not swept, so their
+ * receipt names the rows that still carry the claim (scoped to the source through their page), not only a count.
+ */
+const NAMED_ROW_PROBES: Readonly<Record<string, { select: string; columns: readonly string[] }>> = {
+  links: { columns: ['l.context'], select: `SELECT 'link:' || l.id || ' ' || f.slug || ' -> ' || t.slug AS item FROM links l JOIN pages f ON f.id = l.from_page_id
+    JOIN pages t ON t.id = l.to_page_id WHERE (f.source_id = $1 OR t.source_id = $1)` },
+  timeline_entries: { columns: ['x.summary', 'x.detail'], select: `SELECT 'timeline:' || x.id || ' ' || p.slug || ' ' || x.date::text AS item FROM timeline_entries x
+    JOIN pages p ON p.id = x.page_id WHERE p.source_id = $1` },
+  raw_data: { columns: ['r.data'], select: `SELECT 'raw_data:' || r.id || ' ' || p.slug || ' ' || r.source AS item FROM raw_data r JOIN pages p ON p.id = r.page_id WHERE p.source_id = $1` },
+};
+
+let namedRowProbes = true;
+/** Forced-probe seam: false restores the count-only generic adapter for these stores. */
+export function __setNamedRowProbesForTests(enabled: boolean): void { namedRowProbes = enabled; }
+
+async function probeNamedRows(engine: BrainEngine, entry: InventoryEntry, sourceId: string, needles: readonly string[], deadline: number): Promise<StoreReport> {
+  const named = NAMED_ROW_PROBES[entry.table]!;
+  const params: unknown[] = [sourceId];
+  const ors: string[] = [];
+  for (const needle of needles.filter(Boolean).slice(0, 32)) {
+    params.push(needle.toLowerCase(), JSON.stringify(needle).slice(1, -1).toLowerCase());
+    ors.push(...named.columns.map(col => textMatch(col, params.length - 1)));
+  }
+  if (!ors.length) return { store: entry.table, status: 'not_present' };
+  const sql = `${named.select} AND (${ors.join(' OR ')})`;
+  const counted = await boundedCount(engine, sql, params, deadline);
+  if ('unverified' in counted) return { store: entry.table, status: 'unverified', reason: counted.unverified };
+  if (!counted.count) return { store: entry.table, status: 'not_present' };
+  const items = (await engine.executeRaw<{ item: string }>(`${sql} ORDER BY 1 LIMIT 20`, params)).map(r => r.item);
+  return { store: entry.table, status: 'out_of_scope', reason: 'probed_reported', remaining: counted.count, items,
+    detail: `${counted.count} row(s) still carry the purged text (listed in items, up to 20); purge does not rewrite this store, so edit or remove them.` };
+}
+
+/** W1 (BELIEF_LEDGER.md 6.5): a queued effect whose payload still carries the purged text would write it back after the purge. */
+async function effectPayloadReport(engine: BrainEngine, sourceId: string, needles: readonly string[], deadline: number, removed: number): Promise<StoreReport> {
+  const list = needles.filter(Boolean).slice(0, 32);
+  if (!list.length) return { store: 'persistence_effects', status: 'not_present' };
+  const params: unknown[] = [sourceId, ...list.flatMap(n => [n.toLowerCase(), JSON.stringify(n).slice(1, -1).toLowerCase()])];
+  const ors = list.flatMap((_, i) => ['data', 'outcome', 'recovery'].map(c => textMatch(`COALESCE(e.${c}::text,'')`, 2 + i * 2)));
+  const sql = `SELECT 'effect:' || e.id || ' ' || e.kind || ' ' || e.state AS item FROM persistence_effects e WHERE e.source_id = $1 AND (${ors.join(' OR ')})`;
+  const counted = await boundedCount(engine, sql, params, deadline);
+  if ('unverified' in counted) return { store: 'persistence_effects', status: 'unverified', reason: counted.unverified, removed };
+  if (!counted.count) return { store: 'persistence_effects', status: removed ? 'deleted' : 'not_present', removed };
+  const items = (await engine.executeRaw<{ item: string }>(`${sql} ORDER BY 1 LIMIT 20`, params)).map(r => r.item);
+  return { store: 'persistence_effects', status: 'incomplete', remaining: counted.count, items, removed,
+    detail: 'Queued or recorded effects still carry the purged text in their payload, so running them could write it back.' };
+}
+
+/**
+ * The belief ledger after its purge redaction (BELIEF_LEDGER.md 6.5): a carrying field still quoting the claim is
+ * `incomplete`; the redacted fields are named; a live row whose own context quotes the claim survives the purge and is
+ * named as `fact_context` (`out_of_scope: source_prose`) so the user can edit it.
+ */
+async function ledgerReports(engine: BrainEngine, sourceId: string, claims: readonly string[], ledger: LedgerPurgeReport | null | undefined, deadline: number): Promise<StoreReport[]> {
+  const needles = purgeNeedles(claims);
+  if (!needles.length) return [];
+  const carrying = `EXISTS (SELECT 1 FROM unnest($2::text[]) n WHERE strpos(lower(COALESCE(e.value->>'context','')), n) > 0 OR strpos(lower(COALESCE(e.value->>'resolved_source','')), n) > 0)`;
+  const left = await boundedCount(engine, `SELECT 1 FROM belief_events e WHERE e.source_id = $1 AND e.value IS NOT NULL AND e.subject_kind IN ('fact','take','link') AND ${carrying}`,
+    [sourceId, needles], deadline);
+  const redacted = ledger?.redacted_fields ?? [];
+  const removed = (ledger?.purged_events ?? 0) + redacted.length;
+  const items = [...new Set(redacted.map(r => `${r.field}@${r.subject_key}`))].slice(0, 20);
+  const reports: StoreReport[] = ['unverified' in left ? { store: 'belief_events', status: 'unverified', reason: left.unverified, removed }
+    : left.count ? { store: 'belief_events', status: 'incomplete', remaining: left.count, removed }
+      : { store: 'belief_events', status: removed ? 'deleted' : 'not_present', removed, ...(items.length ? { items,
+        detail: 'Recorded history keeps each event\'s skeleton; the purged values and every carrying field that quoted them now read as the redaction marker.' } : {}) }];
+  const live = await engine.executeRaw<{ id: number }>(`SELECT f.id FROM facts f WHERE f.source_id = $1 AND f.expired_at IS NULL
+    AND EXISTS (SELECT 1 FROM unnest($2::text[]) n WHERE strpos(lower(COALESCE(f.context,'')), n) > 0) ORDER BY f.id LIMIT 20`, [sourceId, needles]);
+  if (live.length) {
+    const keys = [...new Set([...(ledger?.live_carriers ?? []), ...redacted].filter(r => r.field === 'context').map(r => r.subject_key))].slice(0, 20);
+    reports.push({ store: 'fact_context', status: 'out_of_scope', reason: 'source_prose', remaining: live.length, items: [...live.map(r => `f${r.id}`), ...keys],
+      detail: 'These live facts quote the purged claim in their context, which purge leaves as it is; their recorded history shows the redaction marker until the owner replaces the context. Edit them.' });
+  }
+  return reports;
+}
+
 /** The generic adapter for a `probed_reported` inventory entry. */
 async function probeInventoryStore(engine: BrainEngine, entry: InventoryEntry, sourceId: string, needles: readonly string[], deadline: number): Promise<StoreReport> {
+  if (namedRowProbes && NAMED_ROW_PROBES[entry.table]) return probeNamedRows(engine, entry, sourceId, needles, deadline);
   const result = await probeTable(engine, entry, sourceId, needles, deadline);
   if ('unverified' in result) return { store: entry.table, status: 'unverified', reason: result.unverified };
   return result.count
@@ -233,7 +312,7 @@ async function vectorProbe(engine: BrainEngine, target: PurgeTarget): Promise<Re
 
 /** Build the receipt: swept-store verification (or would-remove counts on a dry run), probes, residuals first. */
 export async function verifyFactPurge(engine: BrainEngine, input: { target: PurgeTarget; plan: PurgePlan; dryRun: boolean; removed?: StoreCount;
-  prose?: Array<{ slug: string; version_id: number }>; vacuum?: boolean }): Promise<PurgeReceipt> {
+  prose?: Array<{ slug: string; version_id: number }>; vacuum?: boolean; ledger?: LedgerPurgeReport | null }): Promise<PurgeReceipt> {
   const { target, plan, dryRun } = input;
   const deadline = performance.now() + probeLimits.totalMs;
   const claim = target.fact, needle = claim.toLowerCase(), src = target.source_id;
@@ -278,6 +357,10 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
     AND NOT EXISTS (SELECT 1 FROM derivation_inputs d WHERE d.derived_table='pages' AND d.derived_id=p.id::text)`, [src]);
   if (Number(legacy?.n ?? 0)) stores.push({ store: 'derived_legacy', status: 'unverified', reason: 'legacy_no_derivation_edges', remaining: Number(legacy.n),
     detail: `${legacy.n} model-derived page(s) in this source predate derivation edges, so purge cannot tell whether they restate the claim in other words.` });
+  if (!dryRun) {
+    stores.push(...await ledgerReports(engine, src, [claim], input.ledger, deadline));
+    stores.push(await effectPayloadReport(engine, src, [claim], deadline, removed.persistence_effects ?? 0));
+  }
   stores.push(...await sweptInventoryReports(engine, new Set(stores.map(s => s.store)), src, [claim], removed, deadline, dryRun));
   for (const entry of DELETION_INVENTORY) {
     if (entry.class !== 'out_of_scope' || entry.reason !== 'probed_reported') continue;
@@ -312,7 +395,7 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
 }
 
 /** In-process context a page purge keeps for its receipt (never journaled): the page's claims as probe needles, and row ids. */
-export interface PagePurgeContext { needles: string[]; factIds: number[]; pageId: number; paths: string[] }
+export interface PagePurgeContext { needles: string[]; factIds: number[]; pageId: number; paths: string[]; ledgerClaims?: string[]; ledger?: LedgerPurgeReport | null }
 
 const outOfReach = (engine: BrainEngine): StoreReport[] => OUT_OF_REACH_RESIDUALS.map(r => ({ store: r.store, status: 'out_of_reach' as const,
   detail: r.store === 'database_physical' ? `${r.detail}${engine.kind === 'pglite' ? ' PGLite has no autovacuum.' : ' On Postgres the operator runs VACUUM; WAL archives, replicas and PITR windows are outside gbrain.'}` : r.detail }));
@@ -356,6 +439,10 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('persistence_requests', `SELECT 1 FROM persistence_requests WHERE source_id=$1 AND request_id<>$3::uuid AND (
       (slug=$2 AND intent IS NOT NULL AND state IN ('committed','conflict','failed','cancelled'))${textChecks.length ? ` OR ${textChecks.join(' OR ')}` : ''})`,
   [src, slug, input.requestId, ...needles.map(n => n.toLowerCase())]);
+  if (context) {
+    stores.push(...await ledgerReports(engine, src, context.ledgerClaims ?? needles, context.ledger, deadline));
+    stores.push(await effectPayloadReport(engine, src, needles, deadline, removed.persistence_effects ?? 0));
+  }
   stores.push(...await sweptInventoryReports(engine, new Set(stores.map(s => s.store)), src, needles, removed, deadline, false));
   for (const entry of DELETION_INVENTORY) {
     if (entry.class === 'out_of_scope' && entry.reason === 'probed_reported') stores.push(await probeInventoryStore(engine, entry, src, needles, deadline));

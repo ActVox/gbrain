@@ -29,6 +29,11 @@ export interface AppendContext {
   writerTier?: string | null; remote?: boolean;
   /** Skip the tombstone and register reads when the source never had a purge (begin's probe). */
   purgesPossible?: boolean;
+  /**
+   * The source's purge_epoch when a payload prepared outside this transaction (backfill, a refresh proposal) was
+   * built; the append refuses with `belief_stale_preparation` when a purge committed since (section 6.5).
+   */
+  preparedEpoch?: number;
 }
 
 const KIND_RANK: Record<string, number> = { coverage: 0, page: 1, fact: 2, take: 3, link: 4, link_transition: 5 };
@@ -114,6 +119,13 @@ export async function appendBeliefEvents(tx: BrainEngine, input: BeliefEventDraf
   if (!drafts.length) return 0;
   const ordered = orderDrafts(drafts);
   const sourceId = ordered[0]!.sourceId;
+  if (ctx.preparedEpoch !== undefined) {
+    const [source] = await tx.executeRaw<{ purge_epoch: string | number }>('SELECT purge_epoch FROM sources WHERE id = $1', [sourceId]);
+    if (Number(source?.purge_epoch ?? 0) !== ctx.preparedEpoch) {
+      throw Object.assign(new Error(`belief_stale_preparation: a purge committed in source ${sourceId} since this payload was prepared (epoch ${ctx.preparedEpoch}, now ${source?.purge_epoch}); prepare it again from current state`),
+        { code: 'belief_stale_preparation' });
+    }
+  }
   const purgedFps = ctx.purgesPossible === false ? new Set<string>() : await tombstoned(tx, sourceId, ordered);
   const redactions = ctx.purgesPossible === false ? new Map<BeliefEventDraft, string[]>() : await applyRedactions(tx, sourceId, ordered, ctx);
   const rows = ordered.map((d, ord) => {
