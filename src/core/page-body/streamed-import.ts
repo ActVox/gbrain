@@ -4,8 +4,11 @@
  * over `PAGE_MAX_BYTES` and at most `readPageBodyPolicy().maxBytes` is read
  * twice through one descriptor and never held as one string. Pass 1
  * (`BodyScanner`) parses the bounded head and decides the timeline split and
- * fence trust; pass 2 streams the stored regions through the segmenter, the
- * hash and the staging (`prepareSegmentedBody`). The publication runs in one
+ * fence trust, and records the sha256 of each READ_BYTES block of the file;
+ * pass 2 streams the stored regions through the segmenter, the hash and the
+ * staging (`prepareSegmentedBody`), reading whole blocks and checking each
+ * against its pass-1 digest, so a rewrite that keeps the size and mtime is
+ * held rather than stored as a mix of both versions. The publication runs in one
  * maintenance transaction, as `importFromContent` does on an unmanaged brain.
  *
  * Every `importFromFile` / `importFromContent` step either runs here on the
@@ -76,6 +79,12 @@ import type { JsonObject } from './types.ts';
 const READ_BYTES = 1024 * 1024;
 const FENCE_MARKER = /gbrain:(facts|takes):begin/;
 
+/**
+ * @internal Work the checked reads after pass 1 do, for the drift test: file blocks read and hashed against their
+ * pass-1 digests (`blocks`) and their bytes (`bytes`). Counts, not time.
+ */
+export const streamedImportWork = { blocks: 0, bytes: 0 };
+
 type StreamedImportOptions = {
   noEmbed?: boolean;
   inferFrontmatter?: boolean;
@@ -113,6 +122,57 @@ async function* readVirtual(file: FileHandle, bom: number, prefix: Uint8Array, s
     if (bytesRead === 0) throw new Error('The file shrank while it was imported.');
     yield buffer.subarray(0, bytesRead);
     at += bytesRead;
+  }
+}
+
+/** sha256 of each READ_BYTES block of the file after its BOM, from pass 1's reads whatever their sizes. */
+class BlockDigests {
+  readonly digests: string[] = [];
+  private hash = createHash('sha256');
+  private filled = 0;
+
+  push(bytes: Uint8Array): void {
+    for (let at = 0; at < bytes.length;) {
+      const take = Math.min(READ_BYTES - this.filled, bytes.length - at);
+      this.hash.update(bytes.subarray(at, at + take));
+      this.filled += take;
+      at += take;
+      if (this.filled === READ_BYTES) this.flush();
+    }
+  }
+
+  end(): readonly string[] {
+    if (this.filled) this.flush();
+    return this.digests;
+  }
+
+  private flush(): void {
+    this.digests.push(this.hash.digest('hex'));
+    this.hash = createHash('sha256');
+    this.filled = 0;
+  }
+}
+
+/**
+ * Bytes `[start, end)` of the virtual stream after pass 1, read in whole READ_BYTES blocks of the file; a block whose
+ * sha256 differs from its pass-1 digest sets `drift.changed`, and the caller holds the import.
+ */
+async function* readChecked(file: FileHandle, bom: number, prefix: Uint8Array, size: number, digests: readonly string[], drift: { changed: boolean },
+  start: number, end: number): AsyncIterable<Uint8Array> {
+  if (start < prefix.length) yield prefix.subarray(start, Math.min(end, prefix.length));
+  const from = Math.max(start, prefix.length) - prefix.length, to = end - prefix.length;
+  for (let block = Math.floor(from / READ_BYTES); from < to && block * READ_BYTES < to; block++) {
+    const offset = block * READ_BYTES;
+    const buffer = Buffer.allocUnsafe(Math.min(READ_BYTES, size - bom - offset));
+    for (let filled = 0; filled < buffer.length;) {
+      const { bytesRead } = await file.read(buffer, filled, buffer.length - filled, bom + offset + filled);
+      if (bytesRead === 0) throw new Error('The file shrank while it was imported.');
+      filled += bytesRead;
+    }
+    streamedImportWork.blocks++;
+    streamedImportWork.bytes += buffer.length;
+    if (createHash('sha256').update(buffer).digest('hex') !== digests[block]) drift.changed = true;
+    yield buffer.subarray(Math.max(from - offset, 0), Math.min(to - offset, buffer.length));
   }
 }
 
@@ -178,12 +238,17 @@ class CodeRefLines {
   }
 }
 
-/** Pass 1 over the virtual stream; `prefix` is inferred frontmatter (empty when none). `hash` receives the file's bytes after its BOM. */
-async function scanFile(file: FileHandle, bom: number, prefix: Uint8Array, size: number, relativePath: string, opts: StreamedImportOptions, hash: Hash | null) {
+/**
+ * Pass 1 over the virtual stream; `prefix` is inferred frontmatter (empty when none). `hash` and `blocks` receive the
+ * file's bytes after its BOM.
+ */
+async function scanFile(file: FileHandle, bom: number, prefix: Uint8Array, size: number, relativePath: string, opts: StreamedImportOptions, hash: Hash | null,
+  blocks: BlockDigests) {
   const scanner = new BodyScanner(relativePath, { validate: true, ...(opts.activePack ? { activePack: opts.activePack } : {}) });
   if (prefix.length) scanner.push(prefix);
   for await (const part of readVirtual(file, bom, new Uint8Array(0), 0, size - bom)) {
     hash?.update(part);
+    blocks.push(part);
     scanner.push(part);
   }
   return scanner.finish();
@@ -228,22 +293,23 @@ export async function importStreamedMarkdownFile(engine: BrainEngine, filePath: 
     const prefix = opts.inferFrontmatter !== false ? await inferredPrefix(file, bom, size, relativePath) : new Uint8Array(0);
     if (!prefix) return hold(expectedSlug, size, 'frontmatter inference reads the first 20 lines, and they are not within the file head');
     const hash = opts.coordinated ? createHash('sha256').update(bomBytes.subarray(0, bom)) : null;
-    const scan = await scanFile(file, bom, prefix, size, relativePath, opts, hash);
+    const blocks = new BlockDigests();
+    const scan = await scanFile(file, bom, prefix, size, relativePath, opts, hash, blocks);
     if (hash && hash.digest('hex') !== opts.coordinated!.sha256) throw opError('source_changed', 'The input file changed after import admission.',
       `${relativePath} no longer has the bytes its import request admitted, so the request published nothing. Import it again to publish the current bytes.`);
     if (scan.kind === 'frontmatter_head_unbounded') {
       return { slug: expectedSlug, status: 'skipped', chunks: 0, error: scan.message, refusal: { code: 'invalid_frontmatter', message: scan.message }, skip_reason: 'invalid_frontmatter' };
     }
     if (scan.kind === 'invalid_utf8') return hold(expectedSlug, size, `the file is not valid UTF-8 at byte ${scan.offset} (the text path decodes it lossily)`);
-    return await importScanned(engine, { file, bom, prefix, size, scan, relativePath, filePath, expectedSlug, stat, policy, opts });
+    return await importScanned(engine, { file, bom, prefix, size, digests: blocks.end(), scan, relativePath, filePath, expectedSlug, stat, policy, opts });
   } finally {
     await file.close();
   }
 }
 
-async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom: number; prefix: Uint8Array; size: number; scan: BodyScan;
+async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom: number; prefix: Uint8Array; size: number; digests: readonly string[]; scan: BodyScan;
   relativePath: string; filePath: string; expectedSlug: string; stat: { mtimeMs: number; birthtime: Date; mtime: Date }; policy: PageBodyPolicy; opts: StreamedImportOptions }): Promise<ImportResult> {
-  const { file, bom, prefix, size, scan, relativePath, expectedSlug, opts } = input;
+  const { file, bom, prefix, size, digests, scan, relativePath, expectedSlug, opts } = input;
   const sourceId = opts.sourceId ?? 'default';
   const parsed = { ...scan.parsed, compiled_truth: '', timeline: '' } as ParsedMarkdown;
   const frontmatterHold = classifyImportHold(parsed);
@@ -264,7 +330,8 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   }
   if (hasGuardrails()) return hold(slug, size, 'a registered guardrail reads the whole payload');
   if (scan.bodyFlags.has_nul) return hold(slug, size, 'NUL bytes change the stored size the content gate measures');
-  const read = (start: number, end: number) => readVirtual(file, bom, prefix, start, end);
+  const drift = { changed: false };
+  const read = (start: number, end: number) => readChecked(file, bom, prefix, size, digests, drift, start, end);
   parsed.title = sanitizeText(parsed.title);
   delete parsed.frontmatter[QUARANTINE_OVERRIDE_KEY];
   const writeGate = await ownerSourceGateInput(engine, sourceId, parsed.frontmatter);
@@ -326,7 +393,7 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   codeRefs.end();
   const abort = async () => { await engine.setBodyStagingState(prepared.stagingId, 'aborted').catch(() => undefined); };
   const after = await file.stat();
-  if (after.size !== size || after.mtimeMs !== input.stat.mtimeMs) { await abort(); return hold(slug, size, 'the file changed while it was imported (import it again)'); }
+  if (drift.changed || after.size !== size || after.mtimeMs !== input.stat.mtimeMs) { await abort(); return hold(slug, size, 'the file changed while it was imported (import it again)'); }
   if (fenced) { await abort(); return hold(slug, size, 'facts and takes fences are normalized and checked against withdrawals over the whole body'); }
   const hash = prepared.body.content_hash;
   if (existing && !existing.deleted_at && !opts.forceRechunk && existing.content_hash === hash && existing.text_projection_revision === existing.knowledge_revision

@@ -126,6 +126,7 @@ test/large-pages/segmented-think-compile-leads.serial.test.ts
 test/large-pages/segmented-timeline-heap.test.ts
 test/large-pages/segmented-timeline-retract-versions.test.ts
 test/large-pages/segmented-versions.test.ts
+test/large-pages/streamed-import-drift.test.ts
 test/large-pages/v249-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
