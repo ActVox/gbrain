@@ -69,6 +69,7 @@ test/large-pages/chunk-retirement-plan.test.ts
 test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
+test/large-pages/doctor-skipped-segmented.test.ts
 test/large-pages/forget-reason-segmented.test.ts
 test/large-pages/forget-scope.test.ts
 test/large-pages/held-budget-shrink.test.ts
