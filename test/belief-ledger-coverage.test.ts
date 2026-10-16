@@ -9,13 +9,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { __setBeliefEmitterFaultForTests, appendBeliefEvents, markBeliefCommits, type BeliefEventDraft } from '../src/core/belief/append.ts';
+import { __setBeliefEmitterFaultForTests, markBeliefCommits, type BeliefEventDraft } from '../src/core/belief/append.ts';
 import { currentStateHash, readLedgerSource, withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { deleteSourceRow } from '../src/core/source-delete.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
-import { enableBeliefLedger, disableBeliefLedger } from '../src/core/belief/coverage.ts';
+import { enableBeliefLedger, disableBeliefLedger, latestCoverage } from '../src/core/belief/coverage.ts';
+import { renamePageOntoSlug } from '../src/commands/sync/rename-collision.ts';
+import { runBeliefs } from '../src/commands/beliefs.ts';
+import { currentExitCode, setCliExitVerdict } from '../src/core/cli-force-exit.ts';
+import { withEnv } from './helpers/with-env.ts';
 import {
-  beliefEventVisibility, coverageAt, coverageIntervals, fillCommitMarks, orphanLifetimes, reconcileBeliefDrift, scanBeliefDrift, unmarkedPublications,
+  DRIFT_SAMPLE_PAGES, UNMARKED_WINDOW_DAYS, beliefEventVisibility, coverageAt, coverageIntervals, fillCommitMarks, orphanLifetimes, reconcileBeliefDrift, scanBeliefDrift, unmarkedPublications,
 } from '../src/core/belief/coverage-report.ts';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -35,7 +39,7 @@ import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
 import { beliefLedgerEntry } from '../src/commands/doctor/checks/belief-ledger.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
-import { COVERAGE_KEY } from '../src/core/belief/keys.ts';
+import { replayPurgesInRestore, type PurgeMirrorLine } from '../src/core/belief/purge-mirror.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, shape, type BeliefBrain } from './helpers/belief-ledger.ts';
 
 afterEach(() => { __setBeliefEmitterFaultForTests(null); });
@@ -58,6 +62,23 @@ async function bypassLink(b: BeliefBrain, target: string) {
     SELECT a.id, p.id, 'mentions', 'markdown', 'bypass', a.id FROM pages a, pages p
     WHERE a.source_id = $1 AND a.slug = 'companies/acme-example' AND p.source_id = $1 AND p.slug = $2`, [b.sourceId, target]);
 }
+
+/** The engine with `before` run (on the real engine, outside any transaction) ahead of its `nth` top-level transaction. */
+function interceptTransactions(engine: BrainEngine, nth: number, before: () => Promise<void>, opts: { after?: boolean } = {}): BrainEngine {
+  let calls = 0;
+  return new Proxy(engine, { get(target, prop, receiver) {
+    if (prop === 'transaction') return async (fn: (tx: BrainEngine) => Promise<unknown>) => {
+      calls++;
+      if (calls === nth && !opts.after) await before();
+      const result = await target.transaction(fn as never);
+      if (calls === nth && opts.after) await before();
+      return result;
+    };
+    const value = Reflect.get(target, prop, receiver);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } }) as BrainEngine;
+}
+const lifetimeCount = async (b: BeliefBrain) => Number((await b.engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM belief_page_lifetimes WHERE source_id = $1', [b.sourceId]))[0]!.n);
 
 async function seeded(b: BeliefBrain) {
   await b.put('people/alice-example', beliefPage({ type: 'person', title: 'Alice Example' }));
@@ -285,6 +306,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         const baselines = (await b.events()).filter(e => e.event_type === 'baseline' && e.subject_kind === 'page');
         expect(baselines.map(e => e.slug)).not.toContain('companies/gamma-example');
         expect(await coverageAt(b.engine, b.sourceId, await dbNow(b), 'companies/gamma-example')).toMatchObject({ ok: false, code: 'coverage_from', from: null });
+        expect((await b.events()).find(e => e.event_type === 'coverage.complete')!.cause).toMatchObject({ unbaselined_slugs: ['companies/gamma-example'] });
       }, { enable: false });
     }, 180_000);
 
@@ -380,20 +402,24 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         __setBeliefEmitterFaultForTests(null);
         expect((await doctor(b, { doFix: true })).status).toBe('ok');
         const source = (await readLedgerSource(b.engine, b.sourceId))!;
-        const restore = async (purgeReplay: string) => {
-          const publicationId = randomUUID();
-          await b.engine.transaction(tx => appendBeliefEvents(tx, [{ sourceId: b.sourceId, incarnation: source.incarnation, lifetime: null, slug: '', subjectKind: 'coverage',
-            subjectKey: COVERAGE_KEY, eventType: 'coverage.restored', trustTier: 'unknown', tierBasis: 'unknown', visibility: 'world', value: null, stateHash: '',
-            cause: { op: 'coverage.restored', archive_created_at: '2026-10-01T00:00:00.000Z', purge_replay: purgeReplay, purge_requests: ['purge-1'] } }],
-          { publicationId, origin: 'live', purgesPossible: false }));
-          await markBeliefCommits(b.engine, [publicationId]);
+        await pause();
+        const archivedAt = await dbNow(b);
+        await pause();
+        const inGap = await dbNow(b);
+        const restore = async (lines: PurgeMirrorLine[] | null) => {
+          await b.engine.transaction(tx => replayPurgesInRestore(tx, { lines, archivedAt, restoreId: randomUUID() }));
+          await fillCommitMarks(b.engine, b.sourceId);
         };
-        await restore('complete');
+        await restore([]);
         expect((await doctor(b)).status).toBe('ok');
-        await restore('partial');
+        expect(await coverageAt(b.engine, b.sourceId, inGap)).toMatchObject({ ok: false, code: 'coverage_gap', reason: 'restore', from: archivedAt });
+        await restore([{ kind: 'intent', request: 'purge-1', request_id: 'req-purge-1', source_id: b.sourceId, source_incarnation: source.incarnation, scope: 'fact',
+          recorded_at: new Date(Date.parse(archivedAt) + 1).toISOString(), purge_epoch: 1, facts: [], takes: [], lifetimes: [] }]);
         const asked = await doctor(b);
         expect(asked).toMatchObject({ status: 'warn', fix: { actor: 'user', ask_user: true } });
-        expect(asked.message).toContain('purge replay partial for purge-1');
+        expect(asked.message).toContain(`(${archivedAt}): purge replay unverified for req-purge-1`);
+        await restore(null);
+        expect((await doctor(b)).message).toContain('purge replay unavailable');
       }, { enable: false });
     }, 180_000);
 
@@ -460,14 +486,151 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         expect(new Set(events.map(e => e.publication_id)).size).toBe(4);
         expect((await backfillBeliefHistory(b.engine, b.sourceId)).events).toBe(0);
         expect(await b.lastId()).toBe(events.at(-1)!.id);
-        // Forced probe: a purge on every attempt exhausts the retries and refuses with belief_preparation_stale.
+        // Forced probe: a purge on every attempt exhausts the retries and refuses with belief_stale_preparation.
         await b.put('companies/beta-example', beliefPage({ title: 'Beta Example', facts: ['Beta ships late'] }));
         await b.engine.executeRaw(`UPDATE pages SET created_at = $2::timestamptz - interval '1 hour' WHERE source_id = $1 AND slug = 'companies/beta-example'`, [b.sourceId, since]);
         await expect(backfillBeliefHistory(b.engine, b.sourceId, { slugs: ['companies/beta-example'], prepareHook: async () => {
           await b.engine.executeRaw('UPDATE sources SET purge_epoch = purge_epoch + 1 WHERE id = $1', [b.sourceId]);
-        } })).rejects.toMatchObject({ code: 'belief_preparation_stale' });
+        } })).rejects.toMatchObject({ code: 'belief_stale_preparation' });
       }, { enable: false });
     }, 180_000);
+
+    test('#7: a disable during enable ends the run without coverage.complete, and a restore never turns a stopped ledger back on', async () => {
+      await brain(async b => {
+        for (let i = 0; i < 5; i++) await b.put(`notes/n-${i}-example`, beliefPage({ type: 'note', title: `N ${i}`, facts: [`Fact number ${i} holds`] }));
+        const run = await enableBeliefLedger(interceptTransactions(b.engine, 3, async () => { expect(await disableBeliefLedger(b.engine, b.sourceId)).toBe(true); }), b.sourceId);
+        expect(run).toMatchObject({ complete: false, certified: false });
+        expect((await latestCoverage(b.engine, b.sourceId))?.type).toBe('coverage.stopped');
+        expect((await coverageIntervals(b.engine, b.sourceId)).map(i => [i.watermark, !!i.stopped_at, i.baseline.complete])).toEqual([[null, true, false]]);
+        const quiet = await b.lastId();
+        await b.put('notes/after-disable-example', beliefPage({ type: 'note', title: 'After', facts: ['Recorded after disable'] }));
+        expect(await b.events(quiet)).toEqual([]);
+        await b.engine.transaction(tx => replayPurgesInRestore(tx, { lines: [], archivedAt: new Date(Date.now() - 60_000).toISOString(), restoreId: randomUUID() }));
+        expect((await readLedgerSource(b.engine, b.sourceId))!.coverage).toBe('coverage.stopped');
+        const restored = await b.lastId();
+        await b.put('notes/after-restore-example', beliefPage({ type: 'note', title: 'After restore', facts: ['Recorded after restore'] }));
+        expect(await b.events(restored)).toEqual([]);
+        const again = await enableBeliefLedger(b.engine, b.sourceId);
+        expect(again).toMatchObject({ resumed: false, complete: true, pages: 7 });
+        expect((await coverageIntervals(b.engine, b.sourceId)).map(i => [!!i.watermark, !!i.stopped_at])).toEqual([[false, true], [true, false]]);
+        // A restore of an archive taken mid-baseline: the next enable resumes that run instead of returning at once.
+        await disableBeliefLedger(b.engine, b.sourceId);
+        fault(drafts => { if (drafts.some(d => d.eventType === 'baseline' && d.slug === 'notes/n-3-example')) throw new Error('interrupted'); return drafts; });
+        await expect(enableBeliefLedger(b.engine, b.sourceId)).rejects.toThrow('interrupted');
+        __setBeliefEmitterFaultForTests(null);
+        await b.engine.transaction(tx => replayPurgesInRestore(tx, { lines: [], archivedAt: new Date(Date.now() - 60_000).toISOString(), restoreId: randomUUID() }));
+        const resumed = await enableBeliefLedger(b.engine, b.sourceId);
+        expect(resumed).toMatchObject({ resumed: true, complete: true });
+        expect(resumed.pages).toBeGreaterThan(0);
+        expect((await coverageIntervals(b.engine, b.sourceId)).at(-1)).toMatchObject({ stopped_at: null, baseline: { complete: true, pages_done: 7 } });
+      }, { managed: false, enable: false });
+    }, 180_000);
+
+    test('#27 and #16: concurrent enables share one run; a page renamed onto a slug the cursor passed is baselined before the watermark', async () => {
+      await brain(async b => {
+        for (let i = 0; i < 12; i++) await b.put(`notes/m-${String(i).padStart(2, '0')}-example`, beliefPage({ type: 'note', title: `M ${i}`, facts: [`Other fact ${i} holds`] }));
+        const runs = await Promise.all([enableBeliefLedger(b.engine, b.sourceId), enableBeliefLedger(b.engine, b.sourceId)]);
+        expect(runs[0]!.runId).toBe(runs[1]!.runId);
+        expect(runs.every(r => r.complete)).toBe(true);
+        const intervals = await coverageIntervals(b.engine, b.sourceId);
+        expect(intervals.map(i => [i.run, !!i.watermark, i.baseline.pages_done])).toEqual([[runs[0]!.runId, true, 12]]);
+        const baselines = (await b.events()).filter(e => e.event_type === 'baseline' && e.subject_kind === 'page').map(e => e.slug);
+        expect(baselines.length).toBe(new Set(baselines).size);
+      }, { managed: false, enable: false });
+      await brain(async b => {
+        for (const slug of ['notes/a-example', 'notes/m-example', 'notes/z-example']) await b.put(slug, beliefPage({ type: 'note', title: slug, facts: [`${slug} claim one`] }));
+        const run = await enableBeliefLedger(interceptTransactions(b.engine, 3, async () => {
+          await renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'notes/z-example', newSlug: 'notes/b-example', to: 'notes/b-example.md' });
+        }, { after: true }), b.sourceId);
+        expect(run).toMatchObject({ complete: true });
+        const baselined = (await b.events()).filter(e => e.event_type === 'baseline' && e.subject_kind === 'page').map(e => e.slug).sort();
+        expect(baselined).toEqual(['notes/a-example', 'notes/b-example', 'notes/m-example']);
+        const [interval] = await coverageIntervals(b.engine, b.sourceId);
+        const baselineB = (await b.events()).find(e => e.event_type === 'baseline' && e.slug === 'notes/b-example')!;
+        expect(Date.parse(baselineB.recorded_at)).toBeLessThanOrEqual(Date.parse(interval!.watermark!));
+      }, { managed: false, enable: false });
+    }, 180_000);
+
+    test('#17: a slug no page key can name is left out of the baseline and listed, and enable completes instead of wedging', async () => {
+      await brain(async b => {
+        await b.put('notes/ok-example', beliefPage({ type: 'note', title: 'Ok', facts: ['Fine fact'] }));
+        await b.engine.executeRaw(`INSERT INTO facts(source_id, entity_slug, fact, kind, visibility, source) VALUES ($1, $2, 'A db-only fact', 'fact', 'world', 'manual')`, [b.sourceId, 'people\\bad']);
+        const run = await enableBeliefLedger(b.engine, b.sourceId);
+        expect(run).toMatchObject({ complete: true, unkeyable: ['people\\bad'] });
+        const complete = (await b.events()).find(e => e.event_type === 'coverage.complete')!;
+        expect(complete.cause).toMatchObject({ unkeyable_slugs: ['people\\bad'], pages: 1 });
+        expect(await enableBeliefLedger(b.engine, b.sourceId)).toMatchObject({ complete: true, resumed: true, pages: 0 });
+      }, { managed: false, enable: false });
+    }, 120_000);
+
+    test('#15: a backfill does not read as drift, so neither the cycle nor doctor reconciles it', async () => {
+      await brain(async b => {
+        await b.put('companies/hist-example', beliefPage({ title: 'Hist Example', facts: ['Hist example sells widgets'] }));
+        await b.put('companies/hist-example', beliefPage({ title: 'Hist Example', facts: ['Hist example sells widgets', 'Hist example has two staff'] }));
+        await b.enable();
+        expect((await backfillBeliefHistory(b.engine, b.sourceId)).events).toBeGreaterThan(0);
+        expect((await scanBeliefDrift(b.engine, b.sourceId, { deep: true })).drifted).toEqual([]);
+        const mark = await b.lastId();
+        expect((await reconcileBeliefDrift(b.engine, b.sourceId, { op: 'cycle_extract', limit: DRIFT_SAMPLE_PAGES })).events).toBe(0);
+        expect(await b.lastId()).toBe(mark);
+        expect((await coverageIntervals(b.engine, b.sourceId))[0]!.drift).toEqual([]);
+        // A real change after the backfill still drifts and reconciles.
+        await b.engine.executeRaw(`UPDATE facts SET confidence = 0.4 WHERE source_id = $1 AND fact = 'Hist example has two staff'`, [b.sourceId]);
+        expect((await scanBeliefDrift(b.engine, b.sourceId, { deep: true })).drifted.map(d => d.slug)).toEqual(['companies/hist-example']);
+      }, { managed: false, enable: false });
+    }, 120_000);
+
+    test('#24: a read-only doctor run mints and ends no page lifetime; --fix does', async () => {
+      await brain(async b => {
+        await seeded(b);
+        await b.engine.putPage('notes/untracked-example', { type: 'note', title: 'Untracked', compiled_truth: 'Written outside every projection point.' }, { sourceId: b.sourceId });
+        const before = await lifetimeCount(b);
+        const report = await doctor(b);
+        expect(report.status).toBe('warn');
+        expect(report.message).toContain('notes/untracked-example');
+        expect(await lifetimeCount(b)).toBe(before);
+        // Forced probe: the --fix reconcile does mint the page's lifetime, so the count would have caught a read-only scan minting one.
+        expect((await doctor(b, { doFix: true })).status).toBe('ok');
+        expect(await lifetimeCount(b)).toBe(before + 1);
+      }, { managed: false });
+    }, 120_000);
+
+    test('#41: a renamed page keeps its cut: coverageAt on the new slug answers from the baseline under its lifetime', async () => {
+      await brain(async b => {
+        await b.put('notes/old-example', beliefPage({ type: 'note', title: 'Old', facts: ['A renamed claim'] }));
+        await b.enable();
+        await pause();
+        const between = await dbNow(b);
+        await pause();
+        await renamePageOntoSlug(b.engine, { sourceId: b.sourceId, oldSlug: 'notes/old-example', newSlug: 'notes/new-example', to: 'notes/new-example.md' });
+        expect(await coverageAt(b.engine, b.sourceId, between, 'notes/new-example')).toMatchObject({ ok: true, certified: false, uncertified_reason: 'unmanaged' });
+        expect(await coverageAt(b.engine, b.sourceId, between, 'notes/never-example')).toMatchObject({ ok: false, code: 'coverage_from' });
+      }, { managed: false, enable: false });
+    }, 120_000);
+
+    test('#28: the routine unmarked-publication scan reads only the recent window; deep reads the whole source', async () => {
+      await brain(async b => {
+        await seeded(b);
+        const [old] = await b.events();
+        await b.engine.executeRaw('DELETE FROM belief_commit_marks WHERE publication_id = $1::uuid', [old!.publication_id]);
+        await b.engine.executeRaw(`UPDATE belief_events SET recorded_at = recorded_at - make_interval(days => ${UNMARKED_WINDOW_DAYS + 1}) WHERE publication_id = $1::uuid`, [old!.publication_id]);
+        expect(await unmarkedPublications(b.engine, b.sourceId)).toEqual([]);
+        expect(await unmarkedPublications(b.engine, b.sourceId, 1000, { deep: true })).toEqual([old!.publication_id]);
+        expect(await fillCommitMarks(b.engine, b.sourceId, { deep: true })).toBe(1);
+      });
+    }, 120_000);
+
+    test('#37: gbrain beliefs resolves the source through the ambient chain, and a bare --source is refused', async () => {
+      await brain(async b => {
+        await withEnv({ GBRAIN_SOURCE: b.sourceId }, () => runBeliefs(b.engine, ['enable']));
+        expect((await latestCoverage(b.engine, b.sourceId))?.type).toBe('coverage.complete');
+        expect(await latestCoverage(b.engine, 'default')).toBeNull();
+        await runBeliefs(b.engine, ['disable', '--source']);
+        expect(currentExitCode()).toBe(2);
+        setCliExitVerdict(0);
+        expect((await latestCoverage(b.engine, b.sourceId))?.type).toBe('coverage.complete');
+      }, { managed: false, enable: false });
+    }, 120_000);
 
     test('probe 9: graduation PGLite -> ' + engineCase.name + ' carries an identical ledger: equal event_key sets, digests and replay', async () => {
       await beliefBrain(async b => {

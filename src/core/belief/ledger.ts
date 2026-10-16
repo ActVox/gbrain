@@ -77,11 +77,11 @@ export function beliefBatchCovers(sourceId: string, slugs: readonly string[]): b
 /** True inside any belief batch: a nested writer's own publication commits with the enclosing transaction, not before it. */
 export const insideBeliefBatch = (): boolean => !!store.getStore();
 
-/** Coverage and purge probes for one source, in one read. */
+/** Coverage and purge probes for one source, in one read. `coverage` is the newest coverage event other than `coverage.restored`. */
 export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<{ incarnation: string; purgeEpoch: number; coverage: string | null; purgesPossible: boolean } | null> {
   const [row] = await tx.executeRaw<Record<string, unknown>>(`SELECT s.incarnation::text AS incarnation, s.purge_epoch,
       (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $2
-        AND e.source_incarnation = s.incarnation ORDER BY e.id DESC LIMIT 1) AS coverage,
+        AND e.source_incarnation = s.incarnation AND e.event_type <> 'coverage.restored' ORDER BY e.id DESC LIMIT 1) AS coverage,
       (s.purge_epoch > 0 OR EXISTS (SELECT 1 FROM fact_purges WHERE source_id = s.id) OR EXISTS (SELECT 1 FROM take_purges WHERE source_id = s.id)
         OR EXISTS (SELECT 1 FROM page_purges WHERE source_id = s.id)) AS purges
     FROM sources s WHERE s.id = $1`, [sourceId, COVERAGE_KEY]);
@@ -391,13 +391,23 @@ function contestedDraft(d: DiffContext, note: Extract<BeliefNote, { kind: 'conte
 }
 
 /** The current belief-set hash of one stream, for the doctor drift check and reconcile. */
-export async function currentStateHash(tx: BrainEngine, sourceId: string, incarnation: string, slug: string): Promise<{ hash: string; state: RawState; lifetimes: Map<number, string> }> {
+export async function currentStateHash(tx: BrainEngine, sourceId: string, incarnation: string, slug: string,
+  opts: { readOnly?: boolean } = {}): Promise<{ hash: string; state: RawState; lifetimes: Map<number, string> }> {
   const state = await readBeliefState(tx, sourceId, [slug]);
-  const lifetimes = await resolveLifetimes(tx, pageNeeds(sourceId, incarnation, state));
+  const lifetimes = opts.readOnly ? await peekLifetimes(tx, pageNeeds(sourceId, incarnation, state)) : await resolveLifetimes(tx, pageNeeds(sourceId, incarnation, state));
   const page = state.pages.find(p => p.slug === slug) ?? null;
   const ctx: KeyContext = { incarnation, lifetimes, pagesBySlug: new Map(page ? [[slug, page]] : []) };
   const subjects = keyedSubjects(ctx, state, id => state.pages.find(p => p.id === id)?.visible === false ? 'private' : 'world').filter(s => s.stream === slug);
   return { hash: stateHashOf(page, page ? lifetimes.get(page.id)! : null, subjects), state, lifetimes };
+}
+
+/** resolveLifetimes without writes (a read-only drift scan): a page with no fitting open lifetime gets a placeholder, so its hash cannot match a recorded one. */
+async function peekLifetimes(tx: BrainEngine, needs: ReturnType<typeof pageNeeds>): Promise<Map<number, string>> {
+  const open = await readOpenLifetimes(tx, needs);
+  return new Map(needs.map(n => {
+    const row = open.get(`${n.incarnation}\u0000${n.slug}`);
+    return [n.pageId, row && (row.page_id == null || row.page_id === n.pageId) ? row.page_lifetime : `unminted:${n.pageId}`];
+  }));
 }
 
 export { stateHashOf };

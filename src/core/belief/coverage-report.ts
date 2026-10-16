@@ -17,14 +17,15 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import type { PurgeReplayState, ReplayRecord } from './purge-mirror.ts';
 import { COVERAGE_KEY, pageKey, valueHash } from './keys.ts';
 import { appendBeliefEvents, markBeliefCommits, type BeliefEventDraft } from './append.ts';
 import { coverageActive, currentStateHash, readLedgerSource } from './ledger.ts';
 import { keyedSubjects } from './subjects.ts';
 import { endLifetime, readOpenLifetimes } from './lifetimes.ts';
 
-export type PurgeReplay = 'complete' | 'partial' | 'unavailable' | 'unverified';
-export interface RestoreMark { event_id: number; at: string; archive_created_at: string | null; purge_replay: PurgeReplay | null; purge_requests: string[]; replay_argv: string[] | null }
+/** One `coverage.restored` (purge-mirror.ts `replayPurgesInRestore`): the archive time and the purge replay outcome. */
+export interface RestoreMark { event_id: number; at: string; archived_at: string | null; purge_replay: PurgeReplayState | null; replays: ReplayRecord[] }
 export interface DriftMark { slug: string; event_id: number; from: string | null; to: string }
 export interface CoverageInterval {
   run: string | null; incarnation: string; started_id: number; started_at: string;
@@ -65,22 +66,24 @@ export async function coverageIntervals(engine: BrainEngine, sourceId: string): 
       current.certified = obj(row.cause).certified === true;
       current.links_certified = current.certified ? 'journaled_only' : false;
       current.baseline.complete = true;
+      const pages = obj(row.cause).pages;
+      if (typeof pages === 'number') current.baseline.pages_done = pages;
     } else if (row.event_type === 'coverage.stopped') current.stopped_at = iso(row.recorded_at);
     else if (row.event_type === 'coverage.restored') {
-      const archive = field(row, 'archive_created_at');
-      const requests = field(row, 'purge_requests');
-      const argv = field(row, 'replay_argv');
-      current.restores.push({ event_id: id, at: iso(row.recorded_at), archive_created_at: archive ? iso(archive) : null,
-        purge_replay: (field(row, 'purge_replay') as PurgeReplay | undefined) ?? null, purge_requests: Array.isArray(requests) ? requests.map(String) : [],
-        replay_argv: Array.isArray(argv) ? argv.map(String) : null });
+      const archive = field(row, 'archived_at');
+      const replays = field(row, 'replays');
+      current.restores.push({ event_id: id, at: iso(row.recorded_at), archived_at: archive ? iso(archive) : null,
+        purge_replay: (field(row, 'purge_replay') as PurgeReplayState | undefined) ?? null, replays: Array.isArray(replays) ? replays as ReplayRecord[] : [] });
     }
   }
   for (const interval of intervals) {
-    const [done] = await engine.executeRaw<{ n: number }>(`SELECT count(DISTINCT slug)::int AS n FROM belief_events
-      WHERE source_id = $1 AND event_type = 'baseline' AND cause->>'run' = $2`, [sourceId, interval.run ?? '']);
-    interval.baseline.pages_done = Number(done?.n ?? 0);
+    if (!interval.baseline.complete || !interval.baseline.pages_done) {
+      const [done] = await engine.executeRaw<{ n: number }>(`SELECT count(DISTINCT slug)::int AS n FROM belief_events
+        WHERE source_id = $1 AND event_type = 'baseline' AND cause->>'run' = $2`, [sourceId, interval.run ?? '']);
+      interval.baseline.pages_done = Number(done?.n ?? 0);
+    }
     const drift = await engine.executeRaw<{ id: number; slug: string; recorded_at: string; from: string | null }>(`SELECT id, slug, recorded_at, cause->>'uncertified_from' AS "from"
-      FROM belief_events WHERE source_id = $1 AND origin = 'reconcile' AND subject_kind = 'page' AND source_incarnation = $2::uuid AND id > $3
+      FROM belief_events WHERE source_id = $1 AND subject_kind = 'page' AND origin = 'reconcile' AND source_incarnation = $2::uuid AND id > $3
         AND ($4::timestamptz IS NULL OR recorded_at <= $4::timestamptz) ORDER BY id`,
     [sourceId, interval.incarnation, interval.started_id, interval.stopped_at]);
     interval.drift = drift.map(d => ({ slug: d.slug, event_id: Number(d.id), from: d.from ? iso(d.from) : null, to: iso(d.recorded_at) }));
@@ -102,10 +105,11 @@ export type CoverageAt =
   | { ok: false; code: 'coverage_from'; from: string | null; message: string }
   | { ok: false; code: 'coverage_gap'; reason: 'not_covered' | 'restore'; from: string | null; until: string | null; message: string };
 
-/** The first recorded cut of `slug` in the interval: its baseline, creation snapshot or first page-less assertion. */
+/** The first recorded cut of `slug` in the interval: its baseline, creation snapshot or first page-less assertion, under the slug or its page's lifetime (a renamed page keeps its cut). */
 async function slugCut(engine: BrainEngine, sourceId: string, interval: CoverageInterval, slug: string): Promise<string | null> {
   const [row] = await engine.executeRaw<{ recorded_at: string }>(`SELECT recorded_at FROM belief_events
-    WHERE source_id = $1 AND source_incarnation = $2::uuid AND slug = $3 AND id > $4
+    WHERE source_id = $1 AND source_incarnation = $2::uuid AND id > $4 AND origin <> 'backfill'
+      AND (slug = $3 OR page_lifetime = (SELECT l.page_lifetime FROM belief_page_lifetimes l WHERE l.source_incarnation = $2::uuid AND l.slug = $3 AND l.ended_at IS NULL))
       AND (event_type = 'baseline' OR (event_type = 'page.published' AND value->>'revision_before' IS NULL)
         OR (page_lifetime IS NULL AND subject_kind = 'fact' AND event_type = 'fact.asserted'))
     ORDER BY id LIMIT 1`, [sourceId, interval.incarnation, slug, interval.started_id]);
@@ -133,10 +137,10 @@ export async function coverageAt(engine: BrainEngine, sourceId: string, at: Date
     return { ok: false, code: 'coverage_gap', reason: 'not_covered', from: interval?.stopped_at ?? null, until: next?.started_at ?? null,
       message: `The belief ledger was not recording ${sourceId} at ${new Date(t).toISOString()}.` };
   }
-  const gap = interval.restores.find(r => r.archive_created_at && t > Date.parse(r.archive_created_at) && t <= Date.parse(r.at));
+  const gap = interval.restores.find(r => r.archived_at && t > Date.parse(r.archived_at) && t <= Date.parse(r.at));
   if (gap) {
-    return { ok: false, code: 'coverage_gap', reason: 'restore', from: gap.archive_created_at, until: gap.at,
-      message: `A backup restore at ${gap.at} replaced the ledger with an archive from ${gap.archive_created_at}; what happened between them is unknown.` };
+    return { ok: false, code: 'coverage_gap', reason: 'restore', from: gap.archived_at, until: gap.at,
+      message: `A backup restore at ${gap.at} replaced the ledger with an archive from ${gap.archived_at}; what happened between them is unknown.` };
   }
   const cut = slug ? await slugCut(engine, sourceId, interval, slug) : interval.watermark;
   if (!cut || t < Date.parse(cut)) {
@@ -168,6 +172,7 @@ export async function beliefEventVisibility(engine: BrainEngine, eventId: number
 export interface DriftFinding { slug: string; recorded_hash: string | null; current_hash: string; last_event_id: number | null }
 export interface DriftScan { checked: number; candidates: number; exact: boolean; drifted: DriftFinding[] }
 export const DRIFT_SAMPLE_PAGES = 200;
+export const UNMARKED_WINDOW_DAYS = 7;
 
 /**
  * Slugs whose current belief set no longer hashes to the `state_hash` of their
@@ -195,13 +200,13 @@ export async function scanBeliefDrift(engine: BrainEngine, sourceId: string, opt
 
 async function newestEvent(tx: BrainEngine, sourceId: string, incarnation: string, slug: string): Promise<{ id: number; state_hash: string; recorded_at: string } | null> {
   const [row] = await tx.executeRaw<{ id: number; state_hash: string; recorded_at: string }>(`SELECT id, state_hash, recorded_at FROM belief_events
-    WHERE source_id = $1 AND source_incarnation = $2::uuid AND slug = $3 AND subject_kind <> 'coverage' ORDER BY id DESC LIMIT 1`, [sourceId, incarnation, slug]);
+    WHERE source_id = $1 AND source_incarnation = $2::uuid AND slug = $3 AND subject_kind <> 'coverage' AND origin <> 'backfill' ORDER BY id DESC LIMIT 1`, [sourceId, incarnation, slug]);
   return row ? { id: Number(row.id), state_hash: row.state_hash, recorded_at: iso(row.recorded_at) } : null;
 }
 
 async function driftOf(engine: BrainEngine, sourceId: string, incarnation: string, slug: string): Promise<DriftFinding | null> {
   return engine.transaction(async tx => {
-    const [{ hash, state }, last] = [await currentStateHash(tx, sourceId, incarnation, slug), await newestEvent(tx, sourceId, incarnation, slug)];
+    const [{ hash, state }, last] = [await currentStateHash(tx, sourceId, incarnation, slug, { readOnly: true }), await newestEvent(tx, sourceId, incarnation, slug)];
     if (last?.state_hash === hash) return null;
     const open = await readOpenLifetimes(tx, [{ incarnation, slug }]);
     if (!last && !state.pages.some(p => p.slug === slug) && !state.facts.length && !open.size) return null;
@@ -242,8 +247,8 @@ export async function reconcileSlug(engine: BrainEngine, sourceId: string, slug:
       id => state.pages.find(p => p.id === id)?.visible === false ? 'private' : 'world').filter(s => s.stream === slug && (page && !page.deleted || s.dbOnly));
     const recorded = await tx.executeRaw<{ id: number; subject_kind: string; subject_key: string; event_type: string; value: unknown; value_hash: string | null; trust_tier: string;
       visibility: string; claim_fp: string | null }>(`SELECT DISTINCT ON (subject_kind, subject_key) id, subject_kind, subject_key, event_type, value, value_hash, trust_tier, visibility, claim_fp
-      FROM belief_events WHERE source_id = $1 AND source_incarnation = $2::uuid AND slug = $3 AND subject_kind NOT IN ('page','coverage')
-        AND id > COALESCE((SELECT max(id) FROM belief_events s WHERE s.source_id = $1 AND s.source_incarnation = $2::uuid AND s.slug = $3 AND s.subject_kind = 'page'
+      FROM belief_events WHERE source_id = $1 AND source_incarnation = $2::uuid AND slug = $3 AND subject_kind NOT IN ('page','coverage') AND origin <> 'backfill'
+        AND id > COALESCE((SELECT max(id) FROM belief_events s WHERE s.source_id = $1 AND s.source_incarnation = $2::uuid AND s.slug = $3 AND s.subject_kind = 'page' AND s.origin <> 'backfill'
           AND (s.event_type IN ('baseline','reconcile') OR (s.event_type = 'page.published' AND s.value->>'revision_before' IS NULL))), 0)
       ORDER BY subject_kind, subject_key, id DESC`, [sourceId, source.incarnation, slug]);
     const proven = new Map(recorded.filter(r => PROVEN_KINDS.test(r.event_type) && r.value_hash).map(r => [`${r.subject_kind}\u0000${r.subject_key}`, recordedVhash(r)]));
@@ -292,30 +297,35 @@ export async function reconcileBeliefDrift(engine: BrainEngine, sourceId: string
   return { scan, reconciled, events };
 }
 
-/** Open lifetimes with no page at their slug (an untracked hard delete), and events naming a lifetime that does not exist. */
-export async function orphanLifetimes(engine: BrainEngine, sourceId: string, limit = 20): Promise<{ count: number; samples: Array<{ slug: string; page_lifetime: string; reason: 'no_page' | 'no_lifetime' }> }> {
+/** Open lifetimes with no page at their slug (an untracked hard delete), and (`deep`, a whole-ledger read) events naming a lifetime that does not exist. */
+export async function orphanLifetimes(engine: BrainEngine, sourceId: string, limit = 20, opts: { deep?: boolean } = {}): Promise<{ count: number; samples: Array<{ slug: string; page_lifetime: string; reason: 'no_page' | 'no_lifetime' }> }> {
   const rows = await engine.executeRaw<{ slug: string; page_lifetime: string; reason: 'no_page' | 'no_lifetime'; total: number }>(`SELECT slug, page_lifetime, reason, count(*) OVER ()::int AS total FROM (
       SELECT l.slug, l.page_lifetime::text AS page_lifetime, 'no_page' AS reason FROM belief_page_lifetimes l JOIN sources s ON s.id = l.source_id AND s.incarnation = l.source_incarnation
       WHERE l.source_id = $1 AND l.ended_at IS NULL AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.source_id = l.source_id AND p.slug = l.slug)
       UNION ALL SELECT DISTINCT e.slug, e.page_lifetime::text, 'no_lifetime' FROM belief_events e
-      WHERE e.source_id = $1 AND e.page_lifetime IS NOT NULL AND NOT EXISTS (SELECT 1 FROM belief_page_lifetimes l WHERE l.page_lifetime = e.page_lifetime)
-    ) o ORDER BY slug LIMIT ${Math.max(1, Math.floor(limit))}`, [sourceId]);
+      WHERE $2::boolean AND e.source_id = $1 AND e.page_lifetime IS NOT NULL AND NOT EXISTS (SELECT 1 FROM belief_page_lifetimes l WHERE l.page_lifetime = e.page_lifetime)
+    ) o ORDER BY slug LIMIT ${Math.max(1, Math.floor(limit))}`, [sourceId, opts.deep === true]);
   return { count: Number(rows[0]?.total ?? 0), samples: rows.map(r => ({ slug: r.slug, page_lifetime: r.page_lifetime, reason: r.reason })) };
 }
 
-/** Committed publications of the source with no commit mark (a crash before the post-commit mark). */
-export async function unmarkedPublications(engine: BrainEngine, sourceId: string, limit = 1000): Promise<string[]> {
+/**
+ * Committed publications of the source with no commit mark (a crash before the post-commit mark). The routine scan
+ * (cycle, doctor, status) reads events recorded in the last UNMARKED_WINDOW_DAYS through the recorded_at index; `deep`
+ * (`gbrain beliefs reconcile`, `doctor --tier deep`) reads the whole source.
+ */
+export async function unmarkedPublications(engine: BrainEngine, sourceId: string, limit = 1000, opts: { deep?: boolean } = {}): Promise<string[]> {
   const rows = await engine.executeRaw<{ publication_id: string }>(`SELECT DISTINCT e.publication_id::text AS publication_id FROM belief_events e
-    WHERE e.source_id = $1 AND NOT EXISTS (SELECT 1 FROM belief_commit_marks m WHERE m.publication_id = e.publication_id)
-    ORDER BY 1 LIMIT ${Math.max(1, Math.floor(limit))}`, [sourceId]);
+    WHERE e.source_id = $1 AND ($2::boolean OR e.recorded_at > now() - make_interval(days => ${UNMARKED_WINDOW_DAYS}))
+      AND NOT EXISTS (SELECT 1 FROM belief_commit_marks m WHERE m.publication_id = e.publication_id)
+    ORDER BY 1 LIMIT ${Math.max(1, Math.floor(limit))}`, [sourceId, opts.deep === true]);
   return rows.map(r => r.publication_id);
 }
 
 /** Writes the missing commit marks (a reader that finds a committed event with no mark writes one, section 5.3). */
-export async function fillCommitMarks(engine: BrainEngine, sourceId: string): Promise<number> {
+export async function fillCommitMarks(engine: BrainEngine, sourceId: string, opts: { deep?: boolean } = {}): Promise<number> {
   let filled = 0;
   for (;;) {
-    const ids = await unmarkedPublications(engine, sourceId);
+    const ids = await unmarkedPublications(engine, sourceId, 1000, opts);
     if (!ids.length) return filled;
     await markBeliefCommits(engine, ids);
     filled += ids.length;
@@ -325,9 +335,9 @@ export async function fillCommitMarks(engine: BrainEngine, sourceId: string): Pr
 
 /** Sources with any coverage event in their current incarnation. */
 export async function coveredSources(engine: BrainEngine): Promise<string[]> {
-  const rows = await engine.executeRaw<{ source_id: string }>(`SELECT DISTINCT e.source_id FROM belief_events e JOIN sources s ON s.id = e.source_id AND s.incarnation = e.source_incarnation
-    WHERE e.subject_kind = 'coverage' ORDER BY 1`);
-  return rows.map(r => r.source_id);
+  const rows = await engine.executeRaw<{ id: string }>(`SELECT s.id FROM sources s WHERE EXISTS (SELECT 1 FROM belief_events e
+    WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $1 AND e.source_incarnation = s.incarnation) ORDER BY 1`, [COVERAGE_KEY]);
+  return rows.map(r => r.id);
 }
 
 /** The cycle's extract phase: a sampled drift reconcile and commit-mark fill on each covered source (or the cycle's source); failures become details. */

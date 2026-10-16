@@ -85,7 +85,7 @@ async function bodySubjects(engine: BrainEngine, lifetime: string, text: string,
 }
 
 /** Reads one page's retained versions before `since` and builds its backfill publications, under the epoch it read. */
-async function preparePage(engine: BrainEngine, sourceId: string, slug: string, since: string): Promise<Prepared | null> {
+async function preparePage(engine: BrainEngine, sourceId: string, slug: string, since: string, hidden: ReadonlySet<string>): Promise<Prepared | null> {
   const source = await readLedgerSource(engine, sourceId);
   if (!source) return null;
   const [page] = await engine.executeRaw<{ id: number; created_at: string; large: boolean; visible: boolean; compiled_truth: string | null; timeline: string | null; revision: string }>(`SELECT p.id, p.created_at, p.knowledge_revision::text AS revision,
@@ -106,8 +106,6 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   const atStart: Body = { revision: closing ? closing.revision : page.revision, source_time: before.length ? iso(before.at(-1)!.snapshot_at)! : iso(page.created_at)!,
     text: closing ? text(closing) : page.large ? null : `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}` };
   const chain = [...bodies, atStart];
-  const hidden = new Set((await engine.executeRaw<{ subject_key: string }>(`SELECT DISTINCT subject_key FROM belief_events WHERE source_id = $1 AND event_type = 'derived.hidden'`,
-    [sourceId])).map(r => r.subject_key));
   const drafts: BeliefEventDraft[][] = [];
   let prior: Keyed[] = [];
   let priorRevision: string | null = null;
@@ -143,7 +141,7 @@ async function preparePage(engine: BrainEngine, sourceId: string, slug: string, 
   return { epoch: source.purgeEpoch, incarnation: source.incarnation, lifetime, pageId: Number(page.id), versions: chain, drafts, summary, complete, reasons: [...new Set(reasons)].sort() };
 }
 
-/** Appends one prepared page under its key; refuses (`belief_preparation_stale`) when a purge moved the source's epoch since preparation. */
+/** Appends one prepared page under its key; refuses (`belief_stale_preparation`) when a purge moved the source's epoch since preparation. */
 async function appendPrepared(engine: BrainEngine, sourceId: string, slug: string, prepared: Prepared): Promise<{ events: number; publications: string[] }> {
   const publications: string[] = [];
   const events = await engine.transaction(async tx => {
@@ -151,7 +149,7 @@ async function appendPrepared(engine: BrainEngine, sourceId: string, slug: strin
     const source = await readLedgerSource(tx, sourceId);
     if (!source || source.incarnation !== prepared.incarnation) return 0;
     if (source.purgeEpoch !== prepared.epoch) {
-      throw opError('belief_preparation_stale', `A purge ran in source ${sourceId} after the backfill of ${slug} was prepared.`,
+      throw opError('belief_stale_preparation', `A purge ran in source ${sourceId} after the backfill of ${slug} was prepared.`,
         'The backfill prepares the page again from the current, redacted versions; rerun gbrain beliefs backfill if it gave up.');
     }
     let n = 0;
@@ -181,9 +179,12 @@ export async function backfillBeliefHistory(engine: BrainEngine, sourceId: strin
   const since = first.started_at;
   const slugs = opts.slugs ?? (await engine.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE source_id = $1 ORDER BY slug', [sourceId])).map(r => r.slug);
   const report: BackfillReport = { source_id: sourceId, since, pages: [], events: 0, retried: 0 };
+  const hiddenKeys = async () => new Set((await engine.executeRaw<{ subject_key: string }>(`SELECT DISTINCT subject_key FROM belief_events
+    WHERE source_id = $1 AND event_type = 'derived.hidden'`, [sourceId])).map(r => r.subject_key));
+  let hidden = await hiddenKeys();
   for (const slug of slugs) {
     for (let attempt = 0; ; attempt++) {
-      const prepared = await preparePage(engine, sourceId, slug, since);
+      const prepared = await preparePage(engine, sourceId, slug, since, hidden);
       if (!prepared) break;
       await opts.prepareHook?.(slug, attempt);
       try {
@@ -193,8 +194,9 @@ export async function backfillBeliefHistory(engine: BrainEngine, sourceId: strin
         report.events += events;
         break;
       } catch (error) {
-        if ((error as { code?: string }).code !== 'belief_preparation_stale' || attempt + 1 >= MAX_EPOCH_RETRIES) throw error;
+        if ((error as { code?: string }).code !== 'belief_stale_preparation' || attempt + 1 >= MAX_EPOCH_RETRIES) throw error;
         report.retried++;
+        hidden = await hiddenKeys();
       }
     }
   }
