@@ -414,11 +414,20 @@ const PROJECTION_JOB_PROBES = `CROSS JOIN LATERAL (SELECT s.id FROM sources s
 const statisticsDebt = new WeakMap<BrainEngine, { rebuilt: number; rows: number | null }>();
 
 /**
- * #5401: a failed rebuild waits this long before the resident retries it. One
- * fragment over `page_projection_jobs j`, shared by the consumer's idle probe
- * and the resident's selector.
+ * The queue reason of a segmented page whose projection a process is building (buildSegmentedProjection): the claim
+ * holds while its `updated_at`, renewed with each chunk batch, is younger than SEGMENTED_PROJECTION_LEASE_SECONDS.
  */
-export const PROJECTION_RETRY_READY_SQL = "(j.reason IS DISTINCT FROM 'rebuild_failed' OR j.updated_at<now()-interval '30 seconds')";
+export const SEGMENTED_PROJECTION_CLAIM = 'segmented_projecting';
+export const SEGMENTED_PROJECTION_LEASE_SECONDS = 60;
+
+/**
+ * #5401: a failed rebuild waits this long before the resident retries it, and
+ * a segmented projection another process holds is left to it. One fragment
+ * over `page_projection_jobs j`, shared by the consumer's idle probe and the
+ * resident's selector.
+ */
+export const PROJECTION_RETRY_READY_SQL = "(j.reason IS DISTINCT FROM 'rebuild_failed' OR j.updated_at<now()-interval '30 seconds')"
+  + ` AND NOT (j.reason='${SEGMENTED_PROJECTION_CLAIM}' AND j.updated_at>=now()-interval '${SEGMENTED_PROJECTION_LEASE_SECONDS} seconds')`;
 
 export interface ProjectionRebuildFailure { source_id: string; slug: string; reason: string }
 

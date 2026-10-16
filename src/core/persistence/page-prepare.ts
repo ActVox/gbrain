@@ -644,11 +644,13 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
     let lowered: { proposal_ref: string } | null = null;
     let contested: string[] = [];
     let projectionPending = false;
+    let segmentedWrite = false;
     if (!noop) {
       const prior = snapshot ? await storedPageTier(tx, row.source_id, row.slug) : null;
       // ENG-1: a managed fence edit keeps the page's tier; CEO-12: an agent rewrite that lowers a page files a queue item.
       const applied = await (isFenceEditWrite(row) ? withTrustKeep(tx, ['pages'], () => ready.apply(tx, lean ? preimage : undefined)) : ready.apply(tx, lean ? preimage : undefined));
       projectionPending = applied?.segmented?.complete === false;
+      segmentedWrite = applied?.segmented !== undefined;
       lowered = prior ? await recordAgentPageLowering(tx, row, { tier: prior, revision: snapshot!.revision }) : null;
       // Mandatory metadata shares publication rollback; exact no-ops never heal it. These, and the
       // projections (facts, takes, timeline rows of the page the import just wrote live), are independent and sent together.
@@ -698,6 +700,8 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
       ...(removedTimeline ? { timeline_rows_removed: timelineRowsRemovedAdvisory(row, removedTimeline) } : {}),
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop, ...(projectionPending ? { projection: 'pending' } : {}),
+      // Wave B: whether search sees a segmented write at commit; a pending one is re-read whenever its receipt is served (searchable.ts).
+      ...(segmentedWrite ? { searchable: isQuarantined(ready.parsedPage.frontmatter) ? false : projectionPending ? 'pending' : true } : {}),
       ...sizeState,
       ...(ready.result.chunks === 0 && !projectionPending ? {chunk_skip_reason: noop ? 'write_skipped'
         : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),

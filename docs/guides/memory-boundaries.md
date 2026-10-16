@@ -163,6 +163,19 @@ after that writer's last write. An older binary that writes without managed
 persistence (a classic brain shared by several hosts) is not detected, so
 upgrade every host before turning the switch on.
 
+<a id="segmented-searchable"></a>
+**When a segmented write is searchable.** The receipt of a write that stores a
+page in segments says `searchable`. A new page up to 4 MiB, and every rewrite of
+a segmented page, is searchable when it commits (`searchable: true`). A larger
+new page commits first and builds its chunks and keyword index right after,
+about 10 seconds for 20 MB: its receipt says `searchable: "pending"`, with
+`searchable_retry_after_ms` and a `searchable_fix` that reads the receipt again
+(`get_write_request`, `gbrain write-request -- <id>`). Read it at that interval
+until it says `searchable: true`; search finds the page from then on. Until
+then, search does not return the page. A quarantined page says
+`searchable: false`. `gbrain import` waits for the build and reports
+`searchable` in its result the same way.
+
 While the switch is off (unset in this release, set to `off`, or held by an
 older writer), new pages are stored inline up to 24 MiB as before.
 Pages already stored in segments stay readable and exportable; a write that

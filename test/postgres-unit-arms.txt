@@ -78,7 +78,9 @@ test/large-pages/remote-get-page-privacy.test.ts
 test/large-pages/remote-window-privacy.test.ts
 test/large-pages/sealed-segmented-search.test.ts
 test/large-pages/segment-vector-reuse.test.ts
+test/large-pages/segmented-append-reembed.test.ts
 test/large-pages/segmented-body-unreachable.test.ts
+test/large-pages/segmented-create-searchable.test.ts
 test/large-pages/segmented-derived-parity.test.ts
 test/large-pages/segmented-derived-passes.test.ts
 test/large-pages/segmented-derived-work.test.ts

@@ -5,9 +5,11 @@
  * everything heavy was staged by `prepareSegmentedBody`.
  *
  * - Create: the page row (`createSegmentedPageShell`), its manifest rows and
- *   the flip 0 -> 1. The text projection stays unsealed (chunks of a page row
- *   that did not exist could not be staged); `buildSegmentedProjection` chunks
- *   it after commit, or the projection queue does after a crash.
+ *   the flip 0 -> 1. A create within SEGMENTED_CREATE_SEAL_MAX_BYTES inserts
+ *   the chunk rows its preparation held (`createChunks`) and the caller seals;
+ *   a larger one stays unsealed (chunks of a page row that did not exist could
+ *   not be staged) and `buildSegmentedProjection` chunks it after commit, or
+ *   the projection queue does after a crash.
  * - Replace (and promotion from inline): the flip G -> G+1 over the staged
  *   rows, dropping chunk rows a dead preparation left under G+1; the caller
  *   seals as its last revision-changing step when every occurrence has chunks
@@ -32,6 +34,7 @@ import { pageSearchVectorSql } from '../fts-language.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { overlayCanonicalBodies, readPageSnapshot } from '../page-state/snapshot.ts';
 import { faultPoint } from './fault-points.ts';
+import { segmentedPageSearchable } from './searchable.ts';
 import { stableJson } from './digest.ts';
 
 const BODY_KEYS = new Set(['compiled_truth', 'timeline', 'content']);
@@ -147,9 +150,12 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
     retireInlineChunks: input.promotion, retireMaxRows: input.retireMaxRows, body: prepared.body, meta: input.meta });
   if (!prepared.createRows) await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=$1 AND body_generation=$2 AND NOT (chunk_index = ANY($3::int[]))',
     [pageId, prepared.newGeneration, prepared.stagedChunkIndexes]);
+  const createChunks = prepared.createChunks?.slug === input.slug ? prepared.createChunks.chunks : null;
+  if (createChunks?.length) await tx.stageSegmentChunks(pageId, prepared.newGeneration, createChunks);
   await faultPoint('segmented:flipped', { sourceId: input.sourceId });
   await tx.setBodyStagingState(prepared.stagingId, 'committed', { commitRequestId: input.requestId ?? null });
-  return { pageId, complete: !prepared.createRows && !flip.retireDeferred && prepared.unchunked === 0, retireDeferred: flip.retireDeferred };
+  const chunked = prepared.createRows ? createChunks !== null : prepared.unchunked === 0;
+  return { pageId, complete: chunked && !flip.retireDeferred, retireDeferred: flip.retireDeferred };
 }
 
 /**
@@ -184,8 +190,11 @@ export interface SegmentedImport {
   /** Set by apply. */
   applied: SegmentedApplied | null;
   apply(tx: BrainEngine, meta: SegmentedPageMeta, contextual: { mode: string; corpusGeneration: string | null }): Promise<SegmentedApplied>;
-  /** After commit: chunk and seal a page the apply left unsealed (create, deferred retirement); the projection queue retries a failure. */
-  afterCommit(engine: BrainEngine): Promise<void>;
+  /**
+   * After commit: chunk and seal a page the apply left unsealed (a create over SEGMENTED_CREATE_SEAL_MAX_BYTES, a deferred
+   * retirement); the projection queue retries a failure. Resolves to whether search sees the page now (undefined: not applied).
+   */
+  afterCommit(engine: BrainEngine): Promise<boolean | 'pending' | undefined>;
 }
 
 /**
@@ -223,10 +232,11 @@ export async function stageSegmentedImport(engine: BrainEngine, input: { slug: s
       return staged.applied;
     },
     afterCommit: async target => {
-      if (!staged.applied) return;
+      if (!staged.applied) return undefined;
       if (!staged.applied.complete) await buildSegmentedProjection(target, { sourceId: input.sourceId, slug: input.slug }).catch(() => undefined);
       const pageId = staged.applied.pageId;
       await segmentWriteScope(target, input.sourceId).then(writes => writes(exec => exec.sweepSegments({ pageId }))).catch(() => undefined);
+      return input.chunking.quarantined ? false : segmentedPageSearchable(target, input.sourceId, input.slug);
     } };
   return staged;
 }

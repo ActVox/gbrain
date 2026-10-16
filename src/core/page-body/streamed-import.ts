@@ -387,5 +387,6 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
     return apply(tx);
   }, writeTrustOfGate(writeGate)).catch(async error => { await abort(); throw error; });
   await afterCommit(engine, applied);
-  return imported;
+  const { segmentedPageSearchable } = await import('../persistence/searchable.ts');
+  return { ...imported, searchable: disposition.quarantined ? false : await segmentedPageSearchable(engine, sourceId, slug) };
 }
