@@ -625,7 +625,8 @@ interface RenderedAction {
 `verify.argv`, `then`) names the brain and source the failing call acted on:
 `--brain <id>` for commands that open a brain, `--source <id>` for commands that
 resolve their source through the ambient chain (shared ops, and CLI commands the
-command table marks `routes_source`). gbrain appends them when it renders the
+command table marks `routes_source`; `gbrain extract`, whose `--source` picks the
+fs|db read mode, gets `--source-id <id>` instead). gbrain appends them when it renders the
 fix, before any bare `--`, and keeps flags the fix already carries. So you can
 run the fix later from another directory, or under a different `GBRAIN_BRAIN_ID`,
 `GBRAIN_SOURCE`, `.gbrain-mount` or `.gbrain-source`, and it still acts on the

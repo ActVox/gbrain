@@ -162,6 +162,7 @@
   "test/e2e/extract-takes-managed.test.ts": 3680,
   "test/e2e/extract-timeline-attendance-postgres.test.ts": 8660,
   "test/e2e/extract-timeline-db-postgres.test.ts": 4140,
+  "test/e2e/extraction-nudge-6803-postgres.test.ts": 4200,
   "test/e2e/extraction-review-postgres.test.ts": 8150,
   "test/e2e/fact-embedding-backfill-parity.test.ts": 5810,
   "test/e2e/fact-embedding-opt-out.test.ts": 4430,
