@@ -70,6 +70,8 @@ src/core/ai/decide/review-lane.ts	pagePairAnchor	field	LEAD	bounded prefix row
 src/core/ai/decide/review-lane.ts	pagePairAnchor	sql	LEAD	boundedBodyPrefixSql (truth_lead for segmented), sliced to PAGE_TEXT_LIMIT
 src/core/attendance-repair.ts	prepareOrigin	field	META	
 src/core/attendance-repair.ts	readOrigin	sql	META	
+src/core/belief/backfill.ts	preparePage	field	STREAM	the backfill parses inline version and page bodies; a segmented page or version is skipped (summary reasons large_page_versions_pruned, segmented_version_body)
+src/core/belief/backfill.ts	preparePage	sql	STREAM	the backfill parses inline version and page bodies; a segmented page or version is skipped (summary reasons large_page_versions_pruned, segmented_version_body)
 src/core/belief/purge.ts	pagePurgeClaims	field	STREAM	segmented version: NULL body parses no fence claims; the live rows' and the lifetimes' event claims still cover it
 src/core/belief/purge.ts	pagePurgeClaims	sql	STREAM	segmented version: NULL body parses no fence claims; the live rows' and the lifetimes' event claims still cover it
 src/core/belief/state.ts	readBeliefState	sql	META	size only (the over-1 MiB creation rule); a segmented page counts as large by body_storage

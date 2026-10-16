@@ -1439,6 +1439,7 @@ async function runPhaseExtract(
     }
     const { sweepStaleRelationships } = await import('./link-relationships.ts');
     staleDetails = { ...staleDetails, ...(await sweepStaleRelationships(engine)) };
+    staleDetails = { ...staleDetails, ...(await (await import('./belief/coverage-report.ts')).cycleBeliefReconcile(engine, sourceId)) };
     return {
       phase: 'extract',
       status: 'ok',
