@@ -34,9 +34,8 @@ import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../cor
 import { readOnlyCatalogPackSourceIds } from '../../../core/shared-skills/adopted-packs.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
-import { agentFix, checkError } from '../check-fix.ts';
-import { classifyManagedSyncOrphans } from '../../../core/persistence/managed-sync-orphans.ts';
-import { firstSyncRunning, noSuccessfulSync, stoppedConnectorIssues, type SyncOutcomeEntry } from '../sync-outcome.ts';
+import { checkError } from '../check-fix.ts';
+import { checkpointMovedFix, firstSyncRunning, noSuccessfulSync, stoppedConnectorIssues, type SyncOutcomeEntry } from '../sync-outcome.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
@@ -1491,27 +1490,13 @@ export async function checkSyncFreshness(
       + (read_only_pack_count ? `. ${read_only_pack_count} read-only skill-pack source(s): no commits to sync` : '') + (catalogPacks.note ? `. ${catalogPacks.note}` : '');
 
     const remedy = issues.length > outcomes.length;
-    // #6834: a stale managed source whose unfinished cursor no sync can publish (its checkpoint moved elsewhere) is retired, not re-synced.
-    const moved = managed && localOnly && staleIds.length ? (await classifyManagedSyncOrphans(engine, staleIds).catch(() => ({ orphans: [] }))).orphans
-      .filter(orphan => orphan.reason === 'checkpoint_moved') : [];
-    const movedFix = moved.length ? agentFix(['gbrain', 'repair', 'managed-sync-orphans', ...(new Set(moved.map(o => o.source_id)).size === 1 ? ['--source', moved[0]!.source_id] : [])],
-      `The unfinished sync of ${[...new Set(moved.map(o => o.source_id))].join(', ')} can never checkpoint (its source's last_commit moved outside the run), so a plain sync stays blocked. The preview lists the cursor and prints the apply command with its hash; writes nothing.`,
-      'sync_freshness', { docs: 'docs/guides/repair.md#managed-sync-orphans' }) : undefined;
-    const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix ?? movedFix;
-    const movedNote = movedFix ? `. ${movedFix.why} Run \`${movedFix.argv!.join(' ')}\`` : '';
-    if (hasFailures) {
+    const moved = managed && localOnly && staleIds.length ? await checkpointMovedFix(engine, staleIds) : null;
+    const outcomeFix = outcomes.find(o => o.code === 'sync_no_successful_sync')?.fix ?? outcomes[0]?.fix ?? moved?.fix;
+    if (hasFailures || hasWarnings) {
       return {
         name: 'sync_freshness',
-        status: 'fail',
-        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` for each stale source` : ''}${movedNote}${inProgressNote}`,
-        details, ...(outcomeFix ? { fix: outcomeFix } : {}),
-      };
-    }
-    if (hasWarnings) {
-      return {
-        name: 'sync_freshness',
-        status: 'warn',
-        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` to refresh` : ''}${movedNote}${inProgressNote}`,
+        status: hasFailures ? 'fail' : 'warn',
+        message: `${issues.join('; ')}${remedy ? `. Run \`gbrain sync --source <id>${managed ? ' --no-pull' : ''}\` ${hasFailures ? 'for each stale source' : 'to refresh'}` : ''}${moved?.note ?? ''}${inProgressNote}`,
         details, ...(outcomeFix ? { fix: outcomeFix } : {}),
       };
     }

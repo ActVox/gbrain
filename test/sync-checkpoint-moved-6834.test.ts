@@ -37,6 +37,7 @@ import { readManagedSyncFailures } from '../src/core/persistence/sync-failures.t
 import { classifyManagedSyncOrphans } from '../src/core/persistence/managed-sync-orphans.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { classifyTerminal, supersessionSql } from '../src/core/persistence/terminal-classify.ts';
+import { readTerminalFailures, readTerminalFailureSummary } from '../src/core/persistence/terminal-failures.ts';
 import { writeFailureDiagnostic } from '../src/core/persistence/verb-errors.ts';
 import { checkSyncFailures } from '../src/commands/doctor/checks/sync-failures.ts';
 import { checkSyncFreshness } from '../src/commands/doctor/checks/extraction-sync.ts';
@@ -306,11 +307,11 @@ describe('#6834 a managed-sync checkpoint whose source checkpoint moved', () => 
         action: { argv: ['gbrain', 'get', '--source', 'example-source', '--', '__managed_sync_checkpoint__'] } });
     }
     const later = async (r: { operation: string }, c: { operation: string; kind: string | null }) => (await engine.executeRaw<{ hit: boolean }>(
-      `SELECT EXISTS(SELECT 1 FROM (VALUES ('example-source','__managed_sync_checkpoint__',1::bigint,'d1',$1::text,'conflict'))
-          r(source_id,slug,sequence,digest,operation,state),
+      `SELECT EXISTS(SELECT 1 FROM (VALUES ($4::uuid,'example-source','__managed_sync_checkpoint__',1::bigint,'d1',$1::text,'conflict'))
+          r(id,source_id,slug,sequence,digest,operation,state),
         (VALUES ('example-source','__managed_sync_checkpoint__',2::bigint,'d2',$2::text,$3::text::jsonb,'committed')) c(source_id,slug,sequence,digest,operation,intent,state)
         WHERE ${supersessionSql('r', 'c')}) AS hit`,
-      [r.operation, c.operation, c.kind ? JSON.stringify({ kind: c.kind }) : null]))[0]!.hit;
+      [r.operation, c.operation, c.kind ? JSON.stringify({ kind: c.kind }) : null, randomUUID()]))[0]!.hit;
     expect(await later({ operation: 'submit_job' }, { operation: 'submit_job', kind: 'managed_sync_checkpoint' })).toBe(true);
     expect(await later({ operation: 'submit_job' }, { operation: 'submit_job', kind: null })).toBe(true);
     expect(await later({ operation: 'remember' }, { operation: 'submit_job', kind: 'managed_sync_checkpoint' })).toBe(false);
@@ -322,5 +323,30 @@ describe('#6834 a managed-sync checkpoint whose source checkpoint moved', () => 
     await beforeCheckpoint(engine, f, 'entries');
     expect((await classifyManagedSyncOrphans(engine, [f.id])).orphans).toEqual([]);
     expect((await outcome(performManagedSync(engine, f.opts))).status).toBe('synced');
+  }), 180_000);
+
+  test('a failed import of a page slugged __managed_sync_checkpoint__ stays a page failure after a later checkpoint commits', () => each(async engine => {
+    const f = await fixture(engine, 'entries');
+    const receipt = async (kind: string) => {
+      const requestId = randomUUID();
+      await engine.executeRaw(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,slug,digest,authority,intent_bytes,terminal_reservation,
+          state,error_code,error_message,intent,completed_at,updated_at,admitter_version)
+        VALUES('local_cli','fixture',$1::uuid,'submit_job',$2,(SELECT incarnation FROM sources WHERE id=$2),'__managed_sync_checkpoint__',$3,'{}'::jsonb,0,0,
+          'conflict','revision_conflict',$4,$5::text::jsonb,now()-interval '1 hour',now()-interval '1 hour',$6)`,
+        [requestId, f.id, randomUUID(), kind === 'managed_sync_checkpoint' ? MOVED : 'The page changed during sync preparation.', JSON.stringify({ kind }), '0.60.262.0']);
+      return (await engine.executeRaw<{ id: string }>('SELECT id::text AS id FROM persistence_requests WHERE request_id=$1::uuid', [requestId]))[0]!;
+    };
+    const page = await receipt('managed_sync_import');
+    const checkpoint = await receipt('managed_sync_checkpoint');
+    expect((await outcome(performManagedSync(engine, f.opts))).status).toBe('synced');
+    expect(await superseded(engine, checkpoint.id)).toBe(true);
+    expect(await superseded(engine, page.id)).toBe(false);
+    const listing = await readTerminalFailures(engine, { sourceId: f.id });
+    expect(listing.status).toBe('ok');
+    const rows = 'rows' in listing ? listing.rows ?? [] : [];
+    expect(rows.filter(row => row.slug === '__managed_sync_checkpoint__')).toEqual([expect.objectContaining({ class: 'page', category: 'caller_conflict',
+      fix: expect.objectContaining({ argv: ['gbrain', 'get', '--source', f.id, '--', '__managed_sync_checkpoint__'] }) })]);
+    const summary = await readTerminalFailureSummary(engine, { sourceIds: [f.id] });
+    expect(summary.status === 'ok' ? summary.sources.find(s => s.source_id === f.id)?.unresolved.rows : null).toBe(1);
   }), 180_000);
 });

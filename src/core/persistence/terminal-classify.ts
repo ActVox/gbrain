@@ -319,7 +319,8 @@ export const PAGE_REMOVAL_OPERATIONS: readonly string[] = ['delete_page', 'purge
  * failed request `r` (both `persistence_requests` aliases): the same intent committed, failed or still pending; a later
  * page removal committed or pending; for a `put_page`, any later write committed or pending, or a later caller
  * `put_page` that failed (the newer content); #6834: for a refused sync checkpoint, any later committed checkpoint of the
- * source. Literal strings only; NULL-safe for a compacted `c` (no intent).
+ * source (both read by kind; a compacted row, which keeps no kind, by its operation). `r` must expose `id`.
+ * Literal strings only; NULL-safe for a compacted `c` (no intent).
  */
 export function supersessionSql(r: string, c: string): string {
   const removals = PAGE_REMOVAL_OPERATIONS.map(op => `'${op}'`).join(',');
@@ -327,6 +328,7 @@ export function supersessionSql(r: string, c: string): string {
     (${c}.digest=${r}.digest AND ${c}.state IN ('committed','failed','queued','running','recovering'))
     OR (${c}.state IN ('committed','queued','running','recovering') AND (${c}.operation IN (${removals}) OR ${r}.operation='put_page'))
     OR (${r}.slug='__managed_sync_checkpoint__' AND ${r}.operation='submit_job' AND ${c}.state='committed' AND ${c}.operation='submit_job'
+      AND COALESCE((SELECT k.intent->>'kind' FROM persistence_requests k WHERE k.id=${r}.id),'managed_sync_checkpoint')='managed_sync_checkpoint'
       AND COALESCE(${c}.intent->>'kind','managed_sync_checkpoint')='managed_sync_checkpoint')
     OR (${r}.operation='put_page' AND ${c}.state='failed' AND ${c}.operation='put_page' AND COALESCE(NOT (${c}.intent ? 'kind'), false))))`;
 }

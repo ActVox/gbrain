@@ -52,6 +52,19 @@ export async function checkpointMovedToTarget(engine: Pick<BrainEngine, 'execute
 }
 
 /**
+ * Why a refused checkpoint can be revived: `'overtaken'` when `last_commit` moved to exactly the run's target
+ * (`checkpointMovedToTarget`; the fresh checkpoint is marked overtaken), `'slug_mode'` when the source now admits its slug
+ * mode (`slugModeCheckpointRevivable`), false when it still blocks.
+ */
+export async function checkpointRevival(engine: Pick<BrainEngine, 'executeRaw'>,
+  cursor: { sourceId: string; incarnation: string; root: string; gitRoot: string },
+  intent: { slugMode: SlugRootMode; from: string | null; target: string; slice?: { done?: boolean } },
+  done: Pick<WriteRequest, 'state' | 'error_code' | 'error_message' | 'recovery'>): Promise<'overtaken' | 'slug_mode' | false> {
+  if (await checkpointMovedToTarget(engine, cursor, intent, done)) return 'overtaken';
+  return await slugModeCheckpointRevivable(engine, cursor, intent, done) ? 'slug_mode' : false;
+}
+
+/**
  * Whether a failed checkpoint was refused for its slug mode and the source now admits it: its `last_commit` is still
  * where the run started, and the pin is unset, equal to the run's mode, or the scope is empty. A legacy
  * `revision_conflict` carrying the moved-checkpoint message qualifies under the same proof; any other refusal does not.
