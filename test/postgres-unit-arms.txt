@@ -88,6 +88,7 @@ test/managed-sync-bulk.test.ts
 test/managed-sync-checkpoint-replaced.test.ts
 test/managed-sync-chunker-version.test.ts
 test/managed-sync-concurrent-write-hold.test.ts
+test/managed-sync-connection-loss.test.ts
 test/managed-sync-drain.test.ts
 test/managed-sync-foreground-priority.test.ts
 test/managed-sync-group-completion.test.ts
