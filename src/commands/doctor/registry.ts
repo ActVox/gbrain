@@ -223,8 +223,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   extractionInputTruncatedEntry,
   ghostPagesEntry,
   missingRecordedFilesEntry,
-  fenceIntegrityEntry,
   syncConfigKeysEntry,
+  fenceIntegrityEntry,
   searchModeEntry,
 ];
 
