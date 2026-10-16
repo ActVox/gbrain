@@ -3997,7 +3997,8 @@ interface RenderedAction {
 `verify.argv`, `then`) names the brain and source the failing call acted on:
 `--brain <id>` for commands that open a brain, `--source <id>` for commands that
 resolve their source through the ambient chain (shared ops, and CLI commands the
-command table marks `routes_source`). gbrain appends them when it renders the
+command table marks `routes_source`; `gbrain extract`, whose `--source` picks the
+fs|db read mode, gets `--source-id <id>` instead). gbrain appends them when it renders the
 fix, before any bare `--`, and keeps flags the fix already carries. So you can
 run the fix later from another directory, or under a different `GBRAIN_BRAIN_ID`,
 `GBRAIN_SOURCE`, `.gbrain-mount` or `.gbrain-source`, and it still acts on the
@@ -4032,6 +4033,8 @@ per-token price), obtain each value as `how` describes and substitute it for
 | `user` | the user, in their own terminal or app (for example a credential prompt, or a CLI-only fix while you are on stdio MCP) |
 | `host_admin` | the operator of the brain host (a remote brain over HTTP, scope grants, server restarts). Never authorizable from MCP |
 | `provider` | an outside service you wait on (rate limits, outages) |
+
+A fix whose expected run time exceeds 120 seconds (`AGENT_TOOL_LIMIT_MS`, the longest an agent tool call reliably stays open) is never `agent`: gbrain gives it actor `user` (or `host_admin` on a remote brain), so it renders `tell_user_to_run` and the user runs it in a terminal on the brain host.
 
 ### The `next` decision table
 
@@ -10560,6 +10563,7 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/tro
 | `remember` or `put_page` refused `source_changed` "The canonical file contains an uncoordinated local edit" on many pages nobody edited, or doctor `lost_caller_writes` warns | upgrade to v0.60.157.0 or later (a database-only v0.13.1 `validate: false` stamp was read as a file edit, #6429); then `gbrain repair failed-writes --source <id>` previews the refused writes and prints the apply command ([failed writes](repair.md#failed-writes)) | agent; the apply after the user agrees | none to preview | `gbrain doctor --only lost_caller_writes --json` is ok |
 | A write (`add_timeline_entry`, `put_page`, `remember`, any `mutating` tool) refused `invalid_params` "unknown parameter … write operations always reject unknown parameters; nothing was written" | the call named a parameter the tool does not declare (for example `content` instead of `detail`); the `suggestion` names the submitted key and the declared one; resend with the declared name. Reads keep the `mcp.strict_params` warn grace period | agent | none | the resent call returns no `invalid_params` and no `unknown_param` warning |
 | Facts extraction or embedding reports `(cause=AIConfigError model_not_found)` or `gbrain models doctor` says `model_not_found` while the key is valid | the provider refused the model, not the key (a 404, or a 403 "project does not have access to model"): the fix text names the config key that selected the model when the gateway knows it ("Selected via models.tier.reasoning. Fix: gbrain config set …"; an env var or config.json pin says what to clear); otherwise check the model id with `gbrain models`, enable the model for the project in the provider console or set another model (`gbrain config set models.facts <provider:model>`) | user (provider console); agent for the config change, after the user agrees | none | `gbrain models doctor` reports the model `ok` |
+| Doctor `links_extraction_lag` or the end-of-sync line says "N page(s) have un-extracted edges" (while `page_extraction_state` has 0 rows) | the count is the link-extraction watermark backlog (`page_extraction_state` is the facts pipeline's large-page table, unrelated); preview with `gbrain extract --stale --dry-run --json`, then on the brain host run `gbrain extract --stale --catch-up [--source-id <id>]` (finishes in one run, safe to interrupt) or repeat plain `gbrain extract --stale` (30 min per run, resumes); scope with `--source-id`, never `--source` (fs\|db) | user on the brain host when the estimate passes 120 s (the fix says `tell_user_to_run`); agent otherwise | none | `gbrain extract --stale --dry-run --json` shows `actionable: 0` (and `mention_due: 0` with mentions on) |
 | A gbrain call failed with a code you don't recognize | follow `fix.next` ([protocol](../protocol/AGENT_OPERATOR_v1.md)); `gbrain errors <code>` | agent | as the fix's `consent` | the fix's `verify` |
 | A graph read omits a relationship you know existed, or says someone still works somewhere they left | the default read returns relationships true today: repeat with `status: "all"` or `as_of`; to record an end, add a dated timeline line (`Ended works_at [[companies/x]]`) or `add_link ... valid_until` ([temporal edges](temporal-edges.md)) | agent | none | `gbrain doctor --only edge_validity --json` |
 | A command exited 3 (`confirmation_required`) | relay `user_message`; run `fix.command` only after the user agrees | agent, after the user agrees | the payload's `effects` | the fix's `verify` |

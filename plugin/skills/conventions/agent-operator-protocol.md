@@ -627,7 +627,8 @@ interface RenderedAction {
 `verify.argv`, `then`) names the brain and source the failing call acted on:
 `--brain <id>` for commands that open a brain, `--source <id>` for commands that
 resolve their source through the ambient chain (shared ops, and CLI commands the
-command table marks `routes_source`). gbrain appends them when it renders the
+command table marks `routes_source`; `gbrain extract`, whose `--source` picks the
+fs|db read mode, gets `--source-id <id>` instead). gbrain appends them when it renders the
 fix, before any bare `--`, and keeps flags the fix already carries. So you can
 run the fix later from another directory, or under a different `GBRAIN_BRAIN_ID`,
 `GBRAIN_SOURCE`, `.gbrain-mount` or `.gbrain-source`, and it still acts on the
@@ -662,6 +663,8 @@ per-token price), obtain each value as `how` describes and substitute it for
 | `user` | the user, in their own terminal or app (for example a credential prompt, or a CLI-only fix while you are on stdio MCP) |
 | `host_admin` | the operator of the brain host (a remote brain over HTTP, scope grants, server restarts). Never authorizable from MCP |
 | `provider` | an outside service you wait on (rate limits, outages) |
+
+A fix whose expected run time exceeds 120 seconds (`AGENT_TOOL_LIMIT_MS`, the longest an agent tool call reliably stays open) is never `agent`: gbrain gives it actor `user` (or `host_admin` on a remote brain), so it renders `tell_user_to_run` and the user runs it in a terminal on the brain host.
 
 ### The `next` decision table
 
