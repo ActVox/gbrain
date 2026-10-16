@@ -318,13 +318,6 @@ export async function appendDerivedHidden(tx: BrainEngine, input: { sourceId: st
 
 export interface LedgerPurgeReport { purged_events: number; redacted_fields: RedactedField[]; live_carriers: RedactedField[]; version_carriers?: RedactedField[]; derived_hidden: number; derived_walk: 'complete' | 'truncated' }
 
-/** Purge requests whose derivation walk was truncated: the coverage check withholds certification of their source until a complete walk runs. */
-export async function truncatedPurgeWalks(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<string[]> {
-  const rows = await engine.executeRaw<{ request: string }>(`SELECT DISTINCT cause->>'purge_request' AS request FROM belief_events
-    WHERE source_id = $1 AND cause->>'derived_walk' = 'truncated' AND cause->>'purge_request' IS NOT NULL ORDER BY 1`, [sourceId]);
-  return rows.map(r => r.request);
-}
-
 /** The logical key of one live fact or take row and its carrying-field values, for an owner release. */
 async function rowSubject(engine: BrainEngine, table: 'facts' | 'takes', id: number): Promise<{ sourceId: string; key: string; value: Record<string, unknown> } | null> {
   const [row] = await engine.executeRaw<{ source_id: string; slug: string | null }>(table === 'facts'

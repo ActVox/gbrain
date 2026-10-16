@@ -11,6 +11,8 @@ import { CODES } from '../src/core/error-registry.ts';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { withBeliefBatch } from '../src/core/belief/ledger.ts';
 import { backfillBeliefHistory } from '../src/core/belief/backfill.ts';
+import { coverageAt, coverageIntervals } from '../src/core/belief/coverage-report.ts';
+import { recordDerivationInputs } from '../src/core/facts/derivation-inputs.ts';
 import { redactCarryingFields, registerLiveCarriers } from '../src/core/belief/purge.ts';
 import { REDACTION_MARKER } from '../src/core/belief/keys.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
@@ -213,6 +215,25 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       }));
       expect(r).toEqual({ retention: 0, purge: 1 });
     }, 240_000);
+    test('#21: a truncated derivation walk withholds certification of the interval it ran in', async () => {
+      const r = await collect<Record<string, unknown>>(report => brain(async b => {
+        const derived = Array.from({ length: 9 }, (_, i) => `Acme derived note ${i + 1}`);
+        await b.put('companies/acme-example', beliefPage({ facts: [X] }));
+        await b.put('notes/derived-example', beliefPage({ title: 'Derived Example', facts: derived }));
+        const ids = async (claims: string[]) => Promise.all(claims.map(async c => Number((await b.engine.executeRaw<{ id: number }>(
+          'SELECT id FROM facts WHERE source_id = $1 AND fact = $2 AND expired_at IS NULL', [b.sourceId, c]))[0]!.id)));
+        const chain = await ids([X, ...derived]);
+        for (let i = 1; i < chain.length; i++) await recordDerivationInputs(b.engine, { table: 'facts', id: chain[i]!, sourceId: b.sourceId }, [{ table: 'facts', id: chain[i - 1]! }]);
+        const before = await coverageAt(b.engine, b.sourceId, new Date());
+        const result = await purgeFact(b, X);
+        const after = await coverageAt(b.engine, b.sourceId, new Date());
+        const [interval] = await coverageIntervals(b.engine, b.sourceId);
+        report({ truncated: result.purge.derived.truncated, before: before.ok && before.certified, after: after.ok && [after.certified, after.uncertified_reason],
+          walks: interval!.truncated_walks.length });
+      }));
+      expect(r).toEqual({ truncated: true, before: true, after: [false, 'truncated_walk'], walks: 1 });
+    }, 240_000);
+
     test('#22: an unwritable purge mirror refuses the purge with a typed error, with or without a ledger', async () => {
       const run = (enable: boolean) => collect<Record<string, unknown>>(report => beliefBrain(async b => {
         await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme sells widgets'] }));

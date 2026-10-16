@@ -38,6 +38,8 @@ export interface CoverageInterval {
   restores: RestoreMark[];
   /** Slug intervals a drift finding uncertified: (from, to], permanently. */
   drift: DriftMark[];
+  /** Purge requests whose derivation walk hit its bound in this interval: the interval is not certified (design 6.5). */
+  truncated_walks: string[];
 }
 
 interface CoverageRow { id: number; event_type: string; recorded_at: string; value: unknown; cause: unknown; incarnation: string }
@@ -56,7 +58,7 @@ export async function coverageIntervals(engine: BrainEngine, sourceId: string): 
     const current = intervals.at(-1);
     if (row.event_type === 'coverage.started') {
       intervals.push({ run: (obj(row.cause).run as string | undefined) ?? null, incarnation: row.incarnation, started_id: id, started_at: iso(row.recorded_at),
-        watermark: null, stopped_at: null, certified: false, links_certified: false, baseline: { pages_done: 0, pending: null, complete: false }, restores: [], drift: [] });
+        watermark: null, stopped_at: null, certified: false, links_certified: false, baseline: { pages_done: 0, pending: null, complete: false }, restores: [], drift: [], truncated_walks: [] });
       continue;
     }
     if (!current || current.stopped_at) continue;
@@ -84,6 +86,11 @@ export async function coverageIntervals(engine: BrainEngine, sourceId: string): 
         AND ($4::timestamptz IS NULL OR recorded_at <= $4::timestamptz) ORDER BY id`,
     [sourceId, interval.incarnation, interval.started_id, interval.stopped_at]);
     interval.drift = drift.map(d => ({ slug: d.slug, event_id: Number(d.id), from: d.from ? iso(d.from) : null, to: iso(d.recorded_at) }));
+    const walks = await engine.executeRaw<{ request: string }>(`SELECT DISTINCT cause->>'purge_request' AS request FROM belief_events
+      WHERE source_id = $1 AND event_type = 'derived.hidden' AND cause->>'derived_walk' = 'truncated' AND source_incarnation = $2::uuid AND id > $3
+        AND ($4::timestamptz IS NULL OR recorded_at <= $4::timestamptz) ORDER BY 1`, [sourceId, interval.incarnation, interval.started_id, interval.stopped_at]);
+    interval.truncated_walks = walks.map(w => w.request);
+    if (walks.length) { interval.certified = false; interval.links_certified = false; }
   }
   const open = intervals.at(-1);
   if (open && !open.stopped_at && !open.baseline.complete) {
@@ -98,7 +105,7 @@ export async function coverageIntervals(engine: BrainEngine, sourceId: string): 
 }
 
 export type CoverageAt =
-  | { ok: true; certified: boolean; uncertified_reason: 'unmanaged' | 'drift' | null; cut: string; interval: CoverageInterval }
+  | { ok: true; certified: boolean; uncertified_reason: 'unmanaged' | 'truncated_walk' | 'drift' | null; cut: string; interval: CoverageInterval }
   | { ok: false; code: 'coverage_from'; from: string | null; message: string }
   | { ok: false; code: 'coverage_gap'; reason: 'not_covered' | 'restore'; from: string | null; until: string | null; message: string };
 
@@ -117,7 +124,8 @@ async function slugCut(engine: BrainEngine, sourceId: string, interval: Coverage
  * (`slug`), from its own cut; for the source, from the watermark. Before the
  * cut: `coverage_from`. Between intervals or inside a restore gap
  * ([archive time, restore]): `coverage_gap`. A covered answer says whether it
- * is certified (managed source, no drift mark over `at`).
+ * is certified (managed source, no truncated purge walk in the interval, no
+ * drift mark over `at`).
  */
 export async function coverageAt(engine: BrainEngine, sourceId: string, at: Date | string, slug?: string): Promise<CoverageAt> {
   const t = new Date(at).getTime();
@@ -144,7 +152,8 @@ export async function coverageAt(engine: BrainEngine, sourceId: string, at: Date
       message: cut ? `The belief ledger covers ${slug ?? sourceId} only from ${cut}.` : `The baseline of ${slug ?? sourceId} has not run yet.` };
   }
   const drifted = slug ? interval.drift.some(d => d.slug === slug && (d.from == null || t > Date.parse(d.from)) && t <= Date.parse(d.to)) : false;
-  return { ok: true, certified: interval.certified && !drifted, uncertified_reason: !interval.certified ? 'unmanaged' : drifted ? 'drift' : null, cut, interval };
+  return { ok: true, certified: interval.certified && !drifted, cut, interval,
+    uncertified_reason: interval.truncated_walks.length ? 'truncated_walk' : !interval.certified ? 'unmanaged' : drifted ? 'drift' : null };
 }
 
 /**
