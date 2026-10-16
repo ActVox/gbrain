@@ -257,10 +257,14 @@ so re-running on the same content is a no-op. `dream.synthesize.exclude_patterns
 Each entry is auto-wrapped as a word-boundary regex (e.g. `medical` matches
 "medical advice" but NOT "comedical"). Power users may pass full regex.
 
-**Cooldown:** the cycle's spend cap. `dream.synthesize.cooldown_hours` (default
-12) means at most ~2 synthesize runs per day under autopilot. The completion
-timestamp is stored in `dream.synthesize.last_completion_ts` and is written
-ONLY on successful runs (not on skipped/failed). Explicit `--input` /
+**Cooldown:** `dream.synthesize.cooldown_hours` (default 12) skips synthesize
+for that long after a fully drained pass. The completion timestamp is stored
+in `dream.synthesize.last_completion_ts` and is written only when every child
+completed and nothing was deferred (synthesis budget, triage time budget or
+publish pending), never on skipped or failed runs. So under a standing
+backlog the cooldown never applies and synthesize runs every cycle until the
+backlog drains (#6753); it is not a cap of ~2 runs a day. To cap spend, use
+`dream.synthesize.max_submissions_per_source_per_day`. Explicit `--input` /
 `--date` / `--from` / `--to` invocations bypass cooldown.
 
 **`--dry-run` semantics:** runs the scored triage pass (judges + caches
