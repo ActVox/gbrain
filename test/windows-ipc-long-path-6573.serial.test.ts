@@ -69,7 +69,7 @@ describe.skipIf(!NATIVE)('Windows long PGLite IPC paths use the per-user run dir
   beforeAll(() => {
     root = mkdtempSync(join(realpathSync.native(tmpdir()), 'gb-6573-'));
     priorProfile = process.env.USERPROFILE;
-    const profile = join(root, 'prøfile-é');
+    const profile = join(root, 'pø-é');
     mkdirSync(profile, { recursive: true });
     process.env.USERPROFILE = profile;
     const dataDir = join(root, 'b'.repeat(80), 'brain.pglite');
@@ -111,6 +111,7 @@ describe.skipIf(!NATIVE)('Windows long PGLite IPC paths use the per-user run dir
   test('the persistence listener binds at its run-dir path and answers capabilities', async () => {
     const path = persistenceSocketPathForConfig(cfg)!;
     expect(path.startsWith(join(process.env.USERPROFILE!, '.gbrain', 'run', 'persistence-'))).toBe(true);
+    expect(Buffer.byteLength(path, 'utf8')).toBeLessThanOrEqual(WINDOWS_UNIX_SOCKET_PATH_MAX_BYTES);
     const binding = await startPersistenceIpcServer(path, { brainId: BRAIN, dispatch: async () => ({}) });
     expect(binding).not.toBeNull();
     try {
