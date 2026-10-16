@@ -8,7 +8,7 @@
  * `aborted: timeout`. A connector cycle now reconciles only its own source,
  * through the bounded reconcile watermark drain.
  *
- * Real handler and cycle on every configured engine. Serial: the fixture
+ * Real handler and cycle on every configured engine. The fixture
  * toggles the brain-wide persistence switch and process env.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

@@ -8,7 +8,7 @@
  * repins it (a sync that passes the account check) or changes its connector config.
  *
  * Real connector sync refusal, then the real freshness loop and per-source
- * fan-out, on every configured engine. Serial: the fixture toggles the
+ * fan-out, on every configured engine. The fixture toggles the
  * brain-wide persistence switch and process env.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

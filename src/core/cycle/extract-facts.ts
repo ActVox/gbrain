@@ -972,9 +972,8 @@ export async function runExtractFacts(
     // real incremental no-op; don't escalate to full-brain walk.
     slugs = opts.slugs;
   } else {
-    // Full walk: every page of this source. Each page reconciles under
-    // `sourceId`, so another source's slugs are never this run's work (#6803:
-    // the unscoped walk visited the whole brain on every connector cycle).
+    // Full walk: every page of this source; pages reconcile under `sourceId`,
+    // so another source's slugs are never this run's work (#6803).
     const allSlugs = await engine.getAllSlugs({ sourceId });
     slugs = Array.from(allSlugs);
   }

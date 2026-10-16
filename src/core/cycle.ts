@@ -60,7 +60,7 @@ import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/p
 import { acquireLeaseSet, maintenanceLockBusySkip, MAINTENANCE_LEASE_ID } from './cycle/lock-set.ts';
 import { assertEmbedNotStalled } from './embed-stall.ts'; import { embedBackfillFix } from './embed-consent.ts';
 import { anyAbortSignal } from './abort-signals.ts';
-import { maybeRefreshPlannerStats } from './planner-stats.ts';
+import { maybeRefreshPlannerStats } from './planner-stats.ts'; import { listSourceChangedPages, sourceCycleWindowStamp, unionSlugSets, type SourceCycleWindow } from './cycle/source-window.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 export { anyAbortSignal } from './abort-signals.ts';
@@ -580,13 +580,7 @@ export interface CycleOpts {
    * Validated via `assertValidSourceId` in `cycleLockIdFor` (defense-in-depth).
    */
   sourceId?: string;
-  /**
-   * #6803: set by the autopilot-cycle handler for a connector source, whose
-   * cycle has no sync phase. The source's pages changed after this instant
-   * (null: never cycled, so every page of the source) are the cycle's
-   * incremental set for extract_facts and recompute_emotional_weight. Without it a checkout-less source cycle took the full-walk mode and
-   * walked every page of the brain on every cycle.
-   */
+  /** #6803: a connector source's cycle (no sync phase) works on its pages changed after this (null: all); see cycle/source-window.ts. */
   sourceChangedSince?: string | null;
   /**
    * #4700 — bare `gbrain dream` may opt the brain's default-like source
@@ -1971,8 +1965,7 @@ async function runCycleUnscoped(
     ? (opts.sourceId ?? (await resolveSourceForDir(engine, brainDir)))
     : opts.sourceId;
   const orphansSourceId = opts.forceGlobalOrphans ? undefined : cycleSourceId;
-  /** #6803: when this cycle began listing the source's changed pages (connector cycles only). */
-  let sourceWindowAt: string | undefined;
+  let sourceWindow: SourceCycleWindow | undefined;
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 
@@ -2260,14 +2253,8 @@ async function runCycleUnscoped(
     // legitimate full reconcile — only a sync that ran and failed suppresses it.
     let syncAttempted = false;
     let synthesizeWrittenSlugs: string[] | undefined;
-    const sourceChangedSlugs = engine && cycleSourceId && opts.sourceChangedSince !== undefined
-      ? await (async () => {
-        sourceWindowAt = (await engine.executeRaw<{ at: string }>('SELECT clock_timestamp()::text AS at'))[0]?.at;
-        return (await engine.executeRaw<{ slug: string }>(
-          'SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND ($2::timestamptz IS NULL OR updated_at>$2::timestamptz) ORDER BY slug',
-          [cycleSourceId, opts.sourceChangedSince])).map(row => row.slug);
-      })()
-      : undefined;
+    sourceWindow = engine && cycleSourceId && opts.sourceChangedSince !== undefined
+      ? await listSourceChangedPages(engine, cycleSourceId, opts.sourceChangedSince) : undefined;
     if (phases.includes('sync')) {
       checkAborted(cycleSignal);
       if (!engine) {
@@ -2424,7 +2411,7 @@ async function runCycleUnscoped(
         // (#1928, codex: keying off phases.includes('sync') wrongly suppressed
         // the skipped-sync full reconcile).
         const syncRanButFailed = syncAttempted && syncPagesAffected === undefined;
-        const xfSlugs = syncRanButFailed ? [] : (sourceChangedSlugs ?? syncPagesAffected);
+        const xfSlugs = syncRanButFailed ? [] : (sourceWindow?.slugs ?? syncPagesAffected);
         const { result, duration_ms } = await timePhase(() =>
           runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, xfSlugs, cycleSignal), 'extract_facts');
         result.duration_ms = duration_ms;
@@ -2641,14 +2628,7 @@ async function runCycleUnscoped(
         // Determine incremental vs full mode. If sync OR synthesize ran in this
         // cycle, do incremental over their union. If neither phase ran (e.g.,
         // user passed `--phase recompute_emotional_weight`), do full walk.
-        const incremental: string[] | undefined =
-          (syncPagesAffected || synthesizeWrittenSlugs || sourceChangedSlugs)
-            ? Array.from(new Set([
-                ...(syncPagesAffected ?? []),
-                ...(synthesizeWrittenSlugs ?? []),
-                ...(sourceChangedSlugs ?? []),
-              ]))
-            : undefined;
+        const incremental = unionSlugSets(syncPagesAffected, synthesizeWrittenSlugs, sourceWindow?.slugs);
         // #4797: raced + signal + lock-refresh + progress, like consolidate —
         // the full-brain write is sliced inside the phase; these hooks fire
         // between slices so a long first run stays observable and abortable.
@@ -3173,13 +3153,7 @@ async function runCycleUnscoped(
       await engine.updateSourceConfig(opts.sourceId, {
         last_source_cycle_at: nowIso,
         last_full_cycle_at: nowIso,
-        // #6803: where the next connector cycle's changed-page window starts: when this cycle listed its pages,
-        // or, when a phase that consumed the window failed, the same window again ('' = every page of the source).
-        ...(sourceWindowAt ? {
-          last_source_cycle_window_at: phaseResults.some(r => (r.phase === 'extract_facts' || r.phase === 'recompute_emotional_weight') && r.status === 'fail')
-            ? (opts.sourceChangedSince ?? '')
-            : sourceWindowAt,
-        } : {}),
+        ...sourceCycleWindowStamp(phaseResults, opts.sourceChangedSince, sourceWindow),
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
