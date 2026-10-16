@@ -8,25 +8,19 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import postgres from '#postgres';
 import { __setBeliefEmitterFaultForTests } from '../src/core/belief/append.ts';
 import { __setPurgeReplayFaultForTests, PURGE_MIRROR_FILE, readRestorePurgeReplay, replayPurgesFromDatabase, type PurgeReplayFault } from '../src/core/belief/purge-mirror.ts';
 import { createPgliteBackup, restorePgliteBackup } from '../src/core/backup/snapshot.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
-import type { OperationContext } from '../src/core/ops/contract.ts';
 import { operations } from '../src/core/operations.ts';
-import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
-import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
-import { enableBeliefLedger } from '../src/core/belief/coverage.ts';
-import { brainApi, beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain } from './helpers/belief-ledger.ts';
+import { beliefBrain, beliefEngineCase, beliefPage, openFileBeliefBrain, withFileBeliefBrain, type BeliefBrain, type FileBeliefBrain } from './helpers/belief-ledger.ts';
 import { testBackends } from './helpers/test-backends.ts';
-import { withEnv } from './helpers/with-env.ts';
 
 afterEach(() => { __setPurgeReplayFaultForTests(null); __setBeliefEmitterFaultForTests(null); });
 
@@ -34,37 +28,6 @@ const X = 'Door code is 4417';
 const SOURCE = 'belief-restore';
 const purgeOp = operations.find(o => o.name === 'purge_fact')!;
 const deleteOp = operations.find(o => o.name === 'delete_page')!;
-
-/** A file-configured PGLite brain at `<home>/.gbrain/brain.pglite` (the backup format), reopened around each backup. */
-interface FileBrain { home: string; open<T>(fn: (b: BeliefBrain) => Promise<T>): Promise<T> }
-
-async function withFileBrain(run: (fb: FileBrain) => Promise<void>): Promise<void> {
-  const home = mkdtempSync(join(tmpdir(), 'gbrain-belief-restore-'));
-  const dbPath = join(home, '.gbrain', 'brain.pglite');
-  mkdirSync(join(home, '.gbrain'), { recursive: true, mode: 0o700 });
-  writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', database_path: dbPath }), { mode: 0o600 });
-  const open = async <T>(fn: (b: BeliefBrain) => Promise<T>, initialize = false): Promise<T> => {
-    const engine = new PGLiteEngine();
-    await engine.connect({ engine: 'pglite', database_path: dbPath });
-    try {
-      if (initialize) await engine.initSchema();
-      const ctx: OperationContext = { engine, sourceId: SOURCE, remote: false, dryRun: false,
-        config: { engine: 'pglite', embedding_disabled: true } as never, logger: { info() {}, warn() {}, error() {} } as never };
-      return await fn(brainApi(engine, ctx, join(home, 'content'), SOURCE));
-    } finally { await disposePersistenceConsumer(engine); await engine.disconnect(); }
-  };
-  try {
-    await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
-      mkdirSync(join(home, 'content'));
-      await open(async b => {
-        await b.engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [SOURCE, join(home, 'content')]);
-        await claimWorktree(b.engine, SOURCE, join(home, 'content'));
-        await enableBeliefLedger(b.engine, SOURCE);
-      }, true);
-      await run({ home, open: fn => open(fn) });
-    });
-  } finally { rmSync(home, { recursive: true, force: true }); }
-}
 
 async function purgeFact(b: BeliefBrain, claim: string): Promise<Record<string, any>> {
   const [row] = await b.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id = $1 AND fact = $2 AND expired_at IS NULL ORDER BY id LIMIT 1', [b.sourceId, claim]);
@@ -85,19 +48,15 @@ async function carriers(b: BeliefBrain, claim: string): Promise<string[]> {
   return found;
 }
 
-async function backupAndRestore(fb: FileBrain, between: () => Promise<void>, opts: { purgeMirror?: string } = {}) {
+async function backupAndRestore(fb: FileBeliefBrain, between: () => Promise<void>, opts: { purgeMirror?: string } = {}) {
   const archive = join(fb.home, `archive-${randomUUID().slice(0, 8)}.gbrain-backup`);
   const archived = await fb.open(b => ledgerRows(b.engine));
   await createPgliteBackup({ root: fb.home, output: archive });
   await between();
   const into = join(fb.home, `restored-${randomUUID().slice(0, 8)}`);
   const result = await restorePgliteBackup({ archive, into, ...opts });
-  const engine = new PGLiteEngine();
-  await engine.connect({ engine: 'pglite', database_path: join(into, '.gbrain', 'brain.pglite') });
-  const ctx = { engine, sourceId: SOURCE, remote: false, dryRun: false, config: { engine: 'pglite', embedding_disabled: true } as never,
-    logger: { info() {}, warn() {}, error() {} } as never } as OperationContext;
-  const restored = brainApi(engine, ctx, join(into, 'content'), SOURCE);
-  return { archived, result, restored, receipt: JSON.parse(readFileSync(join(into, 'restore-receipt.json'), 'utf8')), close: () => engine.disconnect() };
+  const { brain: restored, close } = await openFileBeliefBrain(join(into, '.gbrain', 'brain.pglite'), SOURCE, join(into, 'content'));
+  return { archived, result, restored, receipt: JSON.parse(readFileSync(join(into, 'restore-receipt.json'), 'utf8')), close };
 }
 
 /** Runs a brain scenario to completion (teardown included, so withEnv scopes never overlap) and returns what it reported. */
@@ -122,7 +81,7 @@ const replayFault = (fault: PurgeReplayFault) => () => __setPurgeReplayFaultForT
 
 describe('belief ledger restore (pglite archive)', () => {
   test('probe 11: the restored ledger is the archive\'s plus one coverage.restored; a later purge is replayed; no mirror records unavailable', async () => {
-    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBrain(async fb => {
+    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBeliefBrain(SOURCE, async fb => {
       await fb.open(async b => {
         await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
         await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme sells widgets'] }));
@@ -160,7 +119,7 @@ describe('belief ledger restore (pglite archive)', () => {
   }, 300_000);
 
   test('probe 32: an archive holding only another subject\'s quote of a claim asserted and purged later replays partial and warns', async () => {
-    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBrain(async fb => {
+    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBeliefBrain(SOURCE, async fb => {
       await fb.open(async b => {
         await b.put('notes/quotes-example', beliefPage({ prose: 'Quotes.' }));
         await b.put('notes/quotes-example', beliefPage({ facts: [{ claim: 'Quote one', context: `heard ${X}` }] }));
@@ -179,7 +138,7 @@ describe('belief ledger restore (pglite archive)', () => {
   }, 300_000);
 
   test('probe 34: a purge whose committed line never landed, after complete ones, is reported unverified and warns', async () => {
-    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBrain(async fb => {
+    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBeliefBrain(SOURCE, async fb => {
       await fb.open(async b => {
         await b.put('companies/acme-example', beliefPage({ prose: 'Acme.' }));
         await b.put('companies/acme-example', beliefPage({ facts: [X, 'Acme has two offices'] }));
@@ -204,7 +163,7 @@ describe('belief ledger restore (pglite archive)', () => {
   }, 300_000);
 
   test('probe 36: backup, soft delete, retention cleanup (page.expired), then restore: no tombstone, no redaction, nothing replayed', async () => {
-    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBrain(async fb => {
+    const scenario = () => collect<Record<string, unknown>>(resolve => withFileBeliefBrain(SOURCE, async fb => {
       const slug = 'notes/old-example';
       await fb.open(async b => {
         await b.put(slug, beliefPage({ prose: 'Old.' }));
