@@ -106,9 +106,12 @@ export async function seedGraceBackfill(engine: BrainEngine, sourceId: string, s
  * with no spec). Every sweep: threads with loops an unmute queued for
  * re-check. Once: the newest thread of each of the WITHHELD_BACKFILL_SENDERS
  * senders with the most open reply-owed loops, so the withheld-senders record
- * covers loops opened before the automated-mail rule existed.
+ * covers loops opened before the automated-mail rule existed. `walkFromMs` is
+ * the lower bound of an unfinished backfill walk: that walk runs after the
+ * grace settle and fetches threads active since then itself, so they are not
+ * queued twice.
  */
-export async function seedLoopRechecks(engine: BrainEngine, sourceId: string, state: GoogleSourceState, log: Log, now = Date.now()): Promise<number> {
+export async function seedLoopRechecks(engine: BrainEngine, sourceId: string, state: GoogleSourceState, log: Log, now = Date.now(), walkFromMs: number | null = null): Promise<number> {
   const holds = state.loop_grace_holds ??= {};
   const seed = (rows: Array<{ thread_id: string; page_slug: string | null }>) => rows.reduce((n, r) => {
     if (holds[r.thread_id]) return n;
@@ -119,15 +122,16 @@ export async function seedLoopRechecks(engine: BrainEngine, sourceId: string, st
   let backfill = 0;
   if (!state.loop_automated_backfill_done) {
     backfill = seed(await engine.executeRaw<{ thread_id: string; page_slug: string | null }>(
-      `SELECT DISTINCT ON (counterparty_email) thread_id, page_slug, n FROM (
+      `SELECT DISTINCT ON (counterparty_email) thread_id, page_slug, n, last_activity_at FROM (
          SELECT counterparty_email, thread_id, page_slug, last_activity_at,
                 count(*) OVER (PARTITION BY counterparty_email) AS n
            FROM open_loops
           WHERE source_id = $1 AND status = 'open' AND loop_type = 'unanswered_inbound'
             AND counterparty_email IS NOT NULL AND thread_id IS NOT NULL) l
         ORDER BY counterparty_email, last_activity_at DESC`, [sourceId])
-      .then((rows) => (rows as Array<{ thread_id: string; page_slug: string | null; n: number }>)
-        .sort((a, b) => Number(b.n) - Number(a.n)).slice(0, WITHHELD_BACKFILL_SENDERS)));
+      .then((rows) => (rows as Array<{ thread_id: string; page_slug: string | null; n: number; last_activity_at: Date | string | null }>)
+        .sort((a, b) => Number(b.n) - Number(a.n)).slice(0, WITHHELD_BACKFILL_SENDERS)
+        .filter((r) => walkFromMs == null || r.last_activity_at == null || new Date(r.last_activity_at).getTime() < walkFromMs + DAY_MS)));
     state.loop_automated_backfill_done = true;
   }
   pruneGraceHolds(holds, log);

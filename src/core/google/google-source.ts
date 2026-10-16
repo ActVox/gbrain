@@ -415,7 +415,7 @@ async function sweepGmail(g: GmailSweep, onCurrent?: () => Promise<void>): Promi
     if (deps.opts.signal?.aborted) return false;
     await attemptThread(g, tid, null);
   }
-  if (await settleGraceHolds(g) === 'aborted') return false;
+  if (await settleGraceHolds(g, cutoffMs) === 'aborted') return false;
   const isCurrent = (): boolean => {
     if (delta !== 'done' || state.gmail_gap_floor_ms != null) return false;
     if (state.gmail_backfill_done) return true;
@@ -445,7 +445,7 @@ async function sweepGmail(g: GmailSweep, onCurrent?: () => Promise<void>): Promi
  * A re-fetch goes straight through processThread (never the item holds), so
  * a failed grace re-fetch keeps the grace hold and is not an item failure.
  */
-async function settleGraceHolds(g: GmailSweep): Promise<'aborted' | void> {
+async function settleGraceHolds(g: GmailSweep, cutoffMs: number): Promise<'aborted' | void> {
   const { deps, state } = g;
   try {
     await seedGraceBackfill(deps.engine, deps.sourceId, state, deps.log);
@@ -454,7 +454,7 @@ async function settleGraceHolds(g: GmailSweep): Promise<'aborted' | void> {
     deps.log(`[google] loop grace backfill failed (retried next sweep): ${e instanceof Error ? e.message : String(e)}`);
   }
   try {
-    await seedLoopRechecks(deps.engine, deps.sourceId, state, deps.log);
+    await seedLoopRechecks(deps.engine, deps.sourceId, state, deps.log, Date.now(), state.gmail_backfill_done ? null : cutoffMs);
   } catch (e) {
     deps.log(`[google] loop re-check seeding failed (retried next sweep): ${e instanceof Error ? e.message : String(e)}`);
   }

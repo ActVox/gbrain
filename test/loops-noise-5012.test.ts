@@ -325,6 +325,16 @@ describe('gbrain waiting reports the loops the rule would not have opened', () =
     expect(state.loop_automated_backfill_done).toBe(true);
     expect(await catchup.seedLoopRechecks(engine, 'g1', { loop_automated_backfill_done: true } as GoogleSourceState, () => {}, NOW.getTime())).toBe(0);
   });
+
+  test('the sender backfill leaves threads an unfinished backfill walk will fetch to that walk', async () => {
+    await upsertOpenLoop(engine, loop({ lastActivityAt: '2026-08-01T00:00:00Z' }));
+    await upsertOpenLoop(engine, loop({ threadId: '18c2f4a9b3d21e15', counterpartyEmail: 'carol@example.com', lastActivityAt: '2026-08-24T00:00:00Z' }));
+    const state = {} as GoogleSourceState;
+    const walkFromMs = Date.parse('2026-08-20T00:00:00Z');
+    expect(await catchup.seedLoopRechecks(engine, 'g1', state, () => {}, NOW.getTime(), walkFromMs)).toBe(1);
+    expect(Object.keys(state.loop_grace_holds ?? {})).toEqual(['18c2f4a9b3d21e07']);
+    expect(state.loop_automated_backfill_done).toBe(true);
+  });
 });
 
 describe('opt-in Updates reciprocity', () => {
