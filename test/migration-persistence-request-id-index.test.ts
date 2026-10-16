@@ -38,7 +38,7 @@ describe('#6757 the request-id index migration module', () => {
   test('is registered once in the v179 online-index shape', () => {
     expect(MIGRATIONS.filter(m => m.name === 'persistence_request_id_index')).toHaveLength(1);
     expect(migration).toMatchObject({ idempotent: true, transaction: false, sql: '' });
-    expect(migration!.version).toBeGreaterThan(249);
+    expect(migration!.version).toBeGreaterThan(MIGRATIONS.find(m => m.name === 'persistence_request_slug_intent_index')!.version);
     expect(migration!.version).toBeLessThanOrEqual(LATEST_SCHEMA_VERSION);
     expect(typeof migration!.handler).toBe('function');
   });
