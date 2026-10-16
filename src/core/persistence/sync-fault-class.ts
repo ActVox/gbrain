@@ -193,5 +193,5 @@ export function classifySyncFault(input: { code: string; detail?: string | null;
     && rule.safe_actions[0] !== 'none' && rule.class === 'page';
   if (!exhausted) return { class: rule.class, safe_actions: rule.safe_actions, needs_human: rule.needs_human, ...(rule.needs_human && rule.human_reason ? { human_reason: rule.human_reason } : {}) };
   return { class: rule.class, safe_actions: ['none'], needs_human: true,
-    human_reason: `${rule.human_reason ?? 'The page keeps moving under the sync.'} (held ${input.attempts} times over ${Math.floor(input.held_for_ms! / 3_600_000)} h with code ${rule.code})` };
+    human_reason: `${(rule.human_reason ?? 'The page keeps moving under the sync.').replace(/\.$/, '')} (held ${input.attempts} times over ${Math.floor(input.held_for_ms! / 3_600_000)} h with code ${rule.code}).` };
 }

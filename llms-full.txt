@@ -7252,7 +7252,11 @@ Every hold and error has three fields, from one table
   never escalate this way: a `worktree_dirty` file whose uncommitted bytes
   changed in the last 24 hours (someone is still editing it) and a
   `managed_image_sync_unsupported` image (held by design until multimodal
-  embedding is on or the image is excluded). A repair-class hold is `needs_human` when its stored repair state
+  embedding is on or the image is excluded). Status and unblock re-read a
+  `worktree_dirty` file before calling its edit abandoned, so new bytes hand
+  it back to the agent. An abandoned edit's fix is `sync unblock --apply`
+  behind `next: ask_user`: the person commits or restores the file, then
+  unblock finds it clean and schedules it. A repair-class hold is `needs_human` when its stored repair state
   says so: a fence hold the lane marked `manual` (a manual-only reason, a gate
   rejection, a model answer the run does not retry) or `paid` (spend only the
   user raises), and a slug-conflict hold the lane decided a person must settle

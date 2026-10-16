@@ -148,6 +148,19 @@ for (const backend of testBackends()) describe(`#6712 PR 2 L4 holds and soak cou
     expect(verdict(await read('photo.png'), Date.now() + 9 * HOLD_ESCALATE_MS)).toMatchObject({ needs_human: false });
   });
 
+  test('an attempt that races a newer hold leaves the newer hold as written (it never restores the record it read)', async () => {
+    await writeGitHold(engine, hold('race.md', 'preparation_stalled'));
+    let raced = false;
+    // Another run re-holds the path between this attempt's read and its write.
+    const racing = new Proxy(engine, { get: (target, key) => key !== 'executeRaw' ? Reflect.get(target, key) : async (sql: string, params?: unknown[]) => {
+      if (!raced && /^\s*UPDATE op_checkpoints/.test(sql)) { raced = true; await writeGitHold(engine, { ...hold('race.md', 'invalid_frontmatter'), message: 'newer' }); }
+      return engine.executeRaw(sql, params);
+    } }) as BrainEngine;
+    expect(await recordHoldAttempt(racing, { sourceId: source, incarnation, path: 'race.md', code: 'preparation_stalled' })).toBe(false);
+    expect(raced).toBe(true);
+    expect(await read('race.md')).toMatchObject({ code: 'invalid_frontmatter', message: 'newer', meta: { attempts: 1 } });
+  });
+
   test('the soak sweep counts a hold that needs a person once (file_drift as a content decision); counters sum per day and doctor reports both lines', async () => {
     const before = await readSoakCounters(engine);
     await writeGitHold(engine, hold('race.md', 'concurrent_write'));
@@ -180,6 +193,19 @@ for (const backend of testBackends()) describe(`#6712 PR 2 L4 holds and soak cou
       details: { window_days: 7, interventions: { total: after.interventions.total }, content_decisions: { total: after.content_decisions.total } } });
     expect(check!.message).toContain('content decision(s)');
   });
+
+  test('the sweep counts what status calls needs_human (a manual fence) and is never starved by holds that stay the agent\'s', async () => {
+    const other = `l4b-${randomUUID().slice(0, 8)}`;
+    await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{}')", [other]);
+    const [row] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [other]);
+    const put = (path: string, code: GitHoldRecord['code'], meta: Partial<GitHoldRecord['meta']> = {}) => writeGitHold(engine, { ...hold(path, code, meta), source_id: other, incarnation: row!.incarnation });
+    // 501 agent-actionable holds sort before the two that need a person.
+    for (let i = 0; i <= 500; i++) await put(`a/${String(i).padStart(3, '0')}.md`, 'invalid_frontmatter');
+    await put('z/fence.md', 'invalid_fence', { reason: 'enum_unmapped' });
+    await put('z/race.md', 'concurrent_write');
+    expect(await sweepNeedsHumanHolds(engine, other)).toEqual({ needs_human: 2, file_drift_hold: 0 });
+    expect(await sweepNeedsHumanHolds(engine, other)).toEqual({ needs_human: 0, file_drift_hold: 0 });
+  }, 120_000);
 
   test('a plain scheduler run is not an intervention; a recovery flag is', () => {
     expect(nonPlainSyncFlags(['--all', '--no-pull', '--hard-deadline', '13m', '--json'])).toEqual([]);

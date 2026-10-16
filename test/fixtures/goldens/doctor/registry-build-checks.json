@@ -267,6 +267,10 @@
       },
       {
         "category": "ops",
+        "name": "sync_soak_counters"
+      },
+      {
+        "category": "ops",
         "name": "serve_build_drift"
       },
       {

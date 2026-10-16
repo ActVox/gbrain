@@ -32,7 +32,7 @@ async function runManagedSyncMovementCheck(ctx: DoctorContext): Promise<Check[]>
     if (stranded.length) {
       const first = stranded[0]!;
       checks.push({ name: 'managed_sync_not_moving', status: 'fail', readiness_state: 'degraded', details,
-        message: `${stranded.map(m => `${m.source_id} (${m.admitted} admitted request(s), no progress since ${m.last_progress_at})`).join('; ')}: managed sync is parked with a non-empty `
+        message: `${stranded.map(m => `${m.source_id} (${m.admitted} admitted request(s), no progress since ${m.last_progress_at ?? m.admitted_since})`).join('; ')}: managed sync is parked with a non-empty `
           + `write queue and no consumer for longer than the ${Math.round(first.ceiling_ms / 1000)}s ceiling, so nothing will drain it. Resuming the sync runs its own consumer beside the queue.`,
         fix: agentFix(['gbrain', 'sync', ...(first.cursor?.resume_args ?? ['--source', first.source_id, '--no-pull'])],
           `Resumes ${first.source_id}'s unfinished cursor with its stored options; the run consumes the queued requests itself (one drainer per source) and finishes the frozen manifest.`,
@@ -56,9 +56,10 @@ async function runManagedSyncMovementCheck(ctx: DoctorContext): Promise<Check[]>
   return checks;
 }
 
-/** #6552 §2: parked, yet admitted requests wait with no consumer, and nothing has moved for longer than the ceiling. */
+/** #6552 §2: parked, yet admitted requests wait with no consumer, and nothing has moved (or, before any progress, been admitted) for longer than the ceiling. */
 function strandedQueue(m: SourceMovement): boolean {
-  const since = m.last_progress_at ? Date.parse(m.last_progress_at) : NaN;
+  const at = m.last_progress_at ?? m.admitted_since;
+  const since = at ? Date.parse(at) : NaN;
   return m.admitted > 0 && m.live.consumer === null && Number.isFinite(since) && Date.parse(m.sampled_at) - since > m.ceiling_ms;
 }
 

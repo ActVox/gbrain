@@ -313,16 +313,34 @@ export function holdEscalation(record: Pick<GitHoldRecord, 'code' | 'meta' | 'he
  * its repair left the file held): one more failed attempt, and for `worktree_dirty` the uncommitted bytes it saw now
  * (`workingHash`), so a changed edit restarts the live-editor clock. A no-op when the path holds another code by now.
  */
-export async function recordHoldAttempt(tx: Exec, input: { sourceId: string; incarnation: string; path: string; code: GitHoldCode; workingHash?: string }): Promise<boolean> {
-  await lockSummary(tx, input.sourceId, input.incarnation);
+export function recordHoldAttempt(tx: Exec, input: { sourceId: string; incarnation: string; path: string; code: GitHoldCode; workingHash?: string }): Promise<boolean> {
+  return rewriteHoldMeta(tx, input, existing => ({ ...edit(existing, input.workingHash), attempts: (existing.meta.attempts ?? 1) + 1 })).then(record => record !== null);
+}
+
+/** #6712 PR 2 (L4): a `worktree_dirty` hold whose uncommitted bytes changed since it last looked: a live editor (no attempt counted). */
+export function noteHoldEdit(tx: Exec, input: { sourceId: string; incarnation: string; path: string; workingHash: string }): Promise<GitHoldRecord | null> {
+  return rewriteHoldMeta(tx, { ...input, code: 'worktree_dirty' }, existing => existing.meta.working_hash === input.workingHash ? null : edit(existing, input.workingHash));
+}
+
+function edit(existing: GitHoldRecord, workingHash: string | undefined): Partial<GitHoldMeta> {
+  return workingHash !== undefined && workingHash !== existing.meta.working_hash ? { working_hash: workingHash, edited_at: new Date().toISOString() } : {};
+}
+
+/**
+ * Rewrites one hold's meta when it still holds `code`, guarded on the exact record it read: a hold another run replaced
+ * or re-held meanwhile is left as that run wrote it (the update matches no row), so this never restores an obsolete record.
+ */
+async function rewriteHoldMeta(tx: Exec, input: { sourceId: string; incarnation: string; path: string; code: GitHoldCode }, change: (existing: GitHoldRecord) => Partial<GitHoldMeta> | null): Promise<GitHoldRecord | null> {
   const existing = await readRow(tx, input.sourceId, input.incarnation, input.path);
-  if (!existing || existing.code !== input.code) return false;
+  if (!existing || existing.code !== input.code) return null;
+  const meta = change(existing);
+  if (!meta) return null;
   const now = new Date().toISOString();
-  const edited = input.workingHash !== undefined && input.workingHash !== existing.meta.working_hash ? { working_hash: input.workingHash, edited_at: now } : {};
-  const record: GitHoldRecord = { ...existing, meta: { ...existing.meta, ...escalationStamps(existing, existing, now), ...edited, attempts: (existing.meta.attempts ?? 1) + 1 }, updated_at: now };
-  await tx.executeRaw('UPDATE op_checkpoints SET completed_keys=$3::text::jsonb, updated_at=now() WHERE op=$1 AND fingerprint=$2',
-    [GIT_HOLD_OP, gitHoldFingerprint(input.sourceId, input.incarnation, input.path), JSON.stringify([record])]);
-  return true;
+  const record: GitHoldRecord = { ...existing, meta: { ...existing.meta, ...escalationStamps(existing, existing, now), ...meta }, updated_at: now };
+  const rows = await tx.executeRaw(`UPDATE op_checkpoints SET completed_keys=$3::text::jsonb, updated_at=now()
+      WHERE op=$1 AND fingerprint=$2 AND completed_keys=$4::text::jsonb RETURNING 1`,
+  [GIT_HOLD_OP, gitHoldFingerprint(input.sourceId, input.incarnation, input.path), JSON.stringify([record]), JSON.stringify([existing])]);
+  return rows.length ? record : null;
 }
 
 /**
@@ -465,10 +483,12 @@ export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, so
  * has been held `HOLD_ATTEMPTS_NEEDS_HUMAN` times (attempts count real
  * re-holds); past that it waits for `sources retry-held`. #6529: a `managed_image_sync_unsupported` hold
  * re-screens whenever multimodal embedding is on, since managed sync then
- * imports the image instead of holding it.
+ * imports the image instead of holding it. #6712 PR 2: a `content_rejected`, `write_gate_rejected` or
+ * `purged_content` hold rests on a setting, an allow rule or a tombstone its fix lets the user change, so it
+ * re-screens on every sync too.
  */
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
-  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression'].includes(record.code)
+  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content'].includes(record.code)
     // #6712: a transient hold (the write owner stalled, not the file) is retried by every sync until it has been held HOLD_ATTEMPTS_NEEDS_HUMAN times.
     || (record.code === 'preparation_stalled' && (record.meta.attempts ?? 1) < HOLD_ATTEMPTS_NEEDS_HUMAN)
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
@@ -623,16 +643,16 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
     case 'purged_content':
       return { argv: ['gbrain', 'pages', 'purges', 'list', '--source', source], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `${record.path} carries the content of a page the owner purged, so sync holds it. Delete or edit the file and commit; or, only if the purge was a mistake, clear it with gbrain pages unpurge <slug> --source ${source} on the brain host.`,
-        why: 'Purged content stays out of the brain until the owner clears its tombstone; editing the file (a new content hash) imports normally.',
+        why: 'Purged content stays out of the brain until the owner clears its tombstone; the next sync re-screens the file, so an edit (a new content hash) or a cleared tombstone imports it normally.',
         verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
     case 'content_rejected':
       return { argv: ['gbrain', 'config', 'get', 'content_sanity'], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `${record.path} was rejected by the content-sanity gate because junk_disposition is reject. Remove the matched junk from the file, or decide whether to switch junk_disposition back to quarantine.`,
-        why: 'The operator chose to reject junk; changing that setting is a user decision. Editing the file and committing clears the hold on the next sync.' };
+        why: 'The operator chose to reject junk; changing that setting is a user decision. The next sync re-screens the file: an edit committed, or the setting switched, clears the hold.' };
     case 'write_gate_rejected':
       return { argv: ['gbrain', 'config', 'get', 'write_gate.external_mode'], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `${record.path} was refused by the write gate: its source is untrusted and it reads like an instruction to an agent, and write_gate.external_mode is reject. Decide whether to edit the file or switch the setting back to quarantine.`,
-        why: 'The operator chose to reject external instruction-like content; changing that setting is a user decision. Editing the file and committing clears the hold on the next sync.' };
+        why: 'The operator chose to reject external instruction-like content; changing that setting is a user decision. The next sync re-screens the file: an edit committed, the setting switched, or an owner allow rule (gbrain trust allow) for the file clears the hold.' };
     case 'managed_image_sync_unsupported':
       return { argv: ['gbrain', 'config', 'get', 'sync.exclude'], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `Multimodal embedding is off, so managed sync holds ${record.path} and the rest of source ${source} keeps syncing. Keeping images held is fine; to import them, set GBRAIN_EMBEDDING_MULTIMODAL=true for the gbrain process (image embeddings can cost money) and sync again; to stop holding them, leave images out of the source with sync.exclude.`,

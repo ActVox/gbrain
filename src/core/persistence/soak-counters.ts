@@ -18,8 +18,7 @@
  * Reader: doctor `sync_soak_counters` (`readSoakCounters`).
  */
 import type { BrainEngine } from '../engine.ts';
-import { classifySyncFault } from './sync-fault-class.ts';
-import { GIT_HOLD_OP, holdEscalation, type GitHoldRecord } from './sync-holds.ts';
+import { GIT_HOLD_OP, gitHoldFingerprint } from './sync-holds.ts';
 
 export const SOAK_COUNTERS_OP = 'sync-soak-counters';
 export const SOAK_WINDOW_DAYS = 7;
@@ -49,20 +48,27 @@ export function nonPlainSyncFlags(args: readonly string[]): string[] {
 }
 
 /**
- * Counts and stamps the holds of `sourceId` that need a person now and were not counted yet: a `file_drift` hold is a
- * content decision, every other one a `needs_human` intervention. Returns what it counted.
+ * Counts and stamps the holds of `sourceId` that need a person now and were not counted yet, by the verdict `sync status`
+ * shows (`holdVerdict`: escalation after a live-editor check, the fault table, a fence or slug-conflict lane's manual or
+ * paid state): a `file_drift` hold is a content decision, every other one a `needs_human` intervention. Every unstamped
+ * hold is judged each run, so holds that stay agent-actionable never starve later ones; at most `SWEEP_LIMIT` are
+ * stamped per run and the rest are counted by the next. Returns what it counted.
  */
-export async function sweepNeedsHumanHolds(engine: Exec, sourceId: string, now = Date.now()): Promise<{ needs_human: number; file_drift_hold: number }> {
-  const rows = await engine.executeRaw<{ fingerprint: string; record: GitHoldRecord }>(`SELECT h.fingerprint, h.completed_keys->0 AS record FROM op_checkpoints h
-    JOIN sources s ON s.id=h.completed_keys->0->>'source_id' AND s.incarnation::text=h.completed_keys->0->>'incarnation'
-    WHERE h.op=$1 AND s.id=$2 AND NOT (h.completed_keys->0->'meta' ? 'needs_human_at') ORDER BY h.fingerprint LIMIT ${SWEEP_LIMIT}`, [GIT_HOLD_OP, sourceId]);
+export async function sweepNeedsHumanHolds(engine: BrainEngine, sourceId: string, now = Date.now()): Promise<{ needs_human: number; file_drift_hold: number }> {
+  const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]);
   const counted = { needs_human: 0, file_drift_hold: 0 };
+  if (!source) return counted;
+  const { fenceAutoRepairFor, readGitSourceHolds } = await import('./sync-holds.ts');
+  const { holdVerdict, observeDirtyEditors } = await import('./sync-status.ts');
+  const unstamped = ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? [])
+    .filter(hold => hold.incarnation === source.incarnation && !hold.meta.needs_human_at);
+  const records = await observeDirtyEditors(engine, sourceId, source.incarnation, unstamped, now);
+  const auto = await fenceAutoRepairFor(engine, records);
   const stamp = new Date(now).toISOString();
-  for (const { fingerprint, record } of rows) {
-    const content = record.meta.content_repair ? { content_repair: { ...record.meta.content_repair, path: record.path, slug: record.slug } } : {};
-    if (!classifySyncFault({ code: record.code, ...holdEscalation(record, now), ...content }).needs_human) continue;
+  for (const record of records.filter(hold => holdVerdict(hold, auto, now).needs_human).slice(0, SWEEP_LIMIT)) {
     const updated = await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,meta,needs_human_at}',to_jsonb($3::text))
-      WHERE op=$1 AND fingerprint=$2 AND NOT (completed_keys->0->'meta' ? 'needs_human_at') RETURNING 1`, [GIT_HOLD_OP, fingerprint, stamp]);
+      WHERE op=$1 AND fingerprint=$2 AND completed_keys->0->>'code'=$4 AND NOT (completed_keys->0->'meta' ? 'needs_human_at') RETURNING 1`,
+    [GIT_HOLD_OP, gitHoldFingerprint(sourceId, source.incarnation, record.path), stamp, record.code]);
     if (updated.length) counted[record.code === 'file_drift' ? 'file_drift_hold' : 'needs_human']++;
   }
   await recordSoakEvent(engine, 'needs_human', counted.needs_human);

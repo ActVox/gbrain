@@ -67,6 +67,8 @@ export interface SourceMovement {
   holds: MovementHolds;
   /** Managed requests admitted on the worktree and not yet settled (queued or running). */
   admitted: number;
+  /** #6712 PR 2 (#6552): when the oldest of those was admitted (null when none), so a queue stranded before its first commit still ages. */
+  admitted_since: string | null;
   /** #6706: `drain_job_id` is the active `sync` Minions job with a live lock that drives this source, when no CLI drain holds the sync lock. */
   live: { drain: boolean; drain_pid: number | null; drain_job_id: number | null; consumer: 'claim' | 'local' | 'heartbeat' | null };
   ceiling_ms: number;
@@ -89,10 +91,11 @@ export function writerStatusCommand(sourceId: string): string { return `gbrain s
 export const MOVEMENT_WATERMARK_SQL = `SELECT
         (SELECT r.completed_at FROM persistence_requests r WHERE r.worktree_id=$1::uuid AND r.state='committed' AND r.source_incarnation=$2::uuid
            AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%' ORDER BY r.completed_at DESC LIMIT 1) AS last_commit_at,
-        (SELECT count(*) FROM persistence_requests r WHERE r.worktree_id=$1::uuid AND r.state IN ('queued','running') AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS admitted`;
+        (SELECT count(*) FROM persistence_requests r WHERE r.worktree_id=$1::uuid AND r.state IN ('queued','running') AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS admitted,
+        (SELECT min(r.created_at) FROM persistence_requests r WHERE r.worktree_id=$1::uuid AND r.state IN ('queued','running') AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS admitted_since`;
 
 interface BindingRow { source_id: string; worktree_id: string; source_incarnation: string; owner_host_id: string | null }
-interface WatermarkRow { last_commit_at: unknown; admitted: number | string }
+interface WatermarkRow { last_commit_at: unknown; admitted: number | string; admitted_since?: unknown }
 interface HeadRow { request_id: string; state: string; claim_phase: unknown; execution_token: string | null; claim_lapsed: boolean | null; publication_started: boolean | null }
 interface HoldRow { count: number | string | null; stalled: number | string | null; fences: number | string | null; concurrent: number | string | null; updated_at: unknown }
 
@@ -157,7 +160,7 @@ export async function readSourceMovement(engine: BrainEngine, opts: { sourceIds?
     const sampledAt = new Date(now).toISOString();
     const base = { source_id: binding.source_id, sampled_at: sampledAt, last_commit_at: lastCommitAt, last_progress_at: progressAt,
       cursor: cursor ? { index: cursor.index, total: cursor.total, remaining: cursor.remaining, held: cursor.held, last_progress_at: cursor.last_progress_at, resume_command: cursor.resume_command, resume_args: cursor.resume_args } : null,
-      head, holds, admitted, live: { drain: !!drain || !!jobDrain, drain_pid: drain?.holder_pid ?? null, drain_job_id: jobDrain, consumer }, ceiling_ms: policy.ceilingMs, owner_is_this_host: ownerHere,
+      head, holds, admitted, admitted_since: iso(mark?.admitted_since), live: { drain: !!drain || !!jobDrain, drain_pid: drain?.holder_pid ?? null, drain_job_id: jobDrain, consumer }, ceiling_ms: policy.ceilingMs, owner_is_this_host: ownerHere,
       writer_status_command: writerStatusCommand(binding.source_id) };
     out.push({ ...base, ...verdict(base, now) });
   }
