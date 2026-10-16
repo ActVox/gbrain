@@ -75,6 +75,7 @@ import type { SyncRename } from './sync-discovery.ts';
 import type { PreparedContentImport } from './prepared-import.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import { contentRepairCommit, fenceRepairCommit } from './effect-model.ts';
+import { recordSlugLineAlias } from '../page-state/rename-alias.ts';
 import type { WriteRequest } from './model.ts';
 
 export interface ManagedFileRepairIntent extends Record<string, unknown> {
@@ -381,6 +382,7 @@ export async function prepareManagedFileRepairMutation(engine: BrainEngine, row:
       await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2 AND source_path IS DISTINCT FROM $3', [row.source_id, row.slug, p.sourcePath]);
       if (!applied.noop) { await project(tx); await sealPageTextProjection(tx, row.slug, row.source_id); }
       const holdCleared = await clearGitHold(tx, { sourceId: row.source_id, incarnation: row.source_incarnation, path: p.path, observedAt: p.holdObservedAt ?? new Date().toISOString() });
+      if (contentRepair?.declared_alias) await recordSlugLineAlias(tx, row.source_id, contentRepair.declared_alias, row.slug);
       // #6712 PR 1: the record names what is on disk now (the approved bytes), the page revision they produced and the parser, so the next discovery prescreens the file.
       const page = await tx.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
       if (page && page.page.deleted_at == null) await recordSyncImportProvenance(tx, { source_id: row.source_id, incarnation: row.source_incarnation, page_id: Number(page.page.id), origin: p.sourcePath,

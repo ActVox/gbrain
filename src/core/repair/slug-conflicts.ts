@@ -80,9 +80,11 @@ import { callJudgment, CONTENT_REPAIR_MODEL_KEY, judgmentEstimate, judgmentMemoR
 import { CONTENT_REPAIR_MEASURED_MODELS } from '../content-repair/measured.ts';
 import { CONTENT_REPAIR_ACTOR, CONTENT_REPAIR_HOLD_CODE, contentRepairCommitSubject, contentRepairTrailer, type ContentRepairReceipt } from '../content-repair/receipt.ts';
 import { contentPreviewArgv } from '../content-repair/hold-fix.ts';
+import { CONTENT_REPAIR_LANE_VERSION, contentRepairLaneCurrent } from '../persistence/sync-fault-class.ts';
 import { lineDiff } from './frontmatter.ts';
 import { repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairPlanOptions, type RepairResult, type RepairScope } from './core.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { recordSlugLineAlias } from '../page-state/rename-alias.ts';
 
 type Tier = 'deterministic' | 'llm';
 type DeterministicRule = 'absent_page' | 'different_type';
@@ -218,6 +220,11 @@ function otherChanges(removal: SlugLineRemoval): string {
   return removal.blocking.length ? `the frontmatter also needs ${removal.blocking.join(', ')}` : 'the frontmatter needs other changes too';
 }
 
+/** #6865: the blocking codes as the hold records them (omitted when there are none). */
+function otherCodes(removal: SlugLineRemoval): { other_codes?: string[] } {
+  return removal.blocking.length ? { other_codes: removal.blocking } : {};
+}
+
 /** The style-only codes the edit left as written, as a receipt or result field (omitted when there are none). */
 function styleOnly(removal: Pick<SlugLineRemoval, 'style_only'>): { style_only?: string[] } {
   return removal.style_only.length ? { style_only: removal.style_only } : {};
@@ -258,7 +265,7 @@ type Analysis =
   | { status: 'import'; reason: ImportReason }
   | { status: 'deterministic'; rule: DeterministicRule; after: string; style_only: string[] }
   | { status: 'llm'; input: JudgmentInput }
-  | { status: 'held'; reason: string; message: string; named?: string };
+  | { status: 'held'; reason: string; message: string; named?: string; other_codes?: string[] };
 
 /** #6696 C8: the managed sync screen of a candidate's bytes, exactly as the next sync freezes them; null when `sync.holds=fail` (sync screens nothing). */
 type SyncScreen = ((cand: Candidate, content: string) => Promise<ImportScreenResult>) | null;
@@ -329,7 +336,7 @@ async function analyze(cand: Candidate, slugsInCheckout: () => Set<string>, scre
   const edit = async (rule: DeterministicRule): Promise<Analysis> => {
     const removal = removeSlugLine(cand.content, cand.sourcePath, cand.src.activePack);
     const after = removal.after;
-    if (after === null) return { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone does not make it importable (${otherChanges(removal)}); preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
+    if (after === null) return { status: 'held', reason: 'still_invalid', ...otherCodes(removal), message: `Removing the slug: line of ${cand.path} alone does not make it importable (${otherChanges(removal)}); preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
     const screened = screen ? await screen(cand, after) : null;
     if (screened?.status !== 'refused') return { status: 'deterministic', rule, after, style_only: removal.style_only };
     if (screened.refusal.code === 'frontmatter_slug_conflict') return slugPageMismatch(cand, expected, `but its path derives ${expected}`);
@@ -343,7 +350,7 @@ async function analyze(cand: Candidate, slugsInCheckout: () => Set<string>, scre
     if (parsed.type !== cand.named.page.type && !shared) return edit('different_type');
   }
   const removal = removeSlugLine(cand.content, cand.sourcePath, cand.src.activePack);
-  if (removal.after === null) return { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone would not make it importable (${otherChanges(removal)}), so no model is asked; preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
+  if (removal.after === null) return { status: 'held', reason: 'still_invalid', ...otherCodes(removal), message: `Removing the slug: line of ${cand.path} alone would not make it importable (${otherChanges(removal)}), so no model is asked; preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
   const held = judgmentParticipant({ path: cand.path, slug: cand.slug, content: cand.content, otherSlug: cand.namedSlug });
   const named = cand.named ? judgmentParticipant({ path: cand.named.page.source_path ?? null, slug: cand.named.page.slug, content: pageContent(cand.named), otherSlug: cand.slug, type: cand.named.page.type }) : null;
   return { status: 'llm', input: { held, named, reason: 'frontmatter_slug_conflict' } };
@@ -351,10 +358,13 @@ async function analyze(cand: Candidate, slugsInCheckout: () => Set<string>, scre
 
 const nextAttempt = (reason: string, resetsAt?: string): string | null => reason === 'budget_exhausted' ? resetsAt ?? nextUtcMidnight(new Date()) : TRANSIENT.has(reason) ? new Date(Date.now() + RETRY_AFTER_MS).toISOString() : null;
 
+/** Records the lane's verdict on the hold, stamped with this lane's version (#6865) and whether the named page has no file. */
 async function recordState(engine: BrainEngine, cand: Pick<Candidate, 'src' | 'path' | 'hold'>, state: Omit<ContentHoldRepairState, 'at'>): Promise<void> {
   if (!cand.hold) return;
+  const [named] = state.named ? await engine.executeRaw<{ source_path: string | null }>('SELECT source_path FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL LIMIT 1',
+    [cand.src.id, state.named]).catch(() => []) : [];
   await recordContentHoldRepair(engine, { sourceId: cand.src.id, incarnation: cand.src.incarnation, path: cand.path, upstreamVersion: cand.hold.upstream_version,
-    state: { ...state, at: new Date().toISOString() } }).catch(() => false);
+    state: { ...state, ...(named && named.source_path == null ? { named_db_only: true as const } : {}), lane_version: CONTENT_REPAIR_LANE_VERSION, at: new Date().toISOString() } }).catch(() => false);
 }
 
 function item(entry: ApprovedConflict, index: number, hash: string | null, last: boolean): ConflictItem {
@@ -444,7 +454,7 @@ export const slugConflictsRepair: RepairHandler = {
         const analysis = await analyze(cand, slugsInCheckout, screen);
         if (analysis.status === 'skip') { skip(analysis.reason); continue; }
         if (analysis.status === 'held') {
-          await keep({ reason: analysis.reason, tier: 'manual', resolution: analysis.message }, { action: 'remove_slug', reason: analysis.reason, ...(analysis.named ? { named: analysis.named } : {}), next_attempt_after: null });
+          await keep({ reason: analysis.reason, tier: 'manual', resolution: analysis.message }, { action: 'remove_slug', reason: analysis.reason, ...(analysis.named ? { named: analysis.named } : {}), ...(analysis.other_codes ? { other_codes: analysis.other_codes } : {}), next_attempt_after: null });
           continue;
         }
         const base: Omit<ApprovedConflict, 'tier' | 'rule' | 'after' | 'estimate_usd' | 'llm_waiting'> = { source_id: src.id, path, source_path: cand.sourcePath, slug: cand.slug, mode: src.managed ? 'managed' : 'legacy',
@@ -574,7 +584,7 @@ async function applyConflict(ctx: OperationContext, entry: ApprovedConflict, opt
   let slugs: Set<string> | null = null;
   const analysis = await analyze(cand, () => (slugs ??= src.root ? checkoutSlugs(src.root) : new Set<string>()), await syncScreen(engine, src));
   if (analysis.status === 'skip') return skipped(analysis.reason, analysis.message);
-  if (analysis.status === 'held') return held(analysis.reason, analysis.message, { action: 'remove_slug', reason: analysis.reason, ...(analysis.named ? { named: analysis.named } : {}), next_attempt_after: null });
+  if (analysis.status === 'held') return held(analysis.reason, analysis.message, { action: 'remove_slug', reason: analysis.reason, ...(analysis.named ? { named: analysis.named } : {}), ...(analysis.other_codes ? { other_codes: analysis.other_codes } : {}), next_attempt_after: null });
   if (analysis.status === 'import') {
     // #6696 C8: the clear is bound to the hold observation the plan read; a hold a sync wrote since is kept and retried.
     if (opts.expect && cand.hold?.observed_at !== entry.observed_at) {
@@ -585,7 +595,8 @@ async function applyConflict(ctx: OperationContext, entry: ApprovedConflict, opt
   }
   if (analysis.status === 'deterministic') {
     if (opts.expect && sha256(Buffer.from(analysis.after, 'utf8')) !== entry.after) return skipped('changed_since_preview', `The repair of ${entry.path} differs from the preview; preview again.`);
-    return write(ctx, src, cand, analysis.after, { action: 'remove_slug', tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0, ...styleOnly(analysis) }, opts, held, { rule: analysis.rule });
+    return write(ctx, src, cand, analysis.after, { action: 'remove_slug', tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0, ...styleOnly(analysis),
+      ...(analysis.rule === 'absent_page' ? declaredAlias(cand) : {}) }, opts, held, { rule: analysis.rule });
   }
   return judge(ctx, src, cand, analysis.input, entry, opts, held);
 }
@@ -597,7 +608,7 @@ type HeldFn = (reason: string, message: string, state: Omit<ContentHoldRepairSta
  * #6696 C8: `import` writes no file: the held bytes are imported as they are, and the hold clears only while it is still the observation
  * `observedAt` the repair read (a hold a sync wrote since is kept, with a retry recorded on it).
  */
-async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, after: string, parts: Pick<ContentRepairReceipt, 'action' | 'tier' | 'confidence' | 'model' | 'cost_usd' | 'style_only'>, opts: ApplyOptions, held: HeldFn,
+async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, after: string, parts: Pick<ContentRepairReceipt, 'action' | 'tier' | 'confidence' | 'model' | 'cost_usd' | 'style_only' | 'declared_alias'>, opts: ApplyOptions, held: HeldFn,
   extra: Record<string, unknown>, observedAt?: string): Promise<RepairItemOutcome> {
   const engine = ctx.engine;
   const local = { ...ctx, remote: false, sourceId: src.id } as OperationContext;
@@ -655,6 +666,7 @@ async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, a
     return refused(imported.refusal?.code ?? 'error', edits ? 'so the file was restored from its backup' : 'so the hold stays', 'still_invalid');
   }
   const holdCleared = cand.hold ? await kept(await clearGitHold(engine, { sourceId: src.id, incarnation: src.incarnation, path: cand.path, observedAt: observedAt ?? new Date().toISOString() })) : false;
+  if (parts.declared_alias) await recordSlugLineAlias(engine, src.id, parts.declared_alias, cand.slug);
   if (!edits) return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'legacy', imported: imported.status, hold_cleared: holdCleared, content_repair: receipt }, ...spend };
   const commitStep = `git -C ${shellQuote([root])} add -- ${shellQuote([cand.path])} && git -C ${shellQuote([root])} commit -m ${shellQuote([contentRepairCommitSubject(cand.path)])} -m ${shellQuote([contentRepairTrailer(receipt)])} -- ${shellQuote([cand.path])}`;
   return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'legacy', backup, imported: imported.status, hold_cleared: holdCleared, content_repair: receipt, committed: 'commit_step', commit_step: commitStep }, ...spend };
@@ -684,7 +696,7 @@ async function judge(ctx: OperationContext, src: FenceSource, cand: Candidate, i
     }
     if (result.memoHit) {
       const state = cand.hold?.meta.content_repair;
-      const out = await held(result.reason, result.message, state && state.reason === result.reason ? null : { action: result.reason === 'merge_recommended' ? 'merge_into' : result.reason === 'content_repair_needs_human' ? 'needs_human' : 'pending',
+      const out = await held(result.reason, result.message, state && state.reason === result.reason && contentRepairLaneCurrent(state) ? null : { action: result.reason === 'merge_recommended' ? 'merge_into' : result.reason === 'content_repair_needs_human' ? 'needs_human' : 'pending',
         reason: result.reason, ...named, model, next_attempt_after: null }, { memo: 'judged_before' });
       return { ...out, ...spend };
     }
@@ -709,7 +721,7 @@ async function judge(ctx: OperationContext, src: FenceSource, cand: Candidate, i
   if (verdict.action === 'remove_slug') {
     const removal = removeSlugLine(cand.content, cand.sourcePath, src.activePack);
     const after = removal.after;
-    if (after === null) { await store.reject(result.claim, { reason: 'still_invalid' }); return held('still_invalid', `The model chose remove_slug for ${cand.path}, but removing the line alone does not make it importable (${otherChanges(removal)}).`, { action: 'remove_slug', reason: 'still_invalid', model, next_attempt_after: null }, { ...why, ...spend }); }
+    if (after === null) { await store.reject(result.claim, { reason: 'still_invalid' }); return held('still_invalid', `The model chose remove_slug for ${cand.path}, but removing the line alone does not make it importable (${otherChanges(removal)}).`, { action: 'remove_slug', reason: 'still_invalid', ...otherCodes(removal), model, next_attempt_after: null }, { ...why, ...spend }); }
     const written = await write(ctx, src, cand, after, { action: 'remove_slug', tier: 'llm', confidence: 'medium', model, cost_usd: result.spentUsd, ...styleOnly(removal) }, opts, held, why);
     if (written.applied) await store.publish(result.claim);
     else if (written.reason === 'changed_since_read' || written.reason === 'sync_in_progress') await store.transient(result.claim, written.reason);
@@ -724,6 +736,56 @@ async function judge(ctx: OperationContext, src: FenceSource, cand: Candidate, i
     ? `The model judged ${cand.path} and page ${cand.namedSlug ?? verdict.canonical} to be the same page; ${verdict.canonical} keeps the slug. gbrain does not merge pages by itself yet, so nothing was written; a person merges them (gbrain sources status ${src.id} shows the paragraph).`
     : `The model could not decide whether ${cand.path} and ${cand.namedSlug ?? 'the page its slug: line names'} are the same page, so nothing was written; a person decides which keeps the slug.`;
   return { ...await held(reason, message, state, { action: verdict.action, ...(verdict.action === 'merge_into' ? { canonical: verdict.canonical } : {}), ...why, tier: 'llm' }), ...spend };
+}
+
+/**
+ * #6865: the alias an absent_page removal records in its write (receipt 'declared_alias'): the removed line's slug, so links
+ * written against it keep resolving to the page the path decides; it named no page and no file, and an exact page lookup
+ * still wins. Omitted when it normalizes to nothing or to the page's own slug.
+ */
+function declaredAlias(cand: Pick<Candidate, 'declared' | 'slug'>): { declared_alias?: string } {
+  const alias = slugifyPath(cand.declared);
+  return alias && alias !== cand.slug ? { declared_alias: alias } : {};
+}
+
+/** #6865: what one sync-time heal pass shares across its files: the source, one checkout slug census and the sync screen. */
+export interface AbsentSlugHealRun { src: FenceSource; slugs: () => Set<string>; screen: SyncScreen; embed: boolean }
+
+/** The heal pass over one source, or null when this host may not write it (no managed checkout, another owner, a mirror). */
+export async function absentSlugHealRun(engine: BrainEngine, sourceId: string, opts: { embed: boolean }): Promise<AbsentSlugHealRun | null> {
+  const src = await loadFenceSource(engine, sourceId, { remote: false, work: 'content repair' });
+  if (!src?.managed || !src.root || src.owner || src.mirror) return null;
+  let slugs: Set<string> | null = null;
+  return { src, slugs: () => (slugs ??= checkoutSlugs(src.root!)), screen: await syncScreen(engine, src), embed: opts.embed };
+}
+
+/**
+ * #6865: the sync-time heal of one held file. Only the deterministic `absent_page` removal is written (the declared
+ * slug names no page and no file), bound to the exact bytes sync held: a file edited since (a newer draft in the
+ * working tree) is left for the next sync to re-screen. Every other analysis is left exactly as held, with nothing
+ * recorded, so a model verdict or the maintenance run's own pass is untouched. The write is the lane's managed
+ * repair publication (hash-bound bytes, import, hold clear and commit in one coordinated write, busy re-read at admission).
+ */
+export async function healAbsentSlugLine(ctx: OperationContext, run: AbsentSlugHealRun, path: string): Promise<RepairItemOutcome> {
+  const { src } = run;
+  const left = (reason: string, message: string): RepairItemOutcome => ({ applied: false, outcome: 'skipped', reason, detail: { path, message } });
+  if (repairBusy(src.busy, { path })) return left('sync_in_progress', repairBusyMessage(src.busy, src.id, path));
+  const read = await readCandidate(ctx.engine, src, path);
+  if (!read.ok) return left(read.reason, `${path} is ${read.reason}.`);
+  const cand = read.cand;
+  if (cand.hold?.code !== 'frontmatter_slug_conflict') return left('not_held', `${path} is no longer held for its slug: line.`);
+  if (cand.before !== cand.hold.upstream_version) return left('changed_since_hold', `${path} changed since sync held it; the next sync re-screens the new bytes.`);
+  const analysis = await analyze(cand, run.slugs, run.screen);
+  if (analysis.status !== 'deterministic' || analysis.rule !== 'absent_page') {
+    return left(analysis.status === 'held' || analysis.status === 'skip' ? analysis.reason : analysis.status === 'deterministic' ? analysis.rule : analysis.status,
+      `${path} is not a stray slug: line naming no page; the content-repair lane decides it on the maintenance run.`);
+  }
+  const held: HeldFn = async (reason, message, state, extra = {}) => {
+    if (state) await recordState(ctx.engine, cand, state);
+    return { applied: false, outcome: 'held', reason, detail: { path, message, ...extra } };
+  };
+  return write(ctx, src, cand, analysis.after, { action: 'remove_slug', tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0, ...styleOnly(analysis), ...declaredAlias(cand) },
+    { embed: run.embed, expect: null, noLlm: true }, held, { rule: 'absent_page', trigger: 'sync' });
 }
 
 async function reportConflicts(ctx: OperationContext, scope: RepairScope, result: RepairResult) {
