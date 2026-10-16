@@ -10,6 +10,83 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.255.0] - 2026-10-15
+
+**Doctor stops reading real errors as "not migrated yet", recall and think use your query prefix everywhere, `gbrain waiting` stops listing bank alerts as people, and a surviving `gbrain serve` takes back hook IPC.** This is fix wave 18b: the older backlog nobody else had picked up, plus what wave 17 deferred. Doctor checks and four write paths used to swallow any missing column as a pre-migration brain; they now tolerate only the exact object they need and fail with the real error otherwise. `think`, `synthesize` and six more query paths embedded questions without the brain's `embedding_query_prefix`, so their retrieval drifted from hybrid search. Gmail bulk and no-reply mail opened reply-owed loops, and muting a sender left its old loops open. On Postgres, an aborted transaction left its statement running on the server.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| A doctor check hits a missing column it doesn't depend on | `ok` or `skipped` ("not migrated yet") | fails with the real database error |
+| A source's first sync is still running | `sync_freshness` reads fresh | `warn` with `sync_first_run_in_progress` |
+| A source never synced successfully | "never been synced" | fails `sync_no_successful_sync` with the last attempt and a fix for its state |
+| An adopted read-only skill pack | fails `sync_freshness` as never synced | counted under `read_only_pack_count` |
+| `gbrain sources writer activate` on a source whose Git effects stay skipped | silent | one `git_durability_not_enabled` warning per source with the enable command |
+| `think`, MCP `think`, `synthesize`, CRAG, dream auto-think, `takes search --semantic`, `search diagnose`, eval baselines, `brainstorm` on a prefix brain | query embedded without the prefix | embedded with the brain's `embedding_query_prefix`, like hybrid search |
+| A broad keyword search times out on Postgres, then runs again in the same `gbrain serve` | waits for the timeout again | answers from the vector arm with `keyword_arm_failed: skipped_after_timeout` for 10 minutes |
+| `recall --question` on a model with unmeasured fact admission floors | nothing says so | `facts_calibration: {status: "unmeasured"}` plus one info notice per session |
+| A patterns child appends a timeline entry quoting text that isn't in this run's reflections | kept as written | moved to `unverified_claims`; appended pages count in `patterns_written` |
+| Autopilot runs dream patterns again an hour later | runs | waits `dream.patterns.min_interval_hours` (default 6) and skips with `patterns_min_interval` |
+| Pages an old agent edit stamped `trust_tier: unknown` | no repair | `gbrain trust backfill --repair-unknown-markers` previews and repairs the pages you name |
+| The `embedding_model` config row has no provider prefix | managed fact extraction stops silently | doctor `embedding_identity_unqualified` names the migrate preview |
+| A bank, payment or shipping alert (`Precedence: bulk`, `List-Id`, no-reply `Reply-To`) | `gbrain waiting` lists it as a person waiting on you | no loop opens; old ones get a `gbrain loops drop sender ... --dry-run` line |
+| `gbrain loops mute sender <email>` | stops new loops only | also closes that sender's open reply-owed loops and prints the `Undo:` command |
+| The source's calendar id is one the account can't read | looks like an empty calendar | `calendar_unreadable` in the sync log, `gbrain google status` and doctor |
+| A Postgres transaction aborts while a statement waits on a lock | the statement kept running on the server | the statement is cancelled before the connection is released |
+| The first `gbrain serve` exits while a second one is running | hooks lose per-turn context until a restart | the second serve takes the IPC socket within about 30 seconds |
+| A Windows PGLite brain with a long data-dir path | IPC sockets fail to bind | sockets move under `%USERPROFILE%\.gbrain\run` |
+| `gbrain backup create` on a symlinked or over-8-GiB PGLite brain | late failure ("Out of memory") or a generic refusal | refuses up front with `unmanaged_database_path` or `backup_too_large` and a physical-copy runbook |
+| `bootstrap harness --token` on PGLite before the serve runs | exit 1, nothing wired | wires every target, exits 13 `pending_verify`; re-run once the serve is up |
+
+### Things to watch
+
+- **Errors that used to pass now surface.** A brain with an unrelated missing column used to see doctor `ok`; it now sees the database error. Page writes, rename aliases, links preparation and Google counterparty resolution propagate any undefined table or column other than their own instead of treating it as a pre-migration brain.
+- **Prefix brains move.** On a brain with `embedding_query_prefix` set, `think`, `synthesize`, takes search and saved `gbrain eval` vector baselines return different neighbours than before.
+- **The keyword skip is per process.** `gbrain serve` and MCP benefit; one-shot CLI searches still wait for the timeout. `search.keyword_timeout_negative_cache_seconds 0` turns it off.
+- **Dropping loops by sender can't be undone.** Preview with `--dry-run` first. Muting closes loops; unmuting re-checks them on the next Gmail sync and reopens one only when nothing answered its thread since.
+- `gbrain google status` now reads each calendar once (`--no-probe` skips it) and exits 1 when one is unreadable.
+- `appended_unverified` in the dream patterns result is a deprecated alias of `quote_verify.timeline_appends` and goes away two releases from now.
+- No schema change.
+
+### Itemized changes
+
+**Doctor and schema errors**
+- `isMissingSchemaObject` takes the exact table or column each caller needs across doctor checks (extraction sync, knowledge health, routing and federation, OAuth confidential clients, stale locks, trust scan, unclaimed sources, trust tiers) and 20+ readers. `bun run check:schema-error-predicates` blocks bare `isUndefinedTableError` / `isUndefinedColumnError` / raw `42P01` / `42703` checks outside a reasoned allowlist (#6599 follow-up).
+- `sync_freshness` separates sync outcome from freshness: `sync_first_run_in_progress`, `sync_no_successful_sync` with states `no_attempt`, `attempt_queued`, `holds_pending` and `last_attempt_unsuccessful` (#4960); read-only skill-pack catalogs are counted under `read_only_pack_count` (#6076).
+- Onboarding coverage, the MCP onboarding counts and `extract-ner` typed edges count the types the active pack declares as entities, per source; a pack that doesn't load warns `entity_types_unavailable` and `extract-ner` reports `pack_unavailable` (#4772).
+- `gbrain sources writer activate` returns `warnings[]` with `git_durability_not_enabled` per non-durable filesystem source (#5182).
+- New doctor check `embedding_identity_unqualified` (#6113).
+- New error codes: `sync_first_run_in_progress`, `sync_no_successful_sync`, `entity_types_unavailable`, `git_durability_not_enabled`, `keyword_skipped_after_timeout`, `calendar_unreadable`, `ipc_path_too_long`, `unmanaged_database_path`, `backup_too_large`.
+
+**Search and recall**
+- `src/core/search/query-prefix.ts`: `embedQueryWithPrefix` is used by CRAG, `synthesize`, `think` (CLI and MCP), takes search, dream auto-think, `search diagnose`, eval and `brainstorm`; `test/query-embed-call-sites.test.ts` allowlists the remaining direct `embedQuery` calls with reasons (#3783).
+- `src/core/postgres-engine/keyword-timeout-cache.ts`: a per-engine negative cache keyed on statement, parameters, source scope and timeout. Only a statement timeout (57014) records an entry, never a user cancel. New config key `search.keyword_timeout_negative_cache_seconds` (default 600, 0 off); doctor `keyword_plan` reports `details.negative_cache` (#6495).
+- `recall` reports `facts_calibration` and one `facts_calibration_unmeasured` notice per brain per session; `FACT_ADMISSION_FLOOR_EVIDENCE` moves to `search/fact-relevance.ts` (#6590).
+
+**Dream patterns and trust**
+- Patterns quote-verifies the timeline entries it newly published, selected by write receipt, and reports `details.timeline_appends` (#6302).
+- In-cycle cadence `dream.patterns.min_interval_hours` and a child read budget `dream.patterns.child_read_budget_kb` (default 200 KB) counted from the job's tool-execution ledger (#6297).
+- Patterns grounding and the read budget read segmented page bodies through `materializeSegmentedBody`.
+- `gbrain trust backfill --repair-unknown-markers` previews by default and applies only with `--slug` and `--expect <preview hash>`; `gbrain trust review` adds a `repair` command to the `lower_page` items the marker caused (#6550).
+- Docs: CJK fact subjects need a literal slug or a delimiter (`docs/guides/facts-relink.md`, #6620).
+
+**Gmail loops and calendar**
+- `Precedence`, `List-Id` and `Reply-To` are captured; positively automated mail withholds the reply-owed open with reason `automated_mail` (#5012 item 8). `gbrain loops drop sender`, mute closes and unmute re-checks, and the opt-in key `loops.updates_require_reciprocity` (default `false`).
+- `GoogleForbiddenError`, `CalendarClient.probeCalendar`, doctor `google_calendar_readable` and `gbrain sources set-calendar` (#5012 item 9).
+- `config set search.contextual_retrieval` and `sources set-cr-mode` say that existing pages keep their mode and name `gbrain repair contextual-mode` (#5012 item 6).
+
+**Serve, Windows, backup and harness**
+- `vendor/postgres` and `patches/postgres@3.4.9.patch` gain `own()` cancel-and-discard; `transaction-abort.ts` cancels the running statement with a settle window, keeps the driver error as `cause` and reports a failed cancel as `cancelFailure`. Proven on direct Postgres and PgBouncer (#6598). Contributed by @Kkkkkuro (the cancel hunk of #6790).
+- Each IPC socket a serve could not bind retries every 30 seconds plus jitter through the single-owner probe (#6647).
+- Windows sockets over the 107-byte limit move to `%USERPROFILE%\.gbrain\run\<kind>-<hash12>.sock`; new doctor check `ipc_socket_path` (#6573).
+- 71 more files launch processes through `src/core/spawn.ts`, which hides the console window on Windows; 13 remain on the ratchet (#4992).
+- `gbrain backup create` checks the data-dir layout and the estimated archive size before the lock; doctor `pglite_data_dir` warns from 75% of the 8 GiB cap (#6649, which stays open for larger archives).
+- `bootstrap harness --token` on PGLite ends `pending_verify` (exit 13) when no serve answers and none holds the brain (#6661).
+
+**Tests**
+- Every item has a probe that fails on master and passes here. `test/e2e/persistence-chaos.test.ts` no longer races a late cancel against the commit (from GBRA-110).
+
 ## [0.60.253.0] - 2026-10-15
 
 **A note an agent writes can no longer quietly erase a take or timeline entry you confirmed. And when something an agent derived from is downgraded, everything derived from it is downgraded too.** Until now, an agent rewriting a page could drop or reword a take you had confirmed, or a dated timeline line, and the stored row went with it. The same happened when the takes cleanup or the timeline cleanup decided a row was gone. Now the row stays exactly as it was, and you get a proposal to approve or dismiss. Separately, when a page or fact loses trust (an agent edited it, or you lowered it), the facts, takes and pages computed from it now drop to match. Raising trust never lifts them back up on its own.
