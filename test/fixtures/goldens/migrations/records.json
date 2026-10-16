@@ -3838,10 +3838,13 @@
           "form": "arrow",
           "helpers": [
             "CONTENT_CHUNKS_GENERATION_INDEX",
+            "PLANNER_REPAIR_TABLES",
+            "analyzeAfterIndexBuild",
             "buildIndexOnline",
             "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "tableRows"
           ],
           "sha256": "04311e56cedf0fa4c64828548231ceda89ed68f6e2038d7ece7a907d3e3c413f"
         },
@@ -3874,10 +3877,13 @@
           "form": "arrow",
           "helpers": [
             "INGEST_LOG_UNMARKED_INDEX",
+            "PLANNER_REPAIR_TABLES",
+            "analyzeAfterIndexBuild",
             "buildIndexOnline",
             "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "tableRows"
           ],
           "sha256": "27ceabcd9bfa28c5d7a44c370130e228e786127d7770032bde890d2caa7e9b27"
         },
