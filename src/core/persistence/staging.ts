@@ -7,7 +7,7 @@ import { opError, OperationError } from '../ops/contract.ts';
 import { sha256 } from './digest.ts';
 import type { BrainEngine } from '../engine.ts';
 import { readJournalLimits } from './limits.ts';
-import { hashDescriptor, validateBeforeStagePath } from './large-file.ts';
+import { beforeStageCopyPath, hashDescriptor, validateBeforeStagePath } from './large-file.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
 
 export interface RecoveryStagingFile { path: string; hash: string; bytes: number }
@@ -80,12 +80,31 @@ function withVerifiedStage(stage: RecoveryStagingFile, settle: (fd: number) => v
 }
 
 /**
- * Called under the owner lock. Partial/unknown stages are preserved, never guessed. `keepBefore`: a live request's
- * recovery keeps the prior file's copy until it has decided whether to rename it back (`restoreBeforeStage`).
+ * Removes a regular file at `path` unread (a symlink, directory or other leaf refuses); flushes its directory.
  */
-export function cleanupRecoveryStaging(record: StagedRecovery, opts: { keepBefore?: boolean } = {}): void {
+function removeUnread(path: string): void {
+  const leaf = statIfPresent(path);
+  if (leaf && !leaf.isFile()) throw blocked();
+  if (leaf) unlinkSync(path);
+  flushParent(path);
+}
+
+/**
+ * Called under the owner lock. Partial/unknown stages are preserved, never guessed, with two exceptions that hold no
+ * bytes recovery needs: a before stage's copy still under its temporary name (`beforeStageCopyPath`: the copy was never
+ * renamed, so publication never started) is always removed, and `priorIntact` (the canonical file still holds the
+ * recorded prior bytes, `beforeHash`) removes the before stage itself unread, so a copy a crash cut short at the stage's
+ * name (a binary that copied in place) cannot block the worktree. `keepBefore`: a live request's recovery keeps the
+ * prior file's copy until it has decided whether to rename it back (`restoreBeforeStage`).
+ */
+export function cleanupRecoveryStaging(record: StagedRecovery, opts: { keepBefore?: boolean; priorIntact?: boolean } = {}): void {
+  const before = record.staging?.before;
   for (const stage of stages(record)) {
-    if (opts.keepBefore && stage === record.staging?.before) continue;
+    if (stage === before) {
+      removeUnread(beforeStageCopyPath(stage.path));
+      if (opts.keepBefore) continue;
+      if (opts.priorIntact) { removeUnread(stage.path); continue; }
+    }
     withVerifiedStage(stage, () => unlinkSync(stage.path));
     flushParent(stage.path);
   }
@@ -111,7 +130,7 @@ export function restoreBeforeStage(record: StagedRecovery & { mode: number | nul
 /** The final accounting fence also protects direct terminal-cleanup callers. */
 export function assertRecoveryStagingAbsent(record: StagedRecovery): void {
   for (const stage of stages(record)) {
-    if (statIfPresent(stage.path)) throw blocked();
+    if (statIfPresent(stage.path) || (stage === record.staging?.before && statIfPresent(beforeStageCopyPath(stage.path)))) throw blocked();
     flushParent(stage.path);
   }
 }
