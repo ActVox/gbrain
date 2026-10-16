@@ -111,7 +111,7 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
             live: (await registerLiveCarriers(spy, { sourceId: b.sourceId, request, claims })).map(f => f.field) };
         }, TEST_WRITE_ATTRIBUTION));
         report({ ...out, substring: statements.filter(st => /strpos\(/i.test(st.sql)).length,
-          claimParams: statements.filter(st => JSON.stringify(st.params).includes('needle claim')).length });
+          claimParams: statements.filter(st => JSON.stringify(st.params, (_k, v) => typeof v === 'bigint' ? String(v) : v).includes('needle claim')).length });
       }));
       expect(r).toEqual({ redacted: ['context'], live: ['context'], substring: 0, claimParams: 0 });
     }, 240_000);
