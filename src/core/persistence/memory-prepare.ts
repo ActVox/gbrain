@@ -7,7 +7,7 @@ import { pageIdentityError } from './page-identity.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { factsFenceSection, parseFactsFence, strikeFactRowInPage, upsertFactRow, formatFenceDate } from '../facts-fence.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
-import { assertInlineBody } from '../page-body/page-shape.ts';
+import { pageBodyOverCeilingError } from '../page-body/page-shape.ts';
 import { materializedPage, segmentedOverCeiling } from './segmented-apply.ts';
 import { assertFactNotWithdrawn, decideReplacement, decideSingleFact, prepareFactEmbedding, type SingleFactIntent } from '../facts/single-prepare.ts';
 import { factEmbeddingDisabled } from '../embedding-disabled.ts';
@@ -147,7 +147,7 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
   let fencesNormalized: Record<string, unknown> = {};
   if (p.fence === true && snapshot) {
     // Wave B: a segmented page is read back whole up to the single-string ceiling and rewritten through the put path.
-    if (segmentedOverCeiling(snapshot.page)) assertInlineBody(snapshot.page, 'remember facts fence write');
+    if (segmentedOverCeiling(snapshot.page)) throw pageBodyOverCeilingError(snapshot.page, 'remember facts fence write');
     const base = await materializedPage(engine, snapshot.page);
     // #6188 (D20): the stored fence is normalized in this same write; a residual refuses typed `target_fence_malformed`.
     const target = await normalizeTargetFences(engine, { sourceId: row.source_id, slug: row.slug, kind: 'facts', page: base });

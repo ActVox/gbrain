@@ -139,7 +139,7 @@ export function writeFailureDiagnostic(code: string, message?: string | null): {
 }
 
 const SEGMENTED_WRITE_MESSAGE = 'The target page stores its body in segments, and this write needs the whole body as one string; nothing was changed.';
-const SEGMENTED_WRITE_SUGGESTION = 'The target page is over 1 MiB and stores its body in segments, which this write cannot change yet, so retrying refuses the same way. '
+const SEGMENTED_WRITE_SUGGESTION = 'The target page stores its body in segments over the 24 MiB limit up to which this write reads the body whole, so retrying refuses the same way. '
   + 'For remember: save the claim without an entity (omit entity, infer_entity: false); it is filed under memory/unattributed, and remembering it with entity once that page accepts fact rows replaces that copy. '
   + "Read the page with get_page body: 'auto' or a window.";
 
@@ -149,13 +149,13 @@ export function segmentedRememberFix(): Action {
     mcp: { tool: 'remember', arguments: { fact: '<FACT>', provenance: '<PROVENANCE>', infer_entity: false } },
     inputs: [{ name: 'FACT', how: 'The claim you tried to remember, unchanged.' }, { name: 'PROVENANCE', how: 'The same provenance you passed.' }],
     consent: [], actor: 'agent', requires_exclusive: false,
-    why: "Saves the claim without an entity: the entity page's facts fence cannot take a row while its body is stored in segments. Remembering it with entity later replaces this copy." };
+    why: "Saves the claim without an entity: the entity page's facts fence cannot take a row while its body is stored in segments over 24 MiB. Remembering it with entity later replaces this copy." };
 }
 
 /** A `remember` whose entity (named or inferred) stores its body in segments: refused before admission with the unattributed-save fix. */
 export function segmentedRememberRefusal(slug: string, sourceId: string, inferred: boolean): OperationError {
   return opError('page_body_segmented',
-    `remember: the entity page ${slug} (source ${sourceId})${inferred ? ', inferred from a mention in the fact,' : ''} stores its body in segments, and remember cannot add a row to its facts fence yet. Nothing was saved.`,
+    `remember: the entity page ${slug} (source ${sourceId})${inferred ? ', inferred from a mention in the fact,' : ''} stores its body in segments over the 24 MiB limit up to which remember reads it whole, so remember cannot add a row to its facts fence. Nothing was saved.`,
     SEGMENTED_WRITE_SUGGESTION, { fix: segmentedRememberFix() });
 }
 
