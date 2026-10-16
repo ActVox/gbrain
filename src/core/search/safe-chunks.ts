@@ -1,5 +1,6 @@
 import type { ChunkInput, PageReadScope } from '../types.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
+import type { BrainEngine } from '../engine.ts';
 
 /** First markdown index built from the strict full-body fence sanitizer. */
 export const SAFE_FENCE_CHUNKER_VERSION = 4;
@@ -53,8 +54,11 @@ export function currentTextProjectionFilter(alias: string): string {
  * retirement) and rows of a preparation that never published are invisible
  * whether or not they were deleted yet. The manifest probe is one primary-key
  * lookup per segmented row; `page` must expose `body_storage` and `body_generation`.
+ * `manifest: false` (chunkManifestReads) drops the segmented branch, which then
+ * matches no row the reader can see.
  */
-export function chunkGenerationFilter(page: string, chunk: string): string {
+export function chunkGenerationFilter(page: string, chunk: string, manifest = true): string {
+  if (!manifest) return `(${chunk}.body_generation IS NULL AND ${page}.body_storage <> 'segmented')`;
   return `((${chunk}.body_generation IS NULL AND ${page}.body_storage <> 'segmented')
        OR (${chunk}.body_generation <= ${page}.body_generation
            AND EXISTS (SELECT 1 FROM page_body_manifest lm WHERE lm.page_id = ${chunk}.page_id AND lm.occurrence_id = ${chunk}.occurrence_id
@@ -62,8 +66,32 @@ export function chunkGenerationFilter(page: string, chunk: string): string {
 }
 
 /** `chunkGenerationFilter` for a statement that has no page row joined. */
-export function chunkGenerationProbe(chunk: string): string {
-  return `EXISTS (SELECT 1 FROM pages gp WHERE gp.id = ${chunk}.page_id AND ${chunkGenerationFilter('gp', chunk)})`;
+export function chunkGenerationProbe(chunk: string, manifest = true): string {
+  return `EXISTS (SELECT 1 FROM pages gp WHERE gp.id = ${chunk}.page_id AND ${chunkGenerationFilter('gp', chunk, manifest)})`;
+}
+
+const CHUNK_MANIFEST_ACCESS_SQL = `-- chunk-visibility-ok: whether any chunk row of a segmented body exists, no row is returned
+SELECT has_table_privilege('page_body_manifest', 'SELECT') AS readable,
+  NOT has_table_privilege('page_body_manifest', 'SELECT')
+    AND (EXISTS (SELECT 1 FROM content_chunks WHERE body_generation IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM content_chunks WHERE occurrence_id IS NOT NULL)) AS segmented`;
+const manifestReadable = new WeakSet<object>();
+
+/**
+ * Whether a read's chunk statements name `page_body_manifest`. Postgres checks the privilege on every relation a
+ * statement names, matched or not, so a role without SELECT on it (docs/ENGINES.md, "Segmented page tables") would
+ * fail every chunk read with 42501 although no page is segmented. True on PGLite, for a role that may read the
+ * manifest (kept per engine: a transaction clone probes again, so its SET LOCAL ROLE counts) and for a role that sees
+ * a chunk row of a segmented body (`body_generation` or `occurrence_id` set, both partial-indexed), which then gets
+ * 42501 as documented. Otherwise every chunk row the role sees is an inline row, and the manifest-free forms of
+ * chunkGenerationFilter, chunkGenerationProbe and chunkManifestJoin select exactly the rows the full forms would.
+ * `db` runs the probe: a scoped read passes its transaction, so the probe sees the rows that read sees.
+ */
+export async function chunkManifestReads(engine: Pick<BrainEngine, 'kind' | 'executeRaw'>, db: Pick<BrainEngine, 'executeRaw'> = engine): Promise<boolean> {
+  if (engine.kind !== 'postgres' || manifestReadable.has(engine)) return true;
+  const [access] = await db.executeRaw<{ readable: boolean; segmented: boolean }>(CHUNK_MANIFEST_ACCESS_SQL);
+  if (access?.readable) manifestReadable.add(engine);
+  return access?.readable === true || access?.segmented === true;
 }
 
 /**
@@ -80,8 +108,10 @@ export function chunkVisibleFilter(page: string, chunk: string): string {
 /**
  * The live manifest row of a segmented chunk (no row for an inline chunk), for
  * `chunkDocumentOrder`. LEFT JOIN text; `page` must expose `body_generation`.
+ * `readsManifest: false` (chunkManifestReads) joins no row, as for an inline chunk.
  */
-export function chunkManifestJoin(page: string, chunk: string, manifest: string): string {
+export function chunkManifestJoin(page: string, chunk: string, manifest: string, readsManifest = true): string {
+  if (!readsManifest) return `LEFT JOIN (SELECT NULL::bigint AS byte_start) ${manifest} ON false`;
   return `LEFT JOIN page_body_manifest ${manifest} ON ${chunk}.occurrence_id IS NOT NULL
        AND ${manifest}.page_id = ${chunk}.page_id AND ${manifest}.occurrence_id = ${chunk}.occurrence_id
        AND ${manifest}.staging_id IS NULL AND ${manifest}.gen_from <= ${page}.body_generation

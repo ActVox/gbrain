@@ -27,7 +27,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { SearchResult } from '../types.ts';
-import { chunkManifestJoin, chunkVisibleFilter } from './safe-chunks.ts';
+import { chunkManifestJoin, chunkManifestReads, chunkVisibleFilter } from './safe-chunks.ts';
 
 const COSINE_DEDUP_THRESHOLD = 0.85;
 const MAX_TYPE_RATIO = 0.6;
@@ -55,12 +55,13 @@ function pageKey(r: SearchResult): string {
  * than MAX_PER_PAGE (otherwise the region rule changes nothing); a failed
  * read leaves every page under the inline rule.
  */
-export async function segmentRegions(engine: Pick<BrainEngine, 'executeRaw'>, results: readonly SearchResult[]): Promise<Map<number, number>> {
+export async function segmentRegions(engine: Pick<BrainEngine, 'kind' | 'executeRaw'>, results: readonly SearchResult[]): Promise<Map<number, number>> {
   const counts = new Map<string, number>();
   for (const r of results) counts.set(pageKey(r), (counts.get(pageKey(r)) ?? 0) + 1);
   const ids = results.filter(r => counts.get(pageKey(r))! > MAX_PER_PAGE && r.chunk_id > 0).map(r => r.chunk_id);
   if (ids.length === 0) return new Map();
   try {
+    if (!await chunkManifestReads(engine)) return new Map();
     const rows = await engine.executeRaw<{ id: number; byte_start: number | string }>(`SELECT cc.id, m.byte_start FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id AND p.body_storage = 'segmented'
       ${chunkManifestJoin('p', 'cc', 'm')}

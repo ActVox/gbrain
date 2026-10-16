@@ -391,14 +391,14 @@ async function moveDisplacedChunksAndPrune(exec: SqlExecutor, pageId: number, ch
 function chunkReadWhere(
   slug: string,
   scope: { sourceIds?: string[]; sourceId: string },
-  opts?: { excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean },
+  opts?: { excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; chunkManifest?: boolean },
 ): SqlFragment {
   const scopeSql = scope.sourceIds
     ? sqlFragment`p.source_id = ANY(${scope.sourceIds}::text[])`
     : sqlFragment`p.source_id = ${scope.sourceId}`;
   return sqlFragment`p.slug = ${slug} AND ${scopeSql}
           ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
-          AND ${trustedSql(opts?.includeUnsealed ? chunkGenerationFilter('p', 'cc') : chunkVisibleFilter('p', 'cc'))}
+          AND ${trustedSql(opts?.includeUnsealed ? chunkGenerationFilter('p', 'cc', opts.chunkManifest ?? true) : chunkVisibleFilter('p', 'cc'))}
           ${requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``}`;
 }
 
@@ -407,7 +407,7 @@ export async function getChunks(
   column: string,
   slug: string,
   scope: { sourceIds?: string[]; sourceId: string },
-  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; indexRange?: { from: number; to: number; ordinal?: boolean } },
+  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; chunkManifest?: boolean; indexRange?: { from: number; to: number; ordinal?: boolean } },
 ): Promise<Chunk[]> {
       const colId = trustedSql(quoteIdentifier(column));
       const includeEmbedding = opts?.includeEmbedding === true;
@@ -430,7 +430,7 @@ export async function getChunks(
                ${embedCol}`;
       const from = sqlFragment`FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
-        ${trustedSql(chunkManifestJoin('p', 'cc', 'm'))}
+        ${trustedSql(chunkManifestJoin('p', 'cc', 'm', opts?.chunkManifest ?? true))}
         WHERE ${chunkReadWhere(slug, scope, opts)}`;
       const order = trustedSql(chunkDocumentOrder('cc', 'm'));
       const range = opts?.indexRange;
@@ -471,7 +471,7 @@ export async function getChunkPage(
   column: string,
   slug: string,
   scope: { sourceIds?: string[]; sourceId: string },
-  opts: { fromIndex: number; limit: number; excludePrivate?: boolean; requireSafeChunks?: boolean },
+  opts: { fromIndex: number; limit: number; excludePrivate?: boolean; requireSafeChunks?: boolean; chunkManifest?: boolean },
 ): Promise<{ chunks: Chunk[]; total_chunks: number; max_chunk_index: number | null }> {
       const { rows } = await exec.run<{ total: number | string; max_index: number | null; segmented: boolean | null; max_page_chunks: number | string | null }>(sqlFragment`
         SELECT COALESCE(sum(t.n), 0) AS total, max(t.max_index) AS max_index, bool_or(t.segmented) AS segmented, max(t.n) AS max_page_chunks
@@ -1038,7 +1038,7 @@ export async function getEmbeddingsByChunkIds(exec: LegacyUnscopedRead, ids: num
  * rows come back in one UNION so the row cap never hides a page's
  * authorization.
  */
-export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowRequest[], opts: ChunkWindowOpts): Promise<ChunkWindowPage[]> {
+export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowRequest[], opts: ChunkWindowOpts, chunkManifest = true): Promise<ChunkWindowPage[]> {
   if (requests.length === 0) return [];
   const maxRows = Math.max(0, Math.floor(opts.maxRows));
   const scopeSql = opts.sourceIds && opts.sourceIds.length > 0
@@ -1063,7 +1063,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
       SELECT cc.page_id, cc.id AS chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.projected_byte_start, cc.projected_byte_end, cc.occurrence_id, a.prio
         FROM auth a
         JOIN content_chunks cc ON cc.page_id = a.id
-       WHERE a.sealed AND ${trustedSql(chunkGenerationFilter('a', 'cc'))}
+       WHERE a.sealed AND ${trustedSql(chunkGenerationFilter('a', 'cc', chunkManifest))}
          AND cc.chunk_source = ANY(${opts.chunkSources}::text[])
          AND COALESCE(cc.modality, 'text') = 'text'
          AND EXISTS (SELECT 1 FROM req r WHERE r.page_id = cc.page_id AND cc.chunk_index BETWEEN r.lo AND r.hi)
@@ -1071,7 +1071,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
        LIMIT ${maxRows + 1}
     )
     SELECT 'page' AS kind, a.id AS page_id, a.slug, a.source_id, a.type, a.revision, a.sealed, a.segmented, a.prio,
-           (SELECT MAX(c2.chunk_index) FROM content_chunks c2 WHERE c2.page_id = a.id AND ${trustedSql(chunkGenerationFilter('a', 'c2'))}) AS max_chunk_index,
+           (SELECT MAX(c2.chunk_index) FROM content_chunks c2 WHERE c2.page_id = a.id AND ${trustedSql(chunkGenerationFilter('a', 'c2', chunkManifest))}) AS max_chunk_index,
            a.compiled_truth, a.timeline,
            NULL::int AS chunk_id, NULL::int AS chunk_index, NULL::text AS chunk_text, NULL::text AS chunk_source,
            NULL::bigint AS projected_byte_start, NULL::bigint AS projected_byte_end, NULL::bigint AS occurrence_id
