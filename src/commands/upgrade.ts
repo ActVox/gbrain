@@ -186,7 +186,10 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
 
   if (!upgraded) {
     console.log('Binary: upgrade failed');
-    writeSwapReceipt({ outcome: 'not_installed', from: oldVersion, installed: null });
+    // #6828: an install step can fail after replacing files, so only a probe
+    // that still reads the old version proves nothing was installed.
+    const observed = verifyUpgrade();
+    if (observed && observed === oldVersion) writeSwapReceipt({ outcome: 'not_installed', from: oldVersion, installed: observed });
     return;
   }
   const newVersion = verifyUpgrade();

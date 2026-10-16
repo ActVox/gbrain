@@ -468,7 +468,7 @@ export async function attemptAutopilotSelfUpgrade(
     });
     // #5855: never swap in a release the host's Bun cannot start (a binary carries its own Bun).
     if (decision.action === 'apply' && installMethod !== 'binary') {
-      decision = gateOnTargetRuntime(decision, await readInstallTargetFloor(installMethod), readHostBun());
+      decision = gateOnTargetRuntime(decision, await readInstallTargetFloor(installMethod), readHostBun(), cfg.self_upgrade?.failed_versions);
     }
 
     if (decision.action !== 'apply') {

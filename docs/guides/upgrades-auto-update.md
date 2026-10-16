@@ -139,7 +139,12 @@ head is already installed), it prints `No newer version was installed`, keeps
 marker. The `auto` channel then stays up instead of exiting for a relaunch,
 clears its breadcrumb, records no known-bad version, audits the attempt as
 `skipped` (`nothing newer was installed`) and tries again after 24 hours
-(`self_upgrade.last_check_ts`). A version is recorded known-bad only when it
+(`self_upgrade.last_check_ts`). The channel confirms a swap from a receipt
+`gbrain upgrade` writes, or from `gbrain --version` when there is none; a
+swap that exits 0 with no newer version confirmed is held the same way, never
+relaunched. It also checks the version the install would actually get (a
+bun-link clone follows master, a moving tag can pass the checked version)
+against the known-bad list before swapping. A version is recorded known-bad only when it
 was installed and then failed (the post-swap `gbrain --help` smoke, or a
 relaunch that did not come up on it), under the version actually installed.
 
@@ -159,11 +164,17 @@ gbrain self-upgrade --clear-never-installed --apply    # removes exactly the lis
 gbrain doctor --only self_upgrade_health --json        # verify
 ```
 
-An entry is listed only when the self-upgrade audit proves it was never
-installed: every failure recorded for it is a `swapped` row followed by a
-`crash-on-launch` row that ran the same version, no audit row ever ran the
-version, and `upgrade-state.json` does not name it as the last version
-installed. Anything else stays known-bad. Nothing is rewritten during an
+An entry is listed only when it is proven never installed. The audit rows
+alone are not proof, because a release that installed, crashed before its
+first boot finished, and was rolled back by hand leaves the same rows. The proof
+is the record the no-op swap wrote itself: `last_upgrade` in
+`upgrade-state.json` with the same version as `from` and `to`, timestamped
+inside that entry's swap (between its apply row and its `swapped` row), plus
+exactly one recorded failure for the entry, a `crash-on-launch` row on the
+version that ran the swap, and no audit row that ever ran the entry's version.
+Each swap overwrites `last_upgrade`, so only the most recent no-op can be
+proven; an older entry stays listed as kept, and you clear it by hand as below
+once you have confirmed it. Anything else stays known-bad. Nothing is rewritten during an
 upgrade. `gbrain config set self_upgrade.failed_versions '["<version>"]'` puts
 an entry back. On a release that does not have this command, read the list
 with `gbrain config get self_upgrade.failed_versions`, confirm the entry was

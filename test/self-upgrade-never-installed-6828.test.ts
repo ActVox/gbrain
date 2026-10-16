@@ -39,41 +39,52 @@ function noOpSwapRows(running: string, attempted: string, hour: number) {
   ];
 }
 
+/** The last_upgrade record a pre-fix no-op swap wrote between its apply row and its swapped row. */
+const noOpRecord = (running: string, hour: number) => ({ from: running, to: running, ts: `2026-10-16T0${hour}:01:30.000Z` });
+
 describe('neverInstalledFailedVersions (pure)', () => {
-  test('the #6828 field sequences: both never-installed entries are proven', () => {
+  test('the #6828 field sequences: the entry is proven by the no-op swap\'s own last_upgrade record', () => {
     const events = [
       ...noOpSwapRows(A, B, 5),
       // The operator cleared B; B really installed and ran, then the same defect hit C.
       { ts: '2026-10-16T05:28:16.000Z', channel: 'autopilot', action: 'apply', current: B, latest: B, outcome: 'applied', reason: 'running version is at or past the attempted version' },
       ...noOpSwapRows(B, C, 6),
     ];
-    expect(neverInstalledFailedVersions([C], events, B)).toEqual([
+    expect(neverInstalledFailedVersions([C], events, noOpRecord(B, 6))).toEqual([
       { version: C, running: B, swapped_at: '2026-10-16T06:02:00.000Z', recorded_at: '2026-10-16T06:03:00.000Z' },
     ]);
-    // B ran (an audit row has current = B), so an entry for it is never cleared here.
-    expect(neverInstalledFailedVersions([B, C], events, B).map((e) => e.version)).toEqual([C]);
-    expect(neverInstalledFailedVersions([B], noOpSwapRows(A, B, 5), A).map((e) => e.version)).toEqual([B]);
+    // B ran (an audit row has current = B), so an entry for it is never cleared.
+    expect(neverInstalledFailedVersions([B, C], events, noOpRecord(B, 6)).map((e) => e.version)).toEqual([C]);
+    expect(neverInstalledFailedVersions([B], noOpSwapRows(A, B, 5), noOpRecord(A, 5)).map((e) => e.version)).toEqual([B]);
+  });
+
+  test('a release that installed and crashed before its boot reconcile stays known-bad, even after a later no-op', () => {
+    // A -> B really installed (last_upgrade A -> B); B crashed before writing anything; the operator restored A,
+    // whose boot recorded B. A later no-op swap to C then overwrote last_upgrade with A -> A.
+    const events = [...noOpSwapRows(A, B, 5), ...noOpSwapRows(A, C, 6)];
+    expect(neverInstalledFailedVersions([B, C], events, noOpRecord(A, 6)).map((e) => e.version)).toEqual([C]);
+    expect(neverInstalledFailedVersions([B], noOpSwapRows(A, B, 5), { from: A, to: B, ts: '2026-10-16T05:01:30.000Z' })).toEqual([]);
   });
 
   test('anything unproven stays known-bad', () => {
     const rows = noOpSwapRows(A, B, 5);
-    // No audit at all.
-    expect(neverInstalledFailedVersions([B], [], null)).toEqual([]);
-    // The last recorded upgrade installed it.
-    expect(neverInstalledFailedVersions([B], rows, B)).toEqual([]);
+    const rec = noOpRecord(A, 5);
+    expect(neverInstalledFailedVersions([B], [], rec)).toEqual([]);
+    expect(neverInstalledFailedVersions([B], rows, null)).toEqual([]);
+    // The record is outside this entry's swap window (another swap wrote it).
+    expect(neverInstalledFailedVersions([B], rows, { ...rec, ts: '2026-10-16T05:03:30.000Z' })).toEqual([]);
     // The relaunch ran a different version than the swap (a rollback): not a no-op.
     const rollback = rows.map((e, i) => (i === 2 ? { ...e, current: '0.60.256.0' } : e));
-    expect(neverInstalledFailedVersions([B], rollback, null)).toEqual([]);
+    expect(neverInstalledFailedVersions([B], rollback, rec)).toEqual([]);
     // A swap that failed outright (the install step exited non-zero) proves nothing about the disk.
     const swapFailed = [rows[0], { ...rows[1], outcome: 'failed', reason: undefined, error: 'Command failed: gbrain upgrade --swap-only' }];
-    expect(neverInstalledFailedVersions([B], swapFailed, null)).toEqual([]);
-    // One proven no-op plus one unproven failure for the same version: keep it.
-    expect(neverInstalledFailedVersions([B], [...rows, ...swapFailed.map((e) => ({ ...e, ts: e.ts.replace('T05', 'T07') }))], null)).toEqual([]);
+    expect(neverInstalledFailedVersions([B], swapFailed, rec)).toEqual([]);
+    // A second failure for the same version: keep it.
+    expect(neverInstalledFailedVersions([B], [...rows, ...swapFailed.map((e) => ({ ...e, ts: e.ts.replace('T05', 'T07') }))], rec)).toEqual([]);
     // The crash-on-launch row with no swap row before it.
-    expect(neverInstalledFailedVersions([B], [rows[2]], null)).toEqual([]);
+    expect(neverInstalledFailedVersions([B], [rows[2]], rec)).toEqual([]);
   });
 });
-
 const UNPROVEN = '0.59.1.0';
 
 /** A home whose known-bad list holds B (the #6828 no-op) and an unproven entry, with the pre-fix audit rows. */
@@ -85,7 +96,7 @@ async function withRecoveryHome(fn: (ctx: { failedVersions: () => string[]; run:
       mkdirSync(join(dir, '.gbrain'), { recursive: true });
       writeFileSync(join(dir, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', self_upgrade: { mode: 'auto', failed_versions: [B, UNPROVEN] } }));
       // The no-op swap overwrote last_upgrade with A -> A.
-      writeFileSync(join(dir, '.gbrain', 'upgrade-state.json'), JSON.stringify({ last_upgrade: { from: A, to: A, ts: '2026-10-16T05:03:05.771Z' } }));
+      writeFileSync(join(dir, '.gbrain', 'upgrade-state.json'), JSON.stringify({ last_upgrade: { from: A, to: A, ts: '2026-10-16T05:01:30.000Z' } }));
       for (const row of noOpSwapRows(A, B, 5)) logSelfUpgrade(row as Parameters<typeof logSelfUpgrade>[0]);
       logSelfUpgrade({ ts: '2026-10-01T01:00:00.000Z', channel: 'autopilot', action: 'apply', current: '0.59.0.0', latest: UNPROVEN, outcome: 'failed', error: 'Command failed: gbrain upgrade --swap-only' });
       await fn({

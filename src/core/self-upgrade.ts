@@ -188,14 +188,22 @@ export function decideSelfUpgrade(inp: DecideSelfUpgradeInputs): SelfUpgradeDeci
  * startup (the relaunched daemon included, before it can reconcile the
  * breadcrumb) and an unattended host has nothing that upgrades Bun (#5855).
  * The target is NOT recorded known-bad, so the first tick after the cause
- * clears applies it. Pure.
+ * clears applies it. #6828: the version the install would actually get (a
+ * bun-link clone follows master, a moving tag can pass the checked version)
+ * is also checked against `failedVersions`, so a release recorded known-bad
+ * under its installed version is not reinstalled while the check names
+ * another one. Pure.
  */
 export function gateOnTargetRuntime(
   decision: SelfUpgradeDecision,
   target: TargetFloor,
   host: HostBun | null,
+  failedVersions: readonly string[] = [],
 ): SelfUpgradeDecision {
   if (decision.action !== 'apply') return decision;
+  if (target.version && target.version !== decision.latest && failedVersions.includes(target.version)) {
+    return { ...decision, action: 'known_bad', reason: `the install would get ${target.version}, which previously failed; not retrying` };
+  }
   const verdict = evaluateBunFloor(target, host, decision.latest);
   if (verdict.ok) return decision;
   const retry = verdict.kind === 'unreadable' ? ' The next quiet-hours tick retries.' : '';

@@ -226,12 +226,64 @@ describe('#6828: auto-update while master is ahead of latest-stable', () => {
     expect(tick.audit.at(-1)).toMatchObject({ action: 'apply', outcome: 'failed', latest: MASTER_AHEAD });
   }, 90_000);
 
-  test('a real swap still exits for relaunch and the relaunched binary confirms it', async () => {
+  test('a real swap still exits for relaunch with the breadcrumb on the installed version', async () => {
     const h = harness('real', { cache: `UPGRADE_AVAILABLE ${VERSION} ${MASTER_AHEAD}` });
     const tick = await run(h, h.driver, { FAKE_TARGET_VERSION: MASTER_AHEAD, FAKE_INSTALLED_VERSION: MASTER_AHEAD });
     expect(tick.out).toContain('EXIT_CALLED 0');
     expect(tick.su.attempting_version).toBe(MASTER_AHEAD);
     expect(tick.upgradeState).toBe(true);
     expect(tick.audit.at(-1)).toMatchObject({ action: 'apply', outcome: 'applied', reason: 'swapped; exiting for supervisor relaunch' });
+  }, 90_000);
+});
+
+describe('#6828 review replays', () => {
+  const setConfig = (h: Harness, patch: Record<string, unknown>) => {
+    const p = join(h.home, '.gbrain', 'config.json');
+    const cfg = JSON.parse(readFileSync(p, 'utf8'));
+    cfg.self_upgrade = { ...cfg.self_upgrade, ...patch };
+    writeFileSync(p, JSON.stringify(cfg));
+  };
+
+  test('a swap whose receipt cannot be written is confirmed by the installed version: a no-op still holds', async () => {
+    const h = harness('no-receipt', { cache: `UPGRADE_AVAILABLE ${VERSION} ${MASTER_AHEAD}` });
+    // A directory where the receipt goes: the swap cannot write it and the channel cannot read one.
+    mkdirSync(join(h.home, '.gbrain', 'swap-receipt.json'));
+    const tick = await run(h, h.driver, { FAKE_TARGET_VERSION: MASTER_AHEAD });
+    expect(tick.calls).toContain('bun update gbrain');
+    expect(tick.out).not.toContain('EXIT_CALLED');
+    expect(tick.su.attempting_version).toBeUndefined();
+    expect(tick.su.failed_versions).toBeUndefined();
+    expect(tick.audit.at(-1)).toMatchObject({ action: 'apply', outcome: 'skipped', latest: MASTER_AHEAD });
+    const boot = await run(h, h.bootDriver);
+    expect(boot.su.failed_versions).toBeUndefined();
+  }, 90_000);
+
+  test('the no-op throttle expires after 24 hours', async () => {
+    const h = harness('throttle', { cache: `UPGRADE_AVAILABLE ${VERSION} ${MASTER_AHEAD}` });
+    setConfig(h, { last_check_ts: Date.now() - 25 * 60 * 60 * 1000 });
+    const tick = await run(h, h.driver, { FAKE_TARGET_VERSION: MASTER_AHEAD });
+    expect(tick.calls).toContain('bun update gbrain');
+    setConfig(h, { last_check_ts: Date.now() - 23 * 60 * 60 * 1000 });
+    const held = await run(h, h.driver, { FAKE_TARGET_VERSION: MASTER_AHEAD });
+    expect(held.calls.filter((c) => c === 'bun update gbrain')).toHaveLength(1);
+  }, 90_000);
+
+  test('the version the install would get is checked against known-bad, not only the checked version', async () => {
+    const delivered = `${v[0]}.${v[1]}.${v[2] + 2}.0`;
+    const h = harness('gate-installed', { cache: `UPGRADE_AVAILABLE ${VERSION} ${MASTER_AHEAD}` });
+    setConfig(h, { failed_versions: [delivered] });
+    const tick = await run(h, h.driver, { FAKE_TARGET_VERSION: delivered });
+    expect(tick.calls.filter((c) => c === 'bun update gbrain')).toEqual([]);
+    expect(tick.audit.at(-1)).toMatchObject({ action: 'known_bad', outcome: 'skipped', latest: MASTER_AHEAD });
+    expect(tick.audit.at(-1).reason).toContain(delivered);
+  }, 90_000);
+
+  test('a failure under a different installed version throttles and drops the update cache', async () => {
+    const delivered = `${v[0]}.${v[1]}.${v[2] + 2}.0`;
+    const h = harness('fail-other', { cache: `UPGRADE_AVAILABLE ${VERSION} ${MASTER_AHEAD}` });
+    const tick = await run(h, h.driver, { FAKE_TARGET_VERSION: MASTER_AHEAD, FAKE_INSTALLED_VERSION: delivered, FAKE_HELP_EXIT: '1' });
+    expect(tick.su.failed_versions).toEqual([delivered]);
+    expect(typeof tick.su.last_check_ts).toBe('number');
+    expect(tick.cache).toBeNull();
   }, 90_000);
 });
