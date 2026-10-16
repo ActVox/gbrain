@@ -592,7 +592,7 @@ through `gbrain sources refresh <source>`, the drained worktree-wide fast-forwar
 which runs inside a resident PGLite owner such as `gbrain serve` when one holds the brain;
 see [worktree refresh refusals](../guides/write-refusals.md#worktree-refresh-refusals)) and refuses `--skip-failed` and
 `--include-gitignored`; after fixing a failed item run
-`gbrain sync --no-pull --retry-failed` with the same source and options. Resume
+the plain `gbrain sync --no-pull` with the same source and options (`--retry-failed` is a deprecated alias of it on a managed brain). Resume
 autopilot with `gbrain autopilot resume` and re-enable the hooks you stopped.
 
 When activation refuses with `writer_not_quiesced` because of queued work, the
@@ -638,7 +638,7 @@ runbook above.
 3. Dry run: `gbrain sources writer deactivate --dry-run`. It lists each blocker
    with its exit and what would change, and changes nothing. Blocker exits:
    `gbrain cancel-write-request <request_id>` for a queued write,
-   `gbrain sync --source <id> --no-pull --retry-failed` for one that needs
+   `gbrain sync --source <id> --no-pull` for one that needs
    recovery, `gbrain repair embedding-effects --source <id>` for a stuck
    embedding effect, `gbrain sources writer retry-effects <source> --request-id <id> --dry-run`
    for a failed Git or withdrawal effect, and `gbrain sources writer unlock` for
