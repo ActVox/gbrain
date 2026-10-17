@@ -287,8 +287,11 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     const rel = relative(root, path).split(sep).join('/');
     if (matchesAnyGlob(rel, options.excludeTombstone.patterns)) { options.excludeTombstone.onExcluded(rel); return undefined; }
   }
-  // A prior file over the single-string ceiling is read on demand in pieces (large-file.ts), never whole.
-  const before: Buffer | FileBytes | null = !existsSync(path) ? null : statSync(path).size > LARGE_FILE_MIN_BYTES ? FileBytes.open(path) : readFileSync(path);
+  // A prior file over the single-string ceiling is read on demand in pieces (large-file.ts), never whole; so is the file
+  // of a page stored in segments, or of a streamed target, at any size (its comparison reads it piecewise anyway).
+  const piecewise = (snapshot && bodyUnread(snapshot.page)) || (content !== null && isStreamedContent(content));
+  const before: Buffer | FileBytes | null = !existsSync(path) ? null
+    : piecewise || statSync(path).size > LARGE_FILE_MIN_BYTES ? FileBytes.open(path) : readFileSync(path);
   try {
     return await compareFileTarget(engine, row, snapshot, content, options, { root, path, mode, capturedPath, before });
   } finally { if (before instanceof FileBytes) before.close(); }
