@@ -23,7 +23,8 @@ import type { PassStamp, SyncCursorOptions } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
-import { passIdleProbe, readShadowLevel, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
+import { passIdleProbe, readShadowLevel, workingIdleChange, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
+import { recallWorkingStatCache, rememberWorkingStatCache } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
 import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, type PassEntry } from './sync-pass-batch.ts';
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
@@ -237,19 +238,22 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     readSyncTail(engine, sourceId), readGitHoldRetryPaths(engine, sourceId, incarnation), readGitSourceHolds(engine, { sourceIds: [sourceId] })]);
   assertActive();
   const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
+  // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
+  const cacheKey = passFingerprint(sourceId, incarnation);
+  const working = mode === 'working' && converged ? await workingIdleChange(context, recallWorkingStatCache(cacheKey)) : { changed: mode === 'working', cache: null };
   const kindOf = syncPassKind({ converged: converged ? { target: converged.target, parserFp: converged.parser_fp, pack: converged.pack, selectionFp: converged.selection_fp,
       passesSinceFull: converged.passes_since_full, lastFullAt: Date.parse(converged.last_full_at) } : null,
     head, parserFp, pack, selectionFp, now: started, openEpisode: !!episode, owedTail: tail !== null, retryRow: retry.length > 0,
     notConvergedStreak: obligations.not_converged_streak, mismatchStreak: Object.keys(obligations.mismatch).length,
     requestNewer: probe?.newer === true, openAtStampFinished: !!converged && (converged.open_at_stamp === null || (probe?.stillOpen ?? 0) < converged.open_at_stamp.length),
-    // Lane W ships the working-mode stat cache; until then a working pass always reads the level.
-    workingChange: mode === 'working', rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
+    workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
   const kind: PassKind = admission === 'classify_only' && kindOf.kind === 'idle' ? 'idle' : kindOf.kind;
   const value: ManagedSyncPassValue = { source_id: sourceId, incarnation, lease_token: lease.token, obligations,
     telemetry: { pass_id: passId, target: head, started_at: startedAt, ended_at: null, kind, round: 0, outcome: 'open', stop_reason: null, candidates: 0, settled: 0, remaining: 0,
       counts: {}, duration_ms: null, timings_ms: {} } };
   const bootstrap = !prior;
 
+  if (kind === 'idle' && working.cache) rememberWorkingStatCache(cacheKey, working.cache);
   if (kind === 'idle') {
     // Master's up_to_date (a complete check that found nothing): only last_sync_at, plus the pass row's count.
     const at = new Date().toISOString();
@@ -276,6 +280,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const sliceBase = { started: performance.now(), pages: 0 };
   let batchNo = 0, waits = 0, candidatesFirst = 0;
   let lastMismatch: ShadowPath[] = [];
+  let lastLevel: ShadowLevel | null = null;
+  const rememberLevel = () => { if (lastLevel?.workingCache) rememberWorkingStatCache(cacheKey, lastLevel.workingCache); };
 
   const save = async (outcome: PassOutcome, stopReason: string | null) => {
     const ended = outcome !== 'open';
@@ -326,6 +332,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       levelSlugMode = level.slugMode;
+      lastLevel = level;
       value.telemetry.timings_ms = level.timings_ms;
       if (bootstrap && round === 1) await writeLegacyMarkers(engine, level);
       const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
@@ -374,6 +381,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
             value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts } };
             await writePassRow(tx, value);
           }, principalAttribution(authority.writer.principal)));
+          rememberLevel();
           await clearPassFailures(engine, sourceId, incarnation);
           return { ...result('up_to_date'), fromCommit: remote ? null : head };
         }
@@ -385,6 +393,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         const stopped = await drain([], stamp);
         if (stopped) return stop(stopped);
         value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: configured ? null : 'selection_scoped', remaining: 0 };
+        rememberLevel();
         await clearPassFailures(engine, sourceId, incarnation);
         return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
       }

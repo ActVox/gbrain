@@ -33,7 +33,7 @@ import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHo
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { syncOriginPath } from './sync-origin.ts';
-import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeEntry } from './sync-git-stream.ts';
+import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, workingChanged, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
@@ -77,6 +77,8 @@ export interface ShadowLevel {
   selection: SyncSelection;
   /** Re-screen-due hold paths (Git-root paths): a hold-only round's candidates. */
   rescreenDue: string[];
+  /** Working mode: the stat cache this round's rehash left (`hashWorkingLevel`); the stamp's round is the one a pass remembers. */
+  workingCache: WorkingStatCache | null;
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
   reconcilable: number;
   timings_ms: Record<string, number>;
@@ -198,6 +200,19 @@ function revParse(gitRoot: string, rev: string): string | null {
   return out.ok ? out.stdout.toString('utf8').trim() || null : null;
 }
 
+/**
+ * #6712 PR 4b (design v3.2 §2.2): a working-mode idle tick's check. Every path the cache vouches for, plus `U` (untracked)
+ * and the index's paths in scope, is re-stat'd (`workingChanged`); no cache (a cold process) reads as changed.
+ */
+export async function workingIdleChange(context: Pick<ManagedSyncContext, 'root' | 'gitRoot'>, cache: WorkingStatCache | null): Promise<{ changed: boolean; cache: WorkingStatCache | null }> {
+  if (!cache) return { changed: true, cache: null };
+  const scope = relative(realpathSync.native(context.gitRoot), realpathSync.native(context.root)).split(sep).join('/');
+  const [untracked, index] = await Promise.all([readUntracked(context.gitRoot, scope), readIndexLevel(context.gitRoot)]);
+  const inScope = (path: string) => !scope || path.startsWith(`${scope}/`);
+  const checked = workingChanged(cache, [...untracked, ...[...index.keys()].filter(inScope)]);
+  return { changed: checked.cache === null || checked.changed.length > 0, cache: checked.cache };
+}
+
 /** Working mode's `U`: untracked, not ignored files (index and exclude files only; no worktree conversion). */
 async function readUntracked(gitRoot: string, scope: string): Promise<string[]> {
   const paths: string[] = [];
@@ -315,7 +330,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
 
   // Working mode rehashes every path (the full round's unconditional rehash); committed mode probes candidates only.
   t = timer();
-  const probes = mode === 'working' ? (await hashWorkingLevel(root, gitRoot, [...domain], tree)).probes : new Map();
+  const hashed = mode === 'working' ? await hashWorkingLevel(root, gitRoot, [...domain], tree) : null;
+  const probes = hashed?.probes ?? new Map();
   timings.Dp = t();
 
   const levelOf = (path: string, probe: { dp: string; rawOid: string | null } | undefined): string | null => {
@@ -428,7 +444,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
-    rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)) };
+    rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
 }
 
 /** `workingTreeFilePresent` (sync-discovery.ts) for a Git-root path: a file that exists, or one that cannot be read (fail closed). */
