@@ -7,7 +7,10 @@
  *    applies: its page is above the inline bound (budgetRowAppliesFilter). Rows
  *    on large inline and segmented pages count; rows on pages that shrank to
  *    the bound or under (inline, still segmented inside the demotion
- *    hysteresis, or demoted) and on pages exactly at the bound do not.
+ *    hysteresis, or demoted) and on pages exactly at the bound do not. The
+ *    size check reads only TOAST size headers, never a page body (the work
+ *    count below). The list still includes embed_skip pages and pages with no
+ *    pending chunks, which the count leaves out; the fixture has neither.
  * 2. Fails when: either side applies a held row the other skips, so doctor
  *    reports held pages `gbrain embed --held` cannot list, or the reverse.
  * 3. Why existing coverage misses it: held-budget-shrink.test.ts checks the

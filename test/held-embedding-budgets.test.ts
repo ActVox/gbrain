@@ -154,7 +154,8 @@ for (const backend of testBackends()) {
         get(target, key) {
           if (key === 'executeRaw') {
             return async (sql: string, params?: unknown[], opts?: unknown) => {
-              if (/octet_length\(p\.compiled_truth\)/.test(sql)) await new Promise(r => setTimeout(r, 1500));
+              // The held count's size check reads only TOAST size headers; held-budget-count-list.test.ts's 0-TOAST-block work count is the direct guard that partial_embedding never reads bodies.
+              if (/octet_length\(p\.compiled_truth\)/.test(sql) && !/page_embedding_budget/.test(sql)) await new Promise(r => setTimeout(r, 1500));
               return target.executeRaw(sql, params, opts as never);
             };
           }
