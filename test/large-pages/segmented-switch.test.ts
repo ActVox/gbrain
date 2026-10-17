@@ -43,10 +43,10 @@ async function storage(engine: BrainEngine, slug: string): Promise<string | unde
   return (await engine.executeRaw<{ body_storage: string }>('SELECT body_storage FROM pages WHERE slug=$1', [slug]))[0]?.body_storage;
 }
 
-test('SEGMENTED_WRITER_FLOOR is the release of the switch-on BEHAVIOR_CHANGES row once stamped, and never above this build', () => {
+test('SEGMENTED_WRITER_FLOOR is this build\'s VERSION until the stamp, then the release of the switch-on BEHAVIOR_CHANGES row, and never above this build', () => {
   const row = BEHAVIOR_CHANGES.find(c => typeof c.text === 'string' && c.text.startsWith('Pages over 1 MiB are now stored in segments'));
   expect(row).toBeDefined();
-  if (row!.since !== 'TBD') expect(row!.since).toBe(SEGMENTED_WRITER_FLOOR);
+  expect(row!.since === 'TBD' ? VERSION : row!.since).toBe(SEGMENTED_WRITER_FLOOR);
   expect(compareWriterVersions(SEGMENTED_WRITER_FLOOR, VERSION)).toBeLessThanOrEqual(0);
 });
 

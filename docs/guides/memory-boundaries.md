@@ -153,14 +153,17 @@ files that is only the file at its own place in the checkout, which gbrain
 never rewrites; a database-only source takes it by `gbrain import`.
 
 The switch stays off while an older gbrain writes to the same brain: a
-writer older than the release that turned it on, or one that stamps no
-version, that admitted or published a managed write in the last 7 days keeps
-new pages inline, even when the setting is `on`. `gbrain doctor` check
-`segmented_storage` shows the configured and effective value and names each
-blocking host by UUID. Run `gbrain upgrade` there; the hold clears 7 days
-after that writer's last write. An older binary that writes without managed
-persistence (a classic brain shared by several hosts) is not detected, so
-upgrade every host before writing pages over 1 MiB.
+gbrain older than the release that turned it on by default (v0.60.290.0
+included), or one that stamps no version, that in the last 7 days admitted or
+published a managed write, logged an import, sync or connector run, or ran a
+resident process keeps new pages inline, even when the setting is `on`.
+`gbrain doctor` check `segmented_storage` shows the configured and effective
+value and names each blocking host by UUID. Run `gbrain upgrade` there; the
+hold clears 7 days after that writer's last write. An older binary's
+single-page write on a brain without managed persistence (a classic brain
+shared by several hosts) is not detected: upgrade every host that writes to
+such a brain, or run `gbrain config set pages.segmented_storage off` until
+they are upgraded.
 
 <a id="segmented-searchable"></a>
 **When a segmented write is searchable.** The receipt of a write that stores a
