@@ -58,7 +58,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
-import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
+import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
 import { receiptClass, recordedStop, replaysContentRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
@@ -1195,18 +1195,11 @@ async function cursorMovedAdmission(engine: BrainEngine, key: string, admitting:
   throw error;
 }
 
-/**
- * The result of a committed checkpoint. #6278 (B7): `sources retry-held` schedules re-screens that only discovery honours,
- * and a cursor discovered before them (a backlog the retry was scheduled against, or a run the retry overlapped) never sees
- * them, so the pass yields (`writer_yield`, as at a slice boundary) and the drain's next pass retires the finished cursor and
- * discovers again, taking them; a single-pass caller re-enters the same way.
- */
-async function finishCheckpoint(engine: BrainEngine, key: string, cursor: Cursor, company: boolean, assertActive: () => void): Promise<SyncResult> {
+/** The result of a committed company checkpoint (a non-company source's `sources retry-held` re-screens are a pass's hold rounds). */
+async function finishCheckpoint(engine: BrainEngine, key: string, cursor: Cursor, assertActive: () => void): Promise<SyncResult> {
   await clearManagedSyncFailureAfterSuccess(engine, key);
   assertActive();
-  const scheduled = company ? [] : await readGitHoldRetryPaths(engine, cursor.sourceId, cursor.incarnation);
-  assertActive();
-  return scheduled.length ? result(cursor, 'partial', 'writer_yield') : result(cursor, cursor.from === null ? 'first_sync' : 'synced');
+  return result(cursor, cursor.from === null ? 'first_sync' : 'synced');
 }
 /** What the hold report needs from a managed run: its source, cursor and authority. */
 interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boolean; cursor?: () => Cursor | CursorHeader | null }
@@ -1455,7 +1448,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           if (!cursor?.done) throw syncRunRefusal('storage_error', 'Committed sync checkpoint lost its cursor.',
             { sourceId: context.sourceId, processingOptions: pending.intent.processingOptions, syncOptions: pending.intent.syncOptions ?? syncOptions, repoPath: pending.intent.repoPath ?? frozenRun.repoPath },
             `The final checkpoint request ${pending.requestId} of this sync committed, but its cursor could not be read back to finish the run.`);
-          finishing(cursor); return finishCheckpoint(engine, key, cursor, !!company, assertActive);
+          finishing(cursor); return finishCheckpoint(engine, key, cursor, assertActive);
         }
         // The frozen manifest is shared; only the cursor header changes per page.
         const next: Cursor = committedPast({ ...cursor, ...committedBreaker(cursor), counts: { ...cursor.counts }, progress: stampProgress(cursor.progress, cursor.index, cursor.index + 1, drainStartedAt) }, pending);
