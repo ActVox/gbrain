@@ -1895,7 +1895,9 @@ hold; incremental sync never revisits it. The
 maintenance phase `unindexed_files` finds such files (bounded, never
 clean while incomplete) and schedules a re-screen; doctor
 `unindexed_files` reports them. Run `gbrain sources retry-held <id> --unindexed`, then the sync it prints: each file imports or becomes a
-[hold](#held-files). `slug_taken` stays until one of the two files is renamed.
+[hold](#held-files). `slug_taken` (the path slug belongs to another page) and `deleted_page`
+(the page was deleted while the file stayed committed) are never scheduled:
+rename one of the two files, or delete the file or restore the page.
 `metafile_skipped` (never scheduled) lists titled scaffolding files sync skips
 on purpose (`index.md`, `README.md`, ...): rename one
 (`investors/fund-a/index.md` to `investors/fund-a.md`), commit and sync.

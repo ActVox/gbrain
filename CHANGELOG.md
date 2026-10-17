@@ -31,8 +31,8 @@ Hold messages now say what gbrain actually found: "decide which page keeps the s
 
 ### Things to watch
 
-- The sync edits at most 200 files and spends at most 60 seconds per run; the rest wait for the next sync. Nothing runs at upgrade.
-- To see what it would do first: `gbrain repair content --source <id> --no-llm` (read-only). To turn it off: `gbrain config set sync.slug_conflicts.auto_remove false` (or pause the whole content-repair lane with `fences.repair.enabled false`). To undo one edit: `git revert` its commit and sync, which holds the file again.
+- The sync looks at at most 200 held files and spends at most 60 seconds per run; the rest wait for the next sync. A hold the content-repair lane has already judged is left to the lane. Nothing runs at upgrade.
+- To see what it would do first: `gbrain repair content --source <id> --no-llm` (read-only). To turn it off: `gbrain config set sync.slug_conflicts.auto_remove false` (or pause the whole content-repair lane with `fences.repair.enabled false`). To undo one edit: `git revert` its commit and sync, which holds the file again; the alias stays, so the restored line then names the file's own page and needs a hand edit.
 - Before you upgrade, `gbrain sync unblock --source <id> --apply` or `gbrain repair content --source <id>` removes the same lines by hand.
 
 ## To take advantage of v0.60.271.0
@@ -61,14 +61,16 @@ Hold messages now say what gbrain actually found: "decide which page keeps the s
 
 #### Sync-time removal of stray `slug:` lines
 
-- `src/core/repair/slug-autoheal.ts` `healAfterManagedSync` runs once per managed sync from `commands/sync/perform.ts` `performManagedBranch`, after the drain lease is released. It applies only the content-repair lane's deterministic `absent_page` rule (`healAbsentSlugLine` in `repair/slug-conflicts.ts`), bound to the held bytes (`changed_since_hold`) and skipped for a busy path, through the same coordinated `submitManagedFileRepair` write the maintenance run uses.
+- `src/core/repair/slug-autoheal.ts` `healAfterManagedSync` runs once per managed sync from `commands/sync/perform.ts` `performManagedBranch`, after the drain lease is released. It applies only the content-repair lane's deterministic `absent_page` rule (`healAbsentSlugLine` in `repair/slug-conflicts.ts`), bound to the held bytes (`changed_since_hold`) and skipped for a busy path, through the same coordinated `submitManagedFileRepair` write the maintenance run uses. Inside that write the declared slug is checked again: a page, an alias of another page or a file at its path written since the heal read the source refuses it (`changed_since_preview`). Only holds without a current-lane verdict for their bytes are examined.
+- The declared slug is the YAML scalar the import reads (a trailing comment, quoting and escapes resolved), for the sync-time heal and the maintenance lane alike.
 - The declared slug is recorded as a `slug_aliases` row inside that write (`recordSlugLineAlias`, `page-state/rename-alias.ts`); the receipt carries `declared_alias`.
 - Skip reasons on `SyncResult.slug_lines_removed`: `disabled`, `lane_paused`, `remote_authority`, `sync_unfinished`, `not_writable`. Budget: `SLUG_HEAL_MAX_FILES` 200, `SLUG_HEAL_BUDGET_MS` 60 000.
 - `sync.slug_conflicts.auto_remove` (default on) is registered in `KNOWN_CONFIG_KEYS`; `gbrain config set` rejects values other than true/false.
 
 #### Unindexed files
 
-- `src/core/persistence/unindexed-files.ts` streams the last synced commit's tree (`git ls-tree`), filters it through discovery's own eligibility (`loadSyncEligibility`, now exported from `sync-discovery.ts`) and compares in batches against pages, holds and scheduled re-screens. Bounded by time and count with a resume cursor; an incomplete scan is never reported clean. Results live in `op_checkpoints` (op `unindexed-files`).
+- `src/core/persistence/unindexed-files.ts` streams the last synced commit's tree (`git ls-tree`), filters it through discovery's own eligibility (`loadSyncEligibility`, now exported from `sync-discovery.ts`) and compares in batches against pages, holds and scheduled re-screens. Bounded by time and count with a resume cursor (continued only while the target commit and eligibility are unchanged); blobs are screened in slices of at most 32 MiB with the deadline checked between them; an incomplete scan is never reported clean. Results live in `op_checkpoints` (op `unindexed-files`).
+- Files a re-screen cannot import are never scheduled: `slug_taken` (the path slug belongs to another page) and `deleted_page` (the page was deleted while the file stayed committed). Doctor names them read-only with a user fix (rename, delete or restore).
 - The maintenance cycle phase `unindexed_files` runs one bounded pass per managed Git source and schedules found files with `requestGitHoldRetry`; doctor `unindexed_files` judges the stored result without scanning; `gbrain sources retry-held <id> --unindexed` runs a pass now (`--dry-run` lists only). The scan never runs on the per-sync path.
 - `metafile_skipped` counts titled `isSyncMetafile` names (`index.md`, `README.md`, ...) that sync skips by design; read-only, never scheduled.
 

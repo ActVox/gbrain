@@ -149,6 +149,8 @@ export async function existingPageStopsAndAsks(databaseUrl?: string) {
     expect(verdict.human_reason).toContain('page `concepts/fund-c`');
     expect(verdict.human_reason).toContain('decide which page keeps the slug');
     for (const path of [DB_ONLY_HELD, FILE_HELD]) expect(read(root, path)).toBe(files[path]!);
+    const next = await sync(engine);
+    expect(next.slug_lines_removed).toMatchObject({ removed: 0, pending: 0, left_by_reason: { lane_verdict: 2 } });
   }, { databaseUrl, setup: plant(files, true) });
 }
 
@@ -200,5 +202,33 @@ export async function olderVerdictRecheckedAfterUpgrade(databaseUrl?: string) {
     expect(result.slug_lines_removed).toMatchObject({ removed: 1, removed_paths: [STRAY] });
     expect(await holds(engine)).toEqual([]);
     expect(read(root, STRAY)).not.toContain('slug: fund-a');
+  }, { databaseUrl, setup: plant({ [STRAY]: STRAY_BYTES }) });
+}
+
+/** The declared slug is the YAML scalar: a trailing comment does not hide an existing page, so the line stays held. */
+export async function commentedLineNamingPageStays(databaseUrl?: string) {
+  const bytes = '---\ntitle: Fund B notes\ntype: company\nslug: fund-b # the existing page\n---\nMore on Fund B.\n';
+  await managedBrain(async ({ engine, root }) => {
+    const result = await sync(engine);
+    expect(result.slug_lines_removed).toMatchObject({ removed: 0, failed: 0 });
+    expect(read(root, DB_ONLY_HELD)).toBe(bytes);
+    expect((await holds(engine)).map(hold => hold.path)).toEqual([DB_ONLY_HELD]);
+    expect(await engine.readPageSnapshot('fund-b-the-existing-page', { sourceId: 'default' })).toBeNull();
+  }, { databaseUrl, setup: plant({ [DB_ONLY_HELD]: bytes }, true) });
+}
+
+/** A file created at the declared slug's path after the heal read the checkout refuses the publication: nothing is edited. */
+export async function declaredSlugRecheckedAtPublication(databaseUrl?: string) {
+  await managedBrain(async brain => {
+    const { engine, root, ctx } = brain;
+    await heldWithHealOff(brain);
+    const run = (await absentSlugHealRun(engine, 'default', { embed: false }))!;
+    expect(run.slugs().has('fund-a')).toBe(false);
+    writeFileSync(join(root, 'fund-a.md'), '---\ntitle: Fund A\ntype: company\n---\nWritten while the heal ran.\n');
+    const outcome = await healAbsentSlugLine(ctx, run, STRAY);
+    expect(outcome).toMatchObject({ applied: false, reason: 'changed_since_read' });
+    expect(read(root, STRAY)).toBe(STRAY_BYTES);
+    expect((await holds(engine)).map(hold => hold.path)).toEqual([STRAY]);
+    expect(await engine.executeRaw("SELECT 1 FROM slug_aliases WHERE source_id='default' AND alias_slug='fund-a'")).toEqual([]);
   }, { databaseUrl, setup: plant({ [STRAY]: STRAY_BYTES }) });
 }

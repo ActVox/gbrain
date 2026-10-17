@@ -206,6 +206,48 @@ test('a bounded scan that stops early is incomplete and never clean; later passe
   expect((await s.doctor()).details).toMatchObject({ sources: [{ state: 'scheduled', waiting: 1 }] });
 }), 240_000);
 
+test('slug collisions and deleted pages are reported for a person, never scheduled; syncs keep working and doctor does not warn', () => each(async engine => {
+  const s = await source(engine, { 'notes/a-b.md': note('AB'), 'notes/Case.md': note('Case'), 'notes/gone.md': note('Gone') });
+  await s.sync();
+  await unmanaged(engine, () => engine.executeRaw("UPDATE pages SET deleted_at=now() WHERE source_id=$1 AND slug='notes/gone'", [s.id]));
+  await s.legacy({ 'notes/a b.md': note('A space B'), 'notes/case.md': note('Lower case') });
+  const scan = await findUnindexedFiles(engine, s.id);
+  expect(scan).toMatchObject({ complete: true, unindexed: 3, slug_taken: 2, deleted_page: 1 });
+  const phase = await runUnindexedFilesPhase(engine, { dryRun: false });
+  expect(phase.details).toMatchObject({ scheduled_now: 0 });
+  expect(await readGitHoldRetryPaths(engine, s.id, await incarnationOf(engine, s.id))).toEqual([]);
+  expect((await retryUnindexed(engine, s.id)).scheduled).toBe(0);
+  writeFileSync(join(s.repo, 'notes/new.md'), note('New'));
+  commit(s.repo);
+  await s.sync();
+  expect(await engine.getPage('notes/new', { sourceId: s.id })).not.toBeNull();
+  const [gone] = await engine.executeRaw<{ deleted_at: string | null }>("SELECT deleted_at FROM pages WHERE source_id=$1 AND slug='notes/gone'", [s.id]);
+  expect(gone!.deleted_at).not.toBeNull();
+  const check = await s.doctor();
+  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', slug_taken: 2, deleted_page: 1 }] } });
+  expect((check.fix as Action).actor).toBe('user');
+  expect(check.message).toContain('3 committed file(s) cannot be imported as they are');
+}), 240_000);
+
+test('a stored incomplete scan whose target commit moved starts over instead of continuing its cursor', () => each(async engine => {
+  const s = await source(engine, { 'notes/m.md': note('M'), 'notes/z.md': note('Z') });
+  await s.sync();
+  const first = await refreshUnindexedFiles(engine, s.id, { batch: 1, maxScanned: 1 });
+  expect(first.record).toMatchObject({ complete: false, cursor: 'notes/m.md' });
+  await s.legacy({ 'notes/a.md': note('A') });
+  const second = await refreshUnindexedFiles(engine, s.id);
+  expect(second.record).toMatchObject({ complete: true, scanned: 3, unindexed: 1, target: git(s.repo, 'rev-parse', 'HEAD') });
+  expect(second.record.pending).toEqual(['notes/a.md']);
+}), 240_000);
+
+test('a pass past its deadline reads no more blobs: found files count as unscreened and the scan is incomplete', () => each(async engine => {
+  const s = await source(engine, { 'notes/a.md': note('A') });
+  await s.sync();
+  await s.legacy({ 'notes/b.md': note('B') });
+  const scan = await findUnindexedFiles(engine, s.id, { deadlineAt: 0 });
+  expect(scan).toMatchObject({ complete: false, unindexed: 1, by_code: { unscreened: 1 } });
+}), 240_000);
+
 for (const mode of ['git-root', 'source-root'] as const) {
   test(`a subdirectory source in ${mode} mode: discovery and the detector share one eligibility, compared in source-path space`, () => each(async engine => {
     const s = await source(engine, { 'brain/notes/a.md': note('A'), 'brain/notes/b.md': note('B'), 'brain/.hidden/h.md': note('H'), 'other/x.md': note('X') },
