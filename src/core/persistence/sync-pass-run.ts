@@ -391,8 +391,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const collisions: SyncSlugCollision[] = [];
   const S = new Map<string, string>();
   const settledKey = (path: string, level: string | null) => `${path}\0${level ?? ''}`;
-  // The entries this round's batches settled before the round folds its candidates into S: a slice that yields mid-round
-  // (writer_yield) reports them (yieldSettled); a blocked stop reports S as it replays.
+  // The entries this round's batches settled before the round folds its candidates into S: a slice that stops mid-round
+  // reports them (yieldSettled); a blocked stop reports S as it replays.
   let roundSettled = 0, yieldSettled = 0;
   const retryConsumed = new Set<string>(retry);
   const sliceBase = { started: performance.now(), pages: 0 };
@@ -461,7 +461,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
       waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
     sliceBase.pages += drained.filesImported ?? 0;
-    if (drained.reason === 'writer_yield') yieldSettled = roundSettled + (drained.managedCursor?.index ?? 0);
+    // A slice that stops mid-batch (a writer yield, a deadline, an abort) settled the entries its cursor passed: they count as
+    // settled and leave the round's remaining; a blocked stop reports what its replay reports.
+    if (drained.status !== 'blocked_by_failures') {
+      const passed = drained.managedCursor?.index ?? 0;
+      yieldSettled = roundSettled + passed;
+      value.telemetry.remaining = Math.max(0, value.telemetry.remaining - passed);
+    }
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
     const blockedOn = drained.managedWrite?.path ? drained.managedWrite.write_request.request_id : null;
     if (outcome === 'blocked' && blockedOn && obligations.blocked?.request_id !== blockedOn) obligations.blocked = { request_id: blockedOn, pass_id: passId };
