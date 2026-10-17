@@ -535,7 +535,7 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
         attempt = 0; capacity = null;
         // A cursor slice's counts are its run's so far; a pass result carries its own pass's (each resumed slice is a new pass_id).
         const run = (r: SyncResult | null) => r?.runId ?? r?.pass?.pass_id;
-        if (run(last) && run(result) && run(result) !== run(last)) {
+        if (last && run(last) && run(result) && run(result) !== run(last)) {
           const sum: RunCounts = carried ?? { added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0 };
           carried = { added: sum.added + last.added, modified: sum.modified + last.modified, deleted: sum.deleted + last.deleted, renamed: sum.renamed + last.renamed, chunksCreated: sum.chunksCreated + last.chunksCreated };
         }
