@@ -138,11 +138,11 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
 
 /** `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and pending Git effects of the source. */
 async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
-  const requests = await exec.executeRaw<{ page_id: number | null; source_path: string | null; path: string | null }>(`SELECT page_id, intent->>'sourcePath' AS source_path, intent->>'path' AS path
-    FROM persistence_requests WHERE worktree_id=$1 AND state IN ('queued','running','recovering') AND source_id=$2`, [worktreeId, sourceId]);
-  const effects = await exec.executeRaw<{ page_id: number | null; path: string | null }>(`SELECT r.page_id, e.data->>'relative_path' AS path
+  const [requests, effects] = await Promise.all([exec.executeRaw<{ page_id: number | null; source_path: string | null; path: string | null }>(`SELECT page_id, intent->>'sourcePath' AS source_path, intent->>'path' AS path
+    FROM persistence_requests WHERE worktree_id=$1 AND state IN ('queued','running','recovering') AND source_id=$2`, [worktreeId, sourceId]),
+  exec.executeRaw<{ page_id: number | null; path: string | null }>(`SELECT r.page_id, e.data->>'relative_path' AS path
     FROM persistence_requests r JOIN persistence_effects e ON e.request_id=r.id
-    WHERE r.worktree_id=$1 AND r.source_id=$2 AND e.kind='git' AND e.state IN ('queued','running')`, [worktreeId, sourceId]);
+    WHERE r.worktree_id=$1 AND r.source_id=$2 AND e.kind='git' AND e.state IN ('queued','running')`, [worktreeId, sourceId])]);
   const pageIds = new Set<number>(), origins = new Set<string>();
   for (const row of [...requests, ...effects]) if (row.page_id != null) pageIds.add(Number(row.page_id));
   for (const row of requests) for (const origin of [row.source_path, row.path]) if (origin) origins.add(syncOriginPath(origin));
@@ -219,10 +219,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const includeHidden = [...new Set((settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean).map(v => v.endsWith('/') ? `${v}**` : v))];
   const keepDbPrefixes = (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })();
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
-  const eligible = (gitPath: string) => (!scope || gitPath.startsWith(`${scope}/`)) && !matchesAnyGlob(sourceRelative(gitPath), exclude)
-    && !isReservedSkillBundlePath(slugMode === 'source-root' ? sourceRelative(gitPath) : gitPath) && isSyncable(gitPath, { strategy: strategy as 'markdown', includeHidden });
-  const originOf = (gitPath: string) => syncOriginPath(slugMode === 'source-root' && scope ? sourceRelative(gitPath) : gitPath);
-  const gitPathOf = (origin: string) => { const o = syncOriginPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; };
+  // Pure per path and asked several times per path in a round, so each is computed once.
+  const memo = <T>(fn: (path: string) => T) => { const seen = new Map<string, T>(); return (path: string): T => { let value = seen.get(path); if (value === undefined && !seen.has(path)) seen.set(path, value = fn(path)); return value as T; }; };
+  const eligible = memo((gitPath: string) => (!scope || gitPath.startsWith(`${scope}/`)) && !matchesAnyGlob(sourceRelative(gitPath), exclude)
+    && !isReservedSkillBundlePath(slugMode === 'source-root' ? sourceRelative(gitPath) : gitPath) && isSyncable(gitPath, { strategy: strategy as 'markdown', includeHidden }));
+  const originPath = memo((path: string) => syncOriginPath(path));
+  const originOf = memo((gitPath: string) => originPath(slugMode === 'source-root' && scope ? sourceRelative(gitPath) : gitPath));
+  const gitPathOf = memo((origin: string) => { const o = originPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; });
 
   t = timer();
   const head = revParse(gitRoot, 'HEAD');
@@ -240,11 +243,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const [gitLevel, snapshot, held] = await Promise.all([
     Promise.all([timed('T', () => readTreeLevel(gitRoot, head, scope)), timed('X', () => readIndexLevel(gitRoot)),
       timed('U', async () => (mode === 'working' ? (await readUntracked(gitRoot, scope)).filter(eligible) : []))]),
+    // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
     timed('I⋈P', () => withRoundSnapshot(engine, async exec => {
-      const read = await timed('pages', () => readPages(exec, engineKind, sourceId, incarnation));
-      const work = await timed('open_work', () => readOpenWork(exec, sourceId, context.binding.worktree_id));
-      const markers = await timed('markers', () => readMarkers(exec, sourceId, incarnation));
-      const passRow = await timed('pass_row', () => readPassRow(exec, sourceId, incarnation));
+      const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, engineKind, sourceId, incarnation)),
+        timed('open_work', () => readOpenWork(exec, sourceId, context.binding.worktree_id)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
+        timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
       return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
     })),
     timed('H', async () => {
@@ -274,12 +277,14 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
   const domain = new Set<string>([...tree.keys(), ...untracked, ...(mode === 'working' ? [...index.keys()].filter(eligible) : []), ...[...byOrigin.keys()].filter(eligible), ...[...markers.keys()].map(gitPathOf).filter(eligible)]);
-  const spellings = new Map<string, Set<string>>();
+  // Spellings of one origin that differ only by case or separator: the domain holds each path once, so a count is enough.
+  const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
+  const spellings = new Map<string, number>();
   for (const path of domain) {
     const live = byOrigin.get(path);
     if (!tree.has(path) && !(live && !live.deleted)) continue;
-    const folded = path.replaceAll('\\', '/').toLowerCase();
-    (spellings.get(folded) ?? spellings.set(folded, new Set()).get(folded)!).add(path);
+    const folded = fold(path);
+    spellings.set(folded, (spellings.get(folded) ?? 0) + 1);
   }
   const reconcilable = [...byOrigin.entries()].filter(([path, row]) => !row.deleted && eligible(path)).length;
   timings.domain = t();
@@ -332,13 +337,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const needsBaseline = row && !row.deleted && (record?.revision == null) && level !== null && !recordBlobOids.includes(level);
     const state: SyncPathState = {
       mode, tree: committed?.oid ?? null, level, present: presentNow, dirty, diskOid: probe?.rawOid ?? null,
-      page: row ? { live: !row.deleted, revision: row.revision, originMatches: !!record && syncOriginPath(record.origin) === syncOriginPath(row.source_path) } : null,
+      page: row ? { live: !row.deleted, revision: row.revision, originMatches: !!record && originPath(record.origin) === originPath(row.source_path) } : null,
       record: record ? { blobOids: recordBlobOids, revision: record.revision != null ? String(record.revision) : null, parserSame: sameParser(record.parser, fp(path)) } : null,
       attested, levelSha256: probe?.rawSha256 ?? null,
       published: !!attested?.hash && probe?.rawSha256 === attested.hash,
       hold: hold ? { atLevel: holdAtLevel(hold, level, probe?.rawSha256 ?? null) && !moved.has(path), rescreenDue: holdRescreenDue(hold, retry.has(hold.path)), retried: retry.has(hold.path) } : null,
       marker: marker ?? virtualMarker, baseline: needsBaseline ? await baselineOf(path) : null,
-      spelling: (spellings.get(path.replaceAll('\\', '/').toLowerCase())?.size ?? 0) > 1,
+      spelling: (spellings.get(fold(path)) ?? 0) > 1,
       episodeUnsatisfied: input.full === true && !!row && !row.deleted,
       keepDb: !mirror && keepDbPrefixes.length > 0 && !!row && isKeepDbSlug(row.slug, keepDbPrefixes),
       openWork: !!row && open.pageIds.has(Number(row.id)) || open.origins.has(originOf(path)),
