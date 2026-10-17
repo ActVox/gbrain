@@ -27,6 +27,7 @@ import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { withColdPglite } from './helpers/with-snapshot.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-6911-'));
 const engines: BrainEngine[] = [];
@@ -67,7 +68,8 @@ async function shape(engine: BrainEngine, table: string) {
 }
 
 beforeAll(async () => withEnv({ GBRAIN_HOME: home }, async () => {
-  const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
+  const lite = await withColdPglite(async () => { const e = new PGLiteEngine(); await e.connect({}); await e.initSchema(); return e; });
+  engines.push(lite);
   fresh = new PGLiteEngine(); await fresh.connect({}); await fresh.initSchema();
   if (process.env.DATABASE_URL) {
     const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL);
