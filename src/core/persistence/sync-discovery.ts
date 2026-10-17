@@ -629,7 +629,7 @@ function identityDowngradesOf(manifests: Array<SyncManifest | null>, eligible: (
  * so it must not when both carry an explicit frontmatter id and the ids differ: they are two different documents that
  * happen to map to one slug. The sync is refused before any write, naming both.
  */
-function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
+export function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
   const incoming = holder.fm_id ? incomingId(discovery, winner) : null;
   if (!explicitIdVeto(incoming, holder.fm_id)) return;
   throw opError('page_identity_changed', 'A file would take over a page whose frontmatter id differs from its own.',
@@ -638,7 +638,7 @@ function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, hol
     { detail: 'rename_identity_conflict' });
 }
 /** #6729: the frontmatter id of the file an entry imports (null when it has none or cannot be read). */
-function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string | null {
+export function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string | null {
   try { return frontmatterIdentity(readSyncContent(discovery, entry)).id; } catch { return null; }
 }
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */

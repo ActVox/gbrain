@@ -15,8 +15,9 @@
  */
 import { randomUUID } from 'node:crypto';
 import { opError } from '../ops/contract.ts';
-import { confirmedSyncDelta } from '../sync-rename-identity.ts';
-import type { DowngradedRename } from '../sync.ts';
+import { confirmedSyncDelta, confirmRenameIdentities, explicitIdVeto } from '../sync-rename-identity.ts';
+import { buildDetachedWorkingTreeManifest } from '../sync-delta.ts';
+import type { DowngradedRename, SyncManifest } from '../sync.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import type { Cursor, RetryWait } from './sync-run.ts';
@@ -24,7 +25,7 @@ import { getWriteRequestById } from './journal.ts';
 import type { WriteRequest } from './model.ts';
 import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
 import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
-import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
+import { adoptLegacyPage, assertTakeoverIdentity, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
@@ -150,20 +151,21 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   // that folds to it; several, or one the importer cannot write, keep the slug and the freeze holds legacy_slug_conflict.
   const legacySlugs = new Map<string, Pick<SyncEntry, 'legacySlugs' | 'legacyIdVeto'>>();
   const adopting = fresh.filter(entry => slugOf.get(entry.path) && !isCodeFilePath(entryPaths(level, entry.path).sourcePath));
+  const discovery = { root: level.root, gitRoot: level.gitRoot, target: level.head, sourceId: level.sourceId } as SyncDiscovery;
+  const named = (entry: ShadowPath): SyncEntry => ({ ...entryPaths(level, entry.path), action: 'import', working: working(entry) });
   if (adopting.length) {
     const identities = await engine.executeRaw<LegacyIdentity>("SELECT id, slug, source_path, deleted_at, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND (source_path IS NULL OR slug=ANY($2::text[]))",
       [level.sourceId, [...new Set(adopting.map(entry => slugOf.get(entry.path)!))]]);
     const bySlug = new Map(identities.map(page => [page.slug, page]));
-    const discovery = { root: level.root, gitRoot: level.gitRoot, target: level.head, sourceId: level.sourceId } as SyncDiscovery;
     for (const entry of adopting) {
-      const named: SyncEntry = { ...entryPaths(level, entry.path), action: 'import', working: working(entry) };
-      slugOf.set(entry.path, await adoptLegacyPage(engine, discovery, identities, bySlug.get(slugOf.get(entry.path)!), slugOf.get(entry.path)!, named));
-      if (named.legacySlugs) legacySlugs.set(entry.path, { legacySlugs: named.legacySlugs, ...(named.legacyIdVeto ? { legacyIdVeto: true as const } : {}) });
+      const adopted = named(entry);
+      slugOf.set(entry.path, await adoptLegacyPage(engine, discovery, identities, bySlug.get(slugOf.get(entry.path)!), slugOf.get(entry.path)!, adopted));
+      if (adopted.legacySlugs) legacySlugs.set(entry.path, { legacySlugs: adopted.legacySlugs, ...(adopted.legacyIdVeto ? { legacyIdVeto: true as const } : {}) });
     }
   }
   const slugs = [...new Set([...slugOf.values()].filter(Boolean))];
-  const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean; unbound: boolean }>(
-    `SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted, ${databaseOnlyPageSql('pages')} AS unbound FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])`, [level.sourceId, slugs]) : [])
+  const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean; unbound: boolean; fm_id: string | null }>(
+    `SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted, ${databaseOnlyPageSql('pages')} AS unbound, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])`, [level.sourceId, slugs]) : [])
     .map(page => [page.slug, page]));
   const gitPathOfOrigin = (origin: string) => level.slugMode === 'source-root' && level.scope ? `${level.scope}/${syncOriginPath(origin)}` : syncOriginPath(origin);
   // #6887: a both-moved import imports when the page still holds what its recorded disk blob imports (sync-screen.ts driftBaselineContent).
@@ -181,15 +183,24 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     claims.set(slug, [...claims.get(slug) ?? [], entry]);
   }
   const renamed = new Set<string>();
-  let renames: Promise<Map<string, string> | null> | null = null;
+  let renames: Promise<Map<string, { from: string; identityHead?: string }> | null> | null = null;
   const downgrades: DowngradedRename[] = [];
+  // #6729, as discovery confirms them: the commit range's renames, then (working mode) the dirty tree's, whose target side
+  // is read from disk and whose kept renames are bound to the bytes the verdict read (identityHead, checked at import).
   const gitRenames = () => renames ??= (async () => {
-    if (level.mode !== 'committed' || !level.baselineCommit || level.baselineCommit === level.head || (!deleteEntries.size && !level.heldRenames.length)) return null;
-    const delta = await confirmedSyncDelta(engine, level.gitRoot, level.baselineCommit, level.head, { sourceId: level.sourceId, sourcePathOf: path => entryPaths(level, path).sourcePath });
-    if (delta.status !== 'ok') return null;
-    // #6729: the inexact renames whose identity was not kept are reported (and recorded) as discovery reported them.
-    downgrades.push(...(delta.manifest.downgradedRenames ?? []).map(pair => ({ ...pair, from: entryPaths(level, pair.from).sourcePath, to: entryPaths(level, pair.to).sourcePath })));
-    return new Map(delta.manifest.renamed.map(pair => [pair.to, pair.from]));
+    if (!deleteEntries.size && !level.heldRenames.length) return null;
+    const confirm = { sourceId: level.sourceId, sourcePathOf: (path: string) => entryPaths(level, path).sourcePath };
+    const manifests: SyncManifest[] = [];
+    if (level.baselineCommit && level.baselineCommit !== level.head) {
+      const delta = await confirmedSyncDelta(engine, level.gitRoot, level.baselineCommit, level.head, confirm);
+      if (delta.status === 'ok') manifests.push(delta.manifest);
+      else if (level.mode === 'committed') return null;
+    }
+    if (level.mode === 'working') manifests.push(await confirmRenameIdentities(engine, level.gitRoot, 'HEAD', null, buildDetachedWorkingTreeManifest(level.gitRoot), confirm));
+    if (!manifests.length) return null;
+    // The inexact renames whose identity was not kept are reported (and recorded) as discovery reported them.
+    downgrades.push(...manifests.flatMap(manifest => manifest.downgradedRenames ?? []).map(pair => ({ ...pair, from: entryPaths(level, pair.from).sourcePath, to: entryPaths(level, pair.to).sourcePath })));
+    return new Map(manifests.flatMap(manifest => manifest.renamed.map(pair => [pair.to, { from: pair.from, ...(pair.identityHead ? { identityHead: pair.identityHead } : {}) }] as const)));
   })();
   for (const [slug, claimants] of claims) {
     const holder = holders.get(slug);
@@ -202,6 +213,8 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     const paths = entryPaths(level, winner.path);
     const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
     if (holder) {
+      // #6729: a file whose frontmatter id differs from the page's is another document; it inherits nothing (refused before any write).
+      assertTakeoverIdentity(discovery, named(winner), holder);
       // A live page at the slug with no recorded origin (written straight to the database, or by an older gbrain) attests
       // neither side: the import is guarded as drift of unknown side, so the freeze imports it only as a proven no-op and
       // otherwise holds file_drift (as discovery's tree walk guards it, sync-prescreen.ts). A page written while the source was
@@ -215,10 +228,11 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     // #5988: a held rename destination still owes its page the move: re-bound while the origin page is unchanged, else held rename_held.
     // A held destination renamed again (a Git rename of the held path) carries the held identity on.
     const heldAt = (path: string | undefined) => path === undefined ? undefined : level.heldRenames.find(row => row.path === path)?.rename;
-    const held = heldAt(winner.path) ?? (level.heldRenames.length ? heldAt((await gitRenames())?.get(winner.path)) : undefined);
-    const origin = held ? (await engine.executeRaw<{ source_path: string | null; revision: string; deleted: boolean }>(
-      'SELECT source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id=$1 AND id=$2', [level.sourceId, held.pageId]))[0] : undefined;
-    if (held && origin && !origin.deleted && origin.source_path !== null && syncOriginPath(origin.source_path) === syncOriginPath(held.sourcePath)) {
+    const held = heldAt(winner.path) ?? (level.heldRenames.length ? heldAt((await gitRenames())?.get(winner.path)?.from) : undefined);
+    const origin = held ? (await engine.executeRaw<{ source_path: string | null; revision: string; deleted: boolean; fm_id: string | null }>(
+      "SELECT source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND id=$2", [level.sourceId, held.pageId]))[0] : undefined;
+    if (held && origin && !origin.deleted && origin.source_path !== null && syncOriginPath(origin.source_path) === syncOriginPath(held.sourcePath)
+      && !explicitIdVeto(incomingId(discovery, named(winner)), origin.fm_id)) {
       entries.push({ ...base, pageId: null, revision: null, ...(origin.revision === held.revision ? { renameFrom: held } : { renameHeld: held }) });
       continue;
     }
@@ -226,11 +240,12 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     const twins = fresh.filter(other => other.state.level === winner.state.level);
     // #6729: a Git rename with an edit keeps its page when Git pairs it and the identity is confirmed, as discovery's delta does.
     const inexact = moved.length === 1 && twins.length === 1 ? null : (await gitRenames())?.get(winner.path);
-    const gitMoved = inexact && deleteEntries.has(inexact) && !renamed.has(inexact) ? leaving.get(inexact) : undefined;
+    const gitMoved = inexact && deleteEntries.has(inexact.from) && !renamed.has(inexact.from) ? leaving.get(inexact.from) : undefined;
     if (gitMoved?.pageId != null || (moved.length === 1 && twins.length === 1)) {
       const gone = gitMoved ?? moved[0]!;
       const origin = entryPaths(level, gone.path).sourcePath;
-      entries.push({ ...base, pageId: null, revision: null, renameFrom: { sourcePath: origin, slug: gone.slug!, pageId: gone.pageId!, revision: gone.revision! } });
+      entries.push({ ...base, pageId: null, revision: null, renameFrom: { sourcePath: origin, slug: gone.slug!, pageId: gone.pageId!, revision: gone.revision! },
+        ...(gitMoved && inexact?.identityHead && base.working ? { identityHead: inexact.identityHead } : {}) });
       deleteEntries.delete(gone.path); renamed.add(gone.path);
       continue;
     }
@@ -358,8 +373,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
   const cacheKey = passFingerprint(sourceId, incarnation);
   const working = mode === 'working' && converged ? await workingIdleChange(context, recallWorkingStatCache(cacheKey)) : { changed: mode === 'working', cache: null };
-  const kindOf = syncPassKind({ converged: converged ? { target: converged.target, parserFp: converged.parser_fp, pack: converged.pack, selectionFp: converged.selection_fp,
-      passesSinceFull: converged.passes_since_full, lastFullAt: Date.parse(converged.last_full_at) } : null,
+  // A configured stamp writes last_commit = converged.target: a source whose last_commit moved since (a topology re-clone
+  // clears it, as an upgrade's catch-up does) has no converged state to be idle against.
+  const stamped = converged && (!configured || context.source.last_commit === converged.target) ? converged : null;
+  const kindOf = syncPassKind({ converged: stamped ? { target: stamped.target, parserFp: stamped.parser_fp, pack: stamped.pack, selectionFp: stamped.selection_fp,
+      passesSinceFull: stamped.passes_since_full, lastFullAt: Date.parse(stamped.last_full_at) } : null,
     head, parserFp, pack, selectionFp, now: started, openEpisode: !!episode, owedTail: tail !== null, retryRow: retry.length > 0,
     notConvergedStreak: obligations.not_converged_streak, mismatchStreak: Object.keys(obligations.mismatch).length,
     requestNewer: probe?.newer === true, openAtStampFinished: !!converged && (converged.open_at_stamp === null || (probe?.stillOpen ?? 0) < converged.open_at_stamp.length),
@@ -646,7 +664,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         await finishPassApply(engine, sourceId, applied);
         return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
       }
-      const built = await batchEntries(engine, level, deletes, imports);
+      const built = await batchEntries(engine, level, deletes, imports).catch(async (error: unknown) => {
+        if ((error as { code?: string }).code === 'page_identity_changed') await save('blocked', 'page_identity_changed');
+        throw error;
+      });
       collisions.push(...built.collisions);
       identityDowngrades.push(...built.downgrades.filter(pair => !identityDowngrades.some(seen => seen.from === pair.from && seen.to === pair.to)));
       for (const entry of [...built.skipped, ...built.collisions.flatMap(c => c.skipped.map(sourcePath => imports.find(i => entryPaths(level, i.path).sourcePath === sourcePath)!))].filter(Boolean)) {
