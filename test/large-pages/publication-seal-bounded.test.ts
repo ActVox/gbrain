@@ -5,17 +5,20 @@
  *    chunk row stored) without reading the page: the stale-row probe (projection.ts STALE_CHUNKS_SQL, one index walk
  *    over every occurrence of the page plus every row of each live one) and the live manifest read run in preparation,
  *    and the publication transaction only reads what the write staged. A small edit near the end of a 2 MiB and an
- *    8 MiB page still seals in its publication, and its new text is a keyword hit at once.
+ *    8 MiB page still seals in its publication, and its new text is a keyword hit at once, whatever the planner statistics:
+ *    taken before the page existed (its page_id in no statistic) or taken after its first write.
  * 2. Fails when: the probe runs inside the publication transaction, where its cost grows with the page and
  *    declareDurablePersistence's 5 s statement_timeout can end it on a loaded host (57014), so the whole write is
  *    prepared again; or when the publication stops sealing (the post-commit projection is lost here, so only the
- *    publication can seal).
+ *    publication can seal); or when a statement's plan follows the statistics onto an index that walks the page (the
+ *    stale-row DELETE on idx_chunks_page when the page is newer than the last ANALYZE).
  * 3. Existing coverage: second-write-deferred-retire.test.ts keeps a page whose earlier write deferred its retirement
  *    unsealed; chunk-retirement-plan.test.ts bounds the probe itself.
  * 4. Work is EXPLAIN (ANALYZE, FORMAT JSON) of each content_chunks / page_body_manifest statement the publication
  *    transaction issues (inside a savepoint rolled back before the real statement runs): rows produced plus rows
  *    removed by filters, times loops, summed over plan nodes. Counts, never time. Runs on PGLite, and on Postgres
- *    when DATABASE_URL is set.
+ *    when DATABASE_URL is set. Statistics are set by an explicit ANALYZE, with PGLite's row-delta ANALYZE and Postgres
+ *    autovacuum off for the table, so each state is the one the test names.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -35,7 +38,7 @@ import { testBackends } from '../helpers/test-backends.ts';
 import { withEnv } from '../helpers/with-env.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-publication-seal-'));
-const env = { GBRAIN_HOME: home, OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined, ANTHROPIC_API_KEY: undefined };
+const env = { GBRAIN_HOME: home, OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, GBRAIN_PLANNER_AUTO_ANALYZE: '0' };
 afterAll(() => { rmSync(home, { recursive: true, force: true }); });
 const PROJECTION_PAGE_READ = "FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL AND body_storage='segmented'";
 
@@ -98,21 +101,25 @@ for (const kind of testBackends()) describe(`a segmented write's publication rea
     else { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); close = () => engine.disconnect(); }
     await registerLocalWriter(engine, 'cli');
     await engine.setConfig('pages.segmented_storage', 'on');
+    if (kind === 'postgres') await engine.executeRaw('ALTER TABLE content_chunks SET (autovacuum_enabled = false)');
   }), 120_000);
   afterAll(async () => withEnv(env, async () => { await disposePersistenceConsumer(engine); await close?.(); }));
 
   const found = async (slug: string, word: string) => (await engine.searchKeyword(word, { limit: 10 })).filter(r => r.slug === slug).length;
 
-  for (const mib of [2, 8]) test(`an edit near the end of a ${mib} MiB page seals in its publication, reading only what it staged`, async () => withEnv(env, async () => {
+  for (const mib of [2, 8]) for (const stats of ['taken after its first write', 'taken before the page'] as const) test(`an edit near the end of a ${mib} MiB page seals in its publication, reading only what it staged (statistics ${stats})`, async () => withEnv(env, async () => {
+    const before = stats === 'taken before the page';
     const v0 = conversationPage(mib * 1024 * 1024, { seed: 61, needles: [{ at: 0.95, word: 'tailmarkerquokka' }] });
-    const file = join(home, `page-${mib}.md`);
-    const slug = `notes/publication-seal-${mib}`;
+    const file = join(home, `page-${mib}-${before ? 'before' : 'after'}.md`);
+    const slug = `notes/publication-seal-${mib}-${before ? 'before' : 'after'}`;
     const write = async (on: BrainEngine) => expect(await importFromFile(on, file, `${slug}.md`, { noEmbed: true, bodyPolicy: await readPageBodyPolicy(engine) }))
       .toMatchObject({ status: 'imported' });
+    if (before) await engine.executeRaw('ANALYZE content_chunks');
     writeFileSync(file, v0);
     await write(engine);
-    const before = await segmentedPageRow(engine, slug);
-    expect(before.text_projection_revision).toBe(before.knowledge_revision);
+    if (!before) await engine.executeRaw('ANALYZE content_chunks');
+    const first = await segmentedPageRow(engine, slug);
+    expect(first.text_projection_revision).toBe(first.knowledge_revision);
 
     writeFileSync(file, v0.replace('tailmarkerquokka', 'tailmarkerwalrus'));
     const publication: StatementWork[] = [];

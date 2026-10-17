@@ -1018,6 +1018,7 @@
       "content_chunks_occurrence_generation_idx": "CREATE INDEX content_chunks_occurrence_generation_idx ON public.content_chunks USING btree (page_id, occurrence_id, body_generation)",
       "content_chunks_occurrence_idx": "CREATE INDEX content_chunks_occurrence_idx ON public.content_chunks USING btree (page_id, occurrence_id) WHERE (occurrence_id IS NOT NULL)",
       "content_chunks_pkey": "CREATE UNIQUE INDEX content_chunks_pkey ON public.content_chunks USING btree (id)",
+      "content_chunks_staged_generation_idx": "CREATE INDEX content_chunks_staged_generation_idx ON public.content_chunks USING btree (((page_id)::bigint), body_generation) WHERE (body_generation IS NOT NULL)",
       "content_chunks_stale_idx": "CREATE INDEX content_chunks_stale_idx ON public.content_chunks USING btree (page_id, chunk_index) WHERE (embedding IS NULL)",
       "context_volunteer_events_pkey": "CREATE UNIQUE INDEX context_volunteer_events_pkey ON public.context_volunteer_events USING btree (id)",
       "context_volunteer_events_src_slug_idx": "CREATE INDEX context_volunteer_events_src_slug_idx ON public.context_volunteer_events USING btree (source_id, slug)",
