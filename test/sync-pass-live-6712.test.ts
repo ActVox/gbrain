@@ -12,6 +12,7 @@
  *
  * - probe 49: a re-screen-due hold alone runs a hold-only round (not a full round), which clears it.
  * - item 7: a local CLI pass waits (to 30 s) on its own write while this process's consumer holds it or has yet to claim it.
+ * - in-flight wait: the pass waits on the open work it classified, a pending Git effect included, before stopping writer_pending.
  * - probe 46 (reparse half): a parser change on a fileSame and dbSame page is a `reparse`: re-imported, no hold.
  * - probe 48: a request admitted before the stamp that publishes after it (`open_at_stamp`) makes the next tick a full round, not idle.
  * - probe 53: a repair that changes a candidate mid-pass meets no busy refusal (busy is open requests only), and the path
@@ -141,6 +142,18 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect({ slowed, status: synced.status, reason: synced.reason }).toEqual({ slowed: true, status: 'synced', reason: undefined });
     expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))?.page.compiled_truth).toContain('admitted while the consumer is busy');
   }, { setup }), 180_000);
+
+  test('in-flight wait: a pass waits out a put_page\'s pending Git effect (its request names no page or origin), then imports the committed change', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug: 'notes/d', request_id: randomUUID(), content: note('notes/d', 'The body put_page wrote.') } });
+    // The page's Git effect is still pending (its publication landed; the commit is 2 s out) when an agent commits a change.
+    const held = await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now()+interval '2 seconds' WHERE kind='git' AND state='queued' AND set_config('gbrain.persistence_protocol','2',true)='2' RETURNING id");
+    expect(held).toHaveLength(1);
+    writeFileSync(join(root, 'notes/d.md'), note('notes/d', 'A committed agent change of notes/d.')); commit(root, 'agent change of d');
+    const synced = await performManagedSync(engine, OPTS);
+    expect({ status: synced.status, reason: synced.reason, held: synced.held ?? [] }).toEqual({ status: 'synced', reason: undefined, held: [] });
+    expect((await engine.readPageSnapshot('notes/d', { sourceId: 'default' }))?.page.compiled_truth).toContain('A committed agent change of notes/d.');
+  }, { setup: hardened }), 180_000);
 
   test('a sliced pass that yields writer_yield reports the entries it settled in the stopped round', () => managedBrain(async ({ engine, root }) => {
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
