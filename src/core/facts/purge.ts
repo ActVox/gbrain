@@ -141,6 +141,24 @@ async function stagingsWithClaimAcrossParts(engine: BrainEngine, sourceId: strin
   return [...hits];
 }
 
+/**
+ * The live stagings of the source holding `claim` (aborted by a purge of it) and the unfinished requests that would
+ * publish them. A live staging that recorded a text holding the claim, plain or as a fence cell (page_body_staging_texts:
+ * a create holds its manifest rows in memory until it publishes), is one of them: the purge deletes that text and the
+ * create refuses cleanly (body_staging_expired) instead of failing on the manifest's text foreign key.
+ */
+export async function stagingsHoldingClaim(engine: BrainEngine, sourceId: string, claim: string): Promise<Pick<PurgePlan, 'stagings' | 'held'>> {
+  const stagings = [...new Set([...(await engine.executeRaw<{ id: string }>(`SELECT s.id::text AS id FROM page_body_stagings s
+    WHERE s.source_id=$1 AND ((s.state IN ('open','sealed','prepared') AND (EXISTS (SELECT 1 FROM page_body_manifest m
+        JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256 WHERE m.staging_id=s.id AND strpos(lower(convert_from(t.body,'UTF8')),$2)>0)
+      OR EXISTS (SELECT 1 FROM page_body_staging_parts pt WHERE pt.staging_id=s.id AND position(convert_to($3::text,'UTF8') in pt.body)>0)))
+      OR (${liveStagingSql('s')} AND EXISTS (SELECT 1 FROM page_body_staging_texts r JOIN page_segment_texts t ON t.source_id=r.source_id AND t.sha256=r.sha256
+        WHERE r.staging_id=s.id AND (strpos(lower(convert_from(t.body,'UTF8')),$2)>0 OR strpos(lower(convert_from(t.body,'UTF8')),$4)>0))))
+    ORDER BY s.id`, [sourceId, claim.toLowerCase(), claim, escapeFenceCell(claim).toLowerCase()])).map(row => row.id),
+  ...await stagingsWithClaimAcrossParts(engine, sourceId, claim)])].sort();
+  return { stagings, held: await findRequestsHoldingStagings(engine, sourceId, stagings) };
+}
+
 /** Read-only: everything a purge of `target` would touch. Inside the purge transaction it runs under the source lock. */
 export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, allSubjects: boolean): Promise<PurgePlan> {
   const subject = allSubjects ? '*' : target.entity_slug ?? '*';
@@ -161,18 +179,7 @@ export async function planFactPurge(engine: BrainEngine, target: PurgeTarget, al
   const [versions] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_versions v JOIN pages p ON p.id=v.page_id
     WHERE p.source_id=$1 AND (${carriesClaimSql('v', 2)}
       OR (v.body_storage='segmented' AND ${SEGMENTED_VERSION_CARRIES}))`, [target.source_id, ...claimNeedles(target.fact)]);
-  // A live staging that recorded a text holding the claim, plain or as a fence cell (page_body_staging_texts: a create
-  // holds its manifest rows in memory until it publishes), is aborted with the rest: the purge deletes that text and the
-  // create refuses cleanly (body_staging_expired) instead of failing on the manifest's text foreign key.
-  const stagings = [...new Set([...(await engine.executeRaw<{ id: string }>(`SELECT s.id::text AS id FROM page_body_stagings s
-    WHERE s.source_id=$1 AND ((s.state IN ('open','sealed','prepared') AND (EXISTS (SELECT 1 FROM page_body_manifest m
-        JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256 WHERE m.staging_id=s.id AND strpos(lower(convert_from(t.body,'UTF8')),$2)>0)
-      OR EXISTS (SELECT 1 FROM page_body_staging_parts pt WHERE pt.staging_id=s.id AND position(convert_to($3::text,'UTF8') in pt.body)>0)))
-      OR (${liveStagingSql('s')} AND EXISTS (SELECT 1 FROM page_body_staging_texts r JOIN page_segment_texts t ON t.source_id=r.source_id AND t.sha256=r.sha256
-        WHERE r.staging_id=s.id AND (strpos(lower(convert_from(t.body,'UTF8')),$2)>0 OR strpos(lower(convert_from(t.body,'UTF8')),$4)>0))))
-    ORDER BY s.id`, [target.source_id, target.fact.toLowerCase(), target.fact, escapeFenceCell(target.fact).toLowerCase()])).map(row => row.id),
-  ...await stagingsWithClaimAcrossParts(engine, target.source_id, target.fact)])].sort();
-  const held = await findRequestsHoldingStagings(engine, target.source_id, stagings);
+  const { stagings, held } = await stagingsHoldingClaim(engine, target.source_id, target.fact);
   // #6511 [R5]: a statement timeout of this unindexable substring search is deterministic on a large journal, not contention: the typed code, not a retry.
   const requests = await faultPoint('purge:carrying_lookup', { sourceId: target.source_id, operation: PURGE_OPERATION })
     .then(() => findRequestsCarrying(engine, target.source_id, target.fact)).catch(error => {
@@ -240,9 +247,9 @@ const SEGMENTED_VERSION_CARRIES = `EXISTS (SELECT 1 FROM page_body_manifest m JO
 interface BodyRewrites { rewritten: string[]; segmented: number[]; unsealed: string[]; replaced: Uint8Array[] }
 
 /**
- * Drop purged rows from each affected page's stored body. Each inline page is versioned first (the rewrite advances its
+ * Drop purged rows from each affected page's stored body. Each page is versioned first (the rewrite advances its
  * revision), and `redactPageVersions` then redacts that version like every other one; a segmented page publishes a new
- * generation (spec 11).
+ * generation (spec 11), and its version of the old revision references that generation.
  */
 export async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: PurgePlan['pages']): Promise<BodyRewrites> {
   const out: BodyRewrites = { rewritten: [], segmented: [], unsealed: [], replaced: [] };
@@ -253,8 +260,12 @@ export async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages
     if (row.body_storage === 'segmented') {
       const slug = String(row.slug);
       out.segmented.push(Number(row.id));
+      const preimage = await tx.readPageSnapshot(slug, { sourceId, includeDeleted: true });
       const done = await rewriteLiveSegmentedFences(tx, Number(row.id), fence => dropPurgedFenceRows(tx, sourceId, fence, slug));
       if (!done) continue;
+      // The version of the revision the flip moved off references the new generation: that is the revision's body as a
+      // reader sees it under this purge's tombstone, as the inline preimage is read, so no generation holding the claim stays pinned.
+      if (preimage) await createPageVersion(tx, slug, sourceId, preimage);
       out.rewritten.push(slug);
       out.replaced.push(...done.replaced);
       if (!done.sealed) out.unsealed.push(slug);
@@ -336,9 +347,10 @@ export async function redactPageVersions(tx: BrainEngine, sourceId: string, clai
  * deleted, requests that reference them cancelled with purged_content), closed manifest rows outside every GC root
  * go, and every segment text the rewrites replaced, or that still holds the claim, is deleted once nothing
  * references it, in this transaction (purge never waits for GC). A live staging that recorded such a text was aborted
- * by the plan (planFactPurge), so no write in flight still needs it.
+ * by the plan (`stagingsHoldingClaim`), so no write in flight still needs it. The restore-time purge replay runs it too.
  */
-async function purgeSegmentStorage(tx: BrainEngine, sourceId: string, claim: string, plan: PurgePlan, pageIds: number[], replaced: Uint8Array[], ownRequest: string):
+export async function purgeSegmentStorage(tx: BrainEngine, sourceId: string, claim: string, plan: Pick<PurgePlan, 'stagings' | 'held'>, pageIds: number[],
+  replaced: Uint8Array[], ownRequest: string):
   Promise<{ texts: number; stagings: number; parts: number; cancelled: number }> {
   const cancelled = await cancelRequestsHoldingStagings(tx, plan.held, ownRequest);
   let parts = 0;

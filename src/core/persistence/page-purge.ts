@@ -262,16 +262,8 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     derived_hidden: await appendDerivedHidden(tx, { sourceId, request: row.id, publicationId: row.id, op: 'delete_page', targets: heldTargets, truncated: walk === 'truncated' }),
     derived_walk: walk })) : null;
   if (ledger) removed.belief_events = ledger.purged_events + ledger.redacted_fields.length;
-  // Wave B (spec 11): the segment texts only this page's manifests reference go with it, in this transaction, and so do
-  // its stagings (one of a create has no page row to cascade from).
-  const shas = (await tx.executeRaw<{ sha: string }>(`SELECT DISTINCT encode(sha256,'hex') AS sha FROM page_body_manifest WHERE page_id=$1`, [page.id])).map(r => r.sha);
-  removed.page_body_manifest = (await tx.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM page_body_manifest WHERE page_id=$1', [page.id]))[0]?.n ?? 0;
-  removed.page_body_stagings = await count('DELETE FROM page_body_stagings WHERE source_id=$1 AND (slug=$2 OR page_id=$3) RETURNING 1', [sourceId, slug, page.id]);
-  await tx.deletePage(slug, { sourceId });
-  // A text another page still references stays, and so does one an unpublished write of another page staged or deduped
-  // onto (a create holds its manifest rows in memory until it publishes): that write's copy, not this page's.
-  removed.page_segment_texts = shas.length ? await count(`DELETE FROM page_segment_texts t WHERE t.source_id=$1 AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
-    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')} RETURNING 1`, [sourceId, shas]) : 0;
+  const { shas, ...segmentRows } = await deletePageWithSegments(tx, sourceId, slug, page.id);
+  Object.assign(removed, segmentRows);
   if (!retention) appendPurgeIntent({ request: row.id, request_id: row.request_id, source_id: sourceId, source_incarnation: row.source_incarnation,
     scope: 'page', slug, purge_epoch: epoch, content_hashes: [...hashes], facts: mirrorFacts, takes: mirrorTakes, lifetimes });
   const key = `${sourceId}:${row.request_id}`;
@@ -345,4 +337,22 @@ export async function unpurgePage(ctx: OperationContext, p: Record<string, unkno
     return { slug, source_id: sourceId, cleared: cleared.length, fact_tombstones_cleared: facts, take_tombstones_cleared: takes,
       next: cleared.length ? `The next import of ${slug} with its old content is accepted (gbrain sync --source ${sourceId} --no-pull). Nothing was restored.` : `No purge tombstone is recorded for ${slug} in source ${sourceId}.` };
   });
+}
+
+/**
+ * Delete a purged page with its segment storage (Wave B, spec 11), in the caller's transaction: the segment texts only
+ * its manifests referenced go with it, and so do its stagings (one of a create has no page row to cascade from). A text
+ * another page still references stays, and so does one an unpublished write of another page staged or deduped onto (a
+ * create holds its manifest rows in memory until it publishes): that write's copy, not this page's. The restore-time
+ * purge replay deletes a page this way too.
+ */
+export async function deletePageWithSegments(tx: BrainEngine, sourceId: string, slug: string, pageId: number):
+  Promise<{ shas: string[]; page_body_manifest: number; page_body_stagings: number; page_segment_texts: number }> {
+  const shas = (await tx.executeRaw<{ sha: string }>(`SELECT DISTINCT encode(sha256,'hex') AS sha FROM page_body_manifest WHERE page_id=$1`, [pageId])).map(r => r.sha);
+  const manifest = (await tx.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM page_body_manifest WHERE page_id=$1', [pageId]))[0]?.n ?? 0;
+  const stagings = (await tx.executeRaw('DELETE FROM page_body_stagings WHERE source_id=$1 AND (slug=$2 OR page_id=$3) RETURNING 1', [sourceId, slug, pageId])).length;
+  await tx.deletePage(slug, { sourceId });
+  const texts = shas.length ? (await tx.executeRaw(`DELETE FROM page_segment_texts t WHERE t.source_id=$1 AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
+    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')} RETURNING 1`, [sourceId, shas])).length : 0;
+  return { shas, page_body_manifest: manifest, page_body_stagings: stagings, page_segment_texts: texts };
 }

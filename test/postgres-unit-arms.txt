@@ -96,7 +96,9 @@ test/large-pages/pinned-segmented-reads.test.ts
 test/large-pages/projection-demotion-race.test.ts
 test/large-pages/projection-parity.test.ts
 test/large-pages/purge-fact-inflight-staging.test.ts
+test/large-pages/purge-fact-segmented-preimage.test.ts
 test/large-pages/purge-inflight-create.test.ts
+test/large-pages/purge-replay-segments.test.ts
 test/large-pages/purge-segment-residue.test.ts
 test/large-pages/purge-segmented-versions-batch.test.ts
 test/large-pages/purge-segments.test.ts

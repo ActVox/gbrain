@@ -12,7 +12,9 @@
  * 3. Fixture: 5,000 extra version rows of the first page reference generation
  *    0, which no manifest row covers (an empty, 0-byte generation, so each costs
  *    one manifest read and its rows tile it),
- *    and push the second page's real version past the first batch.
+ *    and push the second page's real version past the first batch. purge_fact versions each page before rewriting it,
+ *    and every segmented version insert prunes the page's history to `versions.segmented_max_per_page`, so the fixture
+ *    raises that cap above the 5,000 extra rows: the redaction still walks them.
  * Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -65,7 +67,11 @@ const coordinated = <T>(engine: BrainEngine, fn: (tx: BrainEngine) => Promise<T>
 beforeAll(async () => withEnv({ GBRAIN_HOME: home }, async () => {
   const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
   if (process.env.DATABASE_URL) { const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL); engines.push(pg.engine); closePostgres = pg.close; }
-  for (const engine of engines) { await registerLocalWriter(engine, 'cli'); await engine.setConfig('pages.segmented_storage', 'on'); }
+  for (const engine of engines) {
+    await registerLocalWriter(engine, 'cli');
+    await engine.setConfig('pages.segmented_storage', 'on');
+    await engine.setConfig('versions.segmented_max_per_page', '10000');
+  }
 }), 120_000);
 afterAll(async () => { for (const engine of engines) await engine.disconnect(); await closePostgres?.(); rmSync(home, { recursive: true, force: true }); });
 
