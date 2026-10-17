@@ -845,7 +845,8 @@ export async function drainProjections(engine: BrainEngine, opts: { limit?: numb
   }
   const after = await projectionBacklog(engine);
   const more = opts.limit !== undefined && tried >= opts.limit
-    && (await engine.executeRaw(`SELECT 1 FROM page_projection_jobs j ${probes} LIMIT 1`)).length > 0;
+    && (await engine.executeRaw(`SELECT 1 FROM page_projection_jobs j ${probes}
+      UNION ALL SELECT 1 FROM page_projection_jobs j ${SEGMENTED_JOB_PROBES} LIMIT 1`)).length > 0;
   const result: ProjectionDrainResult = { rebuilt, superseded, failed, remaining: after.pending, limited: more };
   return opts.media ? { ...result, ...seal, statistics_refreshed: projectionStatisticsRefreshes(engine) > refreshes, remaining_by_class: after } : result;
 }
