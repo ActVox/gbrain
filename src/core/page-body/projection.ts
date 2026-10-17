@@ -14,11 +14,12 @@
  * chunk the whole body; a claim left by a dead process lapses after
  * SEGMENTED_PROJECTION_LEASE_SECONDS, and a build that throws releases it
  * at once (the resident's queue route then marks its own failures
- * `rebuild_failed`). The claim is this build's while the row's `updated_at`
- * is the stamp it last wrote: each renewal, the seal and the release match
- * that stamp, so a build that outlived its claim and lost it to another
- * process stops at its next batch (`claimLost`) without staging, sealing or
- * releasing over the new owner's claim. Within a process, calls for one page
+ * `rebuild_failed`). The claim is this build's while the row's reason is
+ * the token it wrote (`SEGMENTED_PROJECTION_CLAIM:<uuid>`, one per
+ * acquisition, never the lease timestamp two claims can share): each renewal,
+ * the seal and the release match that token, so a build that outlived its
+ * claim and lost it to another process stops at its next batch (`claimLost`)
+ * without staging, sealing or releasing over the new owner's claim. Within a process, calls for one page
  * also run one after another, and a page an earlier call sealed returns at
  * once (#6143).
  *
@@ -28,6 +29,7 @@
  * GC would delete a marked row at once, and a delete leaves the HNSW index
  * alone where marking rewrote each row's entry.
  */
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
@@ -112,36 +114,31 @@ async function retireStaleChunks(engine: BrainEngine, ref: { sourceId: string; s
 
 const JOB_OF_PAGE = 'source_incarnation=(SELECT incarnation FROM sources WHERE id=$1) AND slug=$2';
 
-/** This build's claim: the `updated_at` it last wrote on the page's queue row. Null for a page built unclaimed. */
-type ProjectionClaim = { stamp: string } | null;
+/** This build's claim: the queue reason it wrote, `SEGMENTED_PROJECTION_CLAIM:<uuid>`, unique to this acquisition. Null for a page built unclaimed. */
+type ProjectionClaim = string | null;
 
-/** The page's queue row while it carries this build's claim ($3: its stamp). A function: projections.ts imports this module, so its constants are not initialized while this module loads. */
-const claimedByBuild = () => `${JOB_OF_PAGE} AND reason='${SEGMENTED_PROJECTION_CLAIM}' AND updated_at=$3::text::timestamptz`;
+/** The page's queue row while it carries this build's claim ($3). */
+const CLAIMED_BY_BUILD = `${JOB_OF_PAGE} AND reason=$3`;
 
 /** Claim the page's queue row; false when another process holds it. A page with no queued row is built unclaimed (null). */
 async function claimProjection(engine: Pick<BrainEngine, 'executeRaw'>, ref: { sourceId: string; slug: string }): Promise<ProjectionClaim | false> {
-  const [job] = await engine.executeRaw<{ stamp: string | null }>(`WITH claimed AS (UPDATE page_projection_jobs SET reason='${SEGMENTED_PROJECTION_CLAIM}', updated_at=now()
-      WHERE ${JOB_OF_PAGE} AND NOT (reason='${SEGMENTED_PROJECTION_CLAIM}' AND updated_at>=now()-interval '${SEGMENTED_PROJECTION_LEASE_SECONDS} seconds')
-      RETURNING updated_at::text AS stamp)
-    SELECT (SELECT stamp FROM claimed) AS stamp WHERE EXISTS (SELECT 1 FROM claimed) OR EXISTS (SELECT 1 FROM page_projection_jobs WHERE ${JOB_OF_PAGE})`,
-  [ref.sourceId, ref.slug]);
+  const claim = `${SEGMENTED_PROJECTION_CLAIM}:${randomUUID()}`;
+  const [job] = await engine.executeRaw<{ claimed: boolean }>(`WITH claimed AS (UPDATE page_projection_jobs SET reason=$3, updated_at=clock_timestamp()
+      WHERE ${JOB_OF_PAGE} AND NOT (split_part(reason,':',1)='${SEGMENTED_PROJECTION_CLAIM}' AND updated_at>=now()-interval '${SEGMENTED_PROJECTION_LEASE_SECONDS} seconds') RETURNING 1)
+    SELECT EXISTS (SELECT 1 FROM claimed) AS claimed WHERE EXISTS (SELECT 1 FROM claimed) OR EXISTS (SELECT 1 FROM page_projection_jobs WHERE ${JOB_OF_PAGE})`,
+  [ref.sourceId, ref.slug, claim]);
   if (!job) return null;
-  return job.stamp === null ? false : { stamp: job.stamp };
+  return job.claimed ? claim : false;
 }
 
 /**
- * Renew this build's claim in `tx`, holding the row until `tx` ends so no other process claims it meanwhile; false when
- * the row no longer carries the claim (another process took it over, or a write re-queued the page), changing nothing.
- * A renewal whose transaction rolls back leaves the stamp ahead of the row, so that build's release misses and its claim
- * lapses after the lease: it never matches another build's claim.
+ * Renew this build's claim in `tx` (`clock_timestamp()`: a transaction that waited never renews with its start time),
+ * holding the row until `tx` ends so no other process claims it meanwhile; false when the row no longer carries this
+ * claim (another process took it over, or a write re-queued the page), changing nothing.
  */
 async function renewClaim(tx: Pick<BrainEngine, 'executeRaw'>, ref: { sourceId: string; slug: string }, claim: ProjectionClaim): Promise<boolean> {
   if (!claim) return true;
-  const [row] = await tx.executeRaw<{ stamp: string }>(`UPDATE page_projection_jobs SET updated_at=now() WHERE ${claimedByBuild()} RETURNING updated_at::text AS stamp`,
-    [ref.sourceId, ref.slug, claim.stamp]);
-  if (!row) return false;
-  claim.stamp = row.stamp;
-  return true;
+  return (await tx.executeRaw(`UPDATE page_projection_jobs SET updated_at=clock_timestamp() WHERE ${CLAIMED_BY_BUILD} RETURNING 1`, [ref.sourceId, ref.slug, claim])).length > 0;
 }
 
 /** The projections of each engine's pages running in this process, by source and slug: the newest call of each page. */
@@ -180,8 +177,8 @@ async function projectSegmentedPage(engine: BrainEngine, ref: { sourceId: string
   try {
     return await buildClaimedProjection(engine, ref, page, claim);
   } catch (error) {
-    if (claim) await engine.executeRaw(`UPDATE page_projection_jobs SET reason='canonical_change', updated_at=now() WHERE ${claimedByBuild()}`,
-      [ref.sourceId, ref.slug, claim.stamp]).catch(() => undefined);
+    if (claim) await engine.executeRaw(`UPDATE page_projection_jobs SET reason='canonical_change', updated_at=clock_timestamp() WHERE ${CLAIMED_BY_BUILD}`,
+      [ref.sourceId, ref.slug, claim]).catch(() => undefined);
     throw error;
   }
 }

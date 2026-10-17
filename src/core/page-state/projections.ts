@@ -460,8 +460,8 @@ export async function noteProjectionRebuilds(engine: BrainEngine, rebuilt: numbe
 /**
  * The queue reason of a segmented page whose projection a process is building (buildSegmentedProjection): the claim
  * holds while its `updated_at`, renewed with each chunk batch, is younger than SEGMENTED_PROJECTION_LEASE_SECONDS.
- * That `updated_at` is also the building process's stamp: its renewals, seal and release match it, so any other write
- * to a claimed row's `updated_at` hands the claim back; a deferral or failure mark skips a live claim.
+ * A build writes it as `segmented_projecting:<uuid>`, a token per acquisition that its renewals, seal and release match
+ * (a bare `segmented_projecting`, written by an older binary, is a claim too); a deferral or failure mark skips a live claim.
  */
 export const SEGMENTED_PROJECTION_CLAIM = 'segmented_projecting';
 export const SEGMENTED_PROJECTION_LEASE_SECONDS = 60;
@@ -472,7 +472,7 @@ export const SEGMENTED_PROJECTION_LEASE_SECONDS = 60;
  * over `page_projection_jobs j`, shared by the consumer's idle probe and the
  * resident's selector.
  */
-export const SEGMENTED_PROJECTION_CLAIMED_SQL = `(j.reason='${SEGMENTED_PROJECTION_CLAIM}' AND j.updated_at>=now()-interval '${SEGMENTED_PROJECTION_LEASE_SECONDS} seconds')`;
+export const SEGMENTED_PROJECTION_CLAIMED_SQL = `(split_part(j.reason,':',1)='${SEGMENTED_PROJECTION_CLAIM}' AND j.updated_at>=now()-interval '${SEGMENTED_PROJECTION_LEASE_SECONDS} seconds')`;
 export const PROJECTION_RETRY_READY_SQL = "(j.reason IS DISTINCT FROM 'rebuild_failed' OR j.updated_at<now()-interval '30 seconds')"
   + ` AND NOT ${SEGMENTED_PROJECTION_CLAIMED_SQL}`;
 
