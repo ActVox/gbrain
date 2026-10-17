@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.281.0] - 2026-10-17
+
+**A PGLite brain that is draining a large effects backlog answers requests sooner, and master CI is green again.** When the write owner starts on a backlog of queued embedding effects, its first tick ran the receipt compaction pass, the reservation sweep and the queue `VACUUM` back to back next to the drain, and each drain pass held the event loop for its whole reservation true-up. PGLite statements run synchronously, so a request (or a timer) waited behind all of it: about 0.3 s on a fast machine and 2.2 s on a slow CI runner, which failed `test/persistence-drain-latency.serial.test.ts` on master. Now each of those steps returns to the event loop before the next one, and a request waits behind one step at most.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| longest wait for a tool call while 8,000 no-op embedding effects drain (local PGLite) | 290 to 380 ms | 86 to 120 ms |
+| the same on a host about as slow as the CI runner that failed (statements slowed 4.5x) | 1.9 to 2.1 s (over the 2 s bound in 2 of 3 runs) | 1.0 to 1.2 s |
+| time to drain that backlog (local) | about 2.8 s | about 3.5 s |
+
+### What to do
+
+Nothing. Nothing is rewritten on upgrade and there is no migration. Postgres brains are unaffected apart from the smaller settle batch.
+
+### Itemized changes
+
+- `src/core/persistence/journal.ts`: new `yieldToEventLoop`, which resumes from the timer queue so a timer that came due during the last statement chain runs before the next chain. The consumer's effects drain uses it between passes (it used `setImmediate`, which ran the next pass ahead of due timers). `vacuumPersistenceQueues` vacuums each grown queue table in its own statement with a yield before each.
+- `src/core/persistence/compaction-pass.ts` and `src/core/persistence/consumer.ts`: the compaction pass yields after compacting and after the reservation sweep step, and the consumer's maintenance chains yield between the compaction pass, the segment sweep, the queue vacuum and the planner statistics refresh.
+- `src/core/persistence/embedding-noop-settle.ts`: `NOOP_SETTLE_BATCH` is 50 (was 200), because one pass and its reservation true-up hold the event loop on PGLite.
+- `DRAIN_ANSWER_BOUND_MS` and every assertion of the drain latency test are unchanged.
+- New `test/persistence-maintenance-yield.test.ts`: the queue `VACUUM` runs in a later event-loop turn than the size check, the compaction pass, the sweep and the pass record each run in their own turn, and a yield resumes after a timer that came due before it. All three fail on the previous code.
+
 ## [0.60.280.0] - 2026-10-17
 
 **A managed brain can now make a commit searchable in seconds, and every managed source reports how long that takes.** Until now a commit reached search only when the next scheduled sync ran, which on a managed brain could be most of an hour. Turn on `sync.on_commit` and `gbrain serve` notices the commit within about 3 seconds, waits 3 more for the commit burst to settle, and runs one managed sync for that source. The setting is off by default, so nothing changes until you turn it on.
