@@ -344,8 +344,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
   const cacheKey = passFingerprint(sourceId, incarnation);
   const working = mode === 'working' && converged ? await workingIdleChange(context, recallWorkingStatCache(cacheKey)) : { changed: mode === 'working', cache: null };
-  const kindOf = syncPassKind({ converged: converged ? { target: converged.target, parserFp: converged.parser_fp, pack: converged.pack, selectionFp: converged.selection_fp,
-      passesSinceFull: converged.passes_since_full, lastFullAt: Date.parse(converged.last_full_at) } : null,
+  // A configured stamp writes last_commit = converged.target: a source whose last_commit moved since (a topology re-clone
+  // clears it, as an upgrade's catch-up does) has no converged state to be idle against.
+  const stamped = converged && (!configured || context.source.last_commit === converged.target) ? converged : null;
+  const kindOf = syncPassKind({ converged: stamped ? { target: stamped.target, parserFp: stamped.parser_fp, pack: stamped.pack, selectionFp: stamped.selection_fp,
+      passesSinceFull: stamped.passes_since_full, lastFullAt: Date.parse(stamped.last_full_at) } : null,
     head, parserFp, pack, selectionFp, now: started, openEpisode: !!episode, owedTail: tail !== null, retryRow: retry.length > 0,
     notConvergedStreak: obligations.not_converged_streak, mismatchStreak: Object.keys(obligations.mismatch).length,
     requestNewer: probe?.newer === true, openAtStampFinished: !!converged && (converged.open_at_stamp === null || (probe?.stillOpen ?? 0) < converged.open_at_stamp.length),
