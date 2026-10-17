@@ -33,7 +33,7 @@ import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHo
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { syncOriginPath } from './sync-origin.ts';
-import { probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeEntry } from './sync-git-stream.ts';
+import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeEntry } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
@@ -292,7 +292,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
 
   // Working mode rehashes every path (the full round's unconditional rehash); committed mode probes candidates only.
   t = timer();
-  const probes = mode === 'working' ? await probeDirtiness(root, gitRoot, [...domain], tree, index) : new Map();
+  const probes = mode === 'working' ? (await hashWorkingLevel(root, gitRoot, [...domain], tree)).probes : new Map();
   timings.Dp = t();
 
   const levelOf = (path: string, probe: { dp: string; rawOid: string | null } | undefined): string | null => {
