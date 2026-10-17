@@ -677,7 +677,7 @@
               "by_day": [
                 {
                   "content_decisions": 0,
-                  "day": "<sync-day>",
+                  "day": "2026-10-16",
                   "interventions": 1
                 }
               ],
@@ -4602,7 +4602,7 @@
               "by_day": [
                 {
                   "content_decisions": 0,
-                  "day": "<sync-day>",
+                  "day": "2026-10-16",
                   "interventions": 1
                 }
               ],

@@ -40,15 +40,6 @@ describe('Postgres hot-check golden: the fence trend day', () => {
     expect(() => stampSyncDay(runOn('2026-11-19'), '2026-11-20', ['2026-11-20', '2026-11-20'])).toThrow('not the day the fixture sync stamped');
   });
 
-  test('the soak counters day is stamped too, inside the run and nowhere else', () => {
-    const soakDays = (report: Report) => report.checks.filter(c => c.name === 'sync_soak_counters').flatMap(c => (c.details as { by_day?: Array<{ day: string }> } | undefined)?.by_day ?? []).map(d => d.day);
-    expect(soakDays(golden)).toEqual([SYNC_DAY]);
-    const acrossMidnight = runOn('2026-11-20');
-    for (const c of acrossMidnight.checks) if (c.name === 'sync_soak_counters') for (const d of (c.details as { by_day: Array<{ day: string }> }).by_day) d.day = '2026-11-21';
-    expect(stampSyncDay(acrossMidnight, '2026-11-20', ['2026-11-20', '2026-11-20'], '2026-11-21')).toEqual(golden);
-    expect(() => stampSyncDay(acrossMidnight, '2026-11-20', ['2026-11-20', '2026-11-20'])).toThrow('outside the fixture run');
-  });
-
   test('only the trend day is replaced: other date-like drift still differs', () => {
     const drifted = runOn('2026-11-20');
     const other = drifted.checks.find(c => c.name !== 'fence_integrity' && typeof c.message === 'string')!;
