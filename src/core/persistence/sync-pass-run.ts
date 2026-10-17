@@ -26,7 +26,7 @@ import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
 import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
 import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
-import type { PassStamp, SyncCursorOptions, SyncIntent } from './sync-prepare.ts';
+import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
@@ -53,6 +53,7 @@ import { passResumeArgs } from './sync-pass-readers.ts';
 import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
+import { SIZE_STATE_SAMPLE, type SyncSizeStates } from '../page-embedding-budget.ts';
 import { massReconcileAllowed } from '../sync-reconcile.ts';
 
 /** Rounds a pass runs before it stops `not_converged` (design §3.1). */
@@ -389,7 +390,17 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
 
   const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0 };
   const collisions: SyncSlugCollision[] = [];
+  // What the batches report beside their counts, as a cursor run reported it: committed pages' size states and #5751's legacy skips.
+  let sizeStates: SyncSizeStates | undefined;
+  const legacySkips = { contextualMode: 0, canonicalBytes: 0 };
+  const foldReport = (sizes: SyncSizeStates | undefined, skips: { contextualMode?: number; canonicalBytes?: number } | undefined) => {
+    if (sizes?.total) sizeStates = { total: (sizeStates?.total ?? 0) + sizes.total, pages: [...sizeStates?.pages ?? [], ...sizes.pages].slice(0, SIZE_STATE_SAMPLE) };
+    legacySkips.contextualMode += skips?.contextualMode ?? 0; legacySkips.canonicalBytes += skips?.canonicalBytes ?? 0;
+  };
   const S = new Map<string, string>();
+  // #5751: (path, level) keys a legacy kernel waiver passed. The waiver records no import, so the path classifies as before;
+  // it is settled for this pass (never re-admitted, never a settle mismatch) and re-screened by the next one.
+  const legacyWaived = new Set<string>();
   const settledKey = (path: string, level: string | null) => `${path}\0${level ?? ''}`;
   // The entries this round's batches settled before the round folds its candidates into S: a slice that yields mid-round
   // (writer_yield) reports them (yieldSettled); a blocked stop reports S as it replays.
@@ -416,6 +427,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
     ...(collisions.length ? { slugCollisions: collisions } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
+    ...(sizeStates ? { size_states: sizeStates } : {}), ...(legacySkips.contextualMode || legacySkips.canonicalBytes ? { legacySkips: { ...legacySkips } } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
   try {
@@ -452,6 +464,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0) });
       sliceBase.pages += drained.index;
       roundSettled += drained.index;
+      foldReport(c.sizeStates, { contextualMode: c.skippedContextualMode, canonicalBytes: c.skippedCanonicalBytes });
+      for (const index of drained.legacyWaived ?? []) {
+        const entry = drained.entries[index] as PassEntry;
+        legacyWaived.add(settledKey(lastLevel?.scope ? `${lastLevel.scope}/${entry.path}` : entry.path, entry.level ?? null));
+      }
       return null;
     }
     return drained;
@@ -461,6 +478,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
       waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
     sliceBase.pages += drained.filesImported ?? 0;
+    foldReport(drained.size_states, drained.legacySkips);
     if (drained.reason === 'writer_yield') yieldSettled = roundSettled + (drained.managedCursor?.index ?? 0);
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
     const blockedOn = drained.managedWrite?.path ? drained.managedWrite.write_request.request_id : null;
@@ -521,7 +539,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (r.inFlight) { inFlight.push(entry); continue; }
         if (S.has(settledKey(entry.path, entry.state.level))) {
           // A hold this pass wrote or re-screened at L is that path's fate here, even when its code re-screens every pass.
-          if (entry.state.hold?.atLevel) continue;
+          if (entry.state.hold?.atLevel || legacyWaived.has(settledKey(entry.path, entry.state.level))) continue;
           // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
           const again = settledKey(entry.path, entry.state.level);
           if (readmitted.has(again)) { mismatch.push(entry); continue; }
@@ -579,6 +597,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
             await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
             // Holds on paths that left the level go with it here too, as a stamp releases them.
             for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
+            await recordPassFenceTrend(tx, { worktreeId: context.binding.worktree_id, sourceId, passId, since: converged?.request_hwm ?? null });
             const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP);
             value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
               last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
@@ -599,7 +618,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (closure?.released) counts.episodeReleased = closure.released;
         const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
           closesEpisode, retryTaken: [...retry], releasedHolds: level.releasableHolds, selectionFp, parserFp, pack, full: kind === 'full',
-          changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: !processingOptions.noExtract, since: value.telemetry.started_at };
+          changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: !processingOptions.noExtract, since: value.telemetry.started_at,
+          ...(legacyWaived.size ? { rescreen: true as const } : {}) };
         await save('open', null);
         const stopped = await drain([], stamp);
         if (stopped) return stop(stopped);

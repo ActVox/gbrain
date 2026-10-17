@@ -19,6 +19,7 @@ export function waivedCursor(cursor: Cursor, waived: NoopWaiver, index = cursor.
     waived: { imports: prior.imports + (waived.kind === 'import' ? 1 : 0), deletes: prior.deletes + (waived.kind === 'delete' ? 1 : 0) } } };
   if (waived.kernel.includes('contextual_mode')) next.counts.skippedContextualMode = (next.counts.skippedContextualMode ?? 0) + 1;
   if (waived.kernel.includes('canonical_file_differs')) next.counts.skippedCanonicalBytes = (next.counts.skippedCanonicalBytes ?? 0) + 1;
+  if (cursor.passId && waived.kernel.length) next.legacyWaived = [...cursor.legacyWaived ?? [], index];
   return next;
 }
 /** #6643: the cursor's settled indexes with its current entry added (it passes that entry without a commit). */

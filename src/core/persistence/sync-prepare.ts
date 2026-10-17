@@ -53,11 +53,12 @@ import { syncLockId } from '../db-lock.ts';
 import { readConvergedWatermark } from './sync-pass-batch.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
-import { clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, type FencesTally, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
 import { clearSyncSlice, writeSyncSlice, type SyncSliceState } from './sync-slices.ts';
 import { CHECKPOINT_MOVED_MESSAGE, emptySyncScope, pinnedSlugModeMismatch, slugModeMismatchCause } from './sync-slug-mode.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
 import { fenceWhere } from '../fence-repair/refusal.ts';
+import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { fencesNormalizeEnabled } from '../fence-repair/config.ts';
 import { describeFixes } from '../fence-repair/report.ts';
 import { fenceFixesWire } from '../fence-repair/tier1.ts';
@@ -128,6 +129,8 @@ export interface PassStamp {
   changed: number; extract: boolean;
   /** When the pass pinned, on the database clock: the tail reads the pages its requests imported since then. */
   since?: string;
+  /** #5751: the pass settled paths only by a legacy kernel waiver (they record no import), so the next tick re-screens them: no idle. */
+  rescreen?: true;
 }
 /**
  * #5984: the source-wide part of sync validation (managed mode, configured
@@ -517,12 +520,13 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
     if (stamp.stampChunker) await tx.executeRaw('UPDATE sources SET chunker_version=$2 WHERE id=$1', [row.source_id, chunkerStamp()]);
   }
   await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract, ...(stamp.since ? { since: stamp.since } : {}) });
+  await recordPassFenceTrend(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, passId: p.passId!, since: pass.value.obligations.converged?.request_hwm ?? null });
   for (const path of stamp.releasedHolds) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
   const watermark = await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP);
   const value: ManagedSyncPassValue = structuredClone(pass.value);
   const at = new Date().toISOString(), prior = value.obligations.converged;
-  value.obligations.converged = { target: p.target, at, ...watermark,
+  value.obligations.converged = { target: p.target, at, ...watermark, ...(stamp.rescreen ? { open_at_stamp: null } : {}),
     parser_fp: stamp.parserFp, pack: stamp.pack, selection_fp: stamp.selectionFp, last_full_at: stamp.full || !prior ? at : prior.last_full_at,
     passes_since_full: stamp.full || !prior ? 0 : prior.passes_since_full + 1 };
   if (stamp.closesEpisode) delete value.obligations.episode;
@@ -532,6 +536,21 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
   if (!await writePassRow(tx, value)) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
     `Another pass of ${row.source_id} started while checkpoint ${row.request_id} published, so nothing was stamped.`);
   return { status: 'synced', source_id: row.source_id, pass_id: p.passId, configured: stamp.configured };
+}
+
+/**
+ * #6188 (E33) on a live pass: the stamp records the source's fences_normalized trend row (one per pass, keyed by its id) from
+ * the sync imports committed since the previous stamp's watermark. A pass that stopped before its stamp is counted by the
+ * next stamp, once, so a completed pass always has its trend row and a normalization is never counted twice.
+ */
+export async function recordPassFenceTrend(tx: Pick<BrainEngine, 'executeRaw'>, scope: { worktreeId: string; sourceId: string; passId: string; since: string | null }): Promise<void> {
+  const rows = await tx.executeRaw<{ path: string | null; fences: Array<{ class: string }> }>(`SELECT intent->>'path' AS path, outcome->'fences_normalized' AS fences
+    FROM persistence_requests WHERE worktree_id=$1::uuid AND source_id=$2 AND sequence > $3::bigint AND state='committed'
+      AND intent->>'kind'='managed_sync_import' AND intent->>'passId' IS NOT NULL AND jsonb_typeof(outcome->'fences_normalized')='array' ORDER BY sequence`,
+  [scope.worktreeId, scope.sourceId, scope.since ?? '0']);
+  let tally: FencesTally | undefined;
+  for (const row of rows) if (row.path && row.fences.length) tally = addFencesNormalized(tally, row.path, row.fences);
+  if (tally) await recordSyncRunTrend(tx, { sourceId: scope.sourceId, runId: scope.passId, day: new Date().toISOString().slice(0, 10), count: tally.count, byClass: tally.by_class, writers: tally.dirs });
 }
 
 /** The checkpoint request's publication: the whole run committed, so `last_commit` (and the slug-root pin) advance under the guard. */

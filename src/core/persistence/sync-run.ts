@@ -146,7 +146,9 @@ export interface Cursor extends SyncDiscovery { runId: string; index: number; au
    * the pass's stamp (no entries; its checkpoint publishes the stamp). `fullEpisode`: the open `--full` episode its imports
    * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint).
    */
-  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[]; }
+  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[];
+  /** #5751 on a pass: the batch indexes a legacy kernel waiver (`contextual_mode`, `canonical_file_differs`) passed; they record no import, so the pass settles them for itself. */
+  legacyWaived?: number[]; }
 export interface CursorProgress { startedAt: number; startIndex: number; lastAt: number; lastIndex: number }
 /**
  * #6278 (1.5): the breaker state a run carries in its cursor. `stalled` lists the `preparation_stalled` receipts this run
