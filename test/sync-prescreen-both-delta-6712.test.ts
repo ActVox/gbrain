@@ -7,7 +7,7 @@
  * - both moved, delta sync: the page keeps the database edit and the file is held `file_drift` (side `both`);
  * - control: a file-only edit still imports on a delta sync with no hold;
  * - control: a database-only change an import keeps (a tag) is not guarded: the page still holds what the recorded disk
- *   blob imports (`unchangedSinceBaseline`), so the committed edit imports and the tag stays;
+ *   blob imports (sync-run.ts `sameContentAtOrigin`, `pageOnly`), so the committed edit imports and the tag stays;
  * - control: a page whose current revision write-through wrote to its file is not guarded (`fileBackedRevisions`), so the
  *   committed file edit imports.
  *

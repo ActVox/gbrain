@@ -17,7 +17,7 @@
  *   incremental sync published a committed edit over a database-only `put_page`). `unknown` is guarded in a tree walk
  *   (first sync, `--full`, an unreachable checkpoint, a re-discovery), where no Git delta says the file is the side that
  *   changed. A `both` entry whose page still holds what the recorded disk blob imports (the database changed only what an
- *   import keeps: tags, links) imports (sync-run.ts `unchangedSinceBaseline`). A page whose current revision a
+ *   import keeps: tags, links) imports (sync-screen.ts `driftBaselineContent`). A page whose current revision a
  *   committed managed-sync request of this incarnation wrote, or whose writer's write-through wrote to its file
  *   (`pages.revision_write_request_id`, `fileBackedRevisions`), has no database-only edit to protect and is not guarded. A guarded entry is imported only when the freeze proves the import changes
  *   nothing (`sameContentAtOrigin`); otherwise it is held `file_drift` (sync-run.ts `driftHold`).
