@@ -51,8 +51,9 @@ export interface PassLevelInput {
   includeHidden?: readonly string[];
   strategy?: string;
   /**
-   * The incarnation's first pass (no pass row yet): a page-less path whose level equals its baseline blob reads a virtual
-   * `legacy` marker, which the pass then writes (design §2.7). After it, only stored markers count.
+   * The incarnation's first pass (no pass row yet): a page-less path whose level equals its baseline blob and whose slug a
+   * committed deletion names reads a virtual `legacy` marker, which the pass then writes (design §2.7, b1). After it, only
+   * stored markers count.
    */
   bootstrap?: boolean;
 }
@@ -64,7 +65,7 @@ const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
 
 /** One classified path of the shadow level. */
 export interface ShadowPath { path: string; slug: string | null; pageId: number | null; revision: string | null; state: SyncPathState; result: SyncClassified;
-  /** A page-less path whose file is unchanged since the baseline: PR 4b's bootstrap writes it a `legacy` marker (`legacy_pageless`). */
+  /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
   legacyPageless?: true }
 
 export interface ShadowLevel {
@@ -177,15 +178,29 @@ async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string): P
 }
 
 /** Deletion markers of the incarnation (a primary-key range read); none exist before PR 4b. */
-async function readMarkers(exec: Exec, sourceId: string, incarnation: string): Promise<Map<string, { kind: 'deleted' | 'legacy'; blobOids: string[] }>> {
+async function readMarkers(exec: Exec, sourceId: string, incarnation: string): Promise<Map<string, { kind: 'deleted' | 'legacy'; blobOids: string[]; deletion: string | null }>> {
   const prefix = `${sourceId}:${incarnation}:`;
   // `starts_with`, not a range: under a linguistic collation (en_US) a `< prefix || U+FFFF` bound matches nothing.
-  const rows = await exec.executeRaw<{ fingerprint: string; value: { kind?: string; blob_oids?: unknown } | null }>(
+  const rows = await exec.executeRaw<{ fingerprint: string; value: { kind?: string; blob_oids?: unknown; deletion?: unknown } | null }>(
     'SELECT fingerprint, completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND starts_with(fingerprint, $2)',
     [SYNC_ORIGIN_DELETED_OP, prefix]);
   return new Map(rows.map(row => [syncOriginPath(row.fingerprint.slice(prefix.length)), {
     kind: row.value?.kind === 'legacy' ? 'legacy' as const : 'deleted' as const,
-    blobOids: Array.isArray(row.value?.blob_oids) ? (row.value!.blob_oids as unknown[]).filter((oid): oid is string => typeof oid === 'string') : [] }]));
+    blobOids: Array.isArray(row.value?.blob_oids) ? (row.value!.blob_oids as unknown[]).filter((oid): oid is string => typeof oid === 'string') : [],
+    deletion: typeof row.value?.deletion === 'string' ? row.value.deletion : null }]));
+}
+
+/**
+ * Design §2.7 with the parent's b1 ruling: a page-less path unchanged since the baseline is a page deleted before PR 4 only
+ * when a committed deleting request of this incarnation names the slug its path imports to (the newest one is the proof). A
+ * file sync refused before it ever had a page has none, so it imports.
+ */
+async function readLegacyDeletions(exec: Exec, sourceId: string, incarnation: string, slugs: string[]): Promise<Map<string, string>> {
+  if (!slugs.length) return new Map();
+  const rows = await exec.executeRaw<{ slug: string; id: string }>(`SELECT DISTINCT ON (slug) slug, id::text AS id FROM persistence_requests
+    WHERE source_id=$1 AND source_incarnation=$2::uuid AND state='committed' AND slug=ANY($3::text[])
+      AND (operation='delete_page' OR intent->>'kind'='managed_sync_delete') ORDER BY slug, sequence DESC`, [sourceId, incarnation, slugs]);
+  return new Map(rows.map(row => [row.slug, row.id]));
 }
 
 /** The pass row of the incarnation (PR 4b writes it); null in PR 4a. */
@@ -371,9 +386,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const attested = row && (row.arm1 || row.attested_hash) ? { hash: row.attested_hash ?? null, arm1: row.arm1 === true } : null;
     const hold = holdByGitPath.get(path);
     const marker = markers.get(originOf(path)) ?? null;
-    let virtualMarker: SyncPathState['marker'] = null;
-    let legacyPageless: true | undefined;
-    if (!row && !marker && level !== null && (!input.pass || input.pass.bootstrap) && level === await baselineOf(path)) { virtualMarker = { kind: 'legacy', blobOids: [level] }; legacyPageless = true; }
+    const deletion = !row && !marker && level !== null ? legacyDeletions.get(path) : undefined;
+    const virtualMarker: SyncPathState['marker'] = deletion ? { kind: 'legacy', blobOids: [level!], deletion } : null;
+    const legacyPageless = deletion ? true as const : undefined;
     const needsBaseline = row && !row.deleted && (record?.revision == null) && level !== null && !recordBlobOids.includes(level);
     const state: SyncPathState = {
       mode, tree: committed?.oid ?? null, level, present: presentNow, dirty, diskOid: probe?.rawOid ?? null,
@@ -386,11 +401,30 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       spelling: (spellings.get(fold(path)) ?? 0) > 1,
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && !!row && !row.deleted && record?.full_episode !== input.pass.episodeFullId
         : input.full === true && !!row && !row.deleted,
+      fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
       keepDb: !mirror && keepDbPrefixes.length > 0 && !!row && isKeepDbSlug(row.slug, keepDbPrefixes),
       openWork: !!row && open.pageIds.has(Number(row.id)) || open.origins.has(originOf(path)),
     };
     return { state, ...(row ? { row } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
   };
+
+  // Bootstrap (the incarnation's first pass; for a read-only level, no pass row yet): page-less paths at their baseline blob
+  // whose slug a committed deletion names get a `legacy` marker (§2.7, b1).
+  t = timer();
+  const legacyDeletions = new Map<string, string>();
+  if (baselineCommit && (input.pass ? input.pass.bootstrap === true : !passRow)) {
+    const pageless: Array<{ path: string; slug: string }> = [];
+    for (const path of domain) {
+      if (byOrigin.has(path) || markers.has(originOf(path))) continue;
+      const level = levelOf(path, probes.get(path));
+      if (level === null || level !== await baselineOf(path)) continue;
+      const slug = resolveSlugForPath(originOf(path));
+      if (slug) pageless.push({ path, slug });
+    }
+    const bySlug = await readLegacyDeletions(engine, sourceId, incarnation, [...new Set(pageless.map(entry => entry.slug))]);
+    for (const { path, slug } of pageless) { const id = bySlug.get(slug); if (id) legacyDeletions.set(path, id); }
+    timings.legacy = t();
+  }
 
   t = timer();
   const paths: ShadowPath[] = [];
@@ -439,7 +473,6 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const kind = syncPassKind({ converged: null, head, parserFp: '', pack: pack?.identity ?? null, selectionFp: '', now: Date.now(), openEpisode: input.full === true, owedTail: false,
     retryRow: retry.size > 0, notConvergedStreak: 0, mismatchStreak: 0, requestNewer: false, openAtStampFinished: false, workingChange: false,
     rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.has(hold.path))), full: input.full === true });
-  void passRow;
   timings.total = total();
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,

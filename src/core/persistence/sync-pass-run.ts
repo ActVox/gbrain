@@ -175,11 +175,11 @@ async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: 
   }
 }
 
-/** Design §2.7: the incarnation's first pass writes a `legacy` marker for each page-less path whose level is its baseline blob. */
+/** Design §2.7 (b1): the incarnation's first pass writes a `legacy` marker, with its deletion proof, for each page-less path deleted before PR 4. */
 async function writeLegacyMarkers(engine: BrainEngine, level: ShadowLevel): Promise<number> {
   const rows = level.paths.filter(entry => entry.legacyPageless && entry.state.level).map(entry => ({
     fingerprint: originMarkerFingerprint(level.sourceId, level.incarnation, entryPaths(level, entry.path).sourcePath),
-    value: { source_id: level.sourceId, incarnation: level.incarnation, kind: 'legacy', blob_oids: [entry.state.level], at: new Date().toISOString() } }));
+    value: { source_id: level.sourceId, incarnation: level.incarnation, kind: 'legacy', blob_oids: [entry.state.level], deletion: entry.state.marker?.deletion ?? null, at: new Date().toISOString() } }));
   if (!rows.length) return 0;
   await engine.transaction(async tx => {
     await assertDrainLease(tx, level.sourceId);

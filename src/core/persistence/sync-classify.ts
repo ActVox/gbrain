@@ -46,14 +46,19 @@ export interface SyncPathState {
   published: boolean;
   /** An active hold at `p`: whether it is at level `L` in its own domain, re-screen due, or in the retry set. */
   hold: { atLevel: boolean; rescreenDue: boolean; retried: boolean } | null;
-  /** A deletion marker at the origin: `deleted` (with the blob ids it held) or `legacy` (the baseline blob). */
-  marker: { kind: 'deleted' | 'legacy'; blobOids: readonly string[] } | null;
+  /**
+   * A deletion marker at the origin: `deleted` (with the blob ids it held) or `legacy` (the baseline blob of a page deleted
+   * before PR 4; `deletion` is the committed deleting request that proves it, and a legacy marker without one settles nothing).
+   */
+  marker: { kind: 'deleted' | 'legacy'; blobOids: readonly string[]; deletion?: string | null } | null;
   /** `T[p]` at the pass row's `baseline_commit` (null: absent there, or no baseline). */
   baseline: string | null;
   /** Another live origin differs from `p` only by case or separator. */
   spelling: boolean;
   /** An open full episode has not re-imported this page yet. */
   episodeUnsatisfied: boolean;
+  /** `--full` or an open episode: every path, page-less ones included, owes a re-import (v3.1 §2.7). */
+  fullObligation?: boolean;
   /** Under a `storage.keep_db` prefix, on a source that is not mirror-read-only. */
   keepDb: boolean;
   /** Open work on the page or path (a queued/running/recovering request, a pending Git effect). */
@@ -66,6 +71,10 @@ export interface SyncClassified {
   /** The overlay: an unsettled class whose page has open work is `in_flight` (skipped this round, blocks the stamp). */
   inFlight: boolean;
   action: SyncPathAction;
+  /** Who finishes this path (per path, not per class): a settled `dirty` path is `none`, an unsettled one `repair`; a re-screen-due hold is `owner`. */
+  classAction: SyncClassAction;
+  /** `held`: the hold is re-screen due (or no longer at its level), so the pass re-runs it. */
+  rescreenDue?: true;
   /** `db_ahead`: `pending` (attested), `db_only` (moved off a recorded revision), `unproven` (no record revision). */
   sub?: 'pending' | 'db_only' | 'unproven';
   /** `drift` and `delete_drift`: the hold's side. `deleted_edited`: its state. */
@@ -91,15 +100,32 @@ export function syncClassAction(cls: SyncClass | 'in_flight' | 'keep_db_pending'
   }
 }
 
-/** Rows 1-19 of v3.2 §2.3, tried in order; the first match wins. */
-function firstMatch(s: SyncPathState): Omit<SyncClassified, 'inFlight'> {
+type Matched = Omit<SyncClassified, 'inFlight' | 'classAction'>;
+
+/**
+ * Rows 1-19 of v3.2 §2.3, tried in order; the first match wins. Garry's Q3 = A invariant: a settled path is matched, held or
+ * in a class whose action says who finishes it. So a path with a hold row never settles in a later row (b2): unless the hold
+ * is at its level and not re-screen due, the pass re-runs it (`held`, `rescreenDue`).
+ */
+function firstMatch(s: SyncPathState): Matched {
+  if (s.hold && s.hold.atLevel && !s.hold.rescreenDue && !s.hold.retried) return { cls: 'held', settled: true, action: 'none' };
+  const rest = afterHold(s);
+  // The re-run is the import the hold refused, where an import is what the level would get anyway (`import`) or changes
+  // nothing (`matched`). A level that needs another action (a drift side, a delete proof, a reparse) keeps that class, so
+  // its guard still applies; one that settles any other way (database ahead, a deleted page, an uncommitted edit, a legacy
+  // page) must not be imported over, so the hold stands.
+  if (s.hold && s.level !== null && (rest.cls === 'matched' || rest.cls === 'import')) return { cls: 'held', settled: false, action: 'import', rescreenDue: true };
+  if (s.hold && rest.settled) return { cls: 'held', settled: true, action: 'none' };
+  return rest;
+}
+
+function afterHold(s: SyncPathState): Matched {
   const live = s.page?.live === true;
   const tombstone = s.page !== null && !s.page.live;
   const fileSame = s.level !== null && !!s.record && s.record.blobOids.includes(s.level);
   const dbSame = !!s.page && !!s.record && s.record.revision !== null && s.record.revision === s.page.revision;
   const proof = dbSame || s.attested !== null;
   const obligation = !s.record?.parserSame || !s.page?.originMatches || s.episodeUnsatisfied;
-  if (s.hold && s.hold.atLevel && !s.hold.rescreenDue && !s.hold.retried) return { cls: 'held', settled: true, action: 'none' };
   if (s.spelling) return { cls: 'spelling', settled: false, action: 'refuse' };
   if (s.mode === 'committed' && s.tree === null && !live) return { cls: 'untracked', settled: true, action: 'none' };
   if (live && s.level === null) {
@@ -112,7 +138,7 @@ function firstMatch(s: SyncPathState): Omit<SyncClassified, 'inFlight'> {
     const deletedMarker = s.marker?.kind === 'deleted' ? s.marker : null;
     if ((tombstone && fileSame) || (deletedMarker && s.level !== null && deletedMarker.blobOids.includes(s.level))) return { cls: 'deleted_same', settled: true, action: 'none' };
     if ((tombstone || deletedMarker) && !s.published) return { cls: 'deleted_edited', settled: false, action: 'hold', side: 'deleted', state: tombstone ? 'tombstone_edited' : 'purged_differs' };
-    if (s.marker?.kind === 'legacy' && s.level !== null && s.marker.blobOids.includes(s.level)) return { cls: 'legacy_same', settled: true, action: 'none' };
+    if (s.marker?.kind === 'legacy' && s.marker.deletion && !s.fullObligation && s.level !== null && s.marker.blobOids.includes(s.level)) return { cls: 'legacy_same', settled: true, action: 'none' };
   }
   if (s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty)) {
     const absorbed = (s.tree !== null && !!s.record && s.record.blobOids.includes(s.tree)) || (s.diskOid !== null && !!s.record && s.record.blobOids.includes(s.diskOid));
@@ -141,7 +167,9 @@ function firstMatch(s: SyncPathState): Omit<SyncClassified, 'inFlight'> {
 /** The class of one path (v3.2 §2.3), with the open-work overlay applied. */
 export function classifySyncPath(s: SyncPathState): SyncClassified {
   const match = firstMatch(s);
-  return { ...match, inFlight: !match.settled && s.openWork };
+  const inFlight = !match.settled && s.openWork;
+  const classAction: SyncClassAction = inFlight || match.rescreenDue ? 'owner' : match.cls === 'dirty' ? (match.settled ? 'none' : 'repair') : syncClassAction(match.cls);
+  return { ...match, inFlight, classAction };
 }
 
 /** Why a pass is not idle (v3.2 §2.2); empty = idle. A hold-only round runs when `rescreen_due_hold` is the only reason. */
