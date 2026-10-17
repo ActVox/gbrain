@@ -252,7 +252,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
  * these must join the group: test/doctor-entry-deadline-6803.test.ts).
  */
 export const CHEAP_INCIDENT_CHECKS: ReadonlySet<string> = new Set([
-  'persistence_capacity', 'managed_sync_not_moving', 'text_projection_readiness', 'partial_embedding', 'links_extraction_lag',
+  'persistence_capacity', 'managed_sync_not_moving', 'managed_sync_blocked', 'text_projection_readiness', 'partial_embedding', 'links_extraction_lag',
 ]);
 
 const CONNECTION_LANE: ReadonlySet<DoctorEntry> = new Set([offlineConnectionEntry, dbChecksGateEntry, connectionEntry, connectionGateEntry]);
