@@ -28,7 +28,7 @@ export interface SyncPathState {
   tree: string | null;
   /** `L(p)`: committed mode `T[p]`; working mode the physical bytes' blob id (CRLF-folded / LFS-resolved to `T[p]` when clean); null = absent. */
   level: string | null;
-  /** `workingTreeFilePresent`. */
+  /** `workingTreeFilePresent`; committed mode, `L = absent`: false for a page whose import provenance is the Git blob (`keptWorkingTreePages`). */
   present: boolean;
   /** Committed mode, `p ∈ T`: the candidate dirtiness; null when the pass did not probe it (only paths settled without it). */
   dirty: SyncDirtiness | null;

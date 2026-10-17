@@ -71,6 +71,8 @@ export const FINDINGS = {
     text: 'frontmatter_slug_conflict and legacy_slug_conflict holds are always rescreen-due, so row 1 never holds them; with no page and an unchanged file they fall to row 10 legacy_same (settled, none) while the hold row still exists, so the class contradicts the hold that status shows.' },
   dirtyGlossary: { kind: 'b', ref: 'v3.2 §9 class glossary; sync-classify.ts syncClassAction',
     text: 'Row 11 dirty is settled when absorbed or published, but the glossary gives a class one action and 4a tags every dirty path repair, so a settled write-through publication waiting for its commit reads as needing a person.' },
+  gitTruth: { kind: 'b', ref: 'master #5459 (keptWorkingTreePages); v3.2 §2.3 row 4 ("any provenance")',
+    text: 'master #5459: Git is the truth for tracked paths; row 4 is keptWorkingTreePages. A page Git imported whose file left Git is row 5 delete (row 6 delete_drift without proof) even when a copy lingers untracked; only a working-tree (or unknown-provenance) import is kept. Design row 4 says any provenance, so the shadow follows master, not the table.' },
   twinInvisible: { kind: 'b', ref: 'v3.2 §2.3 domain (pages with a recorded origin only)',
     text: 'A #6885 legacy twin (source_path NULL) is outside the domain: the pair reads as one matched path and nothing in convergence counts it, so PR 4 can neither report nor converge already-forked pairs.' },
 } as const satisfies Record<string, Finding>;
@@ -143,7 +145,8 @@ export function mixCases(): SeededCase[] {
     c('deleted_same: deleted marker', 'mix/purged-marker-same.md', { key: 'deleted_same', ...settledNone }, 'row 8', 'sync, delete_page purge (writes the marker)'),
     c('deleted_edited: deleted marker', 'mix/purged-marker-differs.md', { key: 'deleted_edited', action: 'hold', settled: false, side: 'deleted', state: 'purged_differs' }, 'row 9', 'sync, delete_page purge, raw SQL (marker), git commit'),
     c('legacy_same: legacy marker', 'mix/legacy-marker.md', { key: 'legacy_same', ...settledNone }, 'row 10', 'sync, delete_page purge, raw SQL (the legacy marker PR 4b writes)'),
-    c('kept: live page, file left T, still on disk', 'mix/kept-file.md', { key: 'kept', ...settledNone }, 'row 4', 'sync, git rm --cached and commit'),
+    c('delete: Git-imported page, file left T, still on disk (#5459)', 'mix/kept-file.md', { key: 'delete', action: 'delete', settled: false }, 'row 5 (master #5459)', 'sync, git rm --cached and commit', FINDINGS.gitTruth),
+    c('kept: working-tree import, never in T, still on disk', 'mix/kept-working.md', { key: 'kept', ...settledNone }, 'row 4 (keptWorkingTreePages)', 'sync --working-tree of an untracked file'),
     c('dirty: committed edit under an uncommitted one', 'mix/dirty-held.md', { key: 'dirty', action: 'hold', settled: false }, 'row 11', 'sync, git commit, uncommitted edit'),
     c('dirty: uncommitted edit of a synced file (absorbed)', 'mix/dirty-absorbed.md', { key: 'matched', action: 'none', settled: true }, 'row 12: Dp is read for candidates only (rulings b3)', 'sync, uncommitted edit', FINDINGS.dirtyAbsorbed),
     c('dirty: write-through publication not committed (published)', 'mix/dirty-published.md', { key: 'dirty', action: 'none', settled: true }, 'row 11 (settled: published)', 'sync, put_page (write-through)', FINDINGS.dirtyGlossary),
@@ -194,6 +197,11 @@ export async function seedMix(brain: MixBrain): Promise<SeededCase[]> {
   const first = await performManagedSync(engine, SYNC);
   if (first.status !== 'first_sync') throw new Error(`the first sync ended ${first.status}`);
   const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
+
+  // Stage 1b: a working-tree sync imports an untracked file (provenance working), which stays on disk and never enters T.
+  write(root, 'mix/kept-working.md', note('kept-working', 'An untracked working-tree note.'));
+  const working = await performManagedSync(engine, { ...SYNC, workingTree: true });
+  if (working.status !== 'synced') throw new Error(`the working-tree sync ended ${working.status}`);
 
   // Stage 2: a second sync writes the holds master writes itself.
   await withoutTrigger(() => engine.executeRaw("INSERT INTO pages(source_id,slug,type,page_kind,title,compiled_truth) VALUES('default','mix/Legacy Name','note','markdown','Legacy Name','A legacy page.')"));
@@ -313,12 +321,12 @@ export function seedSpelling(root: string, cases: SeededCase[]): SeededCase[] {
   return [...cases, ...mixCases().filter(entry => SPELLING.includes(entry.path))];
 }
 
-/** Phase B: a mass removal that trips #2828's valve (mass/* plus the single delete of the mix). */
+/** Phase B: a mass removal that trips #2828's valve (mass/* plus the mix's two single deletes). */
 export function seedMassDelete(root: string, cases: SeededCase[]): SeededCase[] {
   gitIn(root, ['rm', '-q', '-r', '--', 'mass']);
   commitStaged(root, 'mass removal');
-  return cases.map(entry => entry.path.startsWith('mass/') || entry.path === 'mix/delete-proof.md'
-    ? { ...entry, category: entry.path.startsWith('mass/') ? 'deletes_withheld (mass removal)' : 'deletes_withheld (the single delete, same trip)', row: '§2.6 valve on row 5',
+  return cases.map(entry => entry.path.startsWith('mass/') || entry.path === 'mix/delete-proof.md' || entry.path === 'mix/kept-file.md'
+    ? { ...entry, category: entry.path.startsWith('mass/') ? 'deletes_withheld (mass removal)' : 'deletes_withheld (a single delete of the mix, same trip)', row: '§2.6 valve on row 5',
       seed: `${entry.seed}, git rm and commit (mass)`, expect: { key: 'deletes_withheld', action: 'delete', settled: true } }
     : entry);
 }
@@ -549,7 +557,7 @@ const SCALE_EXPECT: Record<ScaleKind, { expect: Expected; row: string; finding?:
   drift_both: { expect: { key: 'drift', action: 'hold', side: 'both' }, row: 'row 19' }, drift_unknown: { expect: { key: 'drift', action: 'hold', side: 'unknown' }, row: 'row 19' },
   delete: { expect: { key: 'delete', action: 'delete' }, row: 'row 5' }, delete_drift: { expect: { key: 'delete_drift', action: 'hold' }, row: 'row 6' },
   tombstone_same: { expect: { key: 'deleted_same', action: 'none' }, row: 'row 8' }, tombstone_edited: { expect: { key: 'deleted_edited', action: 'hold' }, row: 'row 9' },
-  tombstone_untracked: { expect: { key: 'untracked', action: 'none' }, row: 'row 3' }, kept: { expect: { key: 'kept', action: 'none' }, row: 'row 4' },
+  tombstone_untracked: { expect: { key: 'untracked', action: 'none' }, row: 'row 3' }, kept: { expect: { key: 'kept', action: 'none' }, row: 'row 4 (keptWorkingTreePages)' },
   dirty: { expect: { key: 'dirty', action: 'hold' }, row: 'row 11' },
   dirty_absorbed: { expect: { key: 'matched', action: 'none' }, row: 'row 12: Dp is read for candidates only (rulings b3)', finding: FINDINGS.dirtyAbsorbed },
   held_invalid_frontmatter: { expect: { key: 'held', action: 'none' }, row: 'row 1' }, legacy_unverified: { expect: { key: 'legacy_unverified', action: 'none' }, row: 'row 17' },
@@ -581,6 +589,8 @@ export async function seedScale(engine: BrainEngine, fixture: Fixture, input: { 
     await recordSql(of('reparse_parser'), `jsonb_set(completed_keys->0, '{parser,parser_version}', '"import=0"')`);
     await recordSql(of('reparse_origin'), `jsonb_set(completed_keys->0, '{origin}', to_jsonb('elsewhere/' || (completed_keys->0->>'origin')))`);
     await recordSql(of('unproven', 'drift_unknown'), "(completed_keys->0) - 'revision'");
+    // Row 4 is keptWorkingTreePages (#5459): the kept picks leave T below, so their records say a working-tree import.
+    await recordSql(of('kept'), `jsonb_set(completed_keys->0, '{working}', 'true')`);
     await recordSql(of('legacy_unverified'), "(completed_keys->0) - 'revision' - 'disk_blob_oid' - 'parser' - 'blob_oid'");
     // A database-only edit: the page's revision moves off its record's, with no request (so no attestation).
     await engine.executeRaw('UPDATE pages SET knowledge_revision=gen_random_uuid() WHERE source_id=$1 AND id=ANY($2::int[])', [sourceId, idsOf(of('db_only', 'unproven', 'drift_both', 'drift_unknown', 'delete_drift'))]);
