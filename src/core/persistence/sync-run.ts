@@ -256,11 +256,11 @@ async function saveCursor(engine: BrainEngine, key: string, before: Cursor | nul
 }
 /** Compare-and-swap inside the caller's transaction; a lost swap returns the cursor that won. */
 async function writeCursor(tx: BrainEngine, key: string, before: Cursor | null, next: Cursor, inTx?: (tx: BrainEngine) => Promise<unknown>, synchronous = false): Promise<Cursor> {
-  await assertDrainLease(tx, next.sourceId);
   // #6643: a cursor records the indexes it settles without a commit from its first save by this build on; a cursor saved
   // before (a run that began on an older build) starts recording at the index it had then.
   if (!next.settled) next.settled = before && before.runId === next.runId ? { from: before.settled?.from ?? before.index, ranges: before.settled?.ranges ?? [] } : { from: 0, ranges: [] };
   if (isPassBatchKey(key)) return await passBatchStep(tx, key, before && JSON.stringify(header(before)), next, JSON.stringify(header(next)), inTx) ? next : currentCursor(tx, key, next);
+  await assertDrainLease(tx, next.sourceId);
   if (before === null) {
     if (synchronous) await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2,$3::text::jsonb) ON CONFLICT DO NOTHING`, [`${OP}-manifest`, next.runId, JSON.stringify(next.entries)]);
@@ -856,16 +856,16 @@ const WAIVER_RUN_MAX = 64;
  * #5984 Phase 3: when the frozen head would be waived, freezes and screens the entries after it four at a time
  * (stopping at the first that would not be waived, is held, is overtaken, refuses to freeze, or at the checkpoint)
  * and waives the run in one transaction, without a `pending` cursor save per entry. Returns null to take the
- * per-entry path for the head (its screen admits it, or the run's transaction validated nothing or timed out);
- * otherwise the cursor past the waived prefix (or as another run moved it), with the entry that ended the prefix
- * saved as pending.
+ * per-entry path for the head when the run's transaction validated nothing or timed out, and `admit` when the head's own
+ * screen admits it (the per-entry path then skips its screen: it would prepare the same frozen entry again); otherwise the
+ * cursor past the waived prefix (or as another run moved it), with the entry that ended the prefix saved as pending.
  */
 async function waiveRun(engine: BrainEngine, cursor: Cursor, head: Pending, key: string, config: GBrainConfig, assertActive: () => void,
-  frozenRun: Parameters<typeof freezeEntry>[4], drainStartedAt: number, limit: number, onProgress: SyncOpts['onProgress']): Promise<Cursor | null> {
+  frozenRun: Parameters<typeof freezeEntry>[4], drainStartedAt: number, limit: number, onProgress: SyncOpts['onProgress']): Promise<Cursor | 'admit' | null> {
   // The run's screens share one memo of root-level path facts (screening-paths.ts); waiveNoopRun re-validates each entry.
   // GBRA-75 wave 9: and one bounded-read session (bounded-reads.ts), so the run's screens share one transaction.
   const run = await withScreeningPaths(() => withBoundedReadSession(engine, session => screenWaiverRun(session, cursor, head, key, config, assertActive, frozenRun, limit)));
-  if (!run) return null;
+  if (!run) return 'admit';
   assertActive(); stampDrainStep('waiver_run', frozenRun.signal);
   const observedAt = frozenRun.observedAt ?? new Date().toISOString();
   const done = await waiveNoopRun(engine, cursor, run, key, async (tx, prefix) => {
@@ -1095,7 +1095,7 @@ async function admitWindowGroup(engine: BrainEngine, cursor: Cursor, key: string
  * pending entry, so the single path settles it by its fault class; #6712: the
  * members after it stay admitted at the head of the window.
  */
-async function groupStep(engine: BrainEngine, cursor: Cursor, key: string, bulk: BulkPass, config: GBrainConfig, wait: { waitMs: number; signal?: AbortSignal },
+async function groupStep(engine: BrainEngine, cursor: Cursor, key: string, bulk: BulkPass, config: GBrainConfig, wait: { waitMs: number; signal?: AbortSignal; whileHeldMs?: number },
   drainStartedAt: number, onProgress: SyncOpts['onProgress'], ahead?: (cursor: Cursor) => Promise<Cursor>): Promise<{ cursor: Cursor } | { result: SyncResult }> {
   const signal = wait.signal;
   const members = cursor.group!;
@@ -1271,8 +1271,11 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   assertPersistenceAccepting(engine);
   validateManagedSyncOptions(opts);
   const context = await resolveManagedSyncContext(engine, opts);
-  if (!opts.dryRun) await assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId);
-  const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root);
+  // Independent reads, one round trip; a refusal still wins over the authority's own error, as when they ran in turn.
+  const reads = await Promise.allSettled([opts.dryRun ? null : assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId),
+    managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root)] as const);
+  for (const read of reads) if (read.status === 'rejected') throw read.reason;
+  const authority = (reads[1] as PromiseFulfilledResult<SyncAuthority>).value;
   const company = currentCompanyBrainSync(context.sourceId);
   const processingOptions = syncProcessingOptions(opts);
   const syncOptions = syncCursorOptions(opts);
@@ -1283,7 +1286,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => live.cursor ?? cursor });
   const dryRun = (value: Cursor, base: Cursor = value) => managedDryRun(engine, value, base, { company: !!company, processingOptions, syncOptions, repoPath: frozenRun.repoPath, remote: authority.writer.remote });
   let phase: ManagedSyncFailure['phase'] = 'resume';
-  let discoveryTarget: string | null = null;
+  let discoveryTarget: string | null = null, levelReading = false;
   const discoveryRun = randomUUID();
   const inheritedSignal = currentSourceFilesystemSignal();
   const signal = opts.signal && inheritedSignal ? AbortSignal.any([opts.signal, inheritedSignal]) : opts.signal ?? inheritedSignal; if (signal) frozenRun.signal = signal;
@@ -1305,8 +1308,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
       const config = loadConfig() ?? { engine: engine.kind }, analyzeEvery = await importAnalyzeEveryPages(engine);
       let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0, foregroundBaseline = 0;
-      let creditedPages = 0, creditStarted = 0, foregroundQueued = false;
+      let creditedPages = 0, creditStarted = 0, foregroundQueued = false, screenedAdmit: string | null = null;
       const sliceStarted = sliceBase?.started ?? performance.now(), sliceFirstIndex = cursor.index - (sliceBase?.pages ?? 0), drainStartedAt = opts.drainStartedAt ?? Date.now();
+      // #6712 PR 4b: a local pass waits on its own write up to 30 s while this process's consumer still holds it (item 7).
+      const whileHeld = !opts.drainStartedAt && !!cursor.passId && !authority.writer.remote ? { whileHeldMs: 30_000 } : {};
       const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
       const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig), prescreen = { missed: new Set<number>(), limit: Infinity, drainStartedAt, assertActive, signal, onProgress: opts.onProgress,
         embeddingRequested: !(cursor.processingOptions ?? processingOptions).noEmbed && !opts.embedDeferred && !config.embedding_disabled && !!config.embedding_model?.trim() };
@@ -1349,10 +1354,13 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
             continue;
           }
           const { frozen, deferredAt } = next;
-          const waived: Cursor | null = waiveBatch && !frozen.rebound && deferredAt === undefined ? await waiveRun(engine, cursor, frozen, key, config, assertActive, frozenRun, drainStartedAt,
+          const ran = waiveBatch && !frozen.rebound && deferredAt === undefined ? await waiveRun(engine, cursor, frozen, key, config, assertActive, frozenRun, drainStartedAt,
             slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : WAIVER_RUN_MAX, opts.onProgress) : null;
+          const waived = ran === 'admit' ? null : ran;
           if (waived && slice && (waived.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(waived, 'partial', 'writer_yield');
           if (waived) { cursor = waived; continue; }
+          // The run's screen of this head already found it admits: its per-entry screen below would prepare it again.
+          screenedAdmit = ran === 'admit' ? frozen.requestId : null;
           cursor = await saveCursor(engine, key, cursor, { ...cursor, ...(frozen.rebound ? { overtaken: true as const } : {}), pending: frozen }, false, assertActive);
         }
         if (!cursor.pending) continue; // another owner-loop advanced the cursor
@@ -1362,7 +1370,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         assertActive();
         // #5470/#5984: a frozen entry whose publication would change nothing advances the cursor without an admission.
         const screened: Cursor = cursor;
-        const waived: Cursor | null = prior ? null : await waiveNoopEntry(engine, screened, pending, config, key,
+        const waived: Cursor | null = prior || screenedAdmit === pending.requestId ? null : await waiveNoopEntry(engine, screened, pending, config, key,
           (tx, noop) => writeCursor(tx, key, screened, { ...waivedCursor(screened, noop, indexOf(screened, pending)), progress: stampProgress(screened.progress, screened.index, screened.index + 1, drainStartedAt) },
             holdClear(screened, pending.intent.path, observedAt)), tx => currentCursor(tx, key, screened), signal);
         if (waived) {
@@ -1376,7 +1384,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun); return 'requestId' in frozen ? frozen : null; };
         if (bulk.settings.enabled && (bulk.foregroundFirst || !foregroundQueued) && !prior && !cursor.group && !pending.rebound && indexOf(cursor, pending) === cursor.index && groupableIntent(pending.intent)) cursor = await formGroup(engine, cursor, pending, key, bulk, config, freezeAt, assertActive);
         if (cursor.group?.[0]?.requestId === pending.requestId && cursor.pending?.requestId === pending.requestId) {
-          const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000 }, drainStartedAt, opts.onProgress,
+          const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000, ...whileHeld }, drainStartedAt, opts.onProgress,
             opts.drainStartedAt ? next => admitAhead(engine, next, key, bulk, config, freezeAt, assertActive) : undefined);
           if ('result' in step) return step.result;
           cursor = step.cursor;
@@ -1390,7 +1398,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
             [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
           const accepted = await admitWriteInTransaction(tx, { requestId: pending.requestId, operation: 'submit_job',
             sourceId: admitting.sourceId, sourceIncarnation: admitting.incarnation, slug: pending.slug, pageId: pending.pageId,
-            worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation,
+            worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation, ownerEpoch: admitting.binding.owner_epoch,
             principal: admitting.authority.writer.principal, authority: admitting.authority.writer, callerIntent: pending.intent, intent: pending.intent });
           // ENG-A7: after the counter locks (the publication lock order), admit only while the cursor still holds this entry
           // with this intent (#6075: a bulk pass may have grouped the head since this pass read it).
@@ -1414,7 +1422,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         // #5762: a checkpoint's validation runs under the coordinator's 5 s statement timeout, so its wait outlasts that
         // budget; a timed-out checkpoint then reports its terminal refusal and hint in this run instead of the next.
         // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry; its stop signal bounds the wait.
-        const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000 });
+        const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000, ...whileHeld });
         const done = waited.row;
         assertSyncDispatchActive();
         if (!isTerminalWriteState(done.state)) {
@@ -1482,8 +1490,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       let folded: Cursor | null = null;
       state.cursor = () => live.cursor ? { ...live.cursor, counts: { ...live.cursor.counts, recovered: totals.recovered, fences: totals.fences }, convertedFromFailed: totals.converted } : null;
       return await runSyncPass(engine, { opts, slice, context, authority, processingOptions, syncOptions, assertActive, signal, state, runStartedAt,
+        // A failed level read is recorded as that read (phase discovery, its target, the incarnation's key), not as the last batch.
+        onLevelRead: target => { phase = 'discovery'; discoveryTarget = target; levelReading = true; key = managedCursorKey(context.incarnation, company); },
         drainBatch: async (batchKey, batch, sliceBase) => {
-          key = batchKey;
+          key = batchKey; levelReading = false;
           setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
           try { return await drainCursor(batch, await preparationConfigView(engine), sliceBase); }
           catch (error) {
@@ -1577,7 +1587,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     return await drainCursor(cursor, startupConfig) as SyncResult;
   } catch (error) {
     assertSyncDispatchActive();
-    if (live.cursor) cursor = live.cursor;
+    if (live.cursor && !levelReading) cursor = live.cursor;
     if (signal?.aborted && error instanceof Error && error.name === 'AbortError') {
       if (cursor) return result(cursor, 'partial', 'timeout');
       const from = authority.writer.remote || opts.full ? null : context.source.last_commit;

@@ -319,7 +319,7 @@ test('--retry-failed counts every managed failure of the source, whatever option
 // #6712 PR 4b: a non-company source keeps no cursor, so a checkpoint moved away from an interrupted run is no longer a
 // failure (the next pass classifies the tree at HEAD; the cursor's checkpoint_moved orphan is gone) and an explicit retry has
 // no frozen cursor to leave alone. A pass that stops before admitting a file still records a diagnosable failure with no
-// receipt: a failed level read (at the pass's resume phase) and a page changed between the level read and its freeze
+// receipt: a failed level read (phase discovery, at the HEAD it read) and a page changed between the level read and its freeze
 // (sync.holds=fail: phase freeze, nothing admitted for that file). Each clears once a pass converges.
 test('a pass that fails reading its level or freezing a changed page stays diagnosable without a file receipt', async () => withEnv(env, async () => {
   for (const engine of engines) {
@@ -333,7 +333,7 @@ test('a pass that fails reading its level or freezing a changed page stays diagn
       await expect(performManagedSync(engine, { sourceId: d.id, noPull: true })).rejects.toMatchObject({ code: 'storage_error' });
       await expect(performManagedSync(engine, { sourceId: d.id, noPull: true })).rejects.toMatchObject({ code: 'storage_error' });
     } finally { engine.executeRaw = execute; }
-    expect(await readManagedSyncFailures(engine, [d.id])).toEqual([expect.objectContaining({ phase: 'resume', path: '<resume>', code: 'storage_error',
+    expect(await readManagedSyncFailures(engine, [d.id])).toEqual([expect.objectContaining({ phase: 'discovery', path: '<discovery>', target: d.head, code: 'storage_error',
       message: 'Synthetic level read failure', request_id: null, attempts: 1 })]);
     expect(loadSyncFailures().filter(row => row.source_id === d.id)).toEqual([expect.objectContaining({ code: 'storage_error', request_id: null, attempts: 1 })]);
     expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [d.id])).toEqual([]);

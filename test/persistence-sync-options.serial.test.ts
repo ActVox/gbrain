@@ -377,10 +377,14 @@ async function changeBoundary(engine: BrainEngine, f: Awaited<ReturnType<typeof 
 // #6712 PR 4b: an active brain's wrong-owner-epoch refusal fenced a persisted cursor frozen under the older binding. The live
 // pass persists no binding: a sync after the epoch moved runs under the current one, and an epoch that moves after admission
 // is refused at publication ('publication revalidates wrong-owner-epoch after successful preparation without changing the
-// original request'). The claimed-inactive brain still refuses it at dispatch.
-for (const change of ['archived', 'recreated', 'wrong-owner-epoch', 'revoked-local', 'physical-root-replaced', 'remote-agent', 'shared-secret'] as const) {
-  check(`dispatch fences ${change} in ${change === 'wrong-owner-epoch' ? 'claimed-inactive brains' : 'active and claimed-inactive brains'}`, async engine => {
-    for (const enabled of change === 'wrong-owner-epoch' ? [false] : [true, false]) {
+// original request'). The claimed-inactive brain still refuses it at dispatch. The active-brain row moves the epoch after the
+// pass's classify read and expects the same source_changed refusal with nothing admitted: red until lane A fences a moved
+// owner epoch before admission (journal.ts assertWorktreeAdmission checks topology_generation, not owner_epoch).
+const DISPATCH_FENCES = [...(['archived', 'recreated', 'revoked-local', 'physical-root-replaced', 'remote-agent', 'shared-secret'] as const).map(change => [change, [true, false]] as const),
+  ['wrong-owner-epoch', [false]] as const, ['wrong-owner-epoch', [true]] as const];
+for (const [change, modes] of DISPATCH_FENCES) {
+  check(`dispatch fences ${change} in ${change !== 'wrong-owner-epoch' ? 'active and claimed-inactive brains' : modes[0] ? 'active brains when the epoch moves after the pass\'s classify read' : 'claimed-inactive brains'}`, async engine => {
+    for (const enabled of modes) {
       const f = await fixture(engine);
       const registration = await registerLocalWriter(engine, 'cli');
       await engine.executeRaw('UPDATE persistence_brain SET enabled=$1 WHERE singleton=1', [enabled]);
@@ -393,6 +397,16 @@ for (const change of ['archived', 'recreated', 'wrong-owner-epoch', 'revoked-loc
         const authority = await prepareRemoteAgent({ engine, remote: true, auth: { clientId, principal: { kind: 'oauth_client', id: clientId }, scopes: ['agent'], sourceId: f.id } } as OperationContext,
           { source_id: f.id, allowed_tools: ['get_page', 'put_page'], allowed_slug_prefixes: ['records/'] });
         run = () => withSubmissionAuthority(authority, () => performSync(engine, f.opts));
+      } else if (change === 'wrong-owner-epoch' && enabled) {
+        run = async () => {
+          const execute = engine.executeRaw; let moved = false;
+          engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
+            const rows = await execute.call(this, sql, params);
+            if (!moved && matchesSyncBarrier('pass-classify', sql, params, this !== engine)) { moved = true; restore = await changeBoundary(engine, f, change); }
+            return rows;
+          } as BrainEngine['executeRaw'];
+          try { return await performSync(engine, f.opts); } finally { engine.executeRaw = execute; }
+        };
       } else if (change !== 'revoked-local') restore = await changeBoundary(engine, f, change);
       try {
         const invoke = async () => {
@@ -598,9 +612,10 @@ async function syncState(engine: BrainEngine, sourceId: string) {
 // #6712 PR 4b: the live pass has no discovery transaction or frozen manifest. Its barriers before any admission are the
 // round's classify read of the level (pass-classify) and the batch freeze's lease-fenced step (pass-freeze-commit, the
 // in-memory batch's compare-and-swap).
-type SyncBarrier = 'pass-classify' | 'foreground' | 'freeze' | 'pass-freeze-commit' | 'request-lookup' | 'admission-commit';
+type SyncBarrier = 'pass-pin-commit' | 'pass-classify' | 'foreground' | 'freeze' | 'pass-freeze-commit' | 'request-lookup' | 'admission-commit';
 const isLeaseCheck = (sql: string) => sql.startsWith('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid');
 function matchesSyncBarrier(boundary: SyncBarrier, sql: string, params: unknown[] | undefined, transactional: boolean): boolean {
+  if (boundary === 'pass-pin-commit') return transactional && sql.startsWith('INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at)') && params?.[0] === 'managed-sync-pass' && params?.[3] === true;
   if (boundary === 'pass-classify') return sql.startsWith('SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision');
   if (boundary === 'foreground') return sql.includes("NOT(COALESCE(intent->>'kind','') LIKE 'managed_sync_%') LIMIT 1");
   if (boundary === 'freeze') return sql.startsWith('SELECT id,slug,source_path,deleted_at FROM pages WHERE source_id=') && !transactional;
@@ -621,7 +636,9 @@ function syncBarrier(boundary: SyncBarrier) {
   };
 }
 
-for (const boundary of ['pass-classify', 'foreground', 'freeze', 'pass-freeze-commit', 'request-lookup', 'admission-commit'] as const) {
+// #6712 PR 4b: pass-pin-commit is the pin's pass-row write inside its transaction. Red until lane A makes the pin atomic with an
+// interrupt (sync-pass-run.ts: the pin transaction has no assertActive inside it, so an interrupt there commits an 'open' row).
+for (const boundary of ['pass-pin-commit', 'pass-classify', 'foreground', 'freeze', 'pass-freeze-commit', 'request-lookup', 'admission-commit'] as const) {
   for (const interrupted of ['explicit-abort', 'caller-abort', 'job-abort', 'lease-loss', 'released-context'] as const) {
     if (interrupted === 'lease-loss' && boundary.endsWith('-commit')) continue;
     for (const kind of ['pglite', ...(process.env.DATABASE_URL ? ['postgres'] : [])]) check(`managed cancellation fences ${interrupted} at ${boundary} (${kind})`, async engine => {
@@ -808,14 +825,14 @@ check('cancellation while a pass waits on an accepted request leaves its receipt
 
 for (const boundary of ['accepted-commit', 'receipt-banking'] as const) check(`cancellation at ${boundary} still banks accepted work without admitting the next page`, async engine => {
   const f = await fixture(engine, 2), execute = engine.executeRaw, transaction = engine.transaction, abort = new AbortController();
-  let accepted = false, observed = false;
-  const previous = new WeakMap<object, string>();
+  let accepted = false, claimed = false, observed = false;
   engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
     const rows = await execute.call(this, sql, params);
     if (sql.includes('INSERT INTO persistence_requests')) accepted = true;
-    // #6712 PR 4b: the pass banks a published page with its batch step (writeCursor's lease fence, then passBatchStep's).
-    if (boundary === 'receipt-banking' && accepted && !observed && this !== engine && isLeaseCheck(sql) && isLeaseCheck(previous.get(this) ?? '')) { observed = true; abort.abort(); }
-    previous.set(this, sql);
+    if (accepted && sql.startsWith("UPDATE persistence_requests SET state='running'")) claimed = true;
+    // #6712 PR 4b: the pass banks a published page with its batch step (passBatchStep), whose one lease check is the first
+    // transactional lease check after the accepted request was claimed (the admission's own check precedes the claim).
+    if (boundary === 'receipt-banking' && claimed && !observed && this !== engine && isLeaseCheck(sql)) { observed = true; abort.abort(); }
     return rows;
   } as BrainEngine['executeRaw'];
   engine.transaction = async function (this: BrainEngine, run: (tx: BrainEngine) => Promise<unknown>) {

@@ -106,6 +106,31 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect(await liveSlugs(engine)).toEqual(['notes/b', 'notes/c']);
   }, { setup }), 180_000);
 
+  test('item 7: a CLI pass keeps waiting on its own write while this process\'s consumer still holds it, past the 5 s wait: synced, not writer_pending', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A body that takes longer than the wait to prepare.')); commit(root, 'edit a');
+    // The write's preparation outlasts the pass's 5 s wait, as a publication over a high-latency link does.
+    let slowed = false;
+    installFaultHook(async (point, detail) => {
+      if (point === 'consumer:prepared' && detail.operation === 'submit_job' && !slowed) { slowed = true; await new Promise(resolve => setTimeout(resolve, 6500)); }
+    });
+    const synced = await performManagedSync(engine, OPTS);
+    installFaultHook(undefined);
+    expect({ slowed, status: synced.status, reason: synced.reason }).toEqual({ slowed: true, status: 'synced', reason: undefined });
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))?.page.compiled_truth).toContain('takes longer than the wait');
+  }, { setup }), 180_000);
+
+  test('a sliced pass that yields writer_yield reports the entries it settled in the stopped round', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    for (const slug of ['a', 'b', 'c']) writeFileSync(join(root, `notes/${slug}.md`), note(`notes/${slug}`, `An edit of notes/${slug}.`));
+    commit(root, 'edit all three');
+    const sliced = await performManagedSync(engine, OPTS, { maxPages: 1, maxMs: 120_000 });
+    expect({ status: sliced.status, reason: sliced.reason, filesImported: sliced.filesImported, settled: sliced.pass?.settled })
+      .toEqual({ status: 'partial', reason: 'writer_yield', filesImported: 1, settled: 1 });
+    const [row] = await engine.executeRaw<{ settled: number }>("SELECT (completed_keys->0->'telemetry'->>'settled')::int AS settled FROM op_checkpoints WHERE op='managed-sync-pass'");
+    expect(row?.settled).toBe(1);
+  }, { setup }), 180_000);
+
   test('not_converged: a working copy that changes under every round ends the pass not_converged; the third in a row reports', () => managedBrain(async ({ engine, root }) => {
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
     let edits = 0;
