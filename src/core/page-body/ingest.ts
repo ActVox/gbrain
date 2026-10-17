@@ -382,8 +382,9 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
   guarded?: boolean;
   /** A create's preparation: the chunks are collected here (its page row does not exist yet) and inserted by the publication. */
   hold?: SegmentChunkInput[];
-  /** Guarded: runs in each batch's transaction (the projection renews its claim on the page's queue row). */
-  renew?: (tx: BrainEngine) => Promise<unknown> }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
+  /** Guarded: runs in each batch's transaction before its insert (the projection renews its claim on the page's queue row);
+   *  false when the caller lost its claim: that batch inserts nothing and the staging stops. */
+  renew?: (tx: BrainEngine) => Promise<boolean> }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
   if (input.chunking.quarantined || !input.occurrences.length) return { rows: 0, occurrences: 0, indexes: [] };
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   const fenceBudget = newFenceChunkBudget();
@@ -421,19 +422,20 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     segmentChunkWork.chunks += chunks.length;
     if (input.hold) input.hold.push(...chunks);
     else if (chunks.length && !input.guarded) indexes.push(...await engine.stageSegmentChunks(input.pageId, input.generation, chunks));
-    let moved = false;
+    let moved = false, lost = false;
+    if (chunks.length && input.guarded) await faultPoint('segmented:projection_batch', { sourceId: input.sourceId, slug: input.slug });
     if (chunks.length && input.guarded) rows -= chunks.length - await engine.transaction(async tx => {
       await tx.lockPageKeys([{ sourceId: input.sourceId, slug: input.slug }]);
       const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1', [input.pageId]);
       if (Number(page?.body_generation) !== input.generation) { moved = true; return 0; }
+      if (input.renew && !await input.renew(tx)) { lost = true; return 0; }
       const open = new Set((await occurrencesWithoutChunks(tx, input.pageId, input.generation, batch)).map(row => row.occurrenceId));
       const still = chunks.filter(chunk => open.has(chunk.occurrence_id));
-      await input.renew?.(tx);
       if (still.length) await tx.stageSegmentChunks(input.pageId, input.generation, still);
       return still.length;
     });
     rows += chunks.length;
-    if (moved) break;
+    if (moved || lost) break;
     done += batch.length;
     collectBatchGarbage();
     if (engine.kind === 'pglite') await new Promise(resolve => setImmediate(resolve));
