@@ -23,6 +23,7 @@ import { isSyncable, matchesAnyGlob } from '../sync.ts';
 import { parseUsdLimit } from '../spend-posture.ts';
 import { digest } from './digest.ts';
 import { readTreeLevel } from './sync-git-stream.ts';
+import { loopYield } from './sync-yield.ts';
 import { SYNC_PASS_COST_OP, type PassEpisode, type SyncSelection } from './sync-pass-row.ts';
 
 type Exec = Pick<BrainEngine, 'executeRaw'>;
@@ -48,30 +49,48 @@ export interface EpisodeClosure {
   released: number;
 }
 
-/** Design §6's closure test over the paths of `T` (the module header). */
-export function episodeClosure(input: { treePaths: Iterable<string>; episode: SyncSelection; pass: SyncSelection; configuredSelection: SyncSelection; configured: boolean;
-  scope: string; slugMode: 'git-root' | 'source-root' }): EpisodeClosure {
+type ClosureInput = { episode: SyncSelection; pass: SyncSelection; configuredSelection: SyncSelection; configured: boolean; scope: string; slugMode: 'git-root' | 'source-root' };
+interface ClosureTally { included: boolean; covers: boolean; released: number }
+
+/** One stretch of design §6's closure test: `paths` folded into `tally`. */
+function tallyClosure(input: ClosureInput, paths: Iterable<string>, tally: ClosureTally): ClosureTally {
   const inE = selectionEligible(input.episode, input.scope, input.slugMode);
   const inPass = selectionEligible(input.pass, input.scope, input.slugMode);
   const inConfig = selectionEligible(input.configuredSelection, input.scope, input.slugMode);
-  let included = true, covers = true, released = 0;
-  for (const path of input.treePaths) {
+  for (const path of paths) {
     const e = inE(path), c = inConfig(path);
-    if (e && !inPass(path)) included = false;
-    if (c && !e) covers = false;
-    if (e && !c) released++;
+    if (e && !inPass(path)) tally.included = false;
+    if (c && !e) tally.covers = false;
+    if (e && !c) tally.released++;
   }
-  if (input.configured) return { closes: true, by: 'configured', stampChunker: covers, released };
+  return tally;
+}
+
+function closureOf(configured: boolean, { included, covers, released }: ClosureTally): EpisodeClosure {
+  if (configured) return { closes: true, by: 'configured', stampChunker: covers, released };
   return included ? { closes: true, by: 'inclusion', stampChunker: false, released: 0 } : { closes: false, by: null, stampChunker: false, released: 0 };
 }
 
-/** The closure of an open episode at the pinned target `head` (one `ls-tree` of the whole commit). */
+/** Design §6's closure test over the paths of `T` (the module header). */
+export function episodeClosure(input: ClosureInput & { treePaths: Iterable<string> }): EpisodeClosure {
+  return closureOf(input.configured, tallyClosure(input, input.treePaths, { included: true, covers: true, released: 0 }));
+}
+
+/** The closure of an open episode at the pinned target `head` (one `ls-tree` of the whole commit), yielding between stretches. */
 export async function passEpisodeClosure(input: { gitRoot: string; root: string; head: string; slugMode: 'git-root' | 'source-root'; episode: PassEpisode; pass: SyncSelection;
   configuredSelection: SyncSelection; configured: boolean }): Promise<EpisodeClosure> {
   const scope = relative(realpathSync.native(input.gitRoot), realpathSync.native(input.root)).split(sep).join('/');
-  const tree = await readTreeLevel(input.gitRoot, input.head, '');
-  return episodeClosure({ treePaths: tree.keys(), episode: input.episode.selection, pass: input.pass, configuredSelection: input.configuredSelection, configured: input.configured, scope, slugMode: input.slugMode });
+  const paths = [...(await readTreeLevel(input.gitRoot, input.head, '')).keys()];
+  const closure: ClosureInput = { episode: input.episode.selection, pass: input.pass, configuredSelection: input.configuredSelection, configured: input.configured, scope, slugMode: input.slugMode };
+  const tally: ClosureTally = { included: true, covers: true, released: 0 };
+  const step = loopYield();
+  for (let i = 0; i < paths.length; i += CLOSURE_STRETCH) {
+    tallyClosure(closure, paths.slice(i, i + CLOSURE_STRETCH), tally);
+    if (step.due(CLOSURE_STRETCH)) await step.pause();
+  }
+  return closureOf(input.configured, tally);
 }
+const CLOSURE_STRETCH = 2_048;
 
 /** What a pass's admissions reserve under (registered at pin, dropped at the pass's end). */
 interface PassCostScope { sourceId: string; incarnation: string; scope: string; pricePerMTok: number }

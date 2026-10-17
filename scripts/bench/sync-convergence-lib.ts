@@ -352,13 +352,24 @@ export function breakdown(rounds: ReadonlyArray<Record<string, number>>): Record
 }
 
 /** Samples process.memoryUsage().rss every everyMs: phasePeak() is the maximum since the last mark(), stop() the overall maximum. */
-export function startRssSampler(everyMs: number): { phasePeak: () => number; mark: () => void; stop: () => { peak: number; samples: number } } {
-  let peak = process.memoryUsage().rss, phase = peak, samples = 1;
-  const timer = setInterval(() => { const rss = process.memoryUsage().rss; samples++; if (rss > peak) peak = rss; if (rss > phase) phase = rss; }, everyMs);
+/**
+ * RSS every `everyMs` (overall and per phase peaks), and the event loop's lag: how late each tick fired past `everyMs`,
+ * the longest stretch a pass kept timers from running (#6712 PR 4b, ruling 4).
+ */
+export function startRssSampler(everyMs: number): { phasePeak: () => number; phaseLag: () => number; mark: () => void; stop: () => { peak: number; samples: number; maxLagMs: number } } {
+  let peak = process.memoryUsage().rss, phase = peak, samples = 1, last = performance.now(), maxLag = 0, phaseLag = 0;
+  const timer = setInterval(() => {
+    const now = performance.now(), lag = Math.max(0, now - last - everyMs);
+    last = now;
+    if (lag > maxLag) maxLag = lag;
+    if (lag > phaseLag) phaseLag = lag;
+    const rss = process.memoryUsage().rss; samples++; if (rss > peak) peak = rss; if (rss > phase) phase = rss;
+  }, everyMs);
   return {
     phasePeak: () => Math.max(phase, process.memoryUsage().rss),
-    mark: () => { phase = process.memoryUsage().rss; },
-    stop: () => { clearInterval(timer); return { peak: Math.max(peak, process.memoryUsage().rss), samples }; },
+    phaseLag: () => Math.round(phaseLag),
+    mark: () => { phase = process.memoryUsage().rss; phaseLag = 0; },
+    stop: () => { clearInterval(timer); return { peak: Math.max(peak, process.memoryUsage().rss), samples, maxLagMs: Math.round(maxLag) }; },
   };
 }
 

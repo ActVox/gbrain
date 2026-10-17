@@ -12,6 +12,7 @@ import { join, relative, sep } from 'node:path';
 import { hardenedGitStream, hardenedStreamComplete, NulRecordSplitter, type HardenedGitStreamResult } from '../hardened-git.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
 import { readSyncFile } from './sync-discovery.ts';
+import { loopYield } from './sync-yield.ts';
 
 export type Dp = 'clean' | 'clean_eol' | 'clean_lfs' | 'modified' | 'deleted' | 'staged' | 'untracked' | 'unknown';
 export interface GitTreeEntry { mode: string; oid: string }
@@ -45,11 +46,36 @@ function outcome(result: HardenedGitStreamResult): string {
 
 const malformed = (read: string, record: string) => new SyncTreeReadIncomplete(read, `malformed record ${JSON.stringify(record.slice(0, 80))}`);
 
-async function readRecords(gitRoot: string, args: string[], read: string, visit: (record: string) => void): Promise<void> {
+async function readRecords(gitRoot: string, args: string[], read: string, visit: (record: Buffer) => void): Promise<void> {
   const splitter = new NulRecordSplitter();
+  // A 600k-path read arrives faster than it parses: past the stretch budget, the stream waits one macrotask.
+  const step = loopYield();
   const result = await gitStream(gitRoot, args, { timeoutMs: READ_TIMEOUT_MS,
-    onChunk: chunk => { for (const record of splitter.push(chunk)) visit(record.toString('utf8')); } });
+    onChunk: chunk => {
+      const records = splitter.push(chunk);
+      for (const record of records) visit(record);
+      return step.due(records.length) ? step.pause() : undefined;
+    } });
   if (!hardenedStreamComplete(result) || !splitter.atRecordBoundary) throw new SyncTreeReadIncomplete(read, outcome(result));
+}
+
+/** The common modes as one string each, so a 600k-entry map holds no per-entry copy. */
+const MODE_NAMES = new Map(['100644', '100755', '120000', '160000', '040000'].map(mode => [mode, mode]));
+
+/**
+ * One `<mode> <a> <b>\t<path>` record (`ls-tree`: type and OID; `ls-files -s`: OID and stage), its fields decoded straight
+ * from the record's bytes as strings of their own (no substring keeps the record alive), or null when the header before the
+ * tab has fewer than three fields (a fourth is ignored, as `split(' ')` did).
+ */
+function headerFields(record: Buffer): { mode: string; a: string; b: string; path: string } | null {
+  const tab = record.indexOf(9);
+  const first = tab < 0 ? -1 : record.indexOf(32);
+  const second = first < 0 || first > tab ? -1 : record.indexOf(32, first + 1);
+  if (second < 0 || second > tab) return null;
+  const third = record.indexOf(32, second + 1);
+  const raw = record.toString('latin1', 0, first);
+  return { mode: MODE_NAMES.get(raw) ?? raw, a: record.toString('latin1', first + 1, second), b: record.toString('latin1', second + 1, third < 0 || third > tab ? tab : third),
+    path: record.toString('utf8', tab + 1) };
 }
 
 function* lines(items: readonly string[], terminator: string): Generator<Buffer> {
@@ -63,33 +89,54 @@ function* lines(items: readonly string[], terminator: string): Generator<Buffer>
  * can mark them unknown.
  */
 export async function readTreeLevel(gitRoot: string, commit: string, scope: string): Promise<Map<string, GitTreeEntry>> {
-  // #6712 PR 4b: a commit's tree never changes, so the last one read by commit id is reused (a pass's second round); callers
-  // only read the map.
-  const key = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit) ? `${gitRoot}\0${commit}\0${scope}` : null;
-  if (key !== null && lastTree?.key === key) return lastTree.tree;
   const tree = new Map<string, GitTreeEntry>();
   await readRecords(gitRoot, ['ls-tree', '-r', '-z', commit, '--', scope === '' ? '.' : scope], 'ls-tree', record => {
-    const tab = record.indexOf('\t');
-    const [mode = '', type = '', oid = ''] = tab < 0 ? [] : record.slice(0, tab).split(' ');
-    if (!OID.test(oid)) throw malformed('ls-tree', record);
-    if (type === 'blob' || type === 'commit') tree.set(record.slice(tab + 1), { mode, oid });
+    const fields = headerFields(record);
+    if (!fields || !OID.test(fields.b)) throw malformed('ls-tree', record.toString('utf8'));
+    if (fields.a === 'blob' || fields.a === 'commit') tree.set(fields.path, { mode: fields.mode, oid: fields.b });
   });
-  if (key !== null) lastTree = { key, tree };
   return tree;
 }
-let lastTree: { key: string; tree: Map<string, GitTreeEntry> } | null = null;
 
 /** `X`: the index (never the worktree), keyed by Git-root-relative path; a conflicted path keeps its highest stage. */
 export async function readIndexLevel(gitRoot: string): Promise<Map<string, GitIndexEntry>> {
   const index = new Map<string, GitIndexEntry>();
   await readRecords(gitRoot, ['ls-files', '-s', '-z'], 'ls-files', record => {
-    const tab = record.indexOf('\t');
-    const [mode = '', oid = '', stage = ''] = tab < 0 ? [] : record.slice(0, tab).split(' ');
-    if (!OID.test(oid) || !/^[0-3]$/.test(stage)) throw malformed('ls-files', record);
-    const path = record.slice(tab + 1);
-    if ((index.get(path)?.stage ?? -1) < Number(stage)) index.set(path, { mode, oid, stage: Number(stage) });
+    const fields = headerFields(record);
+    if (!fields || !OID.test(fields.a) || !/^[0-3]$/.test(fields.b)) throw malformed('ls-files', record.toString('utf8'));
+    const stage = Number(fields.b);
+    if ((index.get(fields.path)?.stage ?? -1) < stage) index.set(fields.path, { mode: fields.mode, oid: fields.a, stage });
   });
   return index;
+}
+
+/**
+ * `X` as committed mode reads it: only the tree paths whose index entry differs from `T` (OID, mode or a non-zero stage,
+ * the highest stage kept; null: absent from the index). A 600k-path checkout whose index matches its tree holds no second
+ * map of every path. Paths outside `tree` are not kept; when some tree path never appeared, the index is read whole
+ * once more to name them.
+ */
+export async function readIndexDelta(gitRoot: string, tree: Map<string, GitTreeEntry>): Promise<Map<string, GitIndexEntry | null>> {
+  const delta = new Map<string, GitIndexEntry | null>();
+  let same = 0;
+  await readRecords(gitRoot, ['ls-files', '-s', '-z'], 'ls-files', record => {
+    const fields = headerFields(record);
+    if (!fields || !OID.test(fields.a) || !/^[0-3]$/.test(fields.b)) throw malformed('ls-files', record.toString('utf8'));
+    const committed = tree.get(fields.path);
+    if (!committed) return;
+    const stage = Number(fields.b);
+    if (stage === 0 && fields.a === committed.oid && fields.mode === committed.mode) { same++; return; }
+    if ((delta.get(fields.path)?.stage ?? -1) < stage) delta.set(fields.path, { mode: fields.mode, oid: fields.a, stage });
+  });
+  if (same + delta.size === tree.size) return delta;
+  const index = await readIndexLevel(gitRoot);
+  const whole = new Map<string, GitIndexEntry | null>();
+  for (const [path, committed] of tree) {
+    const indexed = index.get(path);
+    if (!indexed) whole.set(path, null);
+    else if (indexed.stage !== 0 || indexed.oid !== committed.oid || indexed.mode !== committed.mode) whole.set(path, indexed);
+  }
+  return whole;
 }
 
 /**
@@ -100,7 +147,8 @@ export async function readIndexLevel(gitRoot: string): Promise<Map<string, GitIn
 export async function readRenameHints(gitRoot: string, from: string, to: string): Promise<GitRenameHint[]> {
   const byOid = new Map<string, { deleted: string[]; added: string[] }>();
   let meta: string | null = null;
-  await readRecords(gitRoot, ['diff-tree', '-r', '-z', '--no-renames', from, to], 'diff-tree', record => {
+  await readRecords(gitRoot, ['diff-tree', '-r', '-z', '--no-renames', from, to], 'diff-tree', bytes => {
+    const record = bytes.toString('utf8');
     if (meta === null) {
       if (!record.startsWith(':')) throw malformed('diff-tree', record);
       meta = record;
@@ -231,10 +279,12 @@ export async function probeDirtiness(root: string, gitRoot: string, paths: strin
   let realRoot: string | null = null;
   let realGitRoot: string | null = null;
   try { realRoot = realpathSync.native(root); realGitRoot = realpathSync.native(gitRoot); } catch {}
+  const step = loopYield();
   for (let start = 0; start < paths.length; start += batch) {
     const decided = new Map<string, Dp | null>();
     const read: ReadFile[] = [];
     for (const path of paths.slice(start, start + batch)) {
+      if (step.due()) await step.pause();
       const committed = tree.get(path);
       const indexed = index.get(path);
       let dp: Dp | null = opts.working ? (committed ? null : 'untracked') : !committed && !indexed ? 'untracked'

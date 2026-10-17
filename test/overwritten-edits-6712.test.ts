@@ -5,7 +5,8 @@
  * committed edit of the same file, and the history the cursor engine's incremental sync left when it published the file
  * over the edit with no hold (its import receipt, the archived version, the import record and `last_commit`). #6712 PR 4b's
  * pass no longer publishes over the edit, so the seed writes that history directly and these tests never depend on a
- * sync reproducing the bug; one row asserts the pass route's #6887 guarantee on the same scenario instead.
+ * sync reproducing the bug; one row asserts the pass route's #6887 guarantee on the same scenario instead, and one that
+ * the detector reads a pass import (intent kind `managed_sync_import` with a `passId`) that published over an edit.
  *
  * Protects:
  * - a seeded overwrite is detected `high` (also after receipt compaction nulled every intent), and `repair
@@ -190,6 +191,27 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('The second committed body.');
     expect((await holdOf(engine, 'notes/a.md'))?.code).toBe('file_drift');
     expect((await scanOverwrittenEdits(engine, 'default')).edits).toEqual([]);
+  }, { setup, databaseUrl }), 180_000);
+
+  test('the detector reads a pass import: one the pass published over a database edit (its record named the edit) is found', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    // The pass holds a both-moved page whose record is honest (the row above), so the record is rewritten to name the
+    // database edit's revision: the pass then publishes the committed file over the edit through a pass import.
+    await engine.setConfig('sync.write_through', 'false');
+    await putPage(engine, ctx, 'notes/a', 'DBONLYMARKER the agent edit.');
+    await engine.setConfig('sync.write_through', 'true');
+    const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug='notes/a'");
+    await engine.executeRaw("UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,revision}', to_jsonb($3::text)) WHERE op=$1 AND fingerprint=$2",
+      [SYNC_IMPORT_PROVENANCE_OP, `default:${await incarnationOf(engine)}:${page!.id}`, await revisionOf(engine, 'notes/a')]);
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'The second committed body.'));
+    commit(root, 'edit notes/a');
+    await performManagedSync(engine, OPTS);
+    expect(await bodyOf(engine, 'notes/a')).toContain('The second committed body.');
+    const scan = await scanOverwrittenEdits(engine, 'default');
+    expect(scan.edits.map(edit => [edit.slug, edit.confidence, edit.db_operation])).toEqual([['notes/a', 'high', 'put_page']]);
+    const [imported] = await engine.executeRaw<{ kind: string; pass: boolean }>(
+      "SELECT intent->>'kind' AS kind, intent ? 'passId' AS pass FROM persistence_requests WHERE id::text=$1", [scan.edits[0]!.import_request_id]);
+    expect(imported).toEqual({ kind: 'managed_sync_import', pass: true });
   }, { setup, databaseUrl }), 180_000);
 
   test('a normal sync-written history is not flagged', () => managedBrain(async ({ engine, ctx, root }) => {

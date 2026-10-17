@@ -96,10 +96,12 @@ export type HardenedGitInput = string | Buffer | Iterable<Buffer | string> | Asy
  * buffered here) and feeding `stdin` with backpressure. The process is killed
  * with SIGKILL past `timeoutMs` or `maxBytes` of stdout. A throw from
  * `onChunk` or from a `stdin` iterable kills the process and rejects, so a
- * caller never mistakes a run cut short for a finished one.
+ * caller never mistakes a run cut short for a finished one. An `onChunk` that
+ * returns a promise holds stdout until it settles (a large read yields to the
+ * event loop between chunks); a rejection fails the run like a throw.
  */
 export async function hardenedGitStream(root: string, args: string[],
-  opts: { stdin?: HardenedGitInput; timeoutMs: number; maxBytes?: number; onChunk?: (chunk: Buffer) => void }): Promise<HardenedGitStreamResult> {
+  opts: { stdin?: HardenedGitInput; timeoutMs: number; maxBytes?: number; onChunk?: (chunk: Buffer) => void | Promise<void> }): Promise<HardenedGitStreamResult> {
   assertHardenedGitArgs(args);
   return await new Promise<HardenedGitStreamResult>((accept, reject) => {
     const child = spawn('git', [...HARDENED_GIT_ARGS, '-C', root, ...args],
@@ -117,7 +119,9 @@ export async function hardenedGitStream(root: string, args: string[],
       bytes += chunk.length;
       if (opts.maxBytes !== undefined && bytes > opts.maxBytes) { stopped = 'too_large'; child.kill('SIGKILL'); return; }
       last = chunk[chunk.length - 1] ?? last;
-      try { opts.onChunk?.(chunk); } catch (error) { fail(error); }
+      let held: void | Promise<void>;
+      try { held = opts.onChunk?.(chunk); } catch (error) { fail(error); return; }
+      if (held) { child.stdout?.pause(); held.then(() => child.stdout?.resume(), fail); }
     });
     child.on('error', () => { if (child.pid === undefined) settle(() => accept({ ok: false, reason: 'unavailable' })); });
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => settle(() => {
