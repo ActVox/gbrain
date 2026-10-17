@@ -233,6 +233,7 @@ test/trust-guarded-supersession.test.ts
 test/trust-held-removals.test.ts
 test/trust-owner-actions.test.ts
 test/unbound-source-6536.test.ts
+test/unindexed-files.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/writer-status-owner-backends.test.ts
