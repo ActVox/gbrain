@@ -50,7 +50,7 @@ export interface KeepDbPolicy { source_id: string; keep_db: string[] }
  */
 export type KeepDbAdmission = (engine: BrainEngine) => Promise<'capacity' | 'write_capacity_backpressure' | null>;
 
-const headroom: KeepDbAdmission = async engine => {
+export const keepDbHeadroom: KeepDbAdmission = async engine => {
   const rows = await capacity({ engine, remote: false } as OperationContext);
   const need = (resource: string) => resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR;
   if (rows.some(c => c.used + need(c.resource) > c.stop_at)) return 'capacity';
@@ -161,7 +161,7 @@ export async function admitKeepDbReconcile(engine: BrainEngine, artifact: KeepDb
     const requestId = await keepDbRequestId(engine, writer.principal, artifact);
     const prior = await getWriteRequest(engine, writer.principal, requestId);
     if (prior) return { request: prior, replayed: true };
-    const stop = await (opts.admission ?? headroom)(engine);
+    const stop = await (opts.admission ?? keepDbHeadroom)(engine);
     if (stop) return { refused: stop };
     let fenced: { error: unknown } | undefined;
     let paused = false;

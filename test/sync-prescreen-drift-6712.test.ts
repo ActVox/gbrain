@@ -33,6 +33,7 @@ import { resolveBulkSettings } from '../src/core/persistence/sync-group.ts';
 import { readShadowLevel } from '../src/core/persistence/sync-pass.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
+import { isWriteCapacityWait } from '../src/core/persistence/admission-retry.ts';
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (root: string, message: string) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', message); };
@@ -202,6 +203,30 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(Number(row?.admitted)).toBe(1);
     expect(await classOf(engine, 'notes/a.md')).toMatchObject({ cls: 'dirty', settled: true });
     expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('The database-only edit of notes/a.');
+  }, { databaseUrl, setup }), 180_000);
+
+  test('two-sided keep_db pages whose keep_db write is refused for write capacity wait as keep_db_pending and are never held file_drift; later passes admit them', () => managedBrain(async ({ engine, ctx, root }) => {
+    await engine.setConfig('sync.write_through', 'false');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const twoSided = ['notes/a', 'notes/b', 'notes/c', 'notes/d'];
+    for (const slug of twoSided) {
+      await databaseOnlyEdit(engine, ctx, slug, `The database-only edit of ${slug}.`);
+      writeFileSync(join(root, `${slug}.md`), note(slug, `A committed edit of ${slug}.`));
+    }
+    writeFileSync(join(root, 'gbrain.yml'), 'storage:\n  keep_db:\n    - notes/\n'); commit(root, 'keep_db and file edits');
+    // Two outstanding requests per writer: the pass's third keep_db admission is refused queue_capacity while the first two are in flight.
+    await engine.setConfig('persistence.limits.principal_outstanding', '2');
+    const incarnation = await incarnationOf(engine);
+    for (let pass = 0; pass < 8; pass++) {
+      // The drain (sync-drain.ts) waits out an outstanding-cap refusal of a sync's own write; a direct pass call does the same here.
+      const result = await performManagedSync(engine, OPTS).catch(async error => { if (!isWriteCapacityWait(error)) throw error; await new Promise(r => setTimeout(r, 200)); return null; });
+      if (result) expect(heldOf(result)).toEqual([]);
+      for (const slug of twoSided) expect(await readGitHold(engine, 'default', incarnation, `${slug}.md`)).toBeNull();
+    }
+    for (const slug of twoSided) {
+      expect(await bodyOf(engine, slug)).toContain(`The database-only edit of ${slug}.`);
+      expect(readFileSync(join(root, `${slug}.md`), 'utf8')).toContain(`The database-only edit of ${slug}.`);
+    }
   }, { databaseUrl, setup }), 180_000);
 
   test('cold upgrade: a database-only edit with no provenance is held, with partial or obsolete provenance it is db_ahead; no edit is overwritten, in a tree walk or under --full', () => managedBrain(async ({ engine, ctx, root }) => {
