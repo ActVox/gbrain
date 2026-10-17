@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 240805,
-    "stdoutSha256": "b74f9cac75ff138b0397cd21bef71fb9d86fb1562cdf1303fd53596fc5c41ac9",
+    "stdoutBytes": 241057,
+    "stdoutSha256": "49eb8473ee380c158399b9e9e48d8ed817820ebb11018fac1a81cee2e169f78e",
     "toolNames": [
       "remember",
       "entity",
@@ -6160,6 +6160,7 @@
         "mutating": false,
         "name": "delta",
         "parameters": {
+          "beliefs": "boolean?",
           "budget_tokens": "number?",
           "cursor": "string?",
           "entities": "string?",
@@ -6172,6 +6173,10 @@
         "required_scopes": [],
         "schema": {
           "properties": {
+            "beliefs": {
+              "description": "Add `beliefs`: each belief that changed in the window, before and after, with cause and evidence (belief ledger); entities narrows it.",
+              "type": "boolean"
+            },
             "budget_tokens": {
               "description": "Token budget; pages pack first.",
               "type": "number"

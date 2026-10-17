@@ -2359,6 +2359,19 @@ guess. The refusal is `retryable`: ask about an instant before the write's
 recorded time, or after its commit was observed (the message names the write).
 A stalled transaction stays unproven until it commits and is marked.
 
+### What changed in a window
+
+`gbrain beliefs changes [<entity>...] [--since 7d]` (and `delta {beliefs: true}`
+for agents) lists each fact, take, link and page that ended the window
+different from how it started: before, after, the event that caused it and
+its event id. An edit and its revert report nothing. `earlier value unknown`
+means no recorded body answers for the start of the window, not that the
+belief was absent; `end by <date>` is a relationship end the nightly check
+inferred, so it ended on or before that date. A window that starts before the
+ledger was enabled says where coverage starts. On a thin client the command
+runs through the host and lists only world beliefs on pages visible now
+([design, section 15](../designs/BELIEF_LEDGER.md#15-w4-as-built-the-weekly-change-diff)).
+
 ## Repair refusal codes
 
 Each heading below is the `docs` anchor a refusal carries.

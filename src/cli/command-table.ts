@@ -397,7 +397,7 @@ export const CLI_COMMANDS: readonly CliCommandRecord[] = [  // Pre-connect: disp
   { name: 'quarantine', phase: 'post-connect', thinClient: 'route-then-refuse', selfHelp: true, load: () => import('./commands/quarantine.ts') },
   // #5575: memory trust. Observational startup: `trust backfill --dry-run` runs with no migrations and no writes.
   // W1 belief ledger coverage: enable, disable, status, reconcile, backfill (docs/designs/BELIEF_LEDGER.md section 7).
-  { name: 'beliefs', phase: 'post-connect', thinClient: 'refuse', selfHelp: true, json: 'document', routes_source: true, load: () => import('./commands/beliefs.ts') },
+  { name: 'beliefs', phase: 'post-connect', thinClient: 'route-then-refuse', selfHelp: true, json: 'document', routes_source: true, load: () => import('./commands/beliefs.ts') },
   { name: 'trust', phase: 'post-connect', thinClient: 'refuse', selfHelp: true, json: 'document', skipStartupHooks: true, startup: 'observational', load: () => import('./commands/trust.ts') },
   // selfHelp: v0.43 (#2095): watch ships WATCH_HELP (flags + the stdin-turn protocol).
   // thin client: v0.43 (#2095): watch streams against a LOCAL engine; thin clients get the
