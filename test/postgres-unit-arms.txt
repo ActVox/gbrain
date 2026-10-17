@@ -116,6 +116,7 @@ test/large-pages/remote-get-page-privacy.test.ts
 test/large-pages/remote-versions-storage-change.test.ts
 test/large-pages/remote-window-privacy.test.ts
 test/large-pages/restore-deferred-retire.test.ts
+test/large-pages/restore-publication-statement-bound.test.ts
 test/large-pages/restore-segmented-reprojects.test.ts
 test/large-pages/sealed-segmented-search.test.ts
 test/large-pages/second-write-deferred-retire.test.ts
