@@ -884,12 +884,25 @@ async function runSingleSourceSync(
     // v0.41.13.0 (T6): try/finally clears the single-source timer so it
     // doesn't fire after performSync resolves OR throws.
     let result: SyncResult;
+    // #6712 PR 4a: a managed dry run also reports the read-only convergence shadow (sync-convergence.ts).
+    const readConvergence = async () => (await import('../../core/persistence/sync-pass.ts')).dryRunConvergence(engine,
+      { sourceId, full: !!full, workingTree, redactPaths: !!redactPaths, noEmbed, noExtract: !!noExtract, noSchemaPack: !!noSchemaPack });
     process.on('SIGINT', onSingleSourceSigint);
     try {
       // #6317 (D1 a′): on a managed Postgres brain whose host a live serve owns, the drain runs inside that serve as this
       // CLI's writer and returns the same SyncResult; every other case keeps this process's own consumer.
       const delegated = companyPolicy ? null : await (await import('../sync-delegate.ts')).maybeDelegateManagedSyncToServe(engine, args, opts);
       result = delegated?.kind === 'delegated' ? delegated.result : await performSync(engine, opts);
+    } catch (error) {
+      // A refused managed dry run (a case- or separator-only spelling pair) still carries its convergence receipt in the
+      // refusal's envelope; the refusal and its exit code are unchanged.
+      const { OperationError } = await import('../../core/ops/contract.ts');
+      if (!(dryRun && jsonOut && !companyPolicy && error instanceof OperationError)) throw error;
+      const convergence = await readConvergence();
+      if (!convergence) throw error;
+      const [{ writeCliError }, { setCliExitVerdict }] = await Promise.all([import('../../cli/cli-error.ts'), import('../../core/cli-force-exit.ts')]);
+      setCliExitVerdict(writeCliError(error, 'sync', { json: true, extra: { convergence }, emit: emitJson }));
+      return;
     } finally {
       if (singleSourceTimer !== undefined) clearTimeout(singleSourceTimer);
       process.off('SIGINT', onSingleSourceSigint);
@@ -963,10 +976,7 @@ async function runSingleSourceSync(
       }
     }
     const capacity = await syncCapacityNotices(engine, jsonOut, result);
-    // #6712 PR 4a: a managed dry run also reports the read-only convergence shadow (sync-convergence.ts).
-    const convergence = jsonOut && result.status === 'dry_run' && !companyPolicy
-      ? await (await import('../../core/persistence/sync-pass.ts')).dryRunConvergence(engine, { sourceId, full: !!full, workingTree, redactPaths: !!redactPaths, noEmbed, noExtract: !!noExtract, noSchemaPack: !!noSchemaPack })
-      : undefined;
+    const convergence = jsonOut && result.status === 'dry_run' && !companyPolicy ? await readConvergence() : undefined;
     if (jsonOut) {
       emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate), ...(convergence ? { convergence } : {}),
         ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId),

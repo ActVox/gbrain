@@ -352,11 +352,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const probes = hashed?.probes ?? new Map();
   timings.Dp = t();
 
-  const levelOf = (path: string, probe: { dp: string; rawOid: string | null } | undefined): string | null => {
+  const levelOf = (path: string, probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): string | null => {
     const committed = tree.get(path) ?? null;
     return mode === 'committed' ? committed?.oid ?? null
       : !probe || probe.dp === 'deleted' ? null
-      : ['clean', 'clean_eol', 'clean_lfs'].includes(probe.dp) ? committed?.oid ?? probe.rawOid : probe.rawOid ?? `unreadable:${path}`;
+      : ['clean', 'clean_eol', 'clean_lfs'].includes(probe.dp) ? committed?.oid ?? probe.rawOid
+      // A path in neither T nor the index (untracked) or only staged has no `deleted` verdict: no bytes and no file is absent.
+      : probe.rawOid ?? (probe.rawSha256 === null && !readPresent(root, path, scope) ? null : `unreadable:${path}`);
   };
   // `A` only matters where the file or the database moved (no row settles on `fileSame ∧ dbSame` with a proof): read it
   // for those pages alone, so a converged source reads none.
@@ -510,7 +512,9 @@ export async function shadowConvergence(engine: BrainEngine, input: { sourceId: 
 
 /**
  * The idle tick's reads (design v3.2 §2.2): `rev-parse`, the per-source request probe above the converged watermark
- * (a range on the unique `sequence` index), the open-set probe (`persistence_requests_pending`) and the pass row. PR 4a
+ * (a range on the unique `sequence` index), the open-set probe (`persistence_requests_pending`, plus
+ * `persistence_requests_database_pending` for the source's write-through-off requests, which carry no worktree) and the
+ * pass row; both request probes count those requests too. PR 4a
  * writes no pass row, so a real tick is never idle yet; `assumeConverged` lets the bench time the reads PR 4b's idle
  * tick will make, with `request_hwm` at the current maximum.
  */
