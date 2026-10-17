@@ -22,10 +22,12 @@
  * (`ambiguous_storage`) make it `unknown`, never a count of zero.
  *
  * #6910: a ghost on a reserved shared-skillpack path (`isReservedSkillBundlePath`, the
- * predicate sync discovery and managed import use) that the knowledge guard refuses to
- * retire (`skill_bundle_required`: the source has an adopted shared skillpack) is not a
- * knowledge ghost: it is reported apart as a skill path (`skill_paths`), never in the
- * approved set, because no knowledge write can remove it.
+ * predicate sync discovery and managed import use) whose path is a member of the source's
+ * adopted shared skillpack (`sharedPackMember`) is not a knowledge ghost: the pack's own
+ * file is missing, so it is reported apart (`skill_paths`, code `ghost_skill_pack_member`)
+ * and never approved. A legacy page on a reserved path that is not a pack member is an
+ * ordinary ghost; the knowledge guard lets its retirement through as a database-only
+ * soft delete.
  *
  * Readers: doctor `ghost_pages`, `gbrain pages ghosts` and `gbrain repair
  * ghost-pages` (`scanGhostSource`, `ghostPageNow`), and the read-scope MCP
@@ -44,8 +46,7 @@ import { sourceMirrorReadOnly } from './persistence/mirror-read-only.ts';
 import { publishesDatabaseOnly } from './persistence/page-prepare.ts';
 import { liveFileDrift } from './persistence/drift-conflicts.ts';
 import { isReservedSkillBundlePath } from './skill-reserved-paths.ts';
-import { assertKnowledgePublicationAllowed } from './shared-skills/knowledge-guard.ts';
-import { OperationError } from './ops/contract.ts';
+import { sharedPackMember } from './shared-skills/knowledge-guard.ts';
 
 export interface GhostPage { source_id: string; slug: string; path: string; revision: string; page_id: number }
 export interface GhostPagesSummary {
@@ -57,7 +58,7 @@ export interface GhostPagesSummary {
   by_source: Array<{ source_id: string; count: number; status: 'known' | 'unknown' | 'not_applicable'; reason?: string; skill_paths?: number }>;
   /** Bounded by `sampleLimit`. */
   samples: GhostPage[];
-  /** #6910: ghosts under an adopted shared skillpack, which no knowledge write can retire; not in `count`. */
+  /** #6910: ghosts whose path is a member of an adopted shared skillpack (the pack's file is missing); not in `count`. */
   skill_paths: number;
   /** Bounded by `sampleLimit`. */
   skill_path_samples: GhostPage[];
@@ -74,8 +75,10 @@ export interface GhostSourceScan {
   status: 'known' | 'unknown' | 'not_applicable';
   reason?: string;
   ghosts: GhostPage[];
-  /** #6910: confirmed ghosts on a reserved shared-skillpack path the knowledge guard refuses to retire; never in `ghosts`. */
+  /** #6910: confirmed ghosts whose path is a member of the source's adopted shared skillpack; never in `ghosts`. */
   skill_paths: GhostPage[];
+  /** The source's canonical root on this host, when the scan ran (the skill-path restore step names it). */
+  root?: string;
   /** Live pages the existence pre-filter examined. */
   inspected: number;
   /** Pages expected to own a canonical file (present, ghost, or not yet confirmed): the mass-delete valve's population. */
@@ -156,16 +159,13 @@ async function confirm(engine: BrainEngine, context: Extract<SourceContext, { ok
   return { kind: 'unknown', reason: live.reason === 'not_owner_host' ? 'not_owner_host' : 'ambiguous_storage' };
 }
 
-/** #6910: a ghost on a reserved skillpack path whose retirement the shared-skillpack knowledge guard refuses. */
-async function underSharedSkillpack(engine: BrainEngine, owner: GhostOwner, ghost: GhostPage): Promise<boolean> {
+/** #6910: a ghost on a reserved skillpack path that is a member of the source's adopted shared skillpack. */
+async function sharedPackMemberGhost(engine: BrainEngine, owner: GhostOwner, ghost: GhostPage): Promise<boolean> {
   if (!isReservedSkillBundlePath(ghost.path) && !isReservedSkillBundlePath(ghost.slug)) return false;
-  try {
-    await assertKnowledgePublicationAllowed(engine, { source_id: ghost.source_id, source_incarnation: owner.source_incarnation, slug: ghost.slug, target_kind: 'page' });
-    return false;
-  } catch (error) {
-    if (error instanceof OperationError && error.code === 'skill_bundle_required') return true;
-    throw error;
-  }
+  const [schema] = await engine.executeRaw<{ present: boolean }>(`SELECT to_regclass('shared_skill_packs') IS NOT NULL AS present`);
+  if (!schema?.present) return false;
+  const adopted = await engine.executeRaw('SELECT 1 FROM shared_skill_packs WHERE source_id=$1 AND source_incarnation=$2::uuid', [ghost.source_id, owner.source_incarnation]);
+  return adopted.length > 0 && sharedPackMember(engine, ghost.source_id, owner.source_incarnation, [ghost.path, `${ghost.slug}.md`]);
 }
 
 /**
@@ -178,6 +178,7 @@ export async function scanGhostSource(engine: BrainEngine, sourceId: string, opt
   const scan: GhostSourceScan = { source_id: sourceId, status: 'known', ghosts: [], skill_paths: [], inspected: 0, file_backed: 0, candidates: 0, truncated: false };
   if (!context.ok) return { ...scan, status: context.status, reason: context.reason };
   scan.owner = context.owner;
+  scan.root = context.root;
   let after = 0;
   let unchecked = 0;
   for (;;) {
@@ -194,7 +195,7 @@ export async function scanGhostSource(engine: BrainEngine, sourceId: string, opt
       if (scan.candidates > limit) { scan.truncated = true; unchecked++; continue; }
       const result = await confirm(engine, context, sourceId, row.slug);
       if (result.kind === 'unknown') return { ...scan, status: result.reason === 'not_owner_host' ? 'not_applicable' : 'unknown', reason: result.reason };
-      if (result.kind === 'ghost') (await underSharedSkillpack(engine, context.owner, result.ghost) ? scan.skill_paths : scan.ghosts).push(result.ghost);
+      if (result.kind === 'ghost') (await sharedPackMemberGhost(engine, context.owner, result.ghost) ? scan.skill_paths : scan.ghosts).push(result.ghost);
       else if (result.reason === 'agrees' || result.reason === 'file_database_drift') scan.file_backed++;
     }
     if (rows.length < BATCH || scan.inspected >= GHOST_SCAN_LIMIT) break;

@@ -10,7 +10,7 @@ import { opError } from '../core/ops/contract.ts';
 import { readFix } from '../core/ops/op-fix.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { scanGhostSource } from '../core/ghost-pages.ts';
-import { GHOST_CONSEQUENCES, GHOST_REPAIR_LIMIT, SKILL_PATH_NOTE, ghostPreviewCommand, ghostScanRefusal } from '../core/repair/ghost-pages.ts';
+import { GHOST_CONSEQUENCES, GHOST_REPAIR_LIMIT, SKILL_PATH_NOTE, ghostPreviewCommand, ghostScanRefusal, skillPathRestore } from '../core/repair/ghost-pages.ts';
 
 export const PAGES_GHOSTS_USAGE = 'Usage: gbrain pages ghosts [--source <id>] [--json]';
 
@@ -42,7 +42,7 @@ export async function runPagesGhosts(engine: BrainEngine, args: string[]): Promi
   }
   console.log(`${scan.ghosts.length}${scan.truncated ? '+' : ''} ghost page(s) in source ${sourceId} (${scan.inspected} live page(s) inspected, ${scan.file_backed} file-backed).`);
   for (const ghost of scan.ghosts) console.log(`  ${ghost.slug}  missing ${ghost.path}  revision ${ghost.revision}`);
-  if (scan.skill_paths.length) console.log(`${scan.skill_paths.length} more under the shared skillpack (listed apart, not removable today):`);
-  for (const ghost of scan.skill_paths) console.log(`  ${ghost.slug}  missing ${ghost.path}  revision ${ghost.revision}`);
+  if (scan.skill_paths.length) console.log(`${scan.skill_paths.length} more are files of the shared skillpack (listed apart; the repair leaves them alone):`);
+  for (const ghost of scan.skill_paths) console.log(`  ${ghost.slug}  missing ${ghost.path}  restore: ${skillPathRestore(scan.root, ghost)}`);
   for (const line of next) console.log(line);
 }

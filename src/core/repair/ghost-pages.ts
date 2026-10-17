@@ -18,9 +18,11 @@
  * came back is skipped (`file_restored`) and the result asks for a new
  * preview; any other change is `changed_since_preview`.
  *
- * #6910: ghosts under an adopted shared skillpack (`skill_paths`, `src/core/ghost-pages.ts`) are listed
- * apart and never approved: the knowledge guard refuses every knowledge write to them and no gbrain
- * command removes them today. A page of the approved set that an item-level guard still refuses (a
+ * #6910: a ghost whose path is a member of the source's adopted shared skillpack (`skill_paths`, code
+ * `ghost_skill_pack_member`, `src/core/ghost-pages.ts`) is listed apart with its restore step and never
+ * approved: the pack's own file is missing and the shared skill publisher owns it. A legacy page on a
+ * reserved path that is not a pack member is an ordinary ghost (the knowledge guard lets its retirement
+ * through as a database-only soft delete). A page of the approved set that an item-level guard still refuses (a
  * registry `caller` refusal such as `skill_bundle_required`) is recorded `refused` with its code
  * and the apply continues; any other error (storage, contention, owner) still stops it.
  *
@@ -40,6 +42,7 @@ import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
 import { CODES } from '../error-registry.ts';
+import { GHOST_RETIREMENT_INTENT } from '../shared-skills/knowledge-guard.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
 import { getWorktreeBinding, managedPersistenceEnabled } from '../persistence/ownership.ts';
@@ -51,7 +54,7 @@ import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } 
 import { ghostPageNow, scanGhostSource, type GhostOwner, type GhostPage, type GhostSourceScan } from '../ghost-pages.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
-export const GHOST_PAGES_INTENT = 'managed_maintenance_retire_ghost_page';
+export const GHOST_PAGES_INTENT = GHOST_RETIREMENT_INTENT;
 /** Ghosts one preview lists; a larger set is applied in rounds (preview, apply, preview again). */
 export const GHOST_REPAIR_LIMIT = 1000;
 export const GHOST_PURGE_FUSE_HOURS = 72;
@@ -59,10 +62,20 @@ const DOCS = 'docs/guides/repair.md#ghost-pages';
 const FILE_CHANGED = 'The canonical file changed after preparation.';
 /** Skill-path slugs a preview lists by name. */
 const SKILL_PATH_SAMPLE = 20;
-/** #6910: why a ghost under the shared skillpack is left alone; the preview, `gbrain pages ghosts` and doctor say it. */
-export const SKILL_PATH_NOTE = 'Ghost pages under the source\'s adopted shared skillpack (skills/, skillpack.json) are knowledge pages the shared skill publisher owns the path of: '
-  + 'every knowledge write to them, a soft delete included, refuses skill_bundle_required, and put_skill/delete_skill change skill bundles, not knowledge pages, so no gbrain command removes them today. '
-  + 'They are listed apart, never applied, and do not block the other ghosts.';
+/** #6910: the stable code of a ghost on a file of the adopted shared skillpack. */
+export const SKILL_PACK_MEMBER_CODE = 'ghost_skill_pack_member';
+/** #6910: why such a ghost is left alone and the human step that clears it; the preview, `gbrain pages ghosts` and doctor say it. */
+export const SKILL_PATH_NOTE = 'A ghost page whose path is a file of the source\'s adopted shared skillpack (skills/<name>/..., skillpack.json) is the pack\'s own file missing from the checkout; '
+  + 'the shared skill publisher owns it, so this repair never removes the page. Restore the file on the owner host (git -C <source root> checkout -- <path> when it is committed; '
+  + 'otherwise republish the skill with put_skill and its catalog expected_revision so the publisher writes it again); the page then stops being a ghost. These pages never block the other ghosts.';
+/** The exact restore command for one pack-member ghost. */
+export const skillPathRestore = (root: string | undefined, ghost: GhostPage) => `git -C ${root ?? '<source root>'} checkout -- ${ghost.path}`;
+/** The `skill_paths` detail every reader prints. */
+export function skillPathDetail(root: string | undefined, ghosts: GhostPage[], count = ghosts.length) {
+  const sample = ghosts.slice(0, SKILL_PATH_SAMPLE);
+  return { code: SKILL_PACK_MEMBER_CODE, count, slugs: sample.map(ghost => ghost.slug), owned_by: 'shared_skill_publisher',
+    restore: sample.map(ghost => skillPathRestore(root, ghost)), note: SKILL_PATH_NOTE, docs: DOCS };
+}
 
 interface ApprovedGhost extends GhostPage { owner: GhostOwner; selection: string[] }
 interface GhostItem extends RepairItem { ghost: GhostPage; owner: GhostOwner; hash: string; last: boolean }
@@ -152,7 +165,7 @@ export const ghostPagesRepair: RepairHandler = {
       const warnings = [
         ...(mass ? [`${scan.ghosts.length} of ${scan.file_backed} file-backed page(s) are ghosts (more than ${Math.round(MASS_RECONCILE_RATIO * 100)}%): the apply refuses (ghost_mass_delete_refused) unless GBRAIN_ALLOW_MASS_RECONCILE=1; check the checkout first.`] : []),
         ...(scan.truncated ? [`More ghosts may exist past the first ${GHOST_REPAIR_LIMIT} checked; apply this set, then preview again.`] : []),
-        ...(skillPaths ? [`${skillPaths} ghost page(s) under the shared skillpack are listed apart (skill_path) and not applied: ${SKILL_PATH_NOTE}`] : []),
+        ...(skillPaths ? [`${skillPaths} ghost page(s) on files of the shared skillpack are listed apart (${SKILL_PACK_MEMBER_CODE}) and not applied: ${SKILL_PATH_NOTE}`] : []),
         ...(scan.reason === 'mirror_read_only' ? [`Source ${sourceId} is a read-only mirror: its pages publish no file, so none is a ghost.`] : []),
         ...(scan.ghosts.length ? Object.values(GHOST_CONSEQUENCES) : []),
       ];
@@ -160,11 +173,10 @@ export const ghostPagesRepair: RepairHandler = {
         residuals: { ghosts: scan.ghosts.length, file_backed: scan.file_backed, inspected: scan.inspected, ...(skillPaths ? { skill_paths: skillPaths } : {}) },
         listing: [...scan.ghosts.map(ghost => ({ item: `${ghost.source_id}:${ghost.slug}`, class: 'canonical_file_missing',
           detail: `file ${ghost.path} is missing; revision ${ghost.revision}` })),
-        ...scan.skill_paths.map(ghost => ({ item: `${ghost.source_id}:${ghost.slug}`, class: 'skill_path',
-          detail: `file ${ghost.path} is missing under the shared skillpack; not applied (no command removes it today)` }))],
+        ...scan.skill_paths.map(ghost => ({ item: `${ghost.source_id}:${ghost.slug}`, class: SKILL_PACK_MEMBER_CODE,
+          detail: `shared skillpack file ${ghost.path} is missing; not applied. Restore it: ${skillPathRestore(scan.root, ghost)}` }))],
         details: { purge_fuse_hours: GHOST_PURGE_FUSE_HOURS, undo: 'gbrain restore <slug> --force', keep: GHOST_CONSEQUENCES.keep, mass_delete: mass, truncated: scan.truncated, docs: DOCS,
-          ...(skillPaths ? { skill_paths: { count: skillPaths, slugs: scan.skill_paths.slice(0, SKILL_PATH_SAMPLE).map(ghost => ghost.slug),
-            owned_by: 'shared_skill_publisher', route: null, note: SKILL_PATH_NOTE, docs: DOCS } } : {}) } };
+          ...(skillPaths ? { skill_paths: skillPathDetail(scan.root, scan.skill_paths) } : {}) } };
     }
     if (!opts.expect) {
       throw opError('invalid_params', 'gbrain repair ghost-pages --apply removes only the set a preview printed.',

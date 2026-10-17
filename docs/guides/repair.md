@@ -968,18 +968,29 @@ again for the rest. Sync never removes ghost pages by itself.
 <a id="ghost-pages-skill-paths"></a>
 **Ghosts under the shared skillpack.** When a source has an adopted shared
 skillpack, its reserved paths (`skills/` and `skillpack.json`) belong to the
-shared skill publisher. A knowledge page on such a path whose file is gone (a
-legacy import from before the pack was adopted, say) is still a ghost, but no
-knowledge write can remove it: every one, a soft delete included, refuses
-`skill_bundle_required`, and `put_skill` / `delete_skill` change skill
-bundles, not knowledge pages. No gbrain command removes such a page today, so
-the preview lists it apart (class `skill_path`, `residuals.skill_paths`, and
-`details.skill_paths` with the first slugs, `owned_by: shared_skill_publisher`
-and `route: null`), leaves it out of the hash and never applies it; the other
-ghosts apply as usual. Doctor `ghost_pages` and `gbrain pages ghosts` count
-these pages apart too (`skill_paths`), never as ghosts waiting for this
-repair. A page on a `skills/` path of a source with no adopted pack is an
-ordinary ghost.
+shared skill publisher, and knowledge writes there refuse
+`skill_bundle_required`. Two kinds of ghost can sit on those paths:
+
+- A legacy knowledge page that no live pack skill owns (imported before the
+  pack was adopted, say, under a `skills/<name>/` directory the pack does not
+  publish). It is an ordinary ghost: the preview lists it with the others and
+  the apply retires it as a database-only soft delete. Its file is already
+  gone and filesystem publication refuses one that reappears, so no pack file
+  changes.
+- A page on a path the pack owns: `skillpack.json`, a file of a live skill's
+  current revision, or anything under a live skill's `skills/<name>/`
+  directory. Its missing file is the pack's own, so the repair never removes
+  the page. The preview lists it apart with code `ghost_skill_pack_member`
+  (`residuals.skill_paths`, and `details.skill_paths` with the first slugs,
+  `owned_by: shared_skill_publisher` and one `restore` command per page) and
+  leaves it out of the hash. To clear it, restore the file on the owner host:
+  `git -C <source root> checkout -- <path>` when the file is committed, or
+  republish the skill with `put_skill` and its catalog `expected_revision` so
+  the publisher writes it again. The page then stops being a ghost.
+
+Doctor `ghost_pages` and `gbrain pages ghosts` count pack-member ghosts apart
+(`skill_paths`, with the same restore step), never as ghosts waiting for this
+repair; on their own they leave the check `ok`.
 
 **`refused`.** A page of the approved set that a per-page guard still refuses
 during the apply (a refusal of class `caller`, such as `skill_bundle_required`

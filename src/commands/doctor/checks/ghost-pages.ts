@@ -12,16 +12,17 @@
  * Off the owner host or on a brain with no bound source it is `ok` + info
  * (`not_applicable`), never a warning; an unreadable or ambiguous checkout is
  * the unknown convention (`warn`, `details.health: 'unknown'`).
- * `undeclared_db_only_pages` stays a separate audit. #6910: ghosts under an
- * adopted shared skillpack are counted apart (`details.skill_paths`) and never
- * as knowledge ghosts awaiting `gbrain repair ghost-pages`, which cannot remove
- * them; on their own they leave the check `ok` with a note.
+ * `undeclared_db_only_pages` stays a separate audit. #6910: ghosts on files of
+ * an adopted shared skillpack are counted apart (`details.skill_paths`, code
+ * `ghost_skill_pack_member`, with their restore commands), never as knowledge
+ * ghosts awaiting `gbrain repair ghost-pages`, which leaves them alone; on
+ * their own they leave the check `ok` with the restore step.
  */
 import type { Check } from '../../doctor.ts';
 import { agentFix, checkError } from '../check-fix.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { readGhostPages } from '../../../core/ghost-pages.ts';
-import { SKILL_PATH_NOTE } from '../../../core/repair/ghost-pages.ts';
+import { SKILL_PACK_MEMBER_CODE, skillPathDetail } from '../../../core/repair/ghost-pages.ts';
 
 const DOCS = 'docs/guides/repair.md#ghost-pages';
 
@@ -31,9 +32,9 @@ async function runGhostPages(ctx: DoctorContext): Promise<Check[]> {
     const summary = await readGhostPages(connectedEngine(ctx), {});
     const details = { count: summary.count, by_source: summary.by_source, samples: summary.samples, inspected: summary.inspected,
       truncated: summary.truncated, exact: summary.exact, docs: DOCS,
-      ...(summary.skill_paths ? { skill_paths: { count: summary.skill_paths, samples: summary.skill_path_samples, owned_by: 'shared_skill_publisher', route: null, note: SKILL_PATH_NOTE } } : {}) };
+      ...(summary.skill_paths ? { skill_paths: { ...skillPathDetail(undefined, summary.skill_path_samples, summary.skill_paths), samples: summary.skill_path_samples } } : {}) };
     const skillNote = summary.skill_paths
-      ? ` ${summary.skill_paths} more under the shared skillpack are counted apart (${summary.skill_path_samples.map(page => `${page.source_id}:${page.slug}`).join(', ')}): no gbrain command removes them today, and they do not block the rest.`
+      ? ` ${summary.skill_paths} more are files of the shared skillpack missing from the checkout (${SKILL_PACK_MEMBER_CODE}: ${summary.skill_path_samples.map(page => `${page.source_id}:${page.slug}`).join(', ')}); the repair leaves them alone: restore each file on the owner host (git -C <source root> checkout -- <path>, or republish the skill with put_skill).`
       : '';
     const ghostSources = summary.by_source.filter(entry => entry.count > 0);
     const unknown = summary.by_source.filter(entry => entry.status === 'unknown');
