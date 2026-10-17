@@ -100,8 +100,9 @@ export async function sealImageProjections(engine: BrainEngine, opts: { limit?: 
           p.contextual_retrieval_mode AS mode,p.corpus_generation
         FROM jsonb_to_recordset($1::text::jsonb) AS v(source_id text, slug text, revision uuid)
         JOIN sources s ON s.id=v.source_id AND NOT s.archived
-        JOIN pages p ON p.source_id=v.source_id AND p.slug=v.slug AND p.deleted_at IS NULL AND p.knowledge_revision=v.revision
-        WHERE ${sealableImageSql('p')}`, [JSON.stringify(group.map(({ source_id, slug, revision }) => ({ source_id, slug, revision })))]);
+        CROSS JOIN LATERAL (SELECT p.id FROM pages p WHERE p.source_id=v.source_id AND p.slug=v.slug OFFSET 0) k
+        JOIN pages p ON p.id=k.id
+        WHERE p.deleted_at IS NULL AND p.knowledge_revision=v.revision AND ${sealableImageSql('p')}`, [JSON.stringify(group.map(({ source_id, slug, revision }) => ({ source_id, slug, revision })))]);
       if (!pages.length) return [];
       const chunks = await tx.executeRaw<{ id: number; page_id: number; chunk_text: string; chunk_source: string;
         embedding_input_hash: string | null; current: boolean }>(`SELECT id,page_id,chunk_text,chunk_source,embedding_input_hash,

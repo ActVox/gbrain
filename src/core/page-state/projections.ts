@@ -419,8 +419,8 @@ export function projectionJobProbes(opts: { media?: boolean } = {}): string {
   const inline = "p.page_kind IN ('markdown','code') AND p.body_storage IS DISTINCT FROM 'segmented'";
   return `CROSS JOIN LATERAL (SELECT s.id FROM sources s
       WHERE s.incarnation=j.source_incarnation AND NOT s.archived OFFSET 0) s
-    CROSS JOIN LATERAL (SELECT p.page_kind FROM (SELECT p.id FROM pages p WHERE p.source_id=s.id AND p.slug=j.slug OFFSET 0) k
-      JOIN pages p ON p.id=k.id WHERE p.deleted_at IS NULL AND ${opts.media ? `((${inline}) OR ${sealableImageSql('p')})` : inline}) p`;
+    CROSS JOIN LATERAL (SELECT p.page_kind FROM pages p WHERE p.id=(SELECT k.id FROM pages k WHERE k.source_id=s.id AND k.slug=j.slug)
+      AND p.deleted_at IS NULL AND ${opts.media ? `((${inline}) OR ${sealableImageSql('p')})` : inline} OFFSET 0) p`;
 }
 const PROJECTION_JOB_PROBES = projectionJobProbes();
 
@@ -497,9 +497,18 @@ export interface ProjectionRebuildOptions {
   window?: ProjectionScanCursor;
   /** #6803: a media drain seals images next, so the statistics refresh also waits for its `sealable` rows. */
   media?: boolean;
+  /**
+   * #6803, the drain's walk position: only rows after `walk.after`, which
+   * each call advances to the last row it attempted. Every row before it was
+   * attempted or is not an inline row, so 93K queued images are walked once
+   * per run instead of once per batch. Ignored with `window`.
+   */
+  walk?: { after?: QueueKey };
 }
 
-type QueuedJob = { source_id: string; source_incarnation: string; slug: string; revision: string; page_kind: string };
+/** A queue row's position in the walk order (updated_at as text, so microseconds survive). */
+export type QueueKey = { updated_at: string; source_incarnation: string; slug: string };
+type QueuedJob = { source_id: string; source_incarnation: string; slug: string; revision: string; page_kind: string; updated_at?: string };
 type WindowKey = { source_incarnation: string; slug: string };
 
 /**
@@ -631,9 +640,14 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
   if (opts.notAfter !== undefined) { params.push(opts.notAfter); filters.push(`j.updated_at<=$${params.length}::text::timestamptz`); }
   if (opts.reasons) { params.push(opts.reasons); filters.push(`j.reason=ANY($${params.length}::text[])`); }
   if (opts.pages) { params.push(opts.pages.slugs); filters.push(`j.slug=ANY($${params.length}::text[])`); }
+  const after = opts.window ? undefined : opts.walk?.after;
+  if (after) {
+    params.push(after.updated_at, after.source_incarnation, after.slug);
+    filters.push(`(j.updated_at,j.source_incarnation,j.slug)>($${params.length - 2}::text::timestamptz,$${params.length - 1}::uuid,$${params.length})`);
+  }
   const sourceFilter = opts.pages ? `WHERE s.id=$${params.push(opts.pages.sourceId)}` : '';
   const selected = opts.window ? await selectWindowJobs(engine, opts.window, opts.retryCooldown === true) : null;
-  const jobs = selected ? selected.jobs.slice(0, Number(params[0])) : await engine.executeRaw<QueuedJob>(`SELECT s.id AS source_id,j.source_incarnation,j.slug,j.revision,p.page_kind
+  const jobs = selected ? selected.jobs.slice(0, Number(params[0])) : await engine.executeRaw<QueuedJob>(`SELECT s.id AS source_id,j.source_incarnation,j.slug,j.revision,p.page_kind,j.updated_at::text AS updated_at
     FROM (SELECT source_incarnation,slug,revision,updated_at FROM page_projection_jobs j
       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
       ORDER BY updated_at,source_incarnation,slug OFFSET 0) j
@@ -710,6 +724,10 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
     : !(await engine.executeRaw(`SELECT 1 FROM page_projection_jobs j
       ${projectionJobProbes({ media: opts.media })}
       WHERE j.reason<>'rebuild_failed' LIMIT 1`)).length);
+  const last = jobs[attempted - 1];
+  if (opts.walk && !selected && last?.updated_at !== undefined) {
+    opts.walk.after = { updated_at: last.updated_at, source_incarnation: last.source_incarnation, slug: last.slug };
+  }
   return { rebuilt, superseded };
 }
 
@@ -737,6 +755,10 @@ export interface ProjectionDrainResult {
 /**
  * `media` (the explicit `gbrain projections drain` only) also seals the
  * `sealable` images after the Markdown and code rows (image-seal.ts).
+ * Queued Markdown/code rows refresh stale planner statistics first: every
+ * rebuild reads and writes its page by key, and without statistics (PGLite
+ * after v153's activation) each of those statements scans pages, so 2,000
+ * notes beside 93K queued images rebuilt at 14 pages/s instead of 150.
  */
 export async function drainProjections(engine: BrainEngine, opts: { limit?: number; progress?: ProgressReporter; reasons?: readonly string[]; media?: boolean } = {}): Promise<ProjectionDrainResult> {
   const [{ runStart }] = await engine.executeRaw<{ runStart: string }>('SELECT now()::text AS "runStart"');
@@ -749,12 +771,14 @@ export async function drainProjections(engine: BrainEngine, opts: { limit?: numb
   const total = before.pending + (opts.media ? before.sealable : 0);
   opts.progress?.start('projections.drain', opts.limit === undefined ? total : Math.min(total, opts.limit));
   const refreshes = projectionStatisticsRefreshes(engine);
+  if (before.pending > 0) await refreshProjectionStatistics(engine, total);
   const failed: ProjectionRebuildFailure[] = [];
   const probes = projectionJobProbes({ media: opts.media });
   let rebuilt = 0;
   let superseded = 0;
   let tried = 0;
   let seal = { sealed: 0, sealed_with_visual: 0, sealed_text_only: 0 };
+  const walk: { after?: QueueKey } = {};
   try {
     // Continue while a batch rebuilt, removed, failed or durably deferred a
     // row; stop on a no-op batch. A bare `superseded` row (another worker
@@ -763,7 +787,7 @@ export async function drainProjections(engine: BrainEngine, opts: { limit?: numb
       let healed = 0;
       let failedNow = 0;
       const batch = await rebuildPendingPageProjections(engine, Math.min(DRAIN_BATCH, (opts.limit ?? Infinity) - tried),
-        { notAfter: runStart, reasons: opts.reasons, media: opts.media, onHeal: () => { healed++; },
+        { notAfter: runStart, reasons: opts.reasons, media: opts.media, walk, onHeal: () => { healed++; },
           onFailure: failure => { failed.push(failure); if (!failure.reason.startsWith('revision_conflict:')) failedNow++; } });
       rebuilt += batch.rebuilt;
       superseded += batch.superseded;
