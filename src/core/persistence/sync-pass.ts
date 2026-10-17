@@ -94,19 +94,22 @@ async function withRoundSnapshot<T>(engine: BrainEngine, fn: (exec: Exec) => Pro
 async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string): Promise<{ rows: PageRow[]; statements: number }> {
   const select = `SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision, p.deleted_at IS NOT NULL AS deleted,
       p.revision_write_request_id::text AS request_id,
-      CASE WHEN c.completed_keys IS NULL THEN NULL ELSE jsonb_build_object('origin', c.completed_keys->0->'origin', 'blob_oid', c.completed_keys->0->'blob_oid',
-        'disk_blob_oid', c.completed_keys->0->'disk_blob_oid', 'revision', c.completed_keys->0->'revision', 'parser', c.completed_keys->0->'parser') END AS record,
-      NULL::boolean AS arm1, NULL::text AS attested_hash
+      c.completed_keys IS NOT NULL AS has_record, c.completed_keys->0->>'origin' AS rec_origin, c.completed_keys->0->>'blob_oid' AS rec_blob_oid,
+      c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser
     FROM pages p LEFT JOIN op_checkpoints c ON c.op=$2 AND c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
-  if (kind === 'postgres') return { rows: await exec.executeRaw<PageRow>(select, params), statements: 1 };
+  type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin: string | null; rec_blob_oid: string | null;
+    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null };
   const rows: PageRow[] = [];
+  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
+    record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined } : null }); };
+  if (kind === 'postgres') { take(await exec.executeRaw<Raw>(select, params)); return { rows, statements: 1 }; }
   let after = 0, statements = 0;
   for (;;) {
     statements++;
-    const page = await exec.executeRaw<PageRow>(`${select} AND p.id>$4 ORDER BY p.id LIMIT ${PGLITE_KEYSET_ROWS}`, [...params, after]);
-    for (const row of page) rows.push(row);
+    const page = await exec.executeRaw<Raw>(`${select} AND p.id>$4 ORDER BY p.id LIMIT ${PGLITE_KEYSET_ROWS}`, [...params, after]);
+    take(page);
     if (page.length < PGLITE_KEYSET_ROWS) return { rows, statements };
     after = Number(page[page.length - 1]!.id);
   }
