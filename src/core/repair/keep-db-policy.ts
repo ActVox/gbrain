@@ -28,6 +28,7 @@ import { readDriftSkips, releaseDriftSkip } from '../persistence/drift-conflicts
 import { localHostId, readLocalWriter, withVerifiedLocalRegistration } from '../persistence/identity.ts';
 import { getWriteRequest } from '../persistence/journal.ts';
 import { admitReconcileArtifact, authorizeReconcile, type ReconcileArtifact } from '../persistence/reconcile.ts';
+import { reconcileBackupRetained } from '../persistence/reconcile-backup.ts';
 import { digest, sha256 } from '../persistence/digest.ts';
 import type { Principal, WriteRequest } from '../persistence/model.ts';
 import { sourceMirrorReadOnly } from '../persistence/mirror-read-only.ts';
@@ -125,8 +126,10 @@ export async function freezeKeepDbReconcile(engine: BrainEngine, input: KeepDbFr
 
 /**
  * The request id of an artifact: derived from the page revision and the frozen bytes, so one drift is submitted once
- * whatever its outcome, except that a request `sync.admission` cancelled at publication (`admission_paused`) leaves the
- * path a candidate again: the next admission takes the next id in that sequence.
+ * whatever its outcome. Two ids leave the path a candidate again, and the next admission takes the next id in the
+ * sequence: a request `sync.admission` cancelled at publication (`admission_paused`), and an id with a retained backup but
+ * no request (an admission refused after retention, such as a lost lease or a paused `sync.admission`), whose backup
+ * would refuse a fresh artifact `idempotency_conflict`.
  */
 async function keepDbRequestId(engine: BrainEngine, principal: Principal, artifact: KeepDbArtifact): Promise<string> {
   for (let attempt = 0; ; attempt++) {
@@ -134,7 +137,8 @@ async function keepDbRequestId(engine: BrainEngine, principal: Principal, artifa
       ...(attempt ? [attempt] : [])]);
     const requestId = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
     const prior = await getWriteRequest(engine, principal, requestId);
-    if (prior?.state !== 'cancelled' || prior.error_code !== 'admission_paused') return requestId;
+    if (prior ? prior.state !== 'cancelled' || prior.error_code !== 'admission_paused'
+      : !reconcileBackupRetained(artifact.preview.preconditions.brain_id, principal, requestId)) return requestId;
   }
 }
 
