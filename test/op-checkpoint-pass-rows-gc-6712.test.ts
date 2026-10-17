@@ -29,3 +29,11 @@ test('GC keeps live-incarnation pass, marker, withheld and cost rows past the TT
   expect(rows.filter(row => row.incarnation === live).map(row => row.op).sort()).toEqual([...SYNC_PASS_ROW_OPS].sort());
   expect(rows.filter(row => row.incarnation === retired)).toEqual([]);
 }, 60_000);
+
+test('GC keeps the sync.admission set_at row past the TTL (lane S: doctor age and effective read it)', async () => {
+  await engine.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at) VALUES('sync-admission','brain',jsonb_build_array('{"value":"imports_only","set_at":"2026-01-01T00:00:00Z"}'::jsonb),now() - interval '30 days')`);
+  await purgeStaleCheckpoints(engine, 7);
+  const rows = await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='sync-admission' AND fingerprint='brain'");
+  expect(rows.length).toBe(1);
+}, 60_000);
+

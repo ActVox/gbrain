@@ -513,6 +513,7 @@ export async function purgeStaleCheckpoints(
            AND op NOT IN ('managed-atoms','managed-atoms-generation','managed-connector','managed-connector-retry','managed-connector-state','managed-connector-migration')
            AND op<>'connector-hold-retry'
            AND op<>'stuck-recovery-resolution'
+           AND op<>'sync-admission'
            AND NOT (op IN ('sync-hold','sync-hold-retry','sync-import-provenance','sync-hold-summary','sync-conversions','${FENCE_CANDIDATE_OP}','${FENCE_SCAN_OP}','${FENCE_REPAIR_ATTEMPT_OP}','${FENCE_UNCOMMITTED_OP}',${SYNC_PASS_ROW_OPS.map(op => `'${op}'`).join(',')})
              AND NOT (op='sync-hold-summary' AND COALESCE((completed_keys->0->>'count')::int,0)=0)
              AND EXISTS (SELECT 1 FROM sources s WHERE s.id=op_checkpoints.completed_keys->0->>'source_id'

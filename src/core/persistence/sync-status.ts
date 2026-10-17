@@ -136,6 +136,8 @@ export interface SyncStatus {
    */
   convergence: import('./sync-convergence.ts').ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | null;
   convergence_read: SyncStatusRead;
+  /** #6712 PR 4b: `sync.admission` (brain-wide), when it was set, and whether it is in effect for this source (sync-admission.ts). */
+  admission: import('./sync-admission.ts').SyncAdmissionStatus;
 }
 export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
 /** Why the source is in its state; one closed list. */
@@ -313,7 +315,8 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     state, reason: stateReason,
     oldest_blocker: oldest, recovery, checkpoint_blockers_read: detail ? { status: 'read' } : notRead('checkpoint blocker list'),
     cursors_read: detail ? { status: 'read' } : notRead('live cursor'), terminal_failures_read: detail ? { status: 'read' } : notRead('terminal-failure summary'),
-    convergence: detail ? await (await import('./sync-pass.ts')).statusConvergence(engine, sourceId) : null, convergence_read: detail ? { status: 'read' } : notRead('convergence shadow') };
+    convergence: detail ? await (await import('./sync-pass.ts')).statusConvergence(engine, sourceId) : null, convergence_read: detail ? { status: 'read' } : notRead('convergence shadow'),
+    admission: await (await import('./sync-admission.ts')).syncAdmissionStatus(engine, sourceId, source.incarnation) };
 }
 
 /** #6712 PR 2: the state and its reason, from what this read saw; a probe that did not answer never yields `synced`. */

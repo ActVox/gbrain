@@ -11,9 +11,10 @@
  *   stored before the upgrade as unapplied.
  */
 import { CONFIG_ROLLBACK_WINDOWS, type ConfigRollbackWindow } from './wire-skew.ts';
+import type { BrainEngine } from './engine.ts';
 
 export const SYNC_TUNABLE_KEYS = ['sync.bulk_size', 'sync.lanes', 'sync.exclude', 'sync.include_hidden', 'sync.include_working_tree', 'sync.holds',
-  'sync.write_through', 'sync.cost_gate_min_usd'] as const;
+  'sync.write_through', 'sync.cost_gate_min_usd', 'sync.admission'] as const;
 
 export interface RetiredSyncKey {
   key: string;
@@ -120,8 +121,18 @@ export function syncKeySetNotice(key: string): { writes: boolean; lines: string[
  * `gbrain config get|set` of a retired or rollback key. `get` prints the value in effect (stdout) and its origin
  * (stderr); `set` prints the key's notice. True when the command is done: every `get`, and the `set` of a retired key,
  * which writes nothing. A rollback key's `set` returns false so the write goes ahead; any other key returns false.
+ * #6712 PR 4b: `get sync.admission` prints the value in effect (`normal` when unset) and when it was set.
  */
-export async function handleSyncKeyConfig(engine: { getConfig(key: string): Promise<string | null> }, action: 'get' | 'set', key: string): Promise<boolean> {
+export async function handleSyncKeyConfig(engine: Pick<BrainEngine, 'getConfig' | 'executeRaw'>, action: 'get' | 'set', key: string): Promise<boolean> {
+  if (action === 'get' && key === 'sync.admission') {
+    const { readSyncAdmissionSetting } = await import('./persistence/sync-admission.ts');
+    const setting = await readSyncAdmissionSetting(engine);
+    console.log(setting.value);
+    console.error(`[config] source: ${setting.stored === null ? 'default (unset)'
+      : setting.stored !== setting.value ? `brain config holds ${JSON.stringify(setting.stored.slice(0, 40))}, which is not a value; managed sync reads it as ${setting.value} (fail closed)`
+      : `brain config${setting.set_at ? `, set at ${setting.set_at}` : ' (set_at unknown)'}`}${setting.value === 'normal' ? '' : '. Restore the default with gbrain config set sync.admission normal'}.`);
+    return true;
+  }
   if (!retiredSyncKey(key) && !rollbackSyncKey(key)) return false;
   if (action === 'set') {
     const notice = syncKeySetNotice(key)!;
