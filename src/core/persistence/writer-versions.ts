@@ -17,7 +17,7 @@ export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
  * v0.60.252.0 until the stamp has none), so the gate also requires the segment-reader mark (migration v254) on
  * every write it sees: an unmarked writer blocks whatever its version, the floor included (`segmentedGateWriters`).
  */
-export const SEGMENTED_WRITER_FLOOR = '0.60.264.0';
+export const SEGMENTED_WRITER_FLOOR = '0.60.290.0';
 
 /** Numeric comparison on all four components; null when either side is not a version. */
 export function compareWriterVersions(a: string, b: string): number | null {

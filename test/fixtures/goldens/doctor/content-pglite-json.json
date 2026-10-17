@@ -1528,7 +1528,7 @@
             "configured": "unset",
             "docs": "docs/guides/memory-boundaries.md#segmented-page-storage",
             "effective": "off",
-            "floor": "0.60.264.0",
+            "floor": "0.60.290.0",
             "max_bytes": 25165824,
             "truncated": false,
             "window_days": 7
