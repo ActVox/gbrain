@@ -82,11 +82,16 @@ export interface PassApplyState {
   /** The newest round's classes and summary (design §9), after this module settled what it finished. */
   classes: Record<string, { count: number; action: SyncClassAction }>;
   summary: PassRoundSummary | null;
+  /**
+   * The pages whose import record the newest round wrote: here, or in its batches (an import, or a waiver of an unchanged
+   * page). The next round's confirm proof attributes those records to the pass.
+   */
+  recorded: Set<number>;
 }
 
 export function newPassApplyState(): PassApplyState {
   return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0 }, settleMismatch: [], adopted: 0,
-    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: new Set(), classes: {}, summary: null };
+    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: new Set(), classes: {}, summary: null, recorded: new Set() };
 }
 
 export interface PassApplyInput {
@@ -123,6 +128,7 @@ function levelMeta(level: ShadowLevel, entry: ShadowPath): Partial<GitHoldMeta> 
 
 /** Runs the round's settle-side work (module header) and settles the paths it finished in `level.paths`. */
 export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
+  state.recorded.clear();
   if (input.fullRound && !input.remote) await retireMarkers(engine, level, state);
   if (input.remote && input.grantPrefixes) {
     const step = loopYield();
@@ -272,8 +278,10 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
 interface RecordWrite { pageId: number; revision: string; record: Omit<SyncImportProvenance, 'recorded_at' | 'validated'> }
 
 /** The batched, fenced record write: a page whose revision moved since the round read it is left alone. Returns the pages written. */
-async function writeRecords(engine: BrainEngine, level: ShadowLevel, writes: RecordWrite[]): Promise<Set<number>> {
+async function writeRecords(engine: BrainEngine, level: ShadowLevel, writes: RecordWrite[], recorded: Set<number>): Promise<Set<number>> {
   if (!writes.length) return new Set();
+  // Noted before the transaction: a commit whose acknowledgement is lost still names the pass as the records' writer.
+  for (const write of writes) recorded.add(write.pageId);
   return engine.transaction(async tx => {
     await assertDrainLease(tx, level.sourceId);
     const rows = await tx.executeRaw<{ id: number | string; revision: string }>('SELECT id, knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND id=ANY($2::int[]) FOR SHARE',
@@ -297,7 +305,7 @@ async function adoptRecords(engine: BrainEngine, level: ShadowLevel, state: Pass
       : { source_id: level.sourceId, incarnation: level.incarnation, page_id: entry.pageId!, origin: sourcePath, raw_sha256: entry.state.levelSha256 ?? '', gbrain_version: VERSION, working: level.mode === 'working' };
     return { pageId: entry.pageId!, revision: entry.revision!, record: { ...base, blob_oid: entry.state.level!, disk_blob_oid: entry.state.diskOid ?? prior?.disk_blob_oid ?? entry.state.level!, revision: entry.revision! } };
   });
-  state.adopted += (await writeRecords(engine, level, writes)).size;
+  state.adopted += (await writeRecords(engine, level, writes, state.recorded)).size;
 }
 
 /** Design §2.7: the bounded read-only legacy sweep; an equal page gets a record and is `matched`. */
@@ -324,7 +332,7 @@ async function sweepLegacy(engine: BrainEngine, level: ShadowLevel, input: PassA
       blob_oid: entry.state.level!, disk_blob_oid: entry.state.diskOid ?? entry.state.level!, revision: entry.revision!, parser: syncImportParserFor(path, level.pack), gbrain_version: VERSION,
       working: level.mode === 'working' } }];
   });
-  const written = await writeRecords(engine, level, writes);
+  const written = await writeRecords(engine, level, writes, state.recorded);
   state.swept.recorded += written.size;
   for (const entry of same) if (written.has(entry.pageId!)) settleAs(entry, { cls: 'matched', settled: true, action: 'none', classAction: 'none' });
 }

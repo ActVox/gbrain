@@ -31,6 +31,7 @@ import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type Sync
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
+import { faultPoint } from './fault-points.ts';
 import { passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
 import { loopYield } from './sync-yield.ts';
 import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
@@ -604,6 +605,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   /** Drains one batch; a stop is the pass's ending, and `stop` folds that batch's counts in. */
   const drain = async (entries: PassEntry[], stamp?: PassStamp): Promise<SyncResult | null> => {
     const key = `${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`;
+    for (const entry of entries) if (entry.pageId != null) applied.recorded.add(entry.pageId);
     const batch = batchCursor(entries, stamp);
     const drained = await input.drainBatch(key, batch, sliceBase);
     if ('entries' in drained) {
@@ -667,9 +669,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       input.onLevelRead(head);
       // The previous round's level is done with: dropped before the next one is read, so a large source holds one level, not two.
       lastLevel = null;
+      await faultPoint('sync:round_start', { sourceId, round });
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
-          slugMode: value.obligations.slug_mode, cache: levelCache } });
+          slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } });
+      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null } : undefined });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is

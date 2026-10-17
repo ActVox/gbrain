@@ -37,6 +37,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'purge:ledger_redaction'
   // #6712 PR 4b: after a page-row deletion of a managed Git source wrote its origin's deletion marker (sync-markers.ts), before the row goes.
   | 'purge:marker_written'
+  // #6712 PR 4b: before each round of a pass reads its level (`round`), and after it read it (`level`: its statements and its
+  // confirm-round verdict), before it applies.
+  | 'sync:round_start' | 'sync:level_read'
   // #6650: `gbrain repair stuck-recovery` (recovery-resolve.ts): after the backup is durable (before its journal step), after the prior
   // bytes are written (before their journal step), after a --keep disk write is abandoned (its journal step written), and after recoverPublication returns.
   | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered'
@@ -52,7 +55,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
  * cancellation (settle on abort) and one that ignores it (hang on).
  */
 /** `writeId` is the write request row: rows of a caller-bound replay share one `requestId` (crash-robot per-request seams key on the row). */
-export interface FaultDetail { requestId?: string; writeId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string }
+export interface FaultDetail { requestId?: string; writeId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string;
+  round?: number; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number } | null } }
 /** Postgres returns `persistence_effects.id` (bigserial) as a BigInt; `faultPoint` hands hooks its decimal string (#6584). */
 export type FaultDetailInput = Omit<FaultDetail, 'effectId'> & { effectId?: string | number | bigint };
 type FaultHook = (point: FaultPoint, detail: FaultDetail) => Promise<void> | void;
