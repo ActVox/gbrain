@@ -47,6 +47,7 @@ import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { isCodeFilePath, resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
+import { databaseOnlyPageSql } from './unbound-pages.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { SYNC_SLICE_OP } from './sync-slices.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
@@ -154,8 +155,8 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
   }
   const slugs = [...new Set([...slugOf.values()].filter(Boolean))];
-  const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean }>(
-    'SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])', [level.sourceId, slugs]) : [])
+  const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean; unbound: boolean }>(
+    `SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted, ${databaseOnlyPageSql('pages')} AS unbound FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])`, [level.sourceId, slugs]) : [])
     .map(page => [page.slug, page]));
   const gitPathOfOrigin = (origin: string) => level.slugMode === 'source-root' && level.scope ? `${level.scope}/${syncOriginPath(origin)}` : syncOriginPath(origin);
   // #6887: a both-moved import imports when the page still holds what its recorded disk blob imports (sync-screen.ts driftBaselineContent).
@@ -196,10 +197,11 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     if (holder) {
       // A live page at the slug with no recorded origin (written straight to the database, or by an older gbrain) attests
       // neither side: the import is guarded as drift of unknown side, so the freeze imports it only as a proven no-op and
-      // otherwise holds file_drift (as discovery's tree walk guards it, sync-prescreen.ts).
+      // otherwise holds file_drift (as discovery's tree walk guards it, sync-prescreen.ts). A page written while the source was
+      // unbound (#5254) is not guarded: its preparation refuses the file that now occupies its path (source_changed).
       entries.push({ ...base, pageId: Number(holder.id), revision: holder.revision,
         ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}),
-        ...(holder.source_path === null && !holder.deleted ? { drift: 'unknown' as const } : {}) });
+        ...(holder.source_path === null && !holder.deleted && !holder.unbound ? { drift: 'unknown' as const } : {}) });
       if (holderPath !== null && deleteEntries.delete(holderPath)) renamed.add(holderPath);
       continue;
     }
