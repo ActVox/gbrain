@@ -74,6 +74,9 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // #6727: pages an older gbrain imported without recording their file fold to the file's slug, several or one sync cannot write; a person decides.
   { code: 'legacy_slug_conflict', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a person decides which legacy page the file takes over',
     human_reason: 'Pages an older gbrain imported without recording their file match this file and sync cannot pick one to import into; a person keeps the one that is its page and removes the others (gbrain delete --source <source> -- <slug>), or renames the file, then syncs.' },
+  // #6712 PR 4b (design v3.2 §3.1): a live pass settled the path three passes in a row and it never classified settled; a gbrain bug or an environment fault, never a loop.
+  { code: 'settle_mismatch', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the pass cannot tell why the path does not settle',
+    human_reason: 'Sync settled this file three passes in a row but it never read settled afterwards; read gbrain doctor --json and gbrain sources writer status <source> (read-only), fix what they name, then run gbrain sources retry-held <source> to re-test it.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },

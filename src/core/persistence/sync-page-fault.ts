@@ -149,7 +149,7 @@ export function fileDriftHold(entry: HoldEntry, slug: string, pageId: number | n
     : 'there is no import record to tell which side changed';
   return base(entry, slug, pageId, 'file_drift',
     `${entry.path}: ${by} since the file was last imported and ${file}, so sync held the import instead of overwriting the database version; the rest of the source synced.`,
-    intent.content ?? null, intent.blobOid, { sides: observed.sides, ...(observed.revision ? { page_revision: observed.revision } : {}),
+    intent.content ?? null, intent.blobOid, { sides: observed.sides, ...(observed.sides !== 'database' ? { side: observed.sides } : {}), ...(observed.revision ? { page_revision: observed.revision } : {}),
       ...(observed.proof ? { competing_request_id: observed.proof.request_id, competing_operation: observed.proof.operation } : {}),
       ...(observed.sharedOrigin ? { shared_origin: true as const } : {}) });
 }

@@ -40,6 +40,7 @@ import { resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
+import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts } from './sync-pass-apply.ts';
 
 /** Rounds a pass runs before it stops `not_converged` (design §3.1). */
 export const PASS_MAX_ROUNDS = 4;
@@ -283,10 +284,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   let lastMismatch: ShadowPath[] = [];
   let lastLevel: ShadowLevel | null = null;
   const rememberLevel = () => { if (lastLevel?.workingCache) rememberWorkingStatCache(cacheKey, lastLevel.workingCache); };
+  const applied = newPassApplyState();
+  const readmitted = new Set<string>();
 
   const save = async (outcome: PassOutcome, stopReason: string | null) => {
     const ended = outcome !== 'open';
-    value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size, counts: { ...counts },
+    value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size, counts: { ...counts, ...passApplyCounts(applied) },
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
     await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value); });
@@ -336,6 +339,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       lastLevel = level;
       value.telemetry.timings_ms = level.timings_ms;
       if (bootstrap && round === 1) await writeLegacyMarkers(engine, level);
+      await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions }, applied);
+      assertActive();
+      if (applied.sweptAll && !value.obligations.legacy_sweep) value.obligations.legacy_sweep = { first_full_at: new Date().toISOString() };
       const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
       lastMismatch = mismatch;
       for (const entry of level.paths) {
@@ -345,7 +351,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (S.has(settledKey(entry.path, entry.state.level))) {
           // A hold this pass wrote or re-screened at L is that path's fate here, even when its code re-screens every pass.
           if (entry.state.hold?.atLevel) continue;
-          mismatch.push(entry); continue;
+          // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
+          const again = settledKey(entry.path, entry.state.level);
+          if (readmitted.has(again)) { mismatch.push(entry); continue; }
+          readmitted.add(again);
         }
         if (r.action === 'delete') {
           if (admission !== 'normal') { S.set(settledKey(entry.path, entry.state.level), 'paused_deletes'); counts.pausedDeletes++; continue; }
@@ -379,11 +388,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
             value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
               last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
             Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });
-            value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts } };
+            value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts, ...passApplyCounts(applied) } };
             await writePassRow(tx, value);
           }, principalAttribution(authority.writer.principal)));
           rememberLevel();
           await clearPassFailures(engine, sourceId, incarnation);
+          await finishPassApply(engine, sourceId, applied);
           return { ...result('up_to_date'), fromCommit: remote ? null : head };
         }
         const closesEpisode = !!episode && configured;
@@ -396,6 +406,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: configured ? null : 'selection_scoped', remaining: 0 };
         rememberLevel();
         await clearPassFailures(engine, sourceId, incarnation);
+        await finishPassApply(engine, sourceId, applied);
         return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
       }
       const built = await batchEntries(engine, level, deletes, imports);

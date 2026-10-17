@@ -84,6 +84,12 @@ export interface SyncClassified {
   keepDbWrite?: true;
   /** `db_ahead` `db_only`/`unproven` under an open full obligation: excluded and counted (`full_skipped_db_ahead`). */
   fullSkipped?: true;
+  /** #6712 PR 4b (sync-pass-apply.ts): a delete the mass-delete valve withheld (design §2.6); settled while the trip lasts. */
+  withheld?: true;
+  /** #6712 PR 4b: a keep_db write over the pass cap (`keep_db_pending`, §4), settled and taken first next pass. */
+  pending?: 'keep_db';
+  /** #6712 PR 4b: a write `sync.admission` pauses (`paused_keep_db`, §8). */
+  paused?: 'keep_db';
 }
 
 const CLEAN = new Set<SyncDirtiness | null>(['clean', 'clean_eol', 'clean_lfs']);
