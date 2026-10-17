@@ -6,7 +6,6 @@ import { withdrawnFact, withdrawalFenceBlocks } from './withdrawal-overlay.ts';
 import { ambiguousFenceClaims, discoverWithdrawalTargets, withdrawalDiscoveryFailure } from './withdrawal-discovery.ts';
 import { dropPurgedFenceRows } from './purge-overlay.ts';
 import { privateProvenanceFilterFragment } from '../search/private-visibility.ts';
-import { rewriteLiveSegmentedFences } from '../page-body/segment-rewrite.ts';
 import { coverageActive, noteBelief, readLedgerSource, withBeliefBatch } from '../belief/ledger.ts';
 import { createPageVersion } from '../page-state/versions.ts';
 import { validateSlug } from '../utils.ts';
@@ -111,7 +110,10 @@ export async function recordFactWithdrawal(
       // generation whose flip retires only the chunks of the occurrences it rewrote.
       const segmented = affected.length ? await tx.executeRaw<{ id: number; slug: string }>(`SELECT id,slug FROM pages
         WHERE source_id=$1 AND slug=ANY($2::text[]) AND body_storage='segmented'`, [sourceId, affected.map(page => page.slug)]) : [];
-      for (const page of segmented) await rewriteLiveSegmentedFences(tx, Number(page.id), fence => preserveWithdrawnFenceRows(tx, sourceId, fence, page.slug));
+      if (segmented.length) {
+        const { rewriteLiveSegmentedFences } = await import('../page-body/segment-rewrite.ts');
+        for (const page of segmented) await rewriteLiveSegmentedFences(tx, Number(page.id), fence => preserveWithdrawnFenceRows(tx, sourceId, fence, page.slug));
+      }
       // Logical revision and projection invalidation commit with the withdrawal.
       // The revision trigger queues durable rebuild work even for unmanaged calls.
       const inline = affected.length ? await tx.executeRaw<{ id: number; slug: string; knowledge_revision: string }>(

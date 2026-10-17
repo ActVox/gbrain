@@ -42,7 +42,7 @@ import { TIMELINE_HEADING_RE } from '../link-extraction.ts';
 import { DAY_HEADER_RE, matchAnchorLine } from '../conversation-parser/parse.ts';
 import { clip, DATE, FENCE, HEADING, HEADING_MAX_CHARS } from '../page-window/window.ts';
 import { SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES, SEGMENT_RANK4_BYTES, SEGMENT_TARGET_BYTES } from './limits.ts';
-import type { BodyRegion, SegmentCutKind } from './types.ts';
+import type { BodyRegion, JsonObject, SegmentCutKind } from './types.ts';
 import { cloneEntryState, type EntryState } from './entry-state.ts';
 import {
   feedPemScan, findTokens, forcePemCut, initialPemScan, markPemCut, pemExposedFrom, newLineSplit, pemBodyLike, pemResolvedTo, PEM_CONTEXT_CHARS,
@@ -167,6 +167,11 @@ export interface RegionFlags {
   protectedTailFrom: number | null;
   /** The trust the region's fence walk observed: differs from the trust used when an append flipped it (rescan). */
   observedFenceTrust: 'trusted' | 'void';
+}
+
+/** The whole-region fence trust a region's stored regions are computed under (body_flags). */
+export function regionTrust(flags: JsonObject | null | undefined, region: BodyRegion): 'trusted' | 'void' {
+  return (region === 'truth' ? flags?.fence_trust : flags?.timeline_fence_trust) === 'void' ? 'void' : 'trusted';
 }
 
 export function regionFlags(exit: EntryState, fenceTrust: 'trusted' | 'void'): RegionFlags {
