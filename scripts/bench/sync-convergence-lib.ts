@@ -18,6 +18,7 @@ import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { recordSyncImportProvenances, syncImportParserFor, type SyncImportProvenance } from '../../src/core/persistence/sync-holds.ts';
 import { gitBlobOid, sha256 } from '../../src/core/persistence/digest.ts';
 import { PHYSICAL_ROOT_MARKER } from '../../src/core/persistence/root-metadata.ts';
+import { loadActivePackForEngine } from '../../src/core/schema-pack/engine-resolution.ts';
 import { VERSION } from '../../src/version.ts';
 import { PGBOUNCER_IMAGE } from './managed-sync-catchup-lib.ts';
 
@@ -181,7 +182,8 @@ export interface SeedResult { source_id: string; incarnation: string; pages: num
  * import leaves it: the source row (last_commit = the fixture base), the
  * worktree claim, one page per file (path-derived slug, settled text
  * projection) and one import provenance record per page whose blob and disk
- * OIDs are the file's blob. Writes run with persistence_brain disabled (as
+ * OIDs are the file's blob and whose parser names the active schema pack, as
+ * the managed import records it. Writes run with persistence_brain disabled (as
  * test fixtures do, so the managed-writer trigger admits them) and re-enable it
  * at the end. ANALYZE leaves planner statistics as a long-lived brain has.
  */
@@ -200,7 +202,8 @@ export async function seedSource(engine: BrainEngine, input: { sourceId: string;
     clearPhysicalRootClaims(fixture);
     await time('worktree_claim', () => claimWorktree(engine, sourceId, fixture.repo));
     const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]);
-    const parser = syncImportParserFor(fixturePath(0), null);
+    const pack = await loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null);
+    const parser = syncImportParserFor(fixturePath(0), pack?.identity ?? null);
     let pagesMs = 0, provenanceMs = 0;
     for (let start = 0; start < fixture.files; start += batch) {
       const end = Math.min(fixture.files, start + batch);
