@@ -110,7 +110,12 @@ export interface SyncResult {
    * cron operators can disambiguate timeout vs pull-timeout in monitoring; connector item failures / early stop exit 1 (isFailedPartial).
    */
   filesImported?: number;
-  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial' | 'drain_lease_held';
+  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial' | 'drain_lease_held'
+    /** #6712 PR 4b (design v3.2 §9): a live pass's endings. `selection_scoped` rides a converged scoped pass (`synced`). */
+    | 'not_converged' | 'admission_paused' | 'reconcile_host_required' | 'grant_scope' | 'reconcile_read_incomplete' | 'selection_scoped';
+  /** #6712 PR 4b: the live pass that produced this result (non-company managed sources; sync-pass-run.ts). */
+  pass?: { pass_id: string; kind: 'idle' | 'hold_only' | 'full'; round: number; outcome: string; stop_reason: string | null; candidates: number; settled: number;
+    remaining: number; not_converged_streak: number };
   /**
    * v0.42.x (#1794): cumulative file paths durably banked to the checkpoint
    * across THIS run + prior resumed runs. Surfaced on every partial/blocked

@@ -50,6 +50,11 @@ export interface PassLevelInput {
   exclude?: readonly string[];
   includeHidden?: readonly string[];
   strategy?: string;
+  /**
+   * The incarnation's first pass (no pass row yet): a page-less path whose level equals its baseline blob reads a virtual
+   * `legacy` marker, which the pass then writes (design §2.7). After it, only stored markers count.
+   */
+  bootstrap?: boolean;
 }
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -352,7 +357,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const marker = markers.get(originOf(path)) ?? null;
     let virtualMarker: SyncPathState['marker'] = null;
     let legacyPageless: true | undefined;
-    if (!row && !marker && level !== null && level === await baselineOf(path)) { virtualMarker = { kind: 'legacy', blobOids: [level] }; legacyPageless = true; }
+    if (!row && !marker && level !== null && (!input.pass || input.pass.bootstrap) && level === await baselineOf(path)) { virtualMarker = { kind: 'legacy', blobOids: [level] }; legacyPageless = true; }
     const needsBaseline = row && !row.deleted && (record?.revision == null) && level !== null && !recordBlobOids.includes(level);
     const state: SyncPathState = {
       mode, tree: committed?.oid ?? null, level, present: presentNow, dirty, diskOid: probe?.rawOid ?? null,
@@ -469,6 +474,65 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   timings.rev_parse = t();
   // The pass row, the request probe above its watermark and the open-set probe are one statement (one round trip).
   t = timer();
-  const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean }>(`WITH pass AS (
+  const probe = await passIdleProbe(engine, { sourceId: context.sourceId, incarnation: context.incarnation, worktreeId: context.binding.worktree_id,
+    requestHwm: input.assumeConverged?.requestHwm ?? null, openAtStamp: [] });
+  timings.probes = t();
+  const row = probe.passRow;
+  const stored = (row?.obligations as { converged?: { target: string; request_hwm: string } } | undefined)?.converged;
+  const converged = input.assumeConverged ?? (stored ? { target: String(stored.target), requestHwm: Number(stored.request_hwm) } : null);
+  const newer = probe.newer, pending = probe.pending;
+  const kind = syncPassKind({ converged: converged ? { target: converged.target, parserFp: '', pack: null, selectionFp: '', passesSinceFull: 0, lastFullAt: Date.now() } : null,
+    head: head ?? '', parserFp: '', pack: null, selectionFp: '', now: Date.now(), openEpisode: false, owedTail: false, retryRow: false, notConvergedStreak: 0, mismatchStreak: 0,
+    requestNewer: newer, openAtStampFinished: pending && !input.assumeConverged, workingChange: false, rescreenDueHold: false, full: false });
+  timings.total = total();
+  return { idle: kind.kind === 'idle', reasons: kind.blockers, timings_ms: timings, rows: (newer ? 1 : 0) + (pending ? 1 : 0) + (row ? 1 : 0) };
+}
+
+/**
+ * #6712 PR 4b (design v3.2 §2.2): the idle tick's database reads in one statement: the pass row, whether a request of the
+ * worktree is newer than the converged watermark (a range on the unique `sequence` index; `requestHwm` overrides the
+ * row's), whether any request is open (`persistence_requests_pending`), and how many of the ids recorded in
+ * `converged.open_at_stamp` are still open (`r:<request>` requests, `e:<effect>` Git effects).
+ */
+export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; incarnation: string; worktreeId: string;
+  requestHwm: string | number | null; openAtStamp: readonly string[] }): Promise<{ passRow: Record<string, unknown> | null; newer: boolean; pending: boolean; stillOpen: number }> {
+  const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean; still_open: number | string }>(`WITH pass AS (
       SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
     SELECT (SELECT value FROM pass) AS pass_row,
+      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'obligations'->'converged'->>'request_hwm')::bigint, 0) AND worktree_id = $4) AS newer,
+      EXISTS (SELECT 1 FROM persistence_requests WHERE worktree_id = $4 AND state IN ('queued','running','recovering')) AS pending,
+      (SELECT count(*) FROM persistence_requests WHERE worktree_id = $4 AND state IN ('queued','running','recovering') AND 'r:'||request_id::text = ANY($5::text[]))
+        + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
+            WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text = ANY($5::text[])) AS still_open`,
+    [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, [...input.openAtStamp]]);
+  return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0) };
+}
+
+/**
+ * `gbrain sync --dry-run --json`'s `convergence` for one source: the receipt with the read-only screen, undefined
+ * on a brain that is not managed or for a company-brain source; a read that cannot run reports why instead of failing
+ * the dry run.
+ */
+export async function dryRunConvergence(engine: BrainEngine, input: { sourceId: string; full: boolean; workingTree?: boolean; redactPaths: boolean;
+  noEmbed: boolean; noExtract: boolean; noSchemaPack: boolean }): Promise<ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | undefined> {
+  if (!await readManagedMode(engine)) return undefined;
+  try {
+    const context = await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
+    return await shadowConvergence(engine, { sourceId: input.sourceId, full: input.full, workingTree: input.workingTree, redactPaths: input.redactPaths, context,
+      screen: readOnlySameContentScreen(engine, context, { noEmbed: input.noEmbed, noExtract: input.noExtract, noSchemaPack: input.noSchemaPack }) }) ?? undefined;
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    return { dry_run: true, status: 'unavailable', code: typeof code === 'string' ? code : 'convergence_read_failed', message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** \`sync status --detail\`'s \`convergence\`: the receipt without the screen (status never prepares an import). */
+export async function statusConvergence(engine: BrainEngine, sourceId: string): Promise<ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | null> {
+  if (!await readManagedMode(engine)) return null;
+  try {
+    return await shadowConvergence(engine, { sourceId, screen: false });
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    return { dry_run: true, status: 'unavailable', code: typeof code === 'string' ? code : 'convergence_read_failed', message: error instanceof Error ? error.message : String(error) };
+  }
+}
