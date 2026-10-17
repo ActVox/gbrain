@@ -275,8 +275,7 @@ async function selectHeld(engine: BrainEngine, sourceId: string, opts: RepairPla
     const group = groups.get(key(target)) ?? { side: target.side, ...(target.state ? { state: target.state } : {}), count: 0 };
     group.count++; groups.set(key(target), group);
   }
-  const narrower = (group: { side: FileDriftSide; state?: FileDriftDeletedState }) => shellQuote([...heldDriftPreviewArgv(sourceId, group.side, group.state, opts.prefer),
-    ...(opts.only ?? []).flatMap(glob => ['--only', glob]), ...(opts.skip ?? []).flatMap(glob => ['--skip', glob])]);
+  const narrower = (group: { side: FileDriftSide; state?: FileDriftDeletedState }) => heldCommand(sourceId, group.side, group.state, opts.prefer, opts);
   const statusFix = readFix('Lists the held files of this source with their side and state, read-only.', { argv: ['gbrain', 'sources', 'status', sourceId, '--json'] });
   if (!opts.side && groups.size > 1) {
     const listed = [...groups.entries()].map(([name, group]) => `${name}=${group.count}`).join(', ');
@@ -289,11 +288,16 @@ async function selectHeld(engine: BrainEngine, sourceId: string, opts: RepairPla
     notSelected, legacy };
 }
 
+/** #6712 PR 4b: the `--held` preview of one Decision, keeping the run's `--only` / `--skip` globs. */
+function heldCommand(sourceId: string, side: FileDriftSide, state: FileDriftDeletedState | undefined, prefer: DriftSide, opts: Pick<RepairPlanOptions, 'only' | 'skip'>): string {
+  const argv = heldDriftPreviewArgv(sourceId, side, state, prefer);
+  return shellQuote([...argv.slice(0, -2), ...(opts.only ?? []).flatMap(glob => ['--only', glob]), ...(opts.skip ?? []).flatMap(glob => ['--skip', glob]), ...argv.slice(-2)]);
+}
+
 /** #6712 PR 4b: `--side deleted` without `--state` (or a held selection that is all one deleted state) names the state to resolve. */
 function stateRequired(sourceId: string, opts: RepairPlanOptions, states: readonly FileDriftDeletedState[]): OperationError {
   const prefer = opts.prefer ?? 'database';
-  const globs = [...(opts.only ?? []).flatMap(glob => ['--only', glob]), ...(opts.skip ?? []).flatMap(glob => ['--skip', glob])];
-  const commands = states.map(state => `${shellQuote([...heldDriftPreviewArgv(sourceId, 'deleted', state, prefer), ...globs])} (${state}: --prefer ${prefer} ${fileDriftActionVerb('deleted', state, prefer)})`);
+  const commands = states.map(state => `${heldCommand(sourceId, 'deleted', state, prefer, opts)} (--prefer ${prefer}: ${fileDriftActionVerb('deleted', state, prefer)})`);
   return opError('file_drift_state_required', 'Resolving held deleted-side file drift needs --state: --prefer file and --prefer database do opposite things in each state.',
     `Nothing was previewed. Name the state: ${commands.join('; ')}.`,
     { fix: readFix('Lists the held files of this source with their side and state, read-only.', { argv: ['gbrain', 'sources', 'status', sourceId, '--json'] }) });
