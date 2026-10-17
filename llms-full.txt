@@ -7558,13 +7558,10 @@ totals for each day that recorded anything. Fields are only ever added.
 
 ## Dry-run convergence classes
 
-On a managed source, `gbrain sync --source <id> --dry-run --json` adds a read-only `convergence` receipt (also in `sync status --detail --json`): what the level-triggered pass (#6712) would do. `--redact-paths` turns sample paths into `sha256:` prefixes so it can be shared. Each class has an `action`:
-
-- `none`: `matched` (file, record and page agree), `adopt` (only the record is stale), `kept`/`untracked` (committed mode leaves the file alone), `gone`, `deleted_same`, `legacy_same` (a deletion still matches the file), `db_ahead` (the page was edited in the database).
-- `owner` (sync finishes it): `import` (the file changed, or a new file), `reparse` (parser, origin or `--full`), `delete` (file gone, page provably from it), `keep_db` and `keep_db_pending` (DB-wins writes, 200 per pass), `legacy_unverified` (the legacy sweep checks it), `in_flight` (open work).
-- `repair` (a person decides): `held`, `dirty` (uncommitted bytes match neither side), `drift` (both sides changed), `delete_drift`, `deleted_edited`, `spelling`, `deletes_withheld` (the mass-delete valve).
-
-`status: "unavailable"` with a `code` (`reconcile_read_incomplete`: a Git listing did not finish) means the shadow could not read; the dry run is unaffected.
+`sync --dry-run --json` adds a read-only `convergence` receipt. Class actions:
+- `none`: settled.
+- `owner`: sync finishes it.
+- `repair`: a person decides.
 
 ## See also
 
