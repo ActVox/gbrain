@@ -34,10 +34,18 @@
  * every printed preview and apply command. #6712 PR 2: `--since` keeps the pages whose newest
  * drift conflict is at or after one concrete instant (the CLI resolves an age once, `since.ts`), part of
  * the selection digest and of every printed command. Trusted local CLI only.
+ *
+ * #6712 wave: a selected live page whose canonical file is gone from the last commit (a ghost whose deletion is
+ * committed, such as a held deletion whose page moved) resolves too: `--prefer database` recreates the file from the
+ * page through the same reconcile apply (its preview pins the observed absence, so a file that reappears is
+ * `changed_since_preview`), and `--prefer file` soft-deletes exactly that page through the ghost-page retirement intent
+ * (bound to its revision, path and owner; the mass-delete valve applies). A file deleted only in the worktree (still
+ * committed at HEAD) is not drift: the preview lists it `deletion_uncommitted` with its route (commit the deletion, or
+ * `gbrain repair ghost-pages`) and resolves nothing.
  */
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { configDir } from '../config.ts';
 import { flushDirectory } from '../fs-durable.ts';
@@ -53,7 +61,11 @@ import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, sa
 import { canonicalFilesystemPath } from '../persistence/root-registry.ts';
 import { auditDriftConflicts, DRIFT_CLASSES, driftClass, liveFileDrift, type DriftClass } from '../persistence/drift-conflicts.ts';
 import { protectedReconcileKey, reconcileCanonical, RECONCILE_SCAN_KEYS, type ReconcileDecision } from '../persistence/reconcile-merge.ts';
-import { readReconcileState, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
+import { ABSENT_FILE_HASH, canonicalDeletionState, missingFileRoute, readReconcileState, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
+import { getWorktreeBinding } from '../persistence/ownership.ts';
+import { ghostPageNow, scanGhostSource, type GhostOwner, type GhostPage } from '../ghost-pages.ts';
+import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } from '../sync-reconcile.ts';
+import { GHOST_PURGE_FUSE_HOURS, GHOST_REPAIR_LIMIT, ghostScanRefusal, massGhosts, massRefusal, retireGhost } from './ghost-pages.ts';
 import { prepareReconcileResult } from '../persistence/reconcile-prepare.ts';
 import { assertReconcileOutputPath, assertReconcileSize } from '../persistence/reconcile-backup.ts';
 import { authorizeReconcile, runReconcileApply } from '../persistence/reconcile.ts';
@@ -66,7 +78,12 @@ export interface DriftException { path: string; reason: 'protected_metadata' | '
 interface ApprovedPage { source_id: string; slug: string; artifact_digest: string; selection: string }
 interface DriftItem extends RepairItem { page: ApprovedPage; hash: string; last: boolean }
 /** One page's prepared resolution: the ready reconcile preview its apply submits, and where it departs from the preferred side. */
-export interface ArtifactPage { slug: string; prefer: DriftSide; class?: DriftClass; adopt_slug_path: boolean; exceptions: DriftException[]; result: ParsedPage; preview: ReconcileArtifact }
+export interface ArtifactPage { slug: string; prefer: DriftSide; class?: DriftClass; adopt_slug_path: boolean; exceptions: DriftException[]; result: ParsedPage; preview: ReconcileArtifact;
+  /** #6712 wave: the canonical file is gone from the last commit and the apply recreates it from the page. */
+  file_gone?: true }
+/** #6712 wave: a page whose canonical file is gone from the last commit, resolved `--prefer file`: soft-delete exactly that page. */
+export interface SoftDeletePage { slug: string; prefer: 'file'; exceptions: DriftException[]; soft_delete: { ghost: GhostPage; owner: GhostOwner } }
+type PlannedPage = ArtifactPage | SoftDeletePage;
 
 const ALL_DRIFTED_LIMIT = 1000;
 const TOP_FIELDS = ['title', 'type', 'compiled_truth', 'timeline'] as const;
@@ -148,12 +165,12 @@ function writeArtifact(hash: string, value: unknown): string {
   return path;
 }
 
-function readArtifact(hash: string, command: string): Map<string, ArtifactPage> {
+function readArtifact(hash: string, command: string): Map<string, PlannedPage> {
   const path = join(artifactDirectory(), `${hash}.json`);
   try {
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('not a regular file');
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { pages?: ArtifactPage[] };
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { pages?: PlannedPage[] };
     return new Map((parsed.pages ?? []).map(page => [page.slug, page]));
   } catch { throw previewChangedError(hash, command); }
 }
@@ -264,10 +281,13 @@ async function survey(engine: BrainEngine, scope: RepairScope, opts: Pick<Repair
  * reconcile's protections, the size check, and the exceptions. Throws `invalid_params` when a path still needs a
  * human decision. The caller runs it as the trusted local CLI and has checked the page is still drifted.
  */
-export async function prepareDriftPage(engine: BrainEngine, sourceId: string, slug: string, prefer: DriftSide, assessmentAt: string): Promise<ArtifactPage> {
+export async function prepareDriftPage(engine: BrainEngine, sourceId: string, slug: string, prefer: DriftSide, assessmentAt: string,
+  opts: { fileGone?: boolean } = {}): Promise<ArtifactPage> {
   const snapshotRow = await engine.readPageSnapshot(slug, { sourceId });
-  const adopt = !!snapshotRow && !snapshotRow.page.source_path && !snapshotRow.page.source_uri;
-  const state = await readReconcileState(engine, sourceId, slug, assessmentAt, { adoptSlugPath: adopt });
+  const adopt = !opts.fileGone && !!snapshotRow && !snapshotRow.page.source_path && !snapshotRow.page.source_uri;
+  const state = await readReconcileState(engine, sourceId, slug, assessmentAt, { adoptSlugPath: adopt, ...(opts.fileGone ? { fileGone: true } : {}) });
+  if (opts.fileGone && state.pins.raw_file_hash !== ABSENT_FILE_HASH) throw opError('source_changed', 'The canonical file reappeared during the preview.',
+    `Nothing was written. The canonical file of ${slug} in '${sourceId}' exists again; preview the page again.`);
   const database = reconcileCanonical(state.snapshot.page, state.snapshot.tags);
   const file = reconcileCanonical(state.file, state.file.tags);
   const decisions = preferSideDecisions(state.file, database, prefer);
@@ -278,7 +298,30 @@ export async function prepareDriftPage(engine: BrainEngine, sourceId: string, sl
     preimages: JSON.parse(stableJson({ file_base64: state.raw.toString('base64'), database: state.snapshot, stored_page: state.storedPage })),
     decisions, conflicts: [], result: prepared.result, result_digest: digest(prepared.result), status: 'ready' };
   await assertReconcileSize(engine, preview);
-  return { slug, prefer, adopt_slug_path: adopt, exceptions: driftExceptions(prepared.result, prefer === 'file' ? file : database), result: prepared.result, preview };
+  return { slug, prefer, adopt_slug_path: adopt, exceptions: driftExceptions(prepared.result, prefer === 'file' ? file : database), result: prepared.result, preview,
+    ...(opts.fileGone ? { file_gone: true as const } : {}) };
+}
+
+/**
+ * #6712 wave: the resolution of a selected page whose canonical file is gone (`canonical_file_missing`), or the reason it
+ * is skipped. Only a deletion gone from HEAD is file-drift's; one still committed at HEAD routes elsewhere.
+ */
+async function fileGonePage(engine: BrainEngine, sourceId: string, slug: string, opts: RepairPlanOptions & { prefer: DriftSide }, assessmentAt: string):
+  Promise<{ page: PlannedPage; detail: string } | { skip: string; detail: string }> {
+  const now = await ghostPageNow(engine, sourceId, slug);
+  if (!now.ghost) return { skip: `unknown_${now.reason}`, detail: now.reason };
+  if (!opts.allDrifted && !selectedByGlobs(now.ghost.path, opts)) return { skip: 'not_selected', detail: now.ghost.path };
+  const binding = await getWorktreeBinding(engine, sourceId);
+  const root = join(binding!.local_path!, binding!.relative_path);
+  const deletion = canonicalDeletionState(root, join(root, ...now.ghost.path.split('/')));
+  if (deletion !== 'gone') return { skip: deletion === 'in_head' ? 'deletion_uncommitted' : 'unknown_deletion_state', detail: missingFileRoute(sourceId, slug, now.ghost.path, deletion) };
+  if (opts.prefer === 'file') return { page: { slug, prefer: 'file', exceptions: [], soft_delete: { ghost: now.ghost, owner: now.owner } },
+    detail: `soft-deletes the page: its file ${now.ghost.path} is gone from the last commit (purged after ${GHOST_PURGE_FUSE_HOURS} h; gbrain restore ${slug} --force undoes it until then)` };
+  const page = await prepareDriftPage(engine, sourceId, slug, 'database', assessmentAt, { fileGone: true });
+  if (page.preview.preconditions.revision !== now.ghost.revision || page.preview.preconditions.relative_path.split(sep).join('/') !== now.ghost.path) {
+    throw opError('source_changed', 'The page or its canonical path changed during the preview.', `Nothing was written. Preview ${slug} in '${sourceId}' again.`);
+  }
+  return { page, detail: `recreates its missing file ${now.ghost.path} from the page` };
 }
 
 function item(page: ApprovedPage, index: number, hash: string, last: boolean, prefer: DriftSide): DriftItem {
@@ -302,12 +345,23 @@ export const fileDriftRepair: RepairHandler = {
         `Preview first: ${command} — then run the apply command it prints with --expect <preview-hash>.`, 'docs/guides/repair.md#explicit-only-repair-kinds');
       const approved = await loadApprovedSet<ApprovedPage>(engine, { command: 'file-drift', hash: opts.expect, previewCommand: command });
       if (approved.items.some(page => page.selection !== selection || page.source_id !== sourceId)) throw previewChangedError(opts.expect, command);
+      // #6712 wave: soft deletes of pages whose file is gone honor the sync mass-delete valve, as `repair ghost-pages` does.
+      if (opts.prefer === 'file' && approved.items.length > MASS_RECONCILE_MIN_PAGES * MASS_RECONCILE_RATIO) {
+        const planned = readArtifact(opts.expect, command);
+        const deletes = approved.items.filter(page => 'soft_delete' in (planned.get(page.slug) ?? {})).length;
+        if (deletes > MASS_RECONCILE_MIN_PAGES * MASS_RECONCILE_RATIO) {
+          const scan = await scanGhostSource(engine, sourceId, { candidateLimit: GHOST_REPAIR_LIMIT });
+          const refusal = ghostScanRefusal(scan);
+          if (refusal) throw refusal;
+          if (massGhosts(deletes, scan.file_backed) && !massReconcileAllowed()) throw massRefusal(sourceId, deletes, scan.file_backed);
+        }
+      }
       const items = approved.items.map((page, index) => item(page, index, opts.expect!, index === approved.items.length - 1, opts.prefer));
       return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals: {} };
     }
     const { slugs, classes, notSelected } = await selectSlugs(engine, sourceId, opts);
     const assessmentAt = new Date().toISOString();
-    const pages: ArtifactPage[] = [];
+    const pages: PlannedPage[] = [];
     const listing: NonNullable<RepairPlan['listing']> = [];
     const residuals: Record<string, number> = notSelected ? { not_selected: notSelected } : {};
     const count = (key: string) => { residuals[key] = (residuals[key] ?? 0) + 1; };
@@ -316,6 +370,17 @@ export const fileDriftRepair: RepairHandler = {
         try {
           await authorizeReconcile(engine, sourceId, slug);
           const live = await liveFileDrift(engine, sourceId, slug);
+          if (live.reason === 'canonical_file_missing') {
+            const gone = await fileGonePage(engine, sourceId, slug, opts, assessmentAt);
+            if ('skip' in gone) {
+              count(gone.skip);
+              if (gone.skip !== 'not_selected') listing.push({ item: `${sourceId}:${slug}`, class: gone.skip.startsWith('unknown_') ? 'unknown' : gone.skip, detail: gone.detail });
+              continue;
+            }
+            pages.push(gone.page);
+            listing.push({ item: `${sourceId}:${slug}`, class: `prefer_${opts.prefer}`, detail: gone.detail });
+            continue;
+          }
           if (!opts.allDrifted && !selectedByGlobs(live.path, opts)) { count('not_selected'); continue; }
           if (live.still_present !== true) {
             count(live.still_present === false ? 'no_drift' : `unknown_${live.reason}`);
@@ -335,7 +400,8 @@ export const fileDriftRepair: RepairHandler = {
       }
     });
     const hash = previewHash({ kind: 'file-drift-v1', brain_id: scope.brain_id, source_id: sourceId, selection,
-      pages: pages.map(page => [page.slug, page.preview.preconditions.revision, page.preview.preconditions.raw_file_hash, page.preview.result_digest]) });
+      pages: pages.map(page => 'soft_delete' in page ? [page.slug, page.soft_delete.ghost.revision, ABSENT_FILE_HASH, 'soft_delete']
+        : [page.slug, page.preview.preconditions.revision, page.preview.preconditions.raw_file_hash, page.preview.result_digest]) });
     let artifact: string | undefined;
     if (pages.length) {
       await assertReconcileOutputPath(engine, sourceId, artifactDirectory());
@@ -346,7 +412,8 @@ export const fileDriftRepair: RepairHandler = {
     return { items: pages.map((page, index) => item({ source_id: sourceId, slug: page.slug, artifact_digest: digest(page), selection }, index, hash, index === pages.length - 1, opts.prefer)),
       preview_hash: hash, residuals, listing,
       details: { prefer: opts.prefer, ...(artifact ? { artifact } : {}),
-        pages: pages.map(page => ({ slug: page.slug, ...(page.class ? { class: page.class } : {}), adopt_slug_path: page.adopt_slug_path, exceptions: page.exceptions, result_digest: page.preview.result_digest })),
+        pages: pages.map(page => 'soft_delete' in page ? { slug: page.slug, action: 'soft_delete', path: page.soft_delete.ghost.path, exceptions: page.exceptions }
+          : { slug: page.slug, ...(page.file_gone ? { action: 'recreate_file' } : {}), ...(page.class ? { class: page.class } : {}), adopt_slug_path: page.adopt_slug_path, exceptions: page.exceptions, result_digest: page.preview.result_digest }),
         protections: 'Protected metadata stays as the database holds it, tags are the union of both sides, and protected takes and private fact rows are kept; exceptions lists each page\'s.' } };
   },
   async apply(ctx, entry, opts): Promise<RepairItemOutcome> {
@@ -356,7 +423,11 @@ export const fileDriftRepair: RepairHandler = {
     if (!artifact || digest(artifact) !== page.artifact_digest) throw previewChangedError(opts?.expect ?? hash, command);
     const requestId = requestIdFor(hash, page);
     let outcome: RepairItemOutcome;
-    try {
+    if ('soft_delete' in artifact) {
+      const retired = await retireGhost(ctx, artifact.soft_delete.ghost, artifact.soft_delete.owner, async () => requestId);
+      outcome = retired.applied ? { applied: true, outcome: 'repaired', detail: { request_id: requestId, prefer: 'file', action: 'soft_delete' } }
+        : { applied: false, outcome: 'changed_since_preview', reason: retired.outcome === 'file_restored' ? 'file_restored' : 'revision_conflict', detail: { request_id: requestId, message: retired.reason } };
+    } else try {
       await asLocalCli(ctx.engine, () => runReconcileApply(ctx.engine, { source_id: page.source_id, slug: page.slug, preview: artifact.preview, request_id: requestId,
         ...(artifact.prefer === 'file' ? { keep_file_bytes: true } : {}) }));
       outcome = { applied: true, outcome: 'repaired', detail: { request_id: requestId, prefer: artifact.prefer } };

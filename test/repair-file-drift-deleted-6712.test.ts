@@ -148,6 +148,7 @@ for (const backend of testBackends()) describe(`#6712 wave: deleted-file repair 
     expect([recreate.affected, dropMoved.affected, dropBack.affected]).toEqual([1, 1, 1]);
 
     const local = page('notes/a', 'Written back by hand.');
+    mkdirSync(join(root, 'notes'), { recursive: true });
     writeFileSync(join(root, 'notes/a.md'), local);
     await bumpRevision(sourceId, 'notes/b');
     writeFileSync(join(root, 'notes/c.md'), page('notes/c', 'Restored by hand.'));
