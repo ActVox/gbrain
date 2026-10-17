@@ -395,7 +395,7 @@ The knob folds into the query-cache key (`rrp=`).
 
 ### Breadth-first graph walks
 
-Since v0.60.293.0 every graph walk (`traverse_graph`, `gbrain graph`, the graph
+Since v0.60.294.0 every graph walk (`traverse_graph`, `gbrain graph`, the graph
 context `think` gathers) is breadth-first. Each page is visited once, at its
 shortest distance from the start page, and each edge comes back once, one hop
 past its shallower walked endpoint. The old walk followed every possible route,
