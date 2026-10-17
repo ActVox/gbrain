@@ -68,19 +68,11 @@ import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
 import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
-<<<<<<< HEAD
-import { serr } from '../console-prefix.ts';
-import { noteIdentityDowngrades } from '../sync-identity-downgrades.ts';
-import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
-import type { PassStamp } from './sync-prepare.ts';
-import { runSyncPass } from './sync-pass-run.ts';
-=======
 import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
 import type { PassStamp } from './sync-prepare.ts';
 import { runSyncPass } from './sync-pass-run.ts';
 import { serr } from '../console-prefix.ts';
 import { noteIdentityDowngrades } from '../sync-identity-downgrades.ts';
->>>>>>> origin/capy/6712-pr4b-core
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;

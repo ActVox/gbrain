@@ -42,18 +42,11 @@ import { classifyRecordedFault, classifyTerminal, type TerminalCategory } from '
 import type { PublicCategory } from './public-category.ts';
 import { readSyncFile, resolveManagedSyncContext } from './sync-discovery.ts';
 import { sha256 } from './digest.ts';
-<<<<<<< HEAD
-import { listIdentityDowngrades } from '../sync-identity-downgrades.ts';
-=======
->>>>>>> origin/capy/6712-pr4b-core
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
 import type { DeletesWithheld } from './sync-markers.ts';
-<<<<<<< HEAD
-=======
 import { listIdentityDowngrades } from '../sync-identity-downgrades.ts';
->>>>>>> origin/capy/6712-pr4b-core
 
 export interface SyncStatusHold extends SyncFaultVerdict {
   code: string;
