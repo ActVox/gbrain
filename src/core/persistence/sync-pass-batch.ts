@@ -7,6 +7,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { SyncEntry } from './sync-discovery.ts';
 import { assertDrainLease } from './sync-lease.ts';
 import { admissionAllows, readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
+import { reservePassCost, type PricedIntent } from './sync-pass-episode.ts';
 
 /**
  * #6712 PR 4b (design v3.2 §3.1): a live pass admits each round batch through the cursor machinery of sync-run.ts with no
@@ -83,10 +84,12 @@ export class SyncAdmissionPaused extends Error {
  * Fencing 1 (design v3.2 §8): a pass's admission transaction re-reads `sync.admission` and admits nothing it no longer
  * allows (a delete needs `normal`; an import or the stamp needs `normal` or `imports_only`). Cursor intents are unaffected.
  */
-export async function assertPassAdmission(tx: Pick<BrainEngine, 'executeRaw'>, intents: ReadonlyArray<{ passId?: string; kind: string }>): Promise<void> {
+export async function assertPassAdmission(tx: Pick<BrainEngine, 'executeRaw'>, intents: ReadonlyArray<PricedIntent>): Promise<void> {
   if (!intents.some(intent => intent.passId)) return;
   const admission = await readSyncAdmission(tx);
   for (const intent of intents) {
     if (intent.passId && !admissionAllows(admission, intent.kind === 'managed_sync_delete' ? 'destructive' : 'import')) throw new SyncAdmissionPaused(admission);
   }
+  // Design v3.2 §7: the group's cost reservation commits with its admission.
+  await reservePassCost(tx, intents);
 }

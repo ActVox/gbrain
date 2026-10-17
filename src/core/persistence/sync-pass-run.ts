@@ -41,6 +41,8 @@ import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts } from './sync-pass-apply.ts';
+import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
+import { currentEmbeddingPricePerMTok } from '../embedding.ts';
 
 /** Rounds a pass runs before it stops `not_converged` (design §3.1). */
 export const PASS_MAX_ROUNDS = 4;
@@ -271,10 +273,17 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     await clearPassFailures(engine, sourceId, incarnation);
     return { ...empty('up_to_date'), toCommit: remote ? '' : head, ...(inherited.length ? { inherited_options: inherited } : {}) };
   }
+  // Design §7: the cost decision at pin; an unknown or spent envelope defers embeddings for this pass (never inherited).
+  const costScope = episode?.full_id ?? passId;
+  const costDecision = await passCostDecision(engine, { sourceId, incarnation, scope: costScope, priorRow: !!prior, prior: obligations.cost, approved: opts.costApproved === true });
+  obligations.cost = costDecision.cost;
+  let costDeferred: string | null = null;
+  if (costDecision.defer && !processingOptions.noEmbed) { processingOptions.noEmbed = true; costDeferred = costDecision.defer; }
   await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin: true }); });
   assertActive();
+  registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
 
-  const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0 };
+  const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0 };
   const collisions: SyncSlugCollision[] = [];
   const S = new Map<string, string>();
   const settledKey = (path: string, level: string | null) => `${path}\0${level ?? ''}`;
@@ -396,8 +405,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
           await finishPassApply(engine, sourceId, applied);
           return { ...result('up_to_date'), fromCommit: remote ? null : head };
         }
-        const closesEpisode = !!episode && configured;
-        const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id)),
+        // Design §6: an open episode closes by inclusion (a) or at the configured selection (b); chunker_version only by (b) over U_config.
+        const closure = episode ? await passEpisodeClosure({ gitRoot: context.gitRoot, root: context.root, head, slugMode: levelSlugMode, episode, pass: selection, configured,
+          configuredSelection: await passSelection(engine, { sourceId } as SyncOpts, context, mode) }) : null;
+        const closesEpisode = closure?.closes === true;
+        if (closure?.released) counts.episodeReleased = closure.released;
+        const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
           closesEpisode, retryTaken: [...retry], releasedHolds: [], selectionFp, parserFp, pack, full: kind === 'full',
           changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: !processingOptions.noExtract };
         await save('open', null);
@@ -420,6 +433,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         const stopped = await drain(chunk);
         if (stopped) return stop(stopped);
         value.telemetry.remaining = Math.max(0, built.entries.length - i - chunk.length) + inFlight.length + owed.length + mismatch.length;
+        // Design §7 (v3 §7): crossing the approved envelope defers embeddings for the rest of the pass.
+        const envelope = value.obligations.cost;
+        if (envelope) {
+          envelope.reserved_usd = (await readReservedUsd(engine, sourceId, incarnation, costScope)).usd;
+          if (!processingOptions.noEmbed && envelope.approved_usd !== null && envelope.reserved_usd > 0 && envelope.reserved_usd >= envelope.approved_usd) { processingOptions.noEmbed = true; counts.costDeferred = 1; }
+        }
         await save('open', null);
       }
       // Every candidate of the round settled: committed, waived, held, deferred to a hold, a collision, or (a rename's
@@ -436,12 +455,15 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       return [entry.path, { level: entry.state.level, streak: seen && seen.level === entry.state.level ? seen.streak + 1 : 1 }];
     }));
     value.obligations.not_converged_streak = (value.obligations.not_converged_streak ?? 0) + 1;
+    await finishPassApply(engine, sourceId, applied);
     await save('resumable', 'not_converged');
     return result('partial', 'not_converged');
   } catch (error) {
     if (error instanceof SyncAdmissionPaused) { await save('resumable', 'admission_paused').catch(() => undefined); return result('partial', 'admission_paused'); }
     if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout'); }
     throw error;
+  } finally {
+    unregisterPassCost(passId);
   }
 }
 

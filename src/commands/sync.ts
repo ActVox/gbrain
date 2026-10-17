@@ -171,6 +171,8 @@ export {
 } from '../core/sync-cost-gate.ts';
 
 export interface SyncOpts {
+  /** #6712 PR 4b (design §7): the owner approved this sync's paid work (`--yes`); an unknown pass cost no longer defers it. */
+  costApproved?: boolean;
   repoPath?: string;
   dryRun?: boolean;
   full?: boolean;
