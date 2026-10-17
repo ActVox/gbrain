@@ -59,8 +59,27 @@ async function readRecords(gitRoot: string, args: string[], read: string, visit:
   if (!hardenedStreamComplete(result) || !splitter.atRecordBoundary) throw new SyncTreeReadIncomplete(read, outcome(result));
 }
 
-/** The common modes as one string each, so a 600k-entry map holds no per-entry copy. */
-const MODE_NAMES = new Map(['100644', '100755', '120000', '160000', '040000'].map(mode => [mode, mode]));
+/** The common modes and `ls-tree` types as one string each, so a 600k-entry map holds no per-entry copy and a read decodes none. */
+const MODE_NAMES = ['100644', '100755', '120000', '160000', '040000'], TYPE_NAMES = ['blob', 'commit', 'tree'];
+
+/** `record.toString('latin1', start, end)`, as the one string of `names` it spells when it spells one. */
+function latin1Named(record: Buffer, start: number, end: number, names: readonly string[]): string {
+  next: for (const name of names) {
+    if (name.length !== end - start) continue;
+    for (let i = 0; i < name.length; i++) if (record[start + i] !== name.charCodeAt(i)) continue next;
+    return name;
+  }
+  return record.toString('latin1', start, end);
+}
+
+/** Whether an `ls-files -s` record (its first tab at `tab`) is exactly `<mode> <oid> 0` of `entry`: the parse it skips reads stage 0 at the entry's blob and mode. */
+function sameIndexRecord(record: Buffer, tab: number, entry: GitTreeEntry): boolean {
+  const { mode, oid } = entry;
+  if (tab !== mode.length + oid.length + 3 || record[mode.length] !== 32 || record[tab - 2] !== 32 || record[tab - 1] !== 48) return false;
+  for (let i = 0; i < mode.length; i++) if (record[i] !== mode.charCodeAt(i)) return false;
+  for (let i = 0; i < oid.length; i++) if (record[mode.length + 1 + i] !== oid.charCodeAt(i)) return false;
+  return true;
+}
 
 /**
  * One `<mode> <a> <b>\t<path>` record (`ls-tree`: type and OID; `ls-files -s`: OID and stage), its fields decoded straight
@@ -73,8 +92,7 @@ function headerFields(record: Buffer): { mode: string; a: string; b: string; pat
   const second = first < 0 || first > tab ? -1 : record.indexOf(32, first + 1);
   if (second < 0 || second > tab) return null;
   const third = record.indexOf(32, second + 1);
-  const raw = record.toString('latin1', 0, first);
-  return { mode: MODE_NAMES.get(raw) ?? raw, a: record.toString('latin1', first + 1, second), b: record.toString('latin1', second + 1, third < 0 || third > tab ? tab : third),
+  return { mode: latin1Named(record, 0, first, MODE_NAMES), a: latin1Named(record, first + 1, second, TYPE_NAMES), b: record.toString('latin1', second + 1, third < 0 || third > tab ? tab : third),
     path: record.toString('utf8', tab + 1) };
 }
 
@@ -90,12 +108,17 @@ function* lines(items: readonly string[], terminator: string): Generator<Buffer>
  */
 export async function readTreeLevel(gitRoot: string, commit: string, scope: string): Promise<Map<string, GitTreeEntry>> {
   const tree = new Map<string, GitTreeEntry>();
+  await walkTreeLevel(gitRoot, commit, scope, (path, mode, oid) => tree.set(path, { mode, oid }));
+  return tree;
+}
+
+/** `readTreeLevel`'s entries handed to `visit` in `ls-tree` order as they arrive, none kept: a caller that needs only a pass over `T` holds no map of it. */
+export async function walkTreeLevel(gitRoot: string, commit: string, scope: string, visit: (path: string, mode: string, oid: string) => void): Promise<void> {
   await readRecords(gitRoot, ['ls-tree', '-r', '-z', commit, '--', scope === '' ? '.' : scope], 'ls-tree', record => {
     const fields = headerFields(record);
     if (!fields || !OID.test(fields.b)) throw malformed('ls-tree', record.toString('utf8'));
-    if (fields.a === 'blob' || fields.a === 'commit') tree.set(fields.path, { mode: fields.mode, oid: fields.b });
+    if (fields.a === 'blob' || fields.a === 'commit') visit(fields.path, fields.mode, fields.b);
   });
-  return tree;
 }
 
 /** `X`: the index (never the worktree), keyed by Git-root-relative path; a conflicted path keeps its highest stage. */
@@ -120,6 +143,9 @@ export async function readIndexDelta(gitRoot: string, tree: Map<string, GitTreeE
   const delta = new Map<string, GitIndexEntry | null>();
   let same = 0;
   await readRecords(gitRoot, ['ls-files', '-s', '-z'], 'ls-files', record => {
+    const tab = record.indexOf(9);
+    const matched = tab < 0 ? undefined : tree.get(record.toString('utf8', tab + 1));
+    if (matched && sameIndexRecord(record, tab, matched)) { same++; return; }
     const fields = headerFields(record);
     if (!fields || !OID.test(fields.a) || !/^[0-3]$/.test(fields.b)) throw malformed('ls-files', record.toString('utf8'));
     const committed = tree.get(fields.path);
