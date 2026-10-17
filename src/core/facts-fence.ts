@@ -594,6 +594,11 @@ export function factsGapWarning(
     `dropped by a caller who never saw them, they are now lost.`;
 }
 
+export type NewFactRow = Omit<ParsedFact, 'rowNum' | 'active' | 'supersededBy' | 'forgotten'> & {
+  rowNum?: number;
+  active?: boolean;
+};
+
 /**
  * Append a new fact row to the body. If a fenced facts table exists, the
  * row is added to the end of it. If not, a new `## Facts` section + fence
@@ -604,45 +609,78 @@ export function factsGapWarning(
  * the same row. Throws `FenceRewriteRefusal` when the existing fence does
  * not parse cleanly: re-rendering it would drop the rows the parser skipped.
  */
-export function upsertFactRow(
-  body: string,
-  newRow: Omit<ParsedFact, 'rowNum' | 'active' | 'supersededBy' | 'forgotten'> & {
-    rowNum?: number;
-    active?: boolean;
-  },
-): { body: string; rowNum: number } {
+export function upsertFactRow(body: string, newRow: NewFactRow): { body: string; rowNum: number } {
   const parsed = parseFactsFence(body);
   assertFenceRewritable('facts', parsed);
   const { facts } = parsed;
   const nextRowNum = newRow.rowNum
     ?? (facts.length > 0 ? Math.max(...facts.map(f => f.rowNum)) + 1 : 1);
+  return { body: replaceOrInsertFactsFence(body, renderFactsTable([...facts, factRow(newRow, nextRowNum)])), rowNum: nextRowNum };
+}
 
-  const allRows: ParsedFact[] = [
-    ...facts,
-    {
-      rowNum: nextRowNum,
-      claim: newRow.claim,
-      kind: newRow.kind,
-      confidence: newRow.confidence,
-      visibility: newRow.visibility,
-      notability: newRow.notability,
-      validFrom: newRow.validFrom,
-      validUntil: newRow.validUntil,
-      source: newRow.source,
-      context: newRow.context,
-      active: newRow.active ?? true,
-      // v0.35.4 — typed-claim pass-through. When undefined the renderer
-      // stays at the 10-cell shape so unrelated edits don't widen the
-      // fence.
-      claimMetric: newRow.claimMetric,
-      claimValue:  newRow.claimValue,
-      claimUnit:   newRow.claimUnit,
-      claimPeriod: newRow.claimPeriod,
-      ...(newRow.attributedTo ? { attributedTo: newRow.attributedTo } : {}),
+function factRow(newRow: NewFactRow, rowNum: number): ParsedFact {
+  return {
+    rowNum,
+    claim: newRow.claim,
+    kind: newRow.kind,
+    confidence: newRow.confidence,
+    visibility: newRow.visibility,
+    notability: newRow.notability,
+    validFrom: newRow.validFrom,
+    validUntil: newRow.validUntil,
+    source: newRow.source,
+    context: newRow.context,
+    active: newRow.active ?? true,
+    // v0.35.4 — typed-claim pass-through. When undefined the renderer
+    // stays at the 10-cell shape so unrelated edits don't widen the
+    // fence.
+    claimMetric: newRow.claimMetric,
+    claimValue:  newRow.claimValue,
+    claimUnit:   newRow.claimUnit,
+    claimPeriod: newRow.claimPeriod,
+    ...(newRow.attributedTo ? { attributedTo: newRow.attributedTo } : {}),
+  };
+}
+
+/**
+ * #6898 follow-up: upsertFactRow and strikeFactRowInPage for a whole batch of
+ * rows, with the section's fence parsed once (at the first append, which
+ * throws FenceRewriteRefusal exactly where upsertFactRow would) and rendered
+ * once by `page()`. A publication of N facts on a fence of M rows costs
+ * O(N + M) instead of re-parsing and re-rendering the whole fence per row
+ * (O(N × M): minutes on a fence of thousands of rows). The page it returns is
+ * the page the one-row-at-a-time calls leave.
+ */
+export function factsFenceEditor<T extends { compiled_truth: string; timeline: string }>(page: T, section: 'compiled_truth' | 'timeline') {
+  let current = page;
+  let rows: ParsedFact[] | null = null;
+  return {
+    append(newRow: NewFactRow & { rowNum: number }): void {
+      if (!rows) {
+        const parsed = parseFactsFence(current[section]);
+        assertFenceRewritable('facts', parsed);
+        rows = parsed.facts;
+      }
+      rows.push(factRow(newRow, newRow.rowNum));
     },
-  ];
-
-  return { body: replaceOrInsertFactsFence(body, renderFactsTable(allRows)), rowNum: nextRowNum };
+    strike(rowNum: number, by: number): void {
+      const struck = (f: ParsedFact): ParsedFact => f.rowNum === rowNum ? { ...f, active: false, supersededBy: by, context: `superseded by #${by}` } : f;
+      for (const key of ['compiled_truth', 'timeline'] as const) {
+        if (key === section && rows) {
+          if (!rows.some(f => f.rowNum === rowNum)) continue;
+          rows = rows.map(struck);
+          return;
+        }
+        const found = parseFactsFence(current[key]).facts;
+        if (!found.some(f => f.rowNum === rowNum)) continue;
+        current = { ...current, [key]: replaceOrInsertFactsFence(current[key], renderFactsTable(found.map(struck))) };
+        return;
+      }
+    },
+    page(): T {
+      return rows ? { ...current, [section]: replaceOrInsertFactsFence(current[section], renderFactsTable(rows)) } : current;
+    },
+  };
 }
 
 /**

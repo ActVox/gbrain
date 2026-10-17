@@ -27,6 +27,7 @@ import { catalogueError } from '../error-catalogue.ts';
 import { ACTIVE_REFRESH_STATES_SQL, refreshFenceClear } from './worktree-refresh-schema.ts';
 import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertGraduationAdmission } from './graduation-custody.ts';
+import { schemaAdmissionRefusal } from './schema-admission.ts';
 import { CAPACITY_VERIFY } from './capacity-verify.ts';
 import { readManagedMode } from './managed-mode.ts';
 import { localHostId } from './identity.ts';
@@ -294,6 +295,9 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
       }
       return assertReplayIntent(prior, fingerprint);
     }
+    // #6904: only after a replay returned, so an accepted request id reconciles whatever the schema reads.
+    const schemaRefusal = await schemaAdmissionRefusal(tx);
+    if (schemaRefusal) throw schemaRefusal;
     if (input.targetKind === 'skill_bundle') await assertSharedSkillPersistence(tx, input.sourceId);
     for (const row of counters) {
       const brain = row.key === 'brain';
@@ -376,6 +380,8 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
   }
   const fresh = items.filter(item => !priors.has(item.requestId));
   if (fresh.length) {
+    const schemaRefusal = await schemaAdmissionRefusal(tx);
+    if (schemaRefusal) throw schemaRefusal;
     const bytes = fresh.reduce((sum, item) => sum + item.bytes, 0), terminalBytes = fresh.reduce((sum, item) => sum + item.terminalBytes, 0);
     for (const row of counters) {
       const brain = row.key === 'brain', scope = brain ? 'brain' : 'principal';
