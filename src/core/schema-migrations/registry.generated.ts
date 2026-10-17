@@ -251,6 +251,7 @@ import { v247 } from './v247-page-extraction-state.ts';
 import { v248 } from './v248-segmented-page-storage.ts';
 import { v249 } from './v249-belief-ledger.ts';
 import { v250 } from './v250-persistence-request-id-index.ts';
+import { v251 } from './v251-take-horizons.ts';
 import { v252 } from './v252-segmented-chunk-gc-index.ts';
 import { v253 } from './v253-page-view-digests.ts';
 import { v254 } from './v254-segment-reader-marks.ts';
@@ -505,6 +506,7 @@ export const MIGRATIONS: Migration[] = [
   v248,
   v249,
   v250,
+  v251,
   v252,
   v253,
   v254,

@@ -10,6 +10,57 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.287.0] - 2026-10-17
+
+**A batch of page purges no longer holds a source's write queue for hours (#6884).** Each page purge used to read and case-fold the whole write journal to find old requests that still carried the page's claims, so on a journal of about 540k requests one purge took about 20 minutes and a nightly purge batch blocked ordinary writes for about 2.8 hours. Now one sweep serves a batch of queued purges, later purges read only the rows added since, and the purge run stops submitting when the writer's queue is full instead of failing thousands of pages.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| N purges queued for one source | N full journal sweeps; each receipt's `journal_sweep.scanned` equals the journal size | one sweep for up to 32 queued purges; the others scan only the rows added since (`journal_sweep.batch`, `journal_sweep.watermark`) |
+| `gbrain dream --phase purge` / `gbrain pages purge-deleted` with more expired pages than free queue room | thousands of `queue_capacity` failures, `managed_purge_failed`, each failure counted toward parking the page | submits only while the writer has room (background runs stop at `persistence.capacity.background_pause_pct`); the rest is `write_capacity_deferred` / `capacity_deferred`, the phase warns, the next run picks it up |
+
+### For contributors
+
+- `sweepRequestsForGroups` (`src/core/persistence/intent-redaction.ts`) runs the #6511 census once for several needle groups; `after` starts past an earlier ceiling.
+- The batch cache lives in process memory in `src/core/persistence/page-purge.ts` (`sweepForPurge`); the journal still never stores claims. No schema change and no compaction default changed.
+- `readOutstandingRoom` (`src/core/persistence/journal.ts`) reads the tighter of the principal's and the brain's outstanding caps.
+- Tests: `test/page-purge-batch-sweep-6884.test.ts` (PGLite and Postgres), `test/purge-deleted-capacity-6884.test.ts`.
+- Crash robot (#6896): `consumer:claiming` fires before every claim attempt, idle ticks included, so its pass count followed wall-clock time and a fault picked from the count role's total could go unreached (`competing_writers_one_page consumer:claiming#19`). `seamCounter` (`scripts/persistence/crash-robot.ts`) now counts that seam in claim epochs (distinct requests prepared so far); the unreached-fault check is unchanged.
+- `scripts/postgres-arm-weights.json` re-mined from the latest runs, so the Postgres-arm shards stay under their 20-minute step limit.
+
+## [0.60.286.0] - 2026-10-17
+
+**Your brain keeps a private forecast journal: every prediction, when it was made, by when it had to come true, and how it turned out.** Takes that make a call ("Acme-example will reach $5M ARR by the end of 2024") now get a horizon, the last day the claim can come true. `gbrain takes journal` lists every prediction as resolved, overdue, open or undated, and it always counts the unresolved ones, so a track record can't look better by leaving its misses unresolved. `gbrain takes scorecard --group-by holder` (or `source`) ranks who has been right, with sample-size honesty built in. All of this stays on the brain host: remote agents and thin clients see exactly what they saw before.
+
+### What you'd see
+
+| You run | You get |
+|---|---|
+| `gbrain takes horizon scan` | each take's stated deadline ("by the end of 2024" → 2024-12-31, "within 18 months" counted from its since date); nothing is written until you add `--apply` |
+| `gbrain takes horizon set <slug> --row N --date YYYY-MM-DD` / `clear` | your own horizon for a take with no stated deadline; a scan never overwrites it |
+| `gbrain takes journal` | every prediction with its time, claim, holder, weight, horizon, state and resolution; the totals count every open, overdue and undated prediction whatever `--state` or `--limit` shows |
+| `gbrain takes scorecard --group-by holder` | one row per holder: accuracy, accuracy shrunk toward the brain-wide rate, a 95% interval, recency-weighted accuracy, Brier and Brier skill, how many resolutions cite a source, open and overdue counts, and `low_n` below `--min-n` (default 10) |
+
+**When was a prediction made?** Where the belief ledger records a source, the journal gives the recorded time, and calls it certified on a managed source. Everywhere else it shows the take's since date, labelled `uncertified`, so you always know which dates you can lean on.
+
+### What to do after upgrading
+
+Nothing runs on upgrade. A new migration adds the private `take_horizons` table; no take is touched. To date your takes, run `gbrain takes horizon scan`, look at the list, then run `gbrain takes horizon scan --apply`. Then `gbrain takes journal`.
+
+### Itemized changes
+
+- New `gbrain takes horizon scan [--apply]`, `set` and `clear`, and new `gbrain takes journal`: trusted local only. They have no MCP op, and thin clients refuse them as host-bound.
+- `gbrain takes scorecard` gains `--group-by holder|source`, `--min-n N` and `--source-id`. Without them the scorecard prints what it did before.
+- `takes_scorecard` gains `group_by` and `min_n` for trusted local callers. A remote caller that passes either gets the new `scorecard_group_by_local_only` refusal. Without them, its answer is byte for byte what it was.
+- `takes_list`, `takes_search` and `takes_scorecard` return the same output, locally and remotely, whether or not horizons exist.
+
+### For contributors
+
+- `src/core/takes-horizon.ts` (the deadline parser and the horizon store) and `src/core/forecast-journal.ts` (the journal and the grouped statistics).
+- `evals/forecast-journal/`: a $0 synthetic gate with a frozen preregistration. It uses 20 seeded cohorts of placeholder holders with known skill. On those cohorts the median Spearman ρ between true skill and shrunk accuracy is 0.905. The who-was-right set-F1 is 1.000, the denominator, `low_n` and labelling counts are exact, and 8/8 remote probes pass. Run it with `bun evals/forecast-journal/harness.ts --run`.
+
 ## [0.60.285.0] - 2026-10-17
 
 **Doctor can now find page edits that an earlier sync silently overwrote, and one repair puts them back (#6712).** Between v0.60.255.0 and v0.60.279.0, a plain incremental `gbrain sync` could publish a committed file edit over a page that had also been edited in the database (for example a `put_page` with `sync.write_through` off). v0.60.279.0 stopped new damage. This release finds the pages that were already hit, using records gbrain keeps permanently, and restores them with a preview first.

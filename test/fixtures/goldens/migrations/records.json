@@ -1,12 +1,11 @@
 {
   "golden": {
-    "count": 250,
+    "count": 251,
     "gaps": [
       17,
       18,
       19,
-      100,
-      251
+      100
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
@@ -3890,6 +3889,19 @@
         "version": 250
       },
       {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "take_horizons",
+        "sql": {
+          "length": 414,
+          "sha256": "43fb123a615e4eb3a77b021b2e8766e85093bfb80e8ef4f1dbc86dcc01658137"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 251
+      },
+      {
         "handler": {
           "form": "arrow",
           "helpers": [
@@ -4240,6 +4252,7 @@
       248,
       249,
       250,
+      251,
       252,
       253,
       254,
