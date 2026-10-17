@@ -1209,10 +1209,7 @@ async function finishCheckpoint(engine: BrainEngine, key: string, cursor: Cursor
   return scheduled.length ? result(cursor, 'partial', 'writer_yield') : result(cursor, cursor.from === null ? 'first_sync' : 'synced');
 }
 /** What the hold report needs from a managed run: its source, cursor and authority. */
-interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boolean; cursor?: () => Cursor | CursorHeader | null;
-  /** #6712 PR 1: what the fan-in folded, and what resuming the source's one cursor kept from it. */
-  fanIn?: NonNullable<SyncResult['cursorFanIn']>; adopted?: { inherited: Array<keyof SyncProcessingOptions>; writerChanged: boolean; optionsDiffer: boolean;
-    syncOptions: SyncCursorOptions | null; processingOptions: SyncProcessingOptions | null } }
+interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boolean; cursor?: () => Cursor | CursorHeader | null }
 
 /**
  * One immutable page is admitted at a time; foreground writes can never sit behind a whole scan.
@@ -1252,33 +1249,22 @@ async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: {
       screened: 'entries' in (cursor ?? {}) ? (cursor as Cursor).entries.slice(0, cursor!.index).filter(entry => entry.action === 'import').length : 0 });
     const recovered = state.remote ? undefined : recoveredReport(state.sourceId, cursor?.counts.recovered);
     const fences = fencesNormalizedReport(state.sourceId, cursor?.counts.fences, state.remote === true);
-    return { ...synced, ...report, ...adoptionReport(state), ...(!state.remote && cursor?.convertedFromFailed?.length ? { converted_from_failed: cursor.convertedFromFailed } : {}),
+    return { ...synced, ...report, ...(!state.remote && cursor?.convertedFromFailed?.length ? { converted_from_failed: cursor.convertedFromFailed } : {}),
       ...(recovered ? { recovered_frontmatter: recovered } : {}), ...(fences ? { fences_normalized: fences } : {}) };
   } catch {
     return synced;
   }
 }
 
-/** #6712 PR 1: the result fields of a resumed cursor: the opt-outs it kept from the cursor, and what the fan-in folded. */
-function adoptionReport(state: HoldRunState): Pick<SyncResult, 'inherited_options' | 'cursorAdopted' | 'cursorFanIn'> {
-  const adopted = state.adopted;
-  return { ...(adopted?.inherited.length ? { inherited_options: adopted.inherited } : {}),
-    ...(adopted && (adopted.writerChanged || state.fanIn?.adopted || adopted.optionsDiffer) ? { cursorAdopted: { writer_changed: adopted.writerChanged, legacy_key: state.fanIn?.adopted === true,
-      ...(state.remote ? {} : { sync_options: adopted.syncOptions, processing_options: adopted.processingOptions }) } } : {}),
-    ...(state.fanIn ? { cursorFanIn: state.fanIn } : {}) };
-}
 /**
  * #6712 PR 1: the key this pass reads and the older keys folded in (`resolveManagedCursor`). A remote caller folds nothing
  * in: the cursors it would cancel or retire may belong to another principal (it adopts only its own). A superseded run's
  * write still in flight settles before the adopted run publishes beside it (`waiting`, `writer_pending`).
  */
 async function resolvePassCursor(engine: BrainEngine, input: { sourceId: string; incarnation: string; company: Parameters<typeof resolveManagedCursor>[1]['company'];
-  remote: boolean; dryRun: boolean; assertActive: () => void; state: HoldRunState }): Promise<{ key: string; waiting?: SyncResult }> {
+  remote: boolean; dryRun: boolean; assertActive: () => void }): Promise<{ key: string; waiting?: SyncResult }> {
   const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: input.company, assertActive: input.assertActive,
     readOnly: input.dryRun, foldIn: !input.remote });
-  if (resolution.adoptedLegacyKey || resolution.superseded.length || resolution.retained.length) {
-    input.state.fanIn = { adopted: !!resolution.adoptedLegacyKey, superseded: resolution.superseded.length, retained: resolution.retained.length };
-  }
   const header = resolution.waitFor && !input.dryRun
     ? (await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, resolution.key]))[0]?.completed_keys?.[0] : undefined;
   if (!header) return { key: resolution.key };
@@ -1508,7 +1494,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           } finally { setPassBatch(batchKey, null); }
         } });
     }
-    const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
+    const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive });
     key = resolved.key;
     if (resolved.waiting) return resolved.waiting;
     cursor = await readCursor(engine, key);
