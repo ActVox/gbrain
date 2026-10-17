@@ -58,6 +58,8 @@ export interface PassLevelInput {
   bootstrap?: boolean;
   /** The pass imports without the schema pack (`no-schema-pack` or an episode carrying it): its parser expects no pack. */
   noSchemaPack?: boolean;
+  /** #6694: the slug-root mode an unstamped pass of this source admitted under (`obligations.slug_mode`); a subdirectory source reads under it, not its pin. */
+  slugMode?: 'git-root' | 'source-root';
 }
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -267,7 +269,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   t = timer();
   const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead] = await Promise.allSettled([
     currentCompanyBrainSync(sourceId) ? Promise.resolve(true) : getCompanyBrainProfile(engine, sourceId).then(profile => !!profile),
-    scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
+    scope && input.pass?.slugMode ? Promise.resolve(input.pass.slugMode) : scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
     syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
     engine.getConfig('sync.include_hidden'),
     input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
