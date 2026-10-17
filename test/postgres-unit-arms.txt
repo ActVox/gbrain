@@ -268,6 +268,7 @@ test/repair-frontmatter.test.ts
 test/repair-receipt-compaction.test.ts
 test/repair-rename-identity-6729.test.ts
 test/scripts/test-stress-postgres.test.ts
+test/search-read-keyword-bound.test.ts
 test/search/page-rank-cut.test.ts
 test/search/rerank-gate-hybrid.test.ts
 test/search/rerank-gate-telemetry.test.ts

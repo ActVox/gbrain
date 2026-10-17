@@ -2908,6 +2908,11 @@ export class PGLiteEngine implements BrainEngine {
     return Promise.race([queryPromise, abortPromise]);
   }
 
+  /** No statement timeout on PGLite (BrainEngine.keywordBoundedRead): `read` runs on the engine itself. */
+  async keywordBoundedRead<T>(read: (db: Pick<BrainEngine, 'executeRaw'>) => Promise<T>): Promise<T> {
+    return read(this);
+  }
+
   /**
    * PGLite is in-process WASM with no connection pooler, so the direct-pool
    * routing that `executeRawDirect` provides on Postgres is a no-op here:
