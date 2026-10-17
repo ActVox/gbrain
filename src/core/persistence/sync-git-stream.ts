@@ -7,7 +7,7 @@
  * is parsed as it streams; nothing but the result maps is held, so a
  * 600k-path tree costs its map and one chunk.
  */
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, realpathSync, type BigIntStats } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { hardenedGitStream, hardenedStreamComplete, NulRecordSplitter, type HardenedGitStreamResult } from '../hardened-git.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
@@ -206,10 +206,18 @@ interface ReadFile { path: string; sha256: string; localOid: string; foldedOid: 
  * `hash-object --no-filters --stdin-paths` per batch and must agree with the
  * bytes read here; attributes from one `check-attr -z --stdin`. A present,
  * readable file also reports its raw OID and sha256 under `staged` and
- * `untracked`, for working mode.
+ * `untracked`.
+ *
+ * `working` (design v3.2 §2.1, the working level is the physical bytes):
+ * the index is not read. A path is `deleted` when no file backs it, whatever
+ * the index says; a present file outside the tree is `untracked` with its raw
+ * OID; every other present file is judged from its bytes against the tree,
+ * through the same `clean_eol`/`clean_lfs` domains. So a staged edit, a staged
+ * new file, `git rm --cached`, a staged deletion and a staged file removed from
+ * disk probe exactly as the same disk does with a pristine index.
  */
 export async function probeDirtiness(root: string, gitRoot: string, paths: string[], tree: Map<string, GitTreeEntry>,
-  index: Map<string, GitIndexEntry>, opts: { batch?: number } = {}): Promise<Map<string, DirtinessProbe>> {
+  index: Map<string, GitIndexEntry>, opts: { batch?: number; working?: boolean } = {}): Promise<Map<string, DirtinessProbe>> {
   const batch = Math.max(1, opts.batch ?? 2000);
   const results = new Map<string, DirtinessProbe>();
   const firstOid = tree.values().next().value?.oid ?? index.values().next().value?.oid ?? '';
@@ -223,13 +231,13 @@ export async function probeDirtiness(root: string, gitRoot: string, paths: strin
     for (const path of paths.slice(start, start + batch)) {
       const committed = tree.get(path);
       const indexed = index.get(path);
-      let dp: Dp | null = !committed && !indexed ? 'untracked'
+      let dp: Dp | null = opts.working ? (committed ? null : 'untracked') : !committed && !indexed ? 'untracked'
         : !committed || !indexed || indexed.oid !== committed.oid || indexed.mode !== committed.mode || indexed.stage !== 0 ? 'staged' : null;
       let bytes: Buffer | null = null;
       let unreadable = realRoot === null || realGitRoot === null;
       const sourcePath = unreadable ? '' : relative(realRoot!, join(realGitRoot!, path)).split(sep).join('/');
       if (!unreadable) { try { bytes = readSyncFile(root, sourcePath); } catch { unreadable = true; } }
-      if (dp === null && !unreadable && bytes === null) dp = 'deleted';
+      if ((dp === null || opts.working) && !unreadable && bytes === null) dp = 'deleted';
       const hashable = bytes !== null && !path.includes('\n') && !path.startsWith('"');
       if (dp === null && (committed!.mode === '120000' || committed!.mode === '160000' || unreadable || !hashable)) dp = 'unknown';
       decided.set(path, dp);
@@ -304,4 +312,126 @@ async function readAttributes(gitRoot: string, paths: string[]): Promise<Map<str
     attrs.set(fields[i]!, entry);
   }
   return paths.every(path => ATTRIBUTES.every(name => attrs.get(path)?.[name] !== undefined)) ? attrs : null;
+}
+
+/**
+ * The working stat cache (design v3.2 §2.1, Git's freshness contract). Each
+ * Git-root-relative path maps to the `lstat` key `dev:ino:mode:uid:size:mtime_ns:ctime_ns`
+ * it had when its bytes were hashed, or `absent`. A user can restore `mtime` but
+ * not `ctime`, so a same-size, same-inode edit still changes the key. Plain JSON;
+ * entries are self-contained, so two caches of one root merge by spreading
+ * their entries.
+ */
+export interface WorkingStatCache { v: 1; root: string; entries: Record<string, string> }
+
+const WORKING_RACY_WINDOW_NS = 2_000_000_000n;
+const WORKING_HASH_ATTEMPTS = 3;
+const WORKING_STAT_CACHES_REMEMBERED = 64;
+const ABSENT = 'absent';
+const STAT_KEY = /^\d+:\d+:\d+:\d+:\d+:\d+:\d+$/;
+/** Entries a cache keeps (by path order); a path beyond the bound reads as changed [estimated]. */
+export const WORKING_STAT_CACHE_MAX_ENTRIES = 100_000;
+
+/** The cache key of one bigint `lstat`, or null when it cannot vouch for the file (no stat, or no `ctime`). */
+export function workingStatKey(stats: Pick<BigIntStats, 'dev' | 'ino' | 'mode' | 'uid' | 'size' | 'mtimeNs' | 'ctimeNs'> | null): string | null {
+  if (!stats || !stats.ctimeNs) return null;
+  return [stats.dev, stats.ino, stats.mode, stats.uid, stats.size, stats.mtimeNs, stats.ctimeNs].join(':');
+}
+
+/** `absent` for a path nothing backs, its key, or null for any other stat failure (uncertain). */
+function statAt(root: string, path: string): string | null {
+  try { return workingStatKey(lstatSync(join(root, path), { bigint: true })); }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? ABSENT : null; }
+}
+
+function rootStill(root: string): boolean {
+  try { return realpathSync.native(root) === root; } catch { return false; }
+}
+
+/**
+ * The idle tick's working-mode check: every path in `paths` or in the cache whose
+ * stat no longer matches its entry is changed, as is a path the cache does not
+ * hold (new, racy when hashed, past the bound), a stat that fails or has no
+ * `ctime`, and every path when there is no cache or its root moved. Uncertainty is
+ * never "no change". Returns the changed paths, sorted, and the cache without
+ * them.
+ */
+export function workingChanged(cache: WorkingStatCache | null, paths: Iterable<string>): { changed: string[]; cache: WorkingStatCache | null } {
+  const all = new Set(paths);
+  if (!cache || !rootStill(cache.root)) return { changed: [...all].sort(), cache: null };
+  for (const path of Object.keys(cache.entries)) all.add(path);
+  const changed: string[] = [];
+  const entries: Record<string, string> = {};
+  for (const path of [...all].sort()) {
+    const entry = cache.entries[path];
+    if (entry !== undefined && statAt(cache.root, path) === entry) entries[path] = entry;
+    else changed.push(path);
+  }
+  return { changed, cache: { v: 1, root: cache.root, entries } };
+}
+
+/**
+ * The working level of `paths` (`probeDirtiness` with `working`, every path hashed:
+ * full rounds rehash unconditionally) and the stat cache it leaves. Each path is
+ * stat'd before and after its bytes are hashed; a path whose stat moved is
+ * discarded and rehashed, up to three attempts, and one still moving keeps its
+ * last probe but no entry. An entry is written only for a stable stat whose
+ * `mtime` and `ctime` are older than 2 s before that attempt began (a racy entry is
+ * left out, so the next pass rehashes it), and only for a probe with a level
+ * (raw bytes read, or `deleted` with nothing at the path). `afterHash` runs between
+ * the hash and the re-stat (tests inject an edit there).
+ */
+export async function hashWorkingLevel(root: string, gitRoot: string, paths: string[], tree: Map<string, GitTreeEntry>,
+  opts: { batch?: number; maxEntries?: number; afterHash?: (paths: string[]) => void | Promise<void> } = {}): Promise<{ probes: Map<string, DirtinessProbe>; cache: WorkingStatCache | null }> {
+  let realGitRoot: string | null = null;
+  try { realGitRoot = realpathSync.native(gitRoot); } catch {}
+  const statOf = (path: string) => (realGitRoot === null ? null : statAt(realGitRoot, path));
+  const probes = new Map<string, DirtinessProbe>();
+  const entries = new Map<string, string>();
+  let pending = [...new Set(paths)];
+  for (let attempt = 0; attempt < WORKING_HASH_ATTEMPTS && pending.length > 0; attempt++) {
+    const racyFrom = BigInt(Date.now()) * 1_000_000n - WORKING_RACY_WINDOW_NS;
+    const before = new Map(pending.map(path => [path, statOf(path)]));
+    const probed = await probeDirtiness(root, gitRoot, pending, tree, new Map(), { batch: opts.batch, working: true });
+    await opts.afterHash?.(pending);
+    const moved: string[] = [];
+    for (const path of pending) {
+      const probe = probed.get(path)!;
+      probes.set(path, probe);
+      const key = before.get(path)!;
+      if (statOf(path) !== key) { moved.push(path); continue; }
+      if (key === null) continue;
+      const [mtimeNs = '0', ctimeNs = '0'] = key === ABSENT ? [] : key.split(':').slice(5);
+      const vouched = key === ABSENT ? probe.dp === 'deleted' : probe.rawOid !== null && BigInt(mtimeNs) < racyFrom && BigInt(ctimeNs) < racyFrom;
+      if (vouched) entries.set(path, key);
+    }
+    pending = moved;
+  }
+  if (realGitRoot === null) return { probes, cache: null };
+  const kept = [...entries.keys()].sort().slice(0, Math.max(0, opts.maxEntries ?? WORKING_STAT_CACHE_MAX_ENTRIES));
+  return { probes, cache: { v: 1, root: realGitRoot, entries: Object.fromEntries(kept.map(path => [path, entries.get(path)!])) } };
+}
+
+/** A serialized cache (a pass row's copy), or null for anything that is not one; null reads as "everything changed". */
+export function parseWorkingStatCache(value: unknown): WorkingStatCache | null {
+  if (!value || typeof value !== 'object') return null;
+  const { v, root, entries } = value as Record<string, unknown>;
+  if (v !== 1 || typeof root !== 'string' || !entries || typeof entries !== 'object' || Array.isArray(entries)) return null;
+  const list = Object.entries(entries as Record<string, unknown>);
+  if (list.length > WORKING_STAT_CACHE_MAX_ENTRIES || !list.every(([, key]) => typeof key === 'string' && (key === ABSENT || STAT_KEY.test(key)))) return null;
+  return { v: 1, root, entries: Object.fromEntries(list) as Record<string, string> };
+}
+
+const rememberedCaches = new Map<string, WorkingStatCache>();
+
+/** Keeps a cache in this process under `key` (the pass uses `<source>:<incarnation>`); the least recently stored past 64 are dropped. */
+export function rememberWorkingStatCache(key: string, cache: WorkingStatCache): void {
+  rememberedCaches.delete(key);
+  rememberedCaches.set(key, cache);
+  while (rememberedCaches.size > WORKING_STAT_CACHES_REMEMBERED) rememberedCaches.delete(rememberedCaches.keys().next().value!);
+}
+
+/** The cache this process remembered under `key`, or null. */
+export function recallWorkingStatCache(key: string): WorkingStatCache | null {
+  return rememberedCaches.get(key) ?? null;
 }
