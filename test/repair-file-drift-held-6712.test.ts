@@ -174,6 +174,7 @@ for (const backend of testBackends()) describe(`#6712 PR 4b: repair file-drift -
     expect(preview).toMatchObject({ mode: 'dry_run', affected: 1 });
     expect(preview.details!.pages).toEqual([expect.objectContaining({ slug: 'notes/tomb', action: 'remove_file', state: 'tombstone_edited', verb: 'keep the deletion and remove the file' })]);
     expect(preview.listing).toEqual(expect.arrayContaining([expect.objectContaining({ detail: `keep the deletion and remove the file: ${path}` })]));
+    expect(preview.warnings).toEqual([expect.stringContaining("leaves each removed file's deletion uncommitted")]);
     expect(existsSync(join(f.root, path))).toBe(true);
     const applied = await run(f.sourceId, { side: 'deleted', state: 'tombstone_edited', prefer: 'database', expect: preview.preview_hash! });
     expect(applied.outcomes).toEqual({ repaired: 1 });

@@ -621,12 +621,15 @@ export const fileDriftRepair: RepairHandler = {
         : [page.slug, page.preview.preconditions.revision, page.preview.preconditions.raw_file_hash, page.preview.result_digest]) });
     // #6712 wave: a recreated file stays only once committed; without Git durability the next sync imports the committed deletion again.
     const recreated = pages.flatMap(page => 'preview' in page && page.file_gone ? [page.preview.preconditions.relative_path] : []);
+    // #6712 PR 4b: a removed file is gone only once its deletion is committed; without Git durability the next sync finds the committed file held again.
+    const removed = pages.flatMap(page => 'remove_file' in page ? [page.remove_file.path] : []);
     let warnings: string[] = [];
-    if (recreated.length) {
+    if (recreated.length || removed.length) {
       const binding = await getWorktreeBinding(engine, sourceId);
       const root = join(binding!.local_path!, binding!.relative_path);
       if (!(await gitDurabilityPolicy(binding, root).catch(() => ({ durable: false }))).durable) {
-        warnings = [`Git durability is off for ${sourceId}, so the apply leaves each recreated file uncommitted. Commit it afterwards (git -C ${root} add -- ${recreated.join(' ')} && git -C ${root} commit), or the next sync imports the committed deletion again.`];
+        if (recreated.length) warnings.push(`Git durability is off for ${sourceId}, so the apply leaves each recreated file uncommitted. Commit it afterwards (git -C ${root} add -- ${recreated.join(' ')} && git -C ${root} commit), or the next sync imports the committed deletion again.`);
+        if (removed.length) warnings.push(`Git durability is off for ${sourceId}, so the apply leaves each removed file's deletion uncommitted. Commit it afterwards (git -C ${root} add -- ${removed.join(' ')} && git -C ${root} commit), or the next sync holds the committed file again.`);
       }
     }
     let artifact: string | undefined;
