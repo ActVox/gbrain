@@ -132,7 +132,7 @@ async function runChild(config: ChildConfig): Promise<number> {
       const r = await pass.idleTickProbe(engine, tick);
       idle.push({ wall: performance.now() - t, idle: r.idle, reasons: r.reasons.map(String), rows: r.rows, timings_ms: r.timings_ms });
     }
-    const idlePeak = sampler.phasePeak();
+    const idlePeak = sampler.phasePeak(), idleLag = sampler.phaseLag();
     const full: Array<{ wall: number; timings_ms: Record<string, number>; counts: unknown }> = [];
     sampler.mark();
     for (let i = 0; i < config.full_rounds; i++) {
@@ -140,10 +140,11 @@ async function runChild(config: ChildConfig): Promise<number> {
       const r = await round();
       full.push({ wall: performance.now() - t, timings_ms: r.timings_ms, counts: r.counts });
     }
-    const fullPeak = sampler.phasePeak();
+    const fullPeak = sampler.phasePeak(), fullLag = sampler.phaseLag();
     const overall = sampler.stop();
     out({ available: true, connect_ms: Math.round(connectMs), seeded_pages: seeded?.pages ?? 0, idle, full,
-      rss: { after_connect: rssAfterConnect, idle_peak_sampled: idlePeak, full_peak_sampled: fullPeak, peak_sampled: overall.peak, samples: overall.samples, vm_hwm: readVmHwm() } });
+      rss: { after_connect: rssAfterConnect, idle_peak_sampled: idlePeak, full_peak_sampled: fullPeak, peak_sampled: overall.peak, samples: overall.samples, vm_hwm: readVmHwm() },
+      loop_lag_ms: { idle_max: idleLag, full_max: fullLag, max: overall.maxLagMs } });
     return 0;
   } catch (error) {
     sampler.stop();
@@ -166,12 +167,18 @@ async function runLive(engine: import('../../src/core/engine.ts').BrainEngine, c
     return { at: performance.timeOrigin + t, wall: performance.now() - t, status: r.status, reason: r.reason ?? null, pass: r.pass ?? null };
   };
   let edits = 0;
-  const commitOne = () => {
+  // The bench's own commit runs Git asynchronously, so its wait is not counted as the pass's event-loop lag.
+  const gitAsync = (args: string[]) => new Promise<void>((done, fail) => {
+    const child = spawn('git', ['-C', live.repo, ...args], { stdio: 'ignore' });
+    child.on('error', fail);
+    child.on('exit', code => (code === 0 ? done() : fail(new Error(`git ${args.join(' ')} exited ${code}`))));
+  });
+  const commitOne = async () => {
     const path = fixturePath((edits * 7919) % live.files);
     writeFileSync(join(live.repo, path), fixtureContent((edits * 7919) % live.files, 1000 + edits, live.large));
     edits++;
-    git(live.repo, ['add', '--', path]);
-    git(live.repo, ['-c', 'user.name=Bench', '-c', 'user.email=bench@example.invalid', 'commit', '-q', '-m', 'bench edit ' + edits]);
+    await gitAsync(['add', '--', path]);
+    await gitAsync(['-c', 'user.name=Bench', '-c', 'user.email=bench@example.invalid', 'commit', '-q', '-m', 'bench edit ' + edits]);
   };
   try {
     const warmup: Array<Awaited<ReturnType<typeof sync>>> = [];
@@ -179,19 +186,20 @@ async function runLive(engine: import('../../src/core/engine.ts').BrainEngine, c
     ctx.sampler.mark();
     const idle: Array<Awaited<ReturnType<typeof sync>> & { idle: boolean; reasons: string[]; rows: number; timings_ms: Record<string, number> }> = [];
     for (let i = 0; i < config.idle_rounds; i++) { const r = await sync(); idle.push({ ...r, idle: r.status === 'up_to_date' && !r.pass, reasons: r.pass ? [r.pass.kind] : [], rows: 0, timings_ms: {} }); }
-    const idlePeak = ctx.sampler.phasePeak();
+    const idlePeak = ctx.sampler.phasePeak(), idleLag = ctx.sampler.phaseLag();
     ctx.sampler.mark();
     const full: Array<Awaited<ReturnType<typeof sync>> & { timings_ms: Record<string, number>; counts: unknown }> = [];
     for (let i = 0; i < config.full_rounds; i++) {
-      commitOne();
+      await commitOne();
       const r = await sync();
       const [row] = await engine.executeRaw<{ timings: Record<string, number> | null }>("SELECT completed_keys->0->'telemetry'->'timings_ms' AS timings FROM op_checkpoints WHERE op='managed-sync-pass' AND completed_keys->0->>'source_id'=$1", [config.source_id]);
       full.push({ ...r, timings_ms: row?.timings ?? {}, counts: r.pass });
     }
-    const fullPeak = ctx.sampler.phasePeak();
+    const fullPeak = ctx.sampler.phasePeak(), fullLag = ctx.sampler.phaseLag();
     const overall = ctx.sampler.stop();
     ctx.out({ available: true, connect_ms: Math.round(ctx.connectMs), seeded_pages: ctx.seededPages, warmup, idle, full,
-      rss: { after_connect: ctx.rssAfterConnect, idle_peak_sampled: idlePeak, full_peak_sampled: fullPeak, peak_sampled: overall.peak, samples: overall.samples, vm_hwm: readVmHwm() } });
+      rss: { after_connect: ctx.rssAfterConnect, idle_peak_sampled: idlePeak, full_peak_sampled: fullPeak, peak_sampled: overall.peak, samples: overall.samples, vm_hwm: readVmHwm() },
+      loop_lag_ms: { idle_max: idleLag, full_max: fullLag, max: overall.maxLagMs } });
     return 0;
   } finally { await disposePersistenceConsumer(engine); }
 }
@@ -361,6 +369,7 @@ function report(r: ReportInput): Record<string, unknown> {
     rss_mib: rss ? { after_connect: mib(rss.after_connect ?? null), idle_peak_sampled: mib(rss.idle_peak_sampled ?? null), full_peak_sampled: mib(rss.full_peak_sampled ?? null),
       peak_sampled: mib(rss.peak_sampled ?? null), vm_hwm: mib(rss.vm_hwm ?? null), samples: rss.samples ?? null,
       process: r.engineKind === 'pglite' ? 'measuring child; includes the in-process PGLite database' : 'measuring child; database server and proxy are other processes' } : null,
+    loop_lag_ms: (m as { loop_lag_ms?: unknown } | null)?.loop_lag_ms ?? null,
     breakdown_ms: { idle: breakdown(idle.map(t => t.timings_ms)), full: breakdown(full.map(t => t.timings_ms)) },
     connect_ms: m?.connect_ms ?? null,
     seeded_pages_seen_by_child: m?.seeded_pages ?? null,
@@ -381,6 +390,7 @@ function printSummary(doc: Record<string, unknown>): void {
     `idle tick:  ${s(doc.idle_tick_ms)}, idle fraction ${doc.idle_tick_idle_fraction ?? 'n/a'}, DB rows max ${doc.idle_tick_db_rows_max ?? 'n/a'}`,
     `full round: ${s(doc.full_round_ms)}`,
     `peak RSS: sampled ${rss?.peak_sampled ?? 'n/a'} MiB, VmHWM ${rss?.vm_hwm ?? 'n/a'} MiB`,
+    `event-loop lag: ${JSON.stringify(doc.loop_lag_ms ?? null)} ms`,
     `phases: ${JSON.stringify(doc.phases)}`,
   ];
   for (const [kind, table] of Object.entries(doc.breakdown_ms as Record<string, Record<string, unknown>>))

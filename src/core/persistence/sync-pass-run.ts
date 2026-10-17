@@ -30,7 +30,8 @@ import type { PassStamp, SyncCursorOptions, SyncIntent } from './sync-prepare.ts
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
-import { passIdleProbe, readShadowLevel, workingIdleChange, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
+import { passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
+import { loopYield } from './sync-yield.ts';
 import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
 import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, type PassEntry } from './sync-pass-batch.ts';
@@ -501,12 +502,17 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (!('entries' in drained)) return await stop(drained);
       }
     }
+    // The pass's level cache: its next round at the same commit reuses the tree; it dies with the pass.
+    const levelCache: PassLevelCache = {};
     for (let round = 1; round <= PASS_MAX_ROUNDS; round++) {
       assertActive();
       value.telemetry.round = round;
       input.onLevelRead(head);
+      // The previous round's level is done with: dropped before the next one is read, so a large source holds one level, not two.
+      lastLevel = null;
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
-        pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed() } });
+        pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
+          cache: levelCache } });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is
@@ -528,7 +534,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
       lastMismatch = mismatch;
       const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
+      const step = loopYield();
       for (const entry of level.paths) {
+        if (step.due()) await step.pause();
         const r = entry.result;
         if (r.settled) continue;
         if (r.inFlight) { inFlight.push(entry); continue; }

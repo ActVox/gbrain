@@ -32,6 +32,7 @@ import { VERSION } from '../../version.ts';
 import type { BrainEngine } from '../engine.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { massReconcileAllowed, planReconcileDeletes } from '../sync-reconcile.ts';
+import { loopYield } from './sync-yield.ts';
 import { admitKeepDbReconcile, freezeKeepDbReconcile, releaseMatchedDriftSkips } from '../repair/keep-db-policy.ts';
 import type { SyncProcessingOptions } from './sync-authority.ts';
 import type { SyncClassified } from './sync-classify.ts';
@@ -130,7 +131,11 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
   await adoptRecords(engine, level, state);
   await sweepLegacy(engine, level, input, state);
   await admitKeepDb(engine, level, input, state);
-  for (const entry of level.paths) if (entry.result.cls === 'matched' && entry.slug) state.matchedSlugs.push(entry.slug);
+  const step = loopYield();
+  for (const entry of level.paths) {
+    if (step.due()) await step.pause();
+    if (entry.result.cls === 'matched' && entry.slug) state.matchedSlugs.push(entry.slug);
+  }
   summarizeRound(level, state);
 }
 
@@ -184,10 +189,13 @@ async function readStoredMarker(exec: Pick<BrainEngine, 'executeRaw'>, level: Sh
 /** Design §2.6: the round's deletes through #2828's valve; a trip withholds them all under one source-level record. */
 async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   const deletes = level.paths.filter(entry => entry.result.action === 'delete' && !entry.result.settled && !entry.result.inFlight);
-  const deleting = new Set(deletes.map(entry => entry.path));
-  const live = level.paths.filter(entry => entry.state.page?.live === true && entry.slug);
-  const plan = planReconcileDeletes(live.map(entry => ({ slug: entry.slug!, source_path: entry.path })), live.filter(entry => !deleting.has(entry.path)).map(entry => entry.path), () => true);
-  const tripped = deletes.length > 0 && plan.massDelete && (input.remote || !massReconcileAllowed());
+  // The valve plans over every live page only when the round deletes something (no delete never trips it).
+  const plan = deletes.length ? (() => {
+    const deleting = new Set(deletes.map(entry => entry.path));
+    const live = level.paths.filter(entry => entry.state.page?.live === true && entry.slug);
+    return planReconcileDeletes(live.map(entry => ({ slug: entry.slug!, source_path: entry.path })), live.filter(entry => !deleting.has(entry.path)).map(entry => entry.path), () => true);
+  })() : null;
+  const tripped = !!plan?.massDelete && (input.remote || !massReconcileAllowed());
   state.withheldCount = tripped ? deletes.length : 0;
   if (tripped) {
     for (const entry of deletes) settleAs(entry, { settled: true, action: 'none', withheld: true });
@@ -196,7 +204,7 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
     await engine.transaction(async tx => {
       await assertDrainLease(tx, level.sourceId);
       state.withheld = await writeDeletesWithheld(tx, { sourceId: level.sourceId, incarnation: level.incarnation, target: level.head, count: deletes.length,
-        reconcilable: plan.reconcilableCount, ratio: plan.reconcilableCount ? deletes.length / plan.reconcilableCount : 1, set_hash: deleteSetHash(paths), samples: paths });
+        reconcilable: plan!.reconcilableCount, ratio: plan!.reconcilableCount ? deletes.length / plan!.reconcilableCount : 1, set_hash: deleteSetHash(paths), samples: paths });
     });
     return;
   }
