@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.285.0] - 2026-10-17
+
+**Doctor can now find page edits that an earlier sync silently overwrote, and one repair puts them back (#6712).** Between v0.60.255.0 and v0.60.279.0, a plain incremental `gbrain sync` could publish a committed file edit over a page that had also been edited in the database (for example a `put_page` with `sync.write_through` off). v0.60.279.0 stopped new damage. This release finds the pages that were already hit, using records gbrain keeps permanently, and restores them with a preview first.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| a database edit an earlier sync overwrote | survived only as an old page version; nothing pointed at it | doctor `sync_overwritten_db_edits` warns and names the page; `gbrain repair overwritten-edits` previews a diff |
+| applying the restore | no command | the page goes back to the edit through a database-only, revision-bound revert; the committed file is held `file_drift` when it differs, so sync never publishes it over the edit again |
+| applying on a host that doesn't own the checkout | no command | the page is restored and the outcome is `restored_file_unheld`, naming the file-drift command to run on the owner host |
+| a page whose history has no recorded writer, or a segmented page | not detectable | not reported, or reported `unknown`, and never restored automatically |
+
+### What to do after upgrading
+
+Nothing runs on upgrade. Run `gbrain doctor --only sync_overwritten_db_edits --json`. If it warns, preview with `gbrain repair overwritten-edits --source <id>` (narrow with `--slug <slug>`), decide with the user, then apply with `--apply --expect <hash>` on the host that owns the checkout. Then resolve the `file_drift` hold it leaves, using `gbrain repair file-drift --source <id> --slug <slug>`.
+
+### Itemized changes
+
+- `persistence/overwritten-edits.ts` scans `page_versions` for a revision whose writer was a database-only page write and whose archiver was a managed-sync import that changed the body. It reads only receipt columns that compaction keeps, and caps the scan at 500 candidates per source.
+- The doctor check `sync_overwritten_db_edits` (BRAIN) warns only on high-confidence findings and counts `unknown` separately.
+- The repair kind `overwritten-edits` is explicit-only and preview-bound. It rechecks the revision and the version digest, restores through `revert_version` with `databaseOnly: 'overwrite_restore'`, writes the `file_drift` hold on the owner host, and replays an apply that was interrupted after the restore committed.
+- Tests: `test/overwritten-edits-6712.test.ts` runs on PGLite and Postgres: detect and restore, no false flag on normal sync history, a page that moved since the preview is refused, an interrupted apply replays, and a non-owner host reports the file left unheld. The doctor goldens gain the new row.
+
 ## [0.60.284.0] - 2026-10-17
 
 **Your agent can now finish a rename that sync split in two, find people and companies in every source it can read, and stop chasing warnings that only describe the past (fix wave 18).** When you move a note and rewrite it in the same commit, sync sometimes cannot tell it was a move, so it keeps the old page aside and starts a new one. Until now the only way out was to bring the old page back. Now one command, run after you agree, moves the old page's history, links and facts onto the new name, or closes the pair and lets the old page go.
