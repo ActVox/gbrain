@@ -419,8 +419,8 @@ export function projectionJobProbes(opts: { media?: boolean } = {}): string {
   const inline = "p.page_kind IN ('markdown','code') AND p.body_storage IS DISTINCT FROM 'segmented'";
   return `CROSS JOIN LATERAL (SELECT s.id FROM sources s
       WHERE s.incarnation=j.source_incarnation AND NOT s.archived OFFSET 0) s
-    CROSS JOIN LATERAL (SELECT p.page_kind FROM (SELECT p.id FROM pages p WHERE p.source_id=s.id AND p.slug=j.slug OFFSET 0) k
-      JOIN pages p ON p.id=k.id WHERE p.deleted_at IS NULL AND ${opts.media ? `((${inline}) OR ${sealableImageSql('p')})` : inline}) p`;
+    CROSS JOIN LATERAL (SELECT p.page_kind FROM pages p WHERE p.id=(SELECT k.id FROM pages k WHERE k.source_id=s.id AND k.slug=j.slug)
+      AND p.deleted_at IS NULL AND ${opts.media ? `((${inline}) OR ${sealableImageSql('p')})` : inline} OFFSET 0) p`;
 }
 const PROJECTION_JOB_PROBES = projectionJobProbes();
 
