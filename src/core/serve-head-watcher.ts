@@ -20,8 +20,10 @@
  * flipping `sync.on_commit` needs no restart) and the source list (every 60 s while on). With the flag off nothing
  * else runs: no git call, no sync. It never writes into the checkout or `.git` (`GIT_OPTIONAL_LOCKS=0`). Every error
  * is caught and logged once per distinct message; the loop never throws into serve. serve.ts starts it beside the
- * movement watch (installResidentTickers) and stops it before shutdownDelegatedSync; serve-http.ts (runServeHttp)
- * starts it beside the movement watch and stops it on the same shutdown path.
+ * movement watch (installResidentTickers) and awaits its stop before shutdownDelegatedSync; serve-http.ts (runServeHttp)
+ * starts it beside the movement watch and awaits its stop on the same shutdown path, before the engine disconnects.
+ * `stop()` re-checks after every await, so discovery or a git read in flight when it lands installs nothing and runs
+ * no further git or database call; its promise settles once that step has (bounded by STOP_SETTLE_MS).
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, watch as fsWatch } from 'node:fs';
@@ -37,6 +39,8 @@ export const HEAD_FLAG_EVERY_MS = 30_000;
 export const HEAD_LIST_EVERY_MS = 60_000;
 /** Resumable syncs in a row the watcher resumes on its own before it leaves the source to the next move or cron. */
 export const MAX_RESUMES = 3;
+/** How long `stop()` waits for an in-flight step before it resolves anyway (inside the stdio serve's 5 s cleanup deadline). */
+export const STOP_SETTLE_MS = 3_000;
 const NUDGE_MS = 250;
 const LOG_ONCE_CAP = 200;
 
@@ -66,7 +70,8 @@ export interface ServeHeadWatcherOptions {
   watch?: (gitDir: string, onChange: () => void) => (() => void) | null;
 }
 
-export interface ServeHeadWatcher { tick(): Promise<void>; stop(): void; readonly enabled: boolean }
+/** `stop()` stops polling at once and resolves when the in-flight step has settled (at most STOP_SETTLE_MS); await it before the engine disconnects. */
+export interface ServeHeadWatcher { tick(): Promise<void>; stop(): Promise<void>; readonly enabled: boolean }
 
 interface SourceState extends WatchedSource { head: string | null; movedAt: number | null; synced: string | null; resumes: number }
 
@@ -192,7 +197,7 @@ export function startServeHeadWatcher(engine: BrainEngine, opts: ServeHeadWatche
 
   const refreshSources = async () => {
     const listed = await guard('listing managed sources', d.listSources, null);
-    if (!listed) return;
+    if (!listed || stopped) return;
     const seen = new Set<string>();
     for (const s of listed) {
       seen.add(s.sourceId);
@@ -206,6 +211,7 @@ export function startServeHeadWatcher(engine: BrainEngine, opts: ServeHeadWatche
     for (const dir of dirs) {
       if (watchers.has(dir)) continue;
       const close = await guard(`watching ${dir}`, async () => d.watch(dir, nudge), null);
+      if (close && stopped) { try { close(); } catch { /* best effort */ } return; }
       if (close) watchers.set(dir, close);
     }
   };
@@ -237,6 +243,7 @@ export function startServeHeadWatcher(engine: BrainEngine, opts: ServeHeadWatche
     if (t - flagReadAt >= HEAD_FLAG_EVERY_MS) {
       flagReadAt = t;
       const on = await guard('reading sync.on_commit', d.readFlag, enabled);
+      if (stopped) return;
       if (on !== enabled) {
         enabled = on;
         listedAt = -Infinity;
@@ -248,6 +255,7 @@ export function startServeHeadWatcher(engine: BrainEngine, opts: ServeHeadWatche
     if (t - listedAt >= HEAD_LIST_EVERY_MS) { listedAt = t; await refreshSources(); }
     const heads = new Map<string, string | null>();
     for (const s of sources.values()) {
+      if (stopped) return;
       if (!heads.has(s.root)) heads.set(s.root, await guard(`reading HEAD in ${s.root}`, () => d.revParse(s.root), null));
       const head = heads.get(s.root) ?? null;
       if (head && head !== s.head) { s.head = head; s.movedAt = t; armFire(debounceMs); }
@@ -258,23 +266,31 @@ export function startServeHeadWatcher(engine: BrainEngine, opts: ServeHeadWatche
       settle(job, st);
     }
     if (stopped) return;
-    const due = [...sources.values()].find(s => s.head && s.head !== s.synced && (s.movedAt === null || now() - s.movedAt >= debounceMs));
-    if (!due || await d.syncRunning()) return;
-    const synced = await guard(`reading the last synced commit of ${due.sourceId}`, () => d.lastCommit(due.sourceId), null);
-    if (synced && synced === due.head) { due.synced = synced; due.resumes = 0; return; }
-    if (await guard(`reading the drain lease of ${due.sourceId}`, () => d.drainHeld(due.sourceId), true)) return;
-    if (stopped) return;
-    const head = due.head!;
-    const start = await guard(`starting a sync of ${due.sourceId}`, () => d.startSync(due.sourceId), null);
-    if (!start) { due.synced = head; return; }
-    if ('busy' in start) return;
-    if ('refused' in start) {
-      logOnce(`refused\u0000${due.sourceId}\u0000${start.refused}`, `${due.sourceId}: the serve refused the sync: ${start.refused} (not retried until HEAD moves)`);
-      due.synced = head;
+    // Every due source in order: one whose drain lease is held or whose last_commit already covers HEAD is skipped, so a
+    // long sync of one source never starves another; at most one start per step (global single flight on syncRunning).
+    const due = [...sources.values()].filter(s => s.head && s.head !== s.synced && (s.movedAt === null || now() - s.movedAt >= debounceMs));
+    if (!due.length || await d.syncRunning()) return;
+    for (const s of due) {
+      if (stopped) return;
+      const synced = await guard(`reading the last synced commit of ${s.sourceId}`, () => d.lastCommit(s.sourceId), null);
+      if (stopped) return;
+      if (synced && synced === s.head) { s.synced = synced; s.resumes = 0; continue; }
+      const held = await guard(`reading the drain lease of ${s.sourceId}`, () => d.drainHeld(s.sourceId), true);
+      if (stopped) return;
+      if (held) continue;
+      const head = s.head!;
+      const start = await guard(`starting a sync of ${s.sourceId}`, () => d.startSync(s.sourceId), null);
+      if (!start) { s.synced = head; return; }
+      if ('busy' in start) return;
+      if ('refused' in start) {
+        logOnce(`refused\u0000${s.sourceId}\u0000${start.refused}`, `${s.sourceId}: the serve refused the sync: ${start.refused} (not retried until HEAD moves)`);
+        s.synced = head;
+        return;
+      }
+      job = { id: start.jobId, sourceId: s.sourceId, head };
+      log(`${s.sourceId}: HEAD moved to ${short(head)} (last synced ${short(s.synced)}); started managed sync job ${start.jobId}`);
       return;
     }
-    job = { id: start.jobId, sourceId: due.sourceId, head };
-    log(`${due.sourceId}: HEAD moved to ${short(head)} (last synced ${short(due.synced)}); started managed sync job ${start.jobId}`);
   };
 
   const tick = (): Promise<void> => {
@@ -293,12 +309,18 @@ export function startServeHeadWatcher(engine: BrainEngine, opts: ServeHeadWatche
   return {
     tick,
     get enabled() { return enabled; },
-    stop: () => {
-      if (stopped) return;
-      stopped = true;
-      (opts.clearInterval ?? ((h: unknown) => clearInterval(h as ReturnType<typeof setInterval>)))(interval);
-      if (fireTimer !== null) clearTimer(fireTimer);
-      if (nudgeTimer !== null) clearTimer(nudgeTimer);
+    stop: async () => {
+      if (!stopped) {
+        stopped = true;
+        (opts.clearInterval ?? ((h: unknown) => clearInterval(h as ReturnType<typeof setInterval>)))(interval);
+        if (fireTimer !== null) clearTimer(fireTimer);
+        if (nudgeTimer !== null) clearTimer(nudgeTimer);
+        closeWatchers();
+      }
+      if (!inflight) return;
+      let bound: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([inflight, new Promise<void>(resolve => { bound = setTimeout(resolve, STOP_SETTLE_MS); bound.unref?.(); })]);
+      clearTimeout(bound);
       closeWatchers();
     },
   };

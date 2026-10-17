@@ -917,7 +917,7 @@ ${bootstrapFromEnv
   const { startServeHeadWatcher } = await import('../core/serve-head-watcher.ts');
   const headWatcher = startServeHeadWatcher(engine, { log: (line) => console.error(line) });
   const deregisterEngineCleanup = registerCleanup('pglite-engine-disconnect', async () => {
-    headWatcher.stop();
+    await headWatcher.stop();
     movementWatch.stop();
     await factsDrain.stop();
     await engine.disconnect();
@@ -925,7 +925,7 @@ ${bootstrapFromEnv
   try {
     await waitForHttpServerLifecycle(httpServer);
   } finally {
-    headWatcher.stop();
+    await headWatcher.stop();
     movementWatch.stop();
     await factsDrain.stop();
     // Close the IPC listener + reap the socket file on orderly shutdown

@@ -6,7 +6,9 @@
  *   - a commit during the watcher's own sync starts exactly one follow-up once that sync ends;
  *   - while another sync runs or another process holds the drain lease, the move waits and fires afterwards;
  *   - a resumable stop is resumed up to MAX_RESUMES times, then left to the next move;
- *   - errors never leave the loop and are logged once per distinct message; stop() halts polling.
+ *   - a source whose drain lease is held is skipped, so another due source still starts (no starvation);
+ *   - errors never leave the loop and are logged once per distinct message; stop() halts polling, and a stop that lands
+ *     while discovery is awaiting leaves no watcher open and no git call behind; its promise settles the in-flight step.
  */
 import { describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -191,6 +193,61 @@ describe('serve HEAD watcher', () => {
     h.s.head = B; h.advance(10_000);
     await h.w.tick();
     expect(h.s.git).toBe(git);
+    expect(h.s.starts).toEqual([]);
+  });
+
+  test('a source whose drain lease is held does not starve another due source; it starts once its lease is free', async () => {
+    const held = new Set(['acme-example']);
+    const starts: string[] = [];
+    const h = harness({
+      listSources: async () => ['acme-example', 'alice-example'].map(sourceId => ({ sourceId, root: `/brains/${sourceId}`, gitDir: null, lastCommit: A })),
+      drainHeld: async (id) => held.has(id),
+      startSync: async (id) => { starts.push(id); h.s.jobs.set(`job-${id}`, { state: 'running' }); return { jobId: `job-${id}` }; },
+    }, { head: B });
+    for (let i = 0; i < 3; i++) { await h.w.tick(); h.advance(3000); }
+    expect(starts).toEqual(['alice-example']);
+    held.delete('acme-example');
+    h.finish('job-alice-example');
+    await h.w.tick();
+    expect(starts).toEqual(['alice-example', 'acme-example']);
+  });
+
+  test('a source whose last_commit already covers HEAD is skipped for the next due one', async () => {
+    const starts: string[] = [];
+    const h = harness({
+      listSources: async () => ['acme-example', 'alice-example'].map(sourceId => ({ sourceId, root: `/brains/${sourceId}`, gitDir: null, lastCommit: A })),
+      lastCommit: async (id) => id === 'acme-example' ? B : A,
+      startSync: async (id) => { starts.push(id); return { jobId: `job-${id}` }; },
+      jobStatus: () => ({ state: 'running' }),
+    }, { head: B });
+    await h.w.tick();
+    h.advance(3000);
+    await h.w.tick();
+    expect(starts).toEqual(['alice-example']);
+  });
+
+  test('stop() while discovery awaits: no watcher stays open, no git call runs, and stop() settles the in-flight step', async () => {
+    let release!: (rows: Array<{ sourceId: string; root: string; gitDir: string | null; lastCommit: string | null }>) => void;
+    let entered!: () => void;
+    const listed = new Promise<Parameters<typeof release>[0]>(resolve => { release = resolve; });
+    const entry = new Promise<void>(resolve => { entered = resolve; });
+    let open = 0;
+    const h = harness({
+      listSources: async () => { entered(); return listed; },
+      watch: () => { open++; return () => { open--; }; },
+    }, { head: B });
+    const flight = h.w.tick();
+    await entry;
+    let settled = false;
+    const stopping = h.w.stop().then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release([{ sourceId: 'acme-example', root: '/brains/acme-example', gitDir: '/brains/acme-example/.git', lastCommit: A }]);
+    await stopping;
+    await flight;
+    expect(settled).toBe(true);
+    expect(open).toBe(0);
+    expect(h.s.git).toBe(0);
     expect(h.s.starts).toEqual([]);
   });
 });

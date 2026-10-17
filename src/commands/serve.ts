@@ -603,7 +603,7 @@ function installResidentTickers(engine: BrainEngine, opts: ServeOptions, deps: S
   // The watch keeps its own unref'd timer: the injected lifecycle timers are the parent watchdog's and the idle sweep's, which tests count.
   const movementWatch: MovementWatch = startMovementWatch(engine, { log: deps.log });
   const headWatcher = startServeHeadWatcher(engine, { log: deps.log });
-  return { stop: async () => { headWatcher.stop(); movementWatch.stop(); await factsDrain?.stop(); } };
+  return { stop: async () => { const settled = headWatcher.stop(); movementWatch.stop(); await settled; await factsDrain?.stop(); } };
 }
 
 function installStdioLifecycle(
