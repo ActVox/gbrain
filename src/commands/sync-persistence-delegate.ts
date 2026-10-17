@@ -66,8 +66,9 @@ export function delegatedProgressWindowMs(args:string[],env:Record<string,string
 
 /**
  * The client-side stop for a delegated sync. Past `timeoutMs` a progress-aware
- * deadline extends to one progress window after the last slice that advanced
- * the cursor, and stops only after a full window without progress.
+ * deadline extends to one progress window after the last slice that made
+ * progress (a company cursor that advanced, or a pass that settled paths), and
+ * stops only after a full window without progress.
  */
 export class DelegatedSyncDeadline {
   readonly stop=new AbortController();
