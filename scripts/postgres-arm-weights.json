@@ -160,7 +160,6 @@
   "test/large-pages/segmented-versions.test.ts": 5041,
   "test/large-pages/segmented-withdrawn-fence-delete.test.ts": 53132,
   "test/large-pages/streamed-import-drift.test.ts": 25670,
-  "test/large-pages/v251-master-reader-compat.test.ts": 7087,
   "test/large-pages/v252-master-reader-compat.test.ts": 5966,
   "test/link-cross-source.test.ts": 15094,
   "test/link-preparation-shared-index.test.ts": 11370,
