@@ -106,7 +106,8 @@ function fenceAutoSentence(auto: FenceAutoRepair | undefined): string {
 }
 
 /**
- * Sources whose unfinished managed sync cursor is stopped on a failed content refusal (fixed by the next sync, which converts it in place).
+ * Sources whose unfinished managed sync cursor, or (#6712 PR 4b, design v3.2 §3.7) whose newest pass ended `blocked`, is stopped on a
+ * failed content refusal (fixed by the next sync, which converts it in place).
  * `fence` marks a source whose refusal is a facts or takes fence (#6188); it is held and repaired by `gbrain repair fences`, not by frontmatter repair.
  */
 export async function contentBlockedSources(engine: BrainEngine): Promise<Array<{ source_id: string; fence: boolean }>> {
@@ -114,6 +115,9 @@ export async function contentBlockedSources(engine: BrainEngine): Promise<Array<
       r.error_code, r.error_message, r.error_detail FROM op_checkpoints c JOIN persistence_requests r ON r.request_id::text = c.completed_keys->0->'pending'->>'requestId'
       AND r.source_id = c.completed_keys->0->>'sourceId'
     WHERE c.op = 'managed-sync' AND COALESCE(c.completed_keys->0->>'done','false') <> 'true' AND r.state IN ('failed','conflict','cancelled')
+    UNION ALL SELECT c.completed_keys->0->>'source_id', r.error_code, r.error_message, r.error_detail FROM op_checkpoints c
+      JOIN persistence_requests r ON r.request_id::text = c.completed_keys->0->'obligations'->'blocked'->>'request_id' AND r.source_id = c.completed_keys->0->>'source_id'
+    WHERE c.op = 'managed-sync-pass' AND c.completed_keys->0->'telemetry'->>'outcome' = 'blocked' AND r.state IN ('failed','conflict','cancelled')
     ORDER BY 1`).catch(() => []);
   const out = new Map<string, boolean>();
   for (const row of rows) {

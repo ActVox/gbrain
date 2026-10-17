@@ -244,7 +244,10 @@ test('a legacy stored-row receipt holds the same bytes from the receipt; a compa
 
   // ...but an arbitrary invalid_params receipt, compacted or not, is never a fence hold: once the file is clean, the next
   // plain sync retries it (#6712 PR 3, L7: no --retry-failed) and nothing is held or converted.
-  for (const compacted of [false, true]) {
+  // #6712 PR 4b (design v3.2 §3.3, §6): only a pass at the configured selection (its mode included) stamps last_commit, so the
+  // brain is configured for working-tree sync while these working-tree runs check the first sync.
+  await engine.setConfig('sync.include_working_tree', 'true');
+  try { for (const compacted of [false, true]) {
     await engine.setConfig('sync.holds', 'fail');
     const u = await source(engine, { 'notes/ok.md': note('Ok') });
     u.write('notes/draft.md', MALFORMED);
@@ -259,7 +262,7 @@ test('a legacy stored-row receipt holds the same bytes from the receipt; a compa
     expect(retried.held ?? []).toEqual([]);
     expect(retried.converted_from_failed ?? []).not.toContain(arbitrary!.request_id);
     expect(await u.holds()).toEqual([]);
-  }
+  } } finally { await engine.unsetConfig('sync.include_working_tree'); }
 }), 240_000);
 
 test('dry run lists the fence hold a real run would write and writes nothing', () => each(async engine => {
@@ -392,8 +395,10 @@ test('TE1: a stored take whose prior fence did not parse is updated by its norma
     await tx.executeRaw("UPDATE pages SET compiled_truth=$3 WHERE source_id=$1 AND slug=$2", [s.id, 'people/probe', bad.split('---\n').slice(2).join('---\n')]);
     await tx.executeRaw("INSERT INTO takes(page_id,row_num,claim,kind,holder,weight) SELECT id,2,'Second take','assessment','brain',0.7 FROM pages WHERE source_id=$1 AND slug=$2", [s.id, 'people/probe']);
   }, TEST_WRITE_ATTRIBUTION));
-  // That older writer recorded no import provenance (a recorded database-only edit is held #6712 file_drift instead).
-  await engine.executeRaw("DELETE FROM op_checkpoints WHERE op=$1 AND completed_keys->0->>'page_id'=(SELECT id::text FROM pages WHERE source_id=$2 AND slug=$3)", [SYNC_IMPORT_PROVENANCE_OP, s.id, 'people/probe']);
+  // That older writer was a sync import that recorded its import at the revision it wrote. #6712 PR 4b (design v3.2 §2.3 row 19,
+  // §2.7): an unrecorded database-only edit, followed by a file edit, is a Decision (file_drift), never imported over.
+  await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,revision}',to_jsonb((SELECT knowledge_revision::text FROM pages WHERE source_id=$2 AND slug=$3)))
+    WHERE op=$1 AND completed_keys->0->>'page_id'=(SELECT id::text FROM pages WHERE source_id=$2 AND slug=$3)`, [SYNC_IMPORT_PROVENANCE_OP, s.id, 'people/probe']);
   s.write('people/probe.md', bad); commit(s.root, 'invented kind');
   const result = await s.sync();
   expect(result).toMatchObject({ status: 'synced', fences_normalized: { count: 1, by_class: { kind_map: 1 } } });

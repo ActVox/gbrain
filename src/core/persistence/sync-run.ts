@@ -148,7 +148,9 @@ export interface Cursor extends SyncDiscovery { runId: string; index: number; au
    */
   passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[];
   /** #5751 on a pass: the batch indexes a legacy kernel waiver (`contextual_mode`, `canonical_file_differs`) passed; they record no import, so the pass settles them for itself. */
-  legacyWaived?: number[]; }
+  legacyWaived?: number[];
+  /** #6712 PR 4b: a pass's replay of the request its last blocked pass stopped on carries that pass's id, under which the stop was recorded. */
+  replayOf?: string; }
 export interface CursorProgress { startedAt: number; startIndex: number; lastAt: number; lastIndex: number }
 /**
  * #6278 (1.5): the breaker state a run carries in its cursor. `stalled` lists the `preparation_stalled` receipts this run
@@ -645,6 +647,11 @@ async function holdFailedFenceRequest(engine: BrainEngine, cursor: Cursor, key: 
   const fault = stalled || fence ? null : await receiptPageFaultHold(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, entry, pending, done });
   const observedAt = run.observedAt ?? new Date().toISOString();
   if (!stalled && !fence && !fault && page && fileChangedAfterAdmission(done)) return deferChangedEntry(engine, { cursor, key, pending, assertActive, observedAt, waitMs, base });
+  // #6188 on a pass's replay: a compacted fence-family receipt (its message gone) converts only when the re-screen of the current bytes holds them.
+  if (!stalled && !fence && !fault && cursor.replayOf && done.compacted === true && done.error_message == null && ['invalid_params', 'take_row_collision'].includes(done.error_code ?? '')) {
+    const again = await freezeEntry(engine, { ...base, index: indexOf(cursor, pending) }, key, assertActive, run);
+    return 'hold' in again ? holdUnderGate(engine, { cursor, key, pending, hold: again.hold, assertActive, observedAt, waitMs, base }) : null;
+  }
   if (!stalled && !fence && !fault) return null;
   const hold = stalled ? preparationStalledHold(entry, pending.slug, pending.pageId, done, pending.intent.content ?? null, pending.intent.blobOid, resumeArgsOf(cursor, run))
     : fence ? prepareTimeFenceHold(entry, pending.slug, pending.pageId, fence, pending.intent.content!, pending.intent.blobOid) : fault!;
@@ -745,7 +752,7 @@ async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor;
   const revived = await reviveCheckpoint(engine, input);
   if (revived) { input.assertActive(); return { cursor: revived }; }
   const fault = receiptClass(done);
-  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, cursor.failureKey ?? key, cursor.runId))) {
+  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, cursor.failureKey ?? key, cursor.replayOf ?? cursor.runId))) {
     const refrozen = await refreezeInPlace(engine, input);
     if (refrozen) { input.assertActive(); return { cursor: refrozen }; }
   }

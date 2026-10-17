@@ -23,7 +23,7 @@ import type { Cursor, RetryWait } from './sync-run.ts';
 import { getWriteRequestById } from './journal.ts';
 import type { WriteRequest } from './model.ts';
 import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
-import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
+import { fileUnchangedSinceFreeze, recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
 import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
@@ -490,20 +490,32 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
 
   try {
     // A page refusal the last pass stopped on replays, with no new request, while what decided it is unchanged (#6712 PR 3, L7).
-    // Under the hold policy the next pass re-admits it instead, and its refusal settles as a hold.
+    // Under the hold policy the replay settles that receipt as a hold in place (converted_from_failed, as the cursor's resume
+    // did), so no failed receipt is left behind a newer request for the same bytes.
     const blocked = obligations.blocked;
     delete obligations.blocked;
-    if (blocked && (await readSyncHoldPolicy(engine)).mode === 'fail') {
+    if (blocked) {
       const [row] = await engine.executeRaw<{ id: string }>('SELECT id FROM persistence_requests WHERE source_id=$1 AND request_id=$2', [sourceId, blocked.request_id]);
       const failed = row ? await getWriteRequestById(engine, row.id) : null;
       const intent = failed?.intent as unknown as SyncIntent | null | undefined;
-      const recorded = failed && intent && ['failed', 'conflict', 'cancelled'].includes(failed.state) ? await recordedStop(engine, passFingerprint(sourceId, incarnation), blocked.pass_id) : null;
+      const stopped = failed && intent && ['failed', 'conflict', 'cancelled'].includes(failed.state) ? intent : null;
+      const holds = stopped ? (await readSyncHoldPolicy(engine)).mode !== 'fail' : false;
+      // sync.holds=fail replays while what refused it is unchanged; under the hold policy, while the file has the bytes it froze
+      // (a legacy or compacted receipt included): its settle holds, re-freezes or records it, and the receipt is converted.
+      const recorded = stopped && !holds ? await recordedStop(engine, passFingerprint(sourceId, incarnation), blocked.pass_id) : null;
       assertActive();
-      if (failed && intent && recorded && replaysUnchangedRefusal(failed, recorded, { root: context.root, intent, target: intent.target ?? '', head: () => head })) {
+      if (failed && stopped && (holds ? fileUnchangedSinceFreeze(context.root, stopped) : recorded && replaysUnchangedRefusal(failed, recorded, { root: context.root, intent: stopped, target: stopped.target ?? '', head: () => head }))) {
+        const intent = stopped;
         obligations.blocked = blocked;
-        const replay: Cursor = { ...batchCursor([]), runId: blocked.pass_id, pending: { requestId: failed.request_id, slug: failed.slug, pageId: failed.page_id, intent } };
+        // The refused entry rides the replay, so a hold settles that receipt where the policy holds.
+        const refused: PassEntry[] = intent.path ? [{ path: intent.path, sourcePath: intent.sourcePath ?? intent.path, action: intent.kind === 'managed_sync_delete' ? 'delete' : 'import',
+          working: intent.working === true, slug: failed.slug, pageId: failed.page_id, revision: intent.expected_revision == null ? null : String(intent.expected_revision), level: intent.level ?? null }] : [];
+        // A replay that stops again is recorded under the stopped pass's run, which the next pass's replay check reads; one the
+        // hold policy settles is this pass's hold.
+        const replay: Cursor = { ...batchCursor(refused), runId: holds ? passId : blocked.pass_id, replayOf: blocked.pass_id, pending: { requestId: failed.request_id, slug: failed.slug, pageId: failed.page_id, intent } };
         const drained = await input.drainBatch(`${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`, replay, sliceBase);
         if (!('entries' in drained)) return await stop(drained);
+        delete obligations.blocked;
       }
     }
     for (let round = 1; round <= PASS_MAX_ROUNDS; round++) {
