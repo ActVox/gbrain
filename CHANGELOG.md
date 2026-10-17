@@ -27,6 +27,8 @@ identifiers and attribution are available in the pre-removal Git revision
 - The batch cache lives in process memory in `src/core/persistence/page-purge.ts` (`sweepForPurge`); the journal still never stores claims. No schema change and no compaction default changed.
 - `readOutstandingRoom` (`src/core/persistence/journal.ts`) reads the tighter of the principal's and the brain's outstanding caps.
 - Tests: `test/page-purge-batch-sweep-6884.test.ts` (PGLite and Postgres), `test/purge-deleted-capacity-6884.test.ts`.
+- Crash robot (#6896): `consumer:claiming` fires before every claim attempt, idle ticks included, so its pass count followed wall-clock time and a fault picked from the count role's total could go unreached (`competing_writers_one_page consumer:claiming#19`). `seamCounter` (`scripts/persistence/crash-robot.ts`) now counts that seam in claim epochs (distinct requests prepared so far); the unreached-fault check is unchanged.
+- `scripts/postgres-arm-weights.json` re-mined from the latest runs, so the Postgres-arm shards stay under their 20-minute step limit.
 
 ## [0.60.280.0] - 2026-10-17
 
