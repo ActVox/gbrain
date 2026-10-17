@@ -34,7 +34,7 @@ import { confirmedSyncDelta } from '../sync-rename-identity.ts';
 import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParserFor,
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
-import { sameSyncOrigin, syncOriginPath } from './sync-origin.ts';
+import { sameSyncOrigin, selectOriginClaimant, syncOriginPath } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, workingChanged, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
@@ -70,7 +70,9 @@ const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
 /** One classified path of the shadow level. */
 export interface ShadowPath { path: string; slug: string | null; pageId: number | null; revision: string | null; state: SyncPathState; result: SyncClassified;
   /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
-  legacyPageless?: true }
+  legacyPageless?: true;
+  /** #6517 (`selectOriginClaimant`): several live pages, or no live page and several tombstones, record this origin. */
+  ambiguousOrigin?: { kind: 'several_live' | 'several_tombstones'; slugs: string[] } }
 
 export interface ShadowLevel {
   sourceId: string; incarnation: string; root: string; gitRoot: string; scope: string; slugMode: 'git-root' | 'source-root';
@@ -354,10 +356,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
 
   // The page claiming each origin: the live one first, else the newest tombstone.
   t = timer();
-  const byOrigin = new Map<string, PageRow>();
+  const byOrigin = new Map<string, PageRow>(), claimants = new Map<string, PageRow[]>();
   for (const row of pages) {
     if (isWindowsColonTarget(row.source_path)) continue;
     const key = gitPathOf(pageOrigin(row));
+    claimants.set(key, [...claimants.get(key) ?? [], row]);
     const prior = byOrigin.get(key);
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
@@ -499,7 +502,10 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     // Rows 1-10 precede row 11 and `matched` settles either way, so only the rest are Dp candidates (design v3.2 §2.1).
     const staged = mode === 'committed' && tree.has(path) && (index.get(path)?.oid !== tree.get(path)!.oid || (index.get(path)?.stage ?? 0) !== 0);
     if (mode === 'committed' && tree.has(path) && (!settledBeforeDirtiness.has(result.cls) || staged)) candidates.push(path);
-    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}) });
+    const claimed = claimants.get(path) ?? [];
+    const { ambiguous } = claimed.length > 1 ? selectOriginClaimant(claimed.map(page => ({ ...page, deleted_at: page.deleted ? true : null }))) : { ambiguous: null };
+    const ambiguousOrigin = ambiguous ? { kind: ambiguous, slugs: claimed.filter(page => ambiguous === 'several_tombstones' || !page.deleted).map(page => page.slug) } : undefined;
+    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}), ...(ambiguousOrigin ? { ambiguousOrigin } : {}) });
   }
   timings.classify = t();
   if (candidates.length) {

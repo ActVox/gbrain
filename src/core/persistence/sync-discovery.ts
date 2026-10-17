@@ -642,7 +642,7 @@ export function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string |
   try { return frontmatterIdentity(readSyncContent(discovery, entry)).id; } catch { return null; }
 }
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */
-function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {
+export function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {
   return opError('page_identity_changed', 'Several pages claim the same imported origin.',
     `Pages ${named.map(page => page.slug).join(', ')} in ${sourceId} all record ${sourcePath} as their origin; nothing was written. `
     + (ambiguous === 'several_live' ? `${sharedOriginExit(sourceId, named.map(page => page.slug))} Then` : 'Keep one, remove or re-point the others, then') + ` run gbrain sync --no-pull --source ${sourceId}.`,

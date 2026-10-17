@@ -25,7 +25,7 @@ import { getWriteRequestById } from './journal.ts';
 import type { WriteRequest } from './model.ts';
 import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
 import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
-import { adoptLegacyPage, assertTakeoverIdentity, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
+import { adoptLegacyPage, ambiguousOriginRefusal, assertTakeoverIdentity, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
@@ -560,6 +560,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (markersOwed() && !remote) {
         await writeLegacyMarkers(engine, level);
         value.obligations.legacy_markers_at = new Date().toISOString();
+      }
+      // #6517, as discovery refuses a claim: several pages record the origin of a path this pass would act on (before any hold).
+      const ambiguous = level.paths.find(entry => entry.ambiguousOrigin && !entry.result.settled && !entry.result.inFlight && entry.result.cls !== 'spelling');
+      if (ambiguous) {
+        await save('blocked', 'page_identity_changed');
+        throw ambiguousOriginRefusal(sourceId, entryPaths(level, ambiguous.path).sourcePath, ambiguous.ambiguousOrigin!.slugs.map(slug => ({ slug })), ambiguous.ambiguousOrigin!.kind);
       }
       await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions,
         grantPrefixes: remote ? authority.writer.slugPrefixes : null }, applied);
