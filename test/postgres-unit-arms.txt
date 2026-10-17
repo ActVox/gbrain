@@ -102,6 +102,7 @@ test/large-pages/managed-sync-streamed.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
 test/large-pages/pinned-segmented-reads.test.ts
+test/large-pages/projection-claim-ownership.test.ts
 test/large-pages/projection-demotion-race.test.ts
 test/large-pages/projection-parity.test.ts
 test/large-pages/publication-seal-bounded.test.ts
