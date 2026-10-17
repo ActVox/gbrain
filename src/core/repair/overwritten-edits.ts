@@ -105,7 +105,7 @@ export const overwrittenEditsRepair: RepairHandler = {
         listing: [...previews.map(edit => ({ item: `${edit.source_id}:${edit.slug}`, class: 'restore_database_edit',
           detail: `version ${edit.version_id} (${edit.db_operation} request ${edit.db_request_id}) was replaced by sync import ${edit.import_request_id}${edit.imported_at ? ` at ${edit.imported_at}` : ''}; restoring it changes +${edit.added}/-${edit.removed} line(s)${edit.earlier ? `; ${edit.earlier} earlier overwrite(s) of this page are not restored` : ''}` })),
         ...unknown.map(edit => ({ item: `${edit.source_id}:${edit.slug}`, class: 'unknown', detail: `${edit.reason}: version ${edit.version_id}, replaced by sync import ${edit.import_request_id}; not restored automatically` }))],
-        ...(approved.length ? { warnings: ['Each restore writes the database edit as a new page revision without touching the committed file; a file that then differs from the page is held file_drift until you pick a side with gbrain repair file-drift.'] } : {}),
+        ...(approved.length ? { warnings: ['Each restore writes the database edit as a new page revision without touching the committed file. Only the host that owns the source\'s checkout compares the file and holds it file_drift when it differs; pick a side later with gbrain repair file-drift. On any other host the restore still applies but the file is left unheld (outcome restored_file_unheld), so a later sync that imports a change to that file can publish it over the edit again; run the apply on the owner host, or afterwards run gbrain repair file-drift --source <id> --slug <slug> --prefer database there. No command writes only the hold.'] } : {}),
         details: { docs: DOCS, edits: previews, unknown: unknown.map(edit => ({ source_id: edit.source_id, slug: edit.slug, version_id: edit.version_id, reason: edit.reason })) } };
     }
     if (!opts.expect) {
@@ -140,6 +140,8 @@ export const overwrittenEditsRepair: RepairHandler = {
   },
 };
 
+const ownerHostCommand = (edit: Pick<ApprovedEdit, 'source_id' | 'slug'>) => `gbrain repair file-drift --source ${edit.source_id} --slug ${edit.slug} --prefer database`;
+
 const changed = (reason: string, detail: Record<string, unknown> = {}): RepairItemOutcome =>
   ({ applied: false, outcome: 'changed_since_preview', reason, detail: { ...detail, next: `run ${COMMAND} again for a new preview` } });
 
@@ -160,7 +162,10 @@ async function restoreEdit(ctx: OperationContext, entry: RepairItem, edit: Appro
     throw error;
   }
   const hold = await holdDivergentFile(engine, edit, requestId);
-  return { applied: true, outcome: hold.held ? 'restored_file_held' : 'restored', detail: { request_id: requestId, version_id: edit.version_id, ...(replayed ? { replayed } : {}), ...hold } };
+  const unheld = hold.why === 'checkout_not_on_this_host' || hold.why === 'file_over_read_bound';
+  return { applied: true, outcome: hold.held ? 'restored_file_held' : unheld ? 'restored_file_unheld' : 'restored',
+    detail: { request_id: requestId, version_id: edit.version_id, ...(replayed ? { replayed } : {}), ...hold,
+      ...(unheld ? { next: `the committed file was not compared or held; on the host that owns the checkout, preview ${ownerHostCommand(edit)} and apply it to write the restored edit to the file (no command writes only the hold)` } : {}) } };
 }
 
 /**

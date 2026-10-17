@@ -15,7 +15,10 @@
  *   database-only edit no import replaced;
  * - a page that moved after the preview is `changed_since_preview`: nothing is restored and no hold is written;
  * - an apply interrupted after its restore committed but before the hold was written replays the same request and
- *   writes the hold, instead of reporting the restored page as moved.
+ *   writes the hold, instead of reporting the restored page as moved;
+ * - on a host that does not own the checkout the restore applies but reports the file left unheld
+ *   (`restored_file_unheld`, `checkout_not_on_this_host`) with the owner host's command, and that command
+ *   (`gbrain repair file-drift --prefer database`, run once the host owns the checkout) writes the edit to the file.
  *
  * Doctor `sync_overwritten_db_edits` warns with the source's count and slugs for a high finding and is ok otherwise.
  *
@@ -41,6 +44,7 @@ import { overwrittenEditsEntry } from '../src/commands/doctor/checks/overwritten
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
+import { localHostId } from '../src/core/persistence/identity.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
@@ -178,5 +182,29 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(await bodyOf(engine, 'notes/a')).toContain('DBONLYMARKER');
     expect((await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE operation='revert_version'")).length).toBe(1);
     expect((await holdOf(engine, 'notes/a.md'))?.meta.page_revision).toBe(restored);
+  }, { setup, databaseUrl }), 180_000);
+
+  test('a restore on a host that does not own the checkout reports the file left unheld and names the owner host command', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await seedOverwrite(engine, ctx, root, 'notes/a');
+    const preview = await repair(engine, { slugs: ['notes/a'] });
+    expect(preview.warnings?.join(' ')).toContain("Only the host that owns the source's checkout compares the file");
+    await engine.executeRaw('UPDATE persistence_worktrees SET owner_host_id = $1::uuid', [randomUUID()]);
+    const applied = await repair(engine, { slugs: ['notes/a'], expect: preview.preview_hash });
+    const [outcome] = applied.outcome_items ?? [];
+    expect([outcome?.outcome, outcome?.detail?.held, outcome?.detail?.why]).toEqual(['restored_file_unheld', false, 'checkout_not_on_this_host']);
+    expect(String(outcome?.detail?.next)).toContain('gbrain repair file-drift --source default --slug notes/a --prefer database');
+    expect(await bodyOf(engine, 'notes/a')).toContain('DBONLYMARKER');
+    expect(await holdOf(engine, 'notes/a.md')).toBeNull();
+    expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('The second committed body.');
+
+    await engine.executeRaw('UPDATE persistence_worktrees SET owner_host_id = $1::uuid', [localHostId()]);
+    const scope = await resolveRepairScope(engine, 'default');
+    const drift = { explicit: true, sourceFlag: 'default', slugs: ['notes/a'], prefer: 'database' as const };
+    const driftPreview = await (await repairRunner(engine, { apply: false, logger })).run('file-drift', scope, drift);
+    expect(driftPreview.listing?.map(entry => [entry.item, entry.class])).toEqual([['default:notes/a', 'prefer_database']]);
+    const driftApplied = await (await repairRunner(engine, { apply: true, logger })).run('file-drift', scope, { ...drift, expect: driftPreview.preview_hash });
+    expect(driftApplied.outcome_items?.map(entry => entry.outcome)).toEqual(['repaired']);
+    expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('DBONLYMARKER');
   }, { setup, databaseUrl }), 180_000);
 });

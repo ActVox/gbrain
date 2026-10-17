@@ -535,11 +535,28 @@ The apply reverts each page to the archived version through `revert_version`,
 bound to the page revision the preview saw, so a page that moved since is
 `changed_since_preview` and nothing is written. An apply interrupted after a
 restore committed replays that restore's request on the next run and then
-writes the hold, instead of reporting the page as moved. The restore publishes to the
-database only and never rewrites the committed file. When that file then differs
-from the restored page (on the host that owns the checkout), the file is held
-`file_drift`, so no later sync publishes it over the edit; pick the winner with
-[`gbrain repair file-drift`](#file-drift). A restored page is not listed again.
+writes the hold, instead of reporting the page as moved. The restore
+publishes to the database only and never rewrites the committed file.
+
+Only the host that owns the source's checkout compares that file with the
+restored page. There, a file that differs is held `file_drift` (outcome
+`restored_file_held`), so no later sync publishes it over the edit; pick the
+winner with [`gbrain repair file-drift`](#file-drift). On any other host the
+restore still applies, but the file is neither compared nor held: the outcome
+is `restored_file_unheld` (`why=checkout_not_on_this_host`; the same outcome
+with `why=file_over_read_bound` means the owner host could not read a file
+that large). A later sync that imports a change to that file can then publish
+it over the restored edit again. No command writes only the hold afterward,
+and the restored page is not listed again, so run the apply on the owner host.
+After a restore on another host, resolve the page on the owner host so the
+file holds the restored edit:
+
+```bash
+gbrain repair file-drift --source <id> --slug <slug> --prefer database                          # preview
+gbrain repair file-drift --source <id> --slug <slug> --prefer database --apply --expect <preview-hash>
+```
+
+A restored page is not listed again.
 
 <a id="orphan-bindings"></a>
 ### Orphan persistence bindings
