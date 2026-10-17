@@ -14,6 +14,8 @@
  *   class by it (`by_action`).
  * - b5: under `--full` or an open episode, a legacy-marked path imports (v3.1 §2.7).
  * - b6: the convergence receipt counts #6885 legacy twin pairs (`legacy_twin_pairs`) with legacy-twins' read-only scan.
+ * - legacy cursor handover (design v3.2 §3.5): the first pass retires an unfinished cursor, inherits its opt-outs (a
+ *   flagless pass reports them in `inherited_options`) and, from a `--full` cursor, a full episode; no cursor row remains.
  * - shadow finding (a): a write queued with sync.write_through=false (no worktree) is open work, so the changed file it
  *   would race is `in_flight`; in working mode a committed `git rm` of a synced file reads absent (`delete`).
  *
@@ -34,6 +36,7 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { preparePageAdmission, submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { admitWrite } from '../src/core/persistence/journal.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { managedCursorKey } from '../src/core/persistence/sync-cursor-key.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
@@ -164,5 +167,21 @@ describe('#6712 PR 4b classifier rulings (pglite)', () => {
     git(root, 'rm', '-q', 'notes/b.md'); commit(root, 'remove b');
     const level = await readShadowLevel(engine, { sourceId: 'default', workingTree: true });
     expect(level!.paths.find(entry => entry.path === 'notes/b.md')?.result).toMatchObject({ cls: 'delete', action: 'delete' });
+  }, { setup }), 180_000);
+
+  for (const full of [false, true]) test(`handover: the first pass retires an unfinished legacy cursor and inherits its options${full ? ' (a --full cursor seeds a full episode)' : ''}`, () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const incarnation = (await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'"))[0]!.incarnation;
+    // What a pre-PR 4b `gbrain sync --no-embed --no-extract${full ? ' --full' : ''}` left behind when it stopped part way.
+    await engine.executeRaw(`INSERT INTO op_checkpoints(op, fingerprint, completed_keys, updated_at) VALUES ('managed-sync', $1, jsonb_build_array($2::jsonb), now())
+      ON CONFLICT (op, fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys, updated_at=now()`,
+      [managedCursorKey(incarnation, undefined), JSON.stringify({ sourceId: 'default', incarnation, runId: randomUUID(), index: 1, total: 3, done: false,
+        processingOptions: { noEmbed: true, noExtract: true, noSchemaPack: false }, syncOptions: full ? { full: true } : {} })]);
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+    const result = await performManagedSync(engine, { sourceId: 'default', noPull: true });
+    expect(result.status).toBe('synced');
+    expect([...result.inherited_options ?? []].sort()).toEqual(['noEmbed', 'noExtract']);
+    expect({ modified: result.modified, candidates: result.pass?.candidates, waived: result.waived?.imports }).toEqual({ modified: 1, candidates: full ? 3 : 1, waived: full ? 2 : 0 });
+    expect(await engine.executeRaw("SELECT fingerprint FROM op_checkpoints WHERE op IN ('managed-sync','managed-sync-manifest')")).toEqual([]);
   }, { setup }), 180_000);
 });
