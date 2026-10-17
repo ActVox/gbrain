@@ -764,7 +764,7 @@ More: [docs/guides/write-refusals.md#content_repair_needs_human](../../docs/guid
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Claude Code continued an answer past its output cap and gbrain could not prove the full text, so the claude-cli call returned no text and no tool calls and finished as length. | Print mode reports only the text after an automatic continuation; parsing or dispatching that tail as a complete answer would act on a fragment. The caller retries or escalates as for any capped answer; the gateway does not resend it to a fallback model. | Wait briefly, then retry the same request (writes: reuse the same request_id). Run: gbrain config set '<KEY>' '<TOKENS>' | agent | `gbrain config get '<KEY>'` | 1 | yes |
+| Claude Code continued an answer past its output cap and gbrain could not prove the full text, so the claude-cli call returned no text and no tool calls and finished as length. | Print mode reports only the text after an automatic continuation; parsing or dispatching that tail as a complete answer would act on a fragment. The caller retries or escalates as for any capped answer; the gateway does not resend it to a fallback model. | Wait briefly, then retry the same request (writes: reuse the same request_id). Run: gbrain config set '<KEY>' '<TOKENS>' | agent | `repeat the read that failed` | 1 | yes |
 
 Reasons: `events_missing`, `no_assistant_events`, `segments_unmatched`.
 
