@@ -69,7 +69,8 @@ async function receipt(engine: BrainEngine, f: Fixture, afterSeconds: number, op
     VALUES('local_cli','cli:example',$1::uuid,'submit_job',$2,$3::uuid,$4,$5,$6::uuid,'d','{}'::jsonb,$7::text::jsonb,1,16384,'committed',$8::timestamptz)`,
   [randomUUID(), f.id, f.incarnation, slug, pageId, f.worktreeId, JSON.stringify(intent), new Date(completed).toISOString()]);
 }
-const doctor = async (engine: BrainEngine) => (await managedSyncLatencyEntry.run({ engine } as unknown as Parameters<typeof managedSyncLatencyEntry.run>[0]) as unknown as Array<Record<string, any>>)[0]!;
+const doctor = async (engine: BrainEngine, scope: { sourceIds?: string[]; orphanRatioSourceId?: string } = {}) =>
+  (await managedSyncLatencyEntry.run({ engine, ...scope } as unknown as Parameters<typeof managedSyncLatencyEntry.run>[0]) as unknown as Array<Record<string, any>>)[0]!;
 async function reset(engine: BrainEngine): Promise<void> {
   await engine.executeRaw('DELETE FROM persistence_requests');
   await engine.executeRaw("DELETE FROM config WHERE key IN ('sync.on_commit','sync.freshness_target_seconds')");
@@ -170,6 +171,45 @@ describe('sync freshness (#6858 ask 6)', () => {
       await receipt(engine, f, 10, { intent: { target: 'e'.repeat(40) } });
       const [fresh] = await readSyncFreshness(engine, { sourceIds: [f.id] });
       expect(fresh).toMatchObject({ commits: 0, unresolved_commits: 1, commit_to_searchable: { samples: 0 } });
+    }
+  }), 120_000);
+
+  test('doctor warns when grading is on and synced commits cannot be dated; ok only when there was nothing to measure', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const { name, engine } of engines) {
+      await reset(engine);
+      const f = await managedSource(engine, 60);
+      await receipt(engine, f, 10, { intent: { target: 'e'.repeat(40) } });
+      await receipt(engine, f, 12, { intent: { target: 'd'.repeat(40) } });
+      const ungraded = await doctor(engine, { sourceIds: [f.id] });
+      expect(ungraded, name).toMatchObject({ status: 'ok', details: { graded: false } });
+      expect(ungraded.message).toContain('2 synced commit(s) are not in this host');
+      await engine.setConfig('sync.on_commit', 'true');
+      const warn = await doctor(engine, { sourceIds: [f.id] });
+      expect(warn, name).toMatchObject({ status: 'warn', details: { graded: true, sources: [{ source_id: f.id, unresolved_commits: 2 }] } });
+      expect(warn.message).toBe(`Commit→searchable latency could not be measured for 2 commit(s) synced in the last 24 h: ${f.id} (2). The commit is not in this host's local git checkout, so its commit time is unknown.`);
+      expect(warn.fix.argv).toEqual(['gbrain', 'sync', 'status', '--source', f.id, '--json']);
+      await engine.executeRaw('DELETE FROM persistence_requests');
+      expect(await doctor(engine, { sourceIds: [f.id] }), name).toMatchObject({ status: 'ok', message: expect.stringContaining('no managed sync imported a new commit') });
+    }
+  }), 120_000);
+
+  test('doctor --source grades only that source', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const { name, engine } of engines) {
+      await reset(engine);
+      const scoped = await managedSource(engine, 3600);
+      const other = await managedSource(engine, 3600);
+      await receipt(engine, scoped, 20);
+      for (const after of [400, 500]) await receipt(engine, other, after);
+      await engine.setConfig('sync.on_commit', 'true');
+      for (const scope of [{ orphanRatioSourceId: scoped.id }, { sourceIds: [scoped.id] }]) {
+        const check = await doctor(engine, scope);
+        expect(check, name).toMatchObject({ status: 'ok' });
+        expect(check.details.sources.map((s: { source_id: string }) => s.source_id)).toEqual([scoped.id]);
+        expect(check.message).not.toContain(other.id);
+      }
+      const all = await doctor(engine, { sourceIds: [scoped.id, other.id] });
+      expect(all, name).toMatchObject({ status: 'warn' });
+      expect(all.message).toContain(other.id);
     }
   }), 120_000);
 

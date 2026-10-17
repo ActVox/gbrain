@@ -6850,7 +6850,9 @@ counted, and a run that spans several commits is dated by its newest. Doctor
 `managed_sync_latency` warns when p95 commit→searchable is over
 `sync.freshness_target_seconds` (default 300) and fails over one hour; it
 grades only a brain with `sync.on_commit` on or a target set, and otherwise
-reports the numbers. A stopped or stalled sync is reported by doctor
+reports the numbers. With grading on, it also warns when the synced commits are
+not in this host's git checkout, so their latency cannot be measured.
+`gbrain doctor --source <id>` grades only that source. A stopped or stalled sync is reported by doctor
 `managed_sync_not_moving`, not by this check.
 
 ## Implementation
