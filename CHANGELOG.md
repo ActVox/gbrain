@@ -39,6 +39,26 @@ To turn it on, run `gbrain config set sync.on_commit true` on the brain host. Th
 - New doctor check `managed_sync_latency` (`src/commands/doctor/checks/managed-sync-latency.ts`); the doctor goldens are regenerated for it. With grading on it also warns when the synced commits are not in this host's git checkout (the latency cannot be measured), and `doctor --source` grades only that source.
 - Tests: `test/serve-head-watcher.test.ts` (debounce, single flight, follow-up, resume cap, error handling, stop), `test/serve-head-watcher-managed.serial.test.ts` (a real managed source on PGLite and Postgres: a commit becomes searchable with no manual sync), `test/serve-http-head-watcher.serial.test.ts` (the watcher starts with `gbrain serve --http` and its poll interval is cleared on shutdown), `test/sync-freshness-6858.test.ts` (percentiles, exclusions, doctor thresholds, the additive `sync status --json` block). The two database tests are listed in `test/postgres-unit-arms.txt`.
 
+## [0.60.275.0] - 2026-10-17
+
+**`gstack-pregate` now reaches a verdict on small machines: on a machine under 8 cores, the test tier goes to the full Ubicloud gate instead of thousands of local files.** On a 4-core machine, a one-line edit to a hub file such as `src/core/config.ts` selected about 3,900 test files, and pregate hit its 40-minute cap after 308 of them. `.gstack/pregate.json` now declares a `remote_gate`. Pregate records the selected files as one remote obligation in seconds, and `gstack-pregate --remote` clears it by running the full gate on the working tree.
+
+### How to use it
+
+```bash
+UBI_OWNER=<thread code> gstack-pregate --stage tests --remote --spend-cap <usd> --allow-repo-commands
+```
+
+### Itemized changes
+
+- `scripts/pregate-remote-gate.sh` (new) runs `bun run ci:ubicloud` and prints `PREGATE_REMOTE: tree=<tree> tests=<n> failed=<n>`.
+  - `<tree>` is the working-tree content fingerprint (tracked plus untracked-unignored files), computed before and after the gate.
+  - It refuses without `UBI_OWNER`, or when `PREGATE_TREE` names another tree. It prints no receipt when the tree moved during the gate or the gate printed no summary.
+  - Provider API keys are removed from the gate's environment.
+- `.gstack/pregate.json` declares `remote_gate`. `CONTRIBUTING.md` documents the flow.
+- Tests: `test/scripts/pregate-remote-gate.test.ts`.
+- No product or schema change.
+
 ## [0.60.274.0] - 2026-10-17
 
 **A refresh no longer gets stuck when a commit lands on top of its target, and `gbrain repair file-drift` can now resolve a page whose file is gone.** Two fixes ahead of the level-triggered reconcile (#6712).
