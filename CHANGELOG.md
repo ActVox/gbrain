@@ -10,6 +10,24 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased] - 2026-10-17
+
+**A batch of page purges no longer holds a source's write queue for hours (#6884).** Each page purge used to read and case-fold the whole write journal to find old requests that still carried the page's claims, so on a journal of about 540k requests one purge took about 20 minutes and a nightly purge batch blocked ordinary writes for about 2.8 hours. Now one sweep serves a batch of queued purges, later purges read only the rows added since, and the purge run stops submitting when the writer's queue is full instead of failing thousands of pages.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| N purges queued for one source | N full journal sweeps; each receipt's `journal_sweep.scanned` equals the journal size | one sweep for up to 32 queued purges; the others scan only the rows added since (`journal_sweep.batch`, `journal_sweep.watermark`) |
+| `gbrain dream --phase purge` / `gbrain pages purge-deleted` with more expired pages than free queue room | thousands of `queue_capacity` failures, `managed_purge_failed`, each failure counted toward parking the page | submits only while the writer has room (background runs stop at `persistence.capacity.background_pause_pct`); the rest is `write_capacity_deferred` / `capacity_deferred`, the phase warns, the next run picks it up |
+
+### For contributors
+
+- `sweepRequestsForGroups` (`src/core/persistence/intent-redaction.ts`) runs the #6511 census once for several needle groups; `after` starts past an earlier ceiling.
+- The batch cache lives in process memory in `src/core/persistence/page-purge.ts` (`sweepForPurge`); the journal still never stores claims. No schema change and no compaction default changed.
+- `readOutstandingRoom` (`src/core/persistence/journal.ts`) reads the tighter of the principal's and the brain's outstanding caps.
+- Tests: `test/page-purge-batch-sweep-6884.test.ts` (PGLite and Postgres), `test/purge-deleted-capacity-6884.test.ts`.
+
 ## [0.60.278.0] - 2026-10-17
 
 **A stuck upgrade queue drains, held embeddings say what they need, and doctor and status answer in bounded time (#6803, #6847).** Four things got better for anyone whose brain grew big or went through the recent upgrades. Image pages that an old upgrade left queued (and missing from search) can now be put back with one keyless command when gbrain already knows they're safe, and the rest are counted and named instead of hidden. Large pages waiting for your embedding approval are reported everywhere with one exact command to approve them, and that command now works on free local embedding models too. `gbrain doctor --json` and `gbrain sync --status` stop running for minutes on a large brain. And the "un-extracted edges" nudge after a sync now agrees with doctor and names the command that actually finishes the job.
