@@ -8,7 +8,7 @@ W7 makes each prediction in a brain auditable for its owner: what was predicted,
 
 The horizon of a take is the last day its claim can come true: `2024-12-31` for "by the end of 2024", `2024-09-30` for "by Q3 2024". Without it, the journal cannot tell a prediction that is overdue from one that is still open.
 
-**Where it lives.** It goes in a table of its own, `take_horizons`, one row per take (migration v250 for now; the number is taken when the merge slot is called). It does not go in either of the two obvious places:
+**Where it lives.** It goes in a table of its own, `take_horizons`, one row per take (migration v251 for now; the number is taken when the merge slot is called). It does not go in either of the two obvious places:
 
 - **The takes fence.** Changing the fence format would make sync hold files. Garry's decision is an additive DB column, not a fence-format change.
 - **A column on `takes`.** `takes_list` and `takes_search` return `t.*`, so a new column would reach remote callers. That would break the rule that remote output stays the same, and it would leak a private field.

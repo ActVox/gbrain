@@ -12,8 +12,8 @@ import type { Migration } from './types.ts';
 // take (ON DELETE CASCADE). Dates, an enum, a hash and a timestamp only: no
 // page text. DDL only, nothing to backfill: horizons come from an explicit,
 // preview-first scan or the owner.
-export const v250: Migration = {
-  version: 250,
+export const v251: Migration = {
+  version: 251,
   name: 'take_horizons',
   idempotent: true,
   sql: `

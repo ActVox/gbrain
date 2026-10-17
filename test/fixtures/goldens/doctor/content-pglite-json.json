@@ -1281,12 +1281,16 @@
               {
                 "name": "persistence_requests_slug_intent",
                 "state": "valid"
+              },
+              {
+                "name": "persistence_requests_request_id",
+                "state": "valid"
               }
             ],
             "repair": "request-indexes"
           },
           "elapsed_ms": "<volatile>",
-          "message": "Managed sync request indexes are valid.",
+          "message": "Request-table indexes are valid.",
           "name": "persistence_request_indexes",
           "status": "ok"
         },
@@ -2886,6 +2890,29 @@
         {
           "category": "brain",
           "details": {
+            "by_source": [],
+            "count": 0,
+            "docs": "docs/guides/live-sync.md#renaming-a-page",
+            "samples": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No rename that lost its page identity is waiting for a disposition.",
+          "name": "rename_identity_downgrades",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "parked": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No soft-deleted page is parked by the managed purge.",
+          "name": "purge_parked_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "count": 0,
             "docs": "docs/storage-tiering.md#restoring-a-page-whose-file-is-gone",
             "sources": []
@@ -2894,6 +2921,86 @@
           "message": "Not applicable: no source is a classic checkout on this host (managed sources are checked by ghost_pages).",
           "name": "missing_recorded_files",
           "readiness_state": "not_applicable",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "docs": "docs/guides/repair.md#unindexed-files",
+            "sources": [
+              {
+                "source_id": "default",
+                "state": "missing"
+              },
+              {
+                "source_id": "notes",
+                "state": "missing"
+              }
+            ]
+          },
+          "elapsed_ms": "<volatile>",
+          "fix": {
+            "actor": "agent",
+            "argv": [
+              "gbrain",
+              "sources",
+              "retry-held",
+              "default",
+              "--unindexed",
+              "--brain",
+              "host"
+            ],
+            "command": "gbrain sources retry-held default --unindexed --brain host",
+            "consent": [],
+            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
+            "next": "run",
+            "requires_exclusive": false,
+            "then": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sync",
+                "--source",
+                "default",
+                "--no-pull",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sync --source default --no-pull --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
+              "next": "run",
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "unindexed_files",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "The sync re-screens the scheduled files of default: each one that passes imports, each one that refuses is recorded as a hold that gbrain sources status default lists."
+            },
+            "verify": {
+              "argv": [
+                "gbrain",
+                "doctor",
+                "--only",
+                "unindexed_files",
+                "--json",
+                "--brain",
+                "host"
+              ]
+            },
+            "why": "Finds the committed files of default with no page and no hold (bounded; it continues an incomplete scan), schedules them for a re-screen and stores the result this check reads."
+          },
+          "message": "Unindexed files are not known for default (not computed yet), notes (not computed yet). The maintenance phase unindexed_files computes them on each run and continues an incomplete scan; to compute them now, run gbrain sources retry-held <id> --unindexed.",
+          "name": "unindexed_files",
+          "readiness_state": "unknown",
           "severity": "info",
           "status": "ok"
         },
@@ -3190,7 +3297,7 @@
           "category": "meta",
           "details": {
             "counts": {
-              "global": 15,
+              "global": 16,
               "mixed": 2,
               "source": 12
             },
@@ -3223,11 +3330,12 @@
               "standing_questions": "global",
               "sync": "source",
               "synthesize": "mixed",
-              "synthesize_concepts": "global"
+              "synthesize_concepts": "global",
+              "unindexed_files": "global"
             }
           },
           "elapsed_ms": "<volatile>",
-          "message": "Phase taxonomy: 12 source-scoped, 15 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
+          "message": "Phase taxonomy: 12 source-scoped, 16 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, unindexed_files, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
           "name": "cycle_phase_scope",
           "status": "ok"
         },

@@ -12,9 +12,10 @@ import { journalLimitKey, oneYearCapacity, readJournalLimits, readReceiptRetenti
 import { outstandingCapacityDetail, retryWriteAdmission } from './admission-retry.ts';
 import { PreadmitBrainChanged } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
-import { backgroundPaused, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
+import { backgroundPaused, backgroundWorktreeInactive, declaredBackground, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
 import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
+import { assertBackgroundOwner } from './owner-verification.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
 import { hostname } from 'node:os';
@@ -244,6 +245,8 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   const stamp = writerStamp();
   const origin = resolveAdmissionOrigin(input.origin);
+  // #6741 C: a declared background producer is refused before any receipt when the source's owner fails its verification.
+  if (input.worktreeId && declaredBackground(input.origin)) await assertBackgroundOwner(engine, input.sourceId, ownerStatusFix);
   return { requestId, apply: async (tx: BrainEngine): Promise<WriteRequest> => {
     await declarePersistenceProtocol(tx);
     // The guards are sent together in lock order (worktree, source, writer, counters) and judged in
@@ -324,6 +327,7 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
   const items = inputs.map(input => ({ input, requestId: requireUuid(input.requestId ?? randomUUID()), fingerprint: intentDigest(input),
     bytes: jsonBytes(input.intent) + jsonBytes(input.authority), terminalBytes: Math.max(input.terminalReservation ?? 0, receiptReservation(input)) }));
   assertMutationProtocol({ target_kind: 'page', protocol_version: 1 });
+  if (first.worktreeId && declaredBackground(first.origin)) await assertBackgroundOwner(tx, first.sourceId, ownerStatusFix);
   const ids = items.map(item => item.requestId);
   // #5984: the checks are independent reads and share locks, so they go out back to back in the order they always
   // had (protocol, graduation, worktree, source, writer, counters); a failure is raised in that order.
@@ -512,17 +516,19 @@ export async function chargePreparationAttempt(engine: SqlEngine, row: WriteRequ
  */
 async function assertWorktreeAdmission(tx: BrainEngine, input: WriteAdmission): Promise<void> {
   // Sent together: the server takes the share lock before it reads the fence and the binding.
-  const [, [state]] = await pipelined(tx, [
-    () => tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]),
+  const [[worktree], [state]] = await pipelined(tx, [
+    () => tx.executeRaw<{ state: string }>('SELECT state FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]),
     () => tx.executeRaw<{ refresh: { id: string; state: string; source_ids: string[] } | string | null; bound: boolean }>(`SELECT
       (SELECT row_to_json(f) FROM (SELECT id,state,source_ids FROM persistence_worktree_refreshes
         WHERE worktree_id=$3::uuid AND state IN ${ACTIVE_REFRESH_STATES_SQL} LIMIT 1) f) AS refresh,
       EXISTS (SELECT 1 FROM persistence_source_bindings WHERE source_id=$1
         AND source_incarnation=$2::uuid AND worktree_id=$3::uuid AND topology_generation=$4) AS bound`,
     [input.sourceId, input.sourceIncarnation, input.worktreeId, input.topologyGeneration]),
-  ]) as [unknown, Array<{ refresh: { id: string; state: string; source_ids: string[] } | string | null; bound: boolean }>];
+  ]) as [Array<{ state: string }>, Array<{ refresh: { id: string; state: string; source_ids: string[] } | string | null; bound: boolean }>];
   const refresh = typeof state?.refresh === 'string' ? JSON.parse(state.refresh) as { id: string; state: string; source_ids: string[] } : state?.refresh ?? null;
   if (refresh) await assertWorktreeNotRefreshing(tx, input, refresh);
+  // #6741 C: a background producer never takes a permanent request id against a worktree in recovery (a draining owner still replays).
+  if (worktree?.state === 'recovering' && resolveAdmissionOrigin(input.origin) === 'background') throw backgroundWorktreeInactive(input.sourceId, worktree.state, ownerStatusFix(input.sourceId));
   if (!state?.bound) throw opError('source_changed', 'The source binding changed during admission.',
     `Source ${input.sourceId}'s worktree binding changed (a claim, transfer or lifecycle change) while this write was being admitted, so nothing was accepted. Check the owner with the command in fix, then submit the write again; reusing the same request_id is safe because nothing was recorded.`,
     { fix: ownerStatusFix(input.sourceId) });
