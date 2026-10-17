@@ -15,7 +15,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { RECOVERY_FILE_HEADROOM_BYTES, SEGMENTED_PAGE_CEILING_BYTES } from '../../src/core/page-body/limits.ts';
+import { RECOVERY_FILE_HEADROOM_BYTES, SEGMENTED_PAGE_CEILING_BYTES, SEGMENTED_STORAGE_DEFAULT } from '../../src/core/page-body/limits.ts';
 import { readJournalLimits } from '../../src/core/persistence/limits.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
@@ -37,9 +37,14 @@ for (const kind of testBackends()) describe(`worktree recovery default follows t
   });
   const worktree = async () => (await readJournalLimits(engine)).worktreeRecoveryBytes;
 
-  test('switch off or unset: 256 MiB', async () => {
-    expect(await worktree()).toBe(OLD_DEFAULT);
+  test('unset follows the default switch: twice the ceiling plus headroom', async () => {
+    expect(SEGMENTED_STORAGE_DEFAULT).toBe('on');
+    expect(await worktree()).toBe(2 * (ceiling + RECOVERY_FILE_HEADROOM_BYTES));
+  });
+
+  test('switch off: 256 MiB', async () => {
     await engine.setConfig('pages.segmented_storage', 'off');
+    expect(await worktree()).toBe(OLD_DEFAULT);
     await engine.setConfig('pages.max_bytes', String(ceiling));
     expect(await worktree()).toBe(OLD_DEFAULT);
   });
