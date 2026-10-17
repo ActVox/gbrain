@@ -2729,7 +2729,7 @@
         {
           "category": "brain",
           "details": {
-            "docs": "docs/guides/troubleshooting.md#unindexed-files",
+            "docs": "docs/guides/repair.md#unindexed-files",
             "sources": [
               {
                 "source_id": "default",
@@ -2751,7 +2751,7 @@
             ],
             "command": "gbrain sources retry-held default --unindexed --brain host",
             "consent": [],
-            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#unindexed-files",
+            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
             "next": "run",
             "requires_exclusive": false,
             "then": {
@@ -2767,7 +2767,7 @@
               ],
               "command": "gbrain sync --source default --no-pull --brain host",
               "consent": [],
-              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#unindexed-files",
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
               "next": "run",
               "requires_exclusive": false,
               "verify": {

@@ -145,6 +145,8 @@ export async function buildHotCheckFixture(h: DoctorHome, sql: Sql): Promise<{ s
   git(src, 'commit', '-q', '-m', 'broken files');
   const utcDay = () => new Date().toISOString().slice(0, 10);
   const before = utcDay();
+  // The fixture keeps fm/slug-mismatch.md held for the frontmatter findings, so the sync-time stray slug: line heal (#6865) is off.
+  await gbrain(h, ['config', 'set', 'sync.slug_conflicts.auto_remove', 'false']);
   await runGbrain(h, ['sync', '--source', 'notes', '--no-pull', '--no-embed']);
   const syncDays: [string, string] = [before, utcDay()];
   // After the sync (a full catch-up re-imports changed pages): database-only timeline rows, one materializable and one that cannot round-trip (comment markup).
