@@ -107,7 +107,7 @@ Four smaller fixes ride along: dream synthesis no longer fails a pass when looki
 | `propose_takes` gets `[]` followed by prose | retried as a failure, a paid call every cycle | an empty extraction: the page is tombstoned until its body changes |
 | `gbrain repair slug-conflicts` on a hold whose only other fix is a style-only `NESTED_QUOTES` re-quote | `still_invalid`, needed `repair frontmatter --include-ambiguous` | cleared by removing the `slug:` line; the array stays as written and is listed as `style_only` |
 
-## To take advantage of v0.60.270.0
+## To take advantage of v0.60.276.0
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -115,7 +115,7 @@ Four smaller fixes ride along: dream synthesis no longer fails a pass when looki
    ```bash
    gbrain apply-migrations --yes
    ```
-2. **Your agent reads `skills/migrations/v0.60.270.0.md` the next time you interact with it.** The schema step (one new index, built online on Postgres) needs no action; the note covers the two new doctor checks and the `owner_unavailable` refusal.
+2. **Your agent reads `skills/migrations/v0.60.276.0.md` the next time you interact with it.** The schema step (one new index, built online on Postgres) needs no action; the note covers the two new doctor checks and the `owner_unavailable` refusal.
 3. **Verify the outcome:**
    ```bash
    gbrain doctor --only persistence_request_indexes,rename_identity_downgrades,purge_parked_pages
@@ -164,7 +164,7 @@ Four smaller fixes ride along: dream synthesis no longer fails a pass when looki
 - Flake fix: the CJK keyword deadline test (`cjk-keyword-deadline-postgres`) asserts the arm's statement budgets instead of wall time, so a stalled test process no longer fails a correct arm; a new case injects a stall mid-arm and checks the arm starts nothing past its deadline.
 - Shard weights (`scripts/test-weights.json`, `serial-weights.json`, `e2e-weights.json`) were refreshed from recent Test and E2E runs.
 - Tests whose fixture was an inexact move onto a broken file now use an exact move held by a stale `slug:` line (every hold-lane assertion unchanged); the inexact case keeps one test per path asserting its new outcome. `test/pages-purge-deleted-args.test.ts` expectations gained `retryParked: false`. `test/persistence-connector-fencing.test.ts` orders its request-id reads, since the new index changed the unordered row order.
-- Migration note: `skills/migrations/v0.60.270.0.md`.
+- Migration note: `skills/migrations/v0.60.276.0.md`.
 
 ## [0.60.275.0] - 2026-10-17
 
