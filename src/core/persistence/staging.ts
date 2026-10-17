@@ -127,6 +127,17 @@ export function restoreBeforeStage(record: StagedRecovery & { mode: number | nul
   boundary?.('directory_flushed');
 }
 
+/**
+ * A version 2 mirror record's forward publication (effect-recovery.ts): its verified publication stage, streamed from
+ * the page's segments, is renamed over the canonical path. A missing stage refuses (`unexpected_staging_bytes`).
+ */
+export function publishStreamedStage(record: StagedRecovery): void {
+  const stage = record.staging?.publication;
+  if (!stage || !stages(record).includes(stage)) throw blocked();
+  if (!withVerifiedStage(stage, () => renameSync(stage.path, record.path))) throw blocked();
+  flushDirectory(dirname(record.path));
+}
+
 /** The final accounting fence also protects direct terminal-cleanup callers. */
 export function assertRecoveryStagingAbsent(record: StagedRecovery): void {
   for (const stage of stages(record)) {
