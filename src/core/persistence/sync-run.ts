@@ -43,7 +43,6 @@ import { admittedBy, localResumeRequired, readAdmitted, withoutUnadmitted } from
 import { cursorFenceCause, isSyncKnockOn } from './sync-knock-on.ts';
 import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
-import { isContentRefusal } from '../import-screen.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
@@ -59,7 +58,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
-import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
+import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
 import { receiptClass, recordedStop, replaysContentRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
@@ -621,100 +620,6 @@ async function deferChangedEntry(engine: BrainEngine, input: { cursor: Cursor; k
     tx => recordSyncConversion(tx, cursor.sourceId, cursor.incarnation, { request_id: pending.requestId, path: pending.intent.path ?? null, slug: pending.slug, run_id: cursor.runId, outcome: 'refrozen' }));
   await faultPoint('sync:retry_deferred', { sourceId: cursor.sourceId, path: entry.path });
   return saved;
-}
-
-/**
- * #5988 (E6): a cursor blocked by a failed content refusal converts in place
- * with its stored options: held when the screen holds the frozen entry,
- * re-frozen under a new request when it passes, but only once for the same
- * bytes, so a refusal the screen misses stays blocked without minting a
- * receipt per run.
- * #6188: a failed fence refusal (typed, or a message an older gbrain stored)
- * holds the same bytes even when the screen admits them (`prepare_time`: the
- * refusal read stored rows). A compacted `invalid_params` /
- * `take_row_collision` receipt, whose message is gone, converts only when the
- * re-screen of the current bytes holds them; an arbitrary `invalid_params` is
- * never a fence hold.
- * #6278: a `preparation_stalled` receipt (the owner gave up preparing it)
- * holds the entry as it was frozen: an import by its bytes, a delete as a
- * delete hold; the checkpoint never holds (the run stays blocked). Every hold
- * is written behind the narrowed gate (`holdUnderGate`).
- */
-async function convertBlockedCursor(engine: BrainEngine, blocked: Cursor, key: string, assertActive: () => void,
-  run: Parameters<typeof freezeEntry>[4] & { observedAt?: string }): Promise<Cursor> {
-  const previous = blocked.pending!;
-  const failed = await getWriteRequest(engine, admittedBy(previous, blocked), previous.requestId);
-  if (!failed || !['failed', 'conflict', 'cancelled'].includes(failed.state)) return blocked;
-  // #6712: a legacy knock-on is re-frozen in place by the drain itself (settleFailedRequest → refreezeInPlace).
-  if (isSyncKnockOn(failed)) return blocked;
-  const entry = entryOf(blocked, previous), index = indexOf(blocked, previous);
-  const at = (cursor: Cursor): Cursor => ({ ...cursor, index });
-  const holdWith = async (hold: HeldEntry, base?: Cursor) => {
-    const held = await holdUnderGate(engine, { cursor: blocked, key, pending: previous, hold, assertActive, observedAt: run.observedAt!, waitMs: 5000, ...(base ? { base } : {}) });
-    return held === 'pending' ? blocked : held;
-  };
-  const settleWith = (base: Cursor, done: Settled) => saveCursor(engine, key, blocked, { ...deletionSettled(base, index), convertedFromFailed: [...(blocked.convertedFromFailed ?? []), previous.requestId] },
-    false, assertActive, holdClear(blocked, done.settled.path, run.observedAt ?? new Date().toISOString()));
-  if (preparationStalled(failed)) {
-    if (blocked.companyPlan || previous.intent.kind === 'managed_sync_checkpoint' || !entry || entry.path !== previous.intent.path) return blocked;
-    const converted = [...(blocked.convertedFromFailed ?? []), previous.requestId];
-    if (blocked.breaker?.tripped) {
-      // A run that tripped the breaker holds nothing: its stopped entry is re-frozen under a fresh request (the attempt
-      // counter starts at zero) and the stalled holds it wrote before the trip are scheduled for a re-screen.
-      const base: Cursor = { ...withoutPending(blocked), convertedFromFailed: converted }; delete base.breaker;
-      const again = await freezeEntry(engine, at(base), key, assertActive, run);
-      const rescreen = ((await readGitSourceHolds(engine, { sourceIds: [blocked.sourceId], runId: blocked.runId }))[0]?.holds ?? [])
-        .filter(hold => hold.code === PREPARATION_STALLED).map(hold => hold.path);
-      const inTx = async (tx: BrainEngine) => {
-        if (rescreen.length) await requestGitHoldRetry(tx, blocked.sourceId, blocked.incarnation, rescreen);
-        if ('hold' in again) await heldWrite(blocked, again.hold, run.observedAt!)(tx);
-        if ('settled' in again) await holdClear(blocked, again.settled.path, run.observedAt!)!(tx);
-        await recordSyncConversion(tx, blocked.sourceId, blocked.incarnation, { request_id: previous.requestId, path: previous.intent.path ?? null, slug: previous.slug, run_id: blocked.runId, outcome: 'refrozen' });
-      };
-      return saveCursor(engine, key, blocked, 'hold' in again ? withHeldKeys(advanceHeld(base, converted, index), again.hold)
-        : 'settled' in again ? { ...deletionSettled(base, index), convertedFromFailed: converted } : { ...base, pending: again }, false, assertActive, inTx);
-    }
-    const breaker = breakerAfter(blocked, failed, run.screen!.policy);
-    if (breaker.tripped) return saveCursor(engine, key, blocked, { ...blocked, breaker }, false, assertActive);
-    return holdWith(preparationStalledHold(entry, previous.slug, previous.pageId, failed, previous.intent.content ?? null, previous.intent.blobOid, resumeArgsOf(blocked, run)),
-      { ...withoutPending(blocked), breaker });
-  }
-  const fence = fenceReceiptLocation(failed);
-  const compacted = !fence && failed.compacted === true && failed.error_message == null && ['invalid_params', 'take_row_collision'].includes(failed.error_code ?? '');
-  // #6340: a cursor an older run left blocked on a page that moved under it converts the same way the run now does.
-  if (!fence && !compacted && entry && entry.path === previous.intent.path && previous.intent.kind !== 'managed_sync_checkpoint' && !blocked.companyPlan) {
-    const hold = await receiptPageFaultHold(engine, { sourceId: blocked.sourceId, incarnation: blocked.incarnation, entry, pending: previous, done: failed });
-    assertActive();
-    if (hold) {
-      // The file may have been committed meanwhile: a re-freeze then imports HEAD's bytes instead of holding the stale conflict.
-      if (hold.code === 'worktree_dirty' && headCommittedBytes(blocked, entry.path)?.rawHash !== undefined) {
-        const base = withoutPending(blocked);
-        const again = await freezeEntry(engine, at(base), key, assertActive, run);
-        if ('hold' in again) return holdWith(again.hold);
-        if ('settled' in again) return settleWith(base, again);
-        const converted = [...(blocked.convertedFromFailed ?? []), previous.requestId];
-        return saveCursor(engine, key, blocked, { ...base, convertedFromFailed: converted, pending: { ...again, converted: true } }, false, assertActive,
-          tx => recordSyncConversion(tx, blocked.sourceId, blocked.incarnation, { request_id: previous.requestId, path: previous.intent.path ?? null, slug: previous.slug, run_id: blocked.runId, outcome: 'refrozen' }));
-      }
-      return holdWith(hold);
-    }
-  }
-  if (!fence && !compacted && !isContentRefusal(failed.error_code, failed.error_message)) return blocked;
-  const base = withoutPending(blocked);
-  const again = await freezeEntry(engine, at(base), key, assertActive, run);
-  const converted = [...(blocked.convertedFromFailed ?? []), previous.requestId];
-  if ('hold' in again) return holdWith(again.hold);
-  if ('settled' in again) return settleWith(base, again);
-  const sameBytes = again.intent.rawHash === previous.intent.rawHash && again.intent.content === previous.intent.content;
-  if (fence && sameBytes && again.intent.kind === 'managed_sync_import' && again.intent.content !== null && entry?.path === again.intent.path) {
-    return holdWith(prepareTimeFenceHold(entry, again.slug, again.pageId, fence, again.intent.content, again.intent.blobOid));
-  }
-  if (compacted || (previous.converted && sameBytes)) return blocked;
-  const unfinished = await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) LIMIT 1", [blocked.sourceId]);
-  assertActive();
-  if (unfinished.length) return blocked;
-  return saveCursor(engine, key, blocked, { ...base, convertedFromFailed: converted, pending: { ...again, converted: true } }, false, assertActive,
-    tx => recordSyncConversion(tx, blocked.sourceId, blocked.incarnation, { request_id: previous.requestId, path: previous.intent.path ?? null, slug: previous.slug, run_id: blocked.runId, outcome: 'refrozen' }));
 }
 
 /**
@@ -1433,10 +1338,6 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     try {
       frozenRun.screen = company ? null : await loadSyncScreenRun(startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote);
       const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
-      if (frozenRun.screen && cursor.pending && !cursor.done) {
-        phase = 'freeze';
-        cursor = await convertBlockedCursor(engine, cursor, key, assertActive, frozenRun);
-      }
       const config = loadConfig() ?? { engine: engine.kind }, analyzeEvery = await importAnalyzeEveryPages(engine);
       let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0, foregroundBaseline = 0;
       let creditedPages = 0, creditStarted = 0, foregroundQueued = false;
