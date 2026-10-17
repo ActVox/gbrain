@@ -67,13 +67,20 @@ test('a stopped drain is resumable, its backlog is readable from any process, an
     const first = await runDrain({ signal: stop.signal, pass: (signal, onProgress) => performManagedSync(engine, { sourceId: f.id, noPull: true, noEmbed: true, signal, drainStartedAt,
       onProgress: e => { onProgress(e); if (e.phase === 'managed_sync.page_committed' && ++committed === 2) stop.abort(); } }, { maxPages: 1, maxMs: 60_000 }) });
     expect(first.drain).toMatchObject({ outcome: 'resumable', stop_reason: 'deadline' });
+    // #6712 PR 4b (design v3.2 §3.7): a pass's backlog is its newest round (total = |C_k|, remaining = |C_k| - |S|); the rate and
+    // ETA are null for a non-company source (§9: round-local progress lives in convergence).
+    const imported = async () => (await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM pages WHERE source_id=$1 AND deleted_at IS NULL', [f.id]))[0]!.n;
+    const before = await imported();
+    expect(before).toBeGreaterThan(0);
     const [backlog] = await readManagedSyncBacklog(engine, [f.id]);
-    expect(backlog).toMatchObject({ source_id: f.id, total: 6, resume_command: `gbrain sync --source ${f.id} --no-pull --no-embed` });
-    expect(backlog!.remaining).toBeGreaterThan(0);
-    expect(backlog!.rate_pages_per_min).not.toBeNull();
+    expect(backlog).toMatchObject({ source_id: f.id, remaining: 6 - before, resume_command: `gbrain sync --source ${f.id} --no-pull --no-embed`,
+      rate_pages_per_min: null, pass: { outcome: 'resumable', stop_reason: 'timeout' } });
+    expect(backlog!.index + backlog!.remaining).toBe(backlog!.total);
     const second = await performSync(engine, { sourceId: f.id, noPull: true, noEmbed: true, drain: true });
     expect(second.drain?.outcome).toBe('synced');
-    expect(second.added).toBe(6);
+    expect(second.added).toBe(6 - before);
+    expect(await imported()).toBe(6);
+    expect((await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]))[0]!.n).toBe(6);
     expect(await readManagedSyncBacklog(engine, [f.id])).toEqual([]);
   }
 }), 180_000);

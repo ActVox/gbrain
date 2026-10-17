@@ -106,15 +106,26 @@ function fenceAutoSentence(auto: FenceAutoRepair | undefined): string {
 }
 
 /**
- * Sources whose unfinished managed sync cursor is stopped on a failed content refusal (fixed by the next sync, which converts it in place).
+ * Sources stopped on a failed content refusal: a company (or not yet retired) cursor pending on it, or a non-company source whose
+ * newest pass ended blocked on it. The next sync fixes either (the file is held and the rest imports).
  * `fence` marks a source whose refusal is a facts or takes fence (#6188); it is held and repaired by `gbrain repair fences`, not by frontmatter repair.
  */
 export async function contentBlockedSources(engine: BrainEngine): Promise<Array<{ source_id: string; fence: boolean }>> {
-  const rows = await engine.executeRaw<{ source_id: string; error_code: string | null; error_message: string | null; error_detail: unknown }>(`SELECT c.completed_keys->0->>'sourceId' AS source_id,
+  type Receipt = { source_id: string; error_code: string | null; error_message: string | null; error_detail: unknown };
+  const rows: Receipt[] = await engine.executeRaw<Receipt>(`SELECT c.completed_keys->0->>'sourceId' AS source_id,
       r.error_code, r.error_message, r.error_detail FROM op_checkpoints c JOIN persistence_requests r ON r.request_id::text = c.completed_keys->0->'pending'->>'requestId'
       AND r.source_id = c.completed_keys->0->>'sourceId'
     WHERE c.op = 'managed-sync' AND COALESCE(c.completed_keys->0->>'done','false') <> 'true' AND r.state IN ('failed','conflict','cancelled')
     ORDER BY 1`).catch(() => []);
+  // #6712 PR 4b (design v3.2 §3.7): a non-company source has no cursor; it is blocked when its newest pass ended blocked on a
+  // receipt that pass admitted (the receipt's intent carries the pass id).
+  const { readPassReadings } = await import('../../../core/persistence/sync-pass-readers.ts');
+  for (const { source_id, row, health } of await readPassReadings(engine, { head: false }).catch(() => [])) {
+    if (health.reason !== 'blocked') continue;
+    rows.push(...await engine.executeRaw<Receipt>(`SELECT source_id,
+        error_code, error_message, error_detail FROM persistence_requests WHERE source_id=$1 AND intent->>'passId'=$2 AND state IN ('failed','conflict','cancelled')`,
+      [source_id, row.value.telemetry.pass_id]).catch(() => []));
+  }
   const out = new Map<string, boolean>();
   for (const row of rows) {
     const fence = fenceReceiptLocation(row) !== null;
