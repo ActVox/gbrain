@@ -354,6 +354,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
   // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
   const cacheKey = passFingerprint(sourceId, incarnation);
+  const kindStarted = Date.now();
   const working = mode === 'working' && converged ? await workingIdleChange(context, recallWorkingStatCache(cacheKey)) : { changed: mode === 'working', cache: null };
   const kindOf = syncPassKind({ converged: converged ? { target: converged.target, parserFp: converged.parser_fp, pack: converged.pack, selectionFp: converged.selection_fp,
       passesSinceFull: converged.passes_since_full, lastFullAt: Date.parse(converged.last_full_at) } : null,
@@ -363,7 +364,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
   // Design §2.6: a withheld mass delete is applied by a full round once the owner host's env valve allows it.
   const valveOpen = !remote && !!obligations.deletes_withheld && massReconcileAllowed();
-  const kind: PassKind = admission === 'classify_only' && kindOf.kind === 'idle' ? 'idle' : valveOpen && kindOf.kind === 'idle' ? 'full' : kindOf.kind;
+  // Design §4: keep_db writes the previous pass's cap deferred (`keep_db_pending`) are owed to this pass, so it is not idle.
+  const keepDbOwed = !remote && admission === 'normal' && (prior?.value.telemetry.classes?.keep_db_pending?.count ?? 0) > 0;
+  const kind: PassKind = admission === 'classify_only' && kindOf.kind === 'idle' ? 'idle' : (valveOpen || keepDbOwed) && kindOf.kind === 'idle' ? 'full' : kindOf.kind;
   const value: ManagedSyncPassValue = { source_id: sourceId, incarnation, lease_token: lease.token, obligations,
     telemetry: { pass_id: passId, target: head, started_at: startedAt, ended_at: null, kind, round: 0, outcome: 'open', stop_reason: null, candidates: 0, settled: 0, remaining: 0,
       counts: {}, duration_ms: null, timings_ms: {} } };
@@ -379,7 +382,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     // Design §7: an owner approval (--yes) on an idle tick still makes an unknown cost known again.
     if (opts.costApproved && value.obligations.cost?.approved_usd === null) value.obligations.cost = (await passCostDecision(engine, { sourceId, incarnation,
       scope: episode?.full_id ?? passId, priorRow: true, prior: value.obligations.cost, approved: true })).cost;
-    value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started };
+    value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started, timings_ms: { setup: kindStarted - started, kind: Date.now() - kindStarted } };
     await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
       assertActive();
       // One round trip: the lease check, the stamp and the row (started at the transaction's clock) are pipelined; a lost
