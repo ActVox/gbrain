@@ -202,6 +202,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
   'missing_recorded_files',
+  // #6865: committed files of a managed Git source with no page and no hold, from the stored detector result (doctor/checks/unindexed-files.ts).
+  'unindexed_files',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',

@@ -858,6 +858,10 @@
         "name": "missing_recorded_files"
       },
       {
+        "category": "brain",
+        "name": "unindexed_files"
+      },
+      {
         "category": "meta",
         "name": "sync_config_keys"
       },
