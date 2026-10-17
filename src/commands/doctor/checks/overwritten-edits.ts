@@ -1,6 +1,6 @@
 /**
  * #6712 follow-up `sync_overwritten_db_edits` (BRAIN): live pages whose database-only edit an incremental managed sync
- * replaced with a committed file edit and no `file_drift` hold (the #6887 bug, and managed sync before #6788). Read-only;
+ * replaced with a committed file edit and no `file_drift` hold (the bug #6887 fixes, or any other unguarded import). Read-only;
  * per source it runs `scanOverwrittenEdits` (`persistence/overwritten-edits.ts`, at most `OVERWRITE_SCAN_LIMIT` candidate
  * versions, newest first) and reports each source's count and first slugs. `warn` only for `high` findings; `unknown`
  * ones (no persistence outcome on the writer's receipt, the import's content no longer readable, a segmented version)

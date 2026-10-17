@@ -2,7 +2,7 @@
  * #6712 follow-up: pages an incremental managed sync silently overwrote. Before #6887, `classifyBaseline`
  * (sync-prescreen.ts) guarded a page that moved in both the database and Git only in a tree walk, so a plain delta sync
  * published a committed file edit over a database-only edit (a `put_page` with `sync.write_through` off) with no
- * `file_drift` hold and no backup. Managed sync before #6788 had no drift guard at all. The edit survives as the page
+ * `file_drift` hold and no backup. The edit survives as the page
  * version the import archived. This module finds it from durable rows only, so it finds damage done before the fix too:
  *
  * - `page_versions.write_request_id` names the request that wrote the lost revision and `archived_write_request_id` the

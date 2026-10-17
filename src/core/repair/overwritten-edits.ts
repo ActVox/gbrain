@@ -1,8 +1,8 @@
 /**
  * `gbrain repair overwritten-edits [--source <id>] [--slug <slug>...]` (#6712 follow-up): restore database edits an
- * incremental managed sync published a committed file edit over, with no `file_drift` hold (the #6887 bug, and managed
- * sync before #6788). Detection is `persistence/overwritten-edits.ts`; only its `high` findings are restorable, and
- * `unknown` ones are listed with their reason.
+ * incremental managed sync published a committed file edit over, with no `file_drift` hold (the bug #6887 fixes, or any
+ * other unguarded import). Detection is `persistence/overwritten-edits.ts`; only its `high` findings are restorable,
+ * and `unknown` ones are listed with their reason.
  *
  * Explicit-only and preview-bound: the preview lists each page with the database edit's version, the request that wrote
  * it, the import that replaced it and a diff of the live page against the restored edit, and saves the set under its
@@ -24,7 +24,7 @@ import { localHostId } from '../persistence/identity.ts';
 import { getWorktreeBinding } from '../persistence/ownership.ts';
 import { fileMatchesSnapshot } from '../persistence/page-prepare.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
-import { clearApprovedSet, loadApprovedSet, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
+import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { overwriteContent, overwriteDigest, scanOverwrittenEdits, type OverwrittenEdit } from '../persistence/overwritten-edits.ts';
 import { readTreeBlobs, readBlobContents } from '../persistence/sync-blobs.ts';
 import { syncGit, syncGitPath } from '../persistence/sync-discovery.ts';
@@ -116,7 +116,7 @@ export const overwrittenEditsRepair: RepairHandler = {
     const loaded = await loadApprovedSet<ApprovedEdit>(engine, { command: 'overwritten-edits', hash: opts.expect, previewCommand: command,
       emptyHash: async () => hashOf(scope, selection, (await scanScope(engine, scope, slugs)).flatMap(scan => scan.edits).filter(edit => edit.confidence === 'high')) });
     if (loaded.items.some(edit => JSON.stringify(edit.selection) !== JSON.stringify(selection))) {
-      throw opError('preview_changed', `The preview ${opts.expect} was made for another selection.`, `Re-run the preview: ${command}`);
+      throw previewChangedError(opts.expect, command);
     }
     const items = loaded.items.map((edit, index) => item(edit, index, opts.expect!, index === loaded.items.length - 1));
     return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals: {} };

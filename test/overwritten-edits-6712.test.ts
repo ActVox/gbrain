@@ -15,6 +15,8 @@
  *   database-only edit no import replaced;
  * - a page that moved after the preview is `changed_since_preview`: nothing is restored and no hold is written.
  *
+ * Doctor `sync_overwritten_db_edits` warns with the source's count and slugs for a high finding and is ok otherwise.
+ *
  * PGLite always; Postgres too when DATABASE_URL is set.
  */
 import { describe, expect, test } from 'bun:test';
@@ -32,6 +34,10 @@ import { scanOverwrittenEdits } from '../src/core/persistence/overwritten-edits.
 import { readGitHold, SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { resolveRepairScope } from '../src/core/repair/core.ts';
 import { repairRunner } from '../src/core/repair/registry.ts';
+import { overwrittenEditsEntry } from '../src/commands/doctor/checks/overwritten-edits.ts';
+import type { DoctorContext } from '../src/commands/doctor/context.ts';
+import type { Check } from '../src/commands/doctor.ts';
+import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
@@ -66,6 +72,7 @@ async function seedOverwrite(engine: BrainEngine, ctx: OperationContext, root: s
   await performManagedSync(engine, OPTS);
   expect(await bodyOf(engine, slug)).toContain('The second committed body.');
 }
+const doctor = async (engine: BrainEngine) => ((await overwrittenEditsEntry.run({ engine, tier: 'standard', doFix: false, dryRun: false } as unknown as DoctorContext)) as Check[])[0]!;
 const repair = async (engine: BrainEngine, opts: { expect?: string; slugs?: string[] } = {}) =>
   (await repairRunner(engine, { apply: opts.expect !== undefined, logger })).run('overwritten-edits', await resolveRepairScope(engine, 'default'),
     { explicit: true, sourceFlag: 'default', ...(opts.slugs ? { slugs: opts.slugs } : {}), ...(opts.expect ? { expect: opts.expect } : {}) });
@@ -77,6 +84,11 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
 
     const scan = await scanOverwrittenEdits(engine, 'default');
     expect(scan.edits.map(edit => [edit.slug, edit.confidence, edit.db_operation])).toEqual([['notes/a', 'high', 'put_page']]);
+    const warned = await doctor(engine);
+    expect(warned.status).toBe('warn');
+    expect(warned.details).toMatchObject({ count: 1, unknown: 0, sources: [{ source_id: 'default', count: 1, slugs: ['notes/a'] }] });
+    expect(warned.fix?.argv).toEqual(['gbrain', 'repair', 'overwritten-edits', '--source', 'default', '--json']);
+    expect(categorizeCheck('sync_overwritten_db_edits')).toBe('brain');
 
     await engine.transaction(async tx => { await declarePersistenceProtocol(tx); await tx.executeRaw("UPDATE persistence_requests SET completed_at = now() - interval '400 days'"); });
     expect(await compactWriteReceipts(engine, 0)).toBeGreaterThan(0);
@@ -106,6 +118,7 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(await bodyOf(engine, 'notes/a')).toContain('DBONLYMARKER');
     expect((await holdOf(engine, 'notes/a.md'))?.code).toBe('file_drift');
     expect((await scanOverwrittenEdits(engine, 'default')).edits).toEqual([]);
+    expect((await doctor(engine)).status).toBe('ok');
   }, { setup, databaseUrl }), 180_000);
 
   test('a normal sync-written history is not flagged', () => managedBrain(async ({ engine, ctx, root }) => {
@@ -126,6 +139,7 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     const scan = await scanOverwrittenEdits(engine, 'default');
     expect(scan).toMatchObject({ high: 0, unknown: 0, edits: [], truncated: false });
     expect((await repair(engine)).listing).toEqual([]);
+    expect(await doctor(engine)).toMatchObject({ status: 'ok', details: { count: 0, unknown: 0 } });
   }, { setup, databaseUrl }), 180_000);
 
   test('a page that moved after the preview is refused and nothing is restored or held', () => managedBrain(async ({ engine, ctx, root }) => {
