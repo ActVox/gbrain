@@ -92,10 +92,11 @@ export class DelegatedSyncDeadline {
     const remainingMs=Math.max(this.at-performance.now(),this.progressWindowMs??0);
     return Math.max(1,Math.ceil(remainingMs/1000));
   }
-  /** Call with each slice's committed cursor index; an advance is progress. */
-  noteCursor(index:number|undefined):void {
-    if(index===undefined||index<=this.lastIndex)return;
-    this.lastIndex=index;
+  /** Call with each slice's result; an advanced cursor index, or a pass that settled paths, is progress. */
+  noteSlice(slice:Pick<SyncResult,'managedCursor'|'pass'>):void {
+    const index=slice.managedCursor?.index;
+    if(index!==undefined&&index>this.lastIndex)this.lastIndex=index;
+    else if(!slice.pass?.settled)return;
     this.lastProgressAt=performance.now();
     noteForwardProgress();
   }
@@ -136,7 +137,7 @@ export async function maybeDelegateSyncToPersistence(hostConfig:GBrainConfig|nul
         if(!delegated.handled)throw opError('owner_unavailable','The observed PGLite owner stopped before sync admission.','Retry the same sync options to resume its durable cursor.',
           {fix:{argv:['gbrain','sync',...args],consent:[],actor:'agent',requires_exclusive:false,why:'The owner stopped before admission; the same options resume the durable cursor.'}});
         const slice=delegated.result as SyncResult;
-        deadline.noteCursor(slice.managedCursor?.index);
+        deadline.noteSlice(slice);
         return slice;
       }});
     } finally { deadline.dispose(); }
