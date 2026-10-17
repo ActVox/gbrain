@@ -10,7 +10,22 @@ The preregistration is [`PREREGISTRATION.md`](PREREGISTRATION.md).
 
 ## Current result
 
-Not run yet.
+**PASS.** Measured on 2026-10-17 at gbrain `65ed40ec6` (branch `capy/w7-forecast-journal`), using the instrument and preregistration frozen in that commit. It was one run of all 20 cohorts and 5,622 predictions. It cost $0 and took 7.4 s on in-memory PGLite.
+
+| Criterion | Threshold | Result |
+|---|---|---|
+| Median Spearman ρ, shrunk accuracy vs true skill (12 holders, n ≥ 10) | ≥ 0.80 | **0.905** (18 of 20 cohorts ≥ 0.80; lowest 0.741 and 0.748) |
+| Who-was-right set-F1, macro over 800 topic-cohorts | ≥ 0.95 | **1.000** |
+| Denominator (journal totals; each holder's n, unresolved, overdue, open) | exact | 0 mismatches |
+| `low_n` flags | exact | 0 mismatches |
+| Prediction times labelled `since_date`, uncertified | exact | 0 mismatches |
+| Remote probes | all pass | **8/8** |
+
+The median ρ for raw accuracy is also 0.905, so on these cohorts shrinkage neither helps nor hurts the median rank order. It changes ρ in 13 of 20 cohorts by −0.084 to +0.035. The cohorts with n from 10 to 30 differ less in sample size than a real brain would. Shrinkage matters most for a holder with few resolved predictions, and those holders are flagged `low_n` and kept out of ρ.
+
+The set-F1 of 1.000 and the exact counts are a ceiling. The journal reads the resolutions it was given, so these criteria guard against regressions rather than measure something hard. The ranking criterion is the only one with sampling noise.
+
+The run's `summary.json` and `summary.md` are not committed here. They are mirrored into gbrain-evals when W7 ships.
 
 ## What's here
 
