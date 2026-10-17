@@ -75,6 +75,16 @@ export function pinnedBlob(cursor: PinnedCursor, path: string): TreeBlob | null 
   return readPinnedBlob(cursor.gitRoot, cursor.target, syncGitPath(cursor, path), upcomingGitPaths(cursor));
 }
 
+/**
+ * A `both` entry's recorded disk blob (`driftBaseline`), or null. When the page still holds what it imports (sync-run.ts
+ * `sameContentAtOrigin`, `pageOnly`), the database changed only what an import keeps (tags, links), so the newer file
+ * overwrites nothing the database alone holds and the entry imports.
+ */
+export function driftBaselineContent(gitRoot: string, entry: Pick<SyncEntry, 'drift' | 'driftBaseline'>): string | null {
+  if (entry.drift !== 'both' || !entry.driftBaseline) return null;
+  try { return readBlobContents(gitRoot, [{ oid: entry.driftBaseline, size: SYNC_READ_BOUND }]).get(entry.driftBaseline) ?? null; } catch { return null; }
+}
+
 /** The frozen import content of one entry (`readSyncContent`); a committed entry's pinned blob is read with the entries after it. */
 export function pinnedContent(cursor: SyncDiscovery & { index: number }, entry: SyncEntry): string {
   const content = entry.working ? null : readPinnedContent(cursor.gitRoot, cursor.target, syncGitPath(cursor, entry.path), upcomingGitPaths(cursor));
