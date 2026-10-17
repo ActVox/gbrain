@@ -425,7 +425,10 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
   if (Number(other?.n ?? 0)) residuals.push({ store: 'facts_other_scope', status: 'out_of_scope', reason: plan.subject === '*' ? 'other_visibility' : 'other_subject', remaining: Number(other.n),
     detail: `${other.n} fact row(s) state the same claim about another entity or at another visibility; rerun with --all-subjects to purge every entity's copy.` });
   residuals.push(...stores.filter(s => s.reason === 'source_prose' || s.reason === 'probed_reported' || s.store === 'canonical_markdown' && s.status === 'out_of_scope'));
-  if (input.vacuum && !dryRun && engine.kind === 'pglite') await engine.executeRaw('VACUUM facts, takes, pages, content_chunks, page_versions, persistence_requests, query_cache').catch(() => undefined);
+  if (input.vacuum && !dryRun && engine.kind === 'pglite') {
+    const tables = ['facts', 'takes', 'pages', 'content_chunks', 'page_versions', 'persistence_requests', ...(await relationExists(engine, 'query_cache') ? ['query_cache'] : [])];
+    await engine.executeRaw(`VACUUM ${tables.join(', ')}`).catch(() => undefined);
+  }
   const next = dryRun
     ? ['Review the residuals with the user, then confirm with the token printed above (gbrain forget <id> --purge asks for it on a terminal).']
     : ['Poll completion with gbrain forget --purge --status --request-id <request_id> until it reports complete.'];

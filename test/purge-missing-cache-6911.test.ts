@@ -121,6 +121,20 @@ describe('#6911 missing query_cache', () => {
     }
   }), 120_000);
 
+  test('a recreated query_cache takes the live facts vector shape, not the config default', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      await engine.executeRaw('DROP TABLE query_cache');
+      await engine.executeRaw('DROP INDEX IF EXISTS idx_facts_embedding_hnsw');
+      await engine.executeRaw('ALTER TABLE facts ALTER COLUMN embedding TYPE halfvec(768) USING NULL');
+      const scope = await resolveRepairScope(engine);
+      const preview = await runRepair(ctx(engine), missingTablesRepair, scope, { apply: false, explicit: true });
+      await runRepair(ctx(engine), missingTablesRepair, scope, { apply: true, explicit: true, expect: preview.preview_hash });
+      const [column] = await engine.executeRaw<{ type: string; dims: number }>(`SELECT t.typname AS type, a.atttypmod AS dims FROM pg_attribute a
+        JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass('query_cache') AND a.attname='embedding'`);
+      expect(column).toEqual({ type: 'halfvec', dims: 768 });
+    }
+  }), 120_000);
+
   test('the repair is explicit-only and a missing user-data table still fails the purge loudly', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
       const scope = await resolveRepairScope(engine);

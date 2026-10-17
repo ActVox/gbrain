@@ -13,6 +13,7 @@ import { isRebuildableCache } from './persistence/rebuildable-cache.ts';
 import { v055 } from './schema-migrations/v055-query-cache-search-lite.ts';
 import { v056 } from './schema-migrations/v056-query-cache-knobs-hash.ts';
 import { v059 } from './schema-migrations/v059-code-traversal-cache-v0-34.ts';
+import { hnswIndexExpected, readExistingEmbeddingShape } from './vector-index.ts';
 
 export interface MissingTable {
   table: string;
@@ -33,13 +34,30 @@ export type MissingTablesReport = { status: 'checked'; checked: number; missing:
  */
 export const RECREATE: Readonly<Record<string, (engine: BrainEngine) => Promise<void>>> = {
   query_cache: async engine => {
-    await v055.handler!(engine);
+    // v055 sizes the column from config; an embedding migration since then resized facts and query_cache together, so
+    // the live facts column is the shape a never-dropped query_cache would have.
+    const shape = await readExistingEmbeddingShape(engine, 'facts');
+    if (shape) await engine.runMigration(55, queryCacheDdl(shape.type, shape.dimensions));
+    else await v055.handler!(engine);
     await engine.runMigration(56, v056.sql);
     await engine.runMigration(90, "ALTER TABLE query_cache ADD COLUMN IF NOT EXISTS page_generations JSONB NOT NULL DEFAULT '{}'::jsonb;");
     await engine.runMigration(91, 'ALTER TABLE query_cache ADD COLUMN IF NOT EXISTS max_generation_at_store BIGINT NOT NULL DEFAULT 0;');
   },
   code_traversal_cache: async engine => { await engine.runMigration(59, v059.sql); },
 };
+
+/** v055's DDL for a known vector shape (the table, its source index and, when pgvector can build one, its HNSW index). */
+function queryCacheDdl(type: 'vector' | 'halfvec', dims: number): string {
+  const hnsw = hnswIndexExpected(type, dims)
+    ? `CREATE INDEX IF NOT EXISTS idx_query_cache_embedding_hnsw ON query_cache USING hnsw (embedding ${type === 'halfvec' ? 'halfvec_cosine_ops' : 'vector_cosine_ops'}) WHERE embedding IS NOT NULL;`
+    : '';
+  return `CREATE TABLE IF NOT EXISTS query_cache (
+      id TEXT PRIMARY KEY, query_text TEXT NOT NULL, source_id TEXT NOT NULL DEFAULT 'default', embedding ${type.toUpperCase()}(${dims}),
+      results JSONB NOT NULL DEFAULT '[]'::jsonb, meta JSONB NOT NULL DEFAULT '{}'::jsonb, ttl_seconds INTEGER NOT NULL DEFAULT 3600,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(), hit_count INTEGER NOT NULL DEFAULT 0, last_hit_at TIMESTAMPTZ);
+    CREATE INDEX IF NOT EXISTS idx_query_cache_source_created ON query_cache(source_id, created_at DESC);
+    ${hnsw}`;
+}
 
 export async function readMissingTables(engine: BrainEngine): Promise<MissingTablesReport> {
   const version = parseInt((await engine.getConfig('version')) || '0', 10);

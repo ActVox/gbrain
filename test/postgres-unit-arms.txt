@@ -177,6 +177,7 @@ test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts
 test/purge-fact.test.ts
 test/purge-global-marker.test.ts
+test/purge-missing-cache-6911.test.ts
 test/purge-read-surfaces.test.ts
 test/recall-page-fill.test.ts
 test/remediation-manual-only.test.ts

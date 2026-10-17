@@ -46,13 +46,14 @@ export const missingTablesRepair: RepairHandler = {
   async apply(ctx, item) {
     const recreate = RECREATE[item.slug];
     if (!recreate) return { applied: false, outcome: 'refused', reason: 'not_rebuildable' };
-    if (await relationExists(ctx.engine, item.slug)) return { applied: false, outcome: 'already_present' };
-    await recreate(ctx.engine);
+    const existed = await relationExists(ctx.engine, item.slug);
+    // Every statement is IF NOT EXISTS and runs in one transaction, so a rerun finishes a table an interrupted run left without its later columns.
+    await ctx.engine.transaction(tx => recreate(tx));
     if (!await relationExists(ctx.engine, item.slug)) {
       throw new OperationError('storage_error', `Recreating ${item.slug} ran, but the table still does not exist.`,
         'Run gbrain doctor --json and report the schema_missing_tables entry.');
     }
-    return { applied: true, outcome: 'recreated' };
+    return { applied: true, outcome: existed ? 'completed' : 'recreated' };
   },
   render(details) {
     const d = details as { checked?: number; recreate?: string[]; user_data_tables?: string[] };
