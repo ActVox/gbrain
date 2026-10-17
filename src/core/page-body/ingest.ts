@@ -25,7 +25,7 @@ import { stepFenceWalk, type FenceWalk } from '../fence-scan.ts';
 import { BODY_LEAD_BYTES, BODY_STAGING_HARD_MS, BODY_STAGING_IDLE_MS, SEGMENTED_CREATE_SEAL_MAX_BYTES, STAGE_BATCH_BYTES } from './limits.ts';
 import type { BodyRegion, BodyStagingKind, BodyStorage, JsonObject, ManifestRow, ManifestRowInput, SegmentChunkInput,
   SegmentedBodyColumns, SegmentTextInput } from './types.ts';
-import { segmentStream, SEGMENTER_VERSION, type StoredRegion } from './segmenter.ts';
+import { regionTrust, segmentStream, SEGMENTER_VERSION, type StoredRegion } from './segmenter.ts';
 import { initialEntryState, readEntryState, timelineEntryState, type EntryState } from './entry-state.ts';
 import { ContentHashStream } from './content-hash-stream.ts';
 import { prepareSegmentChunks } from './segment-chunks.ts';
@@ -150,10 +150,6 @@ export function stringBodyFlags(truth: string, timeline: string): JsonObject {
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const sameBytes = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b));
-/** The whole-region fence trust a region's stored regions are computed under (body_flags). */
-export function regionTrust(flags: JsonObject | null | undefined, region: BodyRegion): 'trusted' | 'void' {
-  return (region === 'truth' ? flags?.fence_trust : flags?.timeline_fence_trust) === 'void' ? 'void' : 'trusted';
-}
 
 /** An occurrence is its bytes, entry state and the trust its stored regions were computed under: a trust flip rechunks the region. */
 const occurrenceKey = (sha256: Uint8Array, entryState: unknown, trust: 'trusted' | 'void') => `${hex(sha256)}|${stableJson(entryState)}|${trust}`;
