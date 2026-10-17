@@ -24,8 +24,10 @@ export function printSyncStatusHelp(): void {
   console.log(`Usage: gbrain sync status --source <id> [--detail] [--json]
 
 Where a managed catch-up stands and what to do next, for an operator agent:
-the cursor (index/total, pinned target, last advance), pages committed in the
-last 10 minutes, every held file and the last recorded failure, each with
+the newest sync pass (convergence: outcome, round, candidates, settled,
+remaining, classes) or, for a company-brain source, the cursor (index/total,
+pinned target, last advance), pages committed in the last 10 minutes, every
+held file and the last recorded failure, each with
   class         page | connection | systemic
   safe_actions  retry | retry_when_clean | repair | reconcile | upgrade | none
   needs_human   whether a person has to decide or act (human_reason says why)
@@ -44,6 +46,16 @@ The loop: run this every few minutes; when committed_last_10m is 0 and
 needs_human is false, run \`gbrain sync unblock --source <id> --apply\`, then
 the sync it prints; when needs_human is true, page a person with the slug it
 names; when a *_read field is not_read and you need it, run its fix.
+
+convergence.classes counts the newest round's paths by class, each with an
+action (who finishes it):
+  none    matched, adopt, kept, untracked, gone, deleted_same, legacy_same, db_ahead
+  owner   sync finishes it: in_flight, import, reparse, delete, keep_db,
+          keep_db_pending, legacy_unverified, paused_keep_db
+  repair  a person decides: held, drift, delete_drift, deleted_edited, dirty,
+          spelling, deletes_withheld
+Committed mode reads a file's working-copy dirtiness only for candidates, so
+dirty counts only paths sync would otherwise admit.
 
 Decision table: docs/guides/sync-unblock-runbook.md
 `);

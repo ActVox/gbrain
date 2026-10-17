@@ -267,8 +267,17 @@ for (const kind of testBackends()) describe(`inexact Git rename identity (#6729,
       expect((await pageRow(s.id, 'notes/spec-2'))!.id).not.toBe(spec.id);
       expect([(await pageRow(s.id, 'people/alice'))!.id, (await pageRow(s.id, 'people/bob'))!.id]).not.toContain(a.id);
       expect([(await pageRow(s.id, 'people/alice'))!.id, (await pageRow(s.id, 'people/bob'))!.id]).not.toContain(b.id);
+      // Design v3.2 §2.3 row 6 (delete_drift): in managed sync the retitle moved the old page in the database since its
+      // import, so its file's deletion has no proof and is held file_drift (side deleted); the page is never soft-deleted,
+      // so the downgraded pair has no old page to record.
       expect(result.identityDowngrades?.map(entry => [entry.from, entry.reason]).sort()).toEqual([
-        ['notes/spec.md', 'no_identity_signal'], ['people/a.md', 'title_not_unique'], ['people/b.md', 'title_not_unique']]);
+        ...(mode === 'classic' ? [['notes/spec.md', 'no_identity_signal']] : []), ['people/a.md', 'title_not_unique'], ['people/b.md', 'title_not_unique']]);
+      if (mode === 'managed') {
+        const { readGitSourceHolds } = await import('../src/core/persistence/sync-holds.ts');
+        const holds = (await readGitSourceHolds(engine, { sourceIds: [s.id] }))[0]?.holds ?? [];
+        expect(holds.map(hold => [hold.path, hold.code, hold.meta.side])).toEqual([['notes/spec.md', 'file_drift', 'deleted']]);
+        expect(await pageRow(s.id, 'notes/spec')).toMatchObject({ id: spec.id, deleted_at: null });
+      }
       git(s.root, 'mv', 'notes/draft.md', 'notes/draft-2.md'); write(s.root, 'notes/draft-2.md', h1(`Draft ${mode} h1 6729`, 'Edited.\n'));
       git(s.root, 'add', '-A');
       expect(git(s.root, 'diff', '--cached', '--name-status', '-M')).toMatch(/^R0\d\d\tnotes\/draft.md\tnotes\/draft-2.md$/);
