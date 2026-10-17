@@ -323,7 +323,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     runId: passId, passId, index: 0, authority, processingOptions, syncOptions: input.syncOptions, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 },
     failureKey: passFingerprint(sourceId, incarnation), resumeArgs: passResumeArgs(sourceId, { value, updated_at: startedAt }), ...(episode?.full_id ? { fullEpisode: episode.full_id } : {}), ...(stamp ? { stamp } : {}) });
   let levelSlugMode: Cursor['slugMode'] = 'git-root';
-  /** Drains one batch; a stop is the pass's ending (the batch's counts are folded in either way). */
+  /** Drains one batch; a stop is the pass's ending, and `stop` folds that batch's counts in. */
   const drain = async (entries: PassEntry[], stamp?: PassStamp): Promise<SyncResult | null> => {
     const key = `${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`;
     const batch = batchCursor(entries, stamp);
@@ -338,6 +338,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     return drained;
   };
   const stop = async (drained: SyncResult): Promise<SyncResult> => {
+    Object.assign(counts, { added: counts.added + drained.added, modified: counts.modified + drained.modified, deleted: counts.deleted + drained.deleted,
+      renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
+      waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
+    sliceBase.pages += drained.filesImported ?? 0;
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
     await save(outcome, drained.reason ?? (outcome === 'blocked' ? 'blocked_by_failures' : null));
     const { runId: _run, managedCursor: _cursor, ...rest } = drained;
