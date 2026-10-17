@@ -53,7 +53,7 @@ async function footprint(engine: BrainEngine): Promise<string> {
 function asAsserted(run: EvalRun) {
   return run.results.map(result => {
     const want = result.entry.today ?? result.entry.expect;
-    const got = result.predicted ? Object.fromEntries(Object.keys(want).map(field => [field, (result.predicted as unknown as Record<string, unknown>)[field] ?? (typeof (want as Record<string, unknown>)[field] === 'boolean' ? false : undefined)]))
+    const got = result.predicted ? Object.fromEntries(Object.keys(want).map(field => [field, (result.predicted as unknown as Record<string, unknown>)[field] ?? (typeof (want as unknown as Record<string, unknown>)[field] === 'boolean' ? false : undefined)]))
       : { key: 'outside_domain' };
     return { want: { path: result.entry.path, ...want }, got: { path: result.entry.path, ...got } };
   });
