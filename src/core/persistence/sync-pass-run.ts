@@ -24,7 +24,7 @@ import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { passIdleProbe, readShadowLevel, workingIdleChange, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
-import { recallWorkingStatCache, rememberWorkingStatCache } from './sync-git-stream.ts';
+import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
 import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, type PassEntry } from './sync-pass-batch.ts';
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
@@ -430,6 +430,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   } catch (error) {
     if (error instanceof SyncAdmissionPaused) { await save('resumable', 'admission_paused').catch(() => undefined); return result('partial', 'admission_paused'); }
     if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout'); }
+    // A Git listing that did not finish cleanly classifies nothing (design v3.2 §9): the pass stops blocked, having written nothing for that round.
+    if (error instanceof SyncTreeReadIncomplete) { await save('blocked', 'reconcile_read_incomplete').catch(() => undefined); return result('blocked_by_failures', 'reconcile_read_incomplete'); }
     throw error;
   }
 }

@@ -1684,6 +1684,16 @@ Reasons: `count`, `digest`, `sequence`, `fk`, `trigger`, `relation_set`, `replay
 
 More: [docs/guides/move-to-postgres.md#verify](../../docs/guides/move-to-postgres.md#verify)
 
+### grant_scope
+
+<a id="grant_scope"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync pass ran under a grant that covers only part of the source, so it admitted what the grant can see and cannot finish (stamp) the source. | A slug-fenced grant never stamps a pass (design v3.2 §5): converging the whole source needs a writer that can see every page, which is the owner host's own sync. | On the host that owns the source, run gbrain sync --source <id> --no-pull; check the result with gbrain sync status --source <id> --json. | user | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#drain-grant-scope](../../docs/guides/write-refusals.md#drain-grant-scope)
+
 ### graph_incomplete
 
 <a id="graph_incomplete"></a>
@@ -2354,6 +2364,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
+### not_converged
+
+<a id="not_converged"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync pass used its rounds without the level settling (another writer kept changing it), so it ended resumable; everything it admitted stands. | A pass re-reads the level each round and stamps only when nothing is left to admit. Concurrent writes can keep producing new work; the next pass starts from what this one settled. Three in a row (the pass row's not_converged_streak) mean rerunning is not converging. | Rerun the same gbrain sync; after three consecutive not_converged passes, stop and report it with gbrain sync status --source <id> --json and gbrain doctor --json. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/write-refusals.md#drain-not-converged](../../docs/guides/write-refusals.md#drain-not-converged)
+
 ### not_found
 
 <a id="not_found"></a>
@@ -2849,6 +2869,16 @@ More: [docs/guides/company-brain-ingestion.md#resume-and-verify](../../docs/guid
 | The receipt ID is already bound to different approved ingestion metadata. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/company-brain-ingestion.md#agent-and-ci-use](../../docs/guides/company-brain-ingestion.md#agent-and-ci-use)
+
+### reconcile_host_required
+
+<a id="reconcile_host_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote caller's managed sync admitted what it could, and the rest of the source needs the owner host (holds, markers, keep_db writes or the stamp). | Remote callers admit only one-sided work and never write holds, markers, keep_db writes or stamps (design v3.2 §5), so only the owner host's sync converges the source. | On the host that owns the source, run gbrain sync --source <id> --no-pull; verify with gbrain sync status --source <id> --json. | user | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#drain-reconcile-host-required](../../docs/guides/write-refusals.md#drain-reconcile-host-required)
 
 ### reconcile_read_incomplete
 
