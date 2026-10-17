@@ -139,10 +139,15 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
   return statements;
 }
 
-/** `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and pending Git effects of the source. */
-async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
+/**
+ * `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and of the source incarnation with no
+ * worktree (a write-through-off put_page, page-mutations.ts; `persistence_requests_database_pending`), and pending Git
+ * effects of the source.
+ */
+async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string, incarnation: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
   const [requests, effects] = await Promise.all([exec.executeRaw<{ page_id: number | null; source_path: string | null; path: string | null }>(`SELECT page_id, intent->>'sourcePath' AS source_path, intent->>'path' AS path
-    FROM persistence_requests WHERE worktree_id=$1 AND state IN ('queued','running','recovering') AND source_id=$2`, [worktreeId, sourceId]),
+    FROM persistence_requests WHERE (worktree_id=$1 OR (worktree_id IS NULL AND source_incarnation=$3::uuid)) AND state IN ('queued','running','recovering') AND source_id=$2`,
+    [worktreeId, sourceId, incarnation]),
   exec.executeRaw<{ page_id: number | null; path: string | null }>(`SELECT r.page_id, e.data->>'relative_path' AS path
     FROM persistence_requests r JOIN persistence_effects e ON e.request_id=r.id
     WHERE r.worktree_id=$1 AND r.source_id=$2 AND e.kind='git' AND e.state IN ('queued','running')`, [worktreeId, sourceId])]);
@@ -249,7 +254,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
     timed('I⋈P', () => withRoundSnapshot(engine, async exec => {
       const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, engineKind, sourceId, incarnation)),
-        timed('open_work', () => readOpenWork(exec, sourceId, context.binding.worktree_id)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
+        timed('open_work', () => readOpenWork(exec, sourceId, context.binding.worktree_id, incarnation)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
         timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
       return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
     })),
@@ -297,11 +302,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const probes = mode === 'working' ? await probeDirtiness(root, gitRoot, [...domain], tree, index) : new Map();
   timings.Dp = t();
 
-  const levelOf = (path: string, probe: { dp: string; rawOid: string | null } | undefined): string | null => {
+  const levelOf = (path: string, probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): string | null => {
     const committed = tree.get(path) ?? null;
     return mode === 'committed' ? committed?.oid ?? null
       : !probe || probe.dp === 'deleted' ? null
-      : ['clean', 'clean_eol', 'clean_lfs'].includes(probe.dp) ? committed?.oid ?? probe.rawOid : probe.rawOid ?? `unreadable:${path}`;
+      : ['clean', 'clean_eol', 'clean_lfs'].includes(probe.dp) ? committed?.oid ?? probe.rawOid
+      // A path in neither T nor the index (untracked) or only staged has no `deleted` verdict: no bytes and no file is absent.
+      : probe.rawOid ?? (probe.rawSha256 === null && !readPresent(root, path, scope) ? null : `unreadable:${path}`);
   };
   // `A` only matters where the file or the database moved (no row settles on `fileSame ∧ dbSame` with a proof): read it
   // for those pages alone, so a converged source reads none.
@@ -434,7 +441,9 @@ export async function shadowConvergence(engine: BrainEngine, input: { sourceId: 
 
 /**
  * The idle tick's reads (design v3.2 §2.2): `rev-parse`, the per-source request probe above the converged watermark
- * (a range on the unique `sequence` index), the open-set probe (`persistence_requests_pending`) and the pass row. PR 4a
+ * (a range on the unique `sequence` index), the open-set probe (`persistence_requests_pending`, plus
+ * `persistence_requests_database_pending` for the source's write-through-off requests, which carry no worktree) and the
+ * pass row; both request probes count those requests too. PR 4a
  * writes no pass row, so a real tick is never idle yet; `assumeConverged` lets the bench time the reads PR 4b's idle
  * tick will make, with `request_hwm` at the current maximum.
  */
@@ -453,9 +462,11 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean }>(`WITH pass AS (
       SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
     SELECT (SELECT value FROM pass) AS pass_row,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'converged'->>'request_hwm')::bigint, 0) AND worktree_id = $4) AS newer,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE worktree_id = $4 AND state IN ('queued','running','recovering')) AS pending`,
-    [MANAGED_SYNC_PASS_OP, `${context.sourceId}:${context.incarnation}`, input.assumeConverged?.requestHwm ?? null, context.binding.worktree_id]);
+      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'converged'->>'request_hwm')::bigint, 0)
+        AND (worktree_id = $4 OR (worktree_id IS NULL AND source_incarnation = $5::uuid))) AS newer,
+      EXISTS (SELECT 1 FROM persistence_requests WHERE (worktree_id = $4 OR (worktree_id IS NULL AND source_incarnation = $5::uuid))
+        AND state IN ('queued','running','recovering')) AS pending`,
+    [MANAGED_SYNC_PASS_OP, `${context.sourceId}:${context.incarnation}`, input.assumeConverged?.requestHwm ?? null, context.binding.worktree_id, context.incarnation]);
   timings.probes = t();
   const row = probe?.pass_row ?? null;
   const converged = input.assumeConverged ?? (row?.converged as { target: string; request_hwm: number } | undefined

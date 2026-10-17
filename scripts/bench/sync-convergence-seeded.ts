@@ -61,8 +61,6 @@ const note = (title: string, body: string) => `---\ntitle: ${title}\n---\n\n${bo
 const titleOf = (path: string) => path.replace(/^.*[\\/]/, '').replace(/\.md$/, '');
 
 export const FINDINGS = {
-  inFlightDbOnly: { kind: 'a', ref: 'sync-pass.ts readOpenWork (WHERE worktree_id=$1); page-mutations.ts:400',
-    text: 'U_db reads open requests by worktree_id, but a put_page admitted with sync.write_through=false carries worktree_id NULL (page-mutations.ts:400), so a queued agent write on a page whose file changed is not in_flight and the shadow predicts a plain import (v3.2 §2.3 overlay).' },
   dirtyAbsorbed: { kind: 'b', ref: 'v3.2 §2.3 row 11 before row 12 vs §2.1 (Dp is read for candidates only); sync-pass.ts settledBeforeDirtiness',
     text: 'The design contradicts itself on an uncommitted edit of a matched path: row order puts it in row 11 dirty (settled, absorbed), but §2.1 reads Dp for candidates only, so the dirtiness of a matched path is never known. 4a follows §2.1 and says matched. Settlement and the action tag agree (settled, none); only the class differs.' },
   fullLegacy: { kind: 'b', ref: 'v3.1 §2.7 ("--full imports legacy-marked paths"), which v3.2 §2.7 keeps, vs v3.2 §2.3 row 10 (no episode clause)',
@@ -73,10 +71,6 @@ export const FINDINGS = {
     text: 'frontmatter_slug_conflict and legacy_slug_conflict holds are always rescreen-due, so row 1 never holds them; with no page and an unchanged file they fall to row 10 legacy_same (settled, none) while the hold row still exists, so the class contradicts the hold that status shows.' },
   dirtyGlossary: { kind: 'b', ref: 'v3.2 §9 class glossary; sync-classify.ts syncClassAction',
     text: 'Row 11 dirty is settled when absorbed or published, but the glossary gives a class one action and 4a tags every dirty path repair, so a settled write-through publication waiting for its commit reads as needing a person.' },
-  spellingDryRun: { kind: 'a', ref: 'commands/sync dry run (master discovery throws page_identity_changed before dryRunConvergence runs); v3.2 §11 step 2',
-    text: 'One case- or separator-only collision (row 2) makes gbrain sync --dry-run --json exit 1 with page_identity_changed and no convergence block, so the redacted receipt that §11 makes the evidence channel cannot be produced for such a source; sync status --detail still reports the same counts.' },
-  workingAbsent: { kind: 'a', ref: 'sync-git-stream.ts probeDirtiness (dp untracked before the absence check, :226-236); sync-pass.ts levelOf (rawOid ?? unreadable:<path>)',
-    text: 'In working mode a domain path that is in neither T nor the index and is not on disk probes as untracked with no bytes, and levelOf turns that into the level unreadable:<path> instead of absent. So a committed git rm of a synced file is predicted import (not row 5 delete or row 6 delete_drift), and a tombstone whose file left the checkout is deleted_edited, a hold, instead of row 7 gone.' },
   twinInvisible: { kind: 'b', ref: 'v3.2 §2.3 domain (pages with a recorded origin only)',
     text: 'A #6885 legacy twin (source_path NULL) is outside the domain: the pair reads as one matched path and nothing in convergence counts it, so PR 4 can neither report nor converge already-forked pairs.' },
 } as const satisfies Record<string, Finding>;
@@ -159,7 +153,7 @@ export function mixCases(): SeededCase[] {
     c('spelling: separator-only', 'mix/sep-pair.md', { key: 'spelling', action: 'refuse' }, 'row 2', 'git commit'),
     c('legacy_unverified', 'mix/legacy-unverified.md', { key: 'legacy_unverified', action: 'none', settled: true }, 'row 17', 'sync, raw SQL (record stripped, receipt compacted)'),
     c('in_flight: open write-through put_page on a changed file', 'mix/inflight-wt.md', { key: 'in_flight', action: 'import', settled: false }, 'overlay on row 16', 'sync, git commit, admitWrite (consumer stopped)'),
-    c('in_flight: open put_page (write-through off) on a changed file', 'mix/inflight-dbonly.md', { key: 'in_flight', action: 'import', settled: false }, 'overlay on row 16', 'sync, git commit, admitWrite (consumer stopped)', FINDINGS.inFlightDbOnly, { key: 'import', action: 'import', settled: false }),
+    c('in_flight: open put_page (write-through off) on a changed file', 'mix/inflight-dbonly.md', { key: 'in_flight', action: 'import', settled: false }, 'overlay on row 16', 'sync, git commit, admitWrite (consumer stopped)'),
     c('#6885 legacy twin pair (file side)', 'mix/Twin Page.md', { key: 'matched', ...settledNone }, 'row 12', 'sync, raw SQL (legacy twin page without source_path)', FINDINGS.twinInvisible),
   ];
 }
@@ -317,12 +311,10 @@ export function seedMassDelete(root: string, cases: SeededCase[]): SeededCase[] 
  * class. Only the paths whose working-mode class this mix pins are listed; the rest of the domain is left unchecked.
  */
 export function workingCases(cases: SeededCase[]): SeededCase[] {
-  const absent = { finding: FINDINGS.workingAbsent };
   const want: Record<string, { expect: Expected; row: string; finding?: Finding; today?: Expected }> = {
-    'mix/tomb-gone.md': { expect: { key: 'gone', action: 'none', settled: true }, row: 'row 7 (working mode: L absent, no live page)', ...absent,
-      today: { key: 'deleted_edited', action: 'hold', settled: false } },
-    'mix/delete-proof.md': { expect: { key: 'delete', action: 'delete', settled: false }, row: 'row 5 (L absent, not present, proof)', ...absent, today: { key: 'import', action: 'import', settled: false } },
-    'mix/delete-drift.md': { expect: { key: 'delete_drift', action: 'hold', settled: false }, row: 'row 6 (L absent, not present, no proof)', ...absent, today: { key: 'drift', action: 'hold', settled: false } },
+    'mix/tomb-gone.md': { expect: { key: 'gone', action: 'none', settled: true }, row: 'row 7 (working mode: L absent, no live page)' },
+    'mix/delete-proof.md': { expect: { key: 'delete', action: 'delete', settled: false }, row: 'row 5 (L absent, not present, proof)' },
+    'mix/delete-drift.md': { expect: { key: 'delete_drift', action: 'hold', settled: false }, row: 'row 6 (L absent, not present, no proof)' },
     'mix/untracked-new.md': { expect: { key: 'import', action: 'import', settled: false }, row: 'row 16 (in U, no page, no marker)' },
     'mix/dirty-absorbed.md': { expect: { key: 'import', action: 'import', settled: false }, row: 'row 16 (L = the disk bytes, proof)' },
     'mix/dirty-held.md': { expect: { key: 'import', action: 'import', settled: false }, row: 'row 16 (L = the disk bytes, proof)' },
@@ -459,7 +451,9 @@ export async function cliChecks(engine: BrainEngine, run: EvalRun): Promise<CliC
     else if (result.predicted?.key !== key) mismatches.push(`${result.entry.path}: redacted sample under ${key}, library ${result.predicted?.key}`);
     else if (result.predicted.glossary !== sample.action) mismatches.push(`${result.entry.path}: redacted action ${sample.action}, library ${result.predicted.glossary}`);
   }
-  return { dryRunExit: dry.exit, statusExit: status.exit, ...(dry.error ? { dryRunError: dry.error } : {}), ...(status.error ? { statusError: status.error } : {}), dryRunCounts: counts(dryConvergence), statusCounts: counts(statusConvergence), libraryCounts: counts(run.receipt),
+  // A refused dry run reports its refusal as the envelope's code, beside its convergence receipt.
+  const dryRunError = dry.error ?? (typeof dry.json?.code === 'string' ? { code: dry.json.code, message: String(dry.json.message ?? '') } : undefined);
+  return { dryRunExit: dry.exit, statusExit: status.exit, ...(dryRunError ? { dryRunError } : {}), ...(status.error ? { statusError: status.error } : {}), dryRunCounts: counts(dryConvergence), statusCounts: counts(statusConvergence), libraryCounts: counts(run.receipt),
     redactionLeaks: leaks, redactedSamplesChecked: checked, redactedSampleMismatches: mismatches, dryRunConvergence: dryConvergence, statusConvergence };
 }
 
@@ -692,7 +686,7 @@ async function main(): Promise<number> {
       const mass = await evaluate(brain.engine, seedMassDelete(brain.root, cases), { label: 'committed mode, after a mass removal (the valve)' });
       body = [renderRun(committed), '', renderCli(cli), ` The re-read after the CLI runs ${JSON.stringify(after.receipt.counts) === JSON.stringify(committed.receipt.counts) ? 'has the same counts' : '**has different counts**'}.`, '',
         renderRun(spelled), '', `With the spelling collisions: ${renderCli(spelledCli)}`, '', renderRun(full), '', renderRun(working), '', renderRun(mass), '',
-        renderFindings([committed, spelled, full, working, mass], spelledCli.dryRunError ? [FINDINGS.spellingDryRun] : [])].join('\n');
+        renderFindings([committed, spelled, full, working, mass])].join('\n');
     }, { ...(databaseUrl ? { databaseUrl } : {}), setup: mixSetup });
   }
   mkdirSync(dirname(out), { recursive: true });

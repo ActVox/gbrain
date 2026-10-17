@@ -10,8 +10,9 @@
  * seeding and the reads are the production calls (scripts/bench/sync-convergence-seeded.ts names the raw SQL it needs).
  *
  * Cases whose 4a prediction differs from the design carry it as today: the mix asserts today, so a fix turns the mix red
- * until the case drops it. The (a) findings also have a focused probe each, written as test.failing: red on 4a, and
- * a failure once PR 4b fixes it, when it becomes a plain test.
+ * until the case drops it. The (a) findings this validation found (a write-through-off request outside U_db, an absent
+ * working-mode path read as unreadable, a spelling refusal without its dry-run receipt) are fixed in 4a; each keeps a
+ * focused test below.
  *
  * PGLite, and Postgres with DATABASE_URL (test/e2e/sync-convergence-seeded-6712-postgres.test.ts). Synthetic content only.
  */
@@ -21,12 +22,12 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
-import { shadowConvergence } from '../src/core/persistence/sync-pass.ts';
+import { idleTickProbe, shadowConvergence } from '../src/core/persistence/sync-pass.ts';
 import { preparePageAdmission } from '../src/core/persistence/page-mutations.ts';
 import { admitWrite } from '../src/core/persistence/journal.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { runSync } from '../src/commands/sync.ts';
-import { captureCli, cliChecks, evaluate, FINDINGS, fullCases, mixSetup, seedMassDelete, seedMix, seedSpelling, workingCases, type EvalRun } from '../scripts/bench/sync-convergence-seeded.ts';
+import { captureCli, cliChecks, evaluate, fullCases, mixSetup, seedMassDelete, seedMix, seedSpelling, workingCases, type EvalRun } from '../scripts/bench/sync-convergence-seeded.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -96,9 +97,12 @@ for (const backend of testBackends()) {
       const spelled = await evaluate(engine, cases, { label: 'spelled' });
       expectRun(spelled);
       const spelledCli = await cliChecks(engine, spelled);
-      // Pinned (a) finding spellingDryRun: master's refusal aborts the dry run, so it carries no convergence block.
+      // The real run would refuse the spelling pairs; the refused dry run still carries the convergence receipt.
       expect(spelledCli.dryRunError?.code).toBe('page_identity_changed');
+      expect(spelledCli.dryRunCounts).toBe(spelledCli.libraryCounts);
       expect(spelledCli.statusCounts).toBe(spelledCli.libraryCounts);
+      expect(spelledCli.redactionLeaks).toEqual([]);
+      expect(spelledCli.redactedSampleMismatches).toEqual([]);
 
       expectRun(await evaluate(engine, fullCases(cases), { label: 'full', full: true }));
       expectRun(await evaluate(engine, workingCases(cases), { label: 'working', workingTree: true, partial: true }), { partial: true });
@@ -111,7 +115,7 @@ for (const backend of testBackends()) {
       expect(await footprint(engine)).toBe(before);
     }, mixSetup), 600_000);
 
-    test.failing(`finding (a) inFlightDbOnly: a queued put_page admitted with write-through off is open work, so the changed file is in_flight (${FINDINGS.inFlightDbOnly.ref})`, () => brain(async ({ engine, ctx, root }) => {
+    test('a queued put_page admitted with write-through off (no worktree) is open work, so the changed file is in_flight', () => brain(async ({ engine, ctx, root }) => {
       expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
       await engine.setConfig('sync.write_through', 'false');
       writeFileSync(join(root, 'notes', 'alpha.md'), note('alpha', 'Synthetic alpha two.'));
@@ -119,11 +123,15 @@ for (const backend of testBackends()) {
       await disposePersistenceConsumer(engine);
       const snapshot = (await engine.readPageSnapshot('notes/alpha', { sourceId: 'default' }))!;
       const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/alpha', request_id: crypto.randomUUID(), expected_revision: snapshot.revision, content: note('alpha', 'A queued agent edit.') } });
+      const [{ hwm }] = await engine.executeRaw<{ hwm: number }>('SELECT COALESCE(max(sequence), 0)::int AS hwm FROM persistence_requests');
       expect((await admitWrite(engine, prepared.admission!)).state).toBe('queued');
       expect((await shadowConvergence(engine, { sourceId: 'default' }))!.counts).toEqual({ matched: 2, in_flight: 1 });
+      // The idle tick sees the same request above a watermark taken before it, so the source is not idle.
+      const idle = await idleTickProbe(engine, { sourceId: 'default', assumeConverged: { target: git(root, 'rev-parse', 'HEAD'), requestHwm: hwm! } });
+      expect(idle.idle).toBe(false);
     }, small), 120_000);
 
-    test.failing(`finding (a) workingAbsent: in working mode a committed git rm of a synced file is a delete, not an import (${FINDINGS.workingAbsent.ref})`, () => brain(async ({ engine, root }) => {
+    test('in working mode a committed git rm of a synced file is a delete, not an import (its absent level is absent)', () => brain(async ({ engine, root }) => {
       expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
       git(root, 'rm', '-q', 'notes/beta.md');
       git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'remove beta');
@@ -131,12 +139,13 @@ for (const backend of testBackends()) {
       expect((await shadowConvergence(engine, { sourceId: 'default', workingTree: true }))!.counts).toEqual({ matched: 2, delete: 1 });
     }, small), 120_000);
 
-    test.failing(`finding (a) spellingDryRun: a spelling collision still leaves the dry run its convergence receipt (${FINDINGS.spellingDryRun.ref})`, () => brain(async ({ engine, root }) => {
+    test('a spelling collision still leaves the refused dry run its convergence receipt, the pair under spelling', () => brain(async ({ engine, root }) => {
       expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
       writeFileSync(join(root, 'notes', 'Pair.md'), note('Pair', 'Synthetic pair.'));
       writeFileSync(join(root, 'notes', 'pair.md'), note('pair', 'Synthetic pair.'));
       commit(root, 'a case-only pair');
       const dry = await captureCli(() => runSync(engine, ['--source', 'default', '--no-pull', '--dry-run', '--json', '--no-embed', '--redact-paths']));
+      expect({ exit: dry.exit !== 0, code: dry.json?.code }).toEqual({ exit: true, code: 'page_identity_changed' });
       expect((dry.json?.convergence as { counts?: Record<string, number> } | undefined)?.counts).toEqual({ matched: 3, spelling: 2 });
     }, small), 120_000);
   });
