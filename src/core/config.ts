@@ -7,6 +7,7 @@ import { loadConfigSnapshot } from './config-snapshot.ts';
 import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 import { dotenvValuesForKey } from './env-trust.ts';
 import { REMOTE_PRIVATE_PAGES_KEY } from './search/private-visibility.ts';
+import { RUNTIME_READER_CONFIG_KEYS } from './config-runtime-keys.ts';
 
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
@@ -1726,6 +1727,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // #5984: managed Postgres sync publishes pages in bulk groups (on by default; each page keeps its own request).
   'sync.bulk',
   'sync.bulk_size',
+  // #6858 ask 6: on-commit sync in the resident serve and its freshness target (src/core/sync-config-keys.ts).
+  'sync.on_commit', 'sync.freshness_target_seconds',
   // #6712 PR 2: rollback keys (src/core/sync-config-keys.ts; windows in wire-skew.ts): readable and honored, not tunables.
   'sync.job_drain', 'sync.waive_batch', 'sync.foreground_priority',
   'sync.lanes', 'persistence.single_write_group', 'persistence.preadmit_cache', // the last two: write-path kill switches (persistence/switches.ts)
@@ -1790,6 +1793,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'planner.auto_analyze', 'planner.first_read_budget_ms', 'import.analyze_every_pages', 'health.cache_ttl_ms',
   // Wave B segmented page storage (src/core/page-body/limits.ts PAGE_BODY_CONFIG_KEYS; switch defaults off).
   'pages.segmented_storage', 'pages.max_bytes', 'pages.flip_retire_max_rows', 'versions.segmented_max_per_page', 'versions.segmented_max_pinned_bytes',
+  ...RUNTIME_READER_CONFIG_KEYS, // #6780: getConfig() runtime knobs (config-runtime-keys.ts)
 ];
 
 /**
