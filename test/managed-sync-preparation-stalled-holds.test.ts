@@ -344,16 +344,27 @@ test('bulk groups: a stalled first, middle or last member is held, the committed
 const committedAttempts = async (engine: BrainEngine, sourceId: string, path: string) => (await engine.executeRaw<{ n: number }>(
   "SELECT preparation_attempts::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'=$2 AND state='committed' ORDER BY sequence DESC LIMIT 1", [sourceId, path]))[0]?.n;
 
-test('retry-held against an unfinished cursor: the printed sync finishes the backlog and re-screens the scheduled file in the same drain (Phase 4.1b)', () => each(async engine => {
+// #6712 PR 4b: a non-company source has no cursor backlog; a sliced pass that yields is the backlog (its pass row stays
+// resumable with candidates unsettled, readManagedSyncBacklog reads it). retry-held prints the pass's own resume command,
+// and the printed sync, drained as the CLI drains it, finishes the backlog and re-screens the scheduled file in the same
+// drain: every file is imported once (the sliced pass's imports are not admitted again), the hold and its schedule are
+// gone, and the stalled receipt stays the one failed request.
+test('retry-held against an unfinished pass: the printed sync finishes the backlog and re-screens the scheduled file in the same drain (Phase 4.1b)', () => each(async engine => {
   const s = await source(engine, { 'notes/a.md': note('A'), 'notes/stuck.md': note('Stuck'), 'notes/z1.md': note('Z1'), 'notes/z2.md': note('Z2'), 'notes/z3.md': note('Z3') });
   stallPaths(engine, s.id, new Set(['notes/stuck.md']));
-  // A sliced pass holds the stalled entry and yields with entries left: the cursor is a backlog, as after the lock run's queue_capacity exit.
+  // A sliced pass holds the stalled file and yields with candidates left: its pass row is the backlog, as after the lock run's queue_capacity exit.
   const sliced = await performManagedSync(engine, { sourceId: s.id, noPull: true, noEmbed: true, noExtract: true }, { maxPages: 2, maxMs: 60_000 });
-  expect(sliced).toMatchObject({ status: 'partial', reason: 'writer_yield', held_count: 1 });
-  expect(sliced.managedCursor!.index).toBeLessThan(5);
+  expect(sliced).toMatchObject({ status: 'partial', reason: 'writer_yield', held_count: 1, held: [{ path: 'notes/stuck.md', code: 'preparation_stalled' }],
+    pass: { outcome: 'resumable', stop_reason: 'writer_yield' } });
   const [failed] = await s.failedRequests();
   expect(failed).toMatchObject({ error_code: 'preparation_stalled', path: 'notes/stuck.md' });
+  const imported = async () => (await engine.executeRaw<{ path: string; pass_id: string }>(
+    "SELECT intent->>'path' AS path,intent->>'passId' AS pass_id FROM persistence_requests WHERE source_id=$1 AND state='committed' AND intent->>'kind'='managed_sync_import' ORDER BY intent->>'path'", [s.id]));
+  const slicedImports = await imported();
+  expect(slicedImports.map(row => row.pass_id)).toEqual(slicedImports.map(() => sliced.pass!.pass_id));
+  expect(slicedImports.length).toBeLessThan(4);
   const [backlog] = await readManagedSyncBacklog(engine, [s.id]);
+  expect(backlog).toMatchObject({ pass: { pass_id: sliced.pass!.pass_id, outcome: 'resumable' } });
   expect(backlog!.remaining).toBeGreaterThan(0);
   // The cause is gone; the operator follows the route: retry-held prints the backlog's own resume command.
   installFaultHook(undefined);
@@ -361,22 +372,22 @@ test('retry-held against an unfinished cursor: the printed sync finishes the bac
   expect(retry).toMatchObject({ scheduled: 1, items: [{ key: 'notes/stuck.md', code: 'preparation_stalled', action: 'retry_scheduled' }] });
   expect(retry.fix!.argv).toEqual(['gbrain', 'sync', ...backlog!.resume_args]);
   expect(await readGitHoldRetryPaths(engine, s.id, await s.incarnation())).toEqual(['notes/stuck.md']);
-  // The printed sync, drained as the CLI drains it: the backlog finishes, then the scheduled re-screen runs before the drain reports synced.
+  // The printed sync, drained as the CLI drains it: one pass finishes the backlog and re-screens the scheduled file before the drain reports synced.
   const drained = await drainManagedSync(engine, { sourceId: s.id, noPull: true, noEmbed: true, noExtract: true }, false);
   expect(drained.drain).toMatchObject({ outcome: 'synced', remaining: 0 });
-  expect(drained.drain!.passes).toBeGreaterThanOrEqual(2);
-  // The report covers both runs: the backlog cursor's four pages (two from the sliced pass) plus the re-screened one; the drain itself wrote three.
-  expect(drained).toMatchObject({ status: 'synced', added: 5, modified: 0 });
+  expect(drained).toMatchObject({ status: 'first_sync', added: 5 - sliced.added, modified: 0, pass: { outcome: 'synced' } });
   expect(drained.drain!.written).toBe(5 - sliced.added);
   expect(drained.holds_outstanding ?? 0).toBe(0);
-  expect(await engine.getPage('notes/stuck', { sourceId: s.id })).not.toBeNull();
-  for (const slug of ['notes/a', 'notes/z1', 'notes/z2', 'notes/z3']) expect(await engine.getPage(slug, { sourceId: s.id })).not.toBeNull();
+  expect((await imported()).map(row => row.path)).toEqual(['notes/a.md', 'notes/stuck.md', 'notes/z1.md', 'notes/z2.md', 'notes/z3.md']);
+  expect((await imported()).filter(row => row.pass_id === sliced.pass!.pass_id)).toEqual(slicedImports);
+  for (const slug of ['notes/a', 'notes/stuck', 'notes/z1', 'notes/z2', 'notes/z3']) expect(await engine.getPage(slug, { sourceId: s.id })).not.toBeNull();
   expect(await s.holds()).toEqual([]);
   expect(await s.summary()).toMatchObject({ count: 0, stalled: 0 });
   expect(await committedAttempts(engine, s.id, 'notes/stuck.md')).toBe(0);
   expect(await readGitHoldRetryPaths(engine, s.id, await s.incarnation())).toEqual([]);
-  expect(await s.failedRequests()).toHaveLength(1);
+  expect(await s.failedRequests()).toEqual([failed]);
   expect(await s.ledger()).toEqual([]);
+  expect(await s.lastCommit()).toBe(git(s.root, 'rev-parse', 'HEAD'));
   expect(await s.sync()).toMatchObject({ status: 'up_to_date' });
 }), 240_000);
 

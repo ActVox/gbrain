@@ -30,7 +30,7 @@ import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHo
 import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { movedDriftHolds, prescreenSyncEntries, type SyncDriftSide } from './sync-prescreen.ts';
-import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
+import { sliceEntries, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
 
 /** The page an import takes over from its previous origin: a Git rename, or a file that replaced a vanished origin at the same slug. */
 export interface SyncRename { sourcePath: string; slug: string; pageId: number; revision: string; }
@@ -82,10 +82,6 @@ export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gi
 export async function syncExcludePatterns(engine: Pick<BrainEngine, 'getConfig'>, extra: readonly string[] = []): Promise<string[]> {
   return [...extra, ...(await engine.getConfig('sync.exclude') ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)]
     .map(v => v.endsWith('/') ? `${v}**` : v);
-}
-/** Whether `commit` is still reachable in the checkout (a sliced target pinned before a history rewrite is not). */
-function commitExists(gitRoot: string, commit: string): boolean {
-  try { syncGit(gitRoot, ['cat-file', '-e', `${commit}^{commit}`]); return true; } catch { return false; }
 }
 export function syncGit(root: string, args: string[]): string {
   return execFileSync('git', ['-c', 'core.quotepath=false', '-C', root, ...args],
@@ -269,16 +265,6 @@ export function stagedSyncTarget(gitRoot: string, from: string, target: string, 
 }
 
 /**
- * #6349 (P4.4): an unfinished path-sliced target of this source under these exact options continues where its last
- * slice checkpointed, pinned at the same target; a target history no longer holds starts over from HEAD.
- */
-async function resumableSliceStage(engine: BrainEngine, opts: SyncOpts, gitRoot: string, sourceId: string, incarnation: string):
-  Promise<{ target: string; head: string; slice: Pick<SyncSliceCursor, 'phase' | 'after'> } | null> {
-  const resume = await readSyncSlice(engine, sourceId, incarnation, syncCursorOptions(opts));
-  if (!resume || !commitExists(gitRoot, resume.target)) return null;
-  return { target: resume.target, head: syncGit(gitRoot, ['rev-parse', 'HEAD']).trim(), slice: { phase: resume.phase, after: resume.after } };
-}
-/**
  * #5459 (P4.5): "not in the Git tree" is not "deleted" for a page imported from the working tree. The durable import
  * provenance (not the request intent, which compaction nulls) says where the bytes came from; a working-tree import
  * whose file is still present is kept, and unknown provenance with the file present is held rather than deleted. A
@@ -308,10 +294,6 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   stage?: { target: string; head: string; slice?: Pick<SyncSliceCursor, 'phase' | 'after'> }, walk = false): Promise<SyncDiscovery> {
   const { binding, root, gitRoot, sourceId, incarnation, source } = context ?? await resolveManagedSyncContext(engine, opts);
   const company = currentCompanyBrainSync(sourceId);
-  if (!company && !stage && !opts.dryRun) {
-    const resume = await resumableSliceStage(engine, opts, gitRoot, sourceId, incarnation);
-    if (resume) return discoverManagedSync(engine, opts, context ?? { binding, root, gitRoot, sourceId, incarnation, source }, resume, walk);
-  }
   const { scope, slugMode, nativeRoot, nativeGitRoot, eligible, sourcePath } = await loadSyncEligibility(engine, { root, gitRoot, sourceId, source }, opts, !!company);
   const originScope: SyncOriginScope = { sourceId, root, scope, slugMode };
   const target = stage?.target ?? company?.plan.revision?.commit ?? syncGit(gitRoot, ['rev-parse', 'HEAD']).trim();

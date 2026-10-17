@@ -510,7 +510,7 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
   };
   const finish = (result: SyncResult, outcome: DrainOutcome, stopReason?: DrainStopReason, extra?: Partial<DrainReport>): SyncResult => {
     if (result.managedCursor) { index = result.managedCursor.index; total = result.managedCursor.total; }
-    const left = outcome === 'synced' ? 0 : remaining();
+    const left = outcome === 'synced' ? 0 : result.pass ? result.pass.remaining : remaining();
     if (stopReason === 'deadline' && continues(result)) result = { ...result, reason: 'timeout' };
     if (carried) result = { ...result, added: result.added + carried.added, modified: result.modified + carried.modified, deleted: result.deleted + carried.deleted,
       renamed: result.renamed + carried.renamed, chunksCreated: result.chunksCreated + carried.chunksCreated };
@@ -1112,7 +1112,7 @@ export function formatDrainSummary(result: SyncResult, resumeCommand: string, so
   const d = result.drain;
   if (!d) return [];
   // #6712 PR 2 (L5): one headline per state; a drain that finished a run an earlier invocation started says so.
-  const resumed = d.outcome === 'synced' && result.runId && ((result.managedCursor?.progress?.startIndex ?? 0) > 0 || result.cursorAdopted) ? `resumed run ${result.runId} and converged, ` : '';
+  const resumed = d.outcome === 'synced' && result.runId && (result.managedCursor?.progress?.startIndex ?? 0) > 0 ? `resumed run ${result.runId} and converged, ` : '';
   const lines = [`Managed sync ${d.outcome}: ${resumed}${d.processed} entries this run (${d.written} written, ${d.waived} waived)`
     + (d.remaining ? `, ${d.remaining} remaining` : '') + (d.rate_pages_per_min !== null ? `, ${d.rate_pages_per_min} pages/min` : '')
     + (d.remaining && d.eta_seconds !== null ? `, indexing ETA ${formatDuration(d.eta_seconds)}` : '') + '.'];

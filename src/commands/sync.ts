@@ -28,11 +28,6 @@ export interface SyncResult {
    * not set them (`gbrain embed --stale` / `gbrain extract --stale` settle the pages they skipped).
    */
   inherited_options?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
-  /** #6712 PR 1: this run finished a cursor another writer, or an older key, started, under that run's frozen options (shown to local callers). */
-  cursorAdopted?: { writer_changed: boolean; legacy_key: boolean; sync_options?: import('../core/persistence/sync-prepare.ts').SyncCursorOptions | null;
-    processing_options?: import('../core/persistence/sync-authority.ts').SyncProcessingOptions | null };
-  /** #6712 PR 1: older-key cursors of the incarnation this run's fan-in folded (`retained`: left while a request under them is open). */
-  cursorFanIn?: { adopted: boolean; superseded: number; retained: number };
   /** #6693: caller remembers refused while their page's file awaited import (or was held), replayed after this sync imported it. */
   replayedRemembers?: import('../core/repair/failed-writes.ts').ImportReplayReport;
   /** #6712 PR 2 (L4): live pages whose canonical file is gone (ghost pages), counted after a managed sync with the read-only repair preview; sync never deletes them. */
