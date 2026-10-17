@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.280.0] - 2026-10-17
+
+**The take grader now has an eval, and you can review what it has graded.** Wave 4b W6: a preregistered take-grading eval measures which judge models may ever auto-resolve a take, the dream cycle's take grader stops counting evidence about a look-alike company, and `gbrain takes grades` lists its cached verdicts. Auto-resolve stays off.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| The take grader's evidence mentions a different company whose name only resembles the one in the claim | the judge could grade the claim on the other company's outcome | prompt `hybrid-evidence-v2` tells it that evidence does not count, so the verdict is `unresolvable` |
+| The judge wraps its JSON answer in prose, or repeats an answer that agrees | no verdict ("judge output parse failed"), retried next cycle | the answer parses; two answers that disagree still give no verdict |
+| You want to see what the grader concluded | only the database table `take_grade_cache` | `gbrain takes grades [--verdict v] [--min-confidence n] [--applied\|--unapplied] [--limit n] [--json]` lists the newest verdict per take and marks judges the eval has not measured |
+
+### What you need to do
+
+Nothing. Verdicts are cached per prompt version, so the next cycles grade each eligible take once more within the phase's existing budget (`cycle.grade_takes.budget_usd`). No take's resolution changes. `gbrain takes grades` runs on the brain host; thin clients refuse it.
+
+### For contributors
+
+`evals/take-grading/` holds the eval (908 seeded synthetic takes, dev and counted splits, `--check` at $0) and its preregistration. On the counted split (790 takes, $9.25), `gpt-6.1-sol` qualified: 496 applied verdicts, none wrong (95% upper bound 0.6%, bar 1%), so `GRADE_TAKES_MEASURED_MODELS` (`src/core/cycle/grade-takes-measured.ts`) lists it. `claude-sonnet-5-5` (121 applied, 1 wrong) and `claude-opus-5-5` (2 applied: right verdicts, confidence below 0.95) did not. Results are mirrored in gbrain-evals.
+
 ## [0.60.279.0] - 2026-10-17
 
 **A managed brain can now make a commit searchable in seconds, and every managed source reports how long that takes.** Until now a commit reached search only when the next scheduled sync ran, which on a managed brain could be most of an hour. Turn on `sync.on_commit` and `gbrain serve` notices the commit within about 3 seconds, waits 3 more for the commit burst to settle, and runs one managed sync for that source. The setting is off by default, so nothing changes until you turn it on.
