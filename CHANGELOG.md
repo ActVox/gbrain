@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.281.0] - 2026-10-17
+## [0.60.282.0] - 2026-10-17
 
 **The take grader now has an eval, and you can review what it has graded.** Wave 4b W6: a preregistered take-grading eval measures which judge models may ever auto-resolve a take, the dream cycle's take grader stops counting evidence about a look-alike company, and `gbrain takes grades` lists its cached verdicts. Auto-resolve stays off.
 
@@ -29,6 +29,30 @@ Nothing. Verdicts are cached per prompt version, so the next cycles grade each e
 ### For contributors
 
 `evals/take-grading/` holds the eval (908 seeded synthetic takes, dev and counted splits, `--check` at $0) and its preregistration. On the counted split (790 takes, $9.25), `gpt-6.1-sol` qualified: 496 applied verdicts, none wrong (95% upper bound 0.6%, bar 1%), so `GRADE_TAKES_MEASURED_MODELS` (`src/core/cycle/grade-takes-measured.ts`) lists it. `claude-sonnet-5-5` (121 applied, 1 wrong) and `claude-opus-5-5` (2 applied: right verdicts, confidence below 0.95) did not. Results are mirrored in gbrain-evals.
+
+## [0.60.281.0] - 2026-10-17
+
+**A PGLite brain that is draining a large effects backlog answers requests sooner, and master CI is green again.** When the write owner starts on a backlog of queued embedding effects, its first tick ran the receipt compaction pass, the reservation sweep and the queue `VACUUM` back to back next to the drain, and each drain pass held the event loop for its whole reservation true-up. PGLite statements run synchronously, so a request (or a timer) waited behind all of it: about 0.3 s on a fast machine and 2.2 s on a slow CI runner, which failed `test/persistence-drain-latency.serial.test.ts` on master. Now each of those steps returns to the event loop before the next one, and a request waits behind one step at most.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| longest wait for a tool call while 8,000 no-op embedding effects drain (local PGLite) | 290 to 380 ms | 86 to 120 ms |
+| the same on a host about as slow as the CI runner that failed (statements slowed 4.5x) | 1.9 to 2.1 s (over the 2 s bound in 2 of 3 runs) | 1.0 to 1.2 s |
+| time to drain that backlog (local) | about 2.8 s | about 3.5 s |
+
+### What to do
+
+Nothing. Nothing is rewritten on upgrade and there is no migration. Postgres brains are unaffected apart from the smaller settle batch.
+
+### Itemized changes
+
+- `src/core/persistence/journal.ts`: new `yieldToEventLoop`, which resumes from the timer queue so a timer that came due during the last statement chain runs before the next chain. The consumer's effects drain uses it between passes (it used `setImmediate`, which ran the next pass ahead of due timers). `vacuumPersistenceQueues` vacuums each grown queue table in its own statement with a yield before each.
+- `src/core/persistence/compaction-pass.ts` and `src/core/persistence/consumer.ts`: the compaction pass yields after compacting and after the reservation sweep step, and the consumer's maintenance chains yield between the compaction pass, the segment sweep, the queue vacuum and the planner statistics refresh.
+- `src/core/persistence/embedding-noop-settle.ts`: `NOOP_SETTLE_BATCH` is 50 (was 200), because one pass and its reservation true-up hold the event loop on PGLite.
+- `DRAIN_ANSWER_BOUND_MS` and every assertion of the drain latency test are unchanged.
+- New `test/persistence-maintenance-yield.test.ts`: the queue `VACUUM` runs in a later event-loop turn than the size check, the compaction pass, the sweep and the pass record each run in their own turn, and a yield resumes after a timer that came due before it. All three fail on the previous code.
 
 ## [0.60.280.0] - 2026-10-17
 
