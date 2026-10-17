@@ -76,6 +76,14 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
+### admission_paused
+
+<a id="admission_paused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `sync.admission` is not `normal`, so a managed sync's destructive write (a delete or a keep_db DB-wins reconcile) was not admitted, or was cancelled before it published; nothing was written. | `sync.admission` (`imports_only` or `classify_only`) is the brain-wide switch that pauses what managed sync writes. It is read when the pass pins, inside every admission transaction and again when a destructive write publishes, so a change takes effect at the next group and no destructive write lands after it. | Restore admission with `gbrain config set sync.admission normal` when the pause is no longer wanted; the next plain sync admits the paused paths again. Run: gbrain sync status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
+
 ### ambient_capture_off
 
 <a id="ambient_capture_off"></a>
