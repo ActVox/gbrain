@@ -3814,7 +3814,7 @@
             "quietMigrationNotices",
             "tableRows"
           ],
-          "sha256": "2fb35d2d13c92c07dfd2f002db579956d1fea8869a908210f6668911fa6ddd89"
+          "sha256": "f534fe8c1c2a21a072644ff97155d6298e87245cf293fbf25b94c0713f6f4a66"
         },
         "idempotent": true,
         "name": "segmented_page_storage",
