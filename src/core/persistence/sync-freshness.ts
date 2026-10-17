@@ -8,8 +8,11 @@
  *     are not samples: they import history or uncommitted files, not a commit that just landed.
  *   - searchable: the receipt's `completed_at` (the page write committed; search reads it from then on).
  *   - embedded: the newest `content_chunks.embedded_at` of the page's visible chunks, once every one has one (a page with a
- *     chunk still waiting counts as `pending`; a page with no chunks is not an embedding sample). A chunk embedded
- *     before the write committed counts as embedded at the write.
+ *     chunk still waiting counts as `pending`; a page with no chunks is not an embedding sample). Only a receipt whose
+ *     write is still the page's current revision is an embedding sample: the chunks are the page's current ones, so a
+ *     receipt superseded by a later committed write to the same page (same source and slug, higher sequence) would
+ *     read the later revision's embed time; it still counts for commit→searchable. An embed time before the receipt's
+ *     completion (chunks the write did not re-embed) is not a sample either.
  * Latencies are clamped at 0 (a committer clock ahead of the database clock). The read uses the partial index
  * `persistence_requests_sync_watermark` (its predicate is repeated verbatim) and stops after one probe when the window
  * is empty. Nothing is written. Readers: `gbrain sync status` (the `freshness` block), `gbrain status`, and doctor
@@ -91,14 +94,15 @@ export async function readSyncFreshness(engine: BrainEngine, opts: { sourceIds?:
     const commits = Object.keys(times).length;
     if (!commits) { out.push({ ...empty, unresolved_commits: targets.length }); continue; }
     const [row] = await engine.executeRaw<AggregateRow>(`WITH c AS (SELECT key AS target, to_timestamp(value::double precision) AS committed_at FROM jsonb_each_text($4::text::jsonb)),
-      s AS (SELECT r.completed_at, c.committed_at, COALESCE(r.page_id, (SELECT p.id FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug LIMIT 1)) AS page_id
+      s AS (SELECT r.completed_at, c.committed_at, COALESCE(r.page_id, (SELECT p.id FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug LIMIT 1)) AS page_id,
+          EXISTS (SELECT 1 FROM persistence_requests later WHERE later.source_id=r.source_id AND later.slug=r.slug AND later.sequence>r.sequence AND later.state='committed') AS superseded
         FROM persistence_requests r JOIN c ON c.target=r.intent->>'target' WHERE ${SAMPLE_WHERE}),
-      e AS (SELECT s.completed_at, s.committed_at, ch.n, ch.missing, ch.last_at FROM s
+      e AS (SELECT s.completed_at, s.committed_at, s.superseded, ch.n, ch.missing, ch.last_at FROM s
         LEFT JOIN LATERAL (SELECT count(*) AS n, count(*) FILTER (WHERE cc.embedded_at IS NULL) AS missing, max(cc.embedded_at) AS last_at FROM content_chunks cc JOIN pages p ON p.id=cc.page_id
           WHERE cc.page_id=s.page_id AND ${chunkVisibleFilter('p', 'cc')}) ch ON true),
       l AS (SELECT GREATEST(0, extract(epoch FROM completed_at - committed_at)) AS searchable,
-          CASE WHEN n > 0 AND missing = 0 THEN GREATEST(0, extract(epoch FROM GREATEST(last_at, completed_at) - committed_at)) END AS embedded,
-          (n > 0 AND missing > 0) AS pending FROM e)
+          CASE WHEN NOT superseded AND n > 0 AND missing = 0 AND last_at >= completed_at THEN GREATEST(0, extract(epoch FROM last_at - committed_at)) END AS embedded,
+          (NOT superseded AND n > 0 AND missing > 0) AS pending FROM e)
       SELECT count(*) AS samples, percentile_cont(0.5) WITHIN GROUP (ORDER BY searchable) AS s50, percentile_cont(0.95) WITHIN GROUP (ORDER BY searchable) AS s95,
         count(embedded) AS embedded, percentile_cont(0.5) WITHIN GROUP (ORDER BY embedded) AS e50, percentile_cont(0.95) WITHIN GROUP (ORDER BY embedded) AS e95,
         count(*) FILTER (WHERE pending) AS pending FROM l`, [b.worktree_id, b.source_incarnation, FRESHNESS_WINDOW_HOURS, JSON.stringify(times)]);

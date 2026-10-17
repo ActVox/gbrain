@@ -128,6 +128,41 @@ describe('sync freshness (#6858 ask 6)', () => {
     }
   }), 120_000);
 
+  test('a later revision of the page does not rewrite an earlier receipt\'s commit→embedded; an embed before the write is no sample', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const { name, engine } of engines) {
+      await reset(engine);
+      const f = await managedSource(engine, 7200);
+      const later = 'b'.repeat(40);
+      const commitTimes = async () => new Map([[f.sha, f.committedAt], [later, f.committedAt + 3600]]);
+      const slug = 'notes/alice-example';
+      const at = (s: number) => new Date((f.committedAt + s) * 1000).toISOString();
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      const [page] = await engine.executeRaw<{ id: number }>("INSERT INTO pages(source_id,slug,type,title) VALUES($1,$2,'note',$2) RETURNING id", [f.id, slug]);
+      await engine.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision WHERE id=$1', [page!.id]);
+      await engine.executeRaw("INSERT INTO content_chunks(page_id,chunk_index,chunk_text,embedded_at) VALUES($1,0,'first revision',$2::timestamptz)", [page!.id, at(12)]);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      const write = async (target: string, completedAfter: number) => engine.executeRaw(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,slug,page_id,worktree_id,digest,authority,intent,intent_bytes,terminal_reservation,state,completed_at)
+        VALUES('local_cli','cli:example',$1::uuid,'submit_job',$2,$3::uuid,$4,$5,$6::uuid,'d','{}'::jsonb,$7::text::jsonb,1,16384,'committed',$8::timestamptz)`,
+      [randomUUID(), f.id, f.incarnation, slug, page!.id, f.worktreeId, JSON.stringify({ kind: 'managed_sync_import', path: `${slug}.md`, target, from: FROM, runId: randomUUID(), index: 0, total: 1 }), at(completedAfter)]);
+      await write(f.sha, 10);
+      const [first] = await readSyncFreshness(engine, { sourceIds: [f.id], commitTimes });
+      expect(first!.commit_to_embedded, name).toEqual({ samples: 1, p50_seconds: 12, p95_seconds: 12, pending: 0 });
+      // The second revision: committed 3600 s later, written 10 s after it and embedded 12 s after it.
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      await engine.executeRaw("UPDATE content_chunks SET chunk_text='second revision', embedded_at=$1::timestamptz WHERE page_id=$2", [at(3612), page!.id]);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      await write(later, 3610);
+      const [both] = await readSyncFreshness(engine, { sourceIds: [f.id], commitTimes });
+      expect(both, name).toMatchObject({ commits: 2, commit_to_searchable: { samples: 2, p50_seconds: 10, p95_seconds: 10 },
+        commit_to_embedded: { samples: 1, p50_seconds: 12, p95_seconds: 12, pending: 0 } });
+      // A third write whose chunks kept the earlier embed time (nothing re-embedded): searchable, but no embedding sample.
+      await write(later, 3700);
+      const [kept] = await readSyncFreshness(engine, { sourceIds: [f.id], commitTimes });
+      expect(kept!.commit_to_searchable.samples, name).toBe(3);
+      expect(kept!.commit_to_embedded, name).toEqual({ samples: 0, p50_seconds: null, p95_seconds: null, pending: 0 });
+    }
+  }), 120_000);
+
   test('a commit this checkout cannot date is counted unresolved, not sampled', () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const { engine } of engines) {
       await reset(engine);

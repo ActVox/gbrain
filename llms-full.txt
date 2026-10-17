@@ -6844,7 +6844,8 @@ Each managed source's freshness over the last 24 hours shows in
 `gbrain sync status --source <id>` (the `freshness` block in `--json`) and
 in `gbrain status`: p50 and p95 of commit→searchable (from the commit's
 committer time to the page write's `completed_at`) and commit→embedded (to
-the page's last chunk embedding). A first sync and working-tree entries are not
+the page's last chunk embedding, counted only while that write is still the
+page's current revision and only for an embedding after the write). A first sync and working-tree entries are not
 counted, and a run that spans several commits is dated by its newest. Doctor
 `managed_sync_latency` warns when p95 commit→searchable is over
 `sync.freshness_target_seconds` (default 300) and fails over one hour; it
