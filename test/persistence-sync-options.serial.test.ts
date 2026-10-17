@@ -816,11 +816,15 @@ check('cancellation while a pass waits on an accepted request leaves its receipt
     const after = await syncState(engine, f.id);
     expect(passTelemetry(after, f.id)).toMatchObject({ outcome: 'resumable', stop_reason: 'timeout' });
     // The queued receipt's wait diagnostics are the consumer's scheduling state, not its identity: on Postgres the consumer
-    // that stops with the cancelled pass records consumer_stopping where the earlier one left writer_busy.
+    // that stops with the cancelled pass records consumer_stopping where the earlier one left writer_busy. Every other column
+    // is equal; those two are pinned to the consumer's shutdown values and a monotonic updated_at.
     const receipts = (state: typeof before) => ({ ...withoutPassRow(state, f.id),
       requests: state.requests.map(row => { const { blocked_reason: _reason, updated_at: _at, ...rest } = row as Record<string, unknown>; return rest; }) });
     expect(receipts(after)).toEqual(receipts(before));
     expect(after.requests).toEqual([expect.objectContaining({ id: accepted.id, request_id: accepted.request_id, digest: accepted.digest, state: 'queued' })]);
+    const [was, now] = [before.requests[0] as { blocked_reason: string | null; updated_at: Date }, after.requests[0] as { blocked_reason: string | null; updated_at: Date }];
+    expect(['writer_busy', 'consumer_stopping'] as Array<string | null>).toContain(now.blocked_reason);
+    expect(new Date(now.updated_at).getTime()).toBeGreaterThanOrEqual(new Date(was.updated_at).getTime());
   } finally { engine.executeRaw = execute; engine.transaction = transaction; await disposePersistenceConsumer(engine); await lock?.release(); }
   expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 1 });
   const imports = await engine.executeRaw("SELECT * FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]);
