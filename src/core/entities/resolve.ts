@@ -66,7 +66,7 @@ export async function resolveEntitySlug(
   //    a row exactly), use it.
   if (looksLikeSlug(trimmed)) {
     const exact = await tryExactSlug(engine, source_id, trimmed);
-    if (exact) return exact.retired ? (await followRetirement(engine, source_id, exact.slug))?.slug ?? null : exact.slug;
+    if (exact) return exact.retired ? (await followRetirement(engine, source_id, exact.slug))?.slug ?? fallbackSlugify(trimmed) : exact.slug;
   }
 
   // 1.25. Exact own name: a live page whose slug basename IS the mention wins
@@ -169,16 +169,17 @@ export function sameEntityName(reference: string, candidateTitle: string | null 
  * #6898: a page that hands its identity to another page. Frontmatter
  * `canonical: false`, a `superseded_by` or `merged_into` (the concept-merge
  * record, cycle/concept-redirects.ts) target, or a `status` that names the
- * page an alias, a redirect, or superseded or merged
- * (`historical-retired-alias`). A status that describes the entity itself
- * (`retired`, `archived`, `deprecated`) does not retire the page: a person
- * who retired is still that person's page.
+ * page an alias or a redirect (`historical-retired-alias`). A status that
+ * describes the entity itself (`retired`, `archived`, `merged`, `superseded`)
+ * does not retire the page: a person who retired is still that person's page,
+ * and a merged company or a superseded decision is still a record of its own
+ * unless it names a target.
  */
-function retiredPageSql(p: string): string {
+export function retiredPageSql(p: string): string {
   return `(lower(COALESCE(${p}.frontmatter->>'canonical', '')) IN ('false', 'no')
     OR btrim(COALESCE(${p}.frontmatter->>'superseded_by', '')) <> ''
     OR btrim(COALESCE(${p}.frontmatter->>'merged_into', '')) <> ''
-    OR lower(COALESCE(${p}.frontmatter->>'status', '')) ~ '(^|[^a-z])(alias|redirect|redirected|superseded|merged)([^a-z]|$)')`;
+    OR lower(COALESCE(${p}.frontmatter->>'status', '')) ~ '(^|[^a-z])(alias|redirect|redirected)([^a-z]|$)')`;
 }
 
 const MAX_RETIREMENT_HOPS = 5;
@@ -195,7 +196,9 @@ function redirectSlug(value: string): string | null {
  * `merged_into`) target in the same source, hop by hop up to
  * MAX_RETIREMENT_HOPS. Null when the chain has no target, reaches a missing,
  * deleted or (with `privacy`) unreadable page, cycles, or runs too long: the
- * caller refuses rather than guess.
+ * caller refuses rather than guess. The target is a human-written redirect,
+ * so it is followed whatever its type; the strict resolver still applies its
+ * fact-entity check to the page it lands on.
  */
 async function followRetirement(
   engine: BrainEngine,
@@ -384,7 +387,7 @@ export async function resolveEntitySlugWithSource(
     const exact = await tryExactSlug(engine, source_id, trimmed);
     if (exact) {
       const canonical = exact.retired ? (await followRetirement(engine, source_id, exact.slug))?.slug : exact.slug;
-      return canonical ? { slug: canonical, source: 'exact_page' } : null;
+      return canonical ? { slug: canonical, source: 'exact_page' } : fallbackResult(trimmed);
     }
   }
 
@@ -471,7 +474,6 @@ export async function resolveStrictEntityReference(
       const sibling = await siblingCanonical(engine, source_id, rows.map(r => r.slug), { excludePrivate: opts.excludePrivate });
       return sibling ? { slug: sibling, arm } : { slug: null, miss: 'ambiguous' };
     }
-    if (rows.length === 0) return null;
     return await isEntity(rows[0]) ? { slug: rows[0].slug, arm } : { slug: null, miss: 'not_entity' };
   };
 

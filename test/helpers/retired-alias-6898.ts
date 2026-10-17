@@ -36,7 +36,9 @@ const PAGES: Array<[string, Record<string, unknown>, string]> = [
   ['concepts/public-alias-example', { type: 'concept', canonical: false, superseded_by: 'concepts/private-target-example' }, 'Public Alias Example'],
   ['concepts/private-target-example', { type: 'concept', visibility: 'private' }, 'Private Target Example'],
   // A retired same-name page next to nothing else: the fuzzy arm must not take it.
-  ['people/root-copy/bob-example', { type: 'person', status: 'superseded' }, 'Bob Example'],
+  ['people/root-copy/bob-example', { type: 'person', status: 'retired-alias' }, 'Bob Example'],
+  // A merged company that names no target is still a record of its own.
+  ['companies/merged-co-example', { type: 'company', status: 'merged' }, 'Merged Co Example'],
   // Separator folding: aliases written with spaces or underscores.
   ['people/danaexample', { type: 'person', aliases: ['Dana Example'] }, 'Danaexample'],
   ['companies/acmeco-example', { type: 'company', aliases: ['acme_example'] }, 'Acmeco Example'],
@@ -78,10 +80,10 @@ export function retiredAliasCases(getEngine: () => BrainEngine): void {
     test('a chain through superseded_by and merged_into ends on the live page', async () => {
       expect(await resolve('concepts/chain-one-example')).toEqual({ slug: 'concepts/chain-three-example', source: 'exact_page' });
     });
-    test('no redirect, a missing target or a cycle refuses instead of guessing', async () => {
+    test('no redirect, a missing target or a cycle is unresolved instead of a guess', async () => {
       for (const slug of ['concepts/old-widget-example', 'concepts/gone-widget-example', 'concepts/loop-a-example']) {
-        expect(await resolve(slug)).toBeNull();
-        expect(await resolveEntitySlug(getEngine(), 'default', slug)).toBeNull();
+        expect(await resolve(slug)).toEqual({ slug, source: 'fallback_slugify' });
+        expect(await resolveEntitySlug(getEngine(), 'default', slug)).toBe(slug);
       }
     });
   });
@@ -91,8 +93,10 @@ export function retiredAliasCases(getEngine: () => BrainEngine): void {
       expect(await resolve('Bob Example')).toEqual({ slug: 'bob-example', source: 'fallback_slugify' });
       expect(await resolve('Old Widget Example')).toEqual({ slug: 'old-widget-example', source: 'fallback_slugify' });
     });
-    test('a person page whose status describes the person stays a candidate', async () => {
+    test('a page whose status describes the entity stays a candidate', async () => {
       expect((await resolve('Erin Example'))?.slug).toBe('people/erin-example');
+      expect(await resolve('Merged Co Example')).toEqual({ slug: 'companies/merged-co-example', source: 'fuzzy_match' });
+      expect(await resolve('companies/merged-co-example')).toEqual({ slug: 'companies/merged-co-example', source: 'exact_page' });
     });
   });
 
