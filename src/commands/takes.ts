@@ -497,6 +497,10 @@ Subcommands:
                                           Aggregate calibration scorecard (v0.30.0)
   takes calibration [<holder>] [--bucket-size 0.1] [--json]
                                           Calibration curve binned by stated weight (v0.30.0)
+  takes horizon scan [--apply] [--source-id <id>] [--json]
+                                          Preview (or write) each take's stated deadline (W7, private)
+  takes horizon set <slug> --row N --date YYYY-MM-DD | clear <slug> --row N
+                                          Set or clear a take's horizon as the owner
 
 Common flags:
   --dir <path>    Verify the configured canonical directory for mutations
@@ -526,6 +530,7 @@ Common flags:
     // #2411: `takes propose` used to fall through to the slug path and print
     // "No takes on propose." — the LLM proposal queue had no drain surface.
     case 'propose':     return cmdPropose(engine, rest, await resolveTakesSourceId(engine));
+    case 'horizon':     return cmdHorizon(engine, rest);
     case 'scorecard':   return cmdScorecard(engine, rest);
     case 'calibration': return cmdCalibration(engine, rest);
     case 'revisit':     return cmdRevisit(engine, rest);
@@ -727,4 +732,56 @@ async function cmdRevisit(_engine: BrainEngine, rest: string[]): Promise<void> {
     process.stderr.write(`Editor exited with status ${result.status ?? 'unknown'}\n`);
   }
   void execFileSync;
+}
+
+/**
+ * W7: the stated horizon of each take (`scan`, preview-first) and the
+ * owner's own horizon (`set`, `clear`), in the private `take_horizons`
+ * table (src/core/takes-horizon.ts). Trusted local only: there is no MCP op,
+ * so a thin client refuses it.
+ */
+async function cmdHorizon(engine: BrainEngine, args: string[]): Promise<void> {
+  const usage = 'Usage: gbrain takes horizon scan [--apply] [--source-id <id>] [--json]\n' +
+    '       gbrain takes horizon set <slug> --row N --date YYYY-MM-DD [--source-id <id>]\n' +
+    '       gbrain takes horizon clear <slug> --row N [--source-id <id>]';
+  const fail = (message: string): never => { process.stderr.write(`${message}\n`); process.exit(1); };
+  const { scanStatedHorizons, setTakeHorizon, clearTakeHorizon } = await import('../core/takes-horizon.ts');
+  const [sub, ...rest] = args;
+  const json = flagPresent(rest, '--json');
+
+  if (sub === 'scan') {
+    const apply = flagPresent(rest, '--apply');
+    const sourceId = flagValue(rest, '--source-id');
+    const scan = await scanStatedHorizons(engine, { apply, ...(sourceId ? { sourceId } : {}) });
+    if (json) {
+      console.log(JSON.stringify({ applied: apply, ...scan }, null, 2));
+      return;
+    }
+    for (const p of scan.proposed) console.log(`  take ${p.take_id}: ${p.horizon_date} (${p.basis}, "${p.phrase}")${p.replaces ? ` replaces ${p.replaces}` : ''}  ${p.claim}`);
+    const tail = `${scan.kept_owner} owner horizon(s) kept, ${scan.unparsed} take(s) state no single deadline.`;
+    if (apply) console.log(`Wrote ${scan.written} stated horizon(s). ${tail}`);
+    else console.log(`${scan.proposed.length} stated horizon(s) to write. ${tail}${scan.proposed.length ? ' Write them with: gbrain takes horizon scan --apply' : ''}`);
+    return;
+  }
+
+  if (sub !== 'set' && sub !== 'clear') fail(usage);
+  const slug = rest[0] && !rest[0].startsWith('-') ? rest[0] : fail(usage);
+  const rowRaw = flagValue(rest, '--row');
+  const row = rowRaw === undefined ? NaN : Number(rowRaw);
+  if (!Number.isSafeInteger(row) || row < 1) fail(`--row requires the take's row number (a positive integer), e.g. --row 1.\n${usage}`);
+  const sourceId = await resolveSourceId(engine, flagValue(rest, '--source-id') ?? null);
+  const [take] = await engine.executeRaw<{ id: number | string }>(
+    `SELECT t.id FROM takes t JOIN pages p ON p.id = t.page_id
+      WHERE p.source_id = $1 AND p.slug = $2 AND t.row_num = $3 AND p.deleted_at IS NULL`,
+    [sourceId, slug, row]);
+  if (!take) fail(`No take ${slug}#${row} on source ${sourceId}. List the page's takes with: gbrain takes ${slug}`);
+  const takeId = Number(take!.id);
+
+  if (sub === 'set') {
+    const date = flagValue(rest, '--date') ?? fail(`--date YYYY-MM-DD is required.\n${usage}`);
+    await setTakeHorizon(engine, takeId, date, 'owner').catch((e: Error) => fail(e.message));
+    console.log(`Set the horizon of ${slug}#${row} to ${date} (owner).`);
+    return;
+  }
+  console.log(await clearTakeHorizon(engine, takeId) ? `Cleared the horizon of ${slug}#${row}.` : `${slug}#${row} had no horizon.`);
 }
