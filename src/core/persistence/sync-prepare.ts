@@ -527,7 +527,7 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
     parser_fp: stamp.parserFp, pack: stamp.pack, selection_fp: stamp.selectionFp, last_full_at: stamp.full || !prior ? at : prior.last_full_at,
     passes_since_full: stamp.full || !prior ? 0 : prior.passes_since_full + 1 };
   if (stamp.closesEpisode) delete value.obligations.episode;
-  Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, faults: {} });
+  Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, faults: {}, stuck_since: null });
   value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: stamp.configured ? null : 'selection_scoped', ended_at: at, remaining: 0,
     duration_ms: Date.parse(at) - Date.parse(value.telemetry.started_at) };
   if (!await writePassRow(tx, value)) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,

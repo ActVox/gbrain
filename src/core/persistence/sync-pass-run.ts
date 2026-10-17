@@ -253,7 +253,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     // Master's up_to_date (a complete check that found nothing): only last_sync_at, plus the pass row's count.
     const at = new Date().toISOString();
     value.obligations.converged = { ...converged!, passes_since_full: converged!.passes_since_full + 1 };
-    Object.assign(value.obligations, { stuck_since: null });
+    value.obligations.stuck_since = null;
     value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started };
     await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
       assertActive();
@@ -280,7 +280,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     const ended = outcome !== 'open';
     value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size, counts: { ...counts },
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
-    if (outcome === 'blocked' || stopReason === 'not_converged') Object.assign(value.obligations, { stuck_since: (value.obligations as { stuck_since?: string | null }).stuck_since ?? new Date().toISOString() });
+    if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
     await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value); });
   };
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
