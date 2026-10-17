@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.274.0] - 2026-10-16
+## [0.60.275.0] - 2026-10-17
 
 **A stuck upgrade queue drains, held embeddings say what they need, and doctor and status answer in bounded time (#6803, #6847).** Four things got better for anyone whose brain grew big or went through the recent upgrades. Image pages that an old upgrade left queued (and missing from search) can now be put back with one keyless command when gbrain already knows they're safe, and the rest are counted and named instead of hidden. Large pages waiting for your embedding approval are reported everywhere with one exact command to approve them, and that command now works on free local embedding models too. `gbrain doctor --json` and `gbrain sync --status` stop running for minutes on a large brain. And the "un-extracted edges" nudge after a sync now agrees with doctor and names the command that actually finishes the job.
 
@@ -76,6 +76,23 @@ Nothing runs on upgrade. Each repair below is preview-first, and you choose when
 #### Agent protocol
 
 - `AGENT_TOOL_LIMIT_MS` (120 s): a fix expected to run longer than that is the user's or host admin's (`tell_user_to_run`), never the agent's.
+
+## [0.60.274.0] - 2026-10-17
+
+**A refresh no longer gets stuck when a commit lands on top of its target, and `gbrain repair file-drift` can now resolve a page whose file is gone.** Two fixes ahead of the level-triggered reconcile (#6712).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sources refresh` while a commit lands on top of the refresh target | members synced past the target, the refresh stayed `syncing` with the worktree fenced, and `--resume` could not finish it | the refresh completes once every member reached the target or a commit on top of it; `--resume` completes one left `syncing` |
+| A live page whose canonical file is gone from the last commit | `sources reconcile` refused with "repair does not restore files" and nothing offered a per-page fix | `gbrain repair file-drift --slug <slug> --prefer database` recreates the file from the page; `--prefer file` soft-deletes exactly that page (mass-delete valve applies; `gbrain restore <slug> --force` undoes it). Both are preview-first and bound to the page revision and the file's absence |
+| A file deleted only in the worktree (still committed) | the same refusal | listed `deletion_uncommitted`, routed to committing the deletion or `gbrain repair ghost-pages` |
+| A held deletion's next step | a reconcile preview that refused | the file-drift preview |
+
+### What you need to do
+
+Nothing. Both repairs only run when you ask for them, and nothing changes at upgrade. With Git durability off, commit a recreated file yourself; the preview prints the command.
 
 ## [0.60.273.0] - 2026-10-16
 
