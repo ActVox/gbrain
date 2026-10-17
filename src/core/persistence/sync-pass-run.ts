@@ -30,7 +30,7 @@ import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, typ
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
-import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, syncImportParserFor } from './sync-holds.ts';
+import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances, syncImportParserFor } from './sync-holds.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
 import { managedCursorKey, resolveManagedCursor, retireManagedCursor } from './sync-cursor-key.ts';
@@ -138,11 +138,15 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     'SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])', [level.sourceId, slugs]) : [])
     .map(page => [page.slug, page]));
   const gitPathOfOrigin = (origin: string) => level.slugMode === 'source-root' && level.scope ? `${level.scope}/${syncOriginPath(origin)}` : syncOriginPath(origin);
+  // #6887: a both-moved import imports when the page still holds what its recorded disk blob imports (sync-screen.ts driftBaselineContent).
+  const bothDrift = imports.filter(entry => entry.result.cls === 'drift' && entry.result.side === 'both' && entry.pageId !== null);
+  const baselineRecords = await readSyncImportProvenances(engine, level.sourceId, level.incarnation, bothDrift.map(entry => entry.pageId!));
+  const driftBaseline = (entry: ShadowPath) => entry.result.side === 'both' && entry.pageId !== null ? baselineRecords.get(entry.pageId)?.disk_blob_oid ?? undefined : undefined;
   const entries: PassEntry[] = [], collisions: SyncSlugCollision[] = [], skipped: ShadowPath[] = [];
   const claims = new Map<string, ShadowPath[]>();
   for (const entry of imports) {
     const paths = entryPaths(level, entry.path);
-    const base = { ...paths, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side } : {}) };
+    const base = { ...paths, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side, ...(driftBaseline(entry) ? { driftBaseline: driftBaseline(entry) } : {}) } : {}) };
     if (entry.state.page) { entries.push({ ...base, slug: entry.slug!, pageId: entry.pageId, revision: entry.revision }); continue; }
     const slug = slugOf.get(entry.path);
     if (!slug) { skipped.push(entry); continue; }
