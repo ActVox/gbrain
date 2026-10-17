@@ -145,10 +145,13 @@ const changed = (reason: string, detail: Record<string, unknown> = {}): RepairIt
 
 async function restoreEdit(ctx: OperationContext, entry: RepairItem, edit: ApprovedEdit): Promise<RepairItemOutcome> {
   const engine = ctx.engine;
-  const snapshot = await engine.readPageSnapshot(edit.slug, { sourceId: edit.source_id });
-  if (!snapshot || Number(snapshot.page.id) !== edit.page_id || snapshot.revision !== edit.page_revision) return changed('page_moved', { page_revision: snapshot?.revision ?? null });
-  if (await versionMarkdown(engine, edit, snapshot.page) === null) return changed('version_changed');
   const requestId = await repairRequestId(ctx, 'overwritten-edits', entry, edit.page_revision);
+  const replayed = (await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE request_id=$1::uuid AND operation='revert_version' AND state='committed'", [requestId])).length > 0;
+  if (!replayed) {
+    const snapshot = await engine.readPageSnapshot(edit.slug, { sourceId: edit.source_id });
+    if (!snapshot || Number(snapshot.page.id) !== edit.page_id || snapshot.revision !== edit.page_revision) return changed('page_moved', { page_revision: snapshot?.revision ?? null });
+    if (await versionMarkdown(engine, edit, snapshot.page) === null) return changed('version_changed');
+  }
   try {
     await submitPageMutation({ ...ctx, sourceId: edit.source_id }, { operation: 'revert_version', databaseOnly: 'overwrite_restore',
       params: { slug: edit.slug, source_id: edit.source_id, version_id: edit.version_id, expected_revision: edit.page_revision, request_id: requestId } });
@@ -157,7 +160,7 @@ async function restoreEdit(ctx: OperationContext, entry: RepairItem, edit: Appro
     throw error;
   }
   const hold = await holdDivergentFile(engine, edit, requestId);
-  return { applied: true, outcome: hold.held ? 'restored_file_held' : 'restored', detail: { request_id: requestId, version_id: edit.version_id, ...hold } };
+  return { applied: true, outcome: hold.held ? 'restored_file_held' : 'restored', detail: { request_id: requestId, version_id: edit.version_id, ...(replayed ? { replayed } : {}), ...hold } };
 }
 
 /**

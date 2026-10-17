@@ -13,7 +13,9 @@
  *   as it is, holds that file `file_drift`, and the next sync keeps the edit; the restored page is no longer reported;
  * - a normal sync-written history is not flagged: a file-only edit, a write-through edit later edited in Git, and a
  *   database-only edit no import replaced;
- * - a page that moved after the preview is `changed_since_preview`: nothing is restored and no hold is written.
+ * - a page that moved after the preview is `changed_since_preview`: nothing is restored and no hold is written;
+ * - an apply interrupted after its restore committed but before the hold was written replays the same request and
+ *   writes the hold, instead of reporting the restored page as moved.
  *
  * Doctor `sync_overwritten_db_edits` warns with the source's count and slugs for a high finding and is ok otherwise.
  *
@@ -31,9 +33,10 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import { scanOverwrittenEdits } from '../src/core/persistence/overwritten-edits.ts';
-import { readGitHold, SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
-import { resolveRepairScope } from '../src/core/repair/core.ts';
+import { clearGitHold, readGitHold, SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
+import { resolveRepairScope, type RepairItemOutcome } from '../src/core/repair/core.ts';
 import { repairRunner } from '../src/core/repair/registry.ts';
+import { overwrittenEditsRepair } from '../src/core/repair/overwritten-edits.ts';
 import { overwrittenEditsEntry } from '../src/commands/doctor/checks/overwritten-edits.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
@@ -154,5 +157,26 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(await bodyOf(engine, 'notes/a')).toContain('A newer database edit after the preview.');
     expect((await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE operation='revert_version'")).length).toBe(0);
     expect(await holdOf(engine, 'notes/a.md')).toBeNull();
+  }, { setup, databaseUrl }), 180_000);
+
+  test('an apply interrupted after its restore committed replays it and writes the hold', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const ctx = { engine, config: { engine: engine.kind }, logger, dryRun: false, remote: false, sourceId: 'default' } as unknown as OperationContext;
+    await seedOverwrite(engine, ctx, root, 'notes/a');
+    const preview = await repair(engine, { slugs: ['notes/a'] });
+    const scope = await resolveRepairScope(engine, 'default');
+    const [item] = (await overwrittenEditsRepair.plan(engine, scope, null, { apply: true, expect: preview.preview_hash, slugs: ['notes/a'] })).items;
+    const first = await overwrittenEditsRepair.apply(ctx, item!) as RepairItemOutcome;
+    expect(first.outcome).toBe('restored_file_held');
+    const restored = await revisionOf(engine, 'notes/a');
+    expect(await clearGitHold(engine, { sourceId: 'default', incarnation: await incarnationOf(engine), path: 'notes/a.md', observedAt: new Date().toISOString() })).toBe(true);
+    expect(await holdOf(engine, 'notes/a.md')).toBeNull();
+
+    const replay = await overwrittenEditsRepair.apply(ctx, item!) as RepairItemOutcome;
+    expect([replay.outcome, replay.detail?.replayed, replay.detail?.request_id]).toEqual(['restored_file_held', true, first.detail?.request_id]);
+    expect(await revisionOf(engine, 'notes/a')).toBe(restored);
+    expect(await bodyOf(engine, 'notes/a')).toContain('DBONLYMARKER');
+    expect((await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE operation='revert_version'")).length).toBe(1);
+    expect((await holdOf(engine, 'notes/a.md'))?.meta.page_revision).toBe(restored);
   }, { setup, databaseUrl }), 180_000);
 });

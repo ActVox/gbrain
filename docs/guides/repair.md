@@ -471,7 +471,7 @@ lists nothing.
 
 **Say to your agent:** *"Check whether sync overwrote any of my database edits and show me what it would restore."*
 
-From v0.60.255.0 until #6887, an ordinary incremental `gbrain sync` on a managed
+Before #6887, an ordinary incremental `gbrain sync` on a managed
 brain could publish a committed file edit over a page that was also edited in
 the database since its last import (for example a `put_page` with
 `sync.write_through` off). It wrote no `file_drift` hold and no backup. The database edit is still in
@@ -501,7 +501,9 @@ history.
 
 The apply reverts each page to the archived version through `revert_version`,
 bound to the page revision the preview saw, so a page that moved since is
-`changed_since_preview` and nothing is written. The restore publishes to the
+`changed_since_preview` and nothing is written. An apply interrupted after a
+restore committed replays that restore's request on the next run and then
+writes the hold, instead of reporting the page as moved. The restore publishes to the
 database only and never rewrites the committed file. When that file then differs
 from the restored page (on the host that owns the checkout), the file is held
 `file_drift`, so no later sync publishes it over the edit; pick the winner with
