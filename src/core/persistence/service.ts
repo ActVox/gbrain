@@ -234,7 +234,8 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   consumer.wake(true);
   const waitMs = opts.waitMs ?? 5000;
   const started = performance.now();
-  // `whileHeldMs`: past `waitMs`, keep waiting (to that total) while this process's consumer is executing the request.
+  // `whileHeldMs`: past `waitMs`, keep waiting (to that total) while this process's consumer is executing the request or it
+  // is still queued unblocked: a consumer busy past `waitMs` (an effect pass under load) has not claimed it yet.
   let deadline = started + waitMs;
   const firstPoll = recentlySettled.get(engine)?.has(id) ? 0 : Math.min(WRITE_POLL_START_MS, waitMs / 2);
   let delay = firstPoll, failure: { error: unknown; attempts: number } | undefined;
@@ -243,7 +244,8 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
       if (handed) { row = handed; handed = undefined; if (isTerminal(row)) return { kind: 'terminal', row }; }
       const remaining = deadline - performance.now();
       if (remaining <= 0) {
-        if (opts.whileHeldMs && opts.whileHeldMs > waitMs && deadline === started + waitMs && consumer.holds(id)) { deadline = started + opts.whileHeldMs; continue; }
+        if (opts.whileHeldMs && opts.whileHeldMs > waitMs && deadline === started + waitMs
+          && (consumer.holds(id) || row.state === 'queued' && !row.blocked_reason)) { deadline = started + opts.whileHeldMs; continue; }
         break;
       }
       await new Promise<void>(resolve => {

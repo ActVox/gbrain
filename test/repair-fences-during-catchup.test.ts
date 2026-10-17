@@ -39,6 +39,7 @@ import { resolveRepairScope, type RepairResult } from '../src/core/repair/core.t
 import { repairRunner } from '../src/core/repair/registry.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { waitFor } from './helpers/wait-for.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const backends = testBackends();
@@ -209,6 +210,11 @@ test('a plan approved before a pass started repairs a candidate the pass froze b
   expect(raced.outcome_items!.find(item => item.item.endsWith('people/other'))).toMatchObject({ outcome: 'repaired' });
   expect(s.read('people/race.md')).toContain(FBE);
   expect(s.read('people/other.md')).toContain(FBE);
+  // The repair's Git commits land before the pass goes on, so its next round reads the repaired file from HEAD. Left to
+  // race the pass, a commit landing after the pass's stamp moves HEAD again, and the final sync stamps it instead of idling.
+  await waitFor(async () => !(await engine.executeRaw("SELECT 1 FROM persistence_effects WHERE source_id=$1 AND kind='git' AND state<>'committed'", [s.id])).length,
+    { timeoutMs: 20_000, label: 'the repair commits land in Git' });
+  expect(git(s.root, 'show', 'HEAD:people/race.md')).toContain(FBE);
   frozen.release();
   const result = await sync;
   expect(result).toMatchObject({ status: 'synced', pass: { outcome: 'synced' } });
