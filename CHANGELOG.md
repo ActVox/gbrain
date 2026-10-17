@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.279.0] - 2026-10-17
+
+**An ordinary incremental sync no longer overwrites a page you edited in the database (#6712).** If an agent saved a page with `put_page` while `sync.write_through` was off, and someone later edited and committed that page's file, the next plain `gbrain sync` published the file over the database edit. It raised no hold, took no backup and reported `synced`. The database edit survived only as an old page version. Now sync holds that file as `file_drift` and the page keeps its edit until you choose which version wins. A first sync, `--full` and a failed Git delta already guarded this case. The ordinary delta sync didn't.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| page edited in the database (write-through off), then its file edited and committed, then `gbrain sync` | file published over the database edit, no hold | file held `file_drift` (side `both`); the page keeps its edit |
+| page deleted in the database (write-through off), then its file edited and committed | page recreated from the file | file held `file_drift`; the page stays deleted |
+| a database-only tag or link, then a committed file edit | edit imported, tag kept | unchanged: edit imported, tag kept, no hold |
+| page whose last revision came from sync or write-through, then a committed file edit | edit imported | unchanged |
+
+### What to do after upgrading
+
+Nothing runs on upgrade. When `gbrain sources status <id>` lists a `file_drift` hold, preview both sides with `gbrain repair file-drift --source <id> --slug <slug> --prefer database` (or `--prefer file`), decide which version wins, apply it with the plan hash the preview prints, then run `gbrain sync --source <id> --no-pull`. The rest of the source keeps syncing while a file is held.
+
+### Itemized changes
+
+- `sync-prescreen.ts` `classifyBaseline` now classes an import as `both` in every discovery when the file and the page have both moved since a complete import record. Before, it did so only in a tree walk. An entry with no usable record (`unknown`) is still guarded only in a tree walk.
+- A `both` entry still imports when the page holds exactly what the recorded disk blob would import, which means the database changed only fields an import keeps (tags, links). The freeze checks this with the preparer's own no-op verdict (`sameContentAtOrigin` `pageOnly`, `driftBaselineContent`), so tag overlays and read-only mirrors sync as before.
+- Tests: `test/sync-prescreen-both-delta-6712.test.ts` runs on PGLite and Postgres. It fails on 0.60.278.0, because the page loses the edit and no hold is written. Three existing tests that depended on the overwrite now assert the hold, or record that the older writer they simulate kept no import record.
+
 ## [0.60.278.0] - 2026-10-17
 
 **A stuck upgrade queue drains, held embeddings say what they need, and doctor and status answer in bounded time (#6803, #6847).** Four things got better for anyone whose brain grew big or went through the recent upgrades. Image pages that an old upgrade left queued (and missing from search) can now be put back with one keyless command when gbrain already knows they're safe, and the rest are counted and named instead of hidden. Large pages waiting for your embedding approval are reported everywhere with one exact command to approve them, and that command now works on free local embedding models too. `gbrain doctor --json` and `gbrain sync --status` stop running for minutes on a large brain. And the "un-extracted edges" nudge after a sync now agrees with doctor and names the command that actually finishes the job.
