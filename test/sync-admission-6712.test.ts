@@ -32,12 +32,6 @@ let engine: BrainEngine;
 let incarnation: string;
 const SOURCE = 'default';
 
-async function connect(backend: 'pglite' | 'postgres'): Promise<void> {
-  if (backend === 'postgres') { const pg = new PostgresEngine(); await pg.connect({ database_url: requirePostgresTestDatabase() } as never); engine = pg; }
-  else { const lite = new PGLiteEngine(); await lite.connect({}); engine = lite; }
-  await engine.initSchema();
-  incarnation = (await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [SOURCE]))[0]!.incarnation;
-}
 async function reset(): Promise<void> {
   await engine.unsetConfig(SYNC_ADMISSION_KEY);
   await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=ANY($1::text[])', [[SYNC_ADMISSION_SET_OP, 'managed-sync-pass']]);
@@ -90,7 +84,12 @@ async function setManaged(enabled: boolean) {
 }
 
 for (const backend of testBackends()) describe(backend, () => {
-  beforeAll(() => connect(backend), 120_000);
+  beforeAll(async () => {
+    if (backend === 'postgres') { const pg = new PostgresEngine(); await pg.connect({ database_url: requirePostgresTestDatabase() } as never); engine = pg; }
+    else { const lite = new PGLiteEngine(); await lite.connect({}); engine = lite; }
+    await engine.initSchema();
+    incarnation = (await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [SOURCE]))[0]!.incarnation;
+  }, 120_000);
   afterAll(async () => { await engine.disconnect(); });
   beforeEach(reset);
 

@@ -322,9 +322,9 @@ function validateOptions(scope: RepairScope, opts: RepairPlanOptions | undefined
   if (modes !== 1) throw opError('invalid_params', 'Select pages one way: --slug, --request, --all-drifted or --held.', `Pick one selection: ${usage}`);
   if ((opts.side || opts.state) && !opts.held) throw opError('invalid_params', '--side and --state only narrow --held.', `Drop them, or select the held pages with --held: ${usage}`);
   if (opts.side && !(FILE_DRIFT_SIDES as readonly string[]).includes(opts.side)) throw opError('invalid_params', `Unknown file-drift side '${opts.side}'.`,
-    `Pass --side ${FILE_DRIFT_SIDES.join(', --side ')}; gbrain sources status <source> --json lists each held file's side.`);
+    `Pass --side ${FILE_DRIFT_SIDES.join(', --side ')}; gbrain sources status ${scope.source_ids[0]} --json lists each held file's side.`);
   if (opts.state && !(FILE_DRIFT_DELETED_STATES as readonly string[]).includes(opts.state)) throw opError('invalid_params', `Unknown deleted-side state '${opts.state}'.`,
-    `Pass --state ${FILE_DRIFT_DELETED_STATES.join(', --state ')} with --side deleted; gbrain sources status <source> --json lists each held file's state.`);
+    `Pass --state ${FILE_DRIFT_DELETED_STATES.join(', --state ')} with --side deleted; gbrain sources status ${scope.source_ids[0]} --json lists each held file's state.`);
   if (opts.state && opts.side !== 'deleted') throw opError('invalid_params', '--state only narrows --side deleted.', `Drop --state, or pass --side deleted with it: ${usage}`);
   if (opts.side === 'deleted' && !opts.state) throw stateRequired(scope.source_ids[0]!, opts, FILE_DRIFT_DELETED_STATES);
   if (opts.driftClass && !opts.allDrifted) throw opError('invalid_params', '--class only narrows --all-drifted.', `Drop --class, or use it with --all-drifted: ${usage}`);
