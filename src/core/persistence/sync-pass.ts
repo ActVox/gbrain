@@ -158,9 +158,14 @@ const timer = () => { const started = performance.now(); return () => Math.round
 export async function readShadowLevel(engine: BrainEngine, input: { sourceId: string; full?: boolean; workingTree?: boolean; context?: ManagedSyncContext }): Promise<ShadowLevel | null> {
   const total = timer();
   const timings: Record<string, number> = {};
+  let t = timer();
   const context = input.context ?? await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
+  timings.context = t();
+  t = timer();
   if (currentCompanyBrainSync(context.sourceId) || await getCompanyBrainProfile(engine, context.sourceId)) return null;
+  timings.company = t();
   const { sourceId, incarnation, root, gitRoot } = context;
+  t = timer();
   const nativeRoot = realpathSync.native(root), nativeGitRoot = realpathSync.native(gitRoot);
   const scope = relative(nativeGitRoot, nativeRoot).split(sep).join('/');
   const slugMode = scope ? await resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : 'git-root';
@@ -173,7 +178,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const originOf = (gitPath: string) => syncOriginPath(slugMode === 'source-root' && scope ? sourceRelative(gitPath) : gitPath);
   const gitPathOf = (origin: string) => { const o = syncOriginPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; };
 
-  let t = timer();
+  timings.setup = t();
+  t = timer();
   const head = revParse(gitRoot, 'HEAD');
   if (!head) throw new Error(`source ${sourceId}: HEAD does not name a commit, so there is no level to read`);
   // Master's rule (sync-discovery.ts): a detached HEAD forces working mode.
@@ -195,13 +201,26 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
 
   t = timer();
   const pack = await loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null);
+  timings.pack = t();
+  t = timer();
   const keepDbPrefixes = (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })();
   const mirror = await sourceMirrorReadOnly(engine, sourceId);
+  timings.mirror = t();
+  t = timer();
   const { pages, open, markers, passRow, statements } = await withRoundSnapshot(engine, async exec => {
+    let st = timer();
     const read = await readPages(exec, engine.kind === 'pglite' ? 'pglite' : 'postgres', sourceId, incarnation);
+    timings.pages = st();
+    st = timer();
     const work = await readOpenWork(exec, sourceId, context.binding.worktree_id);
-    return { pages: read.rows, open: work, markers: await readMarkers(exec, sourceId, incarnation), passRow: await readPassRow(exec, sourceId, incarnation),
-      statements: read.statements + work.statements + 2 };
+    timings.open_work = st();
+    st = timer();
+    const markers = await readMarkers(exec, sourceId, incarnation);
+    timings.markers = st();
+    st = timer();
+    const passRow = await readPassRow(exec, sourceId, incarnation);
+    timings.pass_row = st();
+    return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
   });
   timings['I⋈P'] = t();
 
@@ -215,6 +234,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   timings.H = t();
 
   // The page claiming each origin: the live one first, else the newest tombstone.
+  t = timer();
   const byOrigin = new Map<string, PageRow>();
   for (const row of pages) {
     const key = gitPathOf(row.source_path);
@@ -230,6 +250,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     (spellings.get(folded) ?? spellings.set(folded, new Set()).get(folded)!).add(path);
   }
   const reconcilable = [...byOrigin.entries()].filter(([path, row]) => !row.deleted && eligible(path)).length;
+  timings.domain = t();
 
   // Working mode rehashes every path (the full round's unconditional rehash); committed mode probes candidates only.
   t = timer();
@@ -366,8 +387,10 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   Promise<{ idle: boolean; reasons: SyncIdleBlocker[]; timings_ms: Record<string, number>; rows: number }> {
   const timings: Record<string, number> = {};
   const total = timer();
-  const context = input.context ?? await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
   let t = timer();
+  const context = input.context ?? await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
+  timings.context = t();
+  t = timer();
   const head = revParse(context.gitRoot, 'HEAD');
   timings.rev_parse = t();
   t = timer();
