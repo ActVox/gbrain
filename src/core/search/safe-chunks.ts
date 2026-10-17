@@ -1,7 +1,6 @@
 import type { BrainEngine } from '../engine.ts';
 import type { ChunkInput, PageReadScope } from '../types.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
-import type { BrainEngine } from '../engine.ts';
 
 /** First markdown index built from the strict full-body fence sanitizer. */
 export const SAFE_FENCE_CHUNKER_VERSION = 4;
