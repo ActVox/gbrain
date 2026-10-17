@@ -49,6 +49,7 @@ import { slugifyPath } from '../sync.ts';
 import { noteBelief } from '../belief/ledger.ts';
 import { recordRenameAlias } from '../page-state/rename-alias.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
+import { prepareCoreGuard } from '../persistence/core-guard.ts';
 import { existingLocalHostId } from '../persistence/identity.ts';
 import { getWorktreeBinding, managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
@@ -410,7 +411,9 @@ export async function prepareLegacyTwinMerge(engine: BrainEngine, row: WriteRequ
   const moved = await pairNow(engine, pair, owner);
   if (moved) throw refuse(moved);
   await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
+  const core = await prepareCoreGuard(engine, { row, snapshot: await engine.readPageSnapshot(row.slug, { sourceId: row.source_id }), incoming: null });
   const prepared: PreparedMutation = { observedRevision: pair.twin.revision, additionalPageKeys: [{ sourceId: row.source_id, slug: pair.legacy.slug }],
+    ...(core ? { exclusiveSources: core.exclusiveSources } : {}),
     databaseOnlyReason: 'shared_origin',
     validate: async tx => {
       await authorizeWrite(tx, row.authority, 'submit_job', row.slug);
