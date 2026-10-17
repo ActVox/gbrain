@@ -322,7 +322,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     Object.assign(counts, { added: counts.added + drained.added, modified: counts.modified + drained.modified, deleted: counts.deleted + drained.deleted,
       renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
       waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
-    sliceBase.pages += drained.filesImported;
+    sliceBase.pages += drained.filesImported ?? 0;
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
     await save(outcome, drained.reason ?? (outcome === 'blocked' ? 'blocked_by_failures' : null));
     const { runId: _run, managedCursor: _cursor, ...rest } = drained;
