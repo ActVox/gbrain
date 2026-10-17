@@ -33,7 +33,7 @@ Asking about a person or company now looks in every source you can read, not onl
 | a managed sync backlog that cannot be read | `nothing_pending` | `movement_state: unknown`; `gbrain sources writer movement` exits 1 with `movement_unknown` |
 | a v0.11.0 upgrade on a Postgres brain with no `sync.repo_path` | wedged after three partial runs | completes, records Phase F as skipped and prints the install command |
 
-## To take advantage of v0.60.277.0
+## To take advantage of v0.60.281.0
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -41,7 +41,7 @@ Asking about a person or company now looks in every source you can read, not onl
    ```bash
    gbrain apply-migrations --yes
    ```
-2. **Your agent reads `skills/migrations/v0.60.277.0.md` the next time you interact with it.** There is no schema migration. The note covers the rename remedy, the bootstrap exit 14, the coordination lock home for container installs and the one-time mention rescan.
+2. **Your agent reads `skills/migrations/v0.60.281.0.md` the next time you interact with it.** There is no schema migration. The note covers the rename remedy, the bootstrap exit 14, the coordination lock home for container installs and the one-time mention rescan.
 3. **Verify the outcome:**
    ```bash
    gbrain doctor --only rename_identity_downgrades,unlinked_facts,coordination_lock_location,facts_extraction_health --json
@@ -113,7 +113,7 @@ Asking about a person or company now looks in every source you can read, not onl
 - Guides for reading `extract_health` halts (#6760) and for the dream triage threshold and synthesize cooldown (#6753).
 - New error codes: `continuation_unproven`, `bootstrap_cleanup_pending` (exit 14), `fact_rows_collide`, `managed_remedy_unavailable`, `movement_unknown`. New exit code 14 in `src/core/exit-codes.ts`.
 - `FACTS_ABSORB_REASONS` gains `write_pending_accepted` and `write_deferred_unadmitted`; `REPAIR_KINDS` gains `rename-identity`; new doctor check `coordination_lock_location`.
-- Migration note: `skills/migrations/v0.60.277.0.md`.
+- Migration note: `skills/migrations/v0.60.281.0.md`.
 
 ## [0.60.276.0] - 2026-10-17
 
