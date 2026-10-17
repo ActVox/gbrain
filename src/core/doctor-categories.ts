@@ -156,6 +156,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_ratio',
   'oversized_pages',
   'parked_effects',
+  // #6741: managed purges parked after repeated failures (doctor/checks/purge-parks.ts).
+  'purge_parked_pages',
   'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
@@ -198,6 +200,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'undeclared_db_only_pages',
   // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
   'ghost_pages',
+  // #6729: inexact renames whose identity sync did not keep, until the pair gets a disposition (doctor/checks/rename-identity-downgrades.ts).
+  'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
   'missing_recorded_files',
   'unified_multimodal_coverage',

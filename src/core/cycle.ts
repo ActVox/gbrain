@@ -1739,7 +1739,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         details: { dry_run: true, purged_sources_count: 0, purged_pages_count: 0, purged_orphan_clones_count: 0 },
       };
     }
-    const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts')]);
+    const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated, purgePhaseNote, purgePhaseStatus }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts')]);
     // gbrain#4115: {purged, blocked} — a RESTRICT-FK-held source (revoked
     // oauth_client, v64) is reported and skipped instead of aborting the sweep.
     const purgeResult = await purgeExpiredSources(engine);
@@ -1794,12 +1794,12 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     try { purgedFeedback = await (await import('./feedback/store.ts')).pruneRetrievalFeedback(engine, (await (await import('./feedback/settings.ts')).loadFeedbackSettings(engine)).eventRetentionDays); } catch { /* pre-v207 brain */ }
     return {
       phase: 'purge',
-      status: purgedPages.error ? 'fail' : 'ok', error: purgedPages.error,
+      status: purgePhaseStatus(purgedPages), error: purgedPages.error, // #6741: a writer in recovery or a parked page warns
       duration_ms: 0,
       summary:
         `purged ${purgedSources.length} source(s)` +
         (purgeResult.blocked.length > 0 ? ` (${purgeResult.blocked.length} blocked, see details)` : '') +
-        `, ${purgedPages.count} page(s), ` +
+        `, ${purgedPages.count} page(s)${purgePhaseNote(purgedPages)}, ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
         `${purgedBatchRetryAuditFiles} stale batch-retry audit file(s), ` +

@@ -1169,12 +1169,16 @@
               {
                 "name": "persistence_requests_slug_intent",
                 "state": "valid"
+              },
+              {
+                "name": "persistence_requests_request_id",
+                "state": "valid"
               }
             ],
             "repair": "request-indexes"
           },
           "elapsed_ms": "<volatile>",
-          "message": "Managed sync request indexes are valid.",
+          "message": "Request-table indexes are valid.",
           "name": "persistence_request_indexes",
           "status": "ok"
         },
@@ -2671,6 +2675,29 @@
           "elapsed_ms": "<volatile>",
           "message": "No live page is missing its canonical file (0 page(s) inspected).",
           "name": "ghost_pages",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "by_source": [],
+            "count": 0,
+            "docs": "docs/guides/live-sync.md#renaming-a-page",
+            "samples": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No rename that lost its page identity is waiting for a disposition.",
+          "name": "rename_identity_downgrades",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "parked": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No soft-deleted page is parked by the managed purge.",
+          "name": "purge_parked_pages",
           "status": "ok"
         },
         {

@@ -117,6 +117,8 @@ import { behaviorChangesEntry } from './checks/behavior-changes.ts';
 import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
 import { syncConfigKeysEntry } from './checks/sync-config-keys.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
+import { renameIdentityDowngradesEntry } from './checks/rename-identity-downgrades.ts';
+import { purgeParkedPagesEntry } from './checks/purge-parks.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { managedSyncLatencyEntry } from './checks/managed-sync-latency.ts';
@@ -238,6 +240,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   atomHeldFailedEntry,
   extractionInputTruncatedEntry,
   ghostPagesEntry,
+  renameIdentityDowngradesEntry,
+  purgeParkedPagesEntry,
   missingRecordedFilesEntry,
   syncConfigKeysEntry,
   fenceIntegrityEntry,

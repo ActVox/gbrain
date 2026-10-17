@@ -249,6 +249,11 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
   if (entry.renameHeld) {
     return heldEntry(entry, slug, pageId, { code: 'rename_held', reason: 'rename_source_changed', message: `${entry.path} is a rename of page ${entry.renameHeld.slug}, which changed after the rename was recorded, so the page was not moved.` }, content, blob);
   }
+  if (entry.legacySlugs?.length && entry.legacyIdVeto) {
+    const held = heldEntry(entry, slug, pageId, { code: 'legacy_slug_conflict', reason: 'explicit_id_conflict', message: `${entry.path} imports as page ${slug}, but page ${entry.legacySlugs[0]}, which an older gbrain imported from a file of that name `
+      + `and records no file, has a frontmatter id that differs from the file's, so it is a different document and sync held the file instead of taking that page over.` }, content, blob);
+    return { ...held, meta: { ...held.meta, legacy_slugs: entry.legacySlugs } };
+  }
   if (entry.legacySlugs?.length) {
     const [only, several] = [entry.legacySlugs[0], entry.legacySlugs.length > 1];
     const held = heldEntry(entry, slug, pageId, { code: 'legacy_slug_conflict', message: `${entry.path} imports as page ${slug}, but ${several ? `pages ${entry.legacySlugs.join(', ')}` : `page ${only}`}, which an older gbrain imported from a file of that name, `

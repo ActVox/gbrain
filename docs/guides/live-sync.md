@@ -340,6 +340,51 @@ and refuses `revision_conflict` if that page changed after the sync admitted
 it; the Git projection is the sync's own commit. Keep `frontmatter.id` as it
 is; a changed id is a different page.
 
+Git reports a move that also changed the file as a similarity guess (`R087`),
+and two template-shaped files moved in one commit can be paired the wrong way
+round (#6729). So sync keeps the page identity across an inexact rename only
+when the files confirm it: both carry the same `frontmatter.id` and no other
+file or page shares it, or neither carries an id and they share a `slug:` line
+or title that no other file in the source uses. The title is the one the page
+row gets: the frontmatter `title:`, else the body's first `# Heading` (never
+the filename), and the old side counts as the title the brain stores for that
+page now. An exact move (`R100`) needs no signal. Any other pair is imported as a delete plus an add: the new file
+starts a fresh page, and the old page keeps its facts, links and aliases on
+its soft-deleted slug. The sync report prints each such pair, `gbrain sync
+status --source <id> --json` lists it under `identity_downgrades`, doctor
+`rename_identity_downgrades` names it, and the purge leaves the old page alone
+until the pair gets a disposition; there is no time limit, so a pair can still
+be repaired later. Restoring the old page settles it: run
+`gbrain restore <old-slug> --source-id <id> --force` (it then lives beside the
+new page; where the old file cannot be re-created the restore names
+`--detach`). An unbound classic source on Postgres refuses page writes outside
+its checkout, so the report and doctor do not offer the restore there. To move and rewrite a page so it keeps its identity, give it a
+stable id or move, commit and sync first, then edit:
+
+```yaml
+---
+id: roadmap-2026
+title: Roadmap
+---
+```
+
+Two rules decide by `frontmatter.id`. A pair Git reports as a rename (`R<n>`)
+whose two files carry the same id, held by no other file in the range and no
+other live page, is a rename. A new file and a deleted file that Git did not
+pair are a rename only when they share such an id and also show continuity:
+the same file name, the same title, or the same bytes. So a note moved to
+another folder and rewritten keeps its page, while a new note that reuses a
+deleted note's template id starts a fresh page, even when no live page holds
+that id.
+
+With `--working-tree`, the decision reads the files on disk and holds only for
+the bytes it read. A renamed file edited before its page moves keeps nothing:
+classic sync fails that file and the next sync decides again, and a managed
+sync refuses `source_changed` and names
+`gbrain sync --no-pull --working-tree --source <id>`. A managed sync refuses `page_identity_changed`
+(`rename_identity_conflict`) when a file would take over a page whose
+`frontmatter.id` differs from the file's own.
+
 `put_page` at a new slug is not a rename. A content-only write cannot prove the
 old file is gone, so a create-only `put_page` whose `frontmatter.id` and
 content match an existing page resolves to that page (`duplicate`: the receipt

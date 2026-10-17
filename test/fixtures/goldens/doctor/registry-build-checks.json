@@ -851,6 +851,14 @@
       },
       {
         "category": "brain",
+        "name": "rename_identity_downgrades"
+      },
+      {
+        "category": "brain",
+        "name": "purge_parked_pages"
+      },
+      {
+        "category": "brain",
         "name": "missing_recorded_files"
       },
       {
