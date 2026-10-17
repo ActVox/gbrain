@@ -7,8 +7,10 @@
  *    error paths (the build's own release and the queue route's `rebuild_failed` mark) leave the new owner's claim as
  *    it was. The new owner's build stands: every live occurrence chunked, the page sealed once, by it.
  * 2. Fails when: the renewal refreshes the row without checking that this build still owns the claim, so the stale
- *    builder keeps staging next to the new owner and seals the page itself, or a release or failure mark matches any
- *    claim on the row and clobbers the new owner's.
+ *    builder keeps staging next to the new owner and seals the page itself, a release or failure mark matches any
+ *    claim on the row and clobbers the new owner's, or ownership is read from `updated_at` (ABA: two claims on one tick).
+ *    The claim is a per-acquisition token, never the lease timestamp: a new claim stamped with the very `updated_at` the
+ *    stale builder's claim had (a clock tick both share) is still not the stale builder's to renew, seal or release.
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set. The interleaving is forced through the
  *    `segmented:projection_batch` and `segmented:projection_staged` seams: builder 1 stalls, its claim is aged past the
  *    lease in SQL, builder 2 (another engine identity, as another process) claims and stalls, then builder 1 resumes.
@@ -96,7 +98,7 @@ for (const kind of testBackends()) {
      * `onResume` runs in builder 1's seam as it resumes (a throw there fails builder 1).
      */
     async function takeOver<T>(slug: string, stallAt: number, first: (builder: BrainEngine) => Promise<T>,
-      opts: { point?: FaultPoint; onResume?: () => void } = {}) {
+      opts: { point?: FaultPoint; onResume?: () => void; collide?: boolean } = {}) {
       const point = opts.point ?? 'segmented:projection_batch';
       const b1Stalled = gate(), b1Release = gate(), b2Stalled = gate(), b2Release = gate();
       let reached = 0;
@@ -108,12 +110,15 @@ for (const kind of testBackends()) {
       });
       const b1 = first(otherProcess(engine));
       await b1Stalled.opened;
-      expect((await queueRow(slug))?.reason).toBe(SEGMENTED_PROJECTION_CLAIM);
+      const held = await queueRow(slug);
+      expect(held?.reason.startsWith(SEGMENTED_PROJECTION_CLAIM)).toBe(true);
       await engine.executeRaw(`UPDATE page_projection_jobs SET updated_at=updated_at-interval '120 seconds' WHERE slug=$1`, [slug]);
       const b2 = buildSegmentedProjection(otherProcess(engine), { sourceId: 'default', slug });
       await b2Stalled.opened;
+      if (opts.collide) await engine.executeRaw('UPDATE page_projection_jobs SET updated_at=$2::text::timestamptz WHERE slug=$1', [slug, held!.updated_at]);
       const claimed = await queueRow(slug);
-      expect(claimed?.reason).toBe(SEGMENTED_PROJECTION_CLAIM);
+      expect(claimed?.reason.startsWith(SEGMENTED_PROJECTION_CLAIM)).toBe(true);
+      if (opts.collide) expect(claimed?.updated_at).toBe(held!.updated_at);
       return { claimed: claimed!, resumeB1: () => { b1Release.open(); return b1; }, resumeB2: () => { b2Release.open(); return b2; } };
     }
 
@@ -170,6 +175,31 @@ for (const kind of testBackends()) {
         expect(await chunkRows(id)).toBe(0);
 
         expect(await race.resumeB2()).toEqual({ chunks: total, retired: 0, sealed: true });
+        expect(await chunkRows(id)).toBe(total);
+        expect(await queueRow(slug)).toBeNull();
+      }
+    }, 300_000);
+
+    test('a new claim stamped with the stale builder\'s exact updated_at is not the stale builder\'s to renew, seal or release', async () => {
+      for (const mode of ['renew', 'seal', 'release'] as const) {
+        const slug = `notes/claim-same-tick-${mode}`;
+        const { id, total } = await unprojectedPage(slug, 60);
+        const race = await takeOver(slug, 1, builder => buildSegmentedProjection(builder, { sourceId: 'default', slug })
+          .then(result => result, (error: Error) => error.message), {
+          collide: true,
+          point: mode === 'seal' ? 'segmented:projection_staged' : 'segmented:projection_batch',
+          onResume: mode === 'release' ? () => { throw new Error('builder 1 died after losing its claim (probe)'); } : undefined,
+        });
+        const first = await race.resumeB1();
+        if (mode === 'release') expect(first).toBe('builder 1 died after losing its claim (probe)');
+        else expect(first).toEqual({ chunks: mode === 'seal' ? total : 0, retired: 0, sealed: false, claimLost: true });
+        expect(await queueRow(slug)).toEqual(race.claimed);
+        expect(await chunkRows(id)).toBe(mode === 'seal' ? total : 0);
+        expect((await segmentedPageRow(engine, slug)).text_projection_revision).toBeNull();
+
+        expect(await race.resumeB2()).toEqual({ chunks: mode === 'seal' ? 0 : total, retired: 0, sealed: true });
+        const sealed = await segmentedPageRow(engine, slug);
+        expect(sealed.text_projection_revision).toBe(sealed.knowledge_revision);
         expect(await chunkRows(id)).toBe(total);
         expect(await queueRow(slug)).toBeNull();
       }
