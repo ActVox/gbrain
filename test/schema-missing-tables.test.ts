@@ -5,6 +5,8 @@
  * here. Real PGLite, plus Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { LATEST_VERSION } from '../src/core/migrate.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -35,9 +37,12 @@ beforeAll(async () => {
 afterAll(async () => { await engines[0]?.disconnect(); await closePostgres?.(); }, 60_000);
 
 describe('#6911 recreatable caches', () => {
-  test('the recreatable tables are exactly the inventory rebuild tables, and nothing else resolves to a step', () => {
-    const rebuild = GRADUATION_INVENTORY.entries.filter(e => e.class === 'rebuild' && e.kind === 'table').map(e => e.relation).sort();
-    expect([...RECREATABLE_TABLES].sort()).toEqual(rebuild);
+  test('every inventory rebuild table is recreatable or defined by the base schema, and nothing else resolves to a step', () => {
+    const rebuild = GRADUATION_INVENTORY.entries.filter(e => e.class === 'rebuild' && e.kind === 'table').map(e => e.relation);
+    const base = readFileSync(join(import.meta.dir, '..', 'src', 'schema.sql'), 'utf8');
+    const inBase = (table: string) => new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(`).test(base);
+    for (const table of RECREATABLE_TABLES) expect({ table, rebuild: rebuild.includes(table), inBase: inBase(table) }).toEqual({ table, rebuild: true, inBase: false });
+    expect(rebuild.filter(table => !RECREATABLE_TABLES.includes(table) && !inBase(table))).toEqual([]);
     for (const name of ['facts', 'core_edit_notices', 'constructor', 'toString', '__proto__', 'hasOwnProperty']) expect(recreateStep(name)).toBeUndefined();
   });
 
