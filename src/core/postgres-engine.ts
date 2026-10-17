@@ -1194,7 +1194,7 @@ export class PostgresEngine implements BrainEngine {
       (read, settings) => this.withScopedReadTransaction(opts?.sourceIds, opts?.sourceId, tx => read(scopedRead(this.engineSqlOn(tx))), { alwaysTransaction: true, jitOff: true, settings }),
       query,
       opts,
-      { statementTimeout: await this.keywordStatementTimeoutSetting(), relaxedPrefersIndex: true, staleProbe: false, chunkManifest: await chunkManifestReads(this) },
+      { statementTimeout: await this.keywordStatementTimeoutSetting(), relaxedPrefersIndex: true, staleProbe: false, chunkManifest: exec => chunkManifestReads(this, exec) },
     );
   }
 
