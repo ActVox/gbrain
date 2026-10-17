@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.284.0] - 2026-10-17
+## [0.60.286.0] - 2026-10-17
 
 **Your brain keeps a private forecast journal: every prediction, when it was made, by when it had to come true, and how it turned out.** Takes that make a call ("Acme-example will reach $5M ARR by the end of 2024") now get a horizon, the last day the claim can come true. `gbrain takes journal` lists every prediction as resolved, overdue, open or undated, and it always counts the unresolved ones, so a track record can't look better by leaving its misses unresolved. `gbrain takes scorecard --group-by holder` (or `source`) ranks who has been right, with sample-size honesty built in. All of this stays on the brain host: remote agents and thin clients see exactly what they saw before.
 
@@ -41,7 +41,7 @@ Nothing runs on upgrade. A new migration adds the private `take_horizons` table;
 - `src/core/takes-horizon.ts` (the deadline parser and the horizon store) and `src/core/forecast-journal.ts` (the journal and the grouped statistics).
 - `evals/forecast-journal/`: a $0 synthetic gate with a frozen preregistration. It uses 20 seeded cohorts of placeholder holders with known skill. On those cohorts the median Spearman ρ between true skill and shrunk accuracy is 0.905. The who-was-right set-F1 is 1.000, the denominator, `low_n` and labelling counts are exact, and 8/8 remote probes pass. Run it with `bun evals/forecast-journal/harness.ts --run`.
 
-## [0.60.283.0] - 2026-10-17
+## [0.60.285.0] - 2026-10-17
 
 **Doctor can now find page edits that an earlier sync silently overwrote, and one repair puts them back (#6712).** Between v0.60.255.0 and v0.60.279.0, a plain incremental `gbrain sync` could publish a committed file edit over a page that had also been edited in the database (for example a `put_page` with `sync.write_through` off). v0.60.279.0 stopped new damage. This release finds the pages that were already hit, using records gbrain keeps permanently, and restores them with a preview first.
 
@@ -65,7 +65,7 @@ Nothing runs on upgrade. Run `gbrain doctor --only sync_overwritten_db_edits --j
 - The repair kind `overwritten-edits` is explicit-only and preview-bound. It rechecks the revision and the version digest, restores through `revert_version` with `databaseOnly: 'overwrite_restore'`, writes the `file_drift` hold on the owner host, and replays an apply that was interrupted after the restore committed.
 - Tests: `test/overwritten-edits-6712.test.ts` runs on PGLite and Postgres: detect and restore, no false flag on normal sync history, a page that moved since the preview is refused, an interrupted apply replays, and a non-owner host reports the file left unheld. The doctor goldens gain the new row.
 
-## [0.60.282.0] - 2026-10-17
+## [0.60.284.0] - 2026-10-17
 
 **Your agent can now finish a rename that sync split in two, find people and companies in every source it can read, and stop chasing warnings that only describe the past (fix wave 18).** When you move a note and rewrite it in the same commit, sync sometimes cannot tell it was a move, so it keeps the old page aside and starts a new one. Until now the only way out was to bring the old page back. Now one command, run after you agree, moves the old page's history, links and facts onto the new name, or closes the pair and lets the old page go.
 
@@ -88,7 +88,7 @@ Asking about a person or company now looks in every source you can read, not onl
 | a managed sync backlog that cannot be read | `nothing_pending` | `movement_state: unknown`; `gbrain sources writer movement` exits 1 with `movement_unknown` |
 | a v0.11.0 upgrade on a Postgres brain with no `sync.repo_path` | wedged after three partial runs | completes, records Phase F as skipped and prints the install command |
 
-## To take advantage of v0.60.282.0
+## To take advantage of v0.60.284.0
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -96,7 +96,7 @@ Asking about a person or company now looks in every source you can read, not onl
    ```bash
    gbrain apply-migrations --yes
    ```
-2. **Your agent reads `skills/migrations/v0.60.282.0.md` the next time you interact with it.** There is no schema migration. The note covers the rename remedy, the bootstrap exit 14, the coordination lock home for container installs and the one-time mention rescan.
+2. **Your agent reads `skills/migrations/v0.60.284.0.md` the next time you interact with it.** There is no schema migration. The note covers the rename remedy, the bootstrap exit 14, the coordination lock home for container installs and the one-time mention rescan.
 3. **Verify the outcome:**
    ```bash
    gbrain doctor --only rename_identity_downgrades,unlinked_facts,coordination_lock_location,facts_extraction_health --json
@@ -168,9 +168,35 @@ Asking about a person or company now looks in every source you can read, not onl
 - Guides for reading `extract_health` halts (#6760) and for the dream triage threshold and synthesize cooldown (#6753).
 - New error codes: `continuation_unproven`, `bootstrap_cleanup_pending` (exit 14), `fact_rows_collide`, `managed_remedy_unavailable`, `movement_unknown`. New exit code 14 in `src/core/exit-codes.ts`.
 - `FACTS_ABSORB_REASONS` gains `write_pending_accepted` and `write_deferred_unadmitted`; `REPAIR_KINDS` gains `rename-identity`; new doctor check `coordination_lock_location`.
-- Migration note: `skills/migrations/v0.60.282.0.md`.
+- Migration note: `skills/migrations/v0.60.284.0.md`.
 
-## [0.60.281.0] - 2026-10-17
+## [0.60.283.0] - 2026-10-17
+
+**Facts about a person now land on that person's page, not on an old copy you retired.** If you keep an old page around for its history and mark it as replaced by the real one (`canonical: false`, `superseded_by: people/<name>`, or a status like `historical-retired-alias`), gbrain could still pick that old page when it filed new facts. It happened when the real page listed the name only in slug form (`alice-example`) and the extractor wrote it as `people/alice-example` or `Alice Example`: those spellings never matched the alias, and the name-matching fallback then chose the old page because its title carried the same words. One brain saw 91 fact writes go to the retired page in a day against 3 to the real one, and because that page was very large each write took minutes and slowed every other write behind it. Now a retired page is never chosen by a guess, a direct reference to it follows `superseded_by` to the real page, and aliases match whether the words are joined by spaces, hyphens, underscores or a directory prefix. Reported by @liuwenyong1985 (#6898).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| the extractor names `people/alice-example` or `Alice Example`, and the real page has the alias `alice-example` | the alias missed; a retired page with the same name words could win | resolves to the real page through its alias |
+| an alias written `Dana Example` or `acme_example`, referenced as `dana-example` or `Acme Example` | no alias match | matches |
+| a reference that is exactly a retired page's slug | that retired page | the page its `superseded_by` (or `merged_into`) names, up to 5 hops, same source, readable by the caller |
+| the same, when the retired page names no target, the target is missing or private to the caller, or the chain loops | that retired page | unresolved, like an unknown name: extracted facts are saved without an entity |
+| `gbrain recall --entity <retired-slug>` when the retired page names a target | the retired page's facts | the target page's facts (the retired page's own facts stay under its slug) |
+| a retired page is the only page whose name matches a guess (name match, bare-name prefix, phantom merge) | it could be chosen | it is skipped |
+| a person page whose `status` describes the person (`retired`, `archived`) | a candidate | still a candidate |
+
+### What to do
+
+Nothing. No migration, nothing is rewritten on upgrade, and stored aliases are read as they are. Facts that already landed on a retired page stay there; move them by hand for now (`gbrain forget <id>`, then `gbrain remember "<fact>" --entity <slug>`).
+
+### Itemized changes
+
+- `src/core/entities/resolve.ts`: a page is retired when its frontmatter has `canonical: false`, a `superseded_by` or `merged_into` target, or a `status` naming it an alias or a redirect. The fuzzy and same-name arms of both resolvers, bare-name prefix expansion and the phantom-merge candidate queries exclude retired pages in SQL before uniqueness is counted. The exact-slug, basename and alias arms follow a retired page's `superseded_by` (else `merged_into`; `[[...]]`, `.md` and a leading `/` are stripped) within the same source, at most 5 hops, refusing on a cycle, a missing or deleted target, or (strict resolver with `excludePrivate`) a private one. An exact hit that cannot be followed is reported as `fallback_slugify` (unresolved) by `resolveEntitySlugWithSource` and as `not_entity` by `resolveStrictEntityReference`. Relational recall's exact-title fallback skips retired pages too.
+- Alias lookup tries the literal normalized reference first, then its words rejoined with a space, `-` and `_`; a slug-shaped reference uses its last segment, and a folded hit must sit in the same parent directory (`projects/acme-example` never resolves to a `companies/` page's alias). `normalizeAlias` itself is unchanged, so stored `page_aliases` rows, search's alias hop, mentions and CJK handling behave as before.
+- Tests: `test/entity-resolve-retired-alias-6898.test.ts` (PGLite, including the facts backstop landing both spellings on the canonical page) and `test/e2e/entity-resolve-retired-alias-6898-postgres.test.ts` share the fixture and cases in `test/helpers/retired-alias-6898.ts`; both fail on the previous resolver.
+
+## [0.60.282.0] - 2026-10-17
 
 **The take grader now has an eval, and you can review what it has graded.** Wave 4b W6: a preregistered take-grading eval measures which judge models may ever auto-resolve a take, the dream cycle's take grader stops counting evidence about a look-alike company, and `gbrain takes grades` lists its cached verdicts. Auto-resolve stays off.
 
@@ -189,6 +215,30 @@ Nothing. Verdicts are cached per prompt version, so the next cycles grade each e
 ### For contributors
 
 `evals/take-grading/` holds the eval (908 seeded synthetic takes, dev and counted splits, `--check` at $0) and its preregistration. On the counted split (790 takes, $9.25), `gpt-6.1-sol` qualified: 496 applied verdicts, none wrong (95% upper bound 0.6%, bar 1%), so `GRADE_TAKES_MEASURED_MODELS` (`src/core/cycle/grade-takes-measured.ts`) lists it. `claude-sonnet-5-5` (121 applied, 1 wrong) and `claude-opus-5-5` (2 applied: right verdicts, confidence below 0.95) did not. Results are mirrored in gbrain-evals.
+
+## [0.60.281.0] - 2026-10-17
+
+**A PGLite brain that is draining a large effects backlog answers requests sooner, and master CI is green again.** When the write owner starts on a backlog of queued embedding effects, its first tick ran the receipt compaction pass, the reservation sweep and the queue `VACUUM` back to back next to the drain, and each drain pass held the event loop for its whole reservation true-up. PGLite statements run synchronously, so a request (or a timer) waited behind all of it: about 0.3 s on a fast machine and 2.2 s on a slow CI runner, which failed `test/persistence-drain-latency.serial.test.ts` on master. Now each of those steps returns to the event loop before the next one, and a request waits behind one step at most.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| longest wait for a tool call while 8,000 no-op embedding effects drain (local PGLite) | 290 to 380 ms | 86 to 120 ms |
+| the same on a host about as slow as the CI runner that failed (statements slowed 4.5x) | 1.9 to 2.1 s (over the 2 s bound in 2 of 3 runs) | 1.0 to 1.2 s |
+| time to drain that backlog (local) | about 2.8 s | about 3.5 s |
+
+### What to do
+
+Nothing. Nothing is rewritten on upgrade and there is no migration. Postgres brains are unaffected apart from the smaller settle batch.
+
+### Itemized changes
+
+- `src/core/persistence/journal.ts`: new `yieldToEventLoop`, which resumes from the timer queue so a timer that came due during the last statement chain runs before the next chain. The consumer's effects drain uses it between passes (it used `setImmediate`, which ran the next pass ahead of due timers). `vacuumPersistenceQueues` vacuums each grown queue table in its own statement with a yield before each.
+- `src/core/persistence/compaction-pass.ts` and `src/core/persistence/consumer.ts`: the compaction pass yields after compacting and after the reservation sweep step, and the consumer's maintenance chains yield between the compaction pass, the segment sweep, the queue vacuum and the planner statistics refresh.
+- `src/core/persistence/embedding-noop-settle.ts`: `NOOP_SETTLE_BATCH` is 50 (was 200), because one pass and its reservation true-up hold the event loop on PGLite.
+- `DRAIN_ANSWER_BOUND_MS` and every assertion of the drain latency test are unchanged.
+- New `test/persistence-maintenance-yield.test.ts`: the queue `VACUUM` runs in a later event-loop turn than the size check, the compaction pass, the sweep and the pass record each run in their own turn, and a yield resumes after a timer that came due before it. All three fail on the previous code.
 
 ## [0.60.280.0] - 2026-10-17
 
