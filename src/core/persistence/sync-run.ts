@@ -1317,18 +1317,6 @@ async function finishCheckpoint(engine: BrainEngine, key: string, cursor: Cursor
   assertActive();
   return scheduled.length ? result(cursor, 'partial', 'writer_yield') : result(cursor, cursor.from === null ? 'first_sync' : 'synced');
 }
-/** A finished cursor is deleted (compare-and-swap) before the next run discovers; returns whichever cursor replaced it. */
-async function retireCompletedCursor(engine: BrainEngine, key: string, completed: Cursor, assertActive: () => void): Promise<Cursor | null> {
-  await engine.transaction(async tx => {
-    assertActive();
-    await assertDrainLease(tx, completed.sourceId);
-    await tx.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 AND completed_keys=$3::text::jsonb', [OP, key, JSON.stringify([header(completed)])]);
-    assertActive();
-  });
-  assertActive();
-  await clearManagedSyncFailureAfterSuccess(engine, key);
-  return readCursor(engine, key);
-}
 /** What the hold report needs from a managed run: its source, cursor and authority. */
 interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boolean; cursor?: () => Cursor | CursorHeader | null;
   /** #6712 PR 1: what the fan-in folded, and what resuming the source's one cursor kept from it. */
@@ -1668,7 +1656,6 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       assertActive();
       return result(cursor, cursor.from === null ? 'first_sync' : 'synced');
     }
-    if (cursor?.done) cursor = await retireCompletedCursor(engine, key, cursor, assertActive);
     if (!cursor) {
       assertActive();
       phase = 'discovery';
