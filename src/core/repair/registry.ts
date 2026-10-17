@@ -68,6 +68,7 @@ import { stuckRecoveryRepair } from './stuck-recovery.ts';
 import { ghostPagesRepair, GHOST_CONSENT_TEXT, GHOST_CONSEQUENCES, GHOST_PURGE_FUSE_HOURS } from './ghost-pages.ts';
 import { receiptCompactionRepair } from './receipt-compaction.ts';
 import { aliasesRepair } from './aliases.ts';
+import { overwrittenEditsRepair } from './overwritten-edits.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -353,6 +354,14 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'dangling_aliases reports as orphaned. Aliases of a soft-deleted page are kept for gbrain restore and counted; a redirect from an old name '
       + 'of a page that still exists is never touched. Each target slug is rechecked under its page lock; coordinated maintenance write on a managed '
       + 'brain, no journal admission. Runs only when named.',
+  },
+  'overwritten-edits': {
+    handler: overwrittenEditsRepair, embeds: 'effect', checks: ['sync_overwritten_db_edits'], explicit_only: true, preview_bound: true,
+    summary: 'Restore database edits an incremental managed sync overwrote with a committed file edit and no file_drift hold (#6712, fixed by #6887). '
+      + 'Only what the records prove: a database-only revision (its receipt published no file) archived by a managed-sync import that wrote different '
+      + 'content, with no later revision holding the edit again. The preview shows a diff of the live page against the edit; --apply --expect <hash> '
+      + 'reverts each page to that version through a revision-bound, database-only revert_version, then holds the committed file file_drift when it '
+      + 'differs, so sync never publishes it over the edit. Narrow with --slug. Runs only when named.',
   },
 };
 

@@ -202,6 +202,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
   'missing_recorded_files',
+  // #6712: live pages whose database-only edit an incremental sync overwrote without a hold (doctor/checks/overwritten-edits.ts).
+  'sync_overwritten_db_edits',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',

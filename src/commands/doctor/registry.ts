@@ -120,6 +120,7 @@ import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { renameIdentityDowngradesEntry } from './checks/rename-identity-downgrades.ts';
 import { purgeParkedPagesEntry } from './checks/purge-parks.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
+import { overwrittenEditsEntry } from './checks/overwritten-edits.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { managedSyncBlockedEntry } from './checks/managed-sync-blocked.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
@@ -241,6 +242,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   renameIdentityDowngradesEntry,
   purgeParkedPagesEntry,
   missingRecordedFilesEntry,
+  overwrittenEditsEntry,
   syncConfigKeysEntry,
   fenceIntegrityEntry,
   searchModeEntry,
