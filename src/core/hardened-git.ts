@@ -112,7 +112,7 @@ export async function hardenedGitStream(root: string, args: string[],
     const settle = (outcome: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); outcome(); };
     const fail = (error: unknown): void => { failure ??= { error }; child.kill('SIGKILL'); };
     const timer = setTimeout(() => { stopped ??= 'timeout'; child.kill('SIGKILL'); }, opts.timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout?.on('data', (chunk: Buffer) => {
       if (stopped || failure) return;
       bytes += chunk.length;
       if (opts.maxBytes !== undefined && bytes > opts.maxBytes) { stopped = 'too_large'; child.kill('SIGKILL'); return; }
