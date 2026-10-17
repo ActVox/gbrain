@@ -278,14 +278,19 @@ for (const alias of [false, true]) check(`native historical ${alias ? 'alias' : 
     expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
     expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
   } else {
+    // #6712 PR 4b: the first pass reads the whole level, so the unchanged notes/untouched.md, which has no page yet, is
+    // imported beside the changed file (the cursor's incremental delta saw only the change). The historical origin's page
+    // is untouched (below).
     const result = await performManagedSync(engine, opts);
-    expect(result).toMatchObject({ status: 'synced', fromCommit: f.head, toCommit: target, deleted: 0, filesImported: 1 });
+    expect(result).toMatchObject({ status: 'synced', fromCommit: f.head, toCommit: target, deleted: 0, filesImported: 2 });
     const requests = await engine.executeRaw<{ intent: SyncIntent; state: string }>('SELECT intent,state FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [f.id]);
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(requests.every(row => row.state === 'committed')).toBe(true);
-    expect(requests[0].intent).toMatchObject({ kind: 'managed_sync_import', path: 'notes/example.md', from: f.head, target });
-    expect(requests[1].intent.kind).toBe('managed_sync_checkpoint');
-    expect(await engine.getPage('notes/untouched', { sourceId: f.id })).toBeNull();
+    expect(requests.slice(0, 2).map(row => row.intent).sort((a, b) => a.path!.localeCompare(b.path!))).toEqual([
+      expect.objectContaining({ kind: 'managed_sync_import', path: 'notes/example.md', from: f.head, target }),
+      expect.objectContaining({ kind: 'managed_sync_import', path: 'notes/untouched.md', from: f.head, target })]);
+    expect(requests[2].intent.kind).toBe('managed_sync_checkpoint');
+    expect((await engine.getPage('notes/untouched', { sourceId: f.id }))?.source_path).toBe('notes/untouched.md');
     expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(target);
     if (process.platform === 'win32' && alias) expect(await engine.getPage('notes/example', { sourceId: f.id })).toBeNull();
   }

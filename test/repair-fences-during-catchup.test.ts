@@ -180,12 +180,16 @@ test('during a live pass: only the admitted candidate waits; the held, the worki
   expect((await s.run()).affected).toBe(0);
 }), 240_000);
 
-test('a plan approved before a sync started is not applied to a candidate that sync froze; the entry imports once the sync reaches it', () => each(async engine => {
+// #6712 PR 4b (design v3.2 §3.7): only an open request is busy. The pass froze people/race.md in its batch but has admitted
+// no request for it, so the approved plan repairs it too (the cursor engine skipped it as sync_in_progress). The pass's
+// frozen import then finds the page the repair created and is passed over; its next round reads the repaired file and the
+// sync finishes clean, with the stale frozen bytes never published.
+test('a plan approved before a pass started repairs a candidate the pass froze but has not admitted; the stale frozen import is passed over and the sync finishes clean', () => each(async engine => {
   const s = await managed(engine, { 'notes/plain.md': md('Plain', 'Nothing here.\n') });
   expect((await s.sync()).held_count ?? 0).toBe(0);
   s.write('people/race.md', md('Race', fixable('Synthetic race partnership')));
   commit(s.root, 'a fence');
-  // Approved in the same plan, never committed: outside the manifest the sync is about to freeze.
+  // Approved in the same plan, never committed: outside the level the committed-mode pass reads.
   s.write('people/other.md', md('Other', fixable('Synthetic other partnership')));
   const approved = await s.run();
   expect(classes(approved, s.id)).toEqual({ 'people/race.md': 'deterministic', 'people/other.md': 'deterministic' });
@@ -197,17 +201,24 @@ test('a plan approved before a sync started is not applied to a candidate that s
   });
   const sync = s.sync();
   await frozen.hit;
-  expect(await s.cursor()).toMatchObject({ index: '0' });
+  expect(await s.requests('people/race.md')).toEqual([]);
+  expect(await s.cursor()).toBeNull();
   const raced = await s.run({ apply: true, expect: hashOf(approved) });
-  expect(raced).toMatchObject({ applied: 1, outcomes: { skipped: 1, repaired: 1 } });
-  expect(raced.outcome_items!.find(item => item.item.endsWith('people/race'))).toMatchObject({ outcome: 'skipped', reason: 'sync_in_progress' });
+  expect(raced).toMatchObject({ applied: 2, outcomes: { repaired: 2 } });
+  expect(raced.outcome_items!.find(item => item.item.endsWith('people/race'))).toMatchObject({ outcome: 'repaired' });
   expect(raced.outcome_items!.find(item => item.item.endsWith('people/other'))).toMatchObject({ outcome: 'repaired' });
-  expect(s.read('people/race.md')).toBe(md('Race', fixable('Synthetic race partnership')));
+  expect(s.read('people/race.md')).toContain(FBE);
   expect(s.read('people/other.md')).toContain(FBE);
   frozen.release();
   const result = await sync;
-  expect(result.status).not.toBe('error');
-  expect(await s.failed()).toEqual([]);
+  expect(result).toMatchObject({ status: 'synced', pass: { outcome: 'synced' } });
+  expect(result.failures ?? []).toEqual([]);
+  // The one refused request is the stale frozen import, refused by the publication guard and passed over: no failure, no hold.
+  expect(await s.failed()).toEqual([{ request_id: expect.any(String), error_code: 'page_identity_changed', slug: 'people/race' }]);
+  expect(await s.holds()).toEqual([]);
   expect(await engine.readPageSnapshot('people/race', { sourceId: s.id })).not.toBeNull();
   expect(s.read('people/race.md')).toContain(FBE);
+  expect((await engine.getPage('people/race', { sourceId: s.id }))?.compiled_truth).toContain(FBE.split('\n')[0]!);
+  expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='people/race.md' AND intent->>'kind'='managed_sync_import' AND state='committed'", [s.id])).toEqual([]);
+  expect((await s.sync()).status).toBe('up_to_date');
 }), 240_000);
