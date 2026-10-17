@@ -35,6 +35,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'purge:sweep_chunk' | 'purge:carrying_lookup'
   // W1: before each keyset batch of the belief ledger's purge redaction (belief/purge.ts); a 57014 from the hook models its statement timeout.
   | 'purge:ledger_redaction'
+  // #6712 PR 4b: after a page-row deletion of a managed Git source wrote its origin's deletion marker (sync-markers.ts), before the row goes.
+  | 'purge:marker_written'
   // #6650: `gbrain repair stuck-recovery` (recovery-resolve.ts): after the backup is durable (before its journal step), after the prior
   // bytes are written (before their journal step), after a --keep disk write is abandoned (its journal step written), and after recoverPublication returns.
   | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered'
