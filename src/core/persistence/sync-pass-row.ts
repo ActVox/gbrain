@@ -25,6 +25,11 @@ export const SYNC_PASS_ROW_OPS = [MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, 
 /** `open` while the pass runs; the rest are its ending (`DrainOutcome` plus the idle `up_to_date`). */
 export type PassOutcome = 'open' | 'synced' | 'up_to_date' | 'resumable' | 'blocked';
 export type PassKind = 'idle' | 'hold_only' | 'full';
+/** #6712 PR 4b (design v3.2 §9): a live pass's `SyncResult.reason` endings. `selection_scoped` rides a converged scoped pass (`synced`). */
+export type PassResultReason = 'not_converged' | 'admission_paused' | 'reconcile_host_required' | 'grant_scope' | 'reconcile_read_incomplete' | 'selection_scoped';
+/** #6712 PR 4b: `SyncResult.pass`, the live pass that produced a sync result (non-company managed sources; sync-pass-run.ts). */
+export interface PassResultSummary { pass_id: string; kind: PassKind; round: number; outcome: string; stop_reason: string | null; candidates: number; settled: number;
+  remaining: number; not_converged_streak: number }
 
 /** What a pass syncs (design §6): an episode stores it, the configured one stamps `last_commit`. */
 export interface SyncSelection { exclude: string[]; includeHidden: string[]; strategy: string | null; srcSubpath: string | null; mode: 'committed' | 'working' }
