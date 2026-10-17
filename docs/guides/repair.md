@@ -281,10 +281,21 @@ gbrain repair missing-tables --apply --expect <preview-hash>
 
 The apply recreates each previewed cache table empty, in the shape a fully
 migrated brain has, then checks it exists. A table created since the preview
-is skipped as `already_present`. The cache refills as searches run. Missing
-user-data tables are listed under `user_data_tables` and never recreated:
-restore them from a backup. The repair runs only when named and never on
-upgrade, `apply-migrations`, `db-repair` or the maintenance cycle.
+is completed in place (`completed`); every statement is `IF NOT EXISTS` and the
+whole table is built in one transaction. The cache refills as searches run.
+If the database role gbrain connects as may not create tables (an owner/app
+role split), the apply refuses with `permission_denied` and creates nothing:
+run it again connected as the role that owns the schema.
+
+A missing table that holds user data is listed under `user_data_tables` and is
+never recreated empty, because an empty table would hide that its rows are
+gone. Restore that table's rows from your own database backup (a `pg_dump`
+of the brain, or your host's point-in-time recovery). `gbrain backup restore`
+restores a whole brain into a new root, not one table. Until the table is
+back, writes that touch it keep failing, and doctor keeps reporting it.
+
+The repair runs only when named and never on upgrade, `apply-migrations`,
+`db-repair` or the maintenance cycle.
 
 <a id="request-growth"></a>
 ### Request-table growth

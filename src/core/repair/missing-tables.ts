@@ -48,7 +48,13 @@ export const missingTablesRepair: RepairHandler = {
     if (!recreate) return { applied: false, outcome: 'refused', reason: 'not_rebuildable' };
     const existed = await relationExists(ctx.engine, item.slug);
     // Every statement is IF NOT EXISTS and runs in one transaction, so a rerun finishes a table an interrupted run left without its later columns.
-    await ctx.engine.transaction(tx => recreate(tx));
+    try {
+      await ctx.engine.transaction(tx => recreate(tx));
+    } catch (error) {
+      if ((error as { code?: string }).code !== '42501') throw error;
+      throw new OperationError('permission_denied', `This database role may not create ${item.slug}, so nothing was recreated.`,
+        `Run the apply again connected as the role that owns the gbrain schema (the one apply-migrations uses): ${PREVIEW} --apply --expect <preview-hash>`, 'docs/guides/repair.md#missing-tables');
+    }
     if (!await relationExists(ctx.engine, item.slug)) {
       throw new OperationError('storage_error', `Recreating ${item.slug} ran, but the table still does not exist.`,
         'Run gbrain doctor --json and report the schema_missing_tables entry.');
