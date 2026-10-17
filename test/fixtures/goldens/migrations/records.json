@@ -1,12 +1,11 @@
 {
   "golden": {
-    "count": 249,
+    "count": 250,
     "gaps": [
       17,
       18,
       19,
-      100,
-      250
+      100
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
@@ -32,6 +31,7 @@
       "PERSISTENCE_COMPACTABLE_INDEX": "25ee657878efb41ba9ea3a7624464ddcf66407d861659456c230366e57f230a0",
       "PERSISTENCE_DATABASE_PENDING_INDEX_SQL": "6e0f618be33d037454933ea4dea11438413d45aef35d3bd4f33e89624d6e199e",
       "PERSISTENCE_EFFECT_PARKED_INDEX_SQL": "0107863883415378d7c0dce7a0cbd5311c2c5a59fc0f81917cc8b767fd235cf2",
+      "PERSISTENCE_REQUEST_ID_INDEX": "2c5325e86cf395f617d93a39a45593931639cd8b14fd513b6d9e7d125f16c78f",
       "PERSISTENCE_REQUEST_SLUG_INTENT_INDEX": "5f2e4a3dde452e610fe7eaae949642c00d7c61a363b1cd344d7f0917db233aa5",
       "PERSISTENCE_SYNC_RUN_INDEXES": "e1b12613c5fd2facb850e6857b0bddcf49b2478ec258fa226fe15e71e55df9c1",
       "PERSISTENCE_SYNC_WATERMARK_INDEX": "93523954a30e8483717f07ec97a3e0cd062b15d8a60cc759281054b06c23bb40",
@@ -2259,8 +2259,8 @@
         "idempotent": true,
         "name": "durable_concurrent_persistence",
         "sql": {
-          "length": 12465,
-          "sha256": "5b52284b29395bf928f5485af931017f8ebc822dcd6b3715fba27a703fbbff10"
+          "length": 12573,
+          "sha256": "8f5c615007ff91fc8a9ed62d44125951aaf48e5f3fd43a7a30bd76ac68147d7a"
         },
         "sqlFor": "absent",
         "transaction": "absent",
@@ -3866,6 +3866,32 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "PERSISTENCE_REQUEST_ID_INDEX",
+            "PLANNER_REPAIR_TABLES",
+            "analyzeAfterIndexBuild",
+            "buildIndexOnline",
+            "dropInvalidConcurrentIndex",
+            "migrationNotice",
+            "quietMigrationNotices",
+            "tableRows"
+          ],
+          "sha256": "58a55290a23bae9e57c04871a1d470402ef4846361802e4d9fa53f827e34815b"
+        },
+        "idempotent": true,
+        "name": "persistence_request_id_index",
+        "sql": {
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "sqlFor": "absent",
+        "transaction": false,
+        "verify": "absent",
+        "version": 250
+      },
+      {
+        "handler": {
+          "form": "arrow",
+          "helpers": [
             "CONTENT_CHUNKS_GENERATION_INDEX",
             "PLANNER_REPAIR_TABLES",
             "analyzeAfterIndexBuild",
@@ -4212,6 +4238,7 @@
       247,
       248,
       249,
+      250,
       251,
       252,
       253,
