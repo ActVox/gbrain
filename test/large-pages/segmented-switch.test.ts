@@ -24,9 +24,9 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { PAGE_MAX_BYTES } from '../../src/core/page-size-policy.ts';
-import { _resetSegmentedWriterGateForTests, readPageBodyPolicy, SEGMENTED_WRITER_GATE_TTL_MS, segmentedPageCeiling, segmentedWriterGateWork } from '../../src/core/page-body/limits.ts';
+import { _resetSegmentedWriterGateForTests, readPageBodyPolicy, SEGMENTED_WRITER_GATE_TTL_MS, SEGMENTED_WRITER_WINDOW_DAYS, segmentedPageCeiling, segmentedWriterGateWork } from '../../src/core/page-body/limits.ts';
 import { declarePersistenceProtocol } from '../../src/core/persistence/protocol.ts';
-import { compareWriterVersions, SEGMENTED_WRITER_FLOOR, UNSTAMPED_WRITER } from '../../src/core/persistence/writer-versions.ts';
+import { compareWriterVersions, SEGMENTED_WRITER_FLOOR, segmentedGateWriters, UNSTAMPED_WRITER } from '../../src/core/persistence/writer-versions.ts';
 import { BEHAVIOR_CHANGES } from '../../src/core/behavior-change-notice.ts';
 import { VERSION } from '../../src/version.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
@@ -164,6 +164,40 @@ for (const kind of testBackends()) {
         expect(Number((await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_consumers WHERE segment_reader'))[0]!.n)).toBe(1);
         expect(await segmentedNow()).toBe(true);
       } finally { await heartbeat.stop(); }
+    }, 120_000);
+
+    test('B3: marked import runs and resident heartbeats are judged by the floor; unmarked ones block at any version', async () => {
+      await engine.setConfig('pages.segmented_storage', 'on');
+      const below = '0.60.200.0';
+      const importRun = (ref: string, version: string, marked: boolean | null) => engine.executeRaw(`INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary, writer_version, writer_host_id, writer_segment_reader)
+        VALUES ('default', 'sync', $1, '[]'::jsonb, 'run', $2, $3::uuid, $4)`, [ref, version, randomUUID(), marked]);
+      const heartbeat = (nonce: string, version: string, marked: boolean | null) => engine.executeRaw(`INSERT INTO persistence_consumers (host_id, pid, nonce, kind, mode, host_json_path, persistence_home, version, segment_reader)
+        VALUES ($1::uuid, 4242, $2, 'serve', 'full', '/tmp/host.json', '/tmp', $3, $4)`, [randomUUID(), nonce, version, marked]);
+      const seen = async (floor?: string) => (await segmentedGateWriters(engine, SEGMENTED_WRITER_WINDOW_DAYS, floor)).map(b => [b.role, b.version, b.segment_reader]).sort();
+
+      await importRun('marked-run', SEGMENTED_WRITER_FLOOR, true);
+      await heartbeat('marked-nonce', SEGMENTED_WRITER_FLOOR, true);
+      expect(await seen()).toEqual([]);
+      expect(await segmentedNow()).toBe(true);
+      const raised = '0.60.291.0';
+      expect(compareWriterVersions(SEGMENTED_WRITER_FLOOR, raised)).toBeLessThan(0);
+      expect(await seen(raised)).toEqual([['importer', SEGMENTED_WRITER_FLOOR, true], ['resident', SEGMENTED_WRITER_FLOOR, true]]);
+
+      await engine.executeRaw(`UPDATE ingest_log SET writer_version=$1 WHERE source_ref='marked-run'`, [below]);
+      await engine.executeRaw(`UPDATE persistence_consumers SET version=$1 WHERE nonce='marked-nonce'`, [below]);
+      expect(await segmentedNow()).toBe(false);
+      expect((await blockersNow()).map(b => [b.role, b.principal, b.version, b.segment_reader]).sort())
+        .toEqual([['importer', 'ingest:sync', below, true], ['resident', 'process:serve', below, true]]);
+      expect((await segmentedStorageCheck(engine)).message).toContain(below);
+
+      await engine.executeRaw(`UPDATE ingest_log SET writer_version=$1 WHERE source_ref='marked-run'`, [VERSION]);
+      await engine.executeRaw(`UPDATE persistence_consumers SET version=$1 WHERE nonce='marked-nonce'`, [VERSION]);
+      expect(await segmentedNow()).toBe(true);
+      await importRun('unmarked-run', VERSION, null);
+      await heartbeat('unmarked-nonce', '99.0.0.0', null);
+      expect(await segmentedNow()).toBe(false);
+      expect((await blockersNow()).map(b => [b.role, b.version, b.segment_reader]).sort())
+        .toEqual([['importer', VERSION, false], ['resident', '99.0.0.0', false]]);
     }, 120_000);
 
     test('B3: a request an older binary admitted counts in any state, not only once committed', async () => inHome(async () => {

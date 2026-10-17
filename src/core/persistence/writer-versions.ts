@@ -115,10 +115,12 @@ export interface SegmentedGateWriter {
 
 /**
  * Writers seen in the last `days` that keep segmented storage off: evidence without the segment-reader mark (an
- * older binary inserts NULL into a column it does not know; rows from before v254 count too), or a managed write
- * stamped below `floor` (an unparsable or missing stamp counts as below). Admitters count in any state, so a
- * failed or still-queued request of an older binary is seen as well; ingest-log and consumer rows are read only
- * when unmarked (ingest_log_unmarked_idx). Not seen: an older binary that writes neither a request nor an
+ * older binary inserts NULL into a column it does not know; rows from before v254 count too), or marked evidence
+ * stamped below `floor` (an unparsable or missing stamp counts as below) from any role: a release below the floor
+ * may write the mark (v0.60.290.0 does). Admitters count in any state, so a failed or still-queued request of an
+ * older binary is seen as well. The ingest log is read in two arms, unmarked and marked rows, each over its
+ * window on its partial index (ingest_log_unmarked_idx, v254; ingest_log_marked_idx, v257), so the read never
+ * scans the whole log. Not seen: an older binary that writes neither a request nor an
  * ingest-log row (a single-page put on a brain without managed persistence, a run that dies before logging), and
  * one-shot readers and exporters, which write nothing.
  */
@@ -137,8 +139,11 @@ export async function segmentedGateWriters(engine: SqlEngine, days: number, floo
     SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,false,MAX(l.created_at),COUNT(*)::integer
     FROM ingest_log l CROSS JOIN win WHERE l.writer_segment_reader IS NOT TRUE AND l.created_at>=win.since GROUP BY 2,3,4
     UNION ALL
-    SELECT 'resident',c.host_id::text,'process:'||c.kind,c.version,false,MAX(c.renewed_at),COUNT(*)::integer
-    FROM persistence_consumers c CROSS JOIN win WHERE c.segment_reader IS NOT TRUE AND c.renewed_at>=win.since GROUP BY 2,3,4
+    SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,true,MAX(l.created_at),COUNT(*)::integer
+    FROM ingest_log l CROSS JOIN win WHERE l.writer_segment_reader IS TRUE AND l.created_at>=win.since GROUP BY 2,3,4
+    UNION ALL
+    SELECT 'resident',c.host_id::text,'process:'||c.kind,c.version,COALESCE(c.segment_reader,false),MAX(c.renewed_at),COUNT(*)::integer
+    FROM persistence_consumers c CROSS JOIN win WHERE c.renewed_at>=win.since GROUP BY 2,3,4,5
     ORDER BY last_seen DESC`, [days]);
   return rows.map(row => ({ role: row.role, host_id: row.host_id, principal: row.principal, version: row.version, version_label: writerVersionLabel(row.version),
     segment_reader: row.segment_reader === true, last_seen: iso(row.last_seen), requests: Number(row.requests) }))

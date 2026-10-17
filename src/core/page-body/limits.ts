@@ -137,7 +137,7 @@ export const segmentedWriterGateWork = { reads: 0 };
 
 /**
  * Writers seen in the last `SEGMENTED_WRITER_WINDOW_DAYS` days that do not read segmented pages
- * (`segmentedGateWriters`: evidence without the segment-reader mark, or a managed write stamped below
+ * (`segmentedGateWriters`: evidence without the segment-reader mark, or marked evidence of any role stamped below
  * `SEGMENTED_WRITER_FLOOR`). Any one keeps segmented storage off. Cached per engine for
  * `SEGMENTED_WRITER_GATE_TTL_MS`; `fresh` (doctor) reads through.
  */
