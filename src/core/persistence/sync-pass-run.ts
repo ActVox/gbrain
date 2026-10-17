@@ -265,12 +265,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       await assertDrainLease(tx, sourceId);
       await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
+      value.telemetry.started_at = await databaseNow(tx);
       await writePassRow(tx, value, { pin: true });
     }, principalAttribution(authority.writer.principal)));
     await clearPassFailures(engine, sourceId, incarnation);
     return { ...empty('up_to_date'), toCommit: remote ? '' : head, ...(inherited.length ? { inherited_options: inherited } : {}) };
   }
-  await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin: true }); });
+  await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); value.telemetry.started_at = await databaseNow(tx); await writePassRow(tx, value, { pin: true }); });
   assertActive();
 
   const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0 };
@@ -434,6 +435,15 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if (error instanceof SyncTreeReadIncomplete) { await save('blocked', 'reconcile_read_incomplete').catch(() => undefined); return result('blocked_by_failures', 'reconcile_read_incomplete'); }
     throw error;
   }
+}
+
+/**
+ * The pin's start time from the database clock: `sync.admission`'s `effective` compares it with `set_at` (the database's
+ * `clock_timestamp()`), so a host clock running ahead cannot make a restriction look effective early.
+ */
+async function databaseNow(tx: Pick<BrainEngine, 'executeRaw'>): Promise<string> {
+  const [row] = await tx.executeRaw<{ at: string | Date }>('SELECT now() AS at');
+  return new Date(row!.at).toISOString();
 }
 
 /** A converged or idle pass clears what earlier stops recorded: the pass row's failure key and the incarnation's cursor key. */
