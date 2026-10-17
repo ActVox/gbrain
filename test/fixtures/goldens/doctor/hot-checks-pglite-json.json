@@ -643,7 +643,6 @@
               "count": 0,
               "docs": "docs/guides/troubleshooting.md#managed-sync-not-moving",
               "parked": 0,
-              "slow_passes": [],
               "sources": [],
               "stranded": 0
             },
@@ -4881,7 +4880,6 @@
               "count": 0,
               "docs": "docs/guides/troubleshooting.md#managed-sync-not-moving",
               "parked": 0,
-              "slow_passes": [],
               "sources": [],
               "stranded": 0
             },
