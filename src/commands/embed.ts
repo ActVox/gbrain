@@ -50,7 +50,8 @@ import { resolveEmbedConcurrency } from '../core/embed-concurrency.ts';
 export { resolveEmbedConcurrency, _resetEmbedConcurrencyClampWarningForTest } from '../core/embed-concurrency.ts';
 import { isEmbeddingZeroNormError } from '../core/ai/embedding-guard.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
-import { heldEmbedArgv, meterPageBatch, spendGrant } from '../core/page-embedding-budget.ts';
+import { meterPageBatch, spendGrant } from '../core/page-embedding-budget.ts';
+import { heldApprovalUsd, heldEmbedArgv } from '../core/held-embedding.ts';
 import { countSegmentedEmbedRows, embedSegmentedPage, readSealedSegmentedEmbedPage, readSegmentedEmbedPage, type SegmentedEmbedPage } from '../core/page-body/segmented-embedding.ts';
 import {
   restampIfDemotedToTitleTier,
@@ -912,9 +913,7 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
 
   if (args.includes('--held')) {
     const held = await heldEmbedArgv(engine, args, currentEmbeddingSignature(), args.includes('--json') ? serr : slog);
-    if (held && 'error' in held) { serr(held.error); process.exit(1); }
-    if (held) return runEmbed(engine, held.argv, selectedConfig, consent);
-    return { embedded: 0, skipped: 0, would_embed: 0, total_chunks: 0, pages_processed: 0, failures: 0, failure_samples: [], dryRun: args.includes('--dry-run'), chunkless_pages_healed: 0 };
+    return 'argv' in held ? runEmbed(engine, held.argv, selectedConfig, consent) : held;
   }
   const authorization = consent?.authorization ?? null;
   const costCap = args.includes('--dry-run') || args.includes('--background') ? null : embedCostCap(authorization?.cap_usd, authorization?.cap_source);
@@ -982,7 +981,7 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
 
   let opts: EmbedOpts;
   if (slugsIdx >= 0) {
-    const approvedPageCapUsd = authorization?.via === 'max_usd' && authorization.cap_usd !== null ? authorization.cap_usd : undefined;
+    const approvedPageCapUsd = await heldApprovalUsd(engine, args);
     opts = { slugs: slugsAfter(args, slugsIdx), dryRun, sourceId, batchSize, priority, catchUp, ...(approvedPageCapUsd !== undefined && { approvedPageCapUsd }) };
   } else if (all || stale) {
     // E-2: CLI-only single-flight for stale runs (the minion path locks itself).

@@ -6,8 +6,6 @@
  * recorded as internal state.
  */
 export const RUNTIME_READER_CONFIG_KEYS: readonly string[] = [
-  'doctor.entry_budget_ms', // doctor/budget.ts ENTRY_BUDGET_KEY: per-check budget, default 15000 ms
-  'doctor.orphan_ratio.full_scan_max_pages', // doctor/checks/orphan-estimate.ts: exact orphan scan up to N pages, default 50000
   'embed.max_usd_per_page', // page-embedding-budget.ts: large-page embedding cap, default $2 (unlimited under spend.posture tokenmax)
   'facts.absorb_warn_threshold', // doctor facts_extraction_health absorb-refusal warn threshold, default 10 per 24 h
   'think.trajectory_enabled', // think/index.ts: trajectory substrate on temporal intents, default on
