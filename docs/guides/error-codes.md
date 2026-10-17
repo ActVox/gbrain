@@ -1684,6 +1684,16 @@ Reasons: `count`, `digest`, `sequence`, `fk`, `trigger`, `relation_set`, `replay
 
 More: [docs/guides/move-to-postgres.md#verify](../../docs/guides/move-to-postgres.md#verify)
 
+### grant_scope
+
+<a id="grant_scope"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync pass ran under a grant that covers only part of the source, so it admitted what the grant can see and cannot finish (stamp) the source. | A slug-fenced grant never stamps a pass (design v3.2 §5): converging the whole source needs a writer that can see every page, which is the owner host's own sync. | On the host that owns the source, run gbrain sync --source <id> --no-pull; check the result with gbrain sync status --source <id> --json. | user | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#drain-grant-scope](../../docs/guides/write-refusals.md#drain-grant-scope)
+
 ### graph_incomplete
 
 <a id="graph_incomplete"></a>
@@ -2354,6 +2364,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
+### not_converged
+
+<a id="not_converged"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync pass used its rounds without the level settling (another writer kept changing it), so it ended resumable; everything it admitted stands. | A pass re-reads the level each round and stamps only when nothing is left to admit. Concurrent writes can keep producing new work; the next pass starts from what this one settled. Three in a row (the pass row's not_converged_streak) mean rerunning is not converging. | Rerun the same gbrain sync; after three consecutive not_converged passes, stop and report it with gbrain sync status --source <id> --json and gbrain doctor --json. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/write-refusals.md#drain-not-converged](../../docs/guides/write-refusals.md#drain-not-converged)
+
 ### not_found
 
 <a id="not_found"></a>
@@ -2850,6 +2870,16 @@ More: [docs/guides/company-brain-ingestion.md#resume-and-verify](../../docs/guid
 
 More: [docs/guides/company-brain-ingestion.md#agent-and-ci-use](../../docs/guides/company-brain-ingestion.md#agent-and-ci-use)
 
+### reconcile_host_required
+
+<a id="reconcile_host_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote caller's managed sync admitted what it could, and the rest of the source needs the owner host (holds, markers, keep_db writes or the stamp). | Remote callers admit only one-sided work and never write holds, markers, keep_db writes or stamps (design v3.2 §5), so only the owner host's sync converges the source. | On the host that owns the source, run gbrain sync --source <id> --no-pull; verify with gbrain sync status --source <id> --json. | user | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#drain-reconcile-host-required](../../docs/guides/write-refusals.md#drain-reconcile-host-required)
+
 ### reconcile_read_incomplete
 
 <a id="reconcile_read_incomplete"></a>
@@ -3209,6 +3239,16 @@ Reasons: `lock_held`, `no_brain`, `config_unreadable`, `missing_brain`, `brain_u
 | gbrain serve exited on its own because its persistence consumer reported restart_required continuously for GBRAIN_SERVE_RESTART_REQUIRED_EXIT_SECONDS. | Opt-in (off by default, at least 120 s): a supervisor that restarts on failure, such as the installed gbrain-serve service, then starts a fresh serve without a human. Cleanup is bounded (5 s) because the consumer's stop waits on the stuck work, so the process exits even when it cannot drain. Abandoned claims lapse with the exited process's heartbeat; journaled writes resume on the next owner. | Let the supervisor restart serve; if it exits this way again soon after, run gbrain doctor --json and gbrain sources writer status --json and report both with the exit line. | agent | `gbrain doctor --json` | 69 | no |
 
 More: [docs/ENGINES.md#serve-unhealthy-exit](../../docs/ENGINES.md#serve-unhealthy-exit)
+
+### settle_mismatch
+
+<a id="settle_mismatch"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync settled a file at the same level in three consecutive passes, but the next round never classified it settled, so the file is held instead of being re-imported every pass; the rest of the source synced. | A pass records the level it settled each path at and the next round expects the same path to classify settled at that level. A path that keeps coming back unsettled at one level points to a broken writer, a stuck effect or a damaged record, not to the file; re-importing it every pass would spend work without converging, so after three passes sync holds it and stamps the rest. | Run gbrain doctor --json and gbrain sources writer status --source <id> --json (both read-only), fix or report what they name with the gbrain version, then gbrain sources retry-held <id> and gbrain sync --source <id> --no-pull. Run: gbrain doctor --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#settle_mismatch](../../docs/guides/write-refusals.md#settle_mismatch)
 
 ### setup_harness_unsupported
 

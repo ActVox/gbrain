@@ -121,6 +121,27 @@ const waitOn = (request: WriteRequest): NonNullable<CursorResolution['waitFor']>
   kind: (request.intent as { kind?: string } | null)?.kind ?? null, slug: request.slug, state: request.state, recovery: !!request.recovery });
 
 /** The first request under a cursor key that is not merely queued: running, recovering, publishing or carrying recovery. */
+/**
+ * #6712 PR 4b (design v3.2 §3.5): the live pass retires the incarnation's chosen cursor too (`resolveManagedCursor` keeps it
+ * for a cursor pass): a finished one is deleted; an unfinished one is superseded like the others. Returns the open request
+ * to wait for, or null once it is gone (or a consumer kept it with nothing open: the next pass retries).
+ */
+export async function retireManagedCursor(engine: BrainEngine, input: { sourceId: string; incarnation: string; key: string; runId: string | null; done: boolean }):
+  Promise<NonNullable<CursorResolution['waitFor']> | null> {
+  const fence = (tx: BrainEngine) => assertDrainLease(tx, input.sourceId);
+  if (input.done) {
+    await engine.transaction(async tx => {
+      await fence(tx);
+      await tx.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 AND COALESCE(completed_keys->0->>'done','false')='true'", [input.key]);
+    });
+    await clearManagedSyncFailureAfterSuccess(engine, input.key);
+    return null;
+  }
+  const open = await supersede(engine, { key: input.key, done: false, company_receipt_id: null, run_id: input.runId }, { sourceId: input.sourceId, incarnation: input.incarnation, fence });
+  if (open === null) return null;
+  const busy = open === 'kept' ? await busyRequest(engine, input.sourceId, input.key) : open;
+  return busy ? waitOn(busy) : null;
+}
 async function busyRequest(engine: BrainEngine, sourceId: string, key: string): Promise<WriteRequest | null> {
   const open = await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE source_id=$1 AND intent->>'cursorKey'=$2
     AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) ORDER BY sequence`, [sourceId, key]);

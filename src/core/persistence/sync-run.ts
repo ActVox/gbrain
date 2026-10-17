@@ -70,6 +70,9 @@ import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { serr } from '../console-prefix.ts';
 import { noteIdentityDowngrades } from '../sync-identity-downgrades.ts';
+import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
+import type { PassStamp } from './sync-prepare.ts';
+import { runSyncPass } from './sync-pass-run.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -137,7 +140,14 @@ export interface Cursor extends SyncDiscovery { runId: string; index: number; au
    * after one that did not commit lead the window too, so every admitted request's identity stays in the cursor until
    * its own receipt is read, whenever it commits.
    */
-  window?: Pending[][]; }
+  window?: Pending[][];
+  /**
+   * #6712 PR 4b: a live pass's round batch (sync-pass-run.ts), held in memory under a `pass:` key with no cursor row. Its
+   * intents carry `passId` (no cursor fields) and a request id derived from `(passId, path, level)`; `stamp`: the batch is
+   * the pass's stamp (no entries; its checkpoint publishes the stamp). `fullEpisode`: the open `--full` episode its imports
+   * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint).
+   */
+  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[]; }
 export interface CursorProgress { startedAt: number; startIndex: number; lastAt: number; lastIndex: number }
 /**
  * #6278 (1.5): the breaker state a run carries in its cursor. `stalled` lists the `preparation_stalled` receipts this run
@@ -206,6 +216,7 @@ class MissingSyncManifest extends OperationError {
   constructor(readonly cursor: CursorHeader) { super('storage_error', 'The durable sync manifest is unavailable.'); }
 }
 async function readCursor(engine: BrainEngine, key: string, cached?: Cursor): Promise<Cursor | null> {
+  if (isPassBatchKey(key)) return readPassBatch<Cursor>(key);
   const [row] = await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]);
   const value = row?.completed_keys?.[0];
   if (!value) return null;
@@ -250,6 +261,7 @@ async function writeCursor(tx: BrainEngine, key: string, before: Cursor | null, 
   // #6643: a cursor records the indexes it settles without a commit from its first save by this build on; a cursor saved
   // before (a run that began on an older build) starts recording at the index it had then.
   if (!next.settled) next.settled = before && before.runId === next.runId ? { from: before.settled?.from ?? before.index, ranges: before.settled?.ranges ?? [] } : { from: 0, ranges: [] };
+  if (isPassBatchKey(key)) return await passBatchStep(tx, key, before && JSON.stringify(header(before)), next, JSON.stringify(header(next)), inTx) ? next : currentCursor(tx, key, next);
   if (before === null) {
     if (synchronous) await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2,$3::text::jsonb) ON CONFLICT DO NOTHING`, [`${OP}-manifest`, next.runId, JSON.stringify(next.entries)]);
@@ -456,7 +468,8 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
   await validateSyncAuthority(engine, cursor.authority, slug);
   assertActive();
   if (entry?.action === 'import') await faultPoint('sync:after_freeze', { sourceId: cursor.sourceId, slug, path: entry.path });
-  return remember(frozenSnapshot, { requestId: randomUUID(), slug, pageId, ...(occupantRebound ? { rebound: true as const } : {}), intent: { kind: !entry ? 'managed_sync_checkpoint' : entry.action === 'import' ? 'managed_sync_import' : 'managed_sync_delete',
+  const passLevel = cursor.passId ? (entry as PassEntry | undefined)?.level ?? (entry ? null : cursor.target) : undefined;
+  return remember(frozenSnapshot, { requestId: cursor.passId ? passRequestId(cursor.passId, entry?.path ?? slug, passLevel!) : randomUUID(), slug, pageId, ...(occupantRebound ? { rebound: true as const } : {}), intent: { kind: !entry ? 'managed_sync_checkpoint' : entry.action === 'import' ? 'managed_sync_import' : 'managed_sync_delete',
     expected_revision: revision, sourcePath: entry?.sourcePath ?? null, path: entry?.path ?? null, rawHash, content, lineEndingOnly,
     ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}),
     ...(entry?.renameFrom ? { renameFrom: entry.renameFrom } : {}),
@@ -468,8 +481,9 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     // A cursor created before its options were recorded has the same key, so this run's options are its options.
     ...(!entry ? { syncOptions: cursor.syncOptions ?? run.syncOptions, ...(run.repoPath ? { repoPath: run.repoPath } : {}) } : {}),
     ...(!entry && cursor.overtaken ? { overtaken: true } : {}), ...(!entry && cursor.slice ? { slice: cursor.slice } : {}),
-    ownerEpoch: String(cursor.binding.owner_epoch), syncAuthority: cursor.authority, cursorKey: key, runId: cursor.runId,
-    slugMode: cursor.slugMode, index: cursor.index, total: cursor.entries.length, from: cursor.from, target: cursor.target, working: entry?.working ?? false,
+    ownerEpoch: String(cursor.binding.owner_epoch), syncAuthority: cursor.authority, ...cursorIntent(cursor, key),
+    ...(cursor.passId ? { level: passLevel ?? null, ...(!entry && cursor.stamp ? { stamp: cursor.stamp } : {}) } : {}),
+    slugMode: cursor.slugMode, from: cursor.from, target: cursor.target, working: entry?.working ?? false,
     ...(cursor.companyPlan ? { companyApproval: { schema: cursor.companyPlan.schema!, planDigest: cursor.companyPlan.plan_digest, extractorVersion: cursor.companyPlan.extractor_version,
       policyFingerprint: currentCompanyBrainSync(cursor.sourceId)!.policyFingerprint } } : {}) } });
 }
@@ -557,7 +571,7 @@ const preparationStalled = (row: Pick<WriteRequest, 'state' | 'error_code'>) => 
 /** The run's page requests, as `persistence_requests_sync_run_open` indexes them. */
 const SYNC_PAGE_KINDS_SQL = "intent->>'kind' IN ('managed_sync_import','managed_sync_delete')";
 /** The `gbrain sync` arguments a hold or receipt prints to resume this cursor with its own options. */
-const resumeArgsOf = (cursor: Cursor, run: { syncOptions: SyncCursorOptions; repoPath?: string }) =>
+const resumeArgsOf = (cursor: Cursor, run: { syncOptions: SyncCursorOptions; repoPath?: string }) => cursor.resumeArgs ??
   managedSyncResumeArgs({ sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? run.syncOptions, repoPath: run.repoPath });
 
 /**
@@ -858,7 +872,7 @@ async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor;
   const revived = await reviveCheckpoint(engine, input);
   if (revived) { input.assertActive(); return { cursor: revived }; }
   const fault = receiptClass(done);
-  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, key, cursor.runId))) {
+  if (fault === 'transport' || isSyncKnockOn(done) || (fault === 'systemic' && resumableStop(done) && pending.intent.kind !== 'managed_sync_checkpoint' && await stopRecorded(engine, cursor.failureKey ?? key, cursor.runId))) {
     const refrozen = await refreezeInPlace(engine, input);
     if (refrozen) { input.assertActive(); return { cursor: refrozen }; }
   }
@@ -872,7 +886,7 @@ async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor;
   const { failure, ledgerRecorded } = await recordManagedSyncFailure(engine, { source_id: cursor.sourceId, source_incarnation: cursor.incarnation, path: pending.intent.path ?? '<checkpoint>',
     code: done.error_code ?? (done.state === 'cancelled' ? 'cancelled' : 'storage_error'), message: done.error_message ?? 'The accepted sync request did not commit.',
     ...(rootCause ? { root_cause: rootCause } : {}),
-    request_id: pending.requestId, run_id: cursor.runId, target: cursor.target, cursor_key: key,
+    request_id: pending.requestId, run_id: cursor.runId, target: cursor.target, cursor_key: cursor.failureKey ?? key,
     syncOptions: cursor.syncOptions ?? syncOptions, processingOptions: cursor.processingOptions ?? processingOptions,
     phase: pending.intent.kind === 'managed_sync_checkpoint' ? 'checkpoint' : 'receipt', state: done.state, observation_id: pending.requestId,
     first_seen: new Date(done.completed_at ?? done.updated_at).toISOString(), ...(done.error_detail ? { write_error_detail: publicFailureDetail(done.error_detail) } : {}) });
@@ -916,7 +930,7 @@ async function sameContentAtOrigin(engine: BrainEngine, cursor: Cursor, entry: C
   if (!snapshot || snapshot.page.deleted_at != null || content === null) return false;
   const intent: SyncIntent = { kind: 'managed_sync_import', expected_revision: snapshot.revision, sourcePath: entry.sourcePath, path: entry.path, rawHash: pageOnly ? sha256(content) : rawHash, content, lineEndingOnly,
     processingOptions: cursor.processingOptions, ownerEpoch: String(cursor.binding.owner_epoch), syncAuthority: cursor.authority,
-    cursorKey: key, runId: cursor.runId, slugMode: cursor.slugMode, index: cursor.index, total: cursor.entries.length, from: cursor.from, target: cursor.target, working: entry.working ?? false };
+    ...cursorIntent(cursor, key), slugMode: cursor.slugMode, from: cursor.from, target: cursor.target, working: entry.working ?? false };
   try {
     const budgetMs = await syncPreparationBudgetMs(engine);
     const prepared = await raceSyncBudget(prepareManagedSyncMutation(engine, screeningRequest({ source_id: cursor.sourceId, source_incarnation: cursor.incarnation, slug: snapshot.page.slug,
@@ -926,6 +940,15 @@ async function sameContentAtOrigin(engine: BrainEngine, cursor: Cursor, entry: C
     if (signal?.aborted) throw error;
     return false;
   }
+}
+
+/**
+ * The cursor fields of a frozen intent: a cursor's key, run and position, or (#6712 PR 4b) a pass batch's `passId` and the
+ * open episode its import records (`fullEpisode`); the #6862 FIFO guard reads neither (it keys on kind, slug, page and `renameFrom`).
+ */
+function cursorIntent(cursor: Cursor, key: string): Pick<SyncIntent, 'cursorKey' | 'runId' | 'index' | 'total' | 'passId' | 'fullEpisode'> {
+  return cursor.passId ? { passId: cursor.passId, ...(cursor.fullEpisode ? { fullEpisode: cursor.fullEpisode } : {}) }
+    : { cursorKey: key, runId: cursor.runId, index: cursor.index, total: cursor.entries.length };
 }
 
 /** Counts a committed page into the cursor, as the single path does. */
@@ -1078,6 +1101,7 @@ function groupSize(cursor: Cursor, bulk: BulkPass): number {
 async function admitAndSave(engine: BrainEngine, key: string, before: Cursor, next: Cursor, members: Pending[], assertActive: () => void): Promise<Cursor | null> {
   const rows = await admitGroup(engine, members, before, async tx => {
     assertActive();
+    if (isPassBatchKey(key)) return passBatchStep(tx, key, JSON.stringify(header(before)), next, JSON.stringify(header(next)));
     const [saved] = await pipelined(tx, [
       () => tx.executeRaw(`UPDATE op_checkpoints SET completed_keys=$4::text::jsonb,updated_at=now()
         WHERE op=$1 AND fingerprint=$2 AND completed_keys=$3::text::jsonb RETURNING fingerprint`, [OP, key, JSON.stringify([header(before)]), JSON.stringify([header(next)])]),
@@ -1187,6 +1211,7 @@ async function admitWindowGroup(engine: BrainEngine, cursor: Cursor, key: string
   const members = cursor.window![slot]!;
   if ((await readAdmitted(engine, cursor, members)).length >= members.length) return true;
   const rows = await admitGroup(engine, members, cursor, async tx => {
+    if (isPassBatchKey(key)) return readPassBatch<Cursor>(key)?.window?.[slot]?.[0]?.requestId === members[0]!.requestId;
     const [held] = await tx.executeRaw<{ request_id: string | null }>(`SELECT completed_keys->0->'window'->($3::int)->0->>'requestId' AS request_id FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, slot]);
     return held?.request_id === members[0]!.requestId;
   }).catch(() => null);
@@ -1486,7 +1511,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   let key = managedCursorKey(context.incarnation, company); // #6712 PR 1: one per incarnation; resolvePassCursor may pick an older key's cursor
   let cursor: Cursor | null = null;
   let missingManifestCursor: CursorHeader | null = null;
-  if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => cursor });
+  if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => live.cursor ?? cursor });
   const dryRun = (value: Cursor, base: Cursor = value) => managedDryRun(engine, value, base, { company: !!company, processingOptions, syncOptions, repoPath: frozenRun.repoPath, remote: authority.writer.remote });
   let phase: ManagedSyncFailure['phase'] = 'resume';
   let discoveryTarget: string | null = null;
@@ -1501,8 +1526,202 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   // #6696 C4: the checkpoint commit is the run's last commit. #6712 PR 2 (L5): its tail (statistics, links) is owed from that
   // commit (sync-tail.ts) and runs after the lease is released, outside this governed pass.
   const finishing = (done: Cursor) => { opts.onProgress?.({ phase: 'managed_sync.finish', bankedFiles: done.index, total: done.entries.length }); };
+  /** One cursor's drain (or, #6712 PR 4b, one round batch of a live pass): the freeze, screen, waive, group, admit, await and settle loop. */
+  const live: { cursor: Cursor | null } = { cursor: null };
+  const drainCursor = async (from: Cursor, startupConfig: Awaited<ReturnType<typeof preparationConfigView>>, retried: boolean,
+    sliceBase?: { started: number; pages: number }): Promise<SyncResult | Cursor> => {
+    let cursor = from;
+    try {
+      frozenRun.screen = company ? null : await loadSyncScreenRun(startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote);
+      const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
+      if (frozenRun.screen && !retried && cursor.pending && !cursor.done) {
+        phase = 'freeze';
+        cursor = await convertBlockedCursor(engine, cursor, key, assertActive, frozenRun);
+      }
+      const config = loadConfig() ?? { engine: engine.kind }, analyzeEvery = await importAnalyzeEveryPages(engine);
+      let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0, foregroundBaseline = 0;
+      let creditedPages = 0, creditStarted = 0, foregroundQueued = false;
+      const sliceStarted = sliceBase?.started ?? performance.now(), sliceFirstIndex = cursor.index - (sliceBase?.pages ?? 0), drainStartedAt = opts.drainStartedAt ?? Date.now();
+      const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
+      const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig), prescreen = { missed: new Set<number>(), limit: Infinity, drainStartedAt, assertActive, signal, onProgress: opts.onProgress,
+        embeddingRequested: !(cursor.processingOptions ?? processingOptions).noEmbed && !opts.embedDeferred && !config.embedding_disabled && !!config.embedding_model?.trim() };
+      if (opts.capacityPreflight && !cursor.done) await preflightSyncCapacity(engine, { root: cursor.root, writer: cursor.authority.writer, entries: cursor.entries.slice(cursor.index) });
+      opts.onProgress?.({ phase: 'managed_sync.start', bankedFiles: cursor.index, total: cursor.entries.length });
+      while (!cursor.done) {
+        assertActive();
+        // #6712 PR 4b: a pass's round batch ends at its last entry; the pass classifies again (its stamp is its own batch).
+        if (cursor.passId && !cursor.stamp && !cursor.pending && cursor.index >= cursor.entries.length && !cursor.deferred?.length) return cursor;
+        if (!cursor.pending) {
+          // A source remains fair in both directions: foreground gets service, then sync earns one bounded batch even if new interactive work keeps arriving.
+          if (creditedPages && performance.now() - creditStarted >= 250) creditedPages = 0;
+          const [foreground] = await engine.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid
+            AND state IN ('queued','running','recovering') AND NOT(COALESCE(intent->>'kind','') LIKE 'managed_sync_%') LIMIT 1`, [cursor.binding.worktree_id]);
+          assertActive();
+          if ((foregroundQueued = Boolean(foreground))) bulk.foregroundAt = performance.now();
+          if (foreground && creditedPages === 0 && !bulk.foregroundFirst) {
+            startPersistenceConsumer(engine, config);
+            if (!foregroundWaitStart) {
+              foregroundWaitStart = performance.now();
+              foregroundBaseline = foregroundWriteCompletions(engine, cursor.binding.worktree_id);
+            }
+            const completed = foregroundWriteCompletions(engine, cursor.binding.worktree_id) - foregroundBaseline;
+            if (completed < 25 && performance.now() - foregroundWaitStart < 1000) {
+              await new Promise(resolve => setTimeout(resolve, 25));
+              continue;
+            }
+            creditedPages = 25; creditStarted = performance.now();
+          }
+          foregroundWaitStart = 0;
+          const prescreened = await prescreenRun(engine, cursor, key, { ...prescreen, limit: slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : Infinity });
+          if (prescreened && slice && (prescreened.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(prescreened, 'partial', 'writer_yield');
+          if (prescreened) { cursor = prescreened; continue; }
+          phase = 'freeze'; stampDrainStep('freeze', signal);
+          const next = await freezeNext(engine, cursor, key, assertActive, frozenRun, observedAt);
+          if ('saved' in next) {
+            cursor = next.saved;
+            opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, ...(next.held ? {} : { total: cursor.entries.length, waived: true }) }); assertActive();
+            if (next.held && slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
+            continue;
+          }
+          const { frozen, deferredAt } = next;
+          const waived: Cursor | null = waiveBatch && !frozen.rebound && deferredAt === undefined ? await waiveRun(engine, cursor, frozen, key, config, assertActive, frozenRun, drainStartedAt,
+            slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : WAIVER_RUN_MAX, opts.onProgress) : null;
+          if (waived && slice && (waived.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(waived, 'partial', 'writer_yield');
+          if (waived) { cursor = waived; continue; }
+          cursor = await saveCursor(engine, key, cursor, { ...cursor, ...(frozen.rebound ? { overtaken: true as const } : {}), pending: frozen }, false, assertActive);
+        }
+        if (!cursor.pending) continue; // another owner-loop advanced the cursor
+        const pending: Pending = cursor.pending;
+        phase = 'admission'; stampDrainStep('admission', signal);
+        const prior = await getWriteRequest(engine, admittedBy(pending, cursor), pending.requestId);
+        assertActive();
+        // #5470/#5984: a frozen entry whose publication would change nothing advances the cursor without an admission.
+        const screened: Cursor = cursor;
+        const waived: Cursor | null = prior ? null : await waiveNoopEntry(engine, screened, pending, config, key,
+          (tx, noop) => writeCursor(tx, key, screened, { ...waivedCursor(screened, noop, indexOf(screened, pending)), progress: stampProgress(screened.progress, screened.index, screened.index + 1, drainStartedAt) },
+            holdClear(screened, pending.intent.path, observedAt)), tx => currentCursor(tx, key, screened), signal);
+        if (waived) {
+          cursor = waived;
+          opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length, waived: true });
+          assertActive();
+          // A skipped entry still counts toward the caller's slice, so a sliced run yields at the same positions.
+          if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
+          continue;
+        }
+        const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun); return 'requestId' in frozen ? frozen : null; };
+        if (bulk.settings.enabled && (bulk.foregroundFirst || !foregroundQueued) && !prior && !cursor.group && !pending.rebound && indexOf(cursor, pending) === cursor.index && groupableIntent(pending.intent)) cursor = await formGroup(engine, cursor, pending, key, bulk, config, freezeAt, assertActive);
+        if (cursor.group?.[0]?.requestId === pending.requestId && cursor.pending?.requestId === pending.requestId) {
+          const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000 }, drainStartedAt, opts.onProgress,
+            opts.drainStartedAt ? next => admitAhead(engine, next, key, bulk, config, freezeAt, assertActive) : undefined);
+          if ('result' in step) return step.result;
+          cursor = step.cursor;
+          assertActive();
+          continue;
+        }
+        const admitting = cursor;
+        const row = prior ?? await retryWriteAdmission(pending.requestId, remaining => engine.transaction(async tx => {
+          assertActive();
+          await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+            [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
+          const accepted = await admitWriteInTransaction(tx, { requestId: pending.requestId, operation: 'submit_job',
+            sourceId: admitting.sourceId, sourceIncarnation: admitting.incarnation, slug: pending.slug, pageId: pending.pageId,
+            worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation,
+            principal: admitting.authority.writer.principal, authority: admitting.authority.writer, callerIntent: pending.intent, intent: pending.intent });
+          // ENG-A7: after the counter locks (the publication lock order), admit only while the cursor still holds this entry
+          // with this intent (#6075: a bulk pass may have grouped the head since this pass read it).
+          if (isPassBatchKey(key)) {
+            // #6712 PR 4b: a pass batch has no cursor row; the lease (below) fences it, and the batch must still hold this entry.
+            const head = readPassBatch<Cursor>(key)?.pending;
+            if (head?.requestId !== pending.requestId || digest(head.intent) !== digest(pending.intent)) throw new CursorMoved();
+          } else {
+            const [held] = await tx.executeRaw<{ request_id: string | null; same: boolean | null }>(`SELECT completed_keys->0->'pending'->>'requestId' AS request_id,
+              completed_keys->0->'pending'->'intent' = $3::text::jsonb AS same FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, JSON.stringify(pending.intent)]);
+            if (held?.request_id !== pending.requestId || held.same !== true) throw new CursorMoved();
+          }
+          await assertDrainLease(tx, admitting.sourceId);
+          await assertPassAdmission(tx, [pending.intent]);
+          assertActive();
+          return accepted;
+        }), undefined, error => engine.reconnect({ error })).catch(error => cursorMovedAdmission(engine, key, admitting, pending, error));
+        if (!row) { cursor = await currentCursor(engine, key, cursor); continue; }
+        await validateSyncAuthority(engine, cursor.authority, pending.slug);
+        assertSyncDispatchActive(); stampDrainStep('await_receipt', signal);
+        // #5762: a checkpoint's validation runs under the coordinator's 5 s statement timeout, so its wait outlasts that
+        // budget; a timed-out checkpoint then reports its terminal refusal and hint in this run instead of the next.
+        // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry; its stop signal bounds the wait.
+        const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000 });
+        const done = waited.row;
+        assertSyncDispatchActive();
+        if (!isTerminalWriteState(done.state)) {
+          return { ...result(cursor, 'partial', signal?.aborted ? 'timeout' : 'writer_pending'),
+            ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done), writeWait: writeWaitOf(waited) }) };
+        }
+        // #6712 PR 4b: a pass's refused stamp, or a write sync.admission paused at publication, ends the pass, never the page.
+        if (done.state !== 'committed' && cursor.passId && (pending.intent.kind === 'managed_sync_checkpoint' || done.error_code === 'admission_paused')) {
+          return { ...result(cursor, done.error_code === 'admission_paused' ? 'partial' : 'blocked_by_failures', done.error_code === 'admission_paused' ? 'admission_paused' : undefined),
+            ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done) }) };
+        }
+        // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
+        // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
+        // pass not_converged).
+        if (done.state !== 'committed' && cursor.passId && done.error_code === 'source_changed') {
+          cursor = await saveCursor(engine, key, cursor, committedPast({ ...cursor, counts: { ...cursor.counts } }, pending));
+          assertActive();
+          continue;
+        }
+        if (done.state !== 'committed') {
+          const settled = await settleFailedRequest(engine, { cursor, key, pending, done, assertActive, run: frozenRun, syncOptions, processingOptions,
+            remote: authority.writer.remote, waitMs: opts.drainStartedAt ? 30_000 : 5000, signal });
+          if ('result' in settled) return settled.result;
+          cursor = settled.cursor;
+          opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length });
+          continue;
+        }
+        if (pending.intent.kind === 'managed_sync_checkpoint' && cursor.passId) return { ...cursor, pending: undefined, done: true };
+        if (pending.intent.kind === 'managed_sync_checkpoint') {
+          cursor = (await readCursor(engine, key))!;
+          if (!cursor?.done) throw syncRunRefusal('storage_error', 'Committed sync checkpoint lost its cursor.',
+            { sourceId: context.sourceId, processingOptions: pending.intent.processingOptions, syncOptions: pending.intent.syncOptions ?? syncOptions, repoPath: pending.intent.repoPath ?? frozenRun.repoPath },
+            `The final checkpoint request ${pending.requestId} of this sync committed, but its cursor could not be read back to finish the run.`);
+          finishing(cursor); return finishCheckpoint(engine, key, cursor, !!company, assertActive);
+        }
+        // The frozen manifest is shared; only the cursor header changes per page.
+        const next: Cursor = committedPast({ ...cursor, ...committedBreaker(cursor), counts: { ...cursor.counts }, progress: stampProgress(cursor.progress, cursor.index, cursor.index + 1, drainStartedAt) }, pending);
+        countCommitted(next.counts, pending, done.outcome);
+        cursor = await saveCursor(engine, key, cursor, next);
+        opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length });
+        // F4b: PGLite plans the rest of a large sync against fresh statistics (spec Addendum A item 2).
+        if (analyzeEvery > 0 && cursor.index % analyzeEvery === 0) await maybeRefreshPlannerStats(engine, 'managed_sync', { throttle: false }).catch(() => undefined);
+        assertActive();
+        if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
+        batchPages++;
+        if (creditedPages) creditedPages--;
+        if (batchPages >= 25 || performance.now() - batchStart >= 250) {
+          opts.onProgress?.({ phase: 'managed_sync.yield', bankedFiles: cursor.index });
+          await new Promise(resolve => setTimeout(resolve, 0));
+          batchPages = 0; batchStart = performance.now();
+        }
+      }
+      finishing(cursor); return result(cursor, cursor.from === null ? 'first_sync' : 'synced');
+    } finally { live.cursor = cursor; }
+  };
   try {
     assertActive();
+    // #6712 PR 4b (design v3.2 §3.1): a non-company source syncs by the live level-triggered pass; company brains and dry
+    // runs keep the frozen manifest and its cursor.
+    if (!company && !opts.dryRun) {
+      return await runSyncPass(engine, { opts, slice, context, authority, processingOptions, syncOptions, assertActive, signal, state, runStartedAt,
+        drainBatch: async (batchKey, batch, sliceBase) => {
+          key = batchKey;
+          setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
+          try { return await drainCursor(batch, await preparationConfigView(engine), false, sliceBase); }
+          catch (error) {
+            // An abort mid-batch stops the pass with what the batch committed before it.
+            if (signal?.aborted && error instanceof Error && error.name === 'AbortError') return result(live.cursor ?? batch, 'partial', 'timeout');
+            throw error;
+          } finally { setPassBatch(batchKey, null); }
+        } });
+    }
     const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
     key = resolved.key;
     if (resolved.waiting) return resolved.waiting;
@@ -1585,156 +1804,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         `The unfinished sync cursor of source ${cursor.sourceId} was written under an older binding (its owner epoch, topology generation, worktree or root changed since), so this run stopped without importing; the retry rediscovers against the current binding.`);
     }
     if (opts.dryRun) return dryRun(cursor);
-    frozenRun.screen = company ? null : await loadSyncScreenRun(startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote);
-    const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
-    if (frozenRun.screen && !retried && cursor.pending && !cursor.done) {
-      phase = 'freeze';
-      cursor = await convertBlockedCursor(engine, cursor, key, assertActive, frozenRun);
-    }
-    const config = loadConfig() ?? { engine: engine.kind }, analyzeEvery = await importAnalyzeEveryPages(engine);
-    let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0, foregroundBaseline = 0;
-    let creditedPages = 0, creditStarted = 0, foregroundQueued = false;
-    const sliceStarted = performance.now(), sliceFirstIndex = cursor.index, drainStartedAt = opts.drainStartedAt ?? Date.now();
-    const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
-    const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig), prescreen = { missed: new Set<number>(), limit: Infinity, drainStartedAt, assertActive, signal, onProgress: opts.onProgress,
-      embeddingRequested: !(cursor.processingOptions ?? processingOptions).noEmbed && !opts.embedDeferred && !config.embedding_disabled && !!config.embedding_model?.trim() };
-    if (opts.capacityPreflight && !cursor.done) await preflightSyncCapacity(engine, { root: cursor.root, writer: cursor.authority.writer, entries: cursor.entries.slice(cursor.index) });
-    opts.onProgress?.({ phase: 'managed_sync.start', bankedFiles: cursor.index, total: cursor.entries.length });
-    while (!cursor.done) {
-      assertActive();
-      if (!cursor.pending) {
-        // A source remains fair in both directions: foreground gets service, then sync earns one bounded batch even if new interactive work keeps arriving.
-        if (creditedPages && performance.now() - creditStarted >= 250) creditedPages = 0;
-        const [foreground] = await engine.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid
-          AND state IN ('queued','running','recovering') AND NOT(COALESCE(intent->>'kind','') LIKE 'managed_sync_%') LIMIT 1`, [cursor.binding.worktree_id]);
-        assertActive();
-        if ((foregroundQueued = Boolean(foreground))) bulk.foregroundAt = performance.now();
-        if (foreground && creditedPages === 0 && !bulk.foregroundFirst) {
-          startPersistenceConsumer(engine, config);
-          if (!foregroundWaitStart) {
-            foregroundWaitStart = performance.now();
-            foregroundBaseline = foregroundWriteCompletions(engine, cursor.binding.worktree_id);
-          }
-          const completed = foregroundWriteCompletions(engine, cursor.binding.worktree_id) - foregroundBaseline;
-          if (completed < 25 && performance.now() - foregroundWaitStart < 1000) {
-            await new Promise(resolve => setTimeout(resolve, 25));
-            continue;
-          }
-          creditedPages = 25; creditStarted = performance.now();
-        }
-        foregroundWaitStart = 0;
-        const prescreened = await prescreenRun(engine, cursor, key, { ...prescreen, limit: slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : Infinity });
-        if (prescreened && slice && (prescreened.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(prescreened, 'partial', 'writer_yield');
-        if (prescreened) { cursor = prescreened; continue; }
-        phase = 'freeze'; stampDrainStep('freeze', signal);
-        const next = await freezeNext(engine, cursor, key, assertActive, frozenRun, observedAt);
-        if ('saved' in next) {
-          cursor = next.saved;
-          opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, ...(next.held ? {} : { total: cursor.entries.length, waived: true }) }); assertActive();
-          if (next.held && slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
-          continue;
-        }
-        const { frozen, deferredAt } = next;
-        const waived: Cursor | null = waiveBatch && !frozen.rebound && deferredAt === undefined ? await waiveRun(engine, cursor, frozen, key, config, assertActive, frozenRun, drainStartedAt,
-          slice ? slice.maxPages - (cursor.index - sliceFirstIndex) : WAIVER_RUN_MAX, opts.onProgress) : null;
-        if (waived && slice && (waived.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(waived, 'partial', 'writer_yield');
-        if (waived) { cursor = waived; continue; }
-        cursor = await saveCursor(engine, key, cursor, { ...cursor, ...(frozen.rebound ? { overtaken: true as const } : {}), pending: frozen }, false, assertActive);
-      }
-      if (!cursor.pending) continue; // another owner-loop advanced the cursor
-      const pending: Pending = cursor.pending;
-      phase = 'admission'; stampDrainStep('admission', signal);
-      const prior = await getWriteRequest(engine, admittedBy(pending, cursor), pending.requestId);
-      assertActive();
-      // #5470/#5984: a frozen entry whose publication would change nothing advances the cursor without an admission.
-      const screened: Cursor = cursor;
-      const waived: Cursor | null = prior ? null : await waiveNoopEntry(engine, screened, pending, config, key,
-        (tx, noop) => writeCursor(tx, key, screened, { ...waivedCursor(screened, noop, indexOf(screened, pending)), progress: stampProgress(screened.progress, screened.index, screened.index + 1, drainStartedAt) },
-          holdClear(screened, pending.intent.path, observedAt)), tx => currentCursor(tx, key, screened), signal);
-      if (waived) {
-        cursor = waived;
-        opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length, waived: true });
-        assertActive();
-        // A skipped entry still counts toward the caller's slice, so a sliced run yields at the same positions.
-        if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
-        continue;
-      }
-      const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun); return 'requestId' in frozen ? frozen : null; };
-      if (bulk.settings.enabled && (bulk.foregroundFirst || !foregroundQueued) && !prior && !cursor.group && !pending.rebound && indexOf(cursor, pending) === cursor.index && groupableIntent(pending.intent)) cursor = await formGroup(engine, cursor, pending, key, bulk, config, freezeAt, assertActive);
-      if (cursor.group?.[0]?.requestId === pending.requestId && cursor.pending?.requestId === pending.requestId) {
-        const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000 }, drainStartedAt, opts.onProgress,
-          opts.drainStartedAt ? next => admitAhead(engine, next, key, bulk, config, freezeAt, assertActive) : undefined);
-        if ('result' in step) return step.result;
-        cursor = step.cursor;
-        assertActive();
-        continue;
-      }
-      const admitting = cursor;
-      const row = prior ?? await retryWriteAdmission(pending.requestId, remaining => engine.transaction(async tx => {
-        assertActive();
-        await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
-          [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
-        const accepted = await admitWriteInTransaction(tx, { requestId: pending.requestId, operation: 'submit_job',
-          sourceId: admitting.sourceId, sourceIncarnation: admitting.incarnation, slug: pending.slug, pageId: pending.pageId,
-          worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation,
-          principal: admitting.authority.writer.principal, authority: admitting.authority.writer, callerIntent: pending.intent, intent: pending.intent });
-        // ENG-A7: after the counter locks (the publication lock order), admit only while the cursor still holds this entry
-        // with this intent (#6075: a bulk pass may have grouped the head since this pass read it).
-        const [held] = await tx.executeRaw<{ request_id: string | null; same: boolean | null }>(`SELECT completed_keys->0->'pending'->>'requestId' AS request_id,
-          completed_keys->0->'pending'->'intent' = $3::text::jsonb AS same FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, JSON.stringify(pending.intent)]);
-        if (held?.request_id !== pending.requestId || held.same !== true) throw new CursorMoved();
-        await assertDrainLease(tx, admitting.sourceId);
-        assertActive();
-        return accepted;
-      }), undefined, error => engine.reconnect({ error })).catch(error => cursorMovedAdmission(engine, key, admitting, pending, error));
-      if (!row) { cursor = await currentCursor(engine, key, cursor); continue; }
-      await validateSyncAuthority(engine, cursor.authority, pending.slug);
-      assertSyncDispatchActive(); stampDrainStep('await_receipt', signal);
-      // #5762: a checkpoint's validation runs under the coordinator's 5 s statement timeout, so its wait outlasts that
-      // budget; a timed-out checkpoint then reports its terminal refusal and hint in this run instead of the next.
-      // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry; its stop signal bounds the wait.
-      const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000 });
-      const done = waited.row;
-      assertSyncDispatchActive();
-      if (!isTerminalWriteState(done.state)) {
-        return { ...result(cursor, 'partial', signal?.aborted ? 'timeout' : 'writer_pending'),
-          ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done), writeWait: writeWaitOf(waited) }) };
-      }
-      if (done.state !== 'committed') {
-        const settled = await settleFailedRequest(engine, { cursor, key, pending, done, assertActive, run: frozenRun, syncOptions, processingOptions,
-          remote: authority.writer.remote, waitMs: opts.drainStartedAt ? 30_000 : 5000, signal });
-        if ('result' in settled) return settled.result;
-        cursor = settled.cursor;
-        opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length });
-        continue;
-      }
-      if (pending.intent.kind === 'managed_sync_checkpoint') {
-        cursor = (await readCursor(engine, key))!;
-        if (!cursor?.done) throw syncRunRefusal('storage_error', 'Committed sync checkpoint lost its cursor.',
-          { sourceId: context.sourceId, processingOptions: pending.intent.processingOptions, syncOptions: pending.intent.syncOptions ?? syncOptions, repoPath: pending.intent.repoPath ?? frozenRun.repoPath },
-          `The final checkpoint request ${pending.requestId} of this sync committed, but its cursor could not be read back to finish the run.`);
-        finishing(cursor); return finishCheckpoint(engine, key, cursor, !!company, assertActive);
-      }
-      // The frozen manifest is shared; only the cursor header changes per page.
-      const next: Cursor = committedPast({ ...cursor, ...committedBreaker(cursor), counts: { ...cursor.counts }, progress: stampProgress(cursor.progress, cursor.index, cursor.index + 1, drainStartedAt) }, pending);
-      countCommitted(next.counts, pending, done.outcome);
-      cursor = await saveCursor(engine, key, cursor, next);
-      opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length });
-      // F4b: PGLite plans the rest of a large sync against fresh statistics (spec Addendum A item 2).
-      if (analyzeEvery > 0 && cursor.index % analyzeEvery === 0) await maybeRefreshPlannerStats(engine, 'managed_sync', { throttle: false }).catch(() => undefined);
-      assertActive();
-      if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
-      batchPages++;
-      if (creditedPages) creditedPages--;
-      if (batchPages >= 25 || performance.now() - batchStart >= 250) {
-        opts.onProgress?.({ phase: 'managed_sync.yield', bankedFiles: cursor.index });
-        await new Promise(resolve => setTimeout(resolve, 0));
-        batchPages = 0; batchStart = performance.now();
-      }
-    }
-    finishing(cursor); return result(cursor, cursor.from === null ? 'first_sync' : 'synced');
+    return await drainCursor(cursor, startupConfig, retried !== null) as SyncResult;
   } catch (error) {
     assertSyncDispatchActive();
+    if (live.cursor) cursor = live.cursor;
     if (signal?.aborted && error instanceof Error && error.name === 'AbortError') {
       if (cursor) return result(cursor, 'partial', 'timeout');
       if (missingManifestCursor) return result(missingManifestCursor, 'partial', 'timeout');
@@ -1753,7 +1826,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         const failedCursor = cursor ?? stored?.completed_keys?.[0];
         const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,
           message: error instanceof Error ? error.message : String(error), request_id: failedCursor?.pending?.requestId ?? null,
-          run_id: failedCursor?.runId ?? discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: key,
+          run_id: failedCursor?.runId ?? discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
           syncOptions: failedCursor?.syncOptions ?? syncOptions, processingOptions: failedCursor?.processingOptions ?? processingOptions, phase, state: 'failed',
           observation_id: failedCursor ? `${failedCursor.runId}:${failedCursor.index}:${phase}:${code}` : `${key}:discovery:${discoveryTarget}:${code}` });
         if (error instanceof Error) error.message = authority.writer.remote ? 'Managed sync is blocked; ask the host operator to inspect doctor.' : `${formatManagedSyncFailure(failure)} Fix the cause, then run: ${managedSyncRetryCommand(failure, frozenRun.repoPath)}`;

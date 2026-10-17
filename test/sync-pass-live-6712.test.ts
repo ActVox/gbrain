@@ -1,0 +1,262 @@
+/**
+ * #6712 PR 4b lane A: the live pass's fences, stop reasons and completion dependencies (design v3.2 §8, §9, §3).
+ *
+ * Protects:
+ * - probe 51 (pass half): `sync.admission` is re-read in each admission transaction of a pass (a delete admitted after
+ *   it turns `imports_only` is refused and the pass stops `partial` / `admission_paused`, the page live), and a pass's
+ *   `managed_sync_delete` re-reads it at publication (completed `cancelled` / `admission_paused`, nothing written);
+ *   once it is `normal` again the next pass deletes the page.
+ *
+ * - not_converged (design v3.2 §9): a working copy that changes under every round ends the pass `partial` / `not_converged`;
+ *   the pass row counts the streak server-side, and from the third consecutive pass the drain's `next` is `report`.
+ *
+ * - probe 49: a re-screen-due hold alone runs a hold-only round (not a full round), which clears it.
+ * - probe 46 (reparse half): a parser change on a fileSame and dbSame page is a `reparse`: re-imported, no hold.
+ * - probe 48: a request admitted before the stamp that publishes after it (`open_at_stamp`) makes the next tick a full round, not idle.
+ * - probe 53: a repair that changes a candidate mid-pass meets no busy refusal (busy is open requests only), and the path
+ *   settles in a later round with no hold.
+ * - kill after a group's admission commit, before the stamp: the next run resumes the pass and converges, each path imported once.
+ * - probe 40: a connection or pooler fault (SQLSTATE 08006, 57P01) in a pass never becomes a hold; the next run converges.
+ * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
+ *
+ * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
+ * cover its intents (both deletes publish), it has no pass kinds or pass row, and its manifest remainder makes a repair busy.
+ */
+import { afterEach, describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { installFaultHook } from '../src/core/persistence/fault-points.ts';
+import { SYNC_ADMISSION_KEY } from '../src/core/persistence/sync-admission.ts';
+import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { RECOVERY_VERSION } from '../src/core/markdown.ts';
+import { readGitHold, SYNC_IMPORT_PROVENANCE_OP, writeGitHold } from '../src/core/persistence/sync-holds.ts';
+import { preparePageAdmission } from '../src/core/persistence/page-mutations.ts';
+import { admitWrite } from '../src/core/persistence/journal.ts';
+import { createHash, randomUUID } from 'node:crypto';
+import { drainNext, runDrain } from '../src/core/persistence/sync-drain.ts';
+import { managedBrain } from './helpers/managed-brain.ts';
+import { waitFor } from './helpers/wait-for.ts';
+import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../src/core/persistence/file-repair.ts';
+import { readFileSync } from 'node:fs';
+
+const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const commit = (root: string, message: string) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', message); };
+const note = (title: string, body: string) => `---\ntype: concept\ntitle: ${title}\n---\n\n${body}\n`;
+const OPTS = { sourceId: 'default', noPull: true, noEmbed: true, noExtract: true };
+const setup = ({ root }: { root: string }) => {
+  mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q');
+  for (const slug of ['a', 'b', 'c']) writeFileSync(join(root, `notes/${slug}.md`), note(`notes/${slug}`, `The committed body of notes/${slug}.`));
+  commit(root, 'notes');
+};
+/** A durability-hardened checkout (the brain-durability post-commit hook), where a repair's Git effect commits. */
+const hardened = ({ root }: { root: string }) => {
+  setup({ root });
+  writeFileSync(join(root, '.git', 'hooks', 'post-commit'), '#!/bin/sh\n# gbrain brain-durability post-commit hook (v0.42.44+)\n'); chmodSync(join(root, '.git', 'hooks', 'post-commit'), 0o755);
+};
+const liveSlugs = async (engine: BrainEngine) => (await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id='default' AND deleted_at IS NULL ORDER BY slug")).map(row => row.slug);
+const deletes = async (engine: BrainEngine) => (await engine.executeRaw<{ slug: string; state: string; error_code: string | null }>(
+  "SELECT slug, state, error_code FROM persistence_requests WHERE source_id='default' AND intent->>'kind'='managed_sync_delete' ORDER BY sequence"));
+
+afterEach(() => installFaultHook(undefined));
+
+describe('#6712 PR 4b live pass fences (pglite)', () => {
+  test('probe 51 (pass half): sync.admission is re-read in the admission transaction; a delete classified under normal and admitted after imports_only is refused, and the pass stops admission_paused', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    git(root, 'rm', '-q', 'notes/a.md', 'notes/b.md'); commit(root, 'remove a and b');
+    // After the pass classified both deletes under normal, before their admission transaction.
+    let flipped = false;
+    installFaultHook(async point => { if (point === 'sync:mid_checkpoint' && !flipped) { flipped = true; await engine.setConfig(SYNC_ADMISSION_KEY, 'imports_only'); } });
+    const paused = await performManagedSync(engine, OPTS);
+    installFaultHook(undefined);
+    expect({ status: paused.status, reason: paused.reason }).toEqual({ status: 'partial', reason: 'admission_paused' });
+    expect(await liveSlugs(engine)).toEqual(['notes/a', 'notes/b', 'notes/c']);
+    expect(await deletes(engine)).toEqual([]);
+
+    await engine.setConfig(SYNC_ADMISSION_KEY, 'normal');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    expect(await liveSlugs(engine)).toEqual(['notes/c']);
+  }, { setup }), 180_000);
+
+  test('probe 51 (pass half): a managed_sync_delete re-reads sync.admission at publication: cancelled admission_paused, the page live', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    git(root, 'rm', '-q', 'notes/a.md'); commit(root, 'remove a');
+    installFaultHook(async (point, detail) => {
+      // Prepared, before its publication transaction.
+      if (point === 'consumer:prepared' && detail.operation === 'submit_job' && (await deletes(engine)).some(row => row.state === 'running')) await engine.setConfig(SYNC_ADMISSION_KEY, 'imports_only');
+    });
+    const paused = await performManagedSync(engine, OPTS);
+    installFaultHook(undefined);
+    expect({ status: paused.status, reason: paused.reason }).toEqual({ status: 'partial', reason: 'admission_paused' });
+    expect(await deletes(engine)).toEqual([{ slug: 'notes/a', state: 'cancelled', error_code: 'admission_paused' }]);
+    expect(await liveSlugs(engine)).toEqual(['notes/a', 'notes/b', 'notes/c']);
+
+    await engine.setConfig(SYNC_ADMISSION_KEY, 'normal');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    expect(await liveSlugs(engine)).toEqual(['notes/b', 'notes/c']);
+  }, { setup }), 180_000);
+
+  test('not_converged: a working copy that changes under every round ends the pass not_converged; the third in a row reports', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    let edits = 0;
+    installFaultHook(async point => { if (point === 'sync:mid_checkpoint') writeFileSync(join(root, 'notes/a.md'), note('notes/a', `An uncommitted edit ${++edits}.`)); });
+    const streaks: number[] = [], loops: boolean[] = [];
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'An uncommitted edit before the pass.'));
+      const drained = await runDrain({ pass: () => performManagedSync(engine, { ...OPTS, workingTree: true }) });
+      expect({ status: drained.status, reason: drained.reason, stop: drained.drain?.stop_reason }).toEqual({ status: 'partial', reason: 'not_converged', stop: 'not_converged' });
+      streaks.push(drained.pass!.not_converged_streak);
+      loops.push(drainNext(drained, 'gbrain sync --source default --no-pull', 'default')!.safe_to_loop);
+    }
+    installFaultHook(undefined);
+    expect({ streaks, loops }).toEqual({ streaks: [1, 2, 3], loops: [true, true, false] });
+    expect((await performManagedSync(engine, { ...OPTS, workingTree: true })).status).toBe('synced');
+    const [row] = await engine.executeRaw<{ streak: number }>("SELECT (completed_keys->0->'obligations'->>'not_converged_streak')::int AS streak FROM op_checkpoints WHERE op='managed-sync-pass'");
+    expect(row?.streak).toBe(0);
+  }, { setup }), 240_000);
+
+  const incarnationOf = async (engine: BrainEngine) => (await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'"))[0]!.incarnation;
+  const passRow = async (engine: BrainEngine) => (await engine.executeRaw<{ value: { obligations: { converged?: { open_at_stamp: string[] | null } } } }>(
+    "SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op='managed-sync-pass'"))[0]?.value;
+
+  test('probe 49: a re-screen-due hold alone runs a hold-only round, which clears it; the next tick is idle', () => managedBrain(async ({ engine }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const incarnation = await incarnationOf(engine);
+    const page = (await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!;
+    const blob = execFileSync('git', ['-C', (await engine.executeRaw<{ p: string }>("SELECT local_path AS p FROM sources WHERE id='default'"))[0]!.p, 'rev-parse', 'HEAD:notes/a.md'], { encoding: 'utf8' }).trim();
+    await engine.transaction(tx => writeGitHold(tx, { source_id: 'default', incarnation, path: 'notes/a.md', source_path: 'notes/a.md', slug: 'notes/a', page_id: Number(page.page.id),
+      code: 'frontmatter_slug_conflict', message: 'Synthetic frontmatter_slug_conflict hold.', upstream_version: null, observed_at: new Date().toISOString(), run_id: null, mode: 'managed',
+      meta: { recovery_version: RECOVERY_VERSION, blob_oid: blob, page_revision: page.revision } } as never));
+    const round = await performManagedSync(engine, OPTS);
+    expect({ status: round.status, kind: round.pass?.kind }).toEqual({ status: 'synced', kind: 'hold_only' });
+    expect(await readGitHold(engine, 'default', incarnation, 'notes/a.md')).toBeNull();
+    const idle = await performManagedSync(engine, OPTS);
+    expect({ status: idle.status, pass: idle.pass }).toEqual({ status: 'up_to_date', pass: undefined });
+  }, { setup }), 180_000);
+
+  test('probe 46 (reparse half): a parser change on a fileSame and dbSame page re-imports it as reparse, with no hold', () => managedBrain(async ({ engine }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const fingerprint = `default:${await incarnationOf(engine)}:${(await engine.readPageSnapshot('notes/b', { sourceId: 'default' }))!.page.id}`;
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,parser,parser_version}','"an-older-parser"'::jsonb) WHERE op=$1 AND fingerprint=$2`, [SYNC_IMPORT_PROVENANCE_OP, fingerprint]);
+    await engine.executeRaw("UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,obligations,converged,parser_fp}','\"an-older-parser\"'::jsonb) WHERE op='managed-sync-pass'");
+    const pass = await performManagedSync(engine, OPTS);
+    expect({ status: pass.status, kind: pass.pass?.kind, candidates: pass.pass?.candidates, held: pass.held ?? [] }).toEqual({ status: 'synced', kind: 'full', candidates: 1, held: [] });
+    const [record] = await engine.executeRaw<{ v: string }>("SELECT completed_keys->0->'parser'->>'parser_version' AS v FROM op_checkpoints WHERE op=$1 AND fingerprint=$2", [SYNC_IMPORT_PROVENANCE_OP, fingerprint]);
+    expect(record!.v).not.toBe('an-older-parser');
+  }, { setup }), 180_000);
+
+  test('probe 48: a write admitted before the stamp that publishes after it makes the next tick a full round', () => managedBrain(async ({ engine, ctx, root }) => {
+    await engine.setConfig('sync.write_through', 'false');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+    let late: string | null = null;
+    installFaultHook(async (point, detail) => {
+      if (point !== 'consumer:prepared' || late || detail.operation !== 'submit_job') return;
+      const [row] = await engine.executeRaw<{ kind: string }>("SELECT intent->>'kind' AS kind FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
+      if (row?.kind !== 'managed_sync_checkpoint') return;
+      const current = (await engine.readPageSnapshot('notes/c', { sourceId: 'default' }))!;
+      const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/c', request_id: randomUUID(), expected_revision: current.revision, content: note('notes/c', 'A late agent edit.') } });
+      late = (await admitWrite(engine, prepared.admission!)).request_id;
+    });
+    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    installFaultHook(undefined);
+    expect(late).not.toBeNull();
+    expect((await passRow(engine))!.obligations.converged!.open_at_stamp).toContain(`r:${late}`);
+    await waitFor(async () => (await engine.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [late]))[0]?.state === 'committed', { timeoutMs: 20_000, label: 'the late put_page commits' });
+    const next = await performManagedSync(engine, OPTS);
+    expect({ status: next.status, kind: next.pass?.kind }).toEqual({ status: 'up_to_date', kind: 'full' });
+    const idle = await performManagedSync(engine, OPTS);
+    expect(idle.pass).toBeUndefined();
+  }, { setup }), 180_000);
+
+  test('probe 53: a repair changes a candidate mid-pass: no busy refusal, and it settles later with no hold', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.'));
+    writeFileSync(join(root, 'notes/c.md'), note('notes/c', 'A committed change of notes/c.')); commit(root, 'change a and c');
+    const repaired = note('notes/c', 'The repaired body of notes/c.');
+    let outcome: Record<string, unknown> | null = null;
+    installFaultHook(async (point, detail) => {
+      if (point !== 'sync:after_freeze' || detail.path !== 'notes/a.md' || outcome) return;
+      const snapshot = await engine.readPageSnapshot('notes/c', { sourceId: 'default', includeDeleted: true });
+      const publication = await prepareRepairPublication(engine, { sourceId: 'default', slug: 'notes/c', sourcePath: 'notes/c.md', path: 'notes/c.md', root, content: repaired, snapshot, base: snapshot, ...await repairScreenConfig(engine, 'default') });
+      if (publication.status !== 'ready') throw new Error(`the repair publication is ${publication.status}`);
+      outcome = await submitManagedFileRepair(ctx, { sourceId: 'default', requestId: randomUUID(), slug: 'notes/c', path: 'notes/c.md', sourcePath: 'notes/c.md', content: repaired,
+        beforeHash: createHash('sha256').update(readFileSync(join(root, 'notes/c.md'))).digest('hex'), resultDigest: publication.digest, expected_revision: snapshot!.revision, noEmbed: true });
+    });
+    const rounds = [await performManagedSync(engine, OPTS)];
+    installFaultHook(undefined);
+    expect(outcome).toMatchObject({ state: 'committed', file_repaired: true });
+    await waitFor(async () => !(await engine.executeRaw("SELECT 1 FROM persistence_effects WHERE source_id='default' AND kind='git' AND state<>'committed'")).length,
+      { timeoutMs: 20_000, label: 'the repair commit lands in Git' });
+    while (rounds.length < 5 && rounds.at(-1)!.status !== 'up_to_date') rounds.push(await performManagedSync(engine, OPTS));
+    expect({ last: rounds.at(-1)!.status, held: rounds.flatMap(round => round.held ?? []) }).toEqual({ last: 'up_to_date', held: [] });
+    expect((await engine.readPageSnapshot('notes/c', { sourceId: 'default' }))!.page.compiled_truth).toContain('The repaired body of notes/c.');
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!.page.compiled_truth).toContain('A committed change of notes/a.');
+    expect(git(root, 'show', 'HEAD:notes/c.md')).toContain('The repaired body of notes/c.');
+    expect(await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='sync-hold'")).toEqual([]);
+  }, { setup: hardened }), 180_000);
+
+  const lastSequence = async (engine: BrainEngine) => Number((await engine.executeRaw<{ s: number }>('SELECT COALESCE(max(sequence),0) AS s FROM persistence_requests'))[0]!.s);
+  const changeAll = (root: string) => { for (const slug of ['a', 'b', 'c']) writeFileSync(join(root, `notes/${slug}.md`), note(`notes/${slug}`, `A committed change of notes/${slug}.`)); commit(root, 'change all'); };
+  const converged = async (engine: BrainEngine, after: number) => {
+    for (const slug of ['a', 'b', 'c']) expect((await engine.readPageSnapshot(`notes/${slug}`, { sourceId: 'default' }))!.page.compiled_truth).toContain(`A committed change of notes/${slug}.`);
+    expect(await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='sync-hold'")).toEqual([]);
+    const imports = await engine.executeRaw<{ slug: string; n: number }>("SELECT slug, count(*)::int AS n FROM persistence_requests WHERE intent->>'kind'='managed_sync_import' AND state='committed' AND intent ? 'passId' AND sequence>$1 GROUP BY slug ORDER BY slug", [after]);
+    expect(imports.map(row => [row.slug, Number(row.n)])).toEqual([['notes/a', 1], ['notes/b', 1], ['notes/c', 1]]);
+    expect((await performManagedSync(engine, OPTS)).pass).toBeUndefined();
+  };
+
+  test('a kill after a group admission commits, before the stamp, resumes on the next run and converges', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const after = await lastSequence(engine);
+    changeAll(root);
+    let killed = false;
+    installFaultHook(async point => { if (point === 'sync:mid_checkpoint' && !killed) { killed = true; throw new Error('killed after the group admission'); } });
+    const dead = await performManagedSync(engine, OPTS).then(result => result.status, (error: Error) => error.message);
+    installFaultHook(undefined);
+    expect(killed).toBe(true);
+    expect(dead).not.toBe('synced');
+    await disposePersistenceConsumer(engine);
+    const [row] = await engine.executeRaw<{ at: string | null }>("SELECT completed_keys->0->'obligations'->'converged'->>'target' AS at FROM op_checkpoints WHERE op='managed-sync-pass'");
+    expect(row?.at).not.toBe(git(root, 'rev-parse', 'HEAD'));
+    const resumed = await performManagedSync(engine, OPTS);
+    expect({ status: resumed.status, held: resumed.held ?? [] }).toEqual({ status: 'synced', held: [] });
+    await converged(engine, after);
+  }, { setup }), 180_000);
+
+  for (const code of ['08006', '57P01']) test(`probe 40: a connection fault (${code}) in a pass never becomes a hold, and the next run converges`, () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const after = await lastSequence(engine);
+    changeAll(root);
+    const fault = () => Object.assign(new Error('Connection terminated unexpectedly'), { code });
+    const faults = new Set<string>();
+    installFaultHook(async (point, detail) => {
+      if (point === 'sync:mid_checkpoint' && !faults.has(point)) { faults.add(point); throw fault(); }
+      if (point === 'consumer:prepared' && detail.operation === 'submit_job' && !faults.has(point)) { faults.add(point); throw fault(); }
+    });
+    const rounds = [await performManagedSync(engine, OPTS).then(result => result, (error: Error) => ({ status: `threw: ${error.message}`, held: [] as unknown[] }))];
+    while (rounds.length < 5 && rounds.at(-1)!.status !== 'synced' && rounds.at(-1)!.status !== 'up_to_date')
+      rounds.push(await performManagedSync(engine, OPTS).then(result => result, (error: Error) => ({ status: `threw: ${error.message}`, held: [] as unknown[] })));
+    installFaultHook(undefined);
+    expect([...faults].sort()).toEqual(['consumer:prepared', 'sync:mid_checkpoint']);
+    expect({ last: rounds.at(-1)!.status, held: rounds.flatMap(round => round.held ?? []) }).toEqual({ last: 'synced', held: [] });
+    await converged(engine, after);
+  }, { setup }), 180_000);
+
+  test('probe 54: a pass intent keeps what the #6862 FIFO guard reads, renameFrom included', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    git(root, 'mv', 'notes/b.md', 'notes/renamed.md'); commit(root, 'rename b');
+    const seen: Array<Record<string, unknown>> = [];
+    installFaultHook(async (point, detail) => {
+      if (point !== 'consumer:prepared') return;
+      const [row] = await engine.executeRaw<{ kind: string; slug: string; page_id: number | null; rename_slug: string | null; pass_id: string | null }>(
+        "SELECT intent->>'kind' AS kind, slug, page_id, intent->'renameFrom'->>'slug' AS rename_slug, intent->>'passId' AS pass_id FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
+      if (row?.kind === 'managed_sync_import') seen.push({ kind: row.kind, slug: row.slug, page_id: row.page_id === null ? null : Number(row.page_id), rename_slug: row.rename_slug, pass: !!row.pass_id });
+    });
+    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    installFaultHook(undefined);
+    expect(seen).toEqual([{ kind: 'managed_sync_import', slug: 'notes/renamed', page_id: null, rename_slug: 'notes/b', pass: true }]);
+  }, { setup }), 180_000);
+});
