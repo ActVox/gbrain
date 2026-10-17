@@ -376,7 +376,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       value.telemetry.round = round;
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
-        pass: { episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
+        pass: { head, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       levelSlugMode = level.slugMode;

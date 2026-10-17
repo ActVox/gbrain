@@ -22,6 +22,7 @@
  * - a committed edit under a different uncommitted edit (committed mode) is held worktree_dirty, the page and the local
  *   file untouched, and the next pass settles instead of counting a not_converged streak; sync.holds=fail stops the run.
  * - a page written straight to the database at a new file's slug is never overwritten by the file: held file_drift (side unknown).
+ * - a commit during a pass: every round reads the pinned level (no storage_error from a moved HEAD); the next pass takes the new commit.
  * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
  *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
@@ -301,6 +302,25 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect((result.held ?? []).map(hold => [hold.path, hold.code])).toEqual([['notes/d.md', 'file_drift'], ['notes/e.md', 'file_drift']]);
     expect((await engine.readPageSnapshot('notes/d', { sourceId: 'default' }))!.page.compiled_truth).toContain('A database-only page.');
     expect((await engine.executeRaw<{ source_path: string | null }>("SELECT source_path FROM pages WHERE source_id='default' AND slug IN ('notes/d','notes/e') ORDER BY slug")).map(row => row.source_path)).toEqual([null, null]);
+  }, { setup }), 180_000);
+
+  test('a commit landing during a pass: the pass finishes at its pinned level and the next pass imports the new commit', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const pinned = (writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')), commit(root, 'change a'), git(root, 'rev-parse', 'HEAD'));
+    let moved = false;
+    installFaultHook(async (point, detail) => {
+      if (point !== 'consumer:prepared' || moved || detail.operation !== 'submit_job') return;
+      moved = true;
+      writeFileSync(join(root, 'notes/d.md'), note('notes/d', 'A file committed during the pass.')); commit(root, 'add d during the pass');
+    });
+    const during = await performManagedSync(engine, OPTS);
+    installFaultHook(undefined);
+    expect(moved).toBe(true);
+    expect({ status: during.status, to: during.toCommit }).toEqual({ status: 'synced', to: pinned });
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!.page.compiled_truth).toContain('A committed change of notes/a.');
+    const next = await performManagedSync(engine, OPTS);
+    expect({ status: next.status, to: next.toCommit }).toEqual({ status: 'synced', to: git(root, 'rev-parse', 'HEAD') });
+    expect((await engine.readPageSnapshot('notes/d', { sourceId: 'default' }))!.page.compiled_truth).toContain('A file committed during the pass.');
   }, { setup }), 180_000);
 
   test('probe 54: a pass intent keeps what the #6862 FIFO guard reads, renameFrom included', () => managedBrain(async ({ engine, root }) => {
