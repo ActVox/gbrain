@@ -9,7 +9,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "admission_paused",
           "waived": 0,
           "written": 0
@@ -61,7 +61,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "admission_paused",
           "waived": 0,
           "written": 0
@@ -116,7 +116,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "grant_scope",
           "waived": 0,
           "written": 0
@@ -168,7 +168,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "grant_scope",
           "waived": 0,
           "written": 0
@@ -223,7 +223,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "not_converged",
           "waived": 0,
           "written": 0
@@ -274,7 +274,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "not_converged",
           "waived": 0,
           "written": 0
@@ -328,7 +328,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "not_converged",
           "waived": 0,
           "written": 0
@@ -371,7 +371,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "not_converged",
           "waived": 0,
           "written": 0
@@ -417,7 +417,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "reconcile_host_required",
           "waived": 0,
           "written": 0
@@ -469,7 +469,7 @@
           "passes": 1,
           "processed": 0,
           "rate_pages_per_min": null,
-          "remaining": null,
+          "remaining": 1,
           "stop_reason": "reconcile_host_required",
           "waived": 0,
           "written": 0

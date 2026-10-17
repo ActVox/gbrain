@@ -510,7 +510,8 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
   };
   const finish = (result: SyncResult, outcome: DrainOutcome, stopReason?: DrainStopReason, extra?: Partial<DrainReport>): SyncResult => {
     if (result.managedCursor) { index = result.managedCursor.index; total = result.managedCursor.total; }
-    const left = outcome === 'synced' ? 0 : result.pass ? result.pass.remaining : remaining();
+    // A pass that stopped reading its level (reconcile_read_incomplete) has no candidate set, so its remaining is unknown.
+    const left = outcome === 'synced' ? 0 : result.pass ? (result.reason === 'reconcile_read_incomplete' ? null : result.pass.remaining) : remaining();
     if (stopReason === 'deadline' && continues(result)) result = { ...result, reason: 'timeout' };
     if (carried) result = { ...result, added: result.added + carried.added, modified: result.modified + carried.modified, deleted: result.deleted + carried.deleted,
       renamed: result.renamed + carried.renamed, chunksCreated: result.chunksCreated + carried.chunksCreated };

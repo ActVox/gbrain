@@ -825,14 +825,14 @@ check('cancellation while a pass waits on an accepted request leaves its receipt
 
 for (const boundary of ['accepted-commit', 'receipt-banking'] as const) check(`cancellation at ${boundary} still banks accepted work without admitting the next page`, async engine => {
   const f = await fixture(engine, 2), execute = engine.executeRaw, transaction = engine.transaction, abort = new AbortController();
-  let accepted = false, observed = false;
-  const previous = new WeakMap<object, string>();
+  let accepted = false, claimed = false, observed = false;
   engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
     const rows = await execute.call(this, sql, params);
     if (sql.includes('INSERT INTO persistence_requests')) accepted = true;
-    // #6712 PR 4b: the pass banks a published page with its batch step (writeCursor's lease fence, then passBatchStep's).
-    if (boundary === 'receipt-banking' && accepted && !observed && this !== engine && isLeaseCheck(sql) && isLeaseCheck(previous.get(this) ?? '')) { observed = true; abort.abort(); }
-    previous.set(this, sql);
+    if (accepted && sql.startsWith("UPDATE persistence_requests SET state='running'")) claimed = true;
+    // #6712 PR 4b: the pass banks a published page with its batch step (passBatchStep), whose one lease check is the first
+    // transactional lease check after the accepted request was claimed (the admission's own check precedes the claim).
+    if (boundary === 'receipt-banking' && claimed && !observed && this !== engine && isLeaseCheck(sql)) { observed = true; abort.abort(); }
     return rows;
   } as BrainEngine['executeRaw'];
   engine.transaction = async function (this: BrainEngine, run: (tx: BrainEngine) => Promise<unknown>) {
