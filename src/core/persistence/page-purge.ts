@@ -36,6 +36,7 @@ import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { PERSISTENCE_REQUEST_SLUG_INTENT_INDEX } from './schema.ts';
 import { readRequestIndexStates, REQUEST_INDEXES_REPAIR_COMMAND, type RequestIndexState } from './checkpoint-validation.ts';
 import { faultPoint } from './fault-points.ts';
+import { writeOriginDeletedMarker } from './sync-markers.ts';
 import { findRequestsForSlugs, recheckRequestsCarrying, redactRequestIntents, sweepRequestsCarrying, type JournalSweep } from './intent-redaction.ts';
 import { dropPurgedFenceRows } from '../facts/purge-overlay.ts';
 import { derivedRowsFrom, hideDerivedRows } from '../facts/derivation-inputs.ts';
@@ -245,6 +246,7 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     derived_hidden: await appendDerivedHidden(tx, { sourceId, request: row.id, publicationId: row.id, op: 'delete_page', targets: heldTargets, truncated: walk === 'truncated' }),
     derived_walk: walk })) : null;
   if (ledger) removed.belief_events = ledger.purged_events + ledger.redacted_fields.length;
+  await writeOriginDeletedMarker(tx, { sourceId, page: { id: page.id, slug, source_path: page.source_path } });
   await tx.deletePage(slug, { sourceId });
   if (!retention) appendPurgeIntent({ request: row.id, request_id: row.request_id, source_id: sourceId, source_incarnation: row.source_incarnation,
     scope: 'page', slug, purge_epoch: epoch, content_hashes: [...hashes], facts: mirrorFacts, takes: mirrorTakes, lifetimes });
