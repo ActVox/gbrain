@@ -156,7 +156,7 @@ async function runLive(engine: import('../../src/core/engine.ts').BrainEngine, c
   const sync = async () => {
     const t = performance.now();
     const r = await performManagedSync(engine, opts);
-    return { wall: performance.now() - t, status: r.status, reason: r.reason ?? null, pass: r.pass ?? null };
+    return { at: performance.timeOrigin + t, wall: performance.now() - t, status: r.status, reason: r.reason ?? null, pass: r.pass ?? null };
   };
   let edits = 0;
   const commitOne = () => {
@@ -339,6 +339,8 @@ function report(r: ReportInput): Record<string, unknown> {
     gbrain_commit: git(REPO, ['rev-parse', 'HEAD']),
     settings: { idle_rounds: r.idleRounds, full_rounds: r.fullRounds, warmup: r.warmup, rss_sample_ms: r.sampleMs, percentile: 'nearest-rank', full_round_episode: r.episode, live_pass: r.live },
     live_warmup: (r.measured as { warmup?: unknown } | null)?.warmup ?? null,
+    live_runs: r.live ? { idle: idle.map(t => ({ at: (t as { at?: number }).at, wall: t.wall, status: (t as { status?: string }).status })),
+      full: full.map(t => ({ at: (t as { at?: number }).at, wall: t.wall, status: (t as { status?: string }).status })) } : null,
     live_statuses: r.live ? { idle: (m?.idle ?? []).map(t => (t as { status?: string }).status), full: (m?.full ?? []).map(t => (t as { status?: string }).status) } : null,
     measured: m ? (m.available ? (m.error ? { error: m.error } : true) : { unavailable: m.reason }) : 'skipped (--seed-only)',
     idle_tick_ms: summarize(idle.map(t => t.wall)),

@@ -70,10 +70,14 @@ export interface SyncPassInput {
   drainBatch: (key: string, batch: Cursor, sliceBase: { started: number; pages: number }) => Promise<SyncResult | Cursor>;
 }
 
+/** The configured patterns a selection unions with its flags: read once, beside the pin's other reads. */
+function selectionPatterns(engine: BrainEngine, opts: SyncOpts): Promise<[Iterable<string>, string | null]> {
+  return Promise.all([syncExcludePatterns(engine, opts.exclude), engine.getConfig('sync.include_hidden')]);
+}
 /** The selection a pass syncs (design §6), with the configured one's test: no selection flag differs from the source's configuration. */
-async function passSelection(engine: BrainEngine, opts: SyncOpts, context: ManagedSyncContext, mode: SyncSelection['mode']): Promise<SyncSelection> {
-  const exclude = [...await syncExcludePatterns(engine, opts.exclude)].sort();
-  const includeHidden = [...new Set([...opts.includeHidden ?? [], ...(await engine.getConfig('sync.include_hidden') ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)]
+function passSelection([excluded, hidden]: [Iterable<string>, string | null], opts: SyncOpts, context: ManagedSyncContext, mode: SyncSelection['mode']): SyncSelection {
+  const exclude = [...excluded].sort();
+  const includeHidden = [...new Set([...opts.includeHidden ?? [], ...(hidden ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)]
     .map(v => v.endsWith('/') ? `${v}**` : v))].sort();
   return { exclude, includeHidden, strategy: opts.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown', srcSubpath: opts.srcSubpath ?? null, mode };
 }
@@ -295,13 +299,17 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   if (handover.wait) return { ...empty('partial', 'writer_pending'), ...(remote ? {} : { retryWait: handover.wait }) };
   if (handover.hostRequired) return empty('blocked_by_failures', 'reconcile_host_required');
 
-  // Pin (design §2.2): the row, sync.admission, HEAD and the mode.
-  const [prior, admission, configuredWorking] = await Promise.all([readPassRow(engine, sourceId, incarnation), readSyncAdmission(engine), engine.getConfig('sync.include_working_tree')]);
+  // Pin (design §2.2): the row, sync.admission, HEAD and the mode. The reads the kind needs ride the same round trip: the
+  // selection's patterns, the schema pack, the tail, the retry row and the source's holds (only the idle probe needs the row).
+  const [prior, admission, configuredWorking, patterns, loadedPack, tail, retry, sourceHolds] = await Promise.all([readPassRow(engine, sourceId, incarnation),
+    readSyncAdmission(engine), engine.getConfig('sync.include_working_tree'), selectionPatterns(engine, opts),
+    input.processingOptions.noSchemaPack ? null : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
+    readSyncTail(engine, sourceId), readGitHoldRetryPaths(engine, sourceId, incarnation), readGitSourceHolds(engine, { sourceIds: [sourceId] })]);
   assertActive();
   let head = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
   const detached = syncGit(context.gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
   const mode: SyncSelection['mode'] = detached || (opts.workingTree ?? configuredWorking === 'true') ? 'working' : 'committed';
-  const selection = await passSelection(engine, opts, context, mode);
+  const selection = passSelection(patterns, opts, context, mode);
   const configured = !remote && !opts.exclude?.length && !opts.includeHidden?.length && opts.srcSubpath === undefined
     && (opts.strategy === undefined || opts.strategy === ((context.source.config?.strategy as string | undefined) ?? 'markdown'))
     && (detached || opts.workingTree === undefined || opts.workingTree === (configuredWorking === 'true'));
@@ -323,13 +331,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const processingOptions: SyncProcessingOptions = { noEmbed: requested.noEmbed || !!episode?.inherited.noEmbed, noExtract: requested.noExtract || !!episode?.inherited.noExtract,
     noSchemaPack: requested.noSchemaPack || !!episode?.inherited.noSchemaPack };
   const inherited = (['noEmbed', 'noExtract', 'noSchemaPack'] as const).filter(key => processingOptions[key] && !requested[key]);
-  const pack = processingOptions.noSchemaPack ? null : (await loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null))?.identity ?? null;
+  const pack = processingOptions.noSchemaPack ? null : loadedPack?.identity ?? null;
 
   // The kind (design §2.2), from the real converged state.
   const converged = obligations.converged;
-  const [probe, tail, retry, sourceHolds] = await Promise.all([
-    converged ? passIdleProbe(engine, { sourceId, incarnation, worktreeId: context.binding.worktree_id, requestHwm: converged.request_hwm, openAtStamp: converged.open_at_stamp ?? [] }) : null,
-    readSyncTail(engine, sourceId), readGitHoldRetryPaths(engine, sourceId, incarnation), readGitSourceHolds(engine, { sourceIds: [sourceId] })]);
+  const probe = converged ? await passIdleProbe(engine, { sourceId, incarnation, worktreeId: context.binding.worktree_id, requestHwm: converged.request_hwm,
+    openAtStamp: converged.open_at_stamp ?? [] }) : null;
   assertActive();
   const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
   // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
@@ -362,8 +369,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
       assertActive();
       await assertDrainLease(tx, sourceId);
-      await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
-      value.telemetry.started_at = await databaseNow(tx);
+      // One round trip: the stamp and the transaction's clock read are pipelined.
+      [, value.telemetry.started_at] = await Promise.all([tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]),
+        databaseNow(tx)]);
       await writePassRow(tx, value, { pin: true });
     }, principalAttribution(authority.writer.principal)));
     await clearPassFailures(engine, sourceId, incarnation);
@@ -375,7 +383,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   obligations.cost = costDecision.cost;
   let costDeferred: string | null = null;
   if (costDecision.defer && !processingOptions.noEmbed) { processingOptions.noEmbed = true; costDeferred = costDecision.defer; }
-  await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); value.telemetry.started_at = await databaseNow(tx); await writePassRow(tx, value, { pin: true }); });
+  await engine.transaction(async tx => {
+    // The lease check and the clock read share a round trip: a lost lease aborts the transaction before the row is written.
+    [, value.telemetry.started_at] = await Promise.all([assertDrainLease(tx, sourceId), databaseNow(tx)]);
+    await writePassRow(tx, value, { pin: true });
+  });
   assertActive();
   registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
 
@@ -559,7 +571,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         }
         // Design §6: an open episode closes by inclusion (a) or at the configured selection (b); chunker_version only by (b) over U_config.
         const closure = episode ? await passEpisodeClosure({ gitRoot: context.gitRoot, root: context.root, head, slugMode: levelSlugMode, episode, pass: selection, configured,
-          configuredSelection: await passSelection(engine, { sourceId } as SyncOpts, context, mode) }) : null;
+          configuredSelection: passSelection(await selectionPatterns(engine, { sourceId } as SyncOpts), { sourceId } as SyncOpts, context, mode) }) : null;
         const closesEpisode = closure?.closes === true;
         if (closure?.released) counts.episodeReleased = closure.released;
         const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
@@ -634,8 +646,8 @@ async function databaseNow(tx: Pick<BrainEngine, 'executeRaw'>): Promise<string>
 
 /** A converged or idle pass clears what earlier stops recorded: the pass row's failure key and the incarnation's cursor key. */
 async function clearPassFailures(engine: BrainEngine, sourceId: string, incarnation: string): Promise<void> {
-  await clearManagedSyncFailureAfterSuccess(engine, passFingerprint(sourceId, incarnation));
-  await clearManagedSyncFailureAfterSuccess(engine, managedCursorKey(incarnation, undefined));
+  await Promise.all([clearManagedSyncFailureAfterSuccess(engine, passFingerprint(sourceId, incarnation)),
+    clearManagedSyncFailureAfterSuccess(engine, managedCursorKey(incarnation, undefined))]);
 }
 
 export type { SyncAdmission };

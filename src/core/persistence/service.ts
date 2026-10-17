@@ -218,7 +218,7 @@ export type WriteWait =
  * The waiter never owns a provider, database connection, or kernel lock.
  */
 export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config: GBrainConfig,
-  opts: { waitMs?: number; signal?: AbortSignal } = {}): Promise<WriteWait> {
+  opts: { waitMs?: number; signal?: AbortSignal; whileHeldMs?: number } = {}): Promise<WriteWait> {
   if (isTerminal(row)) return { kind: 'terminal', row };
   const consumer = startPersistenceConsumer(engine, config);
   const service = services.get(engine)!;
@@ -233,14 +233,19 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   // The admission transaction has committed: publish now, not after the idle backoff.
   consumer.wake(true);
   const waitMs = opts.waitMs ?? 5000;
-  const deadline = performance.now() + waitMs;
+  const started = performance.now();
+  // `whileHeldMs`: past `waitMs`, keep waiting (to that total) while this process's consumer is executing the request.
+  let deadline = started + waitMs;
   const firstPoll = recentlySettled.get(engine)?.has(id) ? 0 : Math.min(WRITE_POLL_START_MS, waitMs / 2);
   let delay = firstPoll, failure: { error: unknown; attempts: number } | undefined;
   try {
     while (!service.stopping && !opts.signal?.aborted) {
       if (handed) { row = handed; handed = undefined; if (isTerminal(row)) return { kind: 'terminal', row }; }
       const remaining = deadline - performance.now();
-      if (remaining <= 0) break;
+      if (remaining <= 0) {
+        if (opts.whileHeldMs && opts.whileHeldMs > waitMs && deadline === started + waitMs && consumer.holds(id)) { deadline = started + opts.whileHeldMs; continue; }
+        break;
+      }
       await new Promise<void>(resolve => {
         const done = () => { clearTimeout(timer); wake = undefined; opts.signal?.removeEventListener('abort', done); resolve(); };
         const timer = setTimeout(done, Math.min(delay, remaining));
