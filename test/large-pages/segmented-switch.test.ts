@@ -179,7 +179,7 @@ for (const kind of testBackends()) {
       await heartbeat('marked-nonce', SEGMENTED_WRITER_FLOOR, true);
       expect(await seen()).toEqual([]);
       expect(await segmentedNow()).toBe(true);
-      const raised = '0.60.291.0';
+      const raised = '99.0.0.0';
       expect(compareWriterVersions(SEGMENTED_WRITER_FLOOR, raised)).toBeLessThan(0);
       expect(await seen(raised)).toEqual([['importer', SEGMENTED_WRITER_FLOOR, true], ['resident', SEGMENTED_WRITER_FLOOR, true]]);
 

@@ -43,8 +43,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // bytes are written (before their journal step), after a --keep disk write is abandoned (its journal step written), and after recoverPublication returns.
   | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered'
   // Wave B segmented writes (spec 3.4 crash windows): after the texts, the staged manifest rows and the staged chunks of a
-  // preparation, after the generation flip (inside the publication transaction), before each chunk batch a projection inserts (its
-  // claim renewal and insert), and after a projection staged its chunks (before its seal).
+  // preparation, after the generation flip (inside the publication transaction), before each chunk batch a projection reads (its segment
+  // texts, then its claim renewal and insert), and after a projection staged its chunks (before its seal).
   | 'segmented:texts_staged' | 'segmented:manifest_staged' | 'segmented:chunks_staged' | 'segmented:flipped' | 'segmented:projection_batch'
   | 'segmented:projection_staged'
   // A prior file over the single-string ceiling copied to its before stage (large-file.ts `stageBeforeCopy`): after the copy is

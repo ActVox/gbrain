@@ -396,6 +396,7 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     while (end < input.occurrences.length && (end === start || bytes + input.occurrences[end]!.byteLen <= batchBytes)) bytes += input.occurrences[end++]!.byteLen;
     const batch = input.occurrences.slice(start, end);
     start = end;
+    if (input.guarded) await faultPoint('segmented:projection_batch', { sourceId: input.sourceId, slug: input.slug });
     const texts = await engine.readSegmentTexts(input.sourceId, batch.map(row => row.sha256));
     ledger ??= await readBodyLedger(engine, input.sourceId, input.slug);
     const segments = [];
@@ -423,7 +424,6 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
     if (input.hold) input.hold.push(...chunks);
     else if (chunks.length && !input.guarded) indexes.push(...await engine.stageSegmentChunks(input.pageId, input.generation, chunks));
     let moved = false, lost = false;
-    if (chunks.length && input.guarded) await faultPoint('segmented:projection_batch', { sourceId: input.sourceId, slug: input.slug });
     if (chunks.length && input.guarded) rows -= chunks.length - await engine.transaction(async tx => {
       await tx.lockPageKeys([{ sourceId: input.sourceId, slug: input.slug }]);
       const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1', [input.pageId]);
