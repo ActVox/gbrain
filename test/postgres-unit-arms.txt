@@ -25,7 +25,11 @@ test/belief-ledger-privacy.test.ts
 test/belief-ledger-purge-review.test.ts
 test/belief-ledger-purge.test.ts
 test/belief-ledger-restore.test.ts
+test/belief-ledger-touched.test.ts
 test/belief-ledger-trust.test.ts
+test/belief-ledger-w5-time-model.test.ts
+test/belief-ledger-weekly-diff.test.ts
+test/belief-ledger-weekly-probes.test.ts
 test/capture-consent-admission.test.ts
 test/capture-dispatch-provenance-6524.test.ts
 test/chronicle-backfill-max-usd.test.ts
@@ -176,6 +180,7 @@ test/repair-embedding-effects.test.ts
 test/repair-failed-writes-conflict-6429.test.ts
 test/repair-failed-writes-drift-w411.test.ts
 test/repair-fences.test.ts
+test/repair-file-drift-deleted-6712.test.ts
 test/repair-frontmatter-keys-sweep-6454.test.ts
 test/repair-frontmatter.test.ts
 test/repair-receipt-compaction.test.ts

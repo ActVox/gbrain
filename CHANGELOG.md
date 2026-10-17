@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.273.0] - 2026-10-16
+## [0.60.275.0] - 2026-10-16
 
 **Sync stops handing one page's history to another when Git guesses a rename, and background work on a managed brain stops spending write ids it can never use (fix wave 18a).** When you move a note and edit it in the same commit, Git only guesses that it was a move. Two notes made from the same template and moved together could be paired the wrong way round, and sync then carried one page's facts, links and aliases onto the other. Now sync keeps a page across a guessed move only when the files agree: the same `id`, or the same unique `slug:` line or title. Anything else becomes a new page, and the old one stays restorable, with the exact restore command printed and the purge holding it until someone decides. Contributed by @javieraldape (PR #6732, rewritten).
 
@@ -92,6 +92,73 @@ Four smaller fixes ride along: dream synthesis no longer fails a pass when looki
 - Shard weights (`scripts/test-weights.json`, `serial-weights.json`, `e2e-weights.json`) were refreshed from recent Test and E2E runs.
 - Tests whose fixture was an inexact move onto a broken file now use an exact move held by a stale `slug:` line (every hold-lane assertion unchanged); the inexact case keeps one test per path asserting its new outcome. `test/pages-purge-deleted-args.test.ts` expectations gained `retryParked: false`. `test/persistence-connector-fencing.test.ts` orders its request-id reads, since the new index changed the unordered row order.
 - Migration note: `skills/migrations/v0.60.270.0.md`.
+
+## [0.60.274.0] - 2026-10-17
+
+**A refresh no longer gets stuck when a commit lands on top of its target, and `gbrain repair file-drift` can now resolve a page whose file is gone.** Two fixes ahead of the level-triggered reconcile (#6712).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sources refresh` while a commit lands on top of the refresh target | members synced past the target, the refresh stayed `syncing` with the worktree fenced, and `--resume` could not finish it | the refresh completes once every member reached the target or a commit on top of it; `--resume` completes one left `syncing` |
+| A live page whose canonical file is gone from the last commit | `sources reconcile` refused with "repair does not restore files" and nothing offered a per-page fix | `gbrain repair file-drift --slug <slug> --prefer database` recreates the file from the page; `--prefer file` soft-deletes exactly that page (mass-delete valve applies; `gbrain restore <slug> --force` undoes it). Both are preview-first and bound to the page revision and the file's absence |
+| A file deleted only in the worktree (still committed) | the same refusal | listed `deletion_uncommitted`, routed to committing the deletion or `gbrain repair ghost-pages` |
+| A held deletion's next step | a reconcile preview that refused | the file-drift preview |
+
+### What you need to do
+
+Nothing. Both repairs only run when you ask for them, and nothing changes at upgrade. With Git durability off, commit a recreated file yourself; the preview prints the command.
+
+## [0.60.273.0] - 2026-10-16
+
+**Ask what changed this week and get the beliefs that changed, with their old and new values and the evidence, instead of a list of pages.** `delta {beliefs: true}` and `gbrain beliefs changes` read the belief ledger for a window and report each fact, take, link and relationship date that ended the window different from how it started. An edit and its revert report nothing, and a relationship end that only the nightly check inferred is now shown as an upper bound (`by 2025-03-01`) everywhere relationship notes appear. Recording beliefs also costs less: on large pages `put_page` is about 45% faster on PGLite, and the ledger's share of a large Postgres edit drops under 10%.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `delta` with `beliefs: true` | no such option | `beliefs`: each changed belief with before, after, cause and an evidence pointer, plus a `## Belief changes since …` text section |
+| `gbrain beliefs changes acme-example --since 7d` | no such command | one cited line per belief that changed on or about that page this week; on a thin client it asks the host |
+| a relationship closed only by the nightly check | `ended: works_at acme-example (2025-03-01)` | `ended: works_at acme-example (by 2025-03-01)` |
+| an explicit end line later than the inferred closure | the earlier inferred date stayed | the explicit date replaces it |
+| `gbrain migrate --to <engine>` through the legacy copier on a brain with page versions | copied pages without their versions | refuses with `writer_coordinator_required`, `reason: page_history` and the version count |
+| `takes.updated_at` after a page write that leaves a take unchanged | moved | stays |
+
+Measured write overhead of belief recording (ledger share of the write, master → this release; ranges of round medians):
+
+| Cell | Ledger share |
+|---|---|
+| PGLite typical edit | 6.1–6.7% → 6.0–6.7% |
+| PGLite large edit | 3.9–4.3% → 5.6–6.4% (`put_page` itself about 45% faster) |
+| Postgres typical edit | 9.5–10.7% → 7.9–8.5% |
+| Postgres large edit | 10.3–11.3% → 8.4–9.3% |
+
+### What to do
+
+Nothing. Belief recording stays opt-in per source (`gbrain beliefs enable`); without it, `beliefs` reports `not_recorded`. Nothing is rewritten on upgrade and there is no migration.
+
+### Itemized changes
+
+#### Added
+
+- `delta` takes `beliefs: true` (full surface only); `gbrain beliefs changes [<entity>...] [--since 7d]` is its CLI twin and routes to the host on a thin client. Remote callers get the world view: events world-visible when recorded, on pages visible now, takes of holders they may read, never a claim made private later; the event cap counts only events the caller may read.
+
+#### Changed
+
+- Relationship notes (entity cards, `context_pack`, ambient turn context, compiled context files) render an end that only the nightly check dated as `(by <date>)`; only evidence the caller's scope counts can make it exact. An explicit end for the same stint replaces the inferred one, earlier or later.
+- The legacy engine copier refuses a brain holding page versions (`reason: page_history`).
+
+#### Performance
+
+- Fact and take projections write only rows whose values change; the ledger's post read reuses the pre read's rows for tables the transaction did not write (`pg_stat_get_xact_tuples_*`, full read when `track_counts` is off).
+- The batch's source read also reads the managed mode and plan mode; unchanged subjects are keyed once.
+- A bounded process-local fingerprint cache (text hash to fingerprint, 20,000 entries), checked against SQL by a parity probe on both engines.
+- `canonicalJson` sorts keys only when out of order and caches quoted key names; the bytes are unchanged (golden probe).
+
+#### Fixes
+
+- `test/trust-taint-dream.test.ts` counts each engine's patterns prompts separately.
 
 ## [0.60.272.0] - 2026-10-16
 

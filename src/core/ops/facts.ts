@@ -955,13 +955,14 @@ const delta: Operation = {
     session_id: { type: 'string', description: 'Session id; keeps a cursor.' },
     include_private: { type: 'boolean', description: 'Local trusted callers only.' },
     min_trust: MIN_TRUST_PARAM,
+    beliefs: { type: 'boolean', fullSurfaceOnly: true, description: 'Add `beliefs`: each belief that changed in the window, before and after, with cause and evidence (belief ledger); entities narrows it.' },
   },
   scope: 'read',
   verb: true,
   cliHints: { name: 'delta' },
   annotations: { title: 'delta (what changed since)', readOnlyHint: true },
   handler: async (ctx, p) => {
-    const { assembleDeltaContext, renderDelta, PACK_DEFAULT_MAX_ENTITIES, renderPageLine, renderFactLine, renderThreadLine, deltaHeaderCost } =
+    const { assembleDeltaContext, renderDelta, PACK_DEFAULT_MAX_ENTITIES, renderPageLine, renderFactLine, renderThreadLine, deltaHeaderCost, TURN_CONTEXT_ENVELOPE } =
       await import('../context/turn-context.ts');
     const { readDeltaSessionState, upsertSessionContextState, gcSessionContextState } = await import('../context/session-state.ts');
     const cur = await import('../context/delta-cursor.ts');
@@ -1074,6 +1075,7 @@ const delta: Operation = {
         next_cursor: { since: now, slug: '', cursor: cur.encodeDeltaCursor(first) },
         ...(wrote.ok ? {} : { degraded_reason: 'session_state' }),
         ...(budgetTokens !== null ? { budget_tokens: budgetTokens, budget_used: 0, dropped_count: 0 } : {}),
+        ...(p.beliefs === true ? { beliefs: { source_id: sourceId, since: now, until: now, coverage_from: null, changes: [], truncated: false } } : {}),
       };
     }
 
@@ -1105,6 +1107,7 @@ const delta: Operation = {
     let droppedCount: number | undefined;
     let factsDropped = 0;
     let itemBudget = 0;
+    let beliefBudget = 0;
     const fetchedPages = pages.length;
     const fetchedFacts = facts.length;
     if (budgetTokens !== null) {
@@ -1119,6 +1122,7 @@ const delta: Operation = {
       const remaining = itemBudget - pagePack.meta.used;
       const factPack = remaining > 0 ? packToBudget(facts, (f) => lineCost(renderFactLine(f)), remaining) : dropAll(facts);
       facts = factPack.items;
+      beliefBudget = remaining - factPack.meta.used;
       droppedCount = pagePack.meta.dropped + factPack.meta.dropped;
       factsDropped = factPack.meta.dropped;
     }
@@ -1213,7 +1217,10 @@ const delta: Operation = {
     // Re-render the injectable block from the FINAL sets (adversarial review):
     // `text` must honor the budget AND the boundary-tie exclusion the
     // structured arrays reflect — the assembler's render predates both.
-    const text = renderDelta(pages, facts, threads, effectiveSince);
+    let text = renderDelta(pages, facts, threads, effectiveSince);
+    const diff = p.beliefs === true ? await (await import('../belief/changes.ts')).deltaBeliefs(ctx.engine, { sourceId, since: effectiveSince, until: horizon,
+      remote: !includePrivate, takesHolders: readHolders(ctx), entities: parseEntityList(p.entities) }, budgetTokens !== null ? beliefBudget : null, text, TURN_CONTEXT_ENVELOPE) : null;
+    if (diff) text = diff.text;
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
 
     return {
@@ -1249,6 +1256,7 @@ const delta: Operation = {
       ...(budgetTokens !== null
         ? { budget_tokens: budgetTokens, budget_used: budgetUsed, dropped_count: droppedCount }
         : {}),
+      ...(diff ? { beliefs: diff.beliefs } : {}),
     };
   },
 };

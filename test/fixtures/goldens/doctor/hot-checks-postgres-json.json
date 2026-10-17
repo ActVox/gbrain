@@ -677,7 +677,7 @@
               "by_day": [
                 {
                   "content_decisions": 0,
-                  "day": "2026-10-16",
+                  "day": "<soak-day>",
                   "interventions": 1
                 }
               ],
@@ -4629,7 +4629,7 @@
               "by_day": [
                 {
                   "content_decisions": 0,
-                  "day": "2026-10-16",
+                  "day": "<soak-day>",
                   "interventions": 1
                 }
               ],
