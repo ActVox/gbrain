@@ -67,7 +67,7 @@ describe('#6780 guard: every getConfig() key under src/ is registered or recorde
 
   test('the scan sees the reader population (not a vacuous pass)', () => {
     expect(reads.length).toBeGreaterThan(400);
-    expect(literal.some((r) => r.file === 'src/commands/doctor/registry.ts' && r.target.kind === 'keys' && r.target.keys.includes('doctor.entry_budget_ms'))).toBe(true);
+    expect(literal.some((r) => r.file === 'src/core/page-embedding-budget.ts' && r.target.kind === 'keys' && r.target.keys.includes('embed.max_usd_per_page'))).toBe(true);
   });
 
   test('resolved keys are registered or internal state', () => {
