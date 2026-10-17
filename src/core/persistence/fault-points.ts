@@ -4,7 +4,7 @@
  * recovery path must finish: publication boundaries, after an effect's side
  * effect but before its completion is recorded, before a recovery record is
  * cleared, between sync checkpoints, after the consumer prepared a
- * claimed request, (`sync:after_freeze`) after a managed sync import entry is frozen and before it is admitted, (`lane:applied`) when a lane group has applied its pages and waits for its commit turn, (`stuck_recovery:*`) between the steps of a stuck-recovery resolution, (`segmented:*`) between the stages of a segmented write, and (`large_file:*`) while a large prior file is copied to its before stage. Production never installs a hook, so every call is a
+ * claimed request, (`consumer:claiming`) before the consumer claims a request or a lane head, (`sync:after_freeze`) after a managed sync import entry is frozen and before it is admitted, (`lane:applied`) when a lane group has applied its pages and waits for its commit turn, (`stuck_recovery:*`) between the steps of a stuck-recovery resolution, (`segmented:*`) between the stages of a segmented write, and (`large_file:*`) while a large prior file is copied to its before stage. Production never installs a hook, so every call is a
  * no-op there; the gate's workers install one that SIGKILLs or stalls the
  * process at a chosen point.
  */
@@ -16,6 +16,9 @@ export type PublicationBoundary = Parameters<NonNullable<PublicationHooks['bound
 export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${EffectKind}:mid` | 'effect:embedding:settle'
   | 'effect_recovery:before_clear' | 'publication_recovery:before_clear' | 'sync:mid_checkpoint' | 'sync:before_group_admission' | 'sync:mid_waiver_run' | 'sync:prescreened' | 'consumer:prepared'
   | 'consumer:preparing' | 'lane:applied'
+  // Before each claim attempt of the consumer, a FIFO claim or a lane head's: a stalling hook keeps this process from starting
+  // another request or lane group meanwhile, while the requests it already holds run on.
+  | 'consumer:claiming'
   // #6712 PR 0: after `freezeEntry` froze an import entry (its bytes are read) and before the request is admitted or published.
   | 'sync:after_freeze'
   // #6712 PR 1 (L2): after the cursor step that holds a failed entry and settles its index commits (`holdUnderGate`), and after
