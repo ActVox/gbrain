@@ -2758,7 +2758,7 @@ export class PGLiteEngine implements BrainEngine {
     // v0.31.2 (codex P1 #3): source_id threaded so multi-source brains can
     // scope ingest_log queries. Default 'default' matches the column DEFAULT.
     const sourceId = entry.source_id ?? 'default';
-    // v253: the writer's version, host and segment-reader mark (writer-versions.ts writerStamp).
+    // v254: the writer's version, host and segment-reader mark (writer-versions.ts writerStamp).
     const stamp = writerStamp({ mint: false });
     await this.db.query(
       `INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary, writer_version, writer_host_id, writer_segment_reader)

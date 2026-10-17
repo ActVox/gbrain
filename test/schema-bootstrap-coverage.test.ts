@@ -1107,7 +1107,7 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // posture as v178/v198: persistence_requests is migration-created on PGLite,
   // no index references the column, and every reader treats NULL as "sent a UUID or nothing".
   'persistence_requests.client_request_id',
-  // Wave B fix lane B (migration v253) — segment-reader marks next to the v178
+  // Wave B fix lane B (migration v254) — segment-reader marks next to the v178
   // stamps. Same posture as v178: persistence_requests is migration-created on
   // PGLite, no index references the columns, and every reader treats NULL as a
   // writer that does not read segmented pages.

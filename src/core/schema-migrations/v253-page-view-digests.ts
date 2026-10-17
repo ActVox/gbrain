@@ -11,8 +11,8 @@ import type { Migration } from './types.ts';
 // cache: it is used only while its byte total matches the page's stored sums,
 // rows of older revisions are dropped when a new one is written, and rows go
 // with their page (ON DELETE CASCADE). DDL only, nothing to backfill.
-export const v252: Migration = {
-  version: 252,
+export const v253: Migration = {
+  version: 253,
   name: 'page_view_digests',
   idempotent: true,
   sql: `

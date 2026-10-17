@@ -9,7 +9,7 @@
  *    until publication references it; a page-scoped sweep collects only the
  *    texts its page released; chunks of a shifted occurrence keep stored
  *    spans that hold their text in the new body; segment GC's staged-chunk
- *    delete reads an index, not the whole chunk table; v251 keeps
+ *    delete reads an index, not the whole chunk table; v252 keeps
  *    content_chunks.retired_generation for released readers, and no reader at
  *    this version names it.
  * 2. Fails when: visibility trusts body_generation alone, stageSegmentChunks
@@ -17,7 +17,7 @@
  *    deduped text unlocked and its grace unrefreshed, the text sweep ignores
  *    live stagings, a page sweep scans its source's texts, raw spans are
  *    absolute body offsets, content_chunks_generation_idx is missing, or
- *    v251 drops retired_generation or a chunk reader at this version names it.
+ *    v252 drops retired_generation or a chunk reader at this version names it.
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -36,7 +36,7 @@ import { chunk, manifestRow, publishSegmentedPage, segmentText } from '../helper
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { segmentedPageRow } from '../helpers/segmented-page-checks.ts';
 import { testBackends } from '../helpers/test-backends.ts';
-import { v251 } from '../../src/core/schema-migrations/v251-segmented-chunk-gc-index.ts';
+import { v252 } from '../../src/core/schema-migrations/v252-segmented-chunk-gc-index.ts';
 
 /** ~1.4 MB of sections, each its own segment. */
 function sections(tag: string, n = 60): string {
@@ -276,18 +276,18 @@ for (const kind of testBackends()) {
       }
     }, 180_000);
 
-    test('v251 keeps retired_generation on a v248 brain and builds the GC index; no chunk reader names the column', async () => {
+    test('v252 keeps retired_generation on a v248 brain and builds the GC index; no chunk reader names the column', async () => {
       const columns = async () => (await engine.executeRaw<{ attname: string }>(
         "SELECT attname FROM pg_attribute WHERE attrelid = 'content_chunks'::regclass AND attnum > 0 AND NOT attisdropped")).map(r => r.attname);
       expect(await columns()).toContain('retired_generation');
       await importFromContent(engine, 'notes/upgraded', page(sections('u')), { sourceId: 'default', noEmbed: true });
       await engine.executeRaw('DROP INDEX content_chunks_generation_idx');
-      if (v251.sql) await engine.executeRaw(v251.sql);
-      await v251.handler!(engine);
+      if (v252.sql) await engine.executeRaw(v252.sql);
+      await v252.handler!(engine);
       expect(await columns()).toContain('retired_generation');
       const [index] = await engine.executeRaw<{ indexdef: string }>("SELECT indexdef FROM pg_indexes WHERE indexname = 'content_chunks_generation_idx'");
       expect(index?.indexdef).toContain('WHERE (body_generation IS NOT NULL)');
-      // The column stays for released readers (v251-master-reader-compat.test.ts); head's readers must not name it.
+      // The column stays for released readers (v252-master-reader-compat.test.ts); head's readers must not name it.
       await engine.executeRaw('ALTER TABLE content_chunks RENAME COLUMN retired_generation TO retired_generation_hidden');
       try {
         for (const excludePrivate of [false, true]) {

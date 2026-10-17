@@ -11,8 +11,8 @@ import { buildIndexOnline, migrationNotice } from './helpers.ts';
 //   occurrence's closed manifest range (chunkGenerationFilter). The released
 //   binary's chunk readers still select it, so it is dropped only once the
 //   writer floor excludes every binary that reads it
-//   (test/large-pages/v251-master-reader-compat.test.ts). An earlier build of
-//   this migration dropped it; v254 re-adds it on those (test) brains.
+//   (test/large-pages/v252-master-reader-compat.test.ts). An earlier build of
+//   this migration dropped it; v255 re-adds it on those (test) brains.
 // - content_chunks_generation_idx serves segment GC's staged-chunk delete
 //   (`c.body_generation IS NOT NULL AND c.body_generation > p.body_generation`,
 //   engine-sql/page-body.ts sweepSegments), which the resident maintenance
@@ -25,8 +25,8 @@ export const CONTENT_CHUNKS_GENERATION_INDEX = {
   sql: 'CREATE INDEX IF NOT EXISTS content_chunks_generation_idx ON content_chunks (page_id, body_generation) WHERE body_generation IS NOT NULL',
 };
 
-export const v251: Migration = {
-  version: 251,
+export const v252: Migration = {
+  version: 252,
   name: 'segmented_chunk_gc_index',
   idempotent: true,
   transaction: false,

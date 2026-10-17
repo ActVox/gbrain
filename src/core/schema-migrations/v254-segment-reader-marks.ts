@@ -31,8 +31,8 @@ export const INGEST_LOG_UNMARKED_INDEX = {
   sql: 'CREATE INDEX IF NOT EXISTS ingest_log_unmarked_idx ON ingest_log (created_at) WHERE writer_segment_reader IS NOT TRUE',
 };
 
-export const v253: Migration = {
-  version: 253,
+export const v254: Migration = {
+  version: 254,
   name: 'segment_reader_marks',
   idempotent: true,
   transaction: false,

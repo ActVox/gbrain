@@ -28,8 +28,8 @@ const CONTENT_CHUNKS_OCCURRENCE_GENERATION_INDEX = {
   sql: 'CREATE INDEX IF NOT EXISTS content_chunks_occurrence_generation_idx ON content_chunks (page_id, occurrence_id, body_generation)',
 };
 
-export const v255: Migration = {
-  version: 255,
+export const v256: Migration = {
+  version: 256,
   name: 'chunk_retirement_index',
   idempotent: true,
   transaction: false,

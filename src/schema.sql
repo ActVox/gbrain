@@ -346,7 +346,7 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- (segmented-page chunks; NULL for inline pages) and
   -- content_chunks_occurrence_idx are added the same way, and so is v248's
   -- retired_generation, which nothing writes or reads but released chunk readers
-  -- still select (v251 keeps it and adds content_chunks_generation_idx; v255
+  -- still select (v252 keeps it and adds content_chunks_generation_idx; v256
   -- adds content_chunks_occurrence_generation_idx for chunk retirement).
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
@@ -679,7 +679,7 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   pages_updated JSONB   NOT NULL DEFAULT '[]',
   summary       TEXT    NOT NULL DEFAULT '',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- Migration v253: the writing binary's version, host and segment-reader mark (NULL from a binary older than v253).
+  -- Migration v254: the writing binary's version, host and segment-reader mark (NULL from a binary older than v254).
   writer_version TEXT,
   writer_host_id UUID,
   writer_segment_reader BOOLEAN
@@ -2011,7 +2011,7 @@ CREATE TABLE IF NOT EXISTS page_extraction_state (
 );
 CREATE INDEX IF NOT EXISTS page_extraction_state_truncated_idx
   ON page_extraction_state (pipeline, page_id) WHERE input_truncated IS NOT NULL;
--- Wave B segmented pages (migration v252): get_page view sizes and digests per
+-- Wave B segmented pages (migration v253): get_page view sizes and digests per
 -- page revision and audience (src/core/page-window/segmented.ts).
 CREATE TABLE IF NOT EXISTS page_view_digests (
   page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,

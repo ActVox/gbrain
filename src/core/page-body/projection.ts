@@ -51,7 +51,7 @@ async function readProjectionPage(engine: Pick<BrainEngine, 'executeRaw'>, ref: 
 /**
  * Chunk rows of page $1 that generation $2 (live occurrences $3) does not hold: inline rows, rows of other occurrences,
  * and older duplicates of a live occurrence (any row of it below its newest generation at or below $2). Walks the page's
- * occurrences on content_chunks_occurrence_generation_idx (v255), one index probe per occurrence plus the stale rows it
+ * occurrences on content_chunks_occurrence_generation_idx (v256), one index probe per occurrence plus the stale rows it
  * returns, so the work is the page's occurrence count and the rows it retires, never its chunk count times anything: the
  * earlier form tested each row for a newer duplicate with a per-row subquery, which scanned every newer row of the page.
  */

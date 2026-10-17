@@ -171,7 +171,7 @@ test/large-pages/segmented-timeline-retract-versions.test.ts
 test/large-pages/segmented-versions.test.ts
 test/large-pages/segmented-withdrawn-fence-delete.test.ts
 test/large-pages/streamed-import-drift.test.ts
-test/large-pages/v251-master-reader-compat.test.ts
+test/large-pages/v252-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
 test/links-attendance-blocked.test.ts
