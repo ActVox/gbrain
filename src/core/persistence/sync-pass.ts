@@ -37,11 +37,9 @@ import { probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeE
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
+import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP } from './sync-pass-row.ts';
 
-/** The deletion marker op PR 4b writes in every page-row deletion (design v3.2 §2.5); PR 4a only reads it. */
-export const SYNC_ORIGIN_DELETED_OP = 'sync-origin-deleted';
-/** The pass row PR 4b writes (design v3.2 §3.4); PR 4a only reads it, so a shadow pass is always a full round. */
-export const MANAGED_SYNC_PASS_OP = 'managed-sync-pass';
+export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
 /** Blob bytes read for adoption by hash and the screen, per blob. */
