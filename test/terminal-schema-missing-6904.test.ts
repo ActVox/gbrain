@@ -77,6 +77,14 @@ describe('#6904 a missing relation or column at publication is schema_missing', 
     expect(publicFailureDetail(row!.error_detail)).toMatchObject({ origin: 'database', reason: 'schema_missing', sqlstate: '42703' });
   });
 
+  test('a PL/pgSQL RAISE with SQLSTATE 42703 never puts its caller text into the failure', () => {
+    const failure = databaseRefusal(Object.assign(new Error('column "acme-example-codename" does not exist'), { code: '42703', routine: 'exec_stmt_raise' }));
+    expect(failure).toMatchObject({ code: 'storage_error', detail: { origin: 'database', sqlstate: '42703', reason: 'schema_missing' } });
+    expect(failure!.detail).not.toHaveProperty('missing');
+    expect(JSON.stringify(failure)).not.toContain('acme-example-codename');
+    expect(failure!.message).toContain('has no relation or column (42703)');
+  });
+
   test('at head the diagnosis is schema_missing / storage and asks the user, with the missing-tables check', () => inHome(async () => {
     await engine.setConfig('version', String(LATEST_SCHEMA_VERSION));
     const d = await diagnosis();

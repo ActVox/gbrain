@@ -41,7 +41,6 @@ import type { GBrainConfig } from '../config.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
-import { CODES } from '../error-registry.ts';
 import { GHOST_RETIREMENT_INTENT } from '../shared-skills/knowledge-guard.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
@@ -52,7 +51,7 @@ import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/pr
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } from '../sync-reconcile.ts';
 import { ghostPageNow, scanGhostSource, type GhostOwner, type GhostPage, type GhostSourceScan } from '../ghost-pages.ts';
-import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
+import { afterCursor, REPAIR_ITEM_FAILURE_CODES, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
 export const GHOST_PAGES_INTENT = GHOST_RETIREMENT_INTENT;
 /** Ghosts one preview lists; a larger set is applied in rounds (preview, apply, preview again). */
@@ -198,7 +197,7 @@ export const ghostPagesRepair: RepairHandler = {
     try {
       outcome = await retireGhost(ctx, ghost, owner, () => repairRequestId(ctx, 'ghost-pages', ghost, ghost.revision));
     } catch (error) {
-      if (!(error instanceof OperationError) || (CODES as Record<string, { class: string } | undefined>)[error.code]?.class !== 'caller') throw error;
+      if (!(error instanceof OperationError) || !GHOST_ITEM_REFUSALS.has(error.code)) throw error;
       outcome = { applied: false, outcome: 'refused', reason: error.code, detail: { message: error.message } };
     }
     if (last) await clearApprovedSet(ctx.engine, { command: 'ghost-pages', hash });
@@ -208,6 +207,9 @@ export const ghostPagesRepair: RepairHandler = {
     return [`  each removed page: soft-deleted, purged after ${details.purge_fuse_hours} h; undo per slug: ${details.undo}; guide: ${details.docs}`];
   },
 };
+
+/** Refusals about one ghost only; a run-wide refusal (migrations_pending, worktree_dirty, writer transfer) stops the run and keeps the approval. */
+const GHOST_ITEM_REFUSALS: ReadonlySet<string> = new Set([...REPAIR_ITEM_FAILURE_CODES, 'skill_bundle_required']);
 
 const restored = (ghost: GhostPage): RepairItemOutcome => ({ applied: false, outcome: 'file_restored', detail: { path: ghost.path },
   reason: `The canonical file ${ghost.path} exists again, so ${ghost.slug} was kept; run ${ghostPreviewCommand(ghost.source_id)} again for a new preview.` });

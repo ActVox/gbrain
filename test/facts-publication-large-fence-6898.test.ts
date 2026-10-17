@@ -31,6 +31,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { writeFactsToFence } from '../src/core/facts/fence-write.ts';
 import * as journal from '../src/core/persistence/journal.ts';
+import * as factsFence from '../src/core/facts-fence.ts';
 import { MANAGED_FACTS_PUBLICATION_MAX } from '../src/core/persistence/facts-maintenance.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { checkPersistenceCounterDrift } from '../src/commands/doctor/checks/persistence-compaction.ts';
@@ -136,13 +137,17 @@ function recordCounterHolds(): { holds: number[]; restore(): void } {
   return { holds, restore: () => { lock.mockRestore(); complete.mockRestore(); } };
 }
 
-test('a cap-sized publication on a 6,000-row fence costs about what a 1-fact one does', async () => {
+test('a cap-sized publication on a 6,000-row fence edits the fence once, never once per fact', async () => {
   await largeEntity(6000, async ({ write }) => {
     await write('warm', 1);
-    const one = await write('one', 1);
-    const capped = await write('cap', MANAGED_FACTS_PUBLICATION_MAX);
-    expect([one.inserted, capped.inserted]).toEqual([1, MANAGED_FACTS_PUBLICATION_MAX]);
-    expect(capped.ms).toBeLessThan(2 * one.ms);
+    const editor = spyOn(factsFence, 'factsFenceEditor');
+    const perFact = [spyOn(factsFence, 'upsertFactRow'), spyOn(factsFence, 'strikeFactRowInPage')];
+    try {
+      const capped = await write('cap', MANAGED_FACTS_PUBLICATION_MAX);
+      expect(capped.inserted).toBe(MANAGED_FACTS_PUBLICATION_MAX);
+      expect(editor).toHaveBeenCalledTimes(1);
+      expect(perFact.map(spy => spy.mock.calls.length)).toEqual([0, 0]);
+    } finally { editor.mockRestore(); for (const spy of perFact) spy.mockRestore(); }
   });
 }, 300_000);
 
@@ -198,8 +203,10 @@ test('the counter row is held for one part, and a put_page on another source com
       const atPut = (await entityRequests(engine, sourceId)).slice(2);
       expect((await group).inserted).toBe(16 * MANAGED_FACTS_PUBLICATION_MAX);
       expect(atPut.filter(r => r.state !== 'committed').length).toBeGreaterThan(0);
-      expect(probe.holds.length).toBeGreaterThan(0);
-      expect(Math.max(...probe.holds)).toBeLessThan(3 * onePart);
+      expect(onePart).toBeGreaterThan(0);
+      expect(probe.holds).toHaveLength(16);
+      const parts = (await entityRequests(engine, sourceId)).slice(2);
+      expect(parts.map(r => r.outcome.inserted)).toEqual(Array(16).fill(MANAGED_FACTS_PUBLICATION_MAX));
     } finally { probe.restore(); }
   });
 }, 600_000);

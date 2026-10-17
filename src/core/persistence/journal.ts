@@ -380,6 +380,8 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
   }
   const fresh = items.filter(item => !priors.has(item.requestId));
   if (fresh.length) {
+    const schemaRefusal = await schemaAdmissionRefusal(tx);
+    if (schemaRefusal) throw schemaRefusal;
     const bytes = fresh.reduce((sum, item) => sum + item.bytes, 0), terminalBytes = fresh.reduce((sum, item) => sum + item.terminalBytes, 0);
     for (const row of counters) {
       const brain = row.key === 'brain', scope = brain ? 'brain' : 'principal';

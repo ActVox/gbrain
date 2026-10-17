@@ -100,14 +100,15 @@ function publicationReason(sqlstate: string, raiser: string | undefined, message
 
 /**
  * #6904: a relation or column the write path needs is missing (42P01 / 42703, `schema_missing` in `pg-access-classify.ts`):
- * the brain schema is behind this build or lost a table, never a gbrain defect. Names the missing identifier from the error.
+ * the brain schema is behind this build or lost a table, never a gbrain defect. Names the missing identifier from the server's
+ * own parser error; a PL/pgSQL RAISE carries caller text, so it is never parsed (#5974 fixed identifiers).
  */
 const SCHEMA_MISSING_SQLSTATES = new Set(['42P01', '42703']);
 const MISSING_NAME = /(column|relation)\s+"?([A-Za-z_][A-Za-z0-9_.]*)"?(?:\s+of relation\s+"?([A-Za-z_][A-Za-z0-9_.]*)"?)?\s+does not exist/i;
 function schemaMissing(sqlstate: string, message: string): PublicationFailure {
   const match = MISSING_NAME.exec(message);
   const missing = match ? ident(match[3] ? `${match[3]}.${match[2]}` : match[2]) : undefined;
-  const what = match ? `${match[1]!.toLowerCase()} ${missing ?? 'unnamed'}` : 'a relation or column';
+  const what = match ? `${match[1]!.toLowerCase()} ${missing ?? 'unnamed'}` : 'relation or column';
   return { code: 'storage_error', message: `Publication failed: the database has no ${what} (${sqlstate}), which this gbrain build needs, so the brain schema is missing a migration or a table. Nothing was committed.`,
     detail: { origin: 'database', sqlstate, reason: 'schema_missing', ...(missing ? { missing } : {}) } };
 }
@@ -118,7 +119,7 @@ export function databaseRefusal(error: unknown): PublicationFailure | null {
   const e = error as Record<string, unknown>;
   const sqlstate = typeof e.code === 'string' && /^[0-9A-Z]{5}$/.test(e.code) ? e.code : null;
   if (sqlstate && SCHEMA_MISSING_SQLSTATES.has(sqlstate) && classifyPgAccessError(error).reason === 'schema_missing') {
-    return schemaMissing(sqlstate, typeof e.message === 'string' ? e.message : '');
+    return schemaMissing(sqlstate, typeof e.message === 'string' && e.routine !== 'exec_stmt_raise' ? e.message : '');
   }
   if (sqlstate !== 'P0001' && sqlstate !== GRADUATION_SQLSTATE) return null;
   const where = typeof e.where === 'string' ? e.where : '';

@@ -20,6 +20,7 @@ import { OperationError } from '../src/core/ops/contract.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
+import { submitPageBatch } from '../src/core/persistence/page-batch.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { LATEST_SCHEMA_VERSION } from '../src/core/schema-migrations/latest.generated.ts';
 import { acquireMigrationOrchestrationLock } from '../src/core/migration-orchestration-lock.ts';
@@ -93,6 +94,25 @@ describe('#6904 writes refused while the schema is behind', () => {
       await put('notes/replayed', requestId);
       expect(await requests(requestId)).toEqual(['committed']);
       expect((await refusal(() => put('notes/fresh', randomUUID()))).code).toBe('migrations_pending');
+    } finally { await atHead(); }
+  }), 60_000);
+
+  test('put_pages (group admission) refuses the same way and admits nothing; a replayed batch still reconciles', () => inHome(async () => {
+    await atHead();
+    const batch = (requestId: string, prefix: string) => submitPageBatch(ctx, { request_id: requestId,
+      pages: [{ slug: `notes/${prefix}-a`, content: page(`${prefix}-a`) }, { slug: `notes/${prefix}-b`, content: page(`${prefix}-b`) }], wait_ms: 5000 });
+    const accepted = randomUUID();
+    await batch(accepted, 'batch-accepted');
+    const before = (await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests'))[0]!.n;
+    await behind();
+    try {
+      const error = await refusal(() => batch(randomUUID(), 'batch-behind'));
+      expect(error.code).toBe('migrations_pending');
+      expect(error.reason).toBe('schema_behind');
+      expect((await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests'))[0]!.n).toBe(before);
+      expect(await live('notes/batch-behind-a')).toBe(false);
+      await batch(accepted, 'batch-accepted');
+      expect((await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests'))[0]!.n).toBe(before);
     } finally { await atHead(); }
   }), 60_000);
 

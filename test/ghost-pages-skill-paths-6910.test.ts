@@ -175,4 +175,19 @@ describe('#6910 ghost pages under the shared skillpack', () => {
     expect(await live(f.engine, 'notes/c')).toBe(false);
     expect(await live(f.engine, SKILL)).toBe(false);
   }), 120_000);
+
+  test('a run-wide caller refusal stops the apply and keeps the approval instead of marking every ghost refused', () => fixture(async f => {
+    const preview = await repair(f.engine);
+    installFaultHook(async (at, detail) => {
+      if (at !== 'consumer:preparing' || detail.operation !== 'submit_job') return;
+      throw opError('worktree_dirty', 'The canonical worktree has uncommitted changes.', 'Forced run-wide refusal.');
+    });
+    const stopped = await repair(f.engine, { apply: true, expect: preview.preview_hash }).catch((error: unknown) => error);
+    expect(JSON.stringify((stopped as { outcomes?: unknown }).outcomes ?? {})).not.toContain('refused');
+    expect(await live(f.engine, 'notes/a')).toBe(true);
+    installFaultHook(undefined);
+    const applied = await repair(f.engine, { apply: true, expect: preview.preview_hash });
+    expect(applied).toMatchObject({ outcomes: { soft_deleted: 4 } });
+    expect(await live(f.engine, 'notes/a')).toBe(false);
+  }), 120_000);
 });
