@@ -24,7 +24,12 @@
  *    races a live build of) a page stored in segments.
  * 3. Existing coverage: segmented-embedding-paths.test.ts covers an unsealed
  *    create recovered by the projection queue and `embed`.
- * 4. Runs on PGLite, and on Postgres when DATABASE_URL is set.
+ * 4. Runs on PGLite, and on Postgres when DATABASE_URL is set. Each test
+ *    starts with this process's persistence consumer stopped (stop waits for
+ *    its resident projection build): a put_page starts it again, and a
+ *    resident left running from an earlier test is a live builder that
+ *    claims a queued page (the drain then rightly skips it) and reaches the
+ *    next test's projection hook.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -69,6 +74,7 @@ for (const kind of testBackends()) {
       await withEnv({ GBRAIN_HOME: home }, async () => { await disposePersistenceConsumer(engine); await close?.(); });
     });
     beforeEach(async () => {
+      await withEnv({ GBRAIN_HOME: home }, () => disposePersistenceConsumer(engine));
       await engine.executeRaw('DELETE FROM pages');
       await engine.setConfig('pages.segmented_storage', 'on');
     });
