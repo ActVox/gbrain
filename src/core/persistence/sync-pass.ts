@@ -34,7 +34,8 @@ import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeEntry } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
-import { buildConvergenceReceipt, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
+import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
+import { readManagedMode } from './ownership.ts';
 
 /** The deletion marker op PR 4b writes in every page-row deletion (design v3.2 §2.5); PR 4a only reads it. */
 export const SYNC_ORIGIN_DELETED_OP = 'sync-origin-deleted';
@@ -220,7 +221,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const prior = byOrigin.get(key);
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
-  const domain = new Set<string>([...tree.keys(), ...untracked, ...[...byOrigin.keys()].filter(eligible), ...[...markers.keys()].map(gitPathOf).filter(eligible)]);
+  const domain = new Set<string>([...tree.keys(), ...untracked, ...(mode === 'working' ? [...index.keys()].filter(eligible) : []), ...[...byOrigin.keys()].filter(eligible), ...[...markers.keys()].map(gitPathOf).filter(eligible)]);
   const spellings = new Map<string, Set<string>>();
   for (const path of domain) {
     const live = byOrigin.get(path);
@@ -387,4 +388,33 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
     requestNewer: newer.length > 0, openAtStampFinished: pending.length > 0 && !input.assumeConverged, workingChange: false, rescreenDueHold: false, full: false });
   timings.total = total();
   return { idle: kind.kind === 'idle', reasons: kind.blockers, timings_ms: timings, rows: newer.length + pending.length + (row ? 1 : 0) };
+}
+
+/**
+ * `gbrain sync --dry-run --json`'s `convergence` for one source: the receipt with the read-only screen, undefined
+ * on a brain that is not managed or for a company-brain source; a read that cannot run reports why instead of failing
+ * the dry run.
+ */
+export async function dryRunConvergence(engine: BrainEngine, input: { sourceId: string; full: boolean; workingTree?: boolean; redactPaths: boolean;
+  noEmbed: boolean; noExtract: boolean; noSchemaPack: boolean }): Promise<ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | undefined> {
+  if (!await readManagedMode(engine)) return undefined;
+  try {
+    const context = await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
+    return await shadowConvergence(engine, { sourceId: input.sourceId, full: input.full, workingTree: input.workingTree, redactPaths: input.redactPaths, context,
+      screen: readOnlySameContentScreen(engine, context, { noEmbed: input.noEmbed, noExtract: input.noExtract, noSchemaPack: input.noSchemaPack }) }) ?? undefined;
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    return { dry_run: true, status: 'unavailable', code: typeof code === 'string' ? code : 'convergence_read_failed', message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** \`sync status --detail\`'s \`convergence\`: the receipt without the screen (status never prepares an import). */
+export async function statusConvergence(engine: BrainEngine, sourceId: string): Promise<ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | null> {
+  if (!await readManagedMode(engine)) return null;
+  try {
+    return await shadowConvergence(engine, { sourceId, screen: false });
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    return { dry_run: true, status: 'unavailable', code: typeof code === 'string' ? code : 'convergence_read_failed', message: error instanceof Error ? error.message : String(error) };
+  }
 }

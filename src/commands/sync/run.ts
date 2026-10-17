@@ -789,7 +789,7 @@ async function runSingleSourceSync(
 ): Promise<void> {
   const {
     repoPath, watch, interval, dryRun, full, noPull, noBulk, lanes, noExtract, skipFailed, retryFailed, resetCheckpoint, noSchemaPack,
-    includeGitignored, workingTree, jsonOut, yesFlag, noAutoEmbed, strategyArg, srcSubpath,
+    includeGitignored, workingTree, jsonOut, redactPaths, yesFlag, noAutoEmbed, strategyArg, srcSubpath,
     excludePatterns, includeHiddenPatterns, concurrency, timeoutSeconds,
   } = flags;
   const { sourceId, companyPolicy, noEmbed, resumeCommand, args } = input;
@@ -962,8 +962,12 @@ async function runSingleSourceSync(
       }
     }
     const capacity = await syncCapacityNotices(engine, jsonOut, result);
+    // #6712 PR 4a: a managed dry run also reports the read-only convergence shadow (sync-convergence.ts).
+    const convergence = jsonOut && result.status === 'dry_run' && !companyPolicy
+      ? await (await import('../../core/persistence/sync-pass.ts')).dryRunConvergence(engine, { sourceId, full: !!full, workingTree, redactPaths: !!redactPaths, noEmbed, noExtract: !!noExtract, noSchemaPack: !!noSchemaPack })
+      : undefined;
     if (jsonOut) {
-      emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate),
+      emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate), ...(convergence ? { convergence } : {}),
         ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId),
         ...(result.tail ? { tail: syncTailJsonFields(result).tail } : {}), ...capacity }));
     }
