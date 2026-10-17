@@ -74,8 +74,15 @@ export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot
   /** #6729: inexact Git renames split into a delete plus an add (origin form); recorded after the run commits. */
   identityDowngrades?: DowngradedRename[]; }
 /** #5032: the per-file refusal text for a Windows-unstorable ':' path, by the side sync skipped. */
-const COLON_REFUSAL_MESSAGES = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
-  delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.` };
+export const COLON_REFUSAL_MESSAGES = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+  delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.`,
+  rename: (path: string, from: string, to: string) => `${path} is one side of the rename ${from} -> ${to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.` };
+/** #5032: the named refusal of one Windows-unstorable ':' path (discovery and the pass, sync-pass.ts). */
+export function colonFileRefusal(sourceId: string, path: string, message: string): SyncFileRefusal {
+  return { path, code: 'colon_slug_windows_write_through', message,
+    suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
+    docs: ERROR_CATALOGUE.colon_slug_windows_write_through.docs };
+}
 export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   source: { last_commit: string | null; config: Record<string, unknown> }; }
 /** The persisted `sync.exclude` globs (plus a run's `--exclude`), as discovery matches them against a path relative to the source root. */
@@ -330,9 +337,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // keeps its identity until the change is synced from macOS or Linux.
   const refused = new Map<string, SyncFileRefusal>();
   const record = (path: string, message: string) => {
-    if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through', message,
-      suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
-      docs: ERROR_CATALOGUE.colon_slug_windows_write_through.docs });
+    if (eligible(path)) refused.set(path, colonFileRefusal(sourceId, path, message));
   };
   const refuse = (path: string, action: SyncEntry['action'] = 'import') => {
     if (!isWindowsColonTarget(path)) return false;
@@ -349,7 +354,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const putRename = (rename: SyncManifest['renamed'][number], working = false) => {
     if (isWindowsColonTarget(rename.from) || isWindowsColonTarget(rename.to)) {
       for (const path of [rename.from, rename.to]) {
-        record(path, `${path} is one side of the rename ${rename.from} -> ${rename.to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.`);
+        record(path, COLON_REFUSAL_MESSAGES.rename(path, rename.from, rename.to));
       }
       return;
     }
@@ -624,7 +629,7 @@ function identityDowngradesOf(manifests: Array<SyncManifest | null>, eligible: (
  * so it must not when both carry an explicit frontmatter id and the ids differ: they are two different documents that
  * happen to map to one slug. The sync is refused before any write, naming both.
  */
-function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
+export function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, holder: { slug: string; fm_id: string | null }): void {
   const incoming = holder.fm_id ? incomingId(discovery, winner) : null;
   if (!explicitIdVeto(incoming, holder.fm_id)) return;
   throw opError('page_identity_changed', 'A file would take over a page whose frontmatter id differs from its own.',
@@ -633,11 +638,11 @@ function assertTakeoverIdentity(discovery: SyncDiscovery, winner: SyncEntry, hol
     { detail: 'rename_identity_conflict' });
 }
 /** #6729: the frontmatter id of the file an entry imports (null when it has none or cannot be read). */
-function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string | null {
+export function incomingId(discovery: SyncDiscovery, entry: SyncEntry): string | null {
   try { return frontmatterIdentity(readSyncContent(discovery, entry)).id; } catch { return null; }
 }
 /** #6517: several live pages (the soft-delete exit is named) or several tombstones record one imported origin. */
-function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {
+export function ambiguousOriginRefusal(sourceId: string, sourcePath: string, named: Array<{ slug: string }>, ambiguous: 'several_live' | 'several_tombstones'): OperationError {
   return opError('page_identity_changed', 'Several pages claim the same imported origin.',
     `Pages ${named.map(page => page.slug).join(', ')} in ${sourceId} all record ${sourcePath} as their origin; nothing was written. `
     + (ambiguous === 'several_live' ? `${sharedOriginExit(sourceId, named.map(page => page.slug))} Then` : 'Keep one, remove or re-point the others, then') + ` run gbrain sync --no-pull --source ${sourceId}.`,

@@ -28,7 +28,7 @@ export interface SyncPathState {
   tree: string | null;
   /** `L(p)`: committed mode `T[p]`; working mode the physical bytes' blob id (CRLF-folded / LFS-resolved to `T[p]` when clean); null = absent. */
   level: string | null;
-  /** `workingTreeFilePresent`. */
+  /** `workingTreeFilePresent`; committed mode, `L = absent`: false for a page whose import provenance is the Git blob (`keptWorkingTreePages`). */
   present: boolean;
   /** Committed mode, `p ∈ T`: the candidate dirtiness; null when the pass did not probe it (only paths settled without it). */
   dirty: SyncDirtiness | null;
@@ -53,8 +53,11 @@ export interface SyncPathState {
   marker: { kind: 'deleted' | 'legacy'; blobOids: readonly string[]; deletion?: string | null } | null;
   /** `T[p]` at the pass row's `baseline_commit` (null: absent there, or no baseline). */
   baseline: string | null;
-  /** Another live origin differs from `p` only by case or separator. */
-  spelling: boolean;
+  /**
+   * Another live origin differs from `p` only by case or separator. `legacy`: a page-less spelling unchanged since the baseline
+   * that no other claim refuses; master's discovery never claimed it (#6865), so it settles and stays reported for a person.
+   */
+  spelling: boolean | 'legacy';
   /** An open full episode has not re-imported this page yet. */
   episodeUnsatisfied: boolean;
   /** `--full` or an open episode: every path, page-less ones included, owes a re-import (v3.1 §2.7). */
@@ -132,7 +135,7 @@ function afterHold(s: SyncPathState): Matched {
   const dbSame = !!s.page && !!s.record && s.record.revision !== null && s.record.revision === s.page.revision;
   const proof = dbSame || s.attested !== null;
   const obligation = !s.record?.parserSame || !s.page?.originMatches || s.episodeUnsatisfied;
-  if (s.spelling) return { cls: 'spelling', settled: false, action: 'refuse' };
+  if (s.spelling) return { cls: 'spelling', settled: s.spelling === 'legacy', action: s.spelling === 'legacy' ? 'none' : 'refuse' };
   if (s.mode === 'committed' && s.tree === null && !live) return { cls: 'untracked', settled: true, action: 'none' };
   if (live && s.level === null) {
     if (s.mode === 'committed' && s.present) return { cls: 'kept', settled: true, action: 'none' };

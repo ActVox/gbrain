@@ -28,11 +28,13 @@ import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../company-brain/profile.ts';
 import { sha256 } from './digest.ts';
 import { sourceMirrorReadOnly } from './mirror-read-only.ts';
-import { readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGit, type ManagedSyncContext } from './sync-discovery.ts';
+import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGit, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
+import { isWindowsColonTarget } from './native-file-target.ts';
+import { confirmedSyncDelta } from '../sync-rename-identity.ts';
 import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParserFor,
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
-import { syncOriginPath } from './sync-origin.ts';
+import { sameSyncOrigin, selectOriginClaimant, syncOriginPath } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, workingChanged, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
@@ -70,7 +72,9 @@ const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
 /** One classified path of the shadow level. */
 export interface ShadowPath { path: string; slug: string | null; pageId: number | null; revision: string | null; state: SyncPathState; result: SyncClassified;
   /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
-  legacyPageless?: true }
+  legacyPageless?: true;
+  /** #6517 (`selectOriginClaimant`): several live pages, or no live page and several tombstones, record this origin. */
+  ambiguousOrigin?: { kind: 'several_live' | 'several_tombstones'; slugs: string[] } }
 
 export interface ShadowLevel {
   sourceId: string; incarnation: string; root: string; gitRoot: string; scope: string; slugMode: 'git-root' | 'source-root';
@@ -90,13 +94,15 @@ export interface ShadowLevel {
   workingCache: WorkingStatCache | null;
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
   reconcilable: number;
+  /** #5032: Windows-unstorable ':' paths this level left out, each with its named refusal (`SyncResult.fileRefusals`). */
+  fileRefusals?: SyncFileRefusal[];
   timings_ms: Record<string, number>;
   statements: number;
 }
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
 interface PageRow { id: number | string; slug: string; source_path: string; revision: string; deleted: boolean; request_id: string | null;
-  record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
+  record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser' | 'working'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
 
 const recordOids = (record: PageRow['record']): string[] =>
   record ? [record.blob_oid, record.disk_blob_oid].filter((oid): oid is string => typeof oid === 'string' && oid.length > 0) : [];
@@ -126,16 +132,16 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
       p.revision_write_request_id::text AS request_id,
       c.completed_keys IS NOT NULL AS has_record, c.completed_keys->0->>'origin' AS rec_origin, c.completed_keys->0->>'blob_oid' AS rec_blob_oid,
       c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser,
-      c.completed_keys->0->>'full_episode' AS rec_full_episode
+      c.completed_keys->0->>'full_episode' AS rec_full_episode, (c.completed_keys->0->'working')::text AS rec_working
     FROM pages p LEFT JOIN op_checkpoints c ON c.op=$2 AND c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin: string | null; rec_blob_oid: string | null;
-    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null; rec_full_episode: string | null };
+    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null; rec_full_episode: string | null; rec_working: string | null };
   const rows: PageRow[] = [];
-  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, rec_full_episode, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
+  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, rec_full_episode, rec_working, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
     record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined,
-      full_episode: rec_full_episode } : null }); };
+      full_episode: rec_full_episode, ...(rec_working === 'true' || rec_working === 'false' ? { working: rec_working === 'true' } : {}) } : null }); };
   if (kind === 'postgres') { take(await exec.executeRaw<Raw>(select, params)); return { rows, statements: 1 }; }
   let after = 0, statements = 0;
   for (;;) {
@@ -149,7 +155,8 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
 
 /**
  * `A` for the given pages: whether the page's current revision came from a committed sync write of this incarnation (arm 1)
- * and the hash its Git effect expects. A committed request and its effect never change, so this reads by the request id
+ * and the hash its Git effect expects, or (a managed file import of the canonical file itself, `inputHash = targetHash`) the
+ * hash of the file bytes it imported: either way the revision is file-backed. A committed request and its effect never change, so this reads by the request id
  * the snapshot returned, after the level is known; the answer is the one the snapshot would have given.
  */
 async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string, rows: PageRow[]): Promise<number> {
@@ -161,8 +168,9 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
     statements++;
     const found = await exec.executeRaw<{ page_id: number; arm1: boolean; attested_hash: string | null }>(`SELECT x.page_id,
         (r.intent->>'kind' = ANY($3::text[]) AND r.source_incarnation::text=$2 AND (r.page_id IS NULL OR r.page_id=x.page_id)) AS arm1,
-        (SELECT e.data->>'expected_hash' FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.revision=x.revision
-          AND e.data->>'expected_hash' IS NOT NULL AND (e.data->>'relative_path'=x.source_path OR right(e.data->>'relative_path', length(x.source_path)+1)='/'||x.source_path) LIMIT 1) AS attested_hash
+        COALESCE((SELECT e.data->>'expected_hash' FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.revision=x.revision
+          AND e.data->>'expected_hash' IS NOT NULL AND (e.data->>'relative_path'=x.source_path OR right(e.data->>'relative_path', length(x.source_path)+1)='/'||x.source_path) LIMIT 1),
+          CASE WHEN r.intent->>'kind'='managed_file_import' AND r.intent->>'sourcePath'=x.source_path AND r.intent->>'inputHash'=r.intent->>'targetHash' THEN r.intent->>'targetHash' END) AS attested_hash
       FROM unnest($4::int[], $5::uuid[], $6::uuid[], $7::text[]) AS x(page_id, request_id, revision, source_path)
       JOIN persistence_requests r ON r.id=x.request_id AND r.state='committed' AND r.source_id=$1`,
       [sourceId, incarnation, SYNC_WRITE_KINDS, chunk.map(row => Number(row.id)), chunk.map(row => row.request_id), chunk.map(row => row.revision), chunk.map(row => row.source_path)]);
@@ -183,8 +191,8 @@ async function readOpenWork(exec: Exec, sourceId: string, incarnation: string, w
     WHERE r.worktree_id=$1 AND r.source_id=$2 AND e.kind='git' AND e.state IN ('queued','running')`, [worktreeId, sourceId])]);
   const pageIds = new Set<number>(), origins = new Set<string>();
   for (const row of [...requests, ...effects]) if (row.page_id != null) pageIds.add(Number(row.page_id));
-  for (const row of requests) for (const origin of [row.source_path, row.path]) if (origin) origins.add(syncOriginPath(origin));
-  for (const row of effects) if (row.path) origins.add(syncOriginPath(row.path));
+  for (const row of requests) for (const origin of [row.source_path, row.path]) if (origin && !isWindowsColonTarget(origin)) origins.add(syncOriginPath(origin));
+  for (const row of effects) if (row.path && !isWindowsColonTarget(row.path)) origins.add(syncOriginPath(row.path));
   return { pageIds, origins, statements: 2 };
 }
 
@@ -195,7 +203,7 @@ async function readMarkers(exec: Exec, sourceId: string, incarnation: string): P
   const rows = await exec.executeRaw<{ fingerprint: string; value: { kind?: string; blob_oids?: unknown; deletion?: unknown } | null }>(
     'SELECT fingerprint, completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND starts_with(fingerprint, $2)',
     [SYNC_ORIGIN_DELETED_OP, prefix]);
-  return new Map(rows.map(row => [syncOriginPath(row.fingerprint.slice(prefix.length)), {
+  return new Map(rows.filter(row => !isWindowsColonTarget(row.fingerprint.slice(prefix.length))).map(row => [syncOriginPath(row.fingerprint.slice(prefix.length)), {
     kind: row.value?.kind === 'legacy' ? 'legacy' as const : 'deleted' as const,
     blobOids: Array.isArray(row.value?.blob_oids) ? (row.value!.blob_oids as unknown[]).filter((oid): oid is string => typeof oid === 'string') : [],
     deletion: typeof row.value?.deletion === 'string' ? row.value.deletion : null }]));
@@ -286,11 +294,23 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   // Pure per path and asked several times per path in a round, so each is computed once.
   const memo = <T>(fn: (path: string) => T) => { const seen = new Map<string, T>(); return (path: string): T => { let value = seen.get(path); if (value === undefined && !seen.has(path)) seen.set(path, value = fn(path)); return value as T; }; };
-  const eligible = memo((gitPath: string) => (!scope || gitPath.startsWith(`${scope}/`)) && !matchesAnyGlob(sourceRelative(gitPath), exclude)
+  const selected = memo((gitPath: string) => (!scope || gitPath.startsWith(`${scope}/`)) && !matchesAnyGlob(sourceRelative(gitPath), exclude)
     && !isReservedSkillBundlePath(slugMode === 'source-root' ? sourceRelative(gitPath) : gitPath) && isSyncable(gitPath, { strategy: strategy as 'markdown', includeHidden }));
+  // #5032: a Windows-unstorable ':' path, and the other side of a rename touching one, take no part in the level.
+  let colonRefused = new Set<string>();
+  const eligible = (gitPath: string) => selected(gitPath) && !isWindowsColonTarget(gitPath) && !colonRefused.has(gitPath);
   const originPath = memo((path: string) => syncOriginPath(path));
   const originOf = memo((gitPath: string) => originPath(slugMode === 'source-root' && scope ? sourceRelative(gitPath) : gitPath));
   const gitPathOf = memo((origin: string) => { const o = originPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; });
+  // #5610: a source-root page whose stored origin is the legacy Git-root spelling (`<scope>/<origin>`) names `<origin>`, by
+  // the one rule discovery and preparation use (sameSyncOrigin; it refuses an origin that could name two files).
+  const originScope = { sourceId, root, scope, slugMode };
+  const pageOrigin = (row: Pick<PageRow, 'slug' | 'source_path'>): string => {
+    const recorded = originPath(row.source_path);
+    if (slugMode !== 'source-root' || !scope || !recorded.startsWith(`${scope}/`)) return recorded;
+    const stripped = recorded.slice(scope.length + 1);
+    return sameSyncOrigin(recorded, stripped, originScope, row.slug) ? stripped : recorded;
+  };
 
   t = timer();
   const head = revParse(gitRoot, 'HEAD');
@@ -325,6 +345,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   ]);
   timings.reads = t();
   const [treeAll, index, untrackedPaths] = gitLevel;
+  const colon = await windowsColonRefusals(engine, { sourceId, gitRoot, from: context.source.last_commit, head, tree: treeAll, pages: snapshot.pages, selected,
+    gitPathOf: origin => slugMode === 'source-root' && scope ? `${scope}/${origin}` : origin, sourcePathOf: gitPath => (slugMode === 'source-root' ? sourceRelative(gitPath) : gitPath) });
+  colonRefused = colon.paths;
   const tree = new Map<string, GitTreeEntry>([...treeAll].filter(([path]) => eligible(path)));
   const untracked = new Set(untrackedPaths);
   const { pages, open, markers, passRow, statements } = snapshot;
@@ -335,9 +358,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
 
   // The page claiming each origin: the live one first, else the newest tombstone.
   t = timer();
-  const byOrigin = new Map<string, PageRow>();
+  const byOrigin = new Map<string, PageRow>(), claimants = new Map<string, PageRow[]>();
   for (const row of pages) {
-    const key = gitPathOf(row.source_path);
+    if (isWindowsColonTarget(row.source_path)) continue;
+    const key = gitPathOf(pageOrigin(row));
+    claimants.set(key, [...claimants.get(key) ?? [], row]);
     const prior = byOrigin.get(key);
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
@@ -354,13 +379,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     spellings.set(folded, [...spellings.get(folded) ?? [], path]);
   }
   // As discovery does, only spellings that name one page are twins: a live origin's page slug, else the slug its path names.
-  const twins = new Set<string>();
+  const twins = new Set<string>(), twinGroups: string[][] = [];
   for (const paths of spellings.values()) {
     if (paths.length < 2) continue;
     const slugOf = (path: string) => { const live = byOrigin.get(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
     const bySlug = new Map<string, string[]>();
     for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
-    for (const group of bySlug.values()) if (group.length > 1) for (const path of group) twins.add(path);
+    for (const group of bySlug.values()) if (group.length > 1) { twinGroups.push(group); for (const path of group) twins.add(path); }
   }
   const reconcilable = [...byOrigin.entries()].filter(([path, row]) => !row.deleted && eligible(path)).length;
   timings.domain = t();
@@ -397,6 +422,21 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (baselineTree === undefined) { const bt = timer(); baselineTree = await readTreeLevel(gitRoot, baselineCommit, scope).catch(() => null); timings.baseline = bt(); }
     return baselineTree?.get(path)?.oid ?? null;
   };
+  // Master refuses a spelling only among the files its sync claims (sync-discovery.ts:538-541): the live page's origin and the
+  // page-less spellings that changed since the cursor. A page-less spelling unchanged since the baseline was never claimed
+  // (#6865), so unless the claimed spellings still collide it settles as `legacy` and the others classify on their own.
+  const legacySpelling = new Set<string>();
+  for (const group of twinGroups) {
+    const unchanged: string[] = [];
+    for (const path of group) {
+      const live = byOrigin.get(path);
+      const level = levelOf(path, probes.get(path));
+      if (!(live && !live.deleted) && level !== null && level === await baselineOf(path)) unchanged.push(path);
+    }
+    if (group.length - unchanged.length > 1) continue;
+    for (const path of group) twins.delete(path);
+    for (const path of unchanged) legacySpelling.add(path);
+  }
 
   const fp = (path: string) => syncImportParserFor(sourceRelative(path), pack?.identity ?? null);
   const stateOf = async (path: string, dirty: SyncPathState['dirty'], probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): Promise<{ state: SyncPathState; row?: PageRow; legacyPageless?: true }> => {
@@ -404,8 +444,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const row = byOrigin.get(path);
     const level = levelOf(path, probe);
     // Presence decides only rows 4-6 (a level of absent); a committed path in T is not read here (Dp covers it).
-    const presentNow = mode === 'working' ? level !== null : level === null ? readPresent(root, path, scope) : true;
     const record = row?.record ?? null;
+    // #5459 (`keptWorkingTreePages`): a page whose import provenance is the pinned Git blob follows Git, so a lingering
+    // untracked copy of its file does not keep it.
+    const fromGit = record?.working === false || (record?.working === undefined && !!record?.blob_oid);
+    const presentNow = mode === 'working' ? level !== null : level === null ? !fromGit && readPresent(root, path, scope) : true;
     const recordBlobOids = recordOids(record);
     const attested = row && (row.arm1 || row.attested_hash) ? { hash: row.attested_hash ?? null, arm1: row.arm1 === true } : null;
     const hold = holdByGitPath.get(path);
@@ -416,13 +459,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const needsBaseline = row && !row.deleted && (record?.revision == null) && level !== null && !recordBlobOids.includes(level);
     const state: SyncPathState = {
       mode, tree: committed?.oid ?? null, level, present: presentNow, dirty, diskOid: probe?.rawOid ?? null,
-      page: row ? { live: !row.deleted, revision: row.revision, originMatches: !!record && originPath(record.origin) === originPath(row.source_path) } : null,
+      page: row ? { live: !row.deleted, revision: row.revision, originMatches: !!record && originPath(record.origin) === pageOrigin(row) } : null,
       record: record ? { blobOids: recordBlobOids, revision: record.revision != null ? String(record.revision) : null, parserSame: sameParser(record.parser, fp(path)) } : null,
       attested, levelSha256: probe?.rawSha256 ?? null,
       published: !!attested?.hash && probe?.rawSha256 === attested.hash,
       hold: hold ? { atLevel: holdAtLevel(hold, level, probe?.rawSha256 ?? null) && !moved.has(path), rescreenDue: holdRescreenDue(hold, retry.has(hold.path)), retried: retry.has(hold.path) } : null,
       marker: marker ?? virtualMarker, baseline: needsBaseline ? await baselineOf(path) : null,
-      spelling: twins.has(path),
+      spelling: legacySpelling.has(path) ? 'legacy' : twins.has(path),
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && !!row && !row.deleted && record?.full_episode !== input.pass.episodeFullId
         : input.full === true && !!row && !row.deleted,
       fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
@@ -461,7 +504,10 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     // Rows 1-10 precede row 11 and `matched` settles either way, so only the rest are Dp candidates (design v3.2 §2.1).
     const staged = mode === 'committed' && tree.has(path) && (index.get(path)?.oid !== tree.get(path)!.oid || (index.get(path)?.stage ?? 0) !== 0);
     if (mode === 'committed' && tree.has(path) && (!settledBeforeDirtiness.has(result.cls) || staged)) candidates.push(path);
-    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}) });
+    const claimed = claimants.get(path) ?? [];
+    const { ambiguous } = claimed.length > 1 ? selectOriginClaimant(claimed.map(page => ({ ...page, deleted_at: page.deleted ? true : null }))) : { ambiguous: null };
+    const ambiguousOrigin = ambiguous ? { kind: ambiguous, slugs: claimed.filter(page => ambiguous === 'several_tombstones' || !page.deleted).map(page => page.slug) } : undefined;
+    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}), ...(ambiguousOrigin ? { ambiguousOrigin } : {}) });
   }
   timings.classify = t();
   if (candidates.length) {
@@ -501,9 +547,32 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
-    paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
+    paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
+}
+
+/**
+ * #5032, as discovery refuses them: on Windows a ':' path has no file. Each selected one gets a named refusal and leaves
+ * the level: a file at the target is skipped, a live page whose file left keeps its page, and a Git rename (last_commit to
+ * HEAD) touching one is refused on both sides, so the page keeps its identity until the change syncs from macOS or Linux.
+ * Off Windows, or with no ':' path, nothing is read.
+ */
+async function windowsColonRefusals(engine: BrainEngine, input: { sourceId: string; gitRoot: string; from: string | null; head: string; tree: Map<string, GitTreeEntry>;
+  pages: PageRow[]; selected: (gitPath: string) => boolean; gitPathOf: (origin: string) => string; sourcePathOf: (gitPath: string) => string }): Promise<{ refusals: Map<string, SyncFileRefusal>; paths: Set<string> }> {
+  const refusals = new Map<string, SyncFileRefusal>(), paths = new Set<string>();
+  const colonTree = [...input.tree.keys()].filter(path => isWindowsColonTarget(path));
+  const colonPages = input.pages.filter(row => !row.deleted && isWindowsColonTarget(row.source_path)).map(row => input.gitPathOf(row.source_path.replaceAll('\\', '/')));
+  if (!colonTree.length && !colonPages.length) return { refusals, paths };
+  const refuse = (path: string, message: string) => { paths.add(path); if (input.selected(path)) refusals.set(path, colonFileRefusal(input.sourceId, path, message)); };
+  const delta = input.from && input.from !== input.head ? await confirmedSyncDelta(engine, input.gitRoot, input.from, input.head, { sourceId: input.sourceId, sourcePathOf: input.sourcePathOf }) : null;
+  for (const rename of delta?.status === 'ok' ? delta.manifest.renamed : []) {
+    if (!isWindowsColonTarget(rename.from) && !isWindowsColonTarget(rename.to)) continue;
+    for (const path of [rename.from, rename.to]) refuse(path, COLON_REFUSAL_MESSAGES.rename(path, rename.from, rename.to));
+  }
+  for (const path of colonTree) if (!paths.has(path)) refuse(path, COLON_REFUSAL_MESSAGES.import(path));
+  for (const path of colonPages) if (!paths.has(path)) refuse(path, COLON_REFUSAL_MESSAGES.delete(path));
+  return { refusals, paths };
 }
 
 /** `workingTreeFilePresent` (sync-discovery.ts) for a Git-root path: a file that exists, or one that cannot be read (fail closed). */
