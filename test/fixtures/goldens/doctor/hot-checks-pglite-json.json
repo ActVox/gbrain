@@ -3188,6 +3188,20 @@
             "status": "ok"
           },
           {
+            "category": "brain",
+            "details": {
+              "count": 0,
+              "docs": "docs/guides/repair.md#overwritten-edits",
+              "sources": [],
+              "truncated": false,
+              "unknown": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No page shows a database edit that a sync import overwrote.",
+            "name": "sync_overwritten_db_edits",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "details": {
               "rollback": [],
@@ -7312,6 +7326,20 @@
             "name": "unindexed_files",
             "readiness_state": "unknown",
             "severity": "info",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "count": 0,
+              "docs": "docs/guides/repair.md#overwritten-edits",
+              "sources": [],
+              "truncated": false,
+              "unknown": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No page shows a database edit that a sync import overwrote.",
+            "name": "sync_overwritten_db_edits",
             "status": "ok"
           },
           {
