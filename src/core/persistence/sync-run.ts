@@ -145,7 +145,7 @@ export interface Cursor extends SyncDiscovery { runId: string; index: number; au
    * the pass's stamp (no entries; its checkpoint publishes the stamp). `fullEpisode`: the open `--full` episode its imports
    * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint).
    */
-  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; }
+  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[]; }
 export interface CursorProgress { startedAt: number; startIndex: number; lastAt: number; lastIndex: number }
 /**
  * #6278 (1.5): the breaker state a run carries in its cursor. `stalled` lists the `preparation_stalled` receipts this run
@@ -569,7 +569,7 @@ const preparationStalled = (row: Pick<WriteRequest, 'state' | 'error_code'>) => 
 /** The run's page requests, as `persistence_requests_sync_run_open` indexes them. */
 const SYNC_PAGE_KINDS_SQL = "intent->>'kind' IN ('managed_sync_import','managed_sync_delete')";
 /** The `gbrain sync` arguments a hold or receipt prints to resume this cursor with its own options. */
-const resumeArgsOf = (cursor: Cursor, run: { syncOptions: SyncCursorOptions; repoPath?: string }) =>
+const resumeArgsOf = (cursor: Cursor, run: { syncOptions: SyncCursorOptions; repoPath?: string }) => cursor.resumeArgs ??
   managedSyncResumeArgs({ sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? run.syncOptions, repoPath: run.repoPath });
 
 /**

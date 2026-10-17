@@ -39,6 +39,7 @@ import { principalAttribution } from './attribution.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
+import { passResumeArgs } from './sync-pass-readers.ts';
 
 /** Rounds a pass runs before it stops `not_converged` (design §3.1). */
 export const PASS_MAX_ROUNDS = 4;
@@ -300,7 +301,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const batchCursor = (entries: PassEntry[], stamp?: PassStamp): Cursor => ({ binding: { ...context.binding, owner_epoch: String(context.binding.owner_epoch), topology_generation: String(context.binding.topology_generation) },
     root: context.root, gitRoot: context.gitRoot, sourceId, incarnation, from: context.source.last_commit, target: head, entries, slugMode: levelSlugMode, discoveredAt: startedAt,
     runId: passId, passId, index: 0, authority, processingOptions, syncOptions: input.syncOptions, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 },
-    failureKey: passFingerprint(sourceId, incarnation), ...(episode?.full_id ? { fullEpisode: episode.full_id } : {}), ...(stamp ? { stamp } : {}) });
+    failureKey: passFingerprint(sourceId, incarnation), resumeArgs: passResumeArgs(sourceId, { value, updated_at: startedAt }), ...(episode?.full_id ? { fullEpisode: episode.full_id } : {}), ...(stamp ? { stamp } : {}) });
   let levelSlugMode: Cursor['slugMode'] = 'git-root';
   /** Drains one batch; a stop is the pass's ending (the batch's counts are folded in either way). */
   const drain = async (entries: PassEntry[], stamp?: PassStamp): Promise<SyncResult | null> => {
