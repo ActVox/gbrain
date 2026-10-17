@@ -15,7 +15,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
-import { managedModeFromRows } from '../persistence/managed-mode.ts';
+import { MANAGED_MODE_ROWS_JSON_SQL, managedModeFromRows } from '../persistence/managed-mode.ts';
 import { COVERAGE_KEY, heldKey, lifetimeRef, pageKey, sha256Hex, canonicalJson, factKeySubject, slugRef } from './keys.ts';
 import { readBeliefState, readFactsById, type RawPage, type RawState } from './state.ts';
 import { keyedSubjects, keyFact, pageNeeds, type KeyContext, type Subject } from './subjects.ts';
@@ -91,8 +91,7 @@ export const insideBeliefBatch = (): boolean => !!store.getStore();
  */
 export async function readLedgerSource(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string, opts: { batch?: boolean } = {}): Promise<{ incarnation: string; purgeEpoch: number;
   coverage: string | null; purgesPossible: boolean; managedRows?: Array<{ enabled: unknown }>; planModePrev?: string } | null> {
-  const [row] = await tx.executeRaw<Record<string, unknown>>(`${opts.batch ? `SELECT q.*, (SELECT COALESCE(json_agg(json_build_object('enabled', b.enabled)), '[]'::json)
-      FROM persistence_brain b WHERE b.singleton = 1) AS managed_rows, current_setting('plan_cache_mode') AS plan_mode_prev,
+  const [row] = await tx.executeRaw<Record<string, unknown>>(`${opts.batch ? `SELECT q.*, ${MANAGED_MODE_ROWS_JSON_SQL} AS managed_rows, current_setting('plan_cache_mode') AS plan_mode_prev,
       set_config('plan_cache_mode', CASE WHEN q.coverage IS NOT NULL AND q.coverage <> 'coverage.stopped' THEN 'force_generic_plan'
         ELSE current_setting('plan_cache_mode') END, true) FROM (` : ''}SELECT s.incarnation::text AS incarnation, s.purge_epoch,
       (SELECT e.event_type FROM belief_events e WHERE e.source_id = s.id AND e.subject_kind = 'coverage' AND e.subject_key = $2
