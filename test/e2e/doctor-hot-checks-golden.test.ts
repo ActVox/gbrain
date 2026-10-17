@@ -80,7 +80,8 @@ async function capture(adminUrl: string): Promise<PgCaptures> {
   const stamped = await db.unsafe(`SELECT DISTINCT completed_keys->0->>'day' AS day FROM op_checkpoints WHERE op = $1`, [FENCE_TREND_OP]).finally(() => db.end());
   expect(stamped.length).toBe(1);
   const day = stamped[0]!.day as string;
-  for (const run of [first, second]) run.json = stampSyncDay(run.json, day, syncDays);
+  const runEnd = new Date().toISOString().slice(0, 10);
+  for (const run of [first, second]) run.json = stampSyncDay(run.json, day, syncDays, runEnd);
   return { first, second, url, name };
 }
 

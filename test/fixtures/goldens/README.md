@@ -121,7 +121,9 @@ reproduce byte for byte. Each file is written by `test/helpers/golden.ts` as
   `test/helpers/fixed-clock-preload.ts`); Postgres, whose server stamps its own times,
   stores `fence_integrity.details.trend[].by_day[].day` as `<sync-day>` only after
   `stampSyncDay` checks it equals the day the fixture's sync stamped (one of the days
-  read around the sync). Regenerating writes the marker again.
+  read around the sync). The soak counters' `sync_soak_counters.details.by_day[].day`
+  is stored the same way, after checking it falls between the day before the sync and
+  the day read after the last doctor run. Regenerating writes the marker again.
 
 ## Setup migration ledger
 
