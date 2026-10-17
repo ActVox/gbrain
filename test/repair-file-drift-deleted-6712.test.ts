@@ -111,6 +111,7 @@ for (const backend of testBackends()) describe(`#6712 wave: deleted-file repair 
     const preview = await run(sourceId, { slugs: ['notes/keep'], prefer: 'database' });
     expect(preview).toMatchObject({ mode: 'dry_run', affected: 1 });
     expect(preview.details!.pages).toEqual([expect.objectContaining({ slug: 'notes/keep', action: 'recreate_file' })]);
+    expect(preview.warnings).toEqual([expect.stringContaining('Git durability is off')]);
     expect(existsSync(file)).toBe(false);
 
     const applied = await run(sourceId, { slugs: ['notes/keep'], prefer: 'database', expect: preview.preview_hash! });
@@ -188,6 +189,24 @@ for (const backend of testBackends()) describe(`#6712 wave: deleted-file repair 
     expect(committed.code).toBe('source_changed');
     expect(committed.suggestion).toContain(`gbrain repair file-drift --source ${sourceId} --slug notes/route --prefer database`);
     expect(committed.suggestion).toContain('--prefer file');
+  }), 240_000);
+
+  test('--prefer file soft deletes honor the mass-delete valve: over half of the file-backed pages refuses unless GBRAIN_ALLOW_MASS_RECONCILE=1', () => fixture(async ({ root, sourceId, ctx }) => {
+    const slugs = Array.from({ length: 22 }, (_, i) => `notes/m-${String(i).padStart(2, '0')}`);
+    for (const slug of slugs) await put(ctx, slug, `Body of ${slug}.`);
+    const gone = slugs.slice(0, 12);
+    removeFiles(root, gone, 'committed');
+    const preview = await run(sourceId, { slugs: gone, prefer: 'file' });
+    expect(preview.affected).toBe(12);
+    await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: undefined }, async () => {
+      await expect(run(sourceId, { slugs: gone, prefer: 'file', expect: preview.preview_hash! })).rejects.toMatchObject({ code: 'ghost_mass_delete_refused' });
+    });
+    for (const slug of gone) expect((await snapshot(sourceId, slug)).page.deleted_at).toBeFalsy();
+    await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: '1' }, async () => {
+      expect((await run(sourceId, { slugs: gone, prefer: 'file', expect: preview.preview_hash! })).outcomes).toEqual({ repaired: 12 });
+    });
+    for (const slug of gone) expect((await snapshot(sourceId, slug)).page.deleted_at).toBeTruthy();
+    expect((await snapshot(sourceId, slugs[12]!)).page.deleted_at).toBeFalsy();
   }), 240_000);
 });
 

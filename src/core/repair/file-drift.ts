@@ -63,6 +63,7 @@ import { auditDriftConflicts, DRIFT_CLASSES, driftClass, liveFileDrift, type Dri
 import { protectedReconcileKey, reconcileCanonical, RECONCILE_SCAN_KEYS, type ReconcileDecision } from '../persistence/reconcile-merge.ts';
 import { ABSENT_FILE_HASH, canonicalDeletionState, missingFileRoute, readReconcileState, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
 import { getWorktreeBinding } from '../persistence/ownership.ts';
+import { gitDurabilityPolicy } from '../persistence/git-durability-policy.ts';
 import { ghostPageNow, scanGhostSource, type GhostOwner, type GhostPage } from '../ghost-pages.ts';
 import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } from '../sync-reconcile.ts';
 import { GHOST_PURGE_FUSE_HOURS, GHOST_REPAIR_LIMIT, ghostScanRefusal, massGhosts, massRefusal, retireGhost } from './ghost-pages.ts';
@@ -402,6 +403,16 @@ export const fileDriftRepair: RepairHandler = {
     const hash = previewHash({ kind: 'file-drift-v1', brain_id: scope.brain_id, source_id: sourceId, selection,
       pages: pages.map(page => 'soft_delete' in page ? [page.slug, page.soft_delete.ghost.revision, ABSENT_FILE_HASH, 'soft_delete']
         : [page.slug, page.preview.preconditions.revision, page.preview.preconditions.raw_file_hash, page.preview.result_digest]) });
+    // #6712 wave: a recreated file stays only once committed; without Git durability the next sync imports the committed deletion again.
+    const recreated = pages.flatMap(page => 'preview' in page && page.file_gone ? [page.preview.preconditions.relative_path] : []);
+    let warnings: string[] = [];
+    if (recreated.length) {
+      const binding = await getWorktreeBinding(engine, sourceId);
+      const root = join(binding!.local_path!, binding!.relative_path);
+      if (!(await gitDurabilityPolicy(binding, root).catch(() => ({ durable: false }))).durable) {
+        warnings = [`Git durability is off for ${sourceId}, so the apply leaves each recreated file uncommitted. Commit it afterwards (git -C ${root} add -- ${recreated.join(' ')} && git -C ${root} commit), or the next sync imports the committed deletion again.`];
+      }
+    }
     let artifact: string | undefined;
     if (pages.length) {
       await assertReconcileOutputPath(engine, sourceId, artifactDirectory());
@@ -410,7 +421,7 @@ export const fileDriftRepair: RepairHandler = {
         artifact_digest: digest(page), selection })));
     }
     return { items: pages.map((page, index) => item({ source_id: sourceId, slug: page.slug, artifact_digest: digest(page), selection }, index, hash, index === pages.length - 1, opts.prefer)),
-      preview_hash: hash, residuals, listing,
+      preview_hash: hash, residuals, listing, ...(warnings.length ? { warnings } : {}),
       details: { prefer: opts.prefer, ...(artifact ? { artifact } : {}),
         pages: pages.map(page => 'soft_delete' in page ? { slug: page.slug, action: 'soft_delete', path: page.soft_delete.ghost.path, exceptions: page.exceptions }
           : { slug: page.slug, ...(page.file_gone ? { action: 'recreate_file' } : {}), ...(page.class ? { class: page.class } : {}), adopt_slug_path: page.adopt_slug_path, exceptions: page.exceptions, result_digest: page.preview.result_digest }),
