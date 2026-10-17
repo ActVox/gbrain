@@ -263,14 +263,16 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
 async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: ShadowPath[], budgetMs: number, assertActive: () => void): Promise<{ added: number; modified: number; deleted: number; renamed: number }> {
   const pageIds = inFlight.flatMap(entry => entry.pageId === null ? [] : [entry.pageId]);
   const origins = inFlight.map(entry => entryPaths(level, entry.path).sourcePath);
-  const names = `r.page_id=ANY($2::int[]) OR r.intent->>'sourcePath'=ANY($3::text[])`;
+  const names = `r.page_id=ANY($2::int[]) OR r.intent->>'sourcePath'=ANY($3::text[]) OR r.intent->>'path'=ANY($3::text[])`;
   const opened = await engine.executeRaw<{ id: string }>(`SELECT r.id FROM persistence_requests r WHERE r.source_id=$1 AND r.state IN ('queued','running','recovering') AND (${names})`,
     [level.sourceId, pageIds, origins]);
   const until = Date.now() + budgetMs;
   while (Date.now() < until) {
-    const [open] = await engine.executeRaw(`SELECT 1 FROM persistence_requests r WHERE r.source_id=$1 AND (r.state IN ('queued','running','recovering')
-        OR EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.state IN ('queued','running')))
-      AND (${names}) LIMIT 1`, [level.sourceId, pageIds, origins]);
+    // The open work readOpenWork marked: an open request, or a pending Git effect named by its request or its relative_path
+    // (a put_page that created its page records no page_id or origin on the request).
+    const [open] = await engine.executeRaw(`SELECT 1 FROM persistence_requests r WHERE r.source_id=$1 AND (r.state IN ('queued','running','recovering') AND (${names})
+        OR EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.state IN ('queued','running')
+          AND (${names} OR e.data->>'relative_path'=ANY($3::text[])))) LIMIT 1`, [level.sourceId, pageIds, origins]);
     assertActive();
     if (!open) break;
     await new Promise(resolve => setTimeout(resolve, 100));
