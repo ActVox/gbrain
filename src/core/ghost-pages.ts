@@ -21,6 +21,12 @@
  * invalid gbrain.yml or a check that ends in any other reason
  * (`ambiguous_storage`) make it `unknown`, never a count of zero.
  *
+ * #6910: a ghost on a reserved shared-skillpack path (`isReservedSkillBundlePath`, the
+ * predicate sync discovery and managed import use) that the knowledge guard refuses to
+ * retire (`skill_bundle_required`: the source has an adopted shared skillpack) is not a
+ * knowledge ghost: it is reported apart as a skill path (`skill_paths`), never in the
+ * approved set, because no knowledge write can remove it.
+ *
  * Readers: doctor `ghost_pages`, `gbrain pages ghosts` and `gbrain repair
  * ghost-pages` (`scanGhostSource`, `ghostPageNow`), and the read-scope MCP
  * health op (`readGhostPages`, counts only for remote callers).
@@ -37,6 +43,9 @@ import { getWorktreeBinding } from './persistence/ownership.ts';
 import { sourceMirrorReadOnly } from './persistence/mirror-read-only.ts';
 import { publishesDatabaseOnly } from './persistence/page-prepare.ts';
 import { liveFileDrift } from './persistence/drift-conflicts.ts';
+import { isReservedSkillBundlePath } from './skill-reserved-paths.ts';
+import { assertKnowledgePublicationAllowed } from './shared-skills/knowledge-guard.ts';
+import { OperationError } from './ops/contract.ts';
 
 export interface GhostPage { source_id: string; slug: string; path: string; revision: string; page_id: number }
 export interface GhostPagesSummary {
@@ -45,9 +54,13 @@ export interface GhostPagesSummary {
   reason?: string;
   /** Ghosts found among inspected pages. */
   count: number;
-  by_source: Array<{ source_id: string; count: number; status: 'known' | 'unknown' | 'not_applicable'; reason?: string }>;
+  by_source: Array<{ source_id: string; count: number; status: 'known' | 'unknown' | 'not_applicable'; reason?: string; skill_paths?: number }>;
   /** Bounded by `sampleLimit`. */
   samples: GhostPage[];
+  /** #6910: ghosts under an adopted shared skillpack, which no knowledge write can retire; not in `count`. */
+  skill_paths: number;
+  /** Bounded by `sampleLimit`. */
+  skill_path_samples: GhostPage[];
   inspected: number;
   truncated: boolean;
   exact: boolean;
@@ -61,6 +74,8 @@ export interface GhostSourceScan {
   status: 'known' | 'unknown' | 'not_applicable';
   reason?: string;
   ghosts: GhostPage[];
+  /** #6910: confirmed ghosts on a reserved shared-skillpack path the knowledge guard refuses to retire; never in `ghosts`. */
+  skill_paths: GhostPage[];
   /** Live pages the existence pre-filter examined. */
   inspected: number;
   /** Pages expected to own a canonical file (present, ghost, or not yet confirmed): the mass-delete valve's population. */
@@ -141,6 +156,18 @@ async function confirm(engine: BrainEngine, context: Extract<SourceContext, { ok
   return { kind: 'unknown', reason: live.reason === 'not_owner_host' ? 'not_owner_host' : 'ambiguous_storage' };
 }
 
+/** #6910: a ghost on a reserved skillpack path whose retirement the shared-skillpack knowledge guard refuses. */
+async function underSharedSkillpack(engine: BrainEngine, owner: GhostOwner, ghost: GhostPage): Promise<boolean> {
+  if (!isReservedSkillBundlePath(ghost.path) && !isReservedSkillBundlePath(ghost.slug)) return false;
+  try {
+    await assertKnowledgePublicationAllowed(engine, { source_id: ghost.source_id, source_incarnation: owner.source_incarnation, slug: ghost.slug, target_kind: 'page' });
+    return false;
+  } catch (error) {
+    if (error instanceof OperationError && error.code === 'skill_bundle_required') return true;
+    throw error;
+  }
+}
+
 /**
  * One source's ghosts in page-id order. `candidateLimit` bounds the full checks (default `GHOST_CHECK_LIMIT`);
  * anything past it, or past `GHOST_SCAN_LIMIT` live pages, sets `truncated`.
@@ -148,7 +175,7 @@ async function confirm(engine: BrainEngine, context: Extract<SourceContext, { ok
 export async function scanGhostSource(engine: BrainEngine, sourceId: string, opts: { candidateLimit?: number } = {}): Promise<GhostSourceScan> {
   const limit = opts.candidateLimit ?? GHOST_CHECK_LIMIT;
   const context = await sourceContext(engine, sourceId);
-  const scan: GhostSourceScan = { source_id: sourceId, status: 'known', ghosts: [], inspected: 0, file_backed: 0, candidates: 0, truncated: false };
+  const scan: GhostSourceScan = { source_id: sourceId, status: 'known', ghosts: [], skill_paths: [], inspected: 0, file_backed: 0, candidates: 0, truncated: false };
   if (!context.ok) return { ...scan, status: context.status, reason: context.reason };
   scan.owner = context.owner;
   let after = 0;
@@ -167,13 +194,13 @@ export async function scanGhostSource(engine: BrainEngine, sourceId: string, opt
       if (scan.candidates > limit) { scan.truncated = true; unchecked++; continue; }
       const result = await confirm(engine, context, sourceId, row.slug);
       if (result.kind === 'unknown') return { ...scan, status: result.reason === 'not_owner_host' ? 'not_applicable' : 'unknown', reason: result.reason };
-      if (result.kind === 'ghost') scan.ghosts.push(result.ghost);
+      if (result.kind === 'ghost') (await underSharedSkillpack(engine, context.owner, result.ghost) ? scan.skill_paths : scan.ghosts).push(result.ghost);
       else if (result.reason === 'agrees' || result.reason === 'file_database_drift') scan.file_backed++;
     }
     if (rows.length < BATCH || scan.inspected >= GHOST_SCAN_LIMIT) break;
     after = Number(rows[rows.length - 1]!.id);
   }
-  scan.file_backed += scan.ghosts.length + unchecked;
+  scan.file_backed += scan.ghosts.length + scan.skill_paths.length + unchecked;
   return scan;
 }
 
@@ -198,12 +225,15 @@ export async function readGhostPages(engine: BrainEngine, opts: { sourceIds?: st
   const known = scans.filter(scan => scan.status === 'known');
   const offOwner = scans.some(scan => scan.reason === 'not_owner_host');
   const count = scans.reduce((sum, scan) => sum + scan.ghosts.length, 0);
+  const skillPaths = scans.reduce((sum, scan) => sum + scan.skill_paths.length, 0);
   const truncated = scans.some(scan => scan.truncated);
   const status = unknown || (!known.length && offOwner) ? 'unknown' : 'known';
   const reason = unknown?.reason ?? (!known.length ? (offOwner ? 'not_owner_host' : 'not_applicable') : undefined);
   return { status, ...(reason ? { reason } : {}), count,
-    by_source: scans.map(scan => ({ source_id: scan.source_id, count: scan.ghosts.length, status: scan.status, ...(scan.reason ? { reason: scan.reason } : {}) })),
+    by_source: scans.map(scan => ({ source_id: scan.source_id, count: scan.ghosts.length, status: scan.status, ...(scan.reason ? { reason: scan.reason } : {}),
+      ...(scan.skill_paths.length ? { skill_paths: scan.skill_paths.length } : {}) })),
     samples: scans.flatMap(scan => scan.ghosts).slice(0, opts.sampleLimit ?? GHOST_SAMPLE_LIMIT),
+    skill_paths: skillPaths, skill_path_samples: scans.flatMap(scan => scan.skill_paths).slice(0, opts.sampleLimit ?? GHOST_SAMPLE_LIMIT),
     inspected: scans.reduce((sum, scan) => sum + scan.inspected, 0), truncated,
     exact: status === 'known' && !truncated && !offOwner && !unknown };
 }

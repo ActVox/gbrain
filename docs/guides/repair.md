@@ -965,6 +965,30 @@ database only and are never ghosts. Doctor `undeclared_db_only_pages` is a
 separate audit. A preview lists at most 1,000 ghosts; apply them, then preview
 again for the rest. Sync never removes ghost pages by itself.
 
+<a id="ghost-pages-skill-paths"></a>
+**Ghosts under the shared skillpack.** When a source has an adopted shared
+skillpack, its reserved paths (`skills/` and `skillpack.json`) belong to the
+shared skill publisher. A knowledge page on such a path whose file is gone (a
+legacy import from before the pack was adopted, say) is still a ghost, but no
+knowledge write can remove it: every one, a soft delete included, refuses
+`skill_bundle_required`, and `put_skill` / `delete_skill` change skill
+bundles, not knowledge pages. No gbrain command removes such a page today, so
+the preview lists it apart (class `skill_path`, `residuals.skill_paths`, and
+`details.skill_paths` with the first slugs, `owned_by: shared_skill_publisher`
+and `route: null`), leaves it out of the hash and never applies it; the other
+ghosts apply as usual. Doctor `ghost_pages` and `gbrain pages ghosts` count
+these pages apart too (`skill_paths`), never as ghosts waiting for this
+repair. A page on a `skills/` path of a source with no adopted pack is an
+ordinary ghost.
+
+**`refused`.** A page of the approved set that a per-page guard still refuses
+during the apply (a refusal of class `caller`, such as `skill_bundle_required`
+on a page an older preview approved) is recorded with outcome `refused` and its
+code in `outcome_items`; nothing is written for it, and the apply goes on with
+the rest of the set. Read the code (`gbrain errors <code>`) before retrying
+that page. Any other error, such as a storage fault, an unavailable owner or
+contention, still stops the apply; rerun the same apply command once it clears.
+
 <a id="rename-identity"></a>
 ### Rename identity
 

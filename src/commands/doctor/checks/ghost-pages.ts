@@ -12,12 +12,16 @@
  * Off the owner host or on a brain with no bound source it is `ok` + info
  * (`not_applicable`), never a warning; an unreadable or ambiguous checkout is
  * the unknown convention (`warn`, `details.health: 'unknown'`).
- * `undeclared_db_only_pages` stays a separate audit.
+ * `undeclared_db_only_pages` stays a separate audit. #6910: ghosts under an
+ * adopted shared skillpack are counted apart (`details.skill_paths`) and never
+ * as knowledge ghosts awaiting `gbrain repair ghost-pages`, which cannot remove
+ * them; on their own they leave the check `ok` with a note.
  */
 import type { Check } from '../../doctor.ts';
 import { agentFix, checkError } from '../check-fix.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { readGhostPages } from '../../../core/ghost-pages.ts';
+import { SKILL_PATH_NOTE } from '../../../core/repair/ghost-pages.ts';
 
 const DOCS = 'docs/guides/repair.md#ghost-pages';
 
@@ -26,7 +30,11 @@ async function runGhostPages(ctx: DoctorContext): Promise<Check[]> {
   try {
     const summary = await readGhostPages(connectedEngine(ctx), {});
     const details = { count: summary.count, by_source: summary.by_source, samples: summary.samples, inspected: summary.inspected,
-      truncated: summary.truncated, exact: summary.exact, docs: DOCS };
+      truncated: summary.truncated, exact: summary.exact, docs: DOCS,
+      ...(summary.skill_paths ? { skill_paths: { count: summary.skill_paths, samples: summary.skill_path_samples, owned_by: 'shared_skill_publisher', route: null, note: SKILL_PATH_NOTE } } : {}) };
+    const skillNote = summary.skill_paths
+      ? ` ${summary.skill_paths} more under the shared skillpack are counted apart (${summary.skill_path_samples.map(page => `${page.source_id}:${page.slug}`).join(', ')}): no gbrain command removes them today, and they do not block the rest.`
+      : '';
     const ghostSources = summary.by_source.filter(entry => entry.count > 0);
     const unknown = summary.by_source.filter(entry => entry.status === 'unknown');
     if (ghostSources.length) {
@@ -35,7 +43,7 @@ async function runGhostPages(ctx: DoctorContext): Promise<Check[]> {
         message: `${summary.count}${summary.exact ? '' : '+'} live page(s) have no canonical file on the owner host (ghost pages), so every write to them refuses and no sync can import them `
           + `(${ghostSources.map(entry => `${entry.source_id}: ${entry.count}`).join('; ')}; e.g. ${summary.samples.map(page => `${page.source_id}:${page.slug} (${page.path})`).join(', ')}).`
           + `${unknown.length ? ` ${unknown.map(entry => entry.source_id).join(', ')} could not be checked (${unknown[0]!.reason}).` : ''}`
-          + ` Preview the removal with gbrain repair ghost-pages --source ${first}; to keep a page instead, restore its file at the recorded path and sync.`,
+          + ` Preview the removal with gbrain repair ghost-pages --source ${first}; to keep a page instead, restore its file at the recorded path and sync.${skillNote}`,
         fix: agentFix(['gbrain', 'repair', 'ghost-pages', '--source', first, '--json'],
           'Read-only preview: lists each ghost page with its recorded canonical path and revision, and prints the apply command with its hash. Apply only after the user agrees (it soft-deletes; restore the file and sync to keep a page).',
           'ghost_pages', { docs: DOCS }) });
@@ -57,7 +65,7 @@ async function runGhostPages(ctx: DoctorContext): Promise<Check[]> {
       return checks;
     }
     checks.push({ name: 'ghost_pages', status: 'ok', details,
-      message: `No live page is missing its canonical file (${summary.inspected} page(s) inspected${summary.truncated ? '; bounded, more not checked' : ''}).` });
+      message: `No live page is missing its canonical file (${summary.inspected} page(s) inspected${summary.truncated ? '; bounded, more not checked' : ''}).${skillNote}` });
   } catch (error) {
     checks.push(checkError('ghost_pages', 'check live pages for a missing canonical file', error, { details: { count: 'unknown', health: 'unknown', docs: DOCS } }));
   }

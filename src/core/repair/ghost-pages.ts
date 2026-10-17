@@ -18,6 +18,12 @@
  * came back is skipped (`file_restored`) and the result asks for a new
  * preview; any other change is `changed_since_preview`.
  *
+ * #6910: ghosts under an adopted shared skillpack (`skill_paths`, `src/core/ghost-pages.ts`) are listed
+ * apart and never approved: the knowledge guard refuses every knowledge write to them and no gbrain
+ * command removes them today. A page of the approved set that an item-level guard still refuses (a
+ * registry `caller` refusal such as `skill_bundle_required`) is recorded `refused` with its code
+ * and the apply continues; any other error (storage, contention, owner) still stops it.
+ *
  * Refuses off the owner host (`not_owner_host`), fails closed when the source
  * root is unavailable or a check is ambiguous (`ghost_storage_unknown`),
  * never lists a declared db_only page, and applies the sync mass-delete valve
@@ -33,6 +39,7 @@ import type { GBrainConfig } from '../config.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
+import { CODES } from '../error-registry.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
 import { getWorktreeBinding, managedPersistenceEnabled } from '../persistence/ownership.ts';
@@ -50,6 +57,12 @@ export const GHOST_REPAIR_LIMIT = 1000;
 export const GHOST_PURGE_FUSE_HOURS = 72;
 const DOCS = 'docs/guides/repair.md#ghost-pages';
 const FILE_CHANGED = 'The canonical file changed after preparation.';
+/** Skill-path slugs a preview lists by name. */
+const SKILL_PATH_SAMPLE = 20;
+/** #6910: why a ghost under the shared skillpack is left alone; the preview, `gbrain pages ghosts` and doctor say it. */
+export const SKILL_PATH_NOTE = 'Ghost pages under the source\'s adopted shared skillpack (skills/, skillpack.json) are knowledge pages the shared skill publisher owns the path of: '
+  + 'every knowledge write to them, a soft delete included, refuses skill_bundle_required, and put_skill/delete_skill change skill bundles, not knowledge pages, so no gbrain command removes them today. '
+  + 'They are listed apart, never applied, and do not block the other ghosts.';
 
 interface ApprovedGhost extends GhostPage { owner: GhostOwner; selection: string[] }
 interface GhostItem extends RepairItem { ghost: GhostPage; owner: GhostOwner; hash: string; last: boolean }
@@ -132,20 +145,26 @@ export const ghostPagesRepair: RepairHandler = {
     if (refusal) throw refusal;
     const mass = massGhosts(scan.ghosts.length, scan.file_backed);
     if (!opts?.apply) {
+      const skillPaths = scan.skill_paths.length;
       const hash = previewHash(hashParts(scope, scan.owner, scan.ghosts));
       if (scan.ghosts.length) await saveApprovedSet<ApprovedGhost>(engine, { command: 'ghost-pages', hash },
         scan.ghosts.map(ghost => ({ ...ghost, owner: scan.owner!, selection: scope.source_ids })));
       const warnings = [
         ...(mass ? [`${scan.ghosts.length} of ${scan.file_backed} file-backed page(s) are ghosts (more than ${Math.round(MASS_RECONCILE_RATIO * 100)}%): the apply refuses (ghost_mass_delete_refused) unless GBRAIN_ALLOW_MASS_RECONCILE=1; check the checkout first.`] : []),
         ...(scan.truncated ? [`More ghosts may exist past the first ${GHOST_REPAIR_LIMIT} checked; apply this set, then preview again.`] : []),
+        ...(skillPaths ? [`${skillPaths} ghost page(s) under the shared skillpack are listed apart (skill_path) and not applied: ${SKILL_PATH_NOTE}`] : []),
         ...(scan.reason === 'mirror_read_only' ? [`Source ${sourceId} is a read-only mirror: its pages publish no file, so none is a ghost.`] : []),
         ...(scan.ghosts.length ? Object.values(GHOST_CONSEQUENCES) : []),
       ];
       return { warnings, items: scan.ghosts.map((ghost, index) => item(ghost, scan.owner!, hash, index === scan.ghosts.length - 1)), preview_hash: hash,
-        residuals: { ghosts: scan.ghosts.length, file_backed: scan.file_backed, inspected: scan.inspected },
-        listing: scan.ghosts.map(ghost => ({ item: `${ghost.source_id}:${ghost.slug}`, class: 'canonical_file_missing',
+        residuals: { ghosts: scan.ghosts.length, file_backed: scan.file_backed, inspected: scan.inspected, ...(skillPaths ? { skill_paths: skillPaths } : {}) },
+        listing: [...scan.ghosts.map(ghost => ({ item: `${ghost.source_id}:${ghost.slug}`, class: 'canonical_file_missing',
           detail: `file ${ghost.path} is missing; revision ${ghost.revision}` })),
-        details: { purge_fuse_hours: GHOST_PURGE_FUSE_HOURS, undo: 'gbrain restore <slug> --force', keep: GHOST_CONSEQUENCES.keep, mass_delete: mass, truncated: scan.truncated, docs: DOCS } };
+        ...scan.skill_paths.map(ghost => ({ item: `${ghost.source_id}:${ghost.slug}`, class: 'skill_path',
+          detail: `file ${ghost.path} is missing under the shared skillpack; not applied (no command removes it today)` }))],
+        details: { purge_fuse_hours: GHOST_PURGE_FUSE_HOURS, undo: 'gbrain restore <slug> --force', keep: GHOST_CONSEQUENCES.keep, mass_delete: mass, truncated: scan.truncated, docs: DOCS,
+          ...(skillPaths ? { skill_paths: { count: skillPaths, slugs: scan.skill_paths.slice(0, SKILL_PATH_SAMPLE).map(ghost => ghost.slug),
+            owned_by: 'shared_skill_publisher', route: null, note: SKILL_PATH_NOTE, docs: DOCS } } : {}) } };
     }
     if (!opts.expect) {
       throw opError('invalid_params', 'gbrain repair ghost-pages --apply removes only the set a preview printed.',
@@ -163,7 +182,13 @@ export const ghostPagesRepair: RepairHandler = {
   },
   async apply(ctx, entry): Promise<RepairItemOutcome> {
     const { ghost, owner, hash, last } = entry as GhostItem;
-    const outcome = await retireGhost(ctx, ghost, owner, () => repairRequestId(ctx, 'ghost-pages', ghost, ghost.revision));
+    let outcome: RepairItemOutcome;
+    try {
+      outcome = await retireGhost(ctx, ghost, owner, () => repairRequestId(ctx, 'ghost-pages', ghost, ghost.revision));
+    } catch (error) {
+      if (!(error instanceof OperationError) || (CODES as Record<string, { class: string } | undefined>)[error.code]?.class !== 'caller') throw error;
+      outcome = { applied: false, outcome: 'refused', reason: error.code, detail: { message: error.message } };
+    }
     if (last) await clearApprovedSet(ctx.engine, { command: 'ghost-pages', hash });
     return outcome;
   },
