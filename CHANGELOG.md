@@ -12,86 +12,23 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.275.0] - 2026-10-17
 
-**Sync stops handing one page's history to another when Git guesses a rename, and background work on a managed brain stops spending write ids it can never use (fix wave 18a).** When you move a note and edit it in the same commit, Git only guesses that it was a move. Two notes made from the same template and moved together could be paired the wrong way round, and sync then carried one page's facts, links and aliases onto the other. Now sync keeps a page across a guessed move only when the files agree: the same `id`, or the same unique `slug:` line or title. Anything else becomes a new page, and the old one stays restorable, with the exact restore command printed and the purge holding it until someone decides. Contributed by @javieraldape (PR #6732, rewritten).
+**`gstack-pregate` now reaches a verdict on small machines: on a machine under 8 cores, the test tier goes to the full Ubicloud gate instead of thousands of local files.** On a 4-core machine, a one-line edit to a hub file such as `src/core/config.ts` selected about 3,900 test files, and pregate hit its 40-minute cap after 308 of them. `.gstack/pregate.json` now declares a `remote_gate`. Pregate records the selected files as one remote obligation in seconds, and `gstack-pregate --remote` clears it by running the full gate on the working tree.
 
-On a brain whose writes go through a writer, background work (the autopilot cycle, jobs, connector syncs) kept submitting writes to a source that could not publish them, a worktree in recovery or a deleted owner marker, and every attempt used up a permanent request id. Those writes are now refused before they take an id. The purge skips such sources and sets aside pages that keep failing instead of failing the cycle, and re-ingesting transcripts that did not change takes no ids at all.
+### How to use it
 
-Four smaller fixes ride along: dream synthesis no longer fails a pass when looking up its own outputs times out, `propose_takes` stops paying again every cycle for a reply that says "nothing here", `gbrain transcripts ingest --since last` moves past Codex sub-agent sessions, and `gbrain repair slug-conflicts` clears a hold it used to leave for a person.
-
-### What you'd see
-
-| Situation | Before | Now |
-|---|---|---|
-| two similar notes moved and edited in one commit (Git reports `R087`) | sync could move one page's facts, links and aliases onto the other | the page keeps its identity only on a shared frontmatter `id`, or a unique `slug:` line or title; otherwise a fresh page plus the old one soft-deleted, the report prints `gbrain restore <old-slug> --source-id <id> --force` and doctor `rename_identity_downgrades` names the pair |
-| a note moved to another folder and rewritten, Git did not pair the two files | a delete plus an add | the same page, when the deleted file carries the same unique `id` and the same file name, title or bytes; a reused template `id` alone still starts a fresh page |
-| a file moved and broken in the same commit (unreadable frontmatter) | held with the old page's identity | the old page is soft-deleted and recorded as above, the file is held as a new file; an exact move (`R100`) still keeps its page |
-| a managed sync finds the one legacy page whose slug folds to the file's, and both carry different explicit `id`s | adopted the legacy page (v0.60.269.0) | held `legacy_slug_conflict` with reason `explicit_id_conflict` |
-| a background write to a source whose worktree is in recovery or whose owner marker `.gbrain-owner.json` is gone | admitted with a permanent request id, then failed at publication | refused `owner_unavailable` before any receipt, fix `gbrain sources writer status --source <id> --json`, checked once per source per run |
-| the managed purge meets a source in recovery, or a page that fails to purge every run | submitted every run; the cycle purge phase failed | the source is skipped (`writer_not_active`), the page is parked after 5 failures (doctor `purge_parked_pages`), the phase warns; `gbrain pages purge-deleted --retry-parked` retries once |
-| `gbrain transcripts ingest` re-reads unchanged sessions on a writer-claimed brain | one new request id per session part per run | none |
-| `gbrain transcripts ingest --since last` with Codex guardian or other sub-agent rollouts | counted as drift, so the watermark never advanced and every run rescanned every session | `N sub-agent rollouts (no user turns by design)`; the watermark advances, real drift still holds it |
-| dream synthesis postprocess times out looking up its committed outputs | the pass failed after the paid synthesis had run | deferred to a later pass and finished there without another synthesis call |
-| `propose_takes` gets `[]` followed by prose | retried as a failure, a paid call every cycle | an empty extraction: the page is tombstoned until its body changes |
-| `gbrain repair slug-conflicts` on a hold whose only other fix is a style-only `NESTED_QUOTES` re-quote | `still_invalid`, needed `repair frontmatter --include-ambiguous` | cleared by removing the `slug:` line; the array stays as written and is listed as `style_only` |
-
-## To take advantage of v0.60.270.0
-
-`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
-
-1. **Run the orchestrator manually:**
-   ```bash
-   gbrain apply-migrations --yes
-   ```
-2. **Your agent reads `skills/migrations/v0.60.270.0.md` the next time you interact with it.** The schema step (one new index, built online on Postgres) needs no action; the note covers the two new doctor checks and the `owner_unavailable` refusal.
-3. **Verify the outcome:**
-   ```bash
-   gbrain doctor --only persistence_request_indexes,rename_identity_downgrades,purge_parked_pages
-   gbrain stats
-   ```
-4. **If any step fails or the numbers look wrong,** please file an issue:
-   https://github.com/garrytan/gbrain/issues with:
-   - output of `gbrain doctor`
-   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
-   - which step broke
-
-   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+```bash
+UBI_OWNER=<thread code> gstack-pregate --stage tests --remote --spend-cap <usd> --allow-repo-commands
+```
 
 ### Itemized changes
 
-#### Rename identity across inexact Git renames (#6729)
-
-- Sync no longer moves one page's facts, links and aliases onto a different page when Git guesses an inexact rename between two similar files. Identity follows a shared frontmatter `id`, a unique `slug:` line or a unique title; anything else is a delete plus an add, reported with its restore command and held from the purge until the pair is settled (#6729). Contributed by @javieraldape (PR #6732, rewritten).
-- `src/core/sync-rename-identity.ts` is the one confirmation stage: `confirmRenameIdentities` reads committed sides through one `git cat-file --batch` stream (64 KiB heads) and the dirty tree from disk; the title follows parseMarkdown precedence (frontmatter, then the first H1, never the filename) and the old side uses the title its page row stores. `explicitIdVeto` is the one explicit-id veto the managed takeovers consult.
-- A `--working-tree` verdict is bound to the bytes it read (`identityHead`, sha256 of the first 64 KiB): classic `applyRename` re-checks it before the identity moves, and a managed sync refuses `source_changed` on frozen bytes that differ.
-- `src/core/sync-identity-downgrades.ts` records each downgraded pair in `op_checkpoints` (op `sync-identity-downgrade`, open until a disposition is set or the old page is restored or purged, no time window). `gbrain sync status --json` lists them under `identity_downgrades`; doctor `rename_identity_downgrades` warns while one is open. On an unbound Postgres source with a checkout, where a restore would refuse `owner_unavailable`, the report and doctor do not offer it.
-- A managed sync refuses `page_identity_changed` (detail `rename_identity_conflict`) when a file would take over a page, or a held rename would carry one, whose frontmatter `id` differs from its own. The #6727 legacy-slug adoption consults the same veto: two different explicit ids hold the file `legacy_slug_conflict` with reason `explicit_id_conflict` instead of adopting the page.
-- `buildSyncManifest` rename entries carry Git's `similarity`.
-
-#### Background writes on a source that cannot publish (#6741)
-
-- Managed brains: background writes no longer spend permanent request ids on a source that cannot publish (a worktree in recovery, or a failed owner check such as a deleted .gbrain-owner.json); they are refused owner_unavailable before any receipt. The purge skips such sources and parks pages that keep failing, the cycle warns instead of failing, and `gbrain pages purge-deleted --retry-parked` retries parked pages within the cutoff and rename holds. (#6741)
-- `src/core/persistence/owner-verification.ts` (`verifyOwnerRoot`, `assertBackgroundOwner`) is the claim's owner verification, shared by writer onboarding and background admissions and cached once per source per run (`admission-origin.ts`). A device-only change is still re-stamped by the write, and a paused (draining) owner still accepts and replays. `assertWorktreeAdmission` refuses a background admission to a `recovering` worktree under its existing lock. Interactive CLI, MCP and repair writes are unaffected.
-- `src/core/persistence/purge-parks.ts` keeps per-tombstone parks in `op_checkpoints` (op `purge-deleted-park`, keyed by source, slug and deletion time, so a re-deleted page starts fresh). `PURGE_PARK_LIMIT` is 5 non-deferral failures; a success clears the park, and parks rearm the first run a source's writer is active again. `selectPurgeCandidates` (`purge-deleted.ts`) is the one eligibility selector for the preview, the consent, the `purge_deleted_pages` op and the run. Doctor `purge_parked_pages` names each parked page with its last error; its fix previews with `gbrain pages purge-deleted --retry-parked --dry-run --json` and runs behind the user's agreement.
-- Managed brains: re-ingesting unchanged transcripts no longer burns a permanent write-request id per session part (an unchanged part is screened by the publication preparer and the no-op kernel before admission). (#6741) The screen is `unchangedPutPage` in `src/core/persistence/put-page-screen.ts`; a pending request, projection work, a missing or edited canonical file or a segmented page still admits. The stale-part delete now runs as a background admission.
-- `gbrain transcripts ingest --since last` no longer rescans every session forever when Codex guardian or other sub-agent rollouts are present: those rollouts are counted as "sub-agent rollouts (no user turns by design)" and the watermark advances. Real drift still holds it. (#6741) `--json` gains `subagentRollouts` at the top level and `subagentRollout: true` on a file outcome (additive).
-
-#### Dream synthesis postprocess (#6757)
-
-- Schema migration v250 (`persistence_request_id_index`) adds `persistence_requests_request_id`, built `CONCURRENTLY` on Postgres (an invalid leftover is dropped first) and inline on PGLite; `gbrain repair request-indexes` builds it on a brain whose schema is already current. DDL only, no backfill.
-- Synthesis postprocess finds each child's committed `put_page` by request id through that index. A statement timeout on the read defers the postprocess (`dream.synthesize.postprocess_pending`, `src/core/cycle/synthesize-postprocess-deferral.ts`); the next pass replays it without a child job and verifies the output's quotes against the current transcript, sending a quote it cannot find to `unverified_claims`. Three deferrals in a row add a line to doctor `persistence_request_indexes`, whose messages now say "request-table indexes".
-
-#### Smaller fixes
-
-- #6782: `propose_takes` decides takes and the empty tombstone from one reply outcome, so `[]` with trailing prose is memoized. The tombstone is keyed by a hash of the page body, so any body edit re-extracts the page; there is no per-page force flag (`docs/guides/cron-schedule.md`).
-- #6749: `gbrain repair content` and `repair slug-conflicts` clear a `frontmatter_slug_conflict` hold with `remove_slug` when the only other change `autoFixFrontmatter` would make is a style-only `NESTED_QUOTES` re-quote of a valid JSON-style tag or alias array. `ContentRepairReceipt` gains an optional `style_only` list (receipts without it are byte-identical). A hold the lane still cannot clear names the fix codes it needs in its `still_invalid` message.
-
-### For contributors
-
-- Flake fix: `scripts/ci-bounded-run.ts` no longer reports a command that already exited as stalled when the runner is descheduled past the bound.
-- Flake fix: the CJK keyword deadline test (`cjk-keyword-deadline-postgres`) asserts the arm's statement budgets instead of wall time, so a stalled test process no longer fails a correct arm; a new case injects a stall mid-arm and checks the arm starts nothing past its deadline.
-- Shard weights (`scripts/test-weights.json`, `serial-weights.json`, `e2e-weights.json`) were refreshed from recent Test and E2E runs.
-- Tests whose fixture was an inexact move onto a broken file now use an exact move held by a stale `slug:` line (every hold-lane assertion unchanged); the inexact case keeps one test per path asserting its new outcome. `test/pages-purge-deleted-args.test.ts` expectations gained `retryParked: false`. `test/persistence-connector-fencing.test.ts` orders its request-id reads, since the new index changed the unordered row order.
-- Migration note: `skills/migrations/v0.60.270.0.md`.
+- `scripts/pregate-remote-gate.sh` (new) runs `bun run ci:ubicloud` and prints `PREGATE_REMOTE: tree=<tree> tests=<n> failed=<n>`.
+  - `<tree>` is the working-tree content fingerprint (tracked plus untracked-unignored files), computed before and after the gate.
+  - It refuses without `UBI_OWNER`, or when `PREGATE_TREE` names another tree. It prints no receipt when the tree moved during the gate or the gate printed no summary.
+  - Provider API keys are removed from the gate's environment.
+- `.gstack/pregate.json` declares `remote_gate`. `CONTRIBUTING.md` documents the flow.
+- Tests: `test/scripts/pregate-remote-gate.test.ts`.
+- No product or schema change.
 
 ## [0.60.274.0] - 2026-10-17
 
