@@ -17,6 +17,8 @@
  *   settles in a later round with no hold.
  * - kill after a group's admission commit, before the stamp: the next run resumes the pass and converges, each path imported once.
  * - probe 40: a connection or pooler fault (SQLSTATE 08006, 57P01) in a pass never becomes a hold; the next run converges.
+ * - #6727 on the pass route: a new file whose slug folds to a legacy page (no recorded origin) the importer cannot write is
+ *   held legacy_slug_conflict and forks no second page.
  * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
  *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
@@ -243,6 +245,21 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect([...faults].sort()).toEqual(['consumer:prepared', 'sync:mid_checkpoint']);
     expect({ last: rounds.at(-1)!.status, held: rounds.flatMap(round => round.held ?? []) }).toEqual({ last: 'synced', held: [] });
     await converged(engine, after);
+  }, { setup }), 180_000);
+
+  test('#6727 on the pass route: a new file whose slug folds to a legacy page it cannot write is held legacy_slug_conflict, never forked', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.transaction(async tx => {
+      await tx.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      await tx.executeRaw("INSERT INTO pages(source_id,slug,type,page_kind,title,compiled_truth) VALUES('default','notes/Legacy Name','note','markdown','Legacy Name','A legacy page.')");
+      await tx.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    });
+    writeFileSync(join(root, 'notes/Legacy Name.md'), note('Legacy Name', 'The file of an unwritable legacy page.')); commit(root, 'legacy file');
+    const result = await performManagedSync(engine, OPTS);
+    expect((result.held ?? []).map(hold => [hold.path, hold.code])).toEqual([['notes/Legacy Name.md', 'legacy_slug_conflict']]);
+    const pages = await engine.executeRaw<{ slug: string; source_path: string | null; body: string }>(
+      "SELECT slug, source_path, compiled_truth AS body FROM pages WHERE source_id='default' AND deleted_at IS NULL AND lower(slug) LIKE 'notes/legacy%' ORDER BY slug");
+    expect(pages.map(page => ({ slug: page.slug, source_path: page.source_path, body: page.body.trim() }))).toEqual([{ slug: 'notes/Legacy Name', source_path: null, body: 'A legacy page.' }]);
   }, { setup }), 180_000);
 
   test('probe 54: a pass intent keeps what the #6862 FIFO guard reads, renameFrom included', () => managedBrain(async ({ engine, root }) => {
