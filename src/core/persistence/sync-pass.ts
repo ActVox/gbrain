@@ -41,6 +41,7 @@ import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceRec
 import { readManagedMode } from './ownership.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from './sync-pass-row.ts';
 import { filterYielding, loopYield, sortYielding, type LoopYield } from './sync-yield.ts';
+import { countsMatch, proveConfirm, readLevelMark, type ConfirmProof, type LevelMark } from './sync-pass-confirm.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
 
@@ -65,6 +66,10 @@ export interface PassLevelInput {
   slugMode?: 'git-root' | 'source-root';
   /** The pass's own cache (it dies with the pass): the eligible tree of the commit and selection its last round read. */
   cache?: PassLevelCache;
+  /** The pass's id: a round after the first reuses the cached `I⋈P` when its writes are all the database changed (sync-pass-confirm.ts). */
+  passId?: string;
+  /** The pages whose import record the pass's previous round wrote (sync-pass-apply.ts `recorded`). */
+  recorded?: ReadonlySet<number>;
 }
 /** PGLite's keyset page size (design v3.2 §2.1). */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -80,7 +85,11 @@ const LEVEL_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
 
 /** What one pass reuses between its rounds: a commit's tree never changes, so the next round at the same commit and selection reads it from here. */
-export interface PassLevelCache { tree?: { key: string; tree: Map<string, GitTreeEntry>; colon: string[] } }
+export interface PassLevelCache {
+  tree?: { key: string; tree: Map<string, GitTreeEntry>; colon: string[] };
+  /** The last committed-mode round's `I⋈P` and its mark (S1), keyed by source, incarnation, worktree, HEAD and expected parser. */
+  pages?: { key: string; mark: LevelMark; table: PageTable };
+}
 
 /**
  * Classifier results never change once made (a settle replaces the object), so equal ones are one object: a 600k-path
@@ -176,6 +185,8 @@ export interface ShadowLevel {
   fileRefusals?: SyncFileRefusal[];
   timings_ms: Record<string, number>;
   statements: number;
+  /** A round after a pass's first: whether it reused the previous round's `I⋈P` (`rows` re-read), or why it read it whole. */
+  confirm?: { taken: boolean; reason: string | null; rows: number };
 }
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
@@ -258,14 +269,15 @@ async function withRoundSnapshot<T>(engine: BrainEngine, fn: (exec: Exec) => Pro
  * stretch of about a second and held every raw row at once. `cursor_tuple_fraction = 1` keeps the whole-result plan.
  * PGLite reads bounded keyset statements so writers interleave.
  */
-async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string, expected: SyncImportParser): Promise<{ pages: PageTable; statements: number }> {
+async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string, expected: SyncImportParser,
+  only?: { table: PageTable; ids: string[]; slots: Map<string, number> }): Promise<{ pages: PageTable; statements: number } | null> {
   // A record's fields usually repeat the page's (origin = source_path, disk = blob, revision = the page's), so those come back
   // as a flag instead of a second copy of the string, and so does the parser when it is the Markdown one the level expects
   // (`expected`, the same object for every such page; any other comes as text parsed once per distinct value): a 600k-page
   // read then holds about one string per field per page and decodes no parser text per page.
   // The record's fields come out of its JSON once, in a subquery. On Postgres `OFFSET 0` keeps it unflattened, so the hash
   // join builds over those few text columns instead of the whole record (600k: about 3.1 s of serial server time to 2.0 s);
-  // PGLite's keyset statements need it flattened, so each probes the record by primary key.
+  // PGLite's keyset statements and a confirm round's few rows need it flattened, so each probes the record by primary key.
   const select = `SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision, p.deleted_at IS NOT NULL AS deleted,
       p.revision_write_request_id::text AS request_id, c.fingerprint IS NOT NULL AS has_record,
       c.origin IS NOT DISTINCT FROM p.source_path AS rec_origin_same,
@@ -280,35 +292,45 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
     FROM pages p LEFT JOIN (SELECT fingerprint, completed_keys->0->>'origin' AS origin, completed_keys->0->>'blob_oid' AS blob_oid,
         completed_keys->0->>'disk_blob_oid' AS disk_blob_oid, completed_keys->0->>'revision' AS revision,
         completed_keys->0->'parser' AS parser, completed_keys->0->>'full_episode' AS full_episode, (completed_keys->0->'working')::text AS working
-      FROM op_checkpoints WHERE op=$2${kind === 'postgres' ? ' OFFSET 0' : ''}) c ON c.fingerprint=$3||p.id::text
+      FROM op_checkpoints WHERE op=$2${kind === 'postgres' && !only ? ' OFFSET 0' : ''}) c ON c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`, JSON.stringify(expected)];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin_same: boolean; rec_origin: string | null; rec_blob_oid: string | null;
     rec_disk_same: boolean; rec_disk_blob_oid: string | null; rec_revision_null: boolean; rec_revision: string | null; rec_parser: string | null; rec_parser_expected: boolean | null; rec_full_episode: string | null; rec_working: string | null };
-  const pages = new PageTable(expected);
+  const pages = only?.table ?? new PageTable(expected);
   const parsers = new Map<string, SyncImportProvenance['parser'] | undefined>(), episodes = new Map<string, string>();
   const parserOf = (text: string | null) => {
     if (text === null) return undefined;
     if (!parsers.has(text)) parsers.set(text, JSON.parse(text) ?? undefined);
     return parsers.get(text);
   };
-  const take = (page: Raw[]) => {
-    for (const raw of page) {
-      const i = pages.length, working = raw.rec_working === 'true' || raw.rec_working === 'false';
-      pages.id.push(raw.id); pages.slug.push(raw.slug); pages.sourcePath.push(raw.source_path); pages.revision.push(raw.revision); pages.requestId.push(raw.request_id);
-      pages.bits.push((raw.deleted ? PAGE_DELETED : 0) | (raw.has_record ? PAGE_RECORD : 0) | (raw.rec_revision_null ? PAGE_REVISION_NULL : 0)
-        | (raw.rec_parser_expected ? PAGE_PARSER_EXPECTED : 0) | (working ? PAGE_WORKING : 0) | (raw.rec_working === 'true' ? PAGE_WORKING_TRUE : 0));
-      const episode = raw.has_record ? raw.rec_full_episode : null;
-      if (typeof episode === 'string' && !episodes.has(episode)) episodes.set(episode, episode);
-      pages.blobOid.push(raw.has_record ? raw.rec_blob_oid ?? undefined : undefined); pages.fullEpisode.push(typeof episode === 'string' ? episodes.get(episode)! : episode);
-      if (!raw.has_record) continue;
-      if (!raw.rec_origin_same) pages.origin.set(i, raw.rec_origin ?? '');
-      if (!raw.rec_disk_same) pages.diskBlobOid.set(i, raw.rec_disk_blob_oid);
-      if (raw.rec_revision !== null) pages.recordRevision.set(i, raw.rec_revision);
-      const parser = raw.rec_parser_expected ? undefined : parserOf(raw.rec_parser);
-      if (parser !== undefined) pages.parser.set(i, parser);
-    }
+  /** Writes `raw` to slot `i`: the next one, or (a confirm round) the slot of a page the pass rewrote. */
+  const put = (raw: Raw, i: number) => {
+    const working = raw.rec_working === 'true' || raw.rec_working === 'false';
+    pages.id[i] = raw.id; pages.slug[i] = raw.slug; pages.sourcePath[i] = raw.source_path; pages.revision[i] = raw.revision; pages.requestId[i] = raw.request_id;
+    pages.bits[i] = (raw.deleted ? PAGE_DELETED : 0) | (raw.has_record ? PAGE_RECORD : 0) | (raw.rec_revision_null ? PAGE_REVISION_NULL : 0)
+      | (raw.rec_parser_expected ? PAGE_PARSER_EXPECTED : 0) | (working ? PAGE_WORKING : 0) | (raw.rec_working === 'true' ? PAGE_WORKING_TRUE : 0);
+    const episode = raw.has_record ? raw.rec_full_episode : null;
+    if (typeof episode === 'string' && !episodes.has(episode)) episodes.set(episode, episode);
+    pages.blobOid[i] = raw.has_record ? raw.rec_blob_oid ?? undefined : undefined; pages.fullEpisode[i] = typeof episode === 'string' ? episodes.get(episode)! : episode;
+    if (only) for (const sparse of [pages.origin, pages.diskBlobOid, pages.recordRevision, pages.parser]) sparse.delete(i);
+    if (!raw.has_record) return;
+    if (!raw.rec_origin_same) pages.origin.set(i, raw.rec_origin ?? '');
+    if (!raw.rec_disk_same) pages.diskBlobOid.set(i, raw.rec_disk_blob_oid);
+    if (raw.rec_revision !== null) pages.recordRevision.set(i, raw.rec_revision);
+    const parser = raw.rec_parser_expected ? undefined : parserOf(raw.rec_parser);
+    if (parser !== undefined) pages.parser.set(i, parser);
   };
+  const take = (page: Raw[]) => { for (const raw of page) put(raw, pages.length); };
+  if (only) {
+    // A confirm round: the previous round's rows, with the pages the pass wrote re-read into their slots (a new page last,
+    // as the keyset would read it). A rewritten page that left `I⋈P` cannot be patched: the caller reads it whole.
+    const rows = await exec.executeRaw<Raw>(`${select} AND p.id = ANY($5::bigint[]) ORDER BY p.id`, [...params, only.ids]);
+    const read = new Set(rows.map(raw => String(raw.id)));
+    if ([...only.slots.keys()].some(id => !read.has(id))) return null;
+    for (const raw of rows) put(raw, only.slots.get(String(raw.id)) ?? pages.length);
+    return { pages, statements: 1 };
+  }
   let statements = 0;
   if (kind === 'postgres') {
     const declared = Promise.all([exec.executeRaw('SET LOCAL cursor_tuple_fraction = 1'), exec.executeRaw(`DECLARE sync_pass_pages NO SCROLL CURSOR FOR ${select}`, params)]);
@@ -520,7 +542,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       mode === 'working' ? timed('X', () => readIndexLevel(gitRoot)) : Promise.resolve(new Map<string, GitIndexEntry>()),
       timed('U', async () => (mode === 'working' ? (await readUntracked(gitRoot, scope)).filter(eligible) : []))]),
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
-    timed('I⋈P', () => readRoundSnapshot(engine, { kind: engineKind, sourceId, incarnation, worktreeId: context.binding.worktree_id, parser: syncImportParser(pack?.identity ?? null) }, timed)),
+    timed('I⋈P', () => readRoundSnapshot(engine, { kind: engineKind, sourceId, incarnation, worktreeId: context.binding.worktree_id, parser: syncImportParser(pack?.identity ?? null),
+      reuse: cache && input.pass?.passId ? { cache, passId: input.pass.passId, recorded: input.pass.recorded, working: mode === 'working', head } : undefined }, timed)),
     timed('H', () => readLevelHolds(engine, sourceId, incarnation, input.pass?.retryConsumed)),
   ]);
   timings.reads = t();
@@ -540,7 +563,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   };
   const inLevel = (path: string) => tree.has(path) || eligible(path);
   const untracked = new Set(untrackedPaths);
-  const { open, markers, passRow, statements } = snapshot;
+  const { open, markers, passRow, statements, confirm } = snapshot;
   const { holds, retry } = held;
   const toGit = (holdPath: string) => (scope ? `${scope}/${holdPath}` : holdPath);
   const holdByGitPath = new Map<string, GitHoldRecord>(holds.map(hold => [toGit(hold.path), hold]));
@@ -737,7 +760,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
-    paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
+    paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3, ...(confirm ? { confirm } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
 }
@@ -762,16 +785,77 @@ async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContex
     keepDbPrefixes: (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })() };
 }
 
-/** The round's database snapshot (`I⋈P`, `U_db`, the markers and the pass row); issued together, its statements pipeline on its one connection (PGLite runs them in turn). */
-async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; worktreeId: string; parser: SyncImportParser },
-  timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
-  const { kind, sourceId, incarnation, worktreeId } = input;
-  return withRoundSnapshot(engine, async exec => {
-    const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, kind, sourceId, incarnation, input.parser)),
-      timed('open_work', () => readOpenWork(exec, sourceId, incarnation, worktreeId)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
+/** A failed mark, proof or delta read: the round reads again without them (it aborted a Postgres snapshot). */
+class ConfirmFailure extends Error {}
+const confirmGuard = <T>(read: Promise<T>) => read.catch((error: unknown) => { throw new ConfirmFailure(String(error)); });
+
+/**
+ * The round's database snapshot (`I⋈P`, `U_db`, the markers and the pass row); issued together, its statements pipeline on
+ * its one connection (PGLite runs them in turn). A pass round (`reuse`) also marks the snapshot, and a later round at the
+ * same key reuses the last `I⋈P` when sync-pass-confirm.ts proves it (else reads it whole). The proof never throws: a
+ * failed mark, proof or delta read reads the round again, whole and unmarked.
+ */
+async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; worktreeId: string; parser: SyncImportParser;
+  reuse?: { cache: PassLevelCache; passId: string; recorded?: ReadonlySet<number>; working: boolean; head: string } }, timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
+  const { kind, sourceId, incarnation, worktreeId, reuse } = input;
+  // Reused only at the same commit, worktree and parser, in committed mode: working mode always reads `I⋈P` whole.
+  const key = JSON.stringify([sourceId, incarnation, worktreeId, reuse?.head, input.parser]);
+  const unkeyed = reuse?.cache.pages && (reuse.working || reuse.cache.pages.key !== key) ? { taken: false, reason: reuse.working ? 'working' : 'key', rows: 0 } : undefined;
+  let prior = reuse && !unkeyed ? reuse.cache.pages : undefined;
+  const confirming = prior !== undefined;
+  if (reuse) reuse.cache.pages = undefined;
+  const round = (marking: boolean) => withRoundSnapshot(engine, async exec => {
+    const base = marking ? prior?.mark : undefined;
+    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres' }))) : null;
+    const marked = marking && !base ? confirmGuard(readLevelMark(exec, sourceId, incarnation)) : null;
+    // PGLite has no snapshot: the mark (or the proof, the next round's mark) runs before the reads it vouches for.
+    if (kind === 'pglite') await (proof ?? marked)?.catch(() => undefined);
+    const others = Promise.all([timed('open_work', () => readOpenWork(exec, sourceId, incarnation, worktreeId)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
       timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
-    return { pages: read.pages, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
+    others.catch(() => undefined);
+    const confirmed = proof ? await confirmPages(exec, { kind, sourceId, incarnation, parser: input.parser, prior: prior!, proof }, timed) : null;
+    // Read whole, the round holds one `I⋈P`, not the reused one beside it.
+    if (!confirmed?.read) prior = undefined;
+    // A failed mark fails what was pipelined after it: the mark's failure is the one to report.
+    const read = confirmed?.read ?? await timed('pages', () => readPages(exec, kind, sourceId, incarnation, input.parser)).catch(async (error: unknown) => { await marked; throw error; });
+    const mark = confirmed?.mark ?? (marked ? await marked : null);
+    const [work, markers, passRow] = await others;
+    if (reuse && mark) reuse.cache.pages = { key, mark, table: read!.pages };
+    const confirm = confirmed?.confirm ?? unkeyed;
+    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 2 : 1) : 0), ...(confirm ? { confirm } : {}) };
   });
+  if (!reuse || reuse.working) return round(false);
+  try { return await round(true); } catch (error) {
+    if (!(error instanceof ConfirmFailure)) throw error;
+    prior = undefined;
+    return { ...await round(false), ...(confirming ? { confirm: { taken: false, reason: 'error', rows: 0 } } : {}) };
+  }
+}
+
+/**
+ * A confirm round's `I⋈P`: with the proof (S2's mark) in hand, the previous round's rows with the pages the pass wrote
+ * re-read into them, when the counts then account for every row (no deletion); else `read: null` and the caller reads
+ * whole. Either way S2's mark is the next round's.
+ */
+async function confirmPages(exec: Exec, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; parser: SyncImportParser;
+  prior: NonNullable<PassLevelCache['pages']>; proof: Promise<ConfirmProof> }, timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
+  const proof = await input.proof, { table } = input.prior;
+  if (!proof.ok) return { read: null, mark: proof.mark, confirm: { taken: false, reason: proof.reason, rows: 0 } };
+  const want = new Set(proof.pages), slots = new Map<string, number>();
+  const step = loopYield();
+  for (let i = 0; i < table.length && slots.size < want.size; i++) {
+    if (want.has(String(table.id[i]))) slots.set(String(table.id[i]), i);
+    if (step.due()) await step.pause();
+  }
+  // An import record the pass wrote for a page that had none in S1 is a new row; one it rewrote was counted in S1.
+  const newRecords = [...proof.records].filter(id => !slots.has(id) || !table.hasRecord(slots.get(id)!)).length;
+  // `A` is the round's own read (readAttestations, after this): the previous round's proofs leave with it.
+  table.attested.clear();
+  const read = proof.pages.length ? await confirmGuard(timed('pages', () => readPages(exec, input.kind, input.sourceId, input.incarnation, input.parser, { table, ids: proof.pages, slots })))
+    : { pages: table, statements: 0 };
+  if (!read) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'page_left_level', rows: 0 } };
+  if (!countsMatch(input.prior.mark, proof, { pages: read.pages.length, newRecords })) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'counts', rows: 0 } };
+  return { read, mark: proof.mark, confirm: { taken: true, reason: null, rows: proof.pages.length } };
 }
 
 /** `H`: the source's holds of this incarnation, the retry set less what the pass consumed, and the holds whose basis or drift moved. */
