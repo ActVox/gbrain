@@ -24,7 +24,7 @@ import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { passIdleProbe, readShadowLevel, workingIdleChange, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
-import { recallWorkingStatCache, rememberWorkingStatCache } from './sync-git-stream.ts';
+import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
 import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, type PassEntry } from './sync-pass-batch.ts';
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
@@ -274,6 +274,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       await assertDrainLease(tx, sourceId);
       await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
+      value.telemetry.started_at = await databaseNow(tx);
       await writePassRow(tx, value, { pin: true });
     }, principalAttribution(authority.writer.principal)));
     await clearPassFailures(engine, sourceId, incarnation);
@@ -285,7 +286,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   obligations.cost = costDecision.cost;
   let costDeferred: string | null = null;
   if (costDecision.defer && !processingOptions.noEmbed) { processingOptions.noEmbed = true; costDeferred = costDecision.defer; }
-  await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin: true }); });
+  await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); value.telemetry.started_at = await databaseNow(tx); await writePassRow(tx, value, { pin: true }); });
   assertActive();
   registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
 
@@ -476,10 +477,21 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   } catch (error) {
     if (error instanceof SyncAdmissionPaused) { await save('resumable', 'admission_paused').catch(() => undefined); return result('partial', 'admission_paused'); }
     if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout'); }
+    // A Git listing that did not finish cleanly classifies nothing (design v3.2 §9): the pass stops blocked, having written nothing for that round.
+    if (error instanceof SyncTreeReadIncomplete) { await save('blocked', 'reconcile_read_incomplete').catch(() => undefined); return result('blocked_by_failures', 'reconcile_read_incomplete'); }
     throw error;
   } finally {
     unregisterPassCost(passId);
   }
+}
+
+/**
+ * The pin's start time from the database clock: `sync.admission`'s `effective` compares it with `set_at` (the database's
+ * `clock_timestamp()`), so a host clock running ahead cannot make a restriction look effective early.
+ */
+async function databaseNow(tx: Pick<BrainEngine, 'executeRaw'>): Promise<string> {
+  const [row] = await tx.executeRaw<{ at: string | Date }>('SELECT now() AS at');
+  return new Date(row!.at).toISOString();
 }
 
 /** A converged or idle pass clears what earlier stops recorded: the pass row's failure key and the incarnation's cursor key. */

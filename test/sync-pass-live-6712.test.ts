@@ -7,6 +7,9 @@
  *   `managed_sync_delete` re-reads it at publication (completed `cancelled` / `admission_paused`, nothing written);
  *   once it is `normal` again the next pass deletes the page.
  *
+ * - not_converged (design v3.2 §9): a working copy that changes under every round ends the pass `partial` / `not_converged`;
+ *   the pass row counts the streak server-side, and from the third consecutive pass the drain's `next` is `report`.
+ *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine, whose intents
  * the fences do not cover, so both deletes publish.
  */
@@ -18,6 +21,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { SYNC_ADMISSION_KEY } from '../src/core/persistence/sync-admission.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { drainNext, runDrain } from '../src/core/persistence/sync-drain.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -70,4 +74,23 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
     expect(await liveSlugs(engine)).toEqual(['notes/b', 'notes/c']);
   }, { setup }), 180_000);
+
+  test('not_converged: a working copy that changes under every round ends the pass not_converged; the third in a row reports', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    let edits = 0;
+    installFaultHook(async point => { if (point === 'sync:mid_checkpoint') writeFileSync(join(root, 'notes/a.md'), note('notes/a', `An uncommitted edit ${++edits}.`)); });
+    const streaks: number[] = [], loops: boolean[] = [];
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'An uncommitted edit before the pass.'));
+      const drained = await runDrain({ pass: () => performManagedSync(engine, { ...OPTS, workingTree: true }) });
+      expect({ status: drained.status, reason: drained.reason, stop: drained.drain?.stop_reason }).toEqual({ status: 'partial', reason: 'not_converged', stop: 'not_converged' });
+      streaks.push(drained.pass!.not_converged_streak);
+      loops.push(drainNext(drained, 'gbrain sync --source default --no-pull', 'default')!.safe_to_loop);
+    }
+    installFaultHook(undefined);
+    expect({ streaks, loops }).toEqual({ streaks: [1, 2, 3], loops: [true, true, false] });
+    expect((await performManagedSync(engine, { ...OPTS, workingTree: true })).status).toBe('synced');
+    const [row] = await engine.executeRaw<{ streak: number }>("SELECT (completed_keys->0->'obligations'->>'not_converged_streak')::int AS streak FROM op_checkpoints WHERE op='managed-sync-pass'");
+    expect(row?.streak).toBe(0);
+  }, { setup }), 240_000);
 });

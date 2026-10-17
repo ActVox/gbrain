@@ -1658,6 +1658,14 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           return { ...result(cursor, done.error_code === 'admission_paused' ? 'partial' : 'blocked_by_failures', done.error_code === 'admission_paused' ? 'admission_paused' : undefined),
             ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done) }) };
         }
+        // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
+        // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
+        // pass not_converged).
+        if (done.state !== 'committed' && cursor.passId && done.error_code === 'source_changed') {
+          cursor = await saveCursor(engine, key, cursor, committedPast({ ...cursor, counts: { ...cursor.counts } }, pending));
+          assertActive();
+          continue;
+        }
         if (done.state !== 'committed') {
           const settled = await settleFailedRequest(engine, { cursor, key, pending, done, assertActive, run: frozenRun, syncOptions, processingOptions,
             remote: authority.writer.remote, waitMs: opts.drainStartedAt ? 30_000 : 5000, signal });
