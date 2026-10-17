@@ -960,7 +960,7 @@ timeline entry's event page) follows the same page rule, and facts and takes
 fence rows never count as an edit. The same assembler serves
 the off-by-default hook push ([push context](../guides/push-context.md)).
 
-### delta(since?, since_slug?, cursor?, entities?, budget_tokens?, session_id?, include_private?) — read, zero LLM
+### delta(since?, since_slug?, cursor?, entities?, budget_tokens?, session_id?, include_private?, beliefs?) — read, zero LLM
 
 "What changed since T" for heartbeats — pages updated after
 the cursor (oldest first) + facts recorded after the cursor + open-thread
@@ -1031,6 +1031,32 @@ are still returned and `budget_used` (the token estimate of `text`) reports the
 real rendered size, which then exceeds the budget. `since` is always
 normalized ISO (never the raw input string). Replay recipe:
 [ambient recall guide](../guides/ambient-recall.md#replay-after-a-degraded-wake).
+
+**Belief changes (`beliefs: true`, full surface only).** Adds `beliefs`: each
+belief that ended the window different from how it started, read from the
+belief ledger for the same window as the wake (`since` to the wake's horizon).
+`{ source_id, since, until, coverage_from, changes[], truncated, not_recorded? }`;
+each change is `{ kind, slug, change, subject, before, after, before_known,
+upper_bound?, cause, evidence: { event_id, recorded_at, slug, row? }, trust_tier }`.
+An edit and its revert in the window report nothing. `before_known: false`
+means the earlier value is unknown (no body answers at `since`), never that
+it was empty; `upper_bound: true` marks a relationship end the nightly check
+inferred, so it ended on or before that date. `coverage_from` is set when the
+ledger starts after `since` (earlier changes are unknown, not absent), and
+`not_recorded` when the source has no ledger coverage. `entities` narrows the
+list to changes on or about the named slugs. A caller without
+`include_private` (every remote caller) gets the world view: events that were
+world-visible when recorded, on pages visible now, and takes of the holders
+the caller may read (the takes surfaces' allow-list, `world` by default).
+Under `budget_tokens` the belief lines pack into what pages, facts and threads
+leave, and `truncated` reports a cut; `text` gains a
+`## Belief changes since <since>` section. The diff is a read of the window,
+not a cursor arm: it does not set `has_more` or hold a `session_id` cursor,
+so lines a cut dropped are not delivered on the next wake; read them with an
+explicit `since` (or `gbrain beliefs changes`). `min_trust` does not filter
+it; each change carries its `trust_tier`. The
+CLI twin is `gbrain beliefs changes [<entity>...] [--since 7d]`. Design:
+[BELIEF_LEDGER.md section 15](../designs/BELIEF_LEDGER.md#15-w4-as-built-the-weekly-change-diff).
 
 ## Latency classes (per verb)
 

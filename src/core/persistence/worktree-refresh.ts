@@ -313,15 +313,19 @@ async function bookkeeping(engine: BrainEngine, row: WorktreeRefreshRow): Promis
   });
 }
 
-/** Steps 6-7: the managed `--no-pull` sync per member, then completion when every member is at target_head. */
-async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRow, root: string): Promise<{ synced: RefreshMemberSync[]; blocked: RefreshSyncBlocked[] }> {
+/** #6712: a member has synced the refresh once its `last_commit` is the target or a descendant of it (a commit landed on top of the target). */
+async function reachedTarget(git: Git, root: string, row: WorktreeRefreshRow, commit: string | null): Promise<boolean> {
+  return commit === row.target_head || (!!commit && commit !== row.old_head && await isAncestor(git, root, row.target_head, commit));
+}
+
+/** Steps 6-7: the managed `--no-pull` sync per member, then completion when every member reached target_head (or a descendant). */
+async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRow, root: string): Promise<{ synced: RefreshMemberSync[]; blocked: RefreshSyncBlocked[]; atTarget: boolean }> {
   const { performManagedSync } = await import('./sync-run.ts');
   const synced: RefreshMemberSync[] = [], blocked: RefreshSyncBlocked[] = [];
   for (const sourceId of row.source_ids) {
     let status = 'up_to_date';
     for (let pass = 0; pass < MAX_MEMBER_SYNC_PASSES; pass++) {
-      const commit = await lastCommit(engine, sourceId);
-      if (commit === row.target_head || (commit && commit !== row.old_head && await isAncestor(git, root, row.target_head, commit))) break;
+      if (await reachedTarget(git, root, row, await lastCommit(engine, sourceId))) break;
       let result: SyncResult;
       try { result = await performManagedSync(engine, { sourceId, noPull: true }); }
       catch (error) {
@@ -342,18 +346,19 @@ async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRo
     await recordUpstreamObservation(engine, sourceId);
     synced.push({ source_id: sourceId, status, last_commit: await lastCommit(engine, sourceId) });
   }
-  const atTarget = synced.every(member => member.last_commit === row.target_head);
+  let atTarget = true;
+  for (const member of synced) if (!await reachedTarget(git, root, row, member.last_commit)) { atTarget = false; break; }
   if (atTarget || blocked.length) await engine.transaction(tx => transition(tx, row, ['syncing'], 'completed',
     { synced, ...(blocked.length ? { sync_blocked: blocked } : {}) }));
-  return { synced, blocked };
+  return { synced, blocked, atTarget };
 }
 async function lastCommit(engine: BrainEngine, sourceId: string): Promise<string | null> {
   const [row] = await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [sourceId]);
   return row?.last_commit ?? null;
 }
 
-function finished(row: WorktreeRefreshRow, sync: { synced: RefreshMemberSync[]; blocked: RefreshSyncBlocked[] }, preserved = row.preserved_uncommitted): WorktreeRefreshResult {
-  const status = sync.blocked.length ? 'sync_blocked' : sync.synced.every(member => member.last_commit === row.target_head) ? 'completed' : 'syncing';
+function finished(row: WorktreeRefreshRow, sync: { synced: RefreshMemberSync[]; blocked: RefreshSyncBlocked[]; atTarget: boolean }, preserved = row.preserved_uncommitted): WorktreeRefreshResult {
+  const status = sync.blocked.length ? 'sync_blocked' : sync.atTarget ? 'completed' : 'syncing';
   return { status, refresh_id: row.id, worktree_id: row.worktree_id, source_ids: row.source_ids, old_head: row.old_head, target_head: row.target_head,
     upstream_ref: row.upstream_ref, preserved_uncommitted: preserved, synced: sync.synced,
     ...(sync.blocked.length ? { sync_blocked: sync.blocked, next: sync.blocked.map(item => item.resume).join(' ; ') } : {}),
