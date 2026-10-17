@@ -37,9 +37,20 @@ import { probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeE
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
-import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP } from './sync-pass-row.ts';
+import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from './sync-pass-row.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
+
+/** What a live pass feeds the level read (sync-pass-run.ts): its episode, the retry paths it already re-screened, and its selection. */
+export interface PassLevelInput {
+  /** The open episode's `full_id`: a live page whose record carries another is `episodeUnsatisfied`. Null: no full obligation. */
+  episodeFullId: string | null;
+  /** Hold paths (source-relative) whose retry row this pass already re-screened: no longer `retried` in its later rounds. */
+  retryConsumed?: ReadonlySet<string>;
+  exclude?: readonly string[];
+  includeHidden?: readonly string[];
+  strategy?: string;
+}
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
 /** Blob bytes read for adoption by hash and the screen, per blob. */
@@ -56,6 +67,11 @@ export interface ShadowLevel {
   mode: 'committed' | 'working'; head: string; baselineCommit: string | null; full: boolean;
   kind: 'idle' | 'hold_only' | 'full'; kindBlockers: SyncIdleBlocker[];
   paths: ShadowPath[];
+  /** The schema pack in effect (the pass's `pack` fingerprint) and the selection the level read (design §6). */
+  pack: string | null;
+  selection: SyncSelection;
+  /** Re-screen-due hold paths (Git-root paths): a hold-only round's candidates. */
+  rescreenDue: string[];
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
   reconcilable: number;
   timings_ms: Record<string, number>;
@@ -64,7 +80,7 @@ export interface ShadowLevel {
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
 interface PageRow { id: number | string; slug: string; source_path: string; revision: string; deleted: boolean; request_id: string | null;
-  record: Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> | null; arm1: boolean | null; attested_hash: string | null }
+  record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
 
 const recordOids = (record: PageRow['record']): string[] =>
   record ? [record.blob_oid, record.disk_blob_oid].filter((oid): oid is string => typeof oid === 'string' && oid.length > 0) : [];
@@ -93,15 +109,17 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
   const select = `SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision, p.deleted_at IS NOT NULL AS deleted,
       p.revision_write_request_id::text AS request_id,
       c.completed_keys IS NOT NULL AS has_record, c.completed_keys->0->>'origin' AS rec_origin, c.completed_keys->0->>'blob_oid' AS rec_blob_oid,
-      c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser
+      c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser,
+      c.completed_keys->0->>'full_episode' AS rec_full_episode
     FROM pages p LEFT JOIN op_checkpoints c ON c.op=$2 AND c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin: string | null; rec_blob_oid: string | null;
-    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null };
+    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null; rec_full_episode: string | null };
   const rows: PageRow[] = [];
-  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
-    record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined } : null }); };
+  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, rec_full_episode, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
+    record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined,
+      full_episode: rec_full_episode } : null }); };
   if (kind === 'postgres') { take(await exec.executeRaw<Raw>(select, params)); return { rows, statements: 1 }; }
   let after = 0, statements = 0;
   for (;;) {
@@ -191,7 +209,7 @@ const timer = () => { const started = performance.now(); return () => Math.round
  * The shadow level of a managed source: every path classified, nothing written. Null for a company-brain source, which
  * keeps its frozen manifest (design v3.2 §3.6).
  */
-export async function readShadowLevel(engine: BrainEngine, input: { sourceId: string; full?: boolean; workingTree?: boolean; context?: ManagedSyncContext }): Promise<ShadowLevel | null> {
+export async function readShadowLevel(engine: BrainEngine, input: { sourceId: string; full?: boolean; workingTree?: boolean; context?: ManagedSyncContext; pass?: PassLevelInput }): Promise<ShadowLevel | null> {
   const total = timer();
   const timings: Record<string, number> = {};
   let t = timer();
@@ -206,7 +224,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead] = await Promise.allSettled([
     currentCompanyBrainSync(sourceId) ? Promise.resolve(true) : getCompanyBrainProfile(engine, sourceId).then(profile => !!profile),
     scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
-    syncExcludePatterns(engine),
+    syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
     engine.getConfig('sync.include_hidden'),
     input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
     loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
@@ -216,8 +234,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
   if (settled(company)) return null;
   const slugMode = settled(slugModeRead), exclude = settled(excludeRead), pack = settled(packRead), mirror = settled(mirrorRead);
-  const strategy = (context.source.config?.strategy as string | undefined) ?? 'markdown';
-  const includeHidden = [...new Set((settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean).map(v => v.endsWith('/') ? `${v}**` : v))];
+  const strategy = input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown';
+  const includeHidden = [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
   const keepDbPrefixes = (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })();
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   // Pure per path and asked several times per path in a round, so each is computed once.
@@ -256,7 +274,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
       const holdByPath = new Map(holds.map(hold => [hold.path, hold]));
       const [basisMoved, driftMoved] = await Promise.all([holdBasisMoved(engine, sourceId, holdByPath, [...holdByPath.keys()]), movedDriftHolds(engine, sourceId, holds)]);
-      return { holds, retry: new Set(retryPaths), moved: [...basisMoved, ...driftMoved] };
+      return { holds, retry: new Set(retryPaths.filter(path => !input.pass?.retryConsumed?.has(path))), moved: [...basisMoved, ...driftMoved] };
     }),
   ]);
   timings.reads = t();
@@ -345,7 +363,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       hold: hold ? { atLevel: holdAtLevel(hold, level, probe?.rawSha256 ?? null) && !moved.has(path), rescreenDue: holdRescreenDue(hold, retry.has(hold.path)), retried: retry.has(hold.path) } : null,
       marker: marker ?? virtualMarker, baseline: needsBaseline ? await baselineOf(path) : null,
       spelling: (spellings.get(fold(path)) ?? 0) > 1,
-      episodeUnsatisfied: input.full === true && !!row && !row.deleted,
+      episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && !!row && !row.deleted && record?.full_episode !== input.pass.episodeFullId
+        : input.full === true && !!row && !row.deleted,
       keepDb: !mirror && keepDbPrefixes.length > 0 && !!row && isKeepDbSlug(row.slug, keepDbPrefixes),
       openWork: !!row && open.pageIds.has(Number(row.id)) || open.origins.has(originOf(path)),
     };
@@ -402,7 +421,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   void passRow;
   timings.total = total();
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
-    paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3 };
+    paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
+    selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
+    rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)) };
 }
 
 /** `workingTreeFilePresent` (sync-discovery.ts) for a Git-root path: a file that exists, or one that cannot be read (fail closed). */
@@ -451,46 +472,3 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean }>(`WITH pass AS (
       SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
     SELECT (SELECT value FROM pass) AS pass_row,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'converged'->>'request_hwm')::bigint, 0) AND worktree_id = $4) AS newer,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE worktree_id = $4 AND state IN ('queued','running','recovering')) AS pending`,
-    [MANAGED_SYNC_PASS_OP, `${context.sourceId}:${context.incarnation}`, input.assumeConverged?.requestHwm ?? null, context.binding.worktree_id]);
-  timings.probes = t();
-  const row = probe?.pass_row ?? null;
-  const converged = input.assumeConverged ?? (row?.converged as { target: string; request_hwm: number } | undefined
-    ? { target: String((row!.converged as Record<string, unknown>).target), requestHwm: Number((row!.converged as Record<string, unknown>).request_hwm) } : null);
-  const newer = probe?.newer === true, pending = probe?.pending === true;
-  const kind = syncPassKind({ converged: converged ? { target: converged.target, parserFp: '', pack: null, selectionFp: '', passesSinceFull: 0, lastFullAt: Date.now() } : null,
-    head: head ?? '', parserFp: '', pack: null, selectionFp: '', now: Date.now(), openEpisode: false, owedTail: false, retryRow: false, notConvergedStreak: 0, mismatchStreak: 0,
-    requestNewer: newer, openAtStampFinished: pending && !input.assumeConverged, workingChange: false, rescreenDueHold: false, full: false });
-  timings.total = total();
-  return { idle: kind.kind === 'idle', reasons: kind.blockers, timings_ms: timings, rows: (newer ? 1 : 0) + (pending ? 1 : 0) + (row ? 1 : 0) };
-}
-
-/**
- * `gbrain sync --dry-run --json`'s `convergence` for one source: the receipt with the read-only screen, undefined
- * on a brain that is not managed or for a company-brain source; a read that cannot run reports why instead of failing
- * the dry run.
- */
-export async function dryRunConvergence(engine: BrainEngine, input: { sourceId: string; full: boolean; workingTree?: boolean; redactPaths: boolean;
-  noEmbed: boolean; noExtract: boolean; noSchemaPack: boolean }): Promise<ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | undefined> {
-  if (!await readManagedMode(engine)) return undefined;
-  try {
-    const context = await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
-    return await shadowConvergence(engine, { sourceId: input.sourceId, full: input.full, workingTree: input.workingTree, redactPaths: input.redactPaths, context,
-      screen: readOnlySameContentScreen(engine, context, { noEmbed: input.noEmbed, noExtract: input.noExtract, noSchemaPack: input.noSchemaPack }) }) ?? undefined;
-  } catch (error) {
-    const code = (error as { code?: unknown }).code;
-    return { dry_run: true, status: 'unavailable', code: typeof code === 'string' ? code : 'convergence_read_failed', message: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/** \`sync status --detail\`'s \`convergence\`: the receipt without the screen (status never prepares an import). */
-export async function statusConvergence(engine: BrainEngine, sourceId: string): Promise<ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | null> {
-  if (!await readManagedMode(engine)) return null;
-  try {
-    return await shadowConvergence(engine, { sourceId, screen: false });
-  } catch (error) {
-    const code = (error as { code?: unknown }).code;
-    return { dry_run: true, status: 'unavailable', code: typeof code === 'string' ? code : 'convergence_read_failed', message: error instanceof Error ? error.message : String(error) };
-  }
-}

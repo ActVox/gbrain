@@ -853,6 +853,8 @@ export interface SyncImportProvenance {
   revision?: string;
   /** What parsed the bytes: the import parser version, the Markdown chunker and the schema pack in effect (null for none). Absent on older records. */
   parser?: SyncImportParser;
+  /** #6712 PR 4b: the open `--full` episode this import was written under (design §6); a live pass's `matched` requires it while the episode is open. */
+  full_episode?: string;
 }
 
 /**

@@ -43,13 +43,16 @@ import type { CompanyBrainPlan } from '../company-brain/types.ts';
 import { companyBrainProfile } from '../company-brain/profile.ts';
 import { companyBrainPolicyFingerprint } from '../company-brain/policy.ts';
 import { isUnboundSourcePage, UNBOUND_COLLISION_MESSAGE } from './unbound-source.ts';
-import { checkpointRetryCommand, findIncompleteSyncReceipt, type SyncSettledIndexes } from './checkpoint-validation.ts';
+import { checkpointRetryCommand, findIncompleteSyncReceipt, findOpenPassWork, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { CURSOR_CHANGED_REFUSAL_MESSAGE, SYNC_CURSOR_FENCE_ORIGIN } from './sync-knock-on.ts';
 import { checkpointCursorReplaced } from './sync-checkpoint-replaced.ts';
-import { recordSyncTail } from './sync-tail-record.ts';
+import { recordPassTail, recordSyncTail } from './sync-tail-record.ts';
+import { readPassRow, writePassRow, OPEN_AT_STAMP_CAP, type ManagedSyncPassValue } from './sync-pass-row.ts';
+import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
+import { syncLockId } from '../db-lock.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
-import { clearGitHold, countGitHolds, recordSyncImportProvenance, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
 import { clearSyncSlice, writeSyncSlice, type SyncSliceState } from './sync-slices.ts';
 import { CHECKPOINT_MOVED_MESSAGE, emptySyncScope, pinnedSlugModeMismatch, slugModeMismatchCause } from './sync-slug-mode.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
@@ -92,8 +95,36 @@ export interface SyncIntent extends Record<string, unknown> {
   supersededRequests?: string[];
   /** #6643 checkpoint only: the indexes the cursor passed without a commit (waived or held), from the index it began recording them. */
   settled?: SyncSettledIndexes;
-  syncAuthority: SyncAuthority; cursorKey: string; runId: string; index: number;
-  from: string | null; target: string; total: number; slugMode: 'git-root' | 'source-root';
+  /**
+   * A cursor intent's key, run and position (company and legacy cursors). #6712 PR 4b: a pass intent (`passId`) carries none
+   * of them; it keeps `kind`, `slug`, `page_id` and `renameFrom`, which the #6862 FIFO guard reads.
+   */
+  cursorKey?: string; runId?: string; index?: number; total?: number;
+  syncAuthority: SyncAuthority; from: string | null; target: string; slugMode: 'git-root' | 'source-root';
+  /** #6712 PR 4b: the live pass that admitted this request (sync-pass-run.ts), and the level `L` it classified the path at. */
+  passId?: string; level?: string | null;
+  /** #6712 PR 4b: the open `--full` episode an import records as its record's `full_episode` (design §6). */
+  fullEpisode?: string;
+  /** #6712 PR 4b, a pass's checkpoint only: what its stamp publishes. */
+  stamp?: PassStamp;
+}
+/**
+ * #6712 PR 4b (design v3.2 §3.3): what a converged pass's `managed_sync_checkpoint` publishes. `configured`: the pass ran at
+ * the source's configured selection, so it advances `last_commit`; a scoped pass stamps its converged state only.
+ */
+export interface PassStamp {
+  leaseToken: string; incarnation: string; configured: boolean;
+  /** `chunker_version` is stamped: a first sync, or a full episode this stamp closes at the configured selection. */
+  stampChunker: boolean;
+  /** The open episode closes with this stamp. */
+  closesEpisode: boolean;
+  /** `sources retry-held` paths this pass re-screened (compare-and-delete) and held paths that left the source. */
+  retryTaken: string[]; releasedHolds: string[];
+  selectionFp: string; parserFp: string; pack: string | null;
+  /** The pass ran a full round (resets `passes_since_full`). */
+  full: boolean;
+  /** The tail obligation: pages the pass changed, and whether their links are extracted. */
+  changed: number; extract: boolean;
 }
 /**
  * #5984: the source-wide part of sync validation (managed mode, configured
@@ -135,7 +166,7 @@ async function sourceSyncChecks(tx: BrainEngine, row: WriteRequest, p: SyncInten
       const [configuredSource] = await tx.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1 FOR SHARE', [row.source_id]);
       assertConfiguredSyncRoot(root, configuredSource?.local_path ?? null);
     },
-    () => readSyncCursorFence(tx, p.cursorKey),
+    () => p.passId || !p.cursorKey ? Promise.resolve(undefined) : readSyncCursorFence(tx, p.cursorKey),
     async () => {
       const current = await getWorktreeBinding(tx, row.source_id);
       if (!current || String(current.owner_epoch) !== p.ownerEpoch) throw syncPublicationRefusal('owner_unavailable', 'The accepted sync owner epoch changed.', row, p,
@@ -328,7 +359,7 @@ async function resolveSyncOrigin(engine: BrainEngine, row: WriteRequest, p: Sync
   if (typeof p.path !== 'string' || typeof p.sourcePath !== 'string') throw syncPublicationRefusal('storage_error', 'The accepted sync origin is missing.', row, p,
     'The stored intent has no recorded file path for this page.');
   let working = p.working;
-  if (p.kind === 'managed_sync_delete' && working === undefined) {
+  if (p.kind === 'managed_sync_delete' && working === undefined && !p.passId) {
     enterClaimStep(clock, 'manifest_entry', undefined, 'db');
     const [manifest] = await engine.executeRaw<{ entry: { path: string; sourcePath: string; action: string; working: boolean; pageId?: number | null } }>(
       "SELECT completed_keys->$2::integer AS entry FROM op_checkpoints WHERE op='managed-sync-manifest' AND fingerprint=$1", [p.runId, p.index]);
@@ -342,7 +373,7 @@ async function resolveSyncOrigin(engine: BrainEngine, row: WriteRequest, p: Sync
   }
   const origin = { path: p.path, sourcePath: p.sourcePath, action: p.kind === 'managed_sync_delete' ? 'delete' as const : 'import' as const, working };
   enterClaimStep(clock, 'git_rev_parse', undefined, 'git');
-  const originContext = { root, gitRoot: syncGitTopLevel(root, p.runId), target: p.target, slugMode: p.slugMode };
+  const originContext = { root, gitRoot: syncGitTopLevel(root, p.passId ?? p.runId ?? row.request_id), target: p.target, slugMode: p.slugMode };
   assertSyncEntryOrigin(originContext, origin);
   const originScope = syncOriginScope({ ...originContext, sourceId: row.source_id });
   enterClaimStep(clock, 'origin_check', undefined, 'db');
@@ -429,7 +460,7 @@ function syncFileProvenance(row: WriteRequest, p: SyncIntent, root: string, rawS
 function publishedSyncNoop(row: WriteRequest, p: SyncIntent, root: string, snapshot: Snapshot | null, schemaPack: string | null,
   validate: (tx: BrainEngine) => Promise<void>, releaseHold: (tx: BrainEngine) => Promise<void>): SyncPreparedMutation {
   const importProvenance: SyncImportProvenanceBase = { source_id: row.source_id, incarnation: row.source_incarnation, origin: p.sourcePath!, raw_sha256: p.rawHash!,
-    working: true, gbrain_version: VERSION, parser: syncImportParser(schemaPack) };
+    working: true, gbrain_version: VERSION, parser: syncImportParser(schemaPack), ...(p.fullEpisode ? { full_episode: p.fullEpisode } : {}) };
   return { observedRevision: snapshot?.revision ?? null, noop: true, contentUnchanged: true, validate, importProvenance,
     apply: async tx => {
       await releaseHold(tx);
@@ -444,6 +475,64 @@ function publishedSyncNoop(row: WriteRequest, p: SyncIntent, root: string, snaps
 /** The bytes on disk of an import that writes no file back: its frozen content when that is the file (raw hash), else the file read now (null: absent). */
 export function syncDiskBytes(root: string, path: string, content: string, rawHash: string | null): Uint8Array | null {
   return rawHash !== null && rawHash === sha256(content) ? Buffer.from(content) : readSyncFile(root, path);
+}
+
+/** A pass's stamp is refused because the pass no longer holds the source (its lease went, or another pass pinned since). */
+export const PASS_LEASE_LOST_MESSAGE = 'The sync pass that admitted this checkpoint no longer holds the source.';
+
+/**
+ * #6712 PR 4b (design v3.2 §3.3; v3 §3.3): a converged pass's stamp. Clause 1: the drain lease that admitted it is live
+ * (`FOR SHARE` on the lock row with the pass's token) and the pass row still names this pass. Clause 2: no recovery row and no
+ * other open managed-sync request of the worktree (`findOpenPassWork`). Then, at the configured selection only,
+ * `last_commit`, `last_sync_at` and the slug-root pin under `WHERE id AND incarnation` (and `chunker_version`); the tail
+ * obligation, hold release, the retry compare-and-delete, and the pass row's converged state (`request_hwm`,
+ * `open_at_stamp`, fingerprints), written under the lease token. The cursor checkpoint (`applyManagedSyncCheckpoint`) is unchanged.
+ */
+async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIntent, root: string, releaseHold: (tx: BrainEngine, path: string | null) => Promise<void>): Promise<Record<string, unknown>> {
+  const stamp = p.stamp!;
+  const lease = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]);
+  const pass = lease.length ? await readPassRow(tx, row.source_id, stamp.incarnation) : null;
+  if (!pass || pass.value.lease_token !== stamp.leaseToken || pass.value.telemetry.pass_id !== p.passId) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
+    `The pass that admitted checkpoint ${row.request_id} of ${row.source_id} lost the source's drain lease, or another pass started since, so nothing was stamped.`);
+  const open = await findOpenPassWork(tx, row.worktree_id!, row.request_id);
+  if (open) throw opError('recovery_required', `An unfinished sync request (request ${open}) still blocks the sync checkpoint.`,
+    `Sync request ${open} of ${row.source_id} is still open or needs recovery, so checkpoint request ${row.request_id} did not commit. Let it finish; do not resubmit it. `
+      + `Then run: ${checkpointRetryCommand({ sourceId: row.source_id, processingOptions: p.processingOptions, syncOptions: p.syncOptions, repoPath: p.repoPath })}`,
+    { fix: syncInspectFix(row, open, false) });
+  if (stamp.configured) {
+    const emptyScope = emptySyncScope(root, syncGitTopLevel(root, p.passId!));
+    const changed = await tx.executeRaw(`UPDATE sources SET last_commit=$3,last_sync_at=now(),
+      config=jsonb_set(${SOURCE_CONFIG_OBJECT_SQL},'{slug_root_mode}',to_jsonb(CASE WHEN $6::boolean THEN COALESCE(config->>'slug_root_mode',$5::text) ELSE $5::text END)),
+      newest_content_at=(SELECT MAX(updated_at) FROM pages WHERE source_id=$1 AND deleted_at IS NULL)
+      WHERE id=$1 AND incarnation=$2::uuid AND (last_commit IS NOT DISTINCT FROM $4 OR last_commit=$3)
+      AND ($6::boolean OR config->>'slug_root_mode' IS NULL OR config->>'slug_root_mode'=$5) RETURNING id`,
+    [row.source_id, row.source_incarnation, p.target, p.from, p.slugMode, emptyScope]);
+    const pinned = !changed.length && !emptyScope ? await pinnedSlugModeMismatch(tx, row.source_id, row.source_incarnation, p.slugMode) : null;
+    if (pinned) throw syncPublicationRefusal('slug_root_mode_mismatch', `The source pins slug_root_mode=${pinned}, but this sync ran under ${p.slugMode}.`, row, p, slugModeMismatchCause(row.source_id, pinned, p.slugMode));
+    if (!changed.length) throw syncPublicationRefusal('revision_conflict', CHECKPOINT_MOVED_MESSAGE, row, p,
+      `Another sync moved the commit checkpoint of ${row.source_id} while this pass published.`);
+    if (stamp.stampChunker) await tx.executeRaw('UPDATE sources SET chunker_version=$2 WHERE id=$1', [row.source_id, chunkerStamp()]);
+  }
+  await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract });
+  for (const path of stamp.releasedHolds) await releaseHold(tx, path);
+  if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
+  const [hwm] = await tx.executeRaw<{ hwm: string | null }>('SELECT max(sequence)::text AS hwm FROM persistence_requests WHERE worktree_id=$1::uuid', [row.worktree_id]);
+  const openIds = await tx.executeRaw<{ id: string }>(`(SELECT 'r:'||request_id::text AS id FROM persistence_requests
+      WHERE worktree_id=$1::uuid AND state IN ('queued','running','recovering') AND request_id<>$2::uuid LIMIT $3)
+    UNION ALL (SELECT 'e:'||e.id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
+      WHERE r.worktree_id=$1::uuid AND e.kind='git' AND e.state IN ('queued','running') LIMIT $3)`, [row.worktree_id, row.request_id, OPEN_AT_STAMP_CAP + 1]);
+  const value: ManagedSyncPassValue = structuredClone(pass.value);
+  const at = new Date().toISOString(), prior = value.obligations.converged;
+  value.obligations.converged = { target: p.target, at, request_hwm: hwm?.hwm ?? '0', open_at_stamp: openIds.length > OPEN_AT_STAMP_CAP ? null : openIds.map(open => open.id),
+    parser_fp: stamp.parserFp, pack: stamp.pack, selection_fp: stamp.selectionFp, last_full_at: stamp.full || !prior ? at : prior.last_full_at,
+    passes_since_full: stamp.full || !prior ? 0 : prior.passes_since_full + 1 };
+  if (stamp.closesEpisode) delete value.obligations.episode;
+  Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, faults: {} });
+  value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: stamp.configured ? null : 'selection_scoped', ended_at: at, remaining: 0,
+    duration_ms: Date.parse(at) - Date.parse(value.telemetry.started_at) };
+  if (!await writePassRow(tx, value)) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
+    `Another pass of ${row.source_id} started while checkpoint ${row.request_id} published, so nothing was stamped.`);
+  return { status: 'synced', source_id: row.source_id, pass_id: p.passId, configured: stamp.configured };
 }
 
 /** The checkpoint request's publication: the whole run committed, so `last_commit` (and the slug-root pin) advance under the guard. */
@@ -569,6 +658,12 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
       },
       async () => { if (p.kind !== 'managed_sync_checkpoint') await assertKnowledgePublicationAllowed(tx, row, p.path === null ? undefined : { root, path: join(root, p.path) }); },
       async () => {
+        // #6712 PR 4b (design v3.2 §8, fencing 2): a pass's deletion re-reads sync.admission at publication.
+        if (p.passId && p.kind === 'managed_sync_delete' && !admissionAllows(await readSyncAdmission(tx), 'destructive')) throw syncPublicationRefusal('admission_paused',
+          'sync.admission paused destructive sync writes before this deletion published.', row, p,
+          `sync.admission is not normal, so the deletion of ${row.slug} in ${row.source_id} published nothing; the page stays live and the next pass re-reads the level.`);
+      },
+      async () => {
         if (p.path !== null && syncRawHash(root, p.path) !== p.rawHash) throw syncPublicationRefusal('source_changed', 'The imported file changed after sync admission.', row, p,
           `The file of ${row.slug} changed on disk after this sync was admitted; review the change and commit it.`);
       },
@@ -592,7 +687,8 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
       await checkApprovedSchemaForEngine(tx, { name: schema.name, identity: schema.identity, resolvedManifestHash: schema.resolved_digest }, { remote: false, sourceId: row.source_id });
     }
   };
-  if (p.kind === 'managed_sync_checkpoint') return { sourceExclusive: true, observedRevision: null, validate, apply: tx => applyManagedSyncCheckpoint(tx, row, p, root, releaseHold) };
+  if (p.kind === 'managed_sync_checkpoint') return { sourceExclusive: true, observedRevision: null, validate,
+    apply: tx => p.passId ? applyPassCheckpoint(tx, row, p, root, releaseHold) : applyManagedSyncCheckpoint(tx, row, p, root, releaseHold) };
   const source = { sourceId: row.source_id };
   enterClaimStep(clock, 'page_snapshot', undefined, 'db');
   const snapshot = await materializedSnapshot(engine, await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true }));
@@ -709,7 +805,8 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   enterClaimStep(clock, 'canonical_projections', undefined, 'db');
   const project = await prepareCanonicalProjections(engine, ready.parsedPage, row.slug, row.source_id, base, p.companyApproval ? 'immutable' : 'file');
   const importProvenance: SyncImportProvenanceBase = { source_id: row.source_id, incarnation: row.source_incarnation, origin: p.sourcePath!, raw_sha256: sha256(p.content!),
-    ...(p.blobOid ? { blob_oid: p.blobOid } : {}), working: p.working === true, gbrain_version: VERSION, ...(recovery?.length ? { recovery } : {}), parser: syncImportParser(pack?.identity ?? null) };
+    ...(p.blobOid ? { blob_oid: p.blobOid } : {}), working: p.working === true, gbrain_version: VERSION, ...(recovery?.length ? { recovery } : {}), parser: syncImportParser(pack?.identity ?? null),
+    ...(p.fullEpisode ? { full_episode: p.fullEpisode } : {}) };
   // afterCommit follows the import that published: a rename publishes its re-preparation at the new slug.
   let published = ready;
   const preparedImport: SyncPreparedMutation = { observedRevision: snapshot?.revision ?? null, trust: await ownerImportTrust(engine, row, ready.parsedPage.frontmatter, p.sourcePath), importProvenance,

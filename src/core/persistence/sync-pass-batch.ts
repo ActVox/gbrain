@@ -1,0 +1,78 @@
+/**
+ * #6712 PR 4b (design v3.2 §3.1): the in-memory round batch of a live pass and its request identity. Kept free of heavy
+ * imports: sync-run.ts, sync-waivers.ts and the pass (sync-pass-run.ts) all read it.
+ */
+import { createHash } from 'node:crypto';
+import type { BrainEngine } from '../engine.ts';
+import type { SyncEntry } from './sync-discovery.ts';
+import { assertDrainLease } from './sync-lease.ts';
+import { admissionAllows, readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
+
+/**
+ * #6712 PR 4b (design v3.2 §3.1): a live pass admits each round batch through the cursor machinery of sync-run.ts with no
+ * persisted cursor behind it. The batch lives in this process under a key with this prefix, held only while the pass
+ * holds the source's drain lease; every step that would compare-and-swap a cursor row asserts the lease instead
+ * (`passBatchStep`).
+ */
+export const PASS_BATCH_KEY_PREFIX = 'pass:';
+export const isPassBatchKey = (key: string | null | undefined): key is string => typeof key === 'string' && key.startsWith(PASS_BATCH_KEY_PREFIX);
+type BatchHead = { sourceId: string; runId: string; index: number; pending?: { requestId: string } | null };
+const passBatches = new Map<string, { value: BatchHead; header: string }>();
+/** The in-memory batch under `key` (null: none, or the pass ended). */
+export function readPassBatch<T>(key: string): T | null { return (passBatches.get(key)?.value as T | undefined) ?? null; }
+/** Replaces (or, with null, drops) the in-memory batch under `key`; `header` is its serialized header, the compare-and-swap's operand. */
+export function setPassBatch(key: string, value: BatchHead | null, header = ''): void {
+  if (value) passBatches.set(key, { value, header }); else passBatches.delete(key);
+}
+/**
+ * One step of an in-memory batch inside `tx`: the drain lease fences it (the pass that holds the lease is the batch's only
+ * writer), and it lands only while the batch's header still is `beforeHeader` (the cursor row's compare-and-swap contract).
+ * Returns false when it did not land.
+ */
+export async function passBatchStep<T extends Pick<BrainEngine, 'executeRaw'>>(tx: T, key: string, beforeHeader: string | null, next: BatchHead, nextHeader: string,
+  inTx?: (tx: T) => Promise<unknown>): Promise<boolean> {
+  await assertDrainLease(tx, next.sourceId);
+  const holds = () => (passBatches.get(key)?.header ?? null) === beforeHeader;
+  if (!holds()) return false;
+  // What rides the step (a hold write or clear) commits in its transaction; the batch moves only after it ran.
+  await inTx?.(tx);
+  if (!holds()) return false;
+  passBatches.set(key, { value: next, header: nextHeader });
+  return true;
+}
+/** The batch's head as the waivers' cursor-row read returns it, fenced by the drain lease. */
+export async function passBatchHead(tx: Pick<BrainEngine, 'executeRaw'>, key: string, sourceId: string): Promise<{ run_id: string | null; index: number | null; request_id: string | null } | undefined> {
+  await assertDrainLease(tx, sourceId);
+  const batch = passBatches.get(key)?.value;
+  return batch ? { run_id: batch.runId, index: batch.index, request_id: batch.pending?.requestId ?? null } : undefined;
+}
+
+/** RFC 4122 namespace of pass request ids (fixed forever: changing it re-admits a same-pass replay). */
+const NS_SYNC_PASS = Buffer.from('5f0c6712b4a84e0b9d1a2c3e4f5a6712', 'hex');
+/** `request_id = uuidv5(NS_SYNC_PASS, passId‖path‖level)` (design v3.2 §3.1): a same-pass replay reads the existing receipt. */
+export function passRequestId(passId: string, path: string, level: string | null): string {
+  const hash = createHash('sha1').update(NS_SYNC_PASS).update(`sync_pass:v1:${passId.toLowerCase()}\0${path}\0${level ?? ''}`).digest();
+  hash[6] = (hash[6]! & 0x0f) | 0x50;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** A round batch's entry: the discovery shape plus the level `L` it was classified at (the request identity's third part). */
+export interface PassEntry extends SyncEntry { level: string | null }
+
+/** `sync.admission` no longer admits what a pass froze (design v3.2 §8.1): the pass stops `resumable`, `admission_paused`. */
+export class SyncAdmissionPaused extends Error {
+  constructor(readonly admission: SyncAdmission) { super(`sync.admission is ${admission}, so this sync admits no more writes of that kind.`); this.name = 'SyncAdmissionPaused'; }
+}
+/**
+ * Fencing 1 (design v3.2 §8): a pass's admission transaction re-reads `sync.admission` and admits nothing it no longer
+ * allows (a delete needs `normal`; an import or the stamp needs `normal` or `imports_only`). Cursor intents are unaffected.
+ */
+export async function assertPassAdmission(tx: Pick<BrainEngine, 'executeRaw'>, intents: ReadonlyArray<{ passId?: string; kind: string }>): Promise<void> {
+  if (!intents.some(intent => intent.passId)) return;
+  const admission = await readSyncAdmission(tx);
+  for (const intent of intents) {
+    if (intent.passId && !admissionAllows(admission, intent.kind === 'managed_sync_delete' ? 'destructive' : 'import')) throw new SyncAdmissionPaused(admission);
+  }
+}

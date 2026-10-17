@@ -22,6 +22,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import type { SyncIntent } from './sync-prepare.ts';
 import type { SyncAuthority } from './sync-authority.ts';
 import { assertDrainLease } from './sync-lease.ts';
+import { assertPassAdmission } from './sync-pass-batch.ts';
 
 /** What sets a drain's lane ceiling: lanes off, the configured maximum, or the connection pool. */
 export type LanesCap = 'disabled' | 'maximum' | 'pool';
@@ -164,6 +165,7 @@ export async function admitGroup(engine: BrainEngine, members: WaiverEntry[], cu
     ]) as [unknown, WriteRequest[]];
     if (!await cursorHolds(tx)) throw new GroupMoved();
     await assertDrainLease(tx, cursor.sourceId);
+    await assertPassAdmission(tx, members.map(member => member.intent));
     return rows;
   }), undefined, error => engine.reconnect({ error })).catch(error => { if (error instanceof GroupMoved) return null; throw error; });
 }
