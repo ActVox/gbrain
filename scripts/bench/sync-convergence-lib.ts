@@ -185,7 +185,10 @@ export interface SeedResult { source_id: string; incarnation: string; pages: num
  * OIDs are the file's blob and whose parser names the active schema pack, as
  * the managed import records it. Writes run with persistence_brain disabled (as
  * test fixtures do, so the managed-writer trigger admits them) and re-enable it
- * at the end. ANALYZE leaves planner statistics as a long-lived brain has.
+ * at the end. ANALYZE runs after batches 1, 2, 4, 8, ... and at the end: the
+ * per-row bump_page_generation_fn trigger runs SELECT MAX(generation) FROM
+ * pages, and a plan cached while the table was empty is a sequential scan, so
+ * without fresh statistics seeding is quadratic (PGLite has no autovacuum).
  */
 export async function seedSource(engine: BrainEngine, input: { sourceId: string; fixture: Fixture; batch: number; log: (line: string) => void }): Promise<SeedResult> {
   const { sourceId, fixture, batch, log } = input;
@@ -204,8 +207,8 @@ export async function seedSource(engine: BrainEngine, input: { sourceId: string;
     const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]);
     const pack = await loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null);
     const parser = syncImportParserFor(fixturePath(0), pack?.identity ?? null);
-    let pagesMs = 0, provenanceMs = 0;
-    for (let start = 0; start < fixture.files; start += batch) {
+    let pagesMs = 0, provenanceMs = 0, analyzeMs = 0, nextAnalyze = 1;
+    for (let start = 0, batchNo = 1; start < fixture.files; start += batch, batchNo++) {
       const end = Math.min(fixture.files, start + batch);
       const rows: Array<{ slug: string; title: string; body: string; path: string; revision: string }> = [];
       const disk = new Map<string, { sha: string; oid: string; revision: string }>();
@@ -229,10 +232,18 @@ export async function seedSource(engine: BrainEngine, input: { sourceId: string;
       t = performance.now();
       await recordSyncImportProvenances(engine, records);
       provenanceMs += performance.now() - t;
-      if (end === fixture.files || (end / batch) % 20 === 0) log(`seed: ${end}/${fixture.files} pages`);
+      if (batchNo === nextAnalyze) {
+        t = performance.now();
+        await engine.executeRaw('ANALYZE pages');
+        await engine.executeRaw('ANALYZE op_checkpoints');
+        analyzeMs += performance.now() - t;
+        nextAnalyze *= 2;
+      }
+      if (end === fixture.files || batchNo % 20 === 0) log(`seed: ${end}/${fixture.files} pages`);
     }
     timings_ms.pages = Math.round(pagesMs);
     timings_ms.provenance = Math.round(provenanceMs);
+    timings_ms.analyze_during = Math.round(analyzeMs);
     await time('analyze', () => engine.executeRaw('ANALYZE'));
     return { source_id: sourceId, incarnation, pages: fixture.files, timings_ms };
   } finally {
