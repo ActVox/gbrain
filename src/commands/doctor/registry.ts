@@ -122,6 +122,7 @@ import { unindexedFilesEntry } from './checks/unindexed-files.ts';
 import { purgeParkedPagesEntry } from './checks/purge-parks.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
+import { managedSyncBlockedEntry } from './checks/managed-sync-blocked.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
 import {
@@ -168,6 +169,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   persistenceCapacityEntry,
   terminalFailuresEntry,
   managedSyncMovementEntry,
+  managedSyncBlockedEntry,
   persistenceCompactionEntry,
   soakCountersEntry,
   serveBuildDriftEntry,

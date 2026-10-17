@@ -21,6 +21,8 @@ export function frontmatterSlugConflictMessage(path: string, found: string, expe
 const HELD_FILE = /^(?:The canonical file is held by sync|A file held by sync) \(([a-z_]+)\) (and differs from the page|occupies the canonical page path); the page is read-only for put_page until the file is repaired\.$/;
 
 /** #6693: the refusal of a page write whose file holds a committed Git change sync has not imported yet (pending-import.ts). */
+/** #6858: the receipt prefix of a write `gbrain repair stuck-recovery --keep disk` abandoned: its canonical file was kept as edited on disk. */
+export const KEEP_DISK_ABANDONED_PREFIX = 'Publication abandoned by gbrain repair stuck-recovery --keep disk';
 export const PENDING_IMPORT_MESSAGE = 'The canonical file holds a committed Git change that sync has not imported yet.';
 
 export function heldFileMessage(kind: 'drift' | 'occupied', code: string): string {
@@ -65,7 +67,7 @@ export function writeFailureDiagnostic(code: string, message?: string | null): {
       suggestion: 'Inspect the exact working-tree bytes and pinned Git version, including CRLF/LF differences. Preserve local edits; do not normalize or discard them automatically. If the file and database disagree, preview gbrain sources reconcile <source> <slug> --brain <brain> --preview on the source host.',
     };
     if (['The imported file changed after sync admission.', 'The canonical file changed after preparation.',
-      'The canonical file changed during preparation.'].includes(message ?? '')) return {
+      'The canonical file changed during preparation.'].includes(message ?? '') || (message ?? '').startsWith(KEEP_DISK_ABANDONED_PREFIX)) return {
       reason: 'raw_file_changed', message: 'The source file bytes changed after this request was accepted.',
       suggestion: 'Review the changed file before starting a corrected attempt. Exact byte checks remain required even when Git reports a clean file.',
     };

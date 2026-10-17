@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { runSync } from '../src/commands/sync.ts';
-import { noteRetryFailedDeprecated, parseSyncFlags, printSyncHelp, RETRY_FAILED_DEPRECATED } from '../src/commands/sync/args.ts';
+import { noteRetryFailedDeprecated, parseSyncFlags, printSyncHelp, resetRetryFailedNoticeForTests, RETRY_FAILED_DEPRECATED } from '../src/commands/sync/args.ts';
 import { refuseManagedForbiddenFlags } from '../src/commands/sync/managed-no-pull.ts';
 import { checkSyncConsolidation } from '../src/commands/doctor.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
@@ -150,6 +150,7 @@ test('--all, --hard-deadline, --no-bulk and --no-lanes stay accepted on a manage
 test('--retry-failed is a deprecated alias of the plain sync: it prints the coaching notice once and syncs the same', async () => withEnv(env, async () => {
   expect(NOTICE_CODES.sync_retry_failed_deprecated).toMatchObject({ kind: 'coaching' });
   expect(RETRY_FAILED_DEPRECATED).toContain('a plain gbrain sync now retries');
+  resetRetryFailedNoticeForTests();
   const plainSource = (await managedSources(1))[0]!;
   const plain = await captured(() => runSync(engine, ['--source', plainSource.id, '--no-pull']));
   expect(plain.stderr).not.toContain('sync_retry_failed_deprecated');

@@ -267,6 +267,10 @@
       },
       {
         "category": "ops",
+        "name": "managed_sync_blocked"
+      },
+      {
+        "category": "ops",
         "name": "persistence_compaction"
       },
       {
