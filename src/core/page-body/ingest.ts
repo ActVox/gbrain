@@ -35,6 +35,7 @@ import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
 import { assertGenerationTiles } from './body-tiling.ts';
+import { hasStaleChunks } from './projection.ts';
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
@@ -89,6 +90,11 @@ export interface PreparedSegmentedBody {
   retireChunkOccurrences: number[];
   /** Occurrences of the new generation that have no chunk rows after staging (a create without `createChunks`: all, chunked after publication). */
   unchunked: number;
+  /**
+   * The live generation stores chunk rows it does not hold (an earlier write's deferred retirement), so the publication
+   * leaves the page unsealed. Read here, not in the publication transaction: the probe walks every occurrence of the page.
+   */
+  priorStale: boolean;
   body: SegmentedBodyColumns;
   /** No manifest row changed: the write changes metadata only. */
   bodyUnchanged: boolean;
@@ -321,7 +327,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
     if (createChunks) await stageOccurrenceChunks(engine, { pageId: 0, sourceId: input.sourceId, slug: input.slug, generation: newGeneration, occurrences: rows,
       title: input.title, frontmatter: input.frontmatter, flags: body.body_flags, chunking: input.chunking, retiredOccurrences: [], hold: createChunks.chunks });
     return { stagingId, expectedGeneration, newGeneration, createRows: rows, createChunks, closeOccurrences: [], retireChunkOccurrences: [],
-      unchunked: createChunks ? 0 : rows.length, body, bodyUnchanged: false, rows: { texts, manifest: rows.length, chunks: createChunks?.chunks.length ?? 0 }, stagedChunkIndexes: [] };
+      unchunked: createChunks ? 0 : rows.length, priorStale: false, body, bodyUnchanged: false, rows: { texts, manifest: rows.length, chunks: createChunks?.chunks.length ?? 0 }, stagedChunkIndexes: [] };
   }
   if (changed.length) await writes(exec => exec.stageManifestRows(changed));
   await faultPoint('segmented:manifest_staged', { sourceId: input.sourceId });
@@ -332,8 +338,9 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   await faultPoint('segmented:chunks_staged', { sourceId: input.sourceId });
   const kept = new Set(rows.filter((_, i) => matched[i]).map(row => row.occurrenceId));
   retireChunkOccurrences.push(...chunkable.filter(row => kept.has(row.occurrenceId)).map(row => row.occurrenceId));
+  const priorStale = !!live && await hasStaleChunks(engine, live.id, expectedGeneration, liveRows.map(row => Number(row.occurrenceId)));
   return { stagingId, expectedGeneration, newGeneration, createRows: null, createChunks: null, closeOccurrences, retireChunkOccurrences,
-    unchunked: input.chunking.quarantined ? 0 : chunkable.length - chunks.occurrences, body,
+    unchunked: input.chunking.quarantined ? 0 : chunkable.length - chunks.occurrences, priorStale, body,
     bodyUnchanged: changed.length === 0 && retireChunkOccurrences.length === 0, rows: { texts, manifest: changed.length, chunks: chunks.rows },
     stagedChunkIndexes: chunks.indexes };
 }
