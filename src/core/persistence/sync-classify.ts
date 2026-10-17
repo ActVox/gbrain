@@ -132,7 +132,7 @@ function firstMatch(s: SyncPathState): Omit<SyncClassified, 'inFlight'> {
         ...(keepDbWrite ? { keepDbWrite: true as const } : {}), ...(s.episodeUnsatisfied && sub !== 'pending' ? { fullSkipped: true as const } : {}) };
     }
   }
-  if ((!fileSame && proof && live) || (!live && s.marker === null)) return { cls: 'import', settled: false, action: 'import' };
+  if ((!fileSame && proof && live) || !live) return { cls: 'import', settled: false, action: 'import' };
   if (live && s.record?.revision == null && s.level !== null && s.level === s.baseline) return { cls: 'legacy_unverified', settled: true, action: 'none' };
   if (live && s.keepDb && s.mode === 'committed' && s.dirty === 'clean') return { cls: 'keep_db', settled: false, action: 'keep_db' };
   return { cls: 'drift', settled: false, action: 'hold', side: s.record?.revision != null ? 'both' : 'unknown' };
