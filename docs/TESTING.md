@@ -278,7 +278,12 @@ imports it (`registerPostgresTests`), a `tests/heavy/` script that names it,
 or a row in `scripts/e2e-backend-matrix.txt`. Unit-lane files with no other
 Postgres owner are listed in `test/postgres-unit-arms.txt`, read by
 `persistence-validation.yml`'s `unit-postgres-arms` job (one Bun process per
-file), the [race hunt](#race-hunt) and the lane guard.
+file), the [race hunt](#race-hunt) and the lane guard. The job runs
+`ARM_SHARDS` (8) shards balanced by `scripts/postgres-arm-weights.json`,
+medians mined from the job's own logs with
+`bun scripts/postgres-unit-arms.ts mine <job logs>`; re-mine after adding heavy
+files. `test/scripts/postgres-unit-arms.test.ts` fails when a shard's weighted
+sum passes 80% of the step's 20-minute timeout.
 `bun run check:postgres-lanes` (in `verify`) fails on every arm with no lane
 and on a bad list row. An arm deliberately left out is an `ALLOWLIST` row in
 `scripts/check-postgres-lane-coverage.ts` naming its reason and TODO; a row
