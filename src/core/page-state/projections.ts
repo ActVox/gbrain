@@ -460,6 +460,8 @@ export async function noteProjectionRebuilds(engine: BrainEngine, rebuilt: numbe
 /**
  * The queue reason of a segmented page whose projection a process is building (buildSegmentedProjection): the claim
  * holds while its `updated_at`, renewed with each chunk batch, is younger than SEGMENTED_PROJECTION_LEASE_SECONDS.
+ * That `updated_at` is also the building process's stamp: its renewals, seal and release match it, so any other write
+ * to a claimed row's `updated_at` hands the claim back; a deferral or failure mark skips a live claim.
  */
 export const SEGMENTED_PROJECTION_CLAIM = 'segmented_projecting';
 export const SEGMENTED_PROJECTION_LEASE_SECONDS = 60;
@@ -701,7 +703,8 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
         const built = await buildSegmentedProjection(engine, { sourceId: job.source_id, slug: job.slug });
         await engine.executeRaw(built.sealed
           ? 'DELETE FROM page_projection_jobs WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid'
-          : 'UPDATE page_projection_jobs SET updated_at=now() WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid', observed);
+          : `UPDATE page_projection_jobs j SET updated_at=now() WHERE j.source_incarnation=$1::uuid AND j.slug=$2 AND j.revision=$3::uuid
+            AND NOT ${SEGMENTED_PROJECTION_CLAIMED_SQL}`, observed);
         if (built.sealed) rebuilt++;
         else superseded++;
         continue;
@@ -711,8 +714,8 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
       rebuilt++;
     } catch (error) {
       if (!(error instanceof PageRevisionConflictError)) {
-        await engine.executeRaw(`UPDATE page_projection_jobs SET reason='rebuild_failed',updated_at=now()
-          WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid`, observed);
+        await engine.executeRaw(`UPDATE page_projection_jobs j SET reason='rebuild_failed',updated_at=now()
+          WHERE j.source_incarnation=$1::uuid AND j.slug=$2 AND j.revision=$3::uuid AND NOT ${SEGMENTED_PROJECTION_CLAIMED_SQL}`, observed);
         if (opts.onFailure) opts.onFailure({ source_id: job.source_id, slug: job.slug, reason: (error instanceof Error ? error.message : String(error)).split('\n')[0].slice(0, 300) });
         else process.stderr.write('[gbrain] Projection rebuild failed; work remains queued. Inspect projection readiness and the recorded source path.\n');
         continue;
