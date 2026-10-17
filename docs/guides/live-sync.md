@@ -230,7 +230,7 @@ host's CLI writer. A sync that is already running, here or in another process,
 is never doubled: the commit waits and gets one more sync when that one ends.
 A sync that stops resumable is resumed up to three times. Nothing is written
 into the checkout or `.git`, and an idle poll costs one git call per checkout.
-`gbrain serve --http` does not run the watcher yet.
+Both `gbrain serve` and `gbrain serve --http` run the watcher.
 
 For a small page, expect a commit to be searchable in about 5 to 15 seconds:
 up to 3 s to notice, the 3 s debounce, then the page write. Embedding follows

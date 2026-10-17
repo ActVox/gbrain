@@ -20,7 +20,8 @@
  * flipping `sync.on_commit` needs no restart) and the source list (every 60 s while on). With the flag off nothing
  * else runs: no git call, no sync. It never writes into the checkout or `.git` (`GIT_OPTIONAL_LOCKS=0`). Every error
  * is caught and logged once per distinct message; the loop never throws into serve. serve.ts starts it beside the
- * movement watch (installResidentTickers) and stops it before shutdownDelegatedSync.
+ * movement watch (installResidentTickers) and stops it before shutdownDelegatedSync; serve-http.ts (runServeHttp)
+ * starts it beside the movement watch and stops it on the same shutdown path.
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, watch as fsWatch } from 'node:fs';
