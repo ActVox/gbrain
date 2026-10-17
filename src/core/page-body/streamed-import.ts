@@ -75,6 +75,7 @@ import { sanitizeText } from '../batch-rows.ts';
 import { applySegmentedBody, sealSegmentedPage, segmentedLivePage } from '../persistence/segmented-apply.ts';
 import { buildSegmentedProjection } from './projection.ts';
 import { prepareSegmentedBody, segmentWriteScope, utf8Prefix, type SegmentedStagingOwner } from './ingest.ts';
+import { readGarbageCollector } from './segment-blocks.ts';
 import type { JsonObject } from './types.ts';
 
 const READ_BYTES = 1024 * 1024;
@@ -82,9 +83,10 @@ const FENCE_MARKER = /gbrain:(facts|takes):begin/;
 
 /**
  * @internal Work the checked reads after pass 1 do, for the drift test: file blocks read and hashed against their
- * pass-1 digests (`blocks`) and their bytes (`bytes`). Counts, not time.
+ * pass-1 digests (`blocks`) and their bytes (`bytes`); and, for the scan memory test, the most file bytes pass 1
+ * read between two full collections (`scanUncollected`). Counts, not time.
  */
-export const streamedImportWork = { blocks: 0, bytes: 0 };
+export const streamedImportWork = { blocks: 0, bytes: 0, scanUncollected: 0 };
 
 type StreamedImportOptions = {
   noEmbed?: boolean;
@@ -241,16 +243,25 @@ class CodeRefLines {
 
 /**
  * Pass 1 over the virtual stream; `prefix` is inferred frontmatter (empty when none). `hash` and `blocks` receive the
- * file's bytes after its BOM.
+ * file's bytes after its BOM. A full collection every few MiB read (readGarbageCollector), as the staging batches
+ * after it collect: each read leaves its buffer and the scanner's decoded text behind, and JSC's own collector rarely
+ * runs during the pass, so a 32 MiB file's pass 1 left ~170 MiB of garbage under the first staging batch, the import's
+ * peak; the peak grew with the file (segmented-ingest-memory: ~310 MiB above a 1 MiB import at 32 MiB, ~400 at 48 MiB;
+ * ~230 at both with the collection).
  */
 async function scanFile(file: FileHandle, bom: number, prefix: Uint8Array, size: number, relativePath: string, opts: StreamedImportOptions, hash: Hash | null,
   blocks: BlockDigests) {
   const scanner = new BodyScanner(relativePath, { validate: true, ...(opts.activePack ? { activePack: opts.activePack } : {}) });
   if (prefix.length) scanner.push(prefix);
+  const collect = readGarbageCollector();
+  let uncollected = 0;
   for await (const part of readVirtual(file, bom, new Uint8Array(0), 0, size - bom)) {
     hash?.update(part);
     blocks.push(part);
     scanner.push(part);
+    uncollected += part.length;
+    streamedImportWork.scanUncollected = Math.max(streamedImportWork.scanUncollected, uncollected);
+    if (collect(part.length)) uncollected = 0;
   }
   return scanner.finish();
 }

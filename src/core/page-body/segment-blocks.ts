@@ -35,15 +35,16 @@ const COLLECT_EVERY_BYTES = 4 * 1024 * 1024;
 /**
  * A full collection every COLLECT_EVERY_BYTES read. Each segment read leaves garbage several times its size (driver
  * buffers, decoded texts), and JSC sizes its threshold to a heap PGLite's WASM memory makes large, so a pass over a
- * 40 MiB page peaked ~0.8 GB above its live heap without this. Feed it the bytes of each piece read.
+ * 40 MiB page peaked ~0.8 GB above its live heap without this. Feed it the bytes of each piece read; true when it collected.
  */
-export function readGarbageCollector(): (bytes: number) => void {
+export function readGarbageCollector(): (bytes: number) => boolean {
   let since = 0;
   return bytes => {
     since += bytes;
-    if (since < COLLECT_EVERY_BYTES) return;
+    if (since < COLLECT_EVERY_BYTES) return false;
     since = 0;
     Bun.gc(true);
+    return true;
   };
 }
 
