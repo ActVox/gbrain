@@ -44,6 +44,7 @@ import { startPersistenceConsumer } from './service.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
 import { managedCursorKey, resolveManagedCursor, retireManagedCursor, retireOrphanSliceRecords } from './sync-cursor-key.ts';
 import { withCoordinatedWrite } from './context.ts';
+import { pipelined } from '../page-state/transactions.ts';
 import { principalAttribution } from './attribution.ts';
 import { isCodeFilePath, resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
@@ -95,11 +96,16 @@ const parserFingerprint = () => digest(['x.md', 'x.ts', 'x.png'].map(path => syn
  */
 async function retireLegacyCursors(engine: BrainEngine, input: { sourceId: string; incarnation: string; remote: boolean; assertActive: () => void }):
   Promise<{ wait?: RetryWait; hostRequired?: true; episode?: PassEpisode }> {
+  const readHeader = (key: string) => engine.executeRaw<{ slices: boolean; header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
+    `SELECT (SELECT completed_keys->0 FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1) AS header,
+      EXISTS (SELECT 1 FROM op_checkpoints WHERE op=$2 AND left(fingerprint, length($3))=$3) AS slices`, [key, SYNC_SLICE_OP, `${input.sourceId}:${input.incarnation}:`]);
+  // #6712 PR 4b: the canonical key's header is read beside the resolution (the key it picks unless it adopts an older one;
+  // the resolution never writes the key it picks), and read again only for an adopted key.
+  const canonical = managedCursorKey(input.incarnation, undefined), speculative = readHeader(canonical);
+  speculative.catch(() => undefined);
   const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: undefined, assertActive: input.assertActive, foldIn: !input.remote });
   if (resolution.waitFor) return { wait: { ...resolution.waitFor, retry_after_ms: 5000 } };
-  const [row] = await engine.executeRaw<{ slices: boolean; header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
-    `SELECT (SELECT completed_keys->0 FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1) AS header,
-      EXISTS (SELECT 1 FROM op_checkpoints WHERE op=$2 AND left(fingerprint, length($3))=$3) AS slices`, [resolution.key, SYNC_SLICE_OP, `${input.sourceId}:${input.incarnation}:`]);
+  const [row] = await (resolution.key === canonical ? speculative : readHeader(resolution.key));
   const header = row?.header;
   if (!header) {
     if (row?.slices && !input.remote) await retireOrphanSliceRecords(engine, input.sourceId, input.incarnation);
@@ -294,22 +300,29 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const remote = authority.writer.remote;
   const lease = currentDrainLease(sourceId);
   if (!lease) throw new Error(`The live sync pass of ${sourceId} runs only under the source's drain lease.`);
+  lease.tailClear = false;
   const started = Date.now(), startedAt = new Date(started).toISOString();
+  // Pin (design §2.2): the row, sync.admission, HEAD and the mode. The reads the kind needs ride the same round trip: the
+  // selection's patterns, the schema pack, the tail, the retry row, the source's holds and the idle probe (which reads the
+  // row's watermark and open ids itself). #6712 PR 4b: the legacy cursors' retirement runs beside them; it writes none of
+  // what they read, and its outcome is still decided first.
+  const pin = Promise.all([readPassRow(engine, sourceId, incarnation),
+    readSyncAdmission(engine), engine.getConfig('sync.include_working_tree'), selectionPatterns(engine, opts),
+    input.processingOptions.noSchemaPack ? null : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
+    readSyncTail(engine, sourceId), readGitHoldRetryPaths(engine, sourceId, incarnation), readGitSourceHolds(engine, { sourceIds: [sourceId] }),
+    passIdleProbe(engine, { sourceId, incarnation, worktreeId: context.binding.worktree_id, requestHwm: null, openAtStamp: null }),
+    engine.executeRaw(`SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=ANY($1::text[]) LIMIT 1`, [passFailureKeys(sourceId, incarnation)])] as const);
+  pin.catch(() => undefined);
   const handover = await retireLegacyCursors(engine, { sourceId, incarnation, remote, assertActive });
   const empty = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : context.source.last_commit ?? '',
     added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0, embedded: 0, pagesAffected: [], filesImported: 0, bankedFiles: 0, ...(reason ? { reason } : {}) });
   if (handover.wait) return { ...empty('partial', 'writer_pending'), ...(remote ? {} : { retryWait: handover.wait }) };
   if (handover.hostRequired) return empty('blocked_by_failures', 'reconcile_host_required');
-
-  // Pin (design §2.2): the row, sync.admission, HEAD and the mode. The reads the kind needs ride the same round trip: the
-  // selection's patterns, the schema pack, the tail, the retry row and the source's holds (only the idle probe needs the row).
-  const [prior, admission, configuredWorking, patterns, loadedPack, tail, retry, sourceHolds] = await Promise.all([readPassRow(engine, sourceId, incarnation),
-    readSyncAdmission(engine), engine.getConfig('sync.include_working_tree'), selectionPatterns(engine, opts),
-    input.processingOptions.noSchemaPack ? null : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
-    readSyncTail(engine, sourceId), readGitHoldRetryPaths(engine, sourceId, incarnation), readGitSourceHolds(engine, { sourceIds: [sourceId] })]);
+  const [prior, admission, configuredWorking, patterns, loadedPack, tail, retry, sourceHolds, rowProbe, failed] = await pin;
   assertActive();
-  let head = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
-  const detached = syncGit(context.gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
+  const [headLine, refLine] = syncGit(context.gitRoot, ['rev-parse', 'HEAD', '--abbrev-ref', 'HEAD']).split('\n');
+  let head = headLine!.trim();
+  const detached = refLine?.trim() === 'HEAD';
   const mode: SyncSelection['mode'] = detached || (opts.workingTree ?? configuredWorking === 'true') ? 'working' : 'committed';
   const selection = passSelection(patterns, opts, context, mode);
   const configured = !remote && !opts.exclude?.length && !opts.includeHidden?.length && opts.srcSubpath === undefined
@@ -337,9 +350,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
 
   // The kind (design §2.2), from the real converged state.
   const converged = obligations.converged;
-  const probe = converged ? await passIdleProbe(engine, { sourceId, incarnation, worktreeId: context.binding.worktree_id, requestHwm: converged.request_hwm,
-    openAtStamp: converged.open_at_stamp ?? [] }) : null;
-  assertActive();
+  const probe = converged ? rowProbe : null;
   const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
   // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
   const cacheKey = passFingerprint(sourceId, incarnation);
@@ -371,13 +382,15 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started };
     await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
       assertActive();
-      await assertDrainLease(tx, sourceId);
-      // One round trip: the stamp and the transaction's clock read are pipelined.
-      [, value.telemetry.started_at] = await Promise.all([tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]),
-        databaseNow(tx)]);
-      await writePassRow(tx, value, { pin: true });
+      // One round trip: the lease check, the stamp and the row (started at the transaction's clock) are pipelined; a lost
+      // lease rolls the other two back.
+      await pipelined(tx, [() => assertDrainLease(tx, sourceId), () => tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]),
+        () => writePassRow(tx, value, { pin: true, clock: true })]);
     }, principalAttribution(authority.writer.principal)));
-    await clearPassFailures(engine, sourceId, incarnation);
+    // A failure is recorded only under the lease this pass holds, so none recorded at pin means none to clear.
+    if (failed.length) await clearPassFailures(engine, sourceId, incarnation);
+    // Nor can a tail be owed since the pin read none: the lease's holder reads none after it (sync-run.ts).
+    lease.tailClear = !tail;
     return { ...empty('up_to_date'), toCommit: remote ? '' : head, ...(inherited.length ? { inherited_options: inherited } : {}) };
   }
   // Design §7: the cost decision at pin; an unknown or spent envelope defers embeddings for this pass (never inherited).
@@ -676,9 +689,9 @@ async function databaseNow(tx: Pick<BrainEngine, 'executeRaw'>): Promise<string>
 }
 
 /** A converged or idle pass clears what earlier stops recorded: the pass row's failure key and the incarnation's cursor key. */
+const passFailureKeys = (sourceId: string, incarnation: string) => [passFingerprint(sourceId, incarnation), managedCursorKey(incarnation, undefined)];
 async function clearPassFailures(engine: BrainEngine, sourceId: string, incarnation: string): Promise<void> {
-  await Promise.all([clearManagedSyncFailureAfterSuccess(engine, passFingerprint(sourceId, incarnation)),
-    clearManagedSyncFailureAfterSuccess(engine, managedCursorKey(incarnation, undefined))]);
+  await Promise.all(passFailureKeys(sourceId, incarnation).map(key => clearManagedSyncFailureAfterSuccess(engine, key)));
 }
 
 export type { SyncAdmission };

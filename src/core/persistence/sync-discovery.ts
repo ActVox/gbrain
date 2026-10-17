@@ -174,17 +174,24 @@ function managedSyncRefusal(sourceId: string, message: string, suggestion: strin
     fix: managedSyncFix(sourceId, 'A managed brain syncs its registered checkout through the persistence coordinator: it imports local HEAD without git pull and keeps every ignored-file and failed-receipt guard.'),
   });
 }
-/** Validate the current owner and source without enumerating a new manifest. */
-export async function resolveManagedSyncContext(engine: BrainEngine, opts: SyncOpts): Promise<ManagedSyncContext> {
-  await assertManagedSyncActive(engine);
+type ManagedSourceRow = { incarnation: string; archived: boolean; local_path: string | null; last_commit: string | null; config: Record<string, unknown> };
+/** The source row and worktree binding `resolveManagedSyncContext` validates, read together. */
+export function readManagedSyncRows(engine: BrainEngine, sourceId: string): Promise<[ManagedSourceRow | undefined, WorktreeBinding | null]> {
+  return Promise.all([engine.executeRaw<ManagedSourceRow>('SELECT incarnation,archived,local_path,last_commit,config FROM sources WHERE id=$1', [sourceId]).then(rows => rows[0]),
+    getWorktreeBinding(engine, sourceId)]);
+}
+/**
+ * Validate the current owner and source without enumerating a new manifest. `rows`: `readManagedSyncRows` started by a
+ * caller that has asserted the managed mode itself (and handles the promise's rejection).
+ */
+export async function resolveManagedSyncContext(engine: BrainEngine, opts: SyncOpts, rows?: ReturnType<typeof readManagedSyncRows>): Promise<ManagedSyncContext> {
+  if (!rows) await assertManagedSyncActive(engine);
   const sourceId = opts.sourceId ?? 'default';
   if (!opts.noPull && !opts.dryRun) throw managedSyncRefusal(sourceId, 'Managed sync requires skipping the Git pull (CLI `--no-pull`, sync_brain `no_pull: true`); Git pull/rebase needs an explicit drained maintenance window.',
     `Sync without pulling to import the checkout as it is (CLI: gbrain sync --no-pull --source ${sourceId}; MCP: sync_brain with no_pull: true), or fast-forward and sync the checkout with gbrain sources refresh ${sourceId}.`);
   const forbidden = managedForbiddenFlag(opts);
   if (forbidden) throw managedSyncFlagRefusal(forbidden, sourceId, ['--source', sourceId, '--no-pull']);
-  const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null; last_commit: string | null; config: Record<string, unknown> }>(
-    'SELECT incarnation,archived,local_path,last_commit,config FROM sources WHERE id=$1', [sourceId]);
-  const binding = await getWorktreeBinding(engine, sourceId);
+  const [source, binding] = await (rows ?? readManagedSyncRows(engine, sourceId));
   if (!source || source.archived || !binding || binding.source_incarnation !== source.incarnation ||
       binding.owner_host_id !== localHostId() || binding.state !== 'active' || !binding.local_path) {
     // #6449: a rooted source with no owner at all is the database-only one activation listed; the exit is a deliberate claim.
