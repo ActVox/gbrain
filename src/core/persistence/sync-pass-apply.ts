@@ -191,7 +191,7 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
   if (tripped) {
     for (const entry of deletes) settleAs(entry, { settled: true, action: 'none', withheld: true });
     if (input.remote) return;
-    const paths = deletes.map(entry => passEntryPaths(level, entry.path).path).sort();
+    const paths = deletes.map(entry => entry.path).sort();
     await engine.transaction(async tx => {
       await assertDrainLease(tx, level.sourceId);
       state.withheld = await writeDeletesWithheld(tx, { sourceId: level.sourceId, incarnation: level.incarnation, target: level.head, count: deletes.length,

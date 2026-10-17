@@ -67,6 +67,8 @@ export interface ManagedSyncPassValue {
     faults: Record<string, { level: string | null; class: string; attempts: number }>;
     /** #6712 PR 4b (design §2.7): when the incarnation's first full round swept every `legacy_unverified` page; later passes sweep at most 500. */
     legacy_sweep?: { first_full_at: string };
+    /** #6712 PR 4b (design §2.6): the set hash of a withheld mass delete; with the env valve set the next tick runs a full round to apply it. */
+    deletes_withheld?: string | null;
   };
   telemetry: {
     pass_id: string;

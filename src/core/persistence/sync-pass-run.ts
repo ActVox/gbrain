@@ -43,6 +43,7 @@ import { passResumeArgs } from './sync-pass-readers.ts';
 import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
+import { massReconcileAllowed } from '../sync-reconcile.ts';
 
 /** Rounds a pass runs before it stops `not_converged` (design §3.1). */
 export const PASS_MAX_ROUNDS = 4;
@@ -251,7 +252,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     notConvergedStreak: obligations.not_converged_streak, mismatchStreak: Object.keys(obligations.mismatch).length,
     requestNewer: probe?.newer === true, openAtStampFinished: !!converged && (converged.open_at_stamp === null || (probe?.stillOpen ?? 0) < converged.open_at_stamp.length),
     workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
-  const kind: PassKind = admission === 'classify_only' && kindOf.kind === 'idle' ? 'idle' : kindOf.kind;
+  // Design §2.6: a withheld mass delete is applied by a full round once the owner host's env valve allows it.
+  const valveOpen = !remote && !!obligations.deletes_withheld && massReconcileAllowed();
+  const kind: PassKind = admission === 'classify_only' && kindOf.kind === 'idle' ? 'idle' : valveOpen && kindOf.kind === 'idle' ? 'full' : kindOf.kind;
   const value: ManagedSyncPassValue = { source_id: sourceId, incarnation, lease_token: lease.token, obligations,
     telemetry: { pass_id: passId, target: head, started_at: startedAt, ended_at: null, kind, round: 0, outcome: 'open', stop_reason: null, candidates: 0, settled: 0, remaining: 0,
       counts: {}, duration_ms: null, timings_ms: {} } };
@@ -263,6 +266,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     const at = new Date().toISOString();
     value.obligations.converged = { ...converged!, passes_since_full: converged!.passes_since_full + 1 };
     value.obligations.stuck_since = null;
+    // Design §7: an owner approval (--yes) on an idle tick still makes an unknown cost known again.
+    if (opts.costApproved && value.obligations.cost?.approved_usd === null) value.obligations.cost = (await passCostDecision(engine, { sourceId, incarnation,
+      scope: episode?.full_id ?? passId, priorRow: true, prior: value.obligations.cost, approved: true })).cost;
     value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started };
     await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
       assertActive();
@@ -353,6 +359,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         grantPrefixes: remote ? authority.writer.slugPrefixes : null }, applied);
       assertActive();
       if (applied.sweptAll && !value.obligations.legacy_sweep) value.obligations.legacy_sweep = { first_full_at: new Date().toISOString() };
+      if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
       const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
       lastMismatch = mismatch;
       for (const entry of level.paths) {
@@ -404,7 +411,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
             value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
               last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
             Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });
-            value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts, ...passApplyCounts(applied) } };
+            value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts, ...passApplyCounts(applied) },
+              classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}) };
             await writePassRow(tx, value);
           }, principalAttribution(authority.writer.principal)));
           rememberLevel();
