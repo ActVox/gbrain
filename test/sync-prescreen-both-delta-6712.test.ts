@@ -6,6 +6,8 @@
  * Protects:
  * - both moved, delta sync: the page keeps the database edit and the file is held `file_drift` (side `both`);
  * - control: a file-only edit still imports on a delta sync with no hold;
+ * - control: a database-only change an import keeps (a tag) is not guarded: the page still holds what the recorded disk
+ *   blob imports (`unchangedSinceBaseline`), so the committed edit imports and the tag stays;
  * - control: a page whose current revision write-through wrote to its file is not guarded (`fileBackedRevisions`), so the
  *   committed file edit imports.
  *
@@ -22,7 +24,9 @@ import type { OperationContext } from '../src/core/ops/contract.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { readGitHold } from '../src/core/persistence/sync-holds.ts';
+import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -58,6 +62,18 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(hold?.code).toBe('file_drift');
     expect(await bodyOf(engine, 'notes/b')).toContain('A file-only edit.');
     expect(await holdOf(engine, 'notes/b.md')).toBeNull();
+  }, { setup, databaseUrl }), 120_000);
+
+  test('a database-only tag does not guard the page: the committed edit imports and keeps the tag', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.setConfig('sync.write_through', 'false');
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.addTag('notes/a', 'kept-in-brain', { sourceId: 'default' }), TEST_WRITE_ATTRIBUTION));
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'The second committed body.'));
+    commit(root, 'edit a');
+    await performManagedSync(engine, OPTS);
+    expect(await bodyOf(engine, 'notes/a')).toContain('The second committed body.');
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))?.tags).toContain('kept-in-brain');
+    expect(await holdOf(engine, 'notes/a.md')).toBeNull();
   }, { setup, databaseUrl }), 120_000);
 
   test('a page whose revision write-through wrote to its file is not guarded: the committed edit imports', () => managedBrain(async ({ engine, ctx, root }) => {

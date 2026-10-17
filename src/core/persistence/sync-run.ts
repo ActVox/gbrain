@@ -45,7 +45,7 @@ import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
 import { isContentRefusal } from '../import-screen.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
-import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
+import { readBlobContents, SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
 import { frozenImageIntent, sameImageBytes } from './sync-image.ts';
 import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
@@ -441,7 +441,8 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     }
     // #6712 PR 1: an import whose page moved since its file was last imported runs only as a proven no-op (sync-prescreen.ts).
     if (entry.drift && !occupantRebound && content !== null && snapshot && !(image ? sameImageBytes(imageBytes, snapshot.page)
-      : await sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly, run.signal))) {
+      : await sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly, run.signal)
+        || await unchangedSinceBaseline(engine, cursor, entry, key, snapshot, run.signal))) {
       if (!holdsOn) throw syncRunRefusal('file_drift', 'An import would overwrite a database version of the page that sync never saw.', retry, `Page ${slug} in source ${cursor.sourceId} changed in the database since ${entry.path} was last imported, and the file differs from it, so the run stopped before admitting it (sync.holds=fail).`);
       const proof = await pageChangeProof(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, pageId, expectedRevision: null }); assertActive();
       return { hold: fileDriftHold(entry, slug, pageId, frozenIntent, { sides: entry.drift, revision: snapshot.revision, proof, sharedOrigin: await sharedOriginSurvivor(engine, cursor.sourceId, entry.sourcePath) }) };
@@ -922,6 +923,30 @@ async function sameContentAtOrigin(engine: BrainEngine, cursor: Cursor, entry: C
     const prepared = await raceSyncBudget(prepareManagedSyncMutation(engine, screeningRequest({ source_id: cursor.sourceId, source_incarnation: cursor.incarnation, slug: snapshot.page.slug,
       page_id: snapshot.page.id, worktree_id: cursor.binding.worktree_id, authority: cursor.authority.writer, intent }), { engine: engine.kind }, startClaimPhase(Date.now(), undefined, budgetMs)), budgetMs, signal);
     return (prepared.contentUnchanged === true || prepared.noop === true) && !prepared.file && prepared.observedRevision === snapshot.revision;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return false;
+  }
+}
+
+/**
+ * #6712: both the file and the page moved since the last recorded import, but the page still holds exactly what the
+ * recorded disk blob imports (the database side changed only what an import keeps: tags, links, withdrawals). The
+ * newer file then overwrites nothing the database alone holds, so the entry imports.
+ */
+async function unchangedSinceBaseline(engine: BrainEngine, cursor: Cursor, entry: Cursor['entries'][number], key: string,
+  snapshot: Awaited<ReturnType<BrainEngine['readPageSnapshot']>>, signal?: AbortSignal): Promise<boolean> {
+  if (entry.drift !== 'both' || !entry.driftBaseline || !snapshot || snapshot.page.deleted_at != null) return false;
+  const baseline = readBlobContents(cursor.gitRoot, [{ oid: entry.driftBaseline, size: 0 }]).get(entry.driftBaseline);
+  if (baseline === undefined) return false;
+  const intent: SyncIntent = { kind: 'managed_sync_import', expected_revision: snapshot.revision, sourcePath: entry.sourcePath, path: entry.path, rawHash: sha256(baseline),
+    content: baseline, lineEndingOnly: false, processingOptions: cursor.processingOptions, ownerEpoch: String(cursor.binding.owner_epoch), syncAuthority: cursor.authority,
+    cursorKey: key, runId: cursor.runId, slugMode: cursor.slugMode, index: cursor.index, total: cursor.entries.length, from: cursor.from, target: cursor.target, working: false };
+  try {
+    const budgetMs = await syncPreparationBudgetMs(engine);
+    const prepared = await raceSyncBudget(prepareManagedSyncMutation(engine, screeningRequest({ source_id: cursor.sourceId, source_incarnation: cursor.incarnation, slug: snapshot.page.slug,
+      page_id: snapshot.page.id, worktree_id: cursor.binding.worktree_id, authority: cursor.authority.writer, intent }), { engine: engine.kind }, startClaimPhase(Date.now(), undefined, budgetMs)), budgetMs, signal);
+    return (prepared.pageUnchanged === true || prepared.noop === true) && prepared.observedRevision === snapshot.revision;
   } catch (error) {
     if (signal?.aborted) throw error;
     return false;
