@@ -33,6 +33,8 @@ import type { BrainEngine } from '../engine.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { massReconcileAllowed, planReconcileDeletes } from '../sync-reconcile.ts';
 import { admitKeepDbReconcile, freezeKeepDbReconcile, releaseMatchedDriftSkips } from '../repair/keep-db-policy.ts';
+
+const KEEP_DB_CAPACITY_REFUSALS = new Set(['capacity', 'write_capacity_backpressure', 'queue_capacity', 'write_quota_exhausted', 'writer_busy', 'writer_pool_capacity']);
 import type { SyncProcessingOptions } from './sync-authority.ts';
 import type { SyncClassified } from './sync-classify.ts';
 import { readOnlySameContentScreen } from './sync-convergence.ts';
@@ -330,6 +332,7 @@ async function admitKeepDb(engine: BrainEngine, level: ShadowLevel, input: PassA
     const bytes = blobs.get(entry.state.level!);
     const refuse = (reason: string) => {
       state.keepDb.refused[reason] = (state.keepDb.refused[reason] ?? 0) + 1;
+      if (KEEP_DB_CAPACITY_REFUSALS.has(reason)) { state.keepDb.pending++; settleAs(entry, { settled: true, action: 'none', pending: 'keep_db' }); return; }
       if (entry.result.cls === 'keep_db') settleAs(entry, { cls: 'drift', settled: false, action: 'hold', side: entry.state.record?.revision != null ? 'both' : 'unknown', classAction: 'repair' });
     };
     if (!bytes) { refuse('bytes_unreadable'); continue; }

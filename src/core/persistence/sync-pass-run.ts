@@ -58,6 +58,7 @@ import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
 import { SIZE_STATE_SAMPLE, type SyncSizeStates } from '../page-embedding-budget.ts';
 import { massReconcileAllowed } from '../sync-reconcile.ts';
+import { keepDbHeadroom } from '../repair/keep-db-policy.ts';
 
 /** Rounds a pass runs before it stops `not_converged` (design §3.1). */
 export const PASS_MAX_ROUNDS = 4;
@@ -385,8 +386,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
   // Design §2.6: a withheld mass delete is applied by a full round once the owner host's env valve allows it.
   const valveOpen = !remote && !!obligations.deletes_withheld && massReconcileAllowed();
-  // Design §4: keep_db writes the previous pass's cap deferred (`keep_db_pending`) are owed to this pass, so it is not idle.
-  const keepDbOwed = !remote && admission === 'normal' && (prior?.value.telemetry.classes?.keep_db_pending?.count ?? 0) > 0;
+  // Design §4: keep_db writes the previous pass deferred (`keep_db_pending`: its cap, or write capacity) are owed to this pass, so it is
+  // not idle, unless write capacity still stops them; then the idle tick stays idle instead of re-reading the tree every tick.
+  const keepDbOwed = !remote && admission === 'normal' && kindOf.kind === 'idle' && (prior?.value.telemetry.classes?.keep_db_pending?.count ?? 0) > 0
+    && !(await keepDbHeadroom(engine));
   const kind: PassKind = admission === 'classify_only' && kindOf.kind === 'idle' ? 'idle' : (valveOpen || keepDbOwed) && kindOf.kind === 'idle' ? 'full' : kindOf.kind;
   const value: ManagedSyncPassValue = { source_id: sourceId, incarnation, lease_token: lease.token, obligations,
     telemetry: { pass_id: passId, target: head, started_at: startedAt, ended_at: null, kind, round: 0, outcome: 'open', stop_reason: null, candidates: 0, settled: 0, remaining: 0,
