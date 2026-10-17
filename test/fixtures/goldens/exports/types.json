@@ -5597,6 +5597,13 @@
       },
       {
         "kind": "function",
+        "name": "explicitMarkdownTitle",
+        "signature": [
+          "(content: string) => string"
+        ]
+      },
+      {
+        "kind": "function",
         "name": "findTimelineSplitIndex",
         "signature": [
           "(lines: string[]) => number"

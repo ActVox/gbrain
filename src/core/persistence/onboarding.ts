@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { existingLocalHostId, persistenceHome } from './identity.ts';
 import { containsPath, getWorktreeBinding, readManagedMode } from './ownership.ts';
-import { assertPhysicalRoot } from './physical-root.ts';
+import { verifyOwnerRoot } from './owner-verification.ts';
 import { inspectLegacyWriterLocks } from './legacy-locks.ts';
 import { UNSUPPORTED_MANAGED_BULK_WRITERS } from './maintenance.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
@@ -40,11 +40,9 @@ export async function writerOnboardingPreflight(engine: BrainEngine, sourceId?: 
     let physicalError: string | undefined;
     if (binding && (binding.source_incarnation !== row.incarnation || binding.state !== 'active')) state = 'recovery_required';
     if (binding && binding.owner_host_id !== host) state = 'owner_host_required';
-    if (binding?.owner_host_id === host && (!binding.local_path || !binding.coordination_path)) state = 'recovery_required';
-    if (binding?.owner_host_id === host && binding.local_path) {
-      try { assertPhysicalRoot(binding.local_path, { worktreeId: binding.worktree_id, coordinationPath: binding.coordination_path }); }
-      catch (error) { state = 'recovery_required'; physicalError = error instanceof Error ? error.message : String(error); }
-    }
+    // #6741 C: the claim's owner verification, shared with background admissions (owner-verification.ts).
+    const owner = binding?.owner_host_id === host ? verifyOwnerRoot(binding) : null;
+    if (owner) { state = 'recovery_required'; physicalError = owner.physical_error; }
     const root = binding?.local_path ?? (connector ? null : configured);
     const paths = root ? containerPathPreflight({ canonical_root: root, reservation_parent: dirname(root), persistence_home: persistenceHome(),
       coordination_directory: binding?.coordination_path ? dirname(binding.coordination_path) : join(persistenceHome(), 'locks') }) : undefined;
