@@ -293,6 +293,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'managed_sync_blocked',
   // #6712 PR 4a: the read-only convergence shadow's counts (doctor/checks/managed-sync-convergence.ts).
   'managed_sync_convergence',
+  // #6712 PR 4b: sync.admission is not normal, so managed sync admits less than it classifies (doctor/checks/sync-admission.ts).
+  'sync_admission_restricted',
   'persistence_session_timeouts',
   // #6317: consumer heartbeat rows and host identity (doctor/checks/persistence-consumers.ts).
   'two_consumers_on_host',
