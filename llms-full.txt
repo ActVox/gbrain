@@ -7524,6 +7524,7 @@ Every hold and error has three fields, from one table
 | `sync_incomplete` | page | retry | no | never: an unfinished cursor resumes with the same command |
 | `connection_lost` | connection | retry | no | three reruns in a row end connection_lost (the database is unreachable from this host) |
 | `database_contention` | connection | retry | no | three reruns in a row stop on it |
+| `write_interrupted` | connection | retry | no | a rerun ends write_interrupted on the same entry again: gbrain sources writer status --source <source> --json (read-only) names the load on the write owner |
 | `write_capacity` | connection | retry | no | writer status shows the cap held by requests that never settle |
 | `write_capacity_backpressure` | connection | retry | no | reason lifetime_ids (request ids never free, so only the host raise lifts it), or the pause outlasts a day |
 | `capacity_paused` | connection | retry | no | reason lifetime_ids (only the host raise resumes it), or the same pause after the raise |

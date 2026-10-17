@@ -15,13 +15,17 @@
  *    loaded host is prepared again, its whole body streamed again, without limit), or when contention or a connection loss is counted.
  * 3. Existing coverage: page-purge-journal-timeout-6511.test.ts bounds the purge's own lookups only;
  *    persistence-preparation-deadline tests bound preparation deadlines, never a publication's interruptions.
+ *    A managed sync member that ends `write_interrupted` is a transient connection-class fault (SYNC_FAULT_TABLE): the
+ *    run re-freezes it in place under a fresh request (STOPS_PER_ENTRY times in a row), then stops resumable with
+ *    `retry` and an escalation naming the read-only `gbrain sources writer status`, never "Unknown code" for a person.
  * 4. Semantic injection: installFaultHook on the publication's before_commit seam (inside the publication transaction),
  *    throwing an error carrying the SQLSTATE, for every publication of the claims the test names. Counts claims, never
  *    time. Runs on PGLite and, with DATABASE_URL, on Postgres.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -31,6 +35,12 @@ import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { resetWriteSwitches } from '../src/core/persistence/switches.ts';
+import { classifySyncFault } from '../src/core/persistence/sync-fault-class.ts';
+import { performManagedSync, STOPS_PER_ENTRY } from '../src/core/persistence/sync-run.ts';
+import { readSyncStatus, unblockSync } from '../src/core/persistence/sync-status.ts';
+import { receiptClass, resumableStop } from '../src/core/persistence/sync-stop-class.ts';
+import { classifyRecordedFault } from '../src/core/persistence/terminal-classify.ts';
+import type { WriteRequest } from '../src/core/persistence/model.ts';
 import { _resetWriteThroughCacheForTest } from '../src/core/write-through.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -39,6 +49,19 @@ import { withEnv } from './helpers/with-env.ts';
 const op = (name: string) => operations.find(o => o.name === name)!;
 const interruption = (code: string) => Object.assign(new Error(code === '57014' ? 'canceling statement due to statement timeout' : `database interruption ${code}`), { code });
 const page = (title: string) => `---\ntitle: ${title}\ntype: note\n---\n# ${title}\n\nBody of ${title}.\n`;
+const WRITER_STATUS = 'gbrain sources writer status';
+
+test('write_interrupted is a transient connection fault whose escalation names the read-only writer status', () => {
+  expect(classifySyncFault({ code: 'write_interrupted' })).toEqual({ class: 'connection', safe_actions: ['retry'], needs_human: false });
+  expect(classifyRecordedFault({ source_id: 'notes', code: 'write_interrupted', slug: 'a' })).toMatchObject({ category: 'transport', public_category: 'transient',
+    class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: expect.stringContaining(WRITER_STATUS) });
+  const receipt = { request_id: randomUUID(), source_id: 'notes', slug: 'a', operation: 'put_page', state: 'failed', error_code: 'write_interrupted',
+    error_message: 'The database ended this write\'s statements 2 time(s).', error_detail: { origin: 'database_interruption', sqlstate: '57014', attempts: 2, limit: 2 },
+    recovery: null, blocked_reason: null, compacted: false, publication_started: false, intent: { kind: 'managed_sync_import' } } as unknown as WriteRequest;
+  expect(receiptClass(receipt)).toBe('transport');
+  expect(resumableStop(receipt)).toBe(true);
+});
+
 type Row = { state: string; error_code: string | null; error_message: string | null; error_detail: Record<string, unknown> | null; preparation_attempts: number; has_recovery: boolean };
 
 for (const backend of testBackends()) describe(`[${backend}] transient publication failures are bounded`, () => {
@@ -122,6 +145,49 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
     expect(claims.attempts).toEqual([0, 0, 0, 0]);
     expect(await row(requestId)).toMatchObject({ state: 'committed' });
   }, 120_000);
+
+  test('a managed sync entry that ends write_interrupted is re-frozen in place, then stops resumable with a retry', async () => withEnv({ GBRAIN_HOME: home,
+    GBRAIN_SYNC_FAILURES_DIR: home, GBRAIN_SOURCE: undefined, OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
+    const id = `wi-${randomUUID().slice(0, 8)}`, root = join(home, id);
+    const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    mkdirSync(root); git('init', '-q');
+    for (const name of ['a', 'b']) writeFileSync(join(root, `${name}.md`), page(`Sync ${name}`));
+    git('add', '.'); git('-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'content');
+    await disposePersistenceConsumer(engine);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    await engine.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,'{}')", [id, root]);
+    await claimWorktree(engine, id, root);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    // Every publication of a request for page `a` of this source has its statement cancelled. The request's page is read
+    // as it is claimed (outside any transaction: PGLite has one connection, which the publication holds).
+    const pageA = new Set<string>();
+    installFaultHook(async (point, detail) => {
+      if (detail.sourceId !== id || !detail.requestId) return;
+      if (point === 'consumer:preparing') {
+        const [request] = await engine.executeRaw<{ slug: string }>('SELECT slug FROM persistence_requests WHERE request_id=$1::uuid', [detail.requestId]);
+        if (request?.slug === 'a') pageA.add(detail.requestId);
+      }
+      if (point === 'publication:before_commit' && pageA.has(detail.requestId)) throw interruption('57014');
+    });
+    const result = await performManagedSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true });
+    installFaultHook(undefined);
+    expect(result).toMatchObject({ status: 'blocked_by_failures', failureCodes: [{ code: 'write_interrupted', count: 1 }] });
+    const requests = await engine.executeRaw<{ state: string; error_code: string | null; preparation_attempts: number }>(
+      "SELECT state,error_code,preparation_attempts FROM persistence_requests WHERE source_id=$1 AND slug='a' ORDER BY sequence", [id]);
+    expect(requests).toEqual(Array.from({ length: STOPS_PER_ENTRY + 1 }, () => ({ state: 'failed', error_code: 'write_interrupted', preparation_attempts: 2 })));
+    expect(await engine.readPageSnapshot('a', { sourceId: id })).toBeNull();
+    const status = await readSyncStatus(engine, id);
+    expect(status.last_error).toMatchObject({ code: 'write_interrupted', category: 'transport', public_category: 'transient', class: 'connection',
+      safe_actions: ['retry'], needs_human: false });
+    expect(status).toMatchObject({ state: 'resumable', needs_human: false });
+    expect(status.next?.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    expect(status.next?.user_message).toBeUndefined();
+    expect((await unblockSync(engine, id, { apply: false })).refused).toEqual([]);
+    // The cause gone, the same sync converges.
+    expect((await performManagedSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true })).status).not.toBe('blocked_by_failures');
+    expect(await engine.readPageSnapshot('a', { sourceId: id })).not.toBeNull();
+    expect(await engine.readPageSnapshot('b', { sourceId: id })).not.toBeNull();
+  }), 300_000);
 
   describe('worktree-backed page', () => {
     let brainDir: string;
