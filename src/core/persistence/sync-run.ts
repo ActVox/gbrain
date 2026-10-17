@@ -294,26 +294,6 @@ async function currentCursor(engine: BrainEngine, key: string, cached: Cursor): 
 }
 /** The rollback signal of an admission whose cursor no longer holds the frozen entry (ENG-A7). */
 class CursorMoved extends Error {}
-async function replaceCursor(engine: BrainEngine, key: string, before: CursorHeader, next: Cursor, assertActive: () => void): Promise<Cursor | { wait: RetryWait }> {
-  next.settled ??= { from: 0, ranges: [] };
-  return engine.transaction(async tx => {
-    assertActive();
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
-    await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR UPDATE', [next.binding.worktree_id]);
-    // #6643: only the old cursor's own open requests and recovery-bearing ones veto the swap, and the caller is told which.
-    await assertDrainLease(tx, next.sourceId);
-    const blocker = await oldRunBlocker(tx, next, key);
-    if (blocker) { assertActive(); return { wait: blocker }; }
-    await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES($1,$2,$3::text::jsonb)`, [`${OP}-manifest`, next.runId, JSON.stringify(next.entries)]);
-    const swapped = await tx.executeRaw('UPDATE op_checkpoints SET completed_keys=$4::text::jsonb,updated_at=now() WHERE op=$1 AND fingerprint=$2 AND completed_keys=$3::text::jsonb RETURNING fingerprint',
-      [OP, key, JSON.stringify([before]), JSON.stringify([header(next)])]);
-    // #6278 (B7): the re-screens the replacing manifest took are consumed with the swap that records them.
-    if (swapped.length && next.retryTaken?.length) await clearGitHoldRetryPaths(tx, next.sourceId, next.incarnation, next.retryTaken);
-    const current = (await readCursor(tx, key, next))!;
-    assertActive();
-    return current;
-  });
-}
 function result(cursor: Cursor | CursorHeader, status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult {
   return { status, ...(cursor.authority.writer.remote ? {} : { runId: cursor.runId }), fromCommit: cursor.authority.writer.remote ? null : cursor.from,
     toCommit: cursor.authority.writer.remote ? '' : cursor.target, added: cursor.counts.added, modified: cursor.counts.modified,
@@ -1362,18 +1342,6 @@ interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boole
 
 /** #6643: a request the whole-manifest retirement must wait for, named with its producer, instead of a silent no-op. */
 export interface RetryWait { request_id: string; kind: string | null; slug: string; state: string; recovery: boolean; retry_after_ms: number }
-/**
- * #6643: what retiring the cursor's frozen manifest must wait for: a request of this cursor (any of its runs) that is
- * still open or carries recovery, or any recovery-bearing request on the worktree (its replay may touch a file the
- * new manifest reads). Foreground and maintenance writes that are merely queued on other pages no longer veto it.
- */
-async function oldRunBlocker(engine: Pick<BrainEngine, 'executeRaw'>, cursor: Pick<Cursor, 'sourceId' | 'binding'>, key: string): Promise<RetryWait | null> {
-  const [row] = await engine.executeRaw<{ request_id: string; kind: string | null; slug: string; state: string; recovery: boolean }>(
-    `SELECT request_id::text AS request_id, intent->>'kind' AS kind, slug, state, recovery IS NOT NULL AS recovery FROM persistence_requests
-      WHERE source_id=$1 AND ((intent->>'cursorKey'=$2 AND state IN ('queued','running','recovering')) OR (worktree_id=$3::uuid AND recovery IS NOT NULL))
-      ORDER BY sequence LIMIT 1`, [cursor.sourceId, key, cursor.binding.worktree_id]);
-  return row ? { ...row, recovery: row.recovery === true, retry_after_ms: 5000 } : null;
-}
 
 /**
  * One managed pass under the source's drain lease (#6712 PR 1): reentrant inside a drain, a staged catch-up or a CLI
