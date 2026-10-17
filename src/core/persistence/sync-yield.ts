@@ -3,7 +3,8 @@
  * A 600k-path round classifies, maps and sorts for seconds; without a turn of the event loop between stretches the
  * persistence consumer's idle probe, lease renewals and every timer starve for that long. A loop asks `due()` once per
  * entry (a counter, then the clock every 64 entries: a probe's entry reads a file) and awaits `pause()` when its stretch has run
- * `LOOP_BUDGET_MS`: one macrotask (`setImmediate`), so expired timers and I/O run before it continues.
+ * `LOOP_BUDGET_MS`: one timer turn (`setTimeout(0)`), so expired timers and I/O run before it continues (Bun can run
+ * consecutive `setImmediate` turns without its timers phase: 61k full rounds held a 50 ms interval timer for 102-276 ms).
  */
 
 /** A stretch of synchronous work longer than this yields (the ruling bounds a stretch at about 100 ms; the rest is room for the entry that crosses it and for work outside these loops). */
@@ -13,7 +14,7 @@ const CHECK_EVERY = 64;
 export interface LoopYield {
   /** Whether the current stretch has run its budget; cheap enough to ask per entry (`entries`: how many this call stands for). */
   due(entries?: number): boolean;
-  /** One macrotask turn; the next stretch starts after it. */
+  /** One timer turn; the next stretch starts after it. */
   pause(): Promise<void>;
 }
 
@@ -21,7 +22,7 @@ export function loopYield(): LoopYield {
   let since = performance.now(), n = 0;
   return {
     due: (entries = 1) => { n += entries; if (n < CHECK_EVERY) return false; n = 0; return performance.now() - since >= LOOP_BUDGET_MS; },
-    pause: async () => { await new Promise<void>(resolve => setImmediate(resolve)); since = performance.now(); },
+    pause: async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); since = performance.now(); },
   };
 }
 
