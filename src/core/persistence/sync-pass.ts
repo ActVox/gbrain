@@ -164,9 +164,12 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
 }
 
 /** `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and pending Git effects of the source. */
-async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
+async function readOpenWork(exec: Exec, sourceId: string, incarnation: string, worktreeId: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
+  // A write admitted with sync.write_through=false carries no worktree (page-mutations.ts), so the incarnation's
+  // worktree-less requests are open work too.
   const [requests, effects] = await Promise.all([exec.executeRaw<{ page_id: number | null; source_path: string | null; path: string | null }>(`SELECT page_id, intent->>'sourcePath' AS source_path, intent->>'path' AS path
-    FROM persistence_requests WHERE worktree_id=$1 AND state IN ('queued','running','recovering') AND source_id=$2`, [worktreeId, sourceId]),
+    FROM persistence_requests WHERE state IN ('queued','running','recovering') AND source_id=$2 AND (worktree_id=$1 OR worktree_id IS NULL AND source_incarnation=$3::uuid)`,
+    [worktreeId, sourceId, incarnation]),
   exec.executeRaw<{ page_id: number | null; path: string | null }>(`SELECT r.page_id, e.data->>'relative_path' AS path
     FROM persistence_requests r JOIN persistence_effects e ON e.request_id=r.id
     WHERE r.worktree_id=$1 AND r.source_id=$2 AND e.kind='git' AND e.state IN ('queued','running')`, [worktreeId, sourceId])]);
@@ -300,7 +303,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
     timed('I⋈P', () => withRoundSnapshot(engine, async exec => {
       const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, engineKind, sourceId, incarnation)),
-        timed('open_work', () => readOpenWork(exec, sourceId, context.binding.worktree_id)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
+        timed('open_work', () => readOpenWork(exec, sourceId, incarnation, context.binding.worktree_id)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
         timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
       return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
     })),
@@ -548,12 +551,14 @@ export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, inp
   const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean; still_open: number | string }>(`WITH pass AS (
       SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
     SELECT (SELECT value FROM pass) AS pass_row,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'obligations'->'converged'->>'request_hwm')::bigint, 0) AND worktree_id = $4) AS newer,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE worktree_id = $4 AND state IN ('queued','running','recovering')) AS pending,
-      (SELECT count(*) FROM persistence_requests WHERE worktree_id = $4 AND state IN ('queued','running','recovering') AND 'r:'||request_id::text = ANY($5::text[]))
+      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'obligations'->'converged'->>'request_hwm')::bigint, 0)
+        AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)) AS newer,
+      EXISTS (SELECT 1 FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)) AS pending,
+      (SELECT count(*) FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)
+        AND 'r:'||request_id::text = ANY($5::text[]))
         + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
             WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text = ANY($5::text[])) AS still_open`,
-    [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, [...input.openAtStamp]]);
+    [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, [...input.openAtStamp], input.sourceId, input.incarnation]);
   return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0) };
 }
 
