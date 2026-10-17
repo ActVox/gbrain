@@ -7,6 +7,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import type { SyncAdmissionStatus } from './sync-admission.ts';
+import { digest } from './digest.ts';
 import { fileDriftSide, type GitHoldRecord } from './sync-holds.ts';
 import { readDeletesWithheld, type DeletesWithheld } from './sync-markers.ts';
 import { NOT_CONVERGED_REPORT_STREAK, passHealth, type PassRoundSummary, type PassRow } from './sync-pass-row.ts';
@@ -45,7 +46,7 @@ export async function passConvergence(engine: Pick<BrainEngine, 'executeRaw'>, i
     legacy_pageless: summary.legacy_pageless, keep_db_admitted: t.counts.keep_db_admitted ?? 0, keep_db_pending: t.counts.keep_db_pending ?? 0,
     deletes_withheld: withheld ? { count: withheld.count, ratio: withheld.ratio, set_hash: withheld.set_hash, samples: withheld.samples } : null,
     classes: t.classes ?? {}, settle_mismatch: Object.keys(o.mismatch ?? {}).sort(),
-    episode: episode ? { full_id: episode.full_id ?? null, opened_at: episode.opened_at, inherited: episode.inherited, selection_fp: null,
+    episode: episode ? { full_id: episode.full_id ?? null, opened_at: episode.opened_at, inherited: episode.inherited, selection_fp: digest(episode.selection),
       reserved_usd: o.cost?.reserved_usd ?? null, approved_usd: o.cost?.approved_usd ?? null } : null,
     admission: input.admission, not_converged_streak: o.not_converged_streak ?? 0,
     duration_ms: t.duration_ms, timings_ms: t.timings_ms, last_full_at: o.converged?.last_full_at ?? null };

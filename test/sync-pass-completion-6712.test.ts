@@ -38,6 +38,7 @@ import { passCostDecision, readReservedUsd, registerPassCost, unregisterPassCost
 import { prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import { managedSyncResumeArgs } from '../src/core/sync-reconcile.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
+import { digest } from '../src/core/persistence/digest.ts';
 import { waitFor } from './helpers/wait-for.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -313,6 +314,8 @@ describe('#6712 PR 4b lane B: episodes (§6, probe 50)', () => {
     await patchObligations(engine, ['episode'], open);
     expect((await performManagedSync(engine, { ...OPTS, exclude: ['notes/c.md'] })).status).toBe('synced');
     expect((await passRow(engine)).obligations.episode?.full_id).toBe(open.full_id);
+    expect(((await readSyncStatus(engine, 'default', { detail: false })).convergence as { episode: { full_id: string; selection_fp: string } }).episode)
+      .toMatchObject({ full_id: open.full_id, selection_fp: digest(open.selection) });
 
     mkdirSync(join(root, '.hidden'), { recursive: true });
     writeFileSync(join(root, '.hidden/h.md'), note('hidden/h', 'A hidden note.'));
