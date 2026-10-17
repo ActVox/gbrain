@@ -207,6 +207,16 @@ describe('doctor mode matrix (registry runner, EO11)', () => {
     expect(await lockPresent()).toBe(true);
   }, 180_000);
 
+  test('the deep tier is exactly the convergence shadow, and --tier deep runs every entry', async () => {
+    expect(DOCTOR_CHECK_REGISTRY.filter((e) => !entryRunsAt(e.tier, 'standard')).map((e) => e.name)).toEqual(['managed_sync_convergence']);
+    await pglite.setConfig('version', String(LATEST_VERSION));
+    const calls: string[] = [];
+    const run = await runMode(recordingEngine(pglite, calls), ['--tier', 'deep'], calls);
+    expect(run.ran.map((r) => r.entry)).toEqual(DOCTOR_CHECK_REGISTRY.map((_, i) => i));
+    expect(run.ran.some((r) => r.result === 'stop')).toBe(false);
+    expect(run.checks.find((c) => c.name === 'managed_sync_convergence')?.status).toBe('ok');
+  }, 180_000);
+
   test('--fast: filesystem entries only, STOP at the DB-checks gate, no connection probe', async () => {
     await seedDeadHolderLock();
     const calls: string[] = [];
