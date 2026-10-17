@@ -195,4 +195,14 @@ describe('#6712 PR 4a convergence shadow (pglite)', () => {
     expect(detail.convergence).toMatchObject({ dry_run: true, counts: { matched: 3 } });
     expect((detail.convergence as Record<string, unknown>).screen_skipped).toBeUndefined();
   }, { setup }), 120_000);
+
+  test('sync status: a non-company source synced by the pass has no cursor, so run_id, cursor, rate_pages_per_min and eta_seconds read null', () => managedBrain(async ({ engine }) => {
+    expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
+    expect(Number((await engine.executeRaw<{ n: number | string }>("SELECT count(*) AS n FROM op_checkpoints WHERE op='managed-sync'"))[0]!.n)).toBe(0);
+    for (const detail of [false, true]) {
+      const status = await readSyncStatus(engine, 'default', { detail });
+      expect(status).toMatchObject({ run_id: null, cursor: null, rate_pages_per_min: null, eta_seconds: null });
+      expect(status.convergence).toMatchObject({ outcome: 'synced' });
+    }
+  }, { setup }), 120_000);
 });

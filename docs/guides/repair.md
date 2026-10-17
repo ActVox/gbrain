@@ -1507,6 +1507,36 @@ such a page refuses and names the same route, and a held deletion's next step
 in `gbrain sources status` is the `--prefer database` preview. `--all-drifted`
 does not select missing files.
 
+<a id="file-drift-held"></a>**Held drift, one Decision at a time** (#6712). A managed sync holds a
+two-sided change as `file_drift` with a `side` (`both`: the file and the page
+both changed since the last import; `unknown`: the page has no import record
+to tell; `deleted`: one side is a deletion) and, for a deleted side, a
+`state`: `tombstone_edited` (the page was deleted and the file was edited),
+`purged_differs` (a purged page's file differs from what was purged) or
+`file_gone` (the file was deleted and the page changed). `gbrain sources status
+<id> --json` lists each held file with both. `--held` selects those holds:
+
+```bash
+gbrain repair file-drift --source <id> --held --side both --prefer file                              # preview
+gbrain repair file-drift --source <id> --held --side deleted --state tombstone_edited --prefer database
+gbrain repair file-drift --source <id> --held --side both --prefer file --apply --expect <hash>
+```
+
+One preview resolves one Decision, so a selection that spans several sides or
+deleted states refuses [`file_drift_mixed_selection`](error-codes.md#file_drift_mixed_selection),
+and a deleted side refuses without `--state`
+([`file_drift_state_required`](error-codes.md#file_drift_state_required)):
+the two `--prefer` values do opposite things in each state.
+
+| State | `--prefer database` | `--prefer file` |
+|---|---|---|
+| `tombstone_edited` | Keeps the deletion and removes the file. | Restores the page and imports the file. |
+| `purged_differs` | Removes the file. | Imports the file as a new page. |
+| `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
+
+`both` and `unknown` resolve as `--slug` does above. `--only` / `--skip` narrow
+the held set by file path, and the preview lists each page's action.
+
 The audit gives every drifted page one class: `structurally_additive`,
 `additive_with_suggestions`, `review_required`, `formatting_only` or `error`.
 `--all-drifted` refuses a selection that mixes classes (the message counts
@@ -1535,17 +1565,16 @@ storage:
     - concepts/
 ```
 
-On the canonical owner host the resident consumer of `gbrain serve`,
-`gbrain jobs work` or `gbrain autopilot` then reconciles each drifted page
-under those prefixes with the database copy winning, the same resolution
-`--prefer database` previews (reconcile's protections and backups apply). It
-submits one request per drifted page, at most 10 every 10 minutes, never
-twice for the same drift (the request id is derived from the page revision
-and file bytes), and stops before an admission that would cross 90% of the
-write-quota stop line. Prefixes match page slugs by whole path segments, like
-`db_tracked` and `db_only`. Nothing else reads the policy: another host, a
-short-lived command, and remote or caller writes keep refusing
-`source_changed` until the page is reconciled. Doctor `maintenance_write_drift`
+The managed sync pass then writes the database copy back to the file for
+each page under those prefixes whose database copy changed since its last
+import (whether or not the file changed too), the same resolution `--prefer database` previews (reconcile's protections and
+backups apply). It does so only in committed mode and for a clean file: the write is
+bound to the bytes the pass froze, and a file with an uncommitted edit is
+held instead. A pass admits at most 200 such writes; the rest wait as
+`keep_db_pending` and go first in the next pass. Prefixes match page slugs by
+whole path segments, like `db_tracked` and `db_only`. A remote caller's sync
+never writes them, and outside a sync a short-lived command or a caller
+write keeps refusing `source_changed` until the page is reconciled. Doctor `maintenance_write_drift`
 echoes each declared policy (`keep_db_policy`: prefixes, how many of the
 drifted pages it checked match, their receipt cost). Remove the block to turn
 the policy off.
@@ -2071,7 +2100,7 @@ the repair is what changes them).
 | Busy (waits as `sync_in_progress`) | Why |
 | --- | --- |
 | A file or page a queued, running or recovering write names, or a finished write whose recovery is still open; both endpoints of a rename | The write is still publishing it. |
-| A file still ahead in the running sync's frozen manifest (from the cursor's index on) | The sync admits it later with the raw hash it reads then; a repair that changed the bytes first would make that entry refuse (`source_changed`). |
+| A file still ahead in a company-brain sync's frozen manifest, or a legacy cursor's that no pass has retired yet (from the cursor's index on) | The sync admits it later with the raw hash it reads then; a repair that changed the bytes first would make that entry refuse (`source_changed`). A live pass adds nothing here: it freezes and admits under the drain lease and re-checks each candidate's revision, so only its open requests (the row above) are busy. |
 | Every candidate, when the busy set cannot be read (a failed query, a cursor whose manifest is missing) | The check fails closed; the hold's text says so. |
 
 The busy set is read when the plan is made, again when each item is applied
