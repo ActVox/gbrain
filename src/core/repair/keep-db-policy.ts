@@ -192,13 +192,18 @@ export async function admitKeepDbReconcile(engine: BrainEngine, artifact: KeepDb
 
 /**
  * Releases the concept drift skips (`dream.concepts.drift_skips`) of pages the pass classified `matched` in `sourceId`:
- * one read of the skips, and one release per matched page that has one.
+ * one read of the skips, and one release per matched page that has one. It walks the source's skips, not the matched
+ * slugs, so a 600k-page pass with no skip does no per-page work.
  */
 export async function releaseMatchedDriftSkips(engine: BrainEngine, sourceId: string, matchedSlugs: Iterable<string>): Promise<number> {
   const skips = await readDriftSkips(engine);
+  const prefix = `${sourceId}:`;
+  const skipped = Object.keys(skips).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length));
+  if (!skipped.length) return 0;
+  const matched = matchedSlugs instanceof Set ? matchedSlugs as Set<string> : new Set(matchedSlugs);
   let released = 0;
-  for (const slug of new Set(matchedSlugs)) {
-    if (!skips[`${sourceId}:${slug}`]) continue;
+  for (const slug of skipped) {
+    if (!matched.has(slug)) continue;
     await releaseDriftSkip(engine, sourceId, slug);
     released++;
   }

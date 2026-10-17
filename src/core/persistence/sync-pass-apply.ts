@@ -32,7 +32,7 @@ import { VERSION } from '../../version.ts';
 import type { BrainEngine } from '../engine.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { massReconcileAllowed, planReconcileDeletes } from '../sync-reconcile.ts';
-import { loopYield } from './sync-yield.ts';
+import { filterYielding, loopYield } from './sync-yield.ts';
 import { admitKeepDbReconcile, freezeKeepDbReconcile, releaseMatchedDriftSkips } from '../repair/keep-db-policy.ts';
 import type { SyncProcessingOptions } from './sync-authority.ts';
 import type { SyncClassified } from './sync-classify.ts';
@@ -76,7 +76,7 @@ export interface PassApplyState {
   keepDb: { admitted: number; pending: number; paused: number; refused: Record<string, number> };
   /** keep_db paths admitted in this pass: never admitted twice. */
   keepDbTaken: string[];
-  matchedSlugs: string[];
+  matchedSlugs: Set<string>;
   /** The newest round's classes and summary (design §9), after this module settled what it finished. */
   classes: Record<string, { count: number; action: SyncClassAction }>;
   summary: PassRoundSummary | null;
@@ -84,7 +84,7 @@ export interface PassApplyState {
 
 export function newPassApplyState(): PassApplyState {
   return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0 }, settleMismatch: [], adopted: 0,
-    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: [], classes: {}, summary: null };
+    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: new Set(), classes: {}, summary: null };
 }
 
 export interface PassApplyInput {
@@ -123,7 +123,11 @@ function levelMeta(level: ShadowLevel, entry: ShadowPath): Partial<GitHoldMeta> 
 export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   if (input.fullRound && !input.remote) await retireMarkers(engine, level, state);
   if (input.remote && input.grantPrefixes) {
-    for (const entry of level.paths) if (!grantSees(level, entry, input.grantPrefixes) && !entry.result.settled) settleAs(entry, { settled: true, action: 'none', classAction: 'none' });
+    const step = loopYield();
+    for (const entry of level.paths) {
+      if (step.due()) await step.pause();
+      if (!grantSees(level, entry, input.grantPrefixes) && !entry.result.settled) settleAs(entry, { settled: true, action: 'none', classAction: 'none' });
+    }
   }
   await applyDeleteValve(engine, level, input, state);
   if (input.remote) { summarizeRound(level, state); return; }
@@ -134,7 +138,7 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
   const step = loopYield();
   for (const entry of level.paths) {
     if (step.due()) await step.pause();
-    if (entry.result.cls === 'matched' && entry.slug) state.matchedSlugs.push(entry.slug);
+    if (entry.result.cls === 'matched' && entry.slug) state.matchedSlugs.add(entry.slug);
   }
   summarizeRound(level, state);
 }
@@ -166,7 +170,7 @@ export function summarizeRound(level: ShadowLevel, state: PassApplyState): void 
 
 /** Design §2.5: retire markers whose origin left both `T` and the disk, or that a live page claims again (compare-and-delete). */
 async function retireMarkers(engine: BrainEngine, level: ShadowLevel, state: PassApplyState): Promise<void> {
-  const retire = level.paths.filter(entry => entry.state.marker && !entry.legacyPageless
+  const retire = await filterYielding(level.paths, entry => entry.state.marker && !entry.legacyPageless
     && ((entry.state.tree === null && !entry.state.present) || entry.state.page?.live === true));
   if (!retire.length) return;
   await engine.transaction(async tx => {
@@ -188,11 +192,11 @@ async function readStoredMarker(exec: Pick<BrainEngine, 'executeRaw'>, level: Sh
 
 /** Design §2.6: the round's deletes through #2828's valve; a trip withholds them all under one source-level record. */
 async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
-  const deletes = level.paths.filter(entry => entry.result.action === 'delete' && !entry.result.settled && !entry.result.inFlight);
+  const deletes = await filterYielding(level.paths, entry => entry.result.action === 'delete' && !entry.result.settled && !entry.result.inFlight);
   // The valve plans over every live page only when the round deletes something (no delete never trips it).
-  const plan = deletes.length ? (() => {
+  const plan = deletes.length ? await (async () => {
     const deleting = new Set(deletes.map(entry => entry.path));
-    const live = level.paths.filter(entry => entry.state.page?.live === true && entry.slug);
+    const live = await filterYielding(level.paths, entry => entry.state.page?.live === true && !!entry.slug);
     return planReconcileDeletes(live.map(entry => ({ slug: entry.slug!, source_path: entry.path })), live.filter(entry => !deleting.has(entry.path)).map(entry => entry.path), () => true);
   })() : null;
   const tripped = !!plan?.massDelete && (input.remote || !massReconcileAllowed());
@@ -219,7 +223,9 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
   const pending: Pending[] = [];
   // A held rename's origin waits for its destination's hold (#5988), whatever its page did meanwhile.
   const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
+  const step = loopYield();
   for (const entry of level.paths) {
+    if (step.due()) await step.pause();
     const r = entry.result;
     if (r.settled || r.inFlight) continue;
     const { path } = passEntryPaths(level, entry.path);
@@ -277,7 +283,7 @@ async function writeRecords(engine: BrainEngine, level: ShadowLevel, writes: Rec
 
 /** Row 13: adopt the level into the page's record, keeping `r.parser` (arm 1: revision only, on `fileSame`). */
 async function adoptRecords(engine: BrainEngine, level: ShadowLevel, state: PassApplyState): Promise<void> {
-  const adopt = level.paths.filter(entry => entry.result.cls === 'adopt' && entry.pageId !== null && entry.revision !== null && entry.state.level !== null);
+  const adopt = await filterYielding(level.paths, entry => entry.result.cls === 'adopt' && entry.pageId !== null && entry.revision !== null && entry.state.level !== null);
   if (!adopt.length) return;
   const records = await readSyncImportProvenances(engine, level.sourceId, level.incarnation, adopt.map(entry => entry.pageId!));
   const writes = adopt.map((entry): RecordWrite => {
@@ -292,7 +298,7 @@ async function adoptRecords(engine: BrainEngine, level: ShadowLevel, state: Pass
 
 /** Design §2.7: the bounded read-only legacy sweep; an equal page gets a record and is `matched`. */
 async function sweepLegacy(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
-  const legacy = level.paths.filter(entry => entry.result.cls === 'legacy_unverified' && entry.pageId !== null && entry.revision !== null && entry.state.level !== null && entry.slug);
+  const legacy = await filterYielding(level.paths, entry => entry.result.cls === 'legacy_unverified' && entry.pageId !== null && entry.revision !== null && entry.state.level !== null && entry.slug);
   if (!legacy.length) return;
   const sweepAll = input.fullRound && !input.obligations.legacy_sweep?.first_full_at;
   const budget = sweepAll ? legacy.length : Math.max(0, PASS_LEGACY_SWEEP_MAX - state.swept.screened);
@@ -322,7 +328,7 @@ async function sweepLegacy(engine: BrainEngine, level: ShadowLevel, input: PassA
 /** Rows 15 and 18 under keep_db (§4): freeze to `T[p]`'s bytes and admit the DB-wins reconcile of the pass, bounded per pass. */
 async function admitKeepDb(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   const taken = new Set(state.keepDbTaken);
-  const want = level.paths.filter(entry => !entry.result.inFlight && !taken.has(entry.path) && entry.pageId !== null && entry.revision !== null && entry.slug && entry.state.level !== null
+  const want = await filterYielding(level.paths, entry => !entry.result.inFlight && !taken.has(entry.path) && entry.pageId !== null && entry.revision !== null && entry.slug && entry.state.level !== null
     && ((entry.result.cls === 'keep_db' && !entry.result.settled) || (entry.result.cls === 'db_ahead' && entry.result.keepDbWrite === true)));
   if (!want.length) return;
   if (input.admission !== 'normal') {
@@ -391,7 +397,7 @@ export function remoteReconcile(level: ShadowLevel, input: { committed: number; 
 
 /** Once per pass: release the concept drift skips of pages the pass classified `matched` (§4). */
 export async function finishPassApply(engine: BrainEngine, sourceId: string, state: PassApplyState): Promise<number> {
-  return state.matchedSlugs.length ? releaseMatchedDriftSkips(engine, sourceId, state.matchedSlugs) : 0;
+  return state.matchedSlugs.size ? releaseMatchedDriftSkips(engine, sourceId, state.matchedSlugs) : 0;
 }
 
 /** The pass row's telemetry counts of what the rounds applied. */

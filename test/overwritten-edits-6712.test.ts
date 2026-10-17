@@ -3,9 +3,11 @@
  *
  * The overwrite is seeded the way it happens on a released brain: a database-only `put_page` (`sync.write_through`
  * off), then a committed edit of the same file, then an incremental sync that publishes the file over the edit with no
- * hold. On a base without #6887 any page reproduces it; the seed also drops the page's import provenance record (a page
- * last imported before PR 0 recorded one), which no released classifier guards in a delta sync, so the seed reproduces
- * with or without #6887 and these tests never depend on that fix.
+ * hold. On a base without #6887 any page reproduces it. The live pass (#6712 PR 4b) holds a both-moved page whose import
+ * record is missing or honest, so the seed rewrites the record to name the database edit's revision: a record that no
+ * longer proves the page and that no classifier can tell from a true one. The pass then publishes the file over the
+ * edit through a pass import (intent kind `managed_sync_import` with a `passId`), which is what the detector reads, and
+ * these tests never depend on #6887.
  *
  * Protects:
  * - a seeded overwrite is detected `high` (also after receipt compaction nulled every intent), and `repair
@@ -73,7 +75,8 @@ async function seedOverwrite(engine: BrainEngine, ctx: OperationContext, root: s
   await putPage(engine, ctx, slug, 'DBONLYMARKER the agent edit.');
   await engine.setConfig('sync.write_through', 'true');
   const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [slug]);
-  await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [SYNC_IMPORT_PROVENANCE_OP, `default:${await incarnationOf(engine)}:${page!.id}`]);
+  await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,revision}', to_jsonb($3::text)) WHERE op=$1 AND fingerprint=$2`,
+    [SYNC_IMPORT_PROVENANCE_OP, `default:${await incarnationOf(engine)}:${page!.id}`, await revisionOf(engine, slug)]);
   writeFileSync(join(root, `${slug}.md`), note(slug, 'The second committed body.'));
   commit(root, `edit ${slug}`);
   await performManagedSync(engine, OPTS);
@@ -91,6 +94,9 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
 
     const scan = await scanOverwrittenEdits(engine, 'default');
     expect(scan.edits.map(edit => [edit.slug, edit.confidence, edit.db_operation])).toEqual([['notes/a', 'high', 'put_page']]);
+    const [imported] = await engine.executeRaw<{ kind: string; pass: boolean }>(
+      "SELECT intent->>'kind' AS kind, intent ? 'passId' AS pass FROM persistence_requests WHERE id::text=$1", [scan.edits[0]!.import_request_id]);
+    expect(imported).toEqual({ kind: 'managed_sync_import', pass: true });
     const warned = await doctor(engine);
     expect(warned.status).toBe('warn');
     expect(warned.details).toMatchObject({ count: 1, unknown: 0, sources: [{ source_id: 'default', count: 1, slugs: ['notes/a'] }] });

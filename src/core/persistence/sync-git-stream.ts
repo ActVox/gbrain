@@ -111,6 +111,35 @@ export async function readIndexLevel(gitRoot: string): Promise<Map<string, GitIn
 }
 
 /**
+ * `X` as committed mode reads it: only the tree paths whose index entry differs from `T` (OID, mode or a non-zero stage,
+ * the highest stage kept; null: absent from the index). A 600k-path checkout whose index matches its tree holds no second
+ * map of every path. Paths outside `tree` are not kept; when some tree path never appeared, the index is read whole
+ * once more to name them.
+ */
+export async function readIndexDelta(gitRoot: string, tree: Map<string, GitTreeEntry>): Promise<Map<string, GitIndexEntry | null>> {
+  const delta = new Map<string, GitIndexEntry | null>();
+  let same = 0;
+  await readRecords(gitRoot, ['ls-files', '-s', '-z'], 'ls-files', record => {
+    const fields = headerFields(record);
+    if (!fields || !OID.test(fields.a) || !/^[0-3]$/.test(fields.b)) throw malformed('ls-files', record.toString('utf8'));
+    const committed = tree.get(fields.path);
+    if (!committed) return;
+    const stage = Number(fields.b);
+    if (stage === 0 && fields.a === committed.oid && fields.mode === committed.mode) { same++; return; }
+    if ((delta.get(fields.path)?.stage ?? -1) < stage) delta.set(fields.path, { mode: fields.mode, oid: fields.a, stage });
+  });
+  if (same + delta.size === tree.size) return delta;
+  const index = await readIndexLevel(gitRoot);
+  const whole = new Map<string, GitIndexEntry | null>();
+  for (const [path, committed] of tree) {
+    const indexed = index.get(path);
+    if (!indexed) whole.set(path, null);
+    else if (indexed.stage !== 0 || indexed.oid !== committed.oid || indexed.mode !== committed.mode) whole.set(path, indexed);
+  }
+  return whole;
+}
+
+/**
  * Exact-OID rename hints from `from` to `to`: a deleted and an added regular
  * file with the same blob, only when that OID has exactly one of each. Hints
  * only; never a source of candidates.

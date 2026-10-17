@@ -25,6 +25,16 @@ export function loopYield(): LoopYield {
   };
 }
 
+/** `items.filter(keep)` with yields between stretches. */
+export async function filterYielding<T>(items: readonly T[], keep: (item: T) => unknown, step: LoopYield = loopYield()): Promise<T[]> {
+  const kept: T[] = [];
+  for (const item of items) {
+    if (step.due()) await step.pause();
+    if (keep(item)) kept.push(item);
+  }
+  return kept;
+}
+
 /** `items.sort()` (code-unit order, as the default comparator) in runs merged with yields between stretches. */
 export async function sortYielding(items: string[], step: LoopYield): Promise<string[]> {
   const RUN = 16_384;

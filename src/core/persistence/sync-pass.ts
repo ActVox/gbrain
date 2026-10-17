@@ -11,8 +11,8 @@
  * records), `H` (holds and retry rows), `U_db` (open requests and pending Git effects), deletion markers, and `A` (the
  * attestation of the current revision) for the pages whose class needs a proof. The Git reads, the database snapshot and
  * the holds run concurrently (`reads` is their wall time). On Postgres the snapshot reads share one `REPEATABLE READ,
- * READ ONLY` transaction and `I⋈P` is one set-based statement; PGLite admits one transaction at a time, so there
- * they run as bounded statements of at most 2,000 rows with writers between them.
+ * READ ONLY` transaction and `I⋈P` is one set-based statement read through a cursor; PGLite admits one transaction at a
+ * time, so there they run as bounded statements of at most 2,000 rows with writers between them.
  */
 import { realpathSync } from 'node:fs';
 import { relative, sep } from 'node:path';
@@ -33,7 +33,7 @@ import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHo
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { syncOriginPath } from './sync-origin.ts';
-import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, workingChanged, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
+import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexDelta, readIndexLevel, readTreeLevel, workingChanged, type GitIndexEntry, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
@@ -64,8 +64,10 @@ export interface PassLevelInput {
   /** The pass's own cache (it dies with the pass): the eligible tree of the commit and selection its last round read. */
   cache?: PassLevelCache;
 }
-/** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
+/** PGLite's keyset page size (design v3.2 §2.1). */
 const PGLITE_KEYSET_ROWS = 2_000;
+/** Rows per `FETCH` of Postgres's `I⋈P` cursor: decoding one fetch stays well under the event-loop budget at 600k pages. */
+const POSTGRES_FETCH_ROWS = 25_000;
 /** Blob bytes read for adoption by hash and the screen, per blob. */
 const LEVEL_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
@@ -90,6 +92,38 @@ function sharedResult(result: SyncClassified): SyncClassified {
 export interface ShadowPath { path: string; slug: string | null; pageId: number | null; revision: string | null; state: SyncPathState; result: SyncClassified;
   /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
   legacyPageless?: true }
+
+/**
+ * A `matched` path whose state is the converged one (a live page whose record proves the level's blob and revision, nothing
+ * held, marked, owed or open): it keeps the few fields that vary and rebuilds the same `SyncPathState` on read. Most paths
+ * of a large converged source are these; a level of 600k holds them in about a fifth of a full entry's memory.
+ */
+class MatchedPath implements ShadowPath {
+  constructor(public path: string, public slug: string | null, public pageId: number | null, public revision: string, public result: SyncClassified,
+    private readonly treeOid: string | null, private readonly levelOid: string, private readonly dirty: SyncPathState['dirty'], private readonly diskRecorded: boolean,
+    private readonly shared: { mode: SyncPathState['mode']; fullObligation: boolean }) {}
+
+  /** Whether `state` is the one `state` would rebuild for a page at `revision`. */
+  static fits(state: SyncPathState, revision: string | null, shared: MatchedPath['shared']): revision is string {
+    return revision !== null && state.mode === shared.mode && state.fullObligation === shared.fullObligation && state.level !== null && state.present
+      && state.diskOid === null && state.levelSha256 === null && !state.published && state.attested === null && state.hold === null && state.marker === null
+      && state.baseline === null && !state.spelling && !state.episodeUnsatisfied && !state.keepDb && !state.openWork
+      && state.page?.live === true && state.page.revision === revision && state.page.originMatches
+      && state.record?.revision === revision && state.record.parserSame && state.record.blobOids.length <= 2 && state.record.blobOids.length > 0
+      && state.record.blobOids.every(oid => oid === state.level);
+  }
+
+  get state(): SyncPathState {
+    return { mode: this.shared.mode, tree: this.treeOid, level: this.levelOid, present: true, dirty: this.dirty, diskOid: null,
+      page: { live: true, revision: this.revision, originMatches: true }, record: { blobOids: this.diskRecorded ? [this.levelOid, this.levelOid] : [this.levelOid], revision: this.revision, parserSame: true },
+      attested: null, levelSha256: null, published: false, hold: null, marker: null, baseline: null, spelling: false, episodeUnsatisfied: false,
+      fullObligation: this.shared.fullObligation, keepDb: false, openWork: false };
+  }
+
+  set state(value: SyncPathState) {
+    Object.defineProperty(this, 'state', { value, writable: true, enumerable: true, configurable: true });
+  }
+}
 
 export interface ShadowLevel {
   sourceId: string; incarnation: string; root: string; gitRoot: string; scope: string; slugMode: 'git-root' | 'source-root';
@@ -117,8 +151,12 @@ export interface ShadowLevel {
 interface PageRow { id: number | string; slug: string; source_path: string; revision: string; deleted: boolean; request_id: string | null;
   record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
 
-const recordOids = (record: PageRow['record']): string[] =>
-  record ? [record.blob_oid, record.disk_blob_oid].filter((oid): oid is string => typeof oid === 'string' && oid.length > 0) : [];
+/** The record's blob ids; one equal to `level` is `level`'s own string, so a converged page keeps one copy of its blob id. */
+const recordOids = (record: PageRow['record'], level?: string | null): string[] => {
+  const oids: string[] = [];
+  for (const oid of record ? [record.blob_oid, record.disk_blob_oid] : []) if (typeof oid === 'string' && oid.length > 0) oids.push(oid === level ? level : oid);
+  return oids;
+};
 
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
@@ -136,25 +174,33 @@ async function withRoundSnapshot<T>(engine: BrainEngine, fn: (exec: Exec) => Pro
 
 /**
  * `I⋈P`: every page of the source with a recorded origin and the fields of its import record the classifier reads. Postgres
- * reads it as one set-based statement inside the round's snapshot (the planner hash-joins pages with their records; a
- * keyset with a per-row primary-key probe made the 61k read plan-bound, about 1.7 s of server time); PGLite reads bounded
- * keyset statements so writers interleave.
+ * plans it as one set-based statement inside the round's snapshot (the planner hash-joins pages with their records; a
+ * keyset with a per-row primary-key probe made the 61k read plan-bound, about 1.7 s of server time) and reads it through a
+ * cursor, `POSTGRES_FETCH_ROWS` at a time with the next fetch in flight: one result of 600k rows decoded in a single
+ * stretch of about a second and held every raw row at once. `cursor_tuple_fraction = 1` keeps the whole-result plan.
+ * PGLite reads bounded keyset statements so writers interleave.
  */
 async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string): Promise<{ rows: PageRow[]; statements: number }> {
   // A record's fields usually repeat the page's (origin = source_path, disk = blob, revision = the page's), so those come back
   // as a flag instead of a second copy of the string, and the parser as text parsed once per distinct value: a 600k-page
   // read then holds about one string per field per page.
+  // The record's fields come out of its JSON once, in a subquery. On Postgres `OFFSET 0` keeps it unflattened, so the hash
+  // join builds over those few text columns instead of the whole record (600k: about 3.1 s of serial server time to 2.0 s);
+  // PGLite's keyset statements need it flattened, so each probes the record by primary key.
   const select = `SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision, p.deleted_at IS NOT NULL AS deleted,
-      p.revision_write_request_id::text AS request_id, c.completed_keys IS NOT NULL AS has_record,
-      c.completed_keys->0->>'origin' IS NOT DISTINCT FROM p.source_path AS rec_origin_same,
-      CASE WHEN c.completed_keys->0->>'origin' IS DISTINCT FROM p.source_path THEN c.completed_keys->0->>'origin' END AS rec_origin,
-      c.completed_keys->0->>'blob_oid' AS rec_blob_oid,
-      c.completed_keys->0->>'disk_blob_oid' IS NOT DISTINCT FROM c.completed_keys->0->>'blob_oid' AS rec_disk_same,
-      CASE WHEN c.completed_keys->0->>'disk_blob_oid' IS DISTINCT FROM c.completed_keys->0->>'blob_oid' THEN c.completed_keys->0->>'disk_blob_oid' END AS rec_disk_blob_oid,
-      c.completed_keys->0->>'revision' IS NULL AS rec_revision_null,
-      NULLIF(c.completed_keys->0->>'revision', p.knowledge_revision::text) AS rec_revision,
-      (c.completed_keys->0->'parser')::text AS rec_parser, c.completed_keys->0->>'full_episode' AS rec_full_episode
-    FROM pages p LEFT JOIN op_checkpoints c ON c.op=$2 AND c.fingerprint=$3||p.id::text
+      p.revision_write_request_id::text AS request_id, c.fingerprint IS NOT NULL AS has_record,
+      c.origin IS NOT DISTINCT FROM p.source_path AS rec_origin_same,
+      CASE WHEN c.origin IS DISTINCT FROM p.source_path THEN c.origin END AS rec_origin,
+      c.blob_oid AS rec_blob_oid,
+      c.disk_blob_oid IS NOT DISTINCT FROM c.blob_oid AS rec_disk_same,
+      CASE WHEN c.disk_blob_oid IS DISTINCT FROM c.blob_oid THEN c.disk_blob_oid END AS rec_disk_blob_oid,
+      c.revision IS NULL AS rec_revision_null,
+      NULLIF(c.revision, p.knowledge_revision::text) AS rec_revision,
+      c.parser AS rec_parser, c.full_episode AS rec_full_episode
+    FROM pages p LEFT JOIN (SELECT fingerprint, completed_keys->0->>'origin' AS origin, completed_keys->0->>'blob_oid' AS blob_oid,
+        completed_keys->0->>'disk_blob_oid' AS disk_blob_oid, completed_keys->0->>'revision' AS revision,
+        (completed_keys->0->'parser')::text AS parser, completed_keys->0->>'full_episode' AS full_episode
+      FROM op_checkpoints WHERE op=$2${kind === 'postgres' ? ' OFFSET 0' : ''}) c ON c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin_same: boolean; rec_origin: string | null; rec_blob_oid: string | null;
@@ -172,8 +218,22 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
         disk_blob_oid: raw.rec_disk_same ? raw.rec_blob_oid : raw.rec_disk_blob_oid, revision: raw.rec_revision_null ? undefined : raw.rec_revision ?? raw.revision,
         parser: parserOf(raw.rec_parser), full_episode: raw.rec_full_episode } : null });
   };
-  if (kind === 'postgres') { take(await exec.executeRaw<Raw>(select, params)); return { rows, statements: 1 }; }
-  let after = 0, statements = 0;
+  let statements = 0;
+  if (kind === 'postgres') {
+    await exec.executeRaw('SET LOCAL cursor_tuple_fraction = 1');
+    await exec.executeRaw(`DECLARE sync_pass_pages NO SCROLL CURSOR FOR ${select}`, params);
+    statements += 2;
+    const fetch = () => { statements++; return exec.executeRaw<Raw>(`FETCH ${POSTGRES_FETCH_ROWS} FROM sync_pass_pages`); };
+    let next = fetch();
+    for (;;) {
+      const page = await next;
+      const more = page.length === POSTGRES_FETCH_ROWS;
+      if (more) next = fetch();
+      take(page);
+      if (!more) return { rows, statements };
+    }
+  }
+  let after = 0;
   for (;;) {
     statements++;
     const page = await exec.executeRaw<Raw>(`${select} AND p.id>$4 ORDER BY p.id LIMIT ${PGLITE_KEYSET_ROWS}`, [...params, after]);
@@ -357,7 +417,10 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const timed = async <T>(key: string, read: () => Promise<T>): Promise<T> => { const st = timer(); try { return await read(); } finally { timings[key] = st(); } };
   t = timer();
   const [gitLevel, snapshot, held] = await Promise.all([
-    Promise.all([timed('T', eligibleTree), timed('X', () => readIndexLevel(gitRoot)),
+    // Working mode reads the whole index (its paths join the domain); committed mode only where it differs from T, read
+    // after T so the two are never held whole together.
+    Promise.all([timed('T', eligibleTree).then(async tree => ({ tree, indexDelta: mode === 'committed' ? await timed('X', () => readIndexDelta(gitRoot, tree)) : null })),
+      mode === 'working' ? timed('X', () => readIndexLevel(gitRoot)) : Promise.resolve(new Map<string, GitIndexEntry>()),
       timed('U', async () => (mode === 'working' ? (await readUntracked(gitRoot, scope)).filter(eligible) : []))]),
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
     timed('I⋈P', () => withRoundSnapshot(engine, async exec => {
@@ -375,7 +438,15 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     }),
   ]);
   timings.reads = t();
-  const [tree, index, untrackedPaths] = gitLevel;
+  const [{ tree, indexDelta }, index, untrackedPaths] = gitLevel;
+  // Committed mode: the index entry of a tree path, its own where it differs from T, else T's at stage 0 (undefined: absent).
+  const indexed = (path: string): GitIndexEntry | undefined => {
+    if (!indexDelta) return index.get(path);
+    const delta = indexDelta.get(path);
+    if (delta !== undefined) return delta ?? undefined;
+    const committed = tree.get(path);
+    return committed ? { ...committed, stage: 0 } : undefined;
+  };
   const inLevel = (path: string) => tree.has(path) || eligible(path);
   const untracked = new Set(untrackedPaths);
   const { open, markers, passRow, statements } = snapshot;
@@ -483,7 +554,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     // Presence decides only rows 4-6 (a level of absent); a committed path in T is not read here (Dp covers it).
     const presentNow = mode === 'working' ? level !== null : level === null ? readPresent(root, path, scope) : true;
     const record = row?.record ?? null;
-    const recordBlobOids = recordOids(record);
+    const recordBlobOids = recordOids(record, level);
     const attested = row && (row.arm1 || row.attested_hash) ? { hash: row.attested_hash ?? null, arm1: row.arm1 === true } : null;
     const hold = holdByGitPath.get(path);
     const marker = markers.get(origin) ?? null;
@@ -534,20 +605,32 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const paths: ShadowPath[] = [];
   const candidates: string[] = [], candidateAt: number[] = [];
   const settledBeforeDirtiness = new Set(['held', 'spelling', 'untracked', 'kept', 'delete', 'delete_drift', 'gone', 'deleted_same', 'deleted_edited', 'legacy_same', 'matched']);
+  const shared = { mode, fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true };
   for (const path of await sortYielding([...domain], step)) {
     if (step.due()) await step.pause();
     const probe = probes.get(path);
     const { state, row, legacyPageless } = stateOf(path, mode === 'committed' && tree.has(path) ? 'clean' : null, probe);
     const result = sharedResult(classifySyncPath(state));
     // Rows 1-10 precede row 11 and `matched` settles either way, so only the rest are Dp candidates (design v3.2 §2.1).
-    const staged = mode === 'committed' && tree.has(path) && (index.get(path)?.oid !== tree.get(path)!.oid || (index.get(path)?.stage ?? 0) !== 0);
+    const staged = mode === 'committed' && tree.has(path) && !!indexDelta?.has(path) && (indexed(path)?.oid !== tree.get(path)!.oid || (indexed(path)?.stage ?? 0) !== 0);
+    const revision = row?.revision ?? null;
     if (mode === 'committed' && tree.has(path) && (!settledBeforeDirtiness.has(result.cls) || staged)) { candidates.push(path); candidateAt.push(paths.length); }
-    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}) });
+    else {
+      // The row's fields the level keeps are copied onto the entry; only a candidate's row is read again (its dirtiness re-classifies it).
+      byOrigin.delete(path);
+      if (result.cls === 'matched' && !legacyPageless && MatchedPath.fits(state, revision, shared)) {
+        paths.push(new MatchedPath(path, row!.slug, Number(row!.id), revision, result, state.tree, state.level!, state.dirty, state.record!.blobOids.length === 2, shared));
+        continue;
+      }
+    }
+    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision, state, result, ...(legacyPageless ? { legacyPageless } : {}) });
   }
   timings.classify = t();
   if (candidates.length) {
     t = timer();
-    const probed = await probeDirtiness(root, gitRoot, candidates, tree, index);
+    const candidateIndex = new Map<string, GitIndexEntry>();
+    for (const path of candidates) { const entry = indexed(path); if (entry) candidateIndex.set(path, entry); }
+    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex);
     timings.Dp = (timings.Dp ?? 0) + t();
     t = timer();
     for (const [k, path] of candidates.entries()) {
