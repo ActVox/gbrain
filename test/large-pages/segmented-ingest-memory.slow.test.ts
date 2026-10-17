@@ -52,12 +52,18 @@ writeFileSync('/proc/self/clear_refs', '5');
 let retained = null;
 installFaultHook(async point => { if (point === 'segmented:texts_staged') retained = live() - start; });
 const result = await importFromFile(engine, file, 'notes/memory-example.md', { noEmbed: true, bodyPolicy });
-const peak = Number(/^VmHWM:\\s+(\\d+) kB$/m.exec(readFileSync('/proc/self/status', 'utf8'))[1]) / 1024;
+const kib = (text, field) => Number(text.split(/\\n/).find(l => l.startsWith(field + ':'))?.slice(field.length + 1).trim().split(/\\s+/)[0]) / 1024;
+const status = readFileSync('/proc/self/status', 'utf8');
+const peak = Number(/^VmHWM:\\s+(\\d+) kB$/m.exec(status)[1]) / 1024;
+const at_end = { vm_rss: kib(status, 'VmRSS'), rss_anon: kib(status, 'RssAnon'), rss_file: kib(status, 'RssFile'), mem_available: kib(readFileSync('/proc/meminfo', 'utf8'), 'MemAvailable') };
 await engine.disconnect();
-console.log(JSON.stringify({ status: result.status, error: result.error ?? null, peak, retained }));
+console.log(JSON.stringify({ status: result.status, error: result.error ?? null, peak, retained, at_end }));
 `;
 
-function importInChild(mib: number): { status: string; error: string | null; peak: number; retained: number | null } {
+/** MiB at the end of the import: the child's VmRSS, RssAnon and RssFile, and the host's MemAvailable (failure diagnostics only). */
+interface AtEnd { vm_rss: number; rss_anon: number; rss_file: number; mem_available: number }
+
+function importInChild(mib: number): { status: string; error: string | null; peak: number; retained: number | null; at_end: AtEnd } {
   const file = join(dir, `page-${mib}.md`);
   writeFileSync(file, conversationPage(mib * 2 ** 20, { seed: 1 }));
   const run = spawnSync(process.execPath, ['--no-env-file', '-e', CHILD, file, join(dir, `brain-${mib}`)],
@@ -76,6 +82,8 @@ describe.skipIf(!existsSync('/proc/self/status'))('segmented ingest memory', () 
     expect(large).toMatchObject({ status: 'imported', error: null });
     expect(large.retained).not.toBeNull();
     expect(large.retained!).toBeLessThan(RETAINED_LIMIT_MIB);
-    expect(large.peak - small.peak).toBeLessThan(PEAK_DELTA_LIMIT_MIB);
+    const delta = large.peak - small.peak;
+    const diagnostics = (label: string, run: typeof small) => `${label}: peak ${run.peak.toFixed(1)} MiB (VmHWM); at the end of the import VmRSS ${run.at_end.vm_rss.toFixed(1)}, RssAnon ${run.at_end.rss_anon.toFixed(1)}, RssFile ${run.at_end.rss_file.toFixed(1)}, MemAvailable ${run.at_end.mem_available.toFixed(1)} MiB`;
+    expect(delta, `peak delta ${delta.toFixed(1)} MiB (limit ${PEAK_DELTA_LIMIT_MIB})\n${diagnostics('1 MiB child', small)}\n${diagnostics('32 MiB child', large)}`).toBeLessThan(PEAK_DELTA_LIMIT_MIB);
   }, 600_000);
 });
