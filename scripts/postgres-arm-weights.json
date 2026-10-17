@@ -18,6 +18,7 @@
   "test/belief-ledger-w5-time-model.test.ts": 10050,
   "test/belief-ledger-weekly-diff.test.ts": 62250,
   "test/belief-ledger-weekly-probes.test.ts": 26000,
+  "test/capacity-bounded-read-6803.test.ts": 3000,
   "test/capture-consent-admission.test.ts": 10340,
   "test/capture-dispatch-provenance-6524.test.ts": 7890,
   "test/chronicle-backfill-max-usd.test.ts": 6426,
