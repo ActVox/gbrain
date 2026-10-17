@@ -174,6 +174,21 @@ export async function assertWriteHeadroom(engine: SqlEngine, principal: Principa
     }
   }
 }
+/**
+ * #6884: how many more requests `principal` can have outstanding before the tighter of its own and the brain's
+ * outstanding caps, each taken at `share` (a background run stops at the pause line), with that cap's counts.
+ */
+export async function readOutstandingRoom(engine: SqlEngine, principal: Principal, share = 1): Promise<{ room: number; scope: 'brain' | 'principal'; used: number; limit: number }> {
+  const limits = await readJournalLimits(engine);
+  const rows = await engine.executeRaw<{ key: string; outstanding_count: number | string }>('SELECT key,outstanding_count FROM persistence_counters WHERE key=ANY($1::text[])',
+    [['brain', principalKey(principal)]]);
+  const room = (scope: 'brain' | 'principal', key: string, cap: number) => {
+    const used = Number(rows.find(row => row.key === key)?.outstanding_count ?? 0), limit = Math.floor(cap * share);
+    return { room: limit - used, scope, used, limit };
+  };
+  const brain = room('brain', 'brain', limits.brainOutstanding), own = room('principal', principalKey(principal), limits.principalOutstanding);
+  return brain.room < own.room ? brain : own;
+}
 /** Creates and locks the counter rows in key order: two statements for any number of keys (#5984 round-trip diet). */
 /** Creates missing counter rows; takes no lock on existing ones. Keys sorted. */
 export const ENSURE_COUNTERS_SQL = 'INSERT INTO persistence_counters(key) SELECT k FROM unnest($1::text[]) WITH ORDINALITY AS u(k,n) ORDER BY n ON CONFLICT DO NOTHING';
@@ -975,6 +990,14 @@ export async function markRecovering(engine: SqlEngine, row: WriteRequest, reaso
 }
 const PERSISTENCE_QUEUE_TABLES = ['persistence_requests', 'persistence_effects', 'persistence_counters', 'page_projection_jobs', 'page_write_guards'];
 /**
+ * Lets timers and I/O run between PGLite statement chains. Every PGLite statement runs synchronously and resolves as a
+ * microtask, so a chain of them never returns to the event loop on its own and holds every request until it ends. It
+ * resumes from the timer queue: a check-phase resume (setImmediate) runs the next chain before timers that came due
+ * during the last one, so two chains back to back held a waiting request through both.
+ */
+export const yieldToEventLoop = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+/**
  * PGLite has no autovacuum. The resident owner reclaims queue churn and keeps
  * planner statistics current, so receipt lookups keep using the request-id
  * index and claims do not walk dead queue entries. A queue table is vacuumed
@@ -990,7 +1013,10 @@ export async function vacuumPersistenceQueues(engine: BrainEngine): Promise<numb
     `SELECT c.relname FROM pg_class c WHERE c.relname = ANY($1::text[]) AND c.relkind = 'r' AND c.relnamespace = 'public'::regnamespace
        AND pg_relation_size(c.oid) / current_setting('block_size')::int > c.relpages * 1.1 + 8`, [PERSISTENCE_QUEUE_TABLES]);
   const tables = PERSISTENCE_QUEUE_TABLES.filter(table => grown.some(row => row.relname === table));
-  if (tables.length) await engine.executeRaw(`VACUUM (ANALYZE) ${tables.join(', ')}`);
+  for (const table of tables) {
+    await yieldToEventLoop();
+    await engine.executeRaw(`VACUUM (ANALYZE) ${table}`);
+  }
   const [requests] = await engine.executeRaw<{ rows: number }>("SELECT GREATEST(reltuples,0)::float8 AS rows FROM pg_class WHERE oid='persistence_requests'::regclass");
   return Number(requests?.rows ?? 0);
 }

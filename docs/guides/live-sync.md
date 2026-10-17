@@ -140,7 +140,8 @@ Timing knobs the drain uses:
 `gbrain config` keeps three kinds of `sync.*` keys (`src/core/sync-config-keys.ts`):
 
 - **Tunables** you set and keep: `sync.bulk_size`, `sync.lanes`, `sync.exclude`, `sync.include_hidden`,
-  `sync.include_working_tree`, `sync.holds`, `sync.write_through`, `sync.cost_gate_min_usd`.
+  `sync.include_working_tree`, `sync.holds`, `sync.write_through`, `sync.cost_gate_min_usd`, `sync.on_commit`,
+  `sync.freshness_target_seconds` ([on-commit sync](on-commit-sync.md)).
 - **Rollback keys**, the way back a notice or migration promised: `sync.job_drain`, `sync.foreground_priority`,
   `sync.federated_v2`, `sync.waive_batch`, `sync.bulk`. Each one set to `false` restores the earlier behavior, and
   stays honored until at least 2027-01-14 (`CONFIG_ROLLBACK_WINDOWS` in `src/core/wire-skew.ts`). They are not
@@ -370,7 +371,13 @@ its soft-deleted slug. The sync report prints each such pair, `gbrain sync
 status --source <id> --json` lists it under `identity_downgrades`, doctor
 `rename_identity_downgrades` names it, and the purge leaves the old page alone
 until the pair gets a disposition; there is no time limit, so a pair can still
-be repaired later. Restoring the old page settles it: run
+be repaired later. Each pair names its remedy, `gbrain repair rename-identity
+--source <id> --slug <new-slug>`: preview it, and after the user agrees apply it
+to carry the old page's identity (history, links, facts) onto the new page, or
+add `--close` to release the hold without carrying it. On a managed source only
+`--close` is available (`managed_remedy_unavailable`). See
+[rename identity](repair.md#rename-identity). Restoring the old page also
+settles the pair: run
 `gbrain restore <old-slug> --source-id <id> --force` (it then lives beside the
 new page; where the old file cannot be re-created the restore names
 `--detach`). An unbound classic source on Postgres refuses page writes outside
