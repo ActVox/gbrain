@@ -5,14 +5,13 @@
  * here. Real PGLite, plus Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { LATEST_VERSION } from '../src/core/migrate.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { GRADUATION_INVENTORY } from '../src/core/persistence/graduation-inventory.ts';
 import { readMissingTables, RECREATABLE_TABLES, recreateStep } from '../src/core/schema-missing-tables.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { withColdPglite } from './helpers/with-snapshot.ts';
 
 const engines: BrainEngine[] = [];
 let closePostgres: (() => Promise<void>) | undefined;
@@ -28,7 +27,7 @@ async function shape(engine: BrainEngine, table: string) {
 async function setVersion(engine: BrainEngine, version: number) { await engine.setConfig('version', String(version)); }
 
 beforeAll(async () => {
-  const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
+  engines.push(await withColdPglite(async () => { const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); return lite; }));
   if (process.env.DATABASE_URL) {
     const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL);
     engines.push(pg.engine); closePostgres = pg.close;
@@ -37,12 +36,15 @@ beforeAll(async () => {
 afterAll(async () => { await engines[0]?.disconnect(); await closePostgres?.(); }, 60_000);
 
 describe('#6911 recreatable caches', () => {
-  test('every inventory rebuild table is recreatable or defined by the base schema, and nothing else resolves to a step', () => {
+  test('every inventory rebuild table is recreatable here or comes back from the base-schema replay, and nothing else resolves to a step', async () => {
     const rebuild = GRADUATION_INVENTORY.entries.filter(e => e.class === 'rebuild' && e.kind === 'table').map(e => e.relation);
-    const base = readFileSync(join(import.meta.dir, '..', 'src', 'schema.sql'), 'utf8');
-    const inBase = (table: string) => new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(`).test(base);
-    for (const table of RECREATABLE_TABLES) expect({ table, rebuild: rebuild.includes(table), inBase: inBase(table) }).toEqual({ table, rebuild: true, inBase: false });
-    expect(rebuild.filter(table => !RECREATABLE_TABLES.includes(table) && !inBase(table))).toEqual([]);
+    for (const table of RECREATABLE_TABLES) expect(rebuild).toContain(table);
+    const engine = engines[0]!;
+    for (const table of rebuild.filter(t => !RECREATABLE_TABLES.includes(t))) {
+      await engine.executeRaw(`DROP TABLE ${table}`);
+      await engine.initSchema();
+      expect({ table, missing: (await readMissingTables(engine) as { missing: Array<{ table: string }> }).missing.map(m => m.table) }).toEqual({ table, missing: [] });
+    }
     for (const name of ['facts', 'core_edit_notices', 'constructor', 'toString', '__proto__', 'hasOwnProperty']) expect(recreateStep(name)).toBeUndefined();
   });
 
