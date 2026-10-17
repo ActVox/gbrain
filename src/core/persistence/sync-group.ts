@@ -150,7 +150,7 @@ export async function freezeFollowers<P extends WaiverEntry & { rebound?: true }
 }
 
 /** Admits the group's members that have no request yet, in one transaction, while the cursor still holds this group. */
-export async function admitGroup(engine: BrainEngine, members: WaiverEntry[], cursor: { sourceId: string; incarnation: string; binding: { worktree_id: string; topology_generation: string | number }; authority: SyncAuthority },
+export async function admitGroup(engine: BrainEngine, members: WaiverEntry[], cursor: { sourceId: string; incarnation: string; binding: { worktree_id: string; topology_generation: string | number; owner_epoch?: string | number }; authority: SyncAuthority },
   cursorHolds: (tx: BrainEngine) => Promise<boolean>): Promise<WriteRequest[] | null> {
   const head = members[0]!;
   return retryWriteAdmission(head.requestId, remaining => engine.transaction(async tx => {
@@ -160,7 +160,7 @@ export async function admitGroup(engine: BrainEngine, members: WaiverEntry[], cu
         [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]),
       () => admitWriteGroupInTransaction(tx, members.map(member => ({ requestId: member.requestId, operation: 'submit_job',
         sourceId: cursor.sourceId, sourceIncarnation: cursor.incarnation, slug: member.slug, pageId: member.pageId,
-        worktreeId: cursor.binding.worktree_id, topologyGeneration: cursor.binding.topology_generation,
+        worktreeId: cursor.binding.worktree_id, topologyGeneration: cursor.binding.topology_generation, ownerEpoch: cursor.binding.owner_epoch,
         principal: cursor.authority.writer.principal, authority: cursor.authority.writer, callerIntent: member.intent, intent: member.intent }))),
     ]) as [unknown, WriteRequest[]];
     if (!await cursorHolds(tx)) throw new GroupMoved();

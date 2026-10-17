@@ -1423,7 +1423,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
             [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
           const accepted = await admitWriteInTransaction(tx, { requestId: pending.requestId, operation: 'submit_job',
             sourceId: admitting.sourceId, sourceIncarnation: admitting.incarnation, slug: pending.slug, pageId: pending.pageId,
-            worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation,
+            worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation, ownerEpoch: admitting.binding.owner_epoch,
             principal: admitting.authority.writer.principal, authority: admitting.authority.writer, callerIntent: pending.intent, intent: pending.intent });
           // ENG-A7: after the counter locks (the publication lock order), admit only while the cursor still holds this entry
           // with this intent (#6075: a bulk pass may have grouped the head since this pass read it).

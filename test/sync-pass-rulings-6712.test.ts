@@ -129,6 +129,28 @@ describe('#6712 PR 4b classifier rulings (pglite)', () => {
     expect(await classOf(engine, 'notes/c.md')).toMatchObject({ cls: 'legacy_same', settled: true });
   }, { setup }), 180_000);
 
+  test('b1: the legacy markers stay owed after a first pass that wrote none; a prior pass row alone does not skip them', () => managedBrain(async ({ engine, ctx }) => {
+    await engine.setConfig('sync.write_through', 'false');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const deletion = await deletePage(engine, ctx, 'notes/c');
+    await raw(engine, () => engine.executeRaw("DELETE FROM pages WHERE source_id='default' AND slug IN ('notes/b','notes/c')"));
+    await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1', [SYNC_ORIGIN_DELETED_OP]);
+    // The row an incarnation's first pass leaves when it fails before its first round wrote the markers: no converged
+    // state and no marker stamp, beside the baseline it pinned.
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_build_array(jsonb_set(jsonb_set(
+        (completed_keys->0) #- '{obligations,converged}' #- '{obligations,legacy_markers_at}',
+        '{obligations,baseline_commit}', to_jsonb((SELECT last_commit FROM sources WHERE id='default'))),
+        '{telemetry,outcome}', '"failed"'::jsonb)) WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+
+    expect((await performManagedSync(engine, OPTS)).status).not.toBe('blocked_by_failures');
+    expect(await liveSlugs(engine)).toEqual(['notes/a', 'notes/b']);
+    const markers = await engine.executeRaw<{ fingerprint: string; value: { kind: string; deletion: string | null } }>(
+      'SELECT fingerprint, completed_keys->0 AS value FROM op_checkpoints WHERE op=$1', [SYNC_ORIGIN_DELETED_OP]);
+    expect(markers.map(row => ({ path: row.fingerprint.split(':').pop(), kind: row.value.kind, deletion: row.value.deletion }))).toEqual([{ path: 'notes/c.md', kind: 'legacy', deletion }]);
+    const [row] = await engine.executeRaw<{ at: string | null }>("SELECT completed_keys->0->'obligations'->>'legacy_markers_at' AS at FROM op_checkpoints WHERE op=$1", [MANAGED_SYNC_PASS_OP]);
+    expect(row?.at).toBeString();
+  }, { setup }), 180_000);
+
   test('b4/b6: the receipt counts dirty paths by their own action and the source\'s legacy twin pairs', () => managedBrain(async ({ engine, root }) => {
     writeFileSync(join(root, 'notes/Foo Bar.md'), note('Foo Bar', 'A synthetic observation about Foo Bar.')); commit(root, 'twin file');
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');

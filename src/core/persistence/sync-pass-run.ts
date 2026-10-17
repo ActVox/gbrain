@@ -354,7 +354,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const value: ManagedSyncPassValue = { source_id: sourceId, incarnation, lease_token: lease.token, obligations,
     telemetry: { pass_id: passId, target: head, started_at: startedAt, ended_at: null, kind, round: 0, outcome: 'open', stop_reason: null, candidates: 0, settled: 0, remaining: 0,
       counts: {}, duration_ms: null, timings_ms: {} } };
-  const bootstrap = !prior;
+  // The incarnation's legacy markers (§2.7 b1) are owed until a local pass wrote them, not only by its first row.
+  const markersOwed = () => remote ? !prior : !value.obligations.legacy_markers_at;
 
   if (kind === 'idle' && working.cache) rememberWorkingStatCache(cacheKey, working.cache);
   if (kind === 'idle') {
@@ -387,6 +388,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     // The lease check and the clock read share a round trip: a lost lease aborts the transaction before the row is written.
     [, value.telemetry.started_at] = await Promise.all([assertDrainLease(tx, sourceId), databaseNow(tx)]);
     await writePassRow(tx, value, { pin: true });
+    // An interrupt during the pin rolls the pin back with it: no `open` row is left for a pass that never ran.
+    assertActive();
   });
   assertActive();
   registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
@@ -474,7 +477,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       value.telemetry.round = round;
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
-        pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
+        pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed() } });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is
@@ -483,7 +486,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       levelSlugMode = level.slugMode;
       lastLevel = level;
       value.telemetry.timings_ms = level.timings_ms;
-      if (bootstrap && round === 1 && !remote) await writeLegacyMarkers(engine, level);
+      // Design §2.7 (b1): until the incarnation's markers are written (an aborted or failed first pass wrote none), not only on its first row.
+      if (markersOwed() && !remote) {
+        await writeLegacyMarkers(engine, level);
+        value.obligations.legacy_markers_at = new Date().toISOString();
+      }
       await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions,
         grantPrefixes: remote ? authority.writer.slugPrefixes : null }, applied);
       assertActive();
