@@ -691,13 +691,11 @@ export interface Chunk {
   parent_symbol_path?: string[] | null;
   doc_comment?: string | null;
   symbol_name_qualified?: string | null;
-  /**
-   * v0.27.1 multimodal. Read side of ChunkInput.modality — must round-trip
-   * through getChunks → embed-stale merge → upsertChunks or image rows get
-   * reset to 'text' (EXCLUDED.modality on the upsert) and vanish from the
-   * image search arm.
-   */
+  /** v0.27.1 multimodal. Read side of ChunkInput.modality — must round-trip through getChunks → embed-stale
+   * merge → upsertChunks or image rows get reset to 'text' (EXCLUDED.modality) and vanish from the image arm. */
   modality?: 'text' | 'image';
+  /** #6871: the image vector; only getChunksWithEmbeddings reads it, so `gbrain migrate` carries it. */
+  embedding_image?: Float32Array | null;
   /** v244: UTF-8 byte span in the chunk_source's projected text (see ChunkInput); null when unrecorded. */
   projected_byte_start?: number | null;
   projected_byte_end?: number | null;

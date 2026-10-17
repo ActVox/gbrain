@@ -50,6 +50,7 @@ Nothing runs on upgrade. Each repair below is preview-first, and you choose when
 - `embed --stale --images` skips sealable pages and reports `reimport`, `incomplete_sealed`, `ocr_required`, `protected` and `archived`.
 - `gbrain projections drain` reports per-class `remaining_by_class` and never says "empty" while image rows remain.
 - A read-only `[AGENT]` notice after upgrading names the drain preview.
+- `gbrain migrate --to <engine>` (the legacy copier) now carries an image chunk's `embedding_image` vector (#6871). Before, a migrated image page arrived without it and needed a paid re-embed to show up in image search.
 
 #### Held embedding budgets (part 3, #6847)
 
