@@ -459,7 +459,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     processingOptions: cursor.processingOptions,
     // A cursor created before its options were recorded has the same key, so this run's options are its options.
     ...(!entry ? { syncOptions: cursor.syncOptions ?? run.syncOptions, ...(run.repoPath ? { repoPath: run.repoPath } : {}) } : {}),
-    ...(!entry && cursor.overtaken ? { overtaken: true } : {}), ...(!entry && cursor.slice ? { slice: cursor.slice } : {}),
+    ...(!entry && cursor.overtaken ? { overtaken: true } : {}),
     ownerEpoch: String(cursor.binding.owner_epoch), syncAuthority: cursor.authority, ...cursorIntent(cursor, key),
     ...(cursor.passId ? { level: passLevel ?? null, ...(!entry && cursor.stamp ? { stamp: cursor.stamp } : {}) } : {}),
     slugMode: cursor.slugMode, from: cursor.from, target: cursor.target, working: entry?.working ?? false,
