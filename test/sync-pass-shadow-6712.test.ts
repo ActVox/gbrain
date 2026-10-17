@@ -168,6 +168,17 @@ describe('#6712 PR 4a convergence shadow (pglite)', () => {
     expect(await footprint(engine)).toBe(before);
   }, { setup }), 120_000);
 
+  test('probe 38, arm 1: a record without a revision whose sync receipt survives is adopted on the attestation (A), not left unverified', () => managedBrain(async ({ engine }) => {
+    expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_build_array((completed_keys->0) - 'revision')
+      WHERE op=$1 AND completed_keys->0->>'origin'='notes/gamma.md'`, [SYNC_IMPORT_PROVENANCE_OP]);
+    const before = await footprint(engine);
+    const receipt = (await shadowConvergence(engine, { sourceId: 'default' }))!;
+    expect(receipt.counts).toEqual({ matched: 2, adopt: 1 });
+    expect(receipt.legacy_unverified).toBe(0);
+    expect(await footprint(engine)).toBe(before);
+  }, { setup }), 120_000);
+
   test('sync status: plain status skips the heavy convergence read; --detail reports it with dry_run: true', () => managedBrain(async ({ engine }) => {
     expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
     const plain = await readSyncStatus(engine, 'default', { detail: false });
