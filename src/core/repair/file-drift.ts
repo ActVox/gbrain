@@ -42,6 +42,15 @@
  * (bound to its revision, path and owner; the mass-delete valve applies). A file deleted only in the worktree (still
  * committed at HEAD) is not drift: the preview lists it `deletion_uncommitted` with its route (commit the deletion, or
  * `gbrain repair ghost-pages`) and resolves nothing.
+ *
+ * #6712 PR 4b: `--held [--side both|unknown|deleted [--state tombstone_edited|purged_differs|file_gone]]` selects the
+ * source's held `file_drift` pages of one Decision (design v3.2 §4). A selection of several sides or states is refused
+ * (`file_drift_mixed_selection`) and a deleted side needs `--state` (`file_drift_state_required`), because the two
+ * options do opposite things in each state. Both/unknown pages resolve as above, `file_gone` as the wave's file-gone
+ * modes; `tombstone_edited` and `purged_differs` (a deleted page, or a deletion marker, at the origin of a file that
+ * differs) resolve `--prefer database` by removing the file through a coordinated publication (`prepareDriftFileRemoval`;
+ * the deletion stands) and `--prefer file` by importing the file's bytes through the managed file repair (the tombstone is
+ * restored, or a new page created; a marker stays for sync to retire). The preview lists each page's action verb.
  */
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -61,7 +70,7 @@ import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, sa
 import { canonicalFilesystemPath } from '../persistence/root-registry.ts';
 import { auditDriftConflicts, DRIFT_CLASSES, driftClass, liveFileDrift, type DriftClass } from '../persistence/drift-conflicts.ts';
 import { protectedReconcileKey, reconcileCanonical, RECONCILE_SCAN_KEYS, type ReconcileDecision } from '../persistence/reconcile-merge.ts';
-import { ABSENT_FILE_HASH, canonicalDeletionState, missingFileRoute, readDeletedDriftTarget, readReconcileState, type DeletedDriftChange, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
+import { ABSENT_FILE_HASH, canonicalDeletionState, missingFileRoute, readDeletedDriftTarget, readReconcileState, type DeletedDriftChange, type DeletedDriftTarget, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
 import { clearGitHold, fileDriftActionVerb, fileDriftSide, FILE_DRIFT_DELETED_STATES, FILE_DRIFT_SIDES, GIT_HOLD_OP, heldDriftPreviewArgv, type FileDriftDeletedState, type FileDriftSide, type GitHoldRecord } from '../persistence/sync-holds.ts';
 import { prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
@@ -445,13 +454,13 @@ async function deletedPage(engine: BrainEngine, sourceId: string, target: HeldTa
 }
 
 /** #6712 PR 4b: the deleted-side pin as the preview hash and the publication read it again. */
-async function assertDeletedPin(engine: BrainEngine, sourceId: string, pin: DeletedDriftPin): Promise<NonNullable<Exclude<Awaited<ReturnType<typeof readDeletedDriftTarget>>, { changed: DeletedDriftChange }>>> {
+async function assertDeletedPin(engine: BrainEngine, sourceId: string, pin: DeletedDriftPin): Promise<DeletedDriftTarget> {
   const live = await readDeletedDriftTarget(engine, sourceId, { path: pin.path, sourcePath: pin.source_path, pageId: pin.page_id });
   const why = 'changed' in live ? DELETED_CHANGES[live.changed] : live.state !== pin.state ? `it is ${live.state} now`
     : live.raw_file_hash !== pin.raw_file_hash ? 'the file bytes changed'
     : (live.tombstone?.page_id ?? null) !== pin.page_id || (live.tombstone?.revision ?? null) !== pin.revision ? 'the deleted page changed'
     : live.marker_digest !== pin.marker_digest ? 'its deletion marker changed' : null;
-  if (why !== null || 'changed' in live) throw opError('changed_since_preview', `${pin.path} changed since its file-drift resolution was previewed: ${why}.`,
+  if ('changed' in live || why !== null) throw opError('changed_since_preview', `${pin.path} changed since its file-drift resolution was previewed: ${why}.`,
     `Nothing was written for ${pin.path}. Preview again with ${shellQuote(heldDriftPreviewArgv(sourceId, 'deleted', pin.state, 'database', pin.path))} (or --prefer file) and apply its new hash.`,
     { fix: readFix('Lists the held files of this source with their side and state, read-only.', { argv: ['gbrain', 'sources', 'status', sourceId, '--json'] }) });
   return live;
