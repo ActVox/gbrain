@@ -31,8 +31,8 @@ import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGit, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
 import { confirmedSyncDelta } from '../sync-rename-identity.ts';
-import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParserFor,
-  type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
+import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportKind, syncImportParser, syncImportParserFor,
+  type GitHoldRecord, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexDelta, readIndexLevel, readTreeLevel, workingChanged, type GitIndexEntry, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
@@ -40,7 +40,7 @@ import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlock
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from './sync-pass-row.ts';
-import { loopYield, sortYielding } from './sync-yield.ts';
+import { filterYielding, loopYield, sortYielding, type LoopYield } from './sync-yield.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
 
@@ -82,11 +82,28 @@ export interface PassLevelCache { tree?: { key: string; tree: Map<string, GitTre
  * level holds a handful instead of one per path. Bounded; a result past the bound stays its own.
  */
 const SHARED_RESULTS = new Map<string, SyncClassified>();
+/**
+ * The last shared result of each class with its keys in order: most paths of a level repeat it, and a match on the same
+ * keys in the same order with the same primitive values (what `JSON.stringify` would key alike) allocates nothing.
+ */
+const LAST_SHARED = new Map<string, { result: SyncClassified; keys: string[] }>();
+const sameFlat = (last: { result: SyncClassified; keys: string[] }, b: SyncClassified): boolean => {
+  const a = last.result as unknown as Record<string, unknown>, other = b as unknown as Record<string, unknown>;
+  let i = 0;
+  for (const key in other) {
+    const value = other[key];
+    if (last.keys[i++] !== key || value === undefined || typeof value === 'object' && value !== null || a[key] !== value) return false;
+  }
+  return i === last.keys.length;
+};
+const rememberShared = (result: SyncClassified) => LAST_SHARED.set(result.cls, { result, keys: Object.keys(result) });
 function sharedResult(result: SyncClassified): SyncClassified {
+  const last = LAST_SHARED.get(result.cls);
+  if (last && sameFlat(last, result)) return last.result;
   const key = JSON.stringify(result);
   const shared = SHARED_RESULTS.get(key);
-  if (shared) return shared;
-  if (SHARED_RESULTS.size < 256) SHARED_RESULTS.set(key, Object.freeze(result) as SyncClassified);
+  if (shared) { rememberShared(shared); return shared; }
+  if (SHARED_RESULTS.size < 256) { SHARED_RESULTS.set(key, Object.freeze(result) as SyncClassified); rememberShared(result); }
   return result;
 }
 
@@ -129,6 +146,9 @@ class MatchedPath implements ShadowPath {
   }
 }
 
+/** Whether `entry` is a compact converged `matched` path: its state is a live page at its level, with no marker, hold or open work. */
+export const isCompactMatched = (entry: ShadowPath): boolean => entry instanceof MatchedPath;
+
 export interface ShadowLevel {
   sourceId: string; incarnation: string; root: string; gitRoot: string; scope: string; slugMode: 'git-root' | 'source-root';
   mode: 'committed' | 'working'; head: string; baselineCommit: string | null; full: boolean;
@@ -164,6 +184,10 @@ const recordOids = (record: PageRow['record'], level?: string | null): string[] 
   return oids;
 };
 
+/** Whether the record names `oid` among its blob ids (`recordOids(record).includes(oid)` without the array). */
+const recordNames = (record: PageRow['record'], oid: string | null): boolean => !!record && typeof oid === 'string' && oid.length > 0
+  && (record.blob_oid === oid || record.disk_blob_oid === oid);
+
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
 /**
@@ -186,10 +210,11 @@ async function withRoundSnapshot<T>(engine: BrainEngine, fn: (exec: Exec) => Pro
  * stretch of about a second and held every raw row at once. `cursor_tuple_fraction = 1` keeps the whole-result plan.
  * PGLite reads bounded keyset statements so writers interleave.
  */
-async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string): Promise<{ rows: PageRow[]; statements: number }> {
+async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string, expected: SyncImportParser): Promise<{ rows: PageRow[]; statements: number }> {
   // A record's fields usually repeat the page's (origin = source_path, disk = blob, revision = the page's), so those come back
-  // as a flag instead of a second copy of the string, and the parser as text parsed once per distinct value: a 600k-page
-  // read then holds about one string per field per page.
+  // as a flag instead of a second copy of the string, and so does the parser when it is the Markdown one the level expects
+  // (`expected`, the same object for every such page; any other comes as text parsed once per distinct value): a 600k-page
+  // read then holds about one string per field per page and decodes no parser text per page.
   // The record's fields come out of its JSON once, in a subquery. On Postgres `OFFSET 0` keeps it unflattened, so the hash
   // join builds over those few text columns instead of the whole record (600k: about 3.1 s of serial server time to 2.0 s);
   // PGLite's keyset statements need it flattened, so each probes the record by primary key.
@@ -202,15 +227,16 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
       CASE WHEN c.disk_blob_oid IS DISTINCT FROM c.blob_oid THEN c.disk_blob_oid END AS rec_disk_blob_oid,
       c.revision IS NULL AS rec_revision_null,
       NULLIF(c.revision, p.knowledge_revision::text) AS rec_revision,
-      c.parser AS rec_parser, c.full_episode AS rec_full_episode, c.working AS rec_working
+      CASE WHEN c.parser IS DISTINCT FROM $4::jsonb THEN c.parser::text END AS rec_parser, c.parser = $4::jsonb AS rec_parser_expected,
+      c.full_episode AS rec_full_episode, c.working AS rec_working
     FROM pages p LEFT JOIN (SELECT fingerprint, completed_keys->0->>'origin' AS origin, completed_keys->0->>'blob_oid' AS blob_oid,
         completed_keys->0->>'disk_blob_oid' AS disk_blob_oid, completed_keys->0->>'revision' AS revision,
-        (completed_keys->0->'parser')::text AS parser, completed_keys->0->>'full_episode' AS full_episode, (completed_keys->0->'working')::text AS working
+        completed_keys->0->'parser' AS parser, completed_keys->0->>'full_episode' AS full_episode, (completed_keys->0->'working')::text AS working
       FROM op_checkpoints WHERE op=$2${kind === 'postgres' ? ' OFFSET 0' : ''}) c ON c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
-  const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
+  const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`, JSON.stringify(expected)];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin_same: boolean; rec_origin: string | null; rec_blob_oid: string | null;
-    rec_disk_same: boolean; rec_disk_blob_oid: string | null; rec_revision_null: boolean; rec_revision: string | null; rec_parser: string | null; rec_full_episode: string | null; rec_working: string | null };
+    rec_disk_same: boolean; rec_disk_blob_oid: string | null; rec_revision_null: boolean; rec_revision: string | null; rec_parser: string | null; rec_parser_expected: boolean | null; rec_full_episode: string | null; rec_working: string | null };
   const rows: PageRow[] = [];
   const parsers = new Map<string, SyncImportProvenance['parser'] | undefined>();
   const parserOf = (text: string | null) => {
@@ -222,7 +248,7 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
     for (const raw of page) rows.push({ id: raw.id, slug: raw.slug, source_path: raw.source_path, revision: raw.revision, deleted: raw.deleted, request_id: raw.request_id,
       arm1: null, attested_hash: null, record: raw.has_record ? { origin: raw.rec_origin_same ? raw.source_path : raw.rec_origin ?? '', blob_oid: raw.rec_blob_oid ?? undefined,
         disk_blob_oid: raw.rec_disk_same ? raw.rec_blob_oid : raw.rec_disk_blob_oid, revision: raw.rec_revision_null ? undefined : raw.rec_revision ?? raw.revision,
-        parser: parserOf(raw.rec_parser), full_episode: raw.rec_full_episode, ...(raw.rec_working === 'true' || raw.rec_working === 'false' ? { working: raw.rec_working === 'true' } : {}) } : null });
+        parser: raw.rec_parser_expected ? expected : parserOf(raw.rec_parser), full_episode: raw.rec_full_episode, ...(raw.rec_working === 'true' || raw.rec_working === 'false' ? { working: raw.rec_working === 'true' } : {}) } : null });
   };
   let statements = 0;
   if (kind === 'postgres') {
@@ -242,7 +268,7 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
   let after = 0;
   for (;;) {
     statements++;
-    const page = await exec.executeRaw<Raw>(`${select} AND p.id>$4 ORDER BY p.id LIMIT ${PGLITE_KEYSET_ROWS}`, [...params, after]);
+    const page = await exec.executeRaw<Raw>(`${select} AND p.id>$5 ORDER BY p.id LIMIT ${PGLITE_KEYSET_ROWS}`, [...params, after]);
     take(page);
     if (page.length < PGLITE_KEYSET_ROWS) return { rows, statements };
     after = Number(page[page.length - 1]!.id);
@@ -369,24 +395,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const engineKind = engine.kind === 'pglite' ? 'pglite' : 'postgres';
   const nativeRoot = realpathSync.native(root), nativeGitRoot = realpathSync.native(gitRoot);
   const scope = relative(nativeGitRoot, nativeRoot).split(sep).join('/');
-  // The setup reads are independent: one round trip each, all in flight together.
   t = timer();
-  const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead] = await Promise.allSettled([
-    currentCompanyBrainSync(sourceId) ? Promise.resolve(true) : getCompanyBrainProfile(engine, sourceId).then(profile => !!profile),
-    scope && input.pass?.slugMode ? Promise.resolve(input.pass.slugMode) : scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
-    syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
-    engine.getConfig('sync.include_hidden'),
-    input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
-    input.pass?.noSchemaPack ? Promise.resolve(null) : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
-    sourceMirrorReadOnly(engine, sourceId),
-  ]);
+  const settings = await readLevelSettings(engine, context, scope, input);
   timings.setup = t();
-  const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
-  if (settled(company)) return null;
-  const slugMode = settled(slugModeRead), exclude = settled(excludeRead), pack = settled(packRead), mirror = settled(mirrorRead);
-  const strategy = input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown';
-  const includeHidden = [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
-  const keepDbPrefixes = (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })();
+  if (!settings) return null;
+  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, workingConfig } = settings;
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   // Eligibility of a path outside the cached tree (every path of the tree is eligible); origins validate per call: a
   // 600k-path level keeps no per-path memo of either.
@@ -414,7 +427,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   if (!head) throw new Error(`source ${sourceId}: HEAD does not name a commit, so there is no level to read`);
   // Master's rule (sync-discovery.ts): a detached HEAD forces working mode.
   const detached = syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
-  const working = detached || (input.workingTree ?? settled(workingRead) === 'true');
+  const working = detached || (input.workingTree ?? workingConfig === 'true');
   const mode: 'committed' | 'working' = working ? 'working' : 'committed';
   timings.rev_parse = t();
 
@@ -445,19 +458,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       mode === 'working' ? timed('X', () => readIndexLevel(gitRoot)) : Promise.resolve(new Map<string, GitIndexEntry>()),
       timed('U', async () => (mode === 'working' ? (await readUntracked(gitRoot, scope)).filter(eligible) : []))]),
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
-    timed('I⋈P', () => withRoundSnapshot(engine, async exec => {
-      const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, engineKind, sourceId, incarnation)),
-        timed('open_work', () => readOpenWork(exec, sourceId, incarnation, context.binding.worktree_id)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
-        timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
-      return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
-    })),
-    timed('H', async () => {
-      const [sourceHolds, retryPaths] = await Promise.all([readGitSourceHolds(engine, { sourceIds: [sourceId] }), readGitHoldRetryPaths(engine, sourceId, incarnation)]);
-      const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
-      const holdByPath = new Map(holds.map(hold => [hold.path, hold]));
-      const [basisMoved, driftMoved] = await Promise.all([holdBasisMoved(engine, sourceId, holdByPath, [...holdByPath.keys()]), movedDriftHolds(engine, sourceId, holds)]);
-      return { holds, retry: new Set(retryPaths.filter(path => !input.pass?.retryConsumed?.has(path))), moved: [...basisMoved, ...driftMoved] };
-    }),
+    timed('I⋈P', () => readRoundSnapshot(engine, { kind: engineKind, sourceId, incarnation, worktreeId: context.binding.worktree_id, parser: syncImportParser(pack?.identity ?? null) }, timed)),
+    timed('H', () => readLevelHolds(engine, sourceId, incarnation, input.pass?.retryConsumed)),
   ]);
   timings.reads = t();
   const [{ tree: eligibleT, colon: colonTree, indexDelta }, index, untrackedPaths] = gitLevel;
@@ -482,19 +484,10 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const holdByGitPath = new Map<string, GitHoldRecord>(holds.map(hold => [toGit(hold.path), hold]));
   const moved = new Set(held.moved.map(toGit));
 
-  // The page claiming each origin: the live one first, else the newest tombstone. The rows leave the snapshot's result
-  // here (the driver's transaction keeps that object until its connection's next one), so only `byOrigin` holds them.
+  // The rows leave the snapshot's result here (the driver's transaction keeps that object until its connection's next one),
+  // so only `byOrigin` (`claimOrigins`) holds them.
   t = timer();
-  // Every page recording an origin that more than one page records (#6517), so the level can name an ambiguous origin.
-  const byOrigin = new Map<string, PageRow>(), claimants = new Map<string, PageRow[]>();
-  for (const row of snapshot.pages) {
-    if (step.due()) await step.pause();
-    if (isWindowsColonTarget(row.source_path)) continue;
-    const key = gitPathOf(pageOrigin(row));
-    const prior = byOrigin.get(key);
-    if (prior) { const all = claimants.get(key); if (all) all.push(row); else claimants.set(key, [prior, row]); }
-    if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
-  }
+  const { byOrigin, claimants } = await claimOrigins(snapshot.pages, row => gitPathOf(pageOrigin(row)), tree, step);
   snapshot.pages = [];
   const domain = new Set<string>();
   for (const path of tree.keys()) { domain.add(path); if (step.due()) await step.pause(); }
@@ -508,29 +501,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (step.due()) await step.pause();
   }
   for (const origin of markers.keys()) { const path = gitPathOf(origin); if (inLevel(path)) domain.add(path); }
-  // Spellings of one origin that differ only by case or separator (the domain holds each path once).
-  const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
-  const spellings = new Map<string, string | string[]>();
-  // Files at L count, and so does a live page's separator-spelled origin; a case-only respelling whose old file this sync
-  // removes is no refusal (discovery's one exception).
-  for (const path of domain) {
-    if (step.due()) await step.pause();
-    const live = byOrigin.get(path);
-    if (!tree.has(path) && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !(live && !live.deleted && live.source_path.includes('\\'))) continue;
-    const folded = fold(path);
-    const prior = spellings.get(folded);
-    spellings.set(folded, prior === undefined ? path : typeof prior === 'string' ? [prior, path] : [...prior, path]);
-  }
-  // As discovery does, only spellings that name one page are twins: a live origin's page slug, else the slug its path names.
-  const twins = new Set<string>(), twinGroups: string[][] = [];
-  for (const paths of spellings.values()) {
-    if (typeof paths === 'string') continue;
-    const slugOf = (path: string) => { const live = byOrigin.get(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
-    const bySlug = new Map<string, string[]>();
-    for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
-    for (const group of bySlug.values()) if (group.length > 1) { twinGroups.push(group); for (const path of group) twins.add(path); }
-  }
-  spellings.clear();
+  const { twins, twinGroups } = await spellingTwins(domain, byOrigin, path => tree.has(path) || (mode === 'working' && (untracked.has(path) || index.has(path))), originOf, step);
   timings.domain = t();
 
   // Working mode rehashes every path (the full round's unconditional rehash); committed mode probes candidates only.
@@ -555,9 +526,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   for (const [path, row] of byOrigin) {
     if (step.due()) await step.pause();
     const level = levelOf(path, probes.get(path));
-    if (!row.deleted && row.record?.revision == null && level !== null && !recordOids(row.record).includes(level) && inLevel(path)) wantBaseline = true;
+    if (!row.deleted && row.record?.revision == null && level !== null && !recordNames(row.record, level) && inLevel(path)) wantBaseline = true;
     if (row.request_id === null) continue;
-    if (row.deleted || level === null || !recordOids(row.record).includes(level) || row.record?.revision == null || String(row.record.revision) !== row.revision) unproven.push(row);
+    if (row.deleted || level === null || !recordNames(row.record, level) || row.record?.revision == null || String(row.record.revision) !== row.revision) unproven.push(row);
   }
   const attestationStatements = unproven.length ? await readAttestations(engine, engineKind, sourceId, incarnation, unproven) : 0;
   timings.A = t();
@@ -574,25 +545,17 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   };
   if (wantBaseline) await loadBaseline();
   const baselineOf = (path: string): string | null => baselineTree?.get(path)?.oid ?? null;
-  // Master refuses a spelling only among the files its sync claims (sync-discovery.ts:538-541): the live page's origin and the
-  // page-less spellings that changed since the cursor. A page-less spelling unchanged since the baseline was never claimed
-  // (#6865), so unless the claimed spellings still collide it settles as `legacy` and the others classify on their own.
-  const legacySpelling = new Set<string>();
-  for (const group of twinGroups) {
-    const unchanged: string[] = [];
-    for (const path of group) {
-      const live = byOrigin.get(path);
-      const level = levelOf(path, probes.get(path));
-      if ((live && !live.deleted) || level === null) continue;
-      await loadBaseline();
-      if (level === baselineOf(path)) unchanged.push(path);
-    }
-    if (group.length - unchanged.length > 1) continue;
-    for (const path of group) twins.delete(path);
-    for (const path of unchanged) legacySpelling.add(path);
-  }
+  // A page-less spelling twin unchanged since the baseline (#6865): see `settleUnchangedSpellings`.
+  const legacySpelling = await settleUnchangedSpellings(twinGroups, twins, async path => {
+    const live = byOrigin.get(path);
+    const level = levelOf(path, probes.get(path));
+    if ((live && !live.deleted) || level === null) return false;
+    await loadBaseline();
+    return level === baselineOf(path);
+  });
 
-  const fp = (path: string) => syncImportParserFor(sourceRelative(path), pack?.identity ?? null);
+  const parserFor = parserByKind(pack?.identity ?? null);
+  const fp = (path: string) => parserFor(sourceRelative(path));
   const stateOf = (path: string, dirty: SyncPathState['dirty'], probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): { state: SyncPathState; row?: PageRow; legacyPageless?: true } => {
     const committed = tree.get(path) ?? null;
     const row = byOrigin.get(path);
@@ -633,23 +596,15 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   // Bootstrap (the incarnation's first pass; for a read-only level, no pass row yet): page-less paths at their baseline blob
   // whose slug a committed deletion names get a `legacy` marker (§2.7, b1).
   t = timer();
-  const legacyDeletions = new Map<string, string>();
-  if (baselineCommit && (input.pass ? input.pass.bootstrap === true : !passRow)) {
-    const pageless: Array<{ path: string; slug: string }> = [];
-    for (const path of domain) {
-      if (step.due()) await step.pause();
-      if (byOrigin.has(path) || markers.has(originOf(path))) continue;
+  const legacyDeletions = baselineCommit && (input.pass ? input.pass.bootstrap === true : !passRow)
+    ? await bootstrapLegacyDeletions(engine, { sourceId, incarnation, domain, step }, async path => {
+      if (byOrigin.has(path) || markers.has(originOf(path))) return null;
       const level = levelOf(path, probes.get(path));
-      if (level === null) continue;
+      if (level === null) return null;
       await loadBaseline();
-      if (level !== baselineOf(path)) continue;
-      const slug = resolveSlugForPath(originOf(path));
-      if (slug) pageless.push({ path, slug });
-    }
-    const bySlug = await readLegacyDeletions(engine, sourceId, incarnation, [...new Set(pageless.map(entry => entry.slug))]);
-    for (const { path, slug } of pageless) { const id = bySlug.get(slug); if (id) legacyDeletions.set(path, id); }
-    timings.legacy = t();
-  }
+      return level === baselineOf(path) ? resolveSlugForPath(originOf(path)) || null : null;
+    }).then(found => { timings.legacy = t(); return found; })
+    : new Map<string, string>();
 
   t = timer();
   const paths: ShadowPath[] = [];
@@ -697,8 +652,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   }
 
   // Adoption by hash needs the level's bytes: committed mode reads the blobs of the candidates that could adopt.
-  const needBytes = paths.filter(entry => entry.state.levelSha256 === null && entry.state.level !== null && entry.state.attested?.hash && entry.state.page?.live
-    && !['matched', 'held', 'dirty'].includes(entry.result.cls));
+  const needBytes = await filterYielding(paths, entry => !['matched', 'held', 'dirty'].includes(entry.result.cls) && entry.state.levelSha256 === null && entry.state.level !== null
+    && entry.state.attested?.hash && entry.state.page?.live, step);
   if (needBytes.length) {
     t = timer();
     const blobs = await readBlobs(gitRoot, [...new Set(needBytes.map(entry => entry.state.level!))], LEVEL_BLOB_MAX_BYTES);
@@ -721,6 +676,151 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
+}
+
+/** The level's settings, one round trip each and all in flight together; null for a company-brain source. */
+async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContext, scope: string, input: { workingTree?: boolean; pass?: PassLevelInput }) {
+  const { sourceId, root } = context;
+  const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead] = await Promise.allSettled([
+    currentCompanyBrainSync(sourceId) ? Promise.resolve(true) : getCompanyBrainProfile(engine, sourceId).then(profile => !!profile),
+    scope && input.pass?.slugMode ? Promise.resolve(input.pass.slugMode) : scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
+    syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
+    engine.getConfig('sync.include_hidden'),
+    input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
+    input.pass?.noSchemaPack ? Promise.resolve(null) : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
+    sourceMirrorReadOnly(engine, sourceId),
+  ]);
+  const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
+  if (settled(company)) return null;
+  return { slugMode: settled(slugModeRead), exclude: settled(excludeRead), pack: settled(packRead), mirror: settled(mirrorRead), workingConfig: settled(workingRead),
+    strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
+    includeHidden: [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))],
+    keepDbPrefixes: (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })() };
+}
+
+/** The round's database snapshot (`I⋈P`, `U_db`, the markers and the pass row); issued together, its statements pipeline on its one connection (PGLite runs them in turn). */
+async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; worktreeId: string; parser: SyncImportParser },
+  timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
+  const { kind, sourceId, incarnation, worktreeId } = input;
+  return withRoundSnapshot(engine, async exec => {
+    const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, kind, sourceId, incarnation, input.parser)),
+      timed('open_work', () => readOpenWork(exec, sourceId, incarnation, worktreeId)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
+      timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
+    return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
+  });
+}
+
+/** `H`: the source's holds of this incarnation, the retry set less what the pass consumed, and the holds whose basis or drift moved. */
+async function readLevelHolds(engine: BrainEngine, sourceId: string, incarnation: string, retryConsumed: ReadonlySet<string> | undefined) {
+  const [sourceHolds, retryPaths] = await Promise.all([readGitSourceHolds(engine, { sourceIds: [sourceId] }), readGitHoldRetryPaths(engine, sourceId, incarnation)]);
+  const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
+  const holdByPath = new Map(holds.map(hold => [hold.path, hold]));
+  const [basisMoved, driftMoved] = await Promise.all([holdBasisMoved(engine, sourceId, holdByPath, [...holdByPath.keys()]), movedDriftHolds(engine, sourceId, holds)]);
+  return { holds, retry: new Set(retryPaths.filter(path => !retryConsumed?.has(path))), moved: [...basisMoved, ...driftMoved] };
+}
+
+/**
+ * Spellings of one origin that differ only by case or separator (the domain holds each path once). Files at L count
+ * (`isFile`), and so does a live page's separator-spelled origin; a case-only respelling whose old file this sync removes
+ * is no refusal (discovery's one exception). As discovery does, only spellings that name one page are twins: a live
+ * origin's page slug, else the slug its path names.
+ */
+/**
+ * The page claiming each origin (keyed by `keyOf`): the live one first, else the newest tombstone; and every page recording
+ * an origin that more than one page records (#6517), so the level can name an ambiguous origin. A record naming the tree's
+ * blob keeps the tree's copy of its id: a converged 600k level holds one string per blob.
+ */
+async function claimOrigins(pages: PageRow[], keyOf: (row: PageRow) => string, tree: Map<string, GitTreeEntry>, step: LoopYield) {
+  const byOrigin = new Map<string, PageRow>(), claimants = new Map<string, PageRow[]>();
+  for (const row of pages) {
+    if (step.due()) await step.pause();
+    if (isWindowsColonTarget(row.source_path)) continue;
+    const key = keyOf(row);
+    const prior = byOrigin.get(key);
+    if (prior) { const all = claimants.get(key); if (all) all.push(row); else claimants.set(key, [prior, row]); }
+    if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
+    const committed = row.record && tree.get(key);
+    if (committed && row.record!.blob_oid === committed.oid) Object.assign(row.record!, { blob_oid: committed.oid, ...(row.record!.disk_blob_oid === committed.oid ? { disk_blob_oid: committed.oid } : {}) });
+  }
+  return { byOrigin, claimants };
+}
+
+/** One parser per importer kind (`syncImportParserFor`) for a whole level, not one object per path. */
+function parserByKind(schemaPack: string | null): (path: string) => SyncImportParser {
+  const parsers = new Map<string, SyncImportParser>();
+  return path => {
+    const kind = syncImportKind(path);
+    let parser = parsers.get(kind);
+    if (!parser) parsers.set(kind, parser = syncImportParserFor(path, schemaPack));
+    return parser;
+  };
+}
+
+async function spellingTwins(domain: Set<string>, byOrigin: Map<string, PageRow>, isFile: (path: string) => boolean, originOf: (gitPath: string) => string, step: LoopYield) {
+  const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
+  const spelled = (path: string) => { const live = byOrigin.get(path); return isFile(path) || !!(live && !live.deleted && live.source_path.includes('\\')); };
+  // Two spellings fold alike only when one is not its own fold, so the first walk keeps only those folds; the second
+  // groups, in the domain's order, the spellings of those folds (a level with none keeps no map of every path).
+  const folds = new Set<string>();
+  for (const path of domain) {
+    if (step.due()) await step.pause();
+    const folded = fold(path);
+    if (folded !== path && spelled(path)) folds.add(folded);
+  }
+  const twins = new Set<string>(), twinGroups: string[][] = [];
+  if (!folds.size) return { twins, twinGroups };
+  const spellings = new Map<string, string[]>();
+  for (const path of domain) {
+    if (step.due()) await step.pause();
+    const folded = fold(path);
+    if (!folds.has(folded) || !spelled(path)) continue;
+    const prior = spellings.get(folded);
+    if (prior) prior.push(path); else spellings.set(folded, [path]);
+  }
+  for (const paths of spellings.values()) {
+    if (paths.length < 2) continue;
+    const slugOf = (path: string) => { const live = byOrigin.get(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
+    const bySlug = new Map<string, string[]>();
+    for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
+    for (const group of bySlug.values()) if (group.length > 1) { twinGroups.push(group); for (const path of group) twins.add(path); }
+  }
+  return { twins, twinGroups };
+}
+
+/**
+ * Master refuses a spelling only among the files its sync claims (sync-discovery.ts:538-541): the live page's origin and the
+ * page-less spellings that changed since the cursor. A page-less spelling unchanged since the baseline was never claimed
+ * (#6865), so unless the claimed spellings still collide it settles as `legacy` (returned) and the others leave `twins`
+ * to classify on their own.
+ */
+async function settleUnchangedSpellings(twinGroups: string[][], twins: Set<string>, unchangedPageless: (path: string) => Promise<boolean>): Promise<Set<string>> {
+  const legacySpelling = new Set<string>();
+  for (const group of twinGroups) {
+    const unchanged: string[] = [];
+    for (const path of group) if (await unchangedPageless(path)) unchanged.push(path);
+    if (group.length - unchanged.length > 1) continue;
+    for (const path of group) twins.delete(path);
+    for (const path of unchanged) legacySpelling.add(path);
+  }
+  return legacySpelling;
+}
+
+/**
+ * Bootstrap (the incarnation's first pass; for a read-only level, no pass row yet): page-less paths at their baseline blob
+ * (`pagelessSlug` names their slug) whose slug a committed deletion names get a `legacy` marker (§2.7, b1).
+ */
+async function bootstrapLegacyDeletions(engine: BrainEngine, input: { sourceId: string; incarnation: string; domain: Set<string>; step: LoopYield },
+  pagelessSlug: (path: string) => Promise<string | null>): Promise<Map<string, string>> {
+  const pageless: Array<{ path: string; slug: string }> = [];
+  for (const path of input.domain) {
+    if (input.step.due()) await input.step.pause();
+    const slug = await pagelessSlug(path);
+    if (slug) pageless.push({ path, slug });
+  }
+  const bySlug = await readLegacyDeletions(engine, input.sourceId, input.incarnation, [...new Set(pageless.map(entry => entry.slug))]);
+  const found = new Map<string, string>();
+  for (const { path, slug } of pageless) { const id = bySlug.get(slug); if (id) found.set(path, id); }
+  return found;
 }
 
 /**

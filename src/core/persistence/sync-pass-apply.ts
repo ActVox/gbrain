@@ -33,7 +33,7 @@ import type { BrainEngine } from '../engine.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { massReconcileAllowed, planReconcileDeletes } from '../sync-reconcile.ts';
 import { filterYielding, loopYield } from './sync-yield.ts';
-import { admitKeepDbReconcile, freezeKeepDbReconcile, releaseMatchedDriftSkips } from '../repair/keep-db-policy.ts';
+import { admitKeepDbReconcile, driftSkippedSlugs, freezeKeepDbReconcile, releaseMatchedDriftSkips } from '../repair/keep-db-policy.ts';
 
 const KEEP_DB_CAPACITY_REFUSALS = new Set(['capacity', 'write_capacity_backpressure', 'queue_capacity', 'write_quota_exhausted', 'writer_busy', 'writer_pool_capacity']);
 import type { SyncProcessingOptions } from './sync-authority.ts';
@@ -47,7 +47,7 @@ import { readSyncImportProvenances, recordSyncImportProvenances, syncImportParse
   type GitHoldCode, type GitHoldMeta, type SyncImportProvenance } from './sync-holds.ts';
 import { assertDrainLease } from './sync-lease.ts';
 import { clearDeletesWithheld, deleteSetHash, readDeletesWithheld, readOriginDeletedMarker, retireOriginDeletedMarker, writeDeletesWithheld, type DeletesWithheld } from './sync-markers.ts';
-import type { ShadowLevel, ShadowPath } from './sync-pass.ts';
+import { isCompactMatched, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
 import { SETTLE_MISMATCH_STREAK, type ManagedSyncPassValue, type PassRoundSummary } from './sync-pass-row.ts';
 import { syncClassAction, type SyncClassAction } from './sync-classify.ts';
 import type { SyncAdmission } from './sync-admission.ts';
@@ -137,10 +137,12 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
   await adoptRecords(engine, level, state);
   await sweepLegacy(engine, level, input, state);
   await admitKeepDb(engine, level, input, state);
+  // Only a matched page the concept side skipped for drift has a skip to release: a 600k level keeps no set of every slug.
+  const skipped = await driftSkippedSlugs(engine, level.sourceId);
   const step = loopYield();
-  for (const entry of level.paths) {
+  for (const entry of skipped.size ? level.paths : []) {
     if (step.due()) await step.pause();
-    if (entry.result.cls === 'matched' && entry.slug) state.matchedSlugs.add(entry.slug);
+    if (entry.result.cls === 'matched' && entry.slug && skipped.has(entry.slug)) state.matchedSlugs.add(entry.slug);
   }
   summarizeRound(level, state);
 }
@@ -172,7 +174,7 @@ export function summarizeRound(level: ShadowLevel, state: PassApplyState): void 
 
 /** Design §2.5: retire markers whose origin left both `T` and the disk, or that a live page claims again (compare-and-delete). */
 async function retireMarkers(engine: BrainEngine, level: ShadowLevel, state: PassApplyState): Promise<void> {
-  const retire = await filterYielding(level.paths, entry => entry.state.marker && !entry.legacyPageless
+  const retire = await filterYielding(level.paths, entry => !isCompactMatched(entry) && entry.state.marker && !entry.legacyPageless
     && ((entry.state.tree === null && !entry.state.present) || entry.state.page?.live === true));
   if (!retire.length) return;
   await engine.transaction(async tx => {
@@ -198,7 +200,7 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
   // The valve plans over every live page only when the round deletes something (no delete never trips it).
   const plan = deletes.length ? await (async () => {
     const deleting = new Set(deletes.map(entry => entry.path));
-    const live = await filterYielding(level.paths, entry => entry.state.page?.live === true && !!entry.slug);
+    const live = await filterYielding(level.paths, entry => (isCompactMatched(entry) || entry.state.page?.live === true) && !!entry.slug);
     return planReconcileDeletes(live.map(entry => ({ slug: entry.slug!, source_path: entry.path })), live.filter(entry => !deleting.has(entry.path)).map(entry => entry.path), () => true);
   })() : null;
   const tripped = !!plan?.massDelete && (input.remote || !massReconcileAllowed());
@@ -330,8 +332,8 @@ async function sweepLegacy(engine: BrainEngine, level: ShadowLevel, input: PassA
 /** Rows 15 and 18 under keep_db (§4): freeze to `T[p]`'s bytes and admit the DB-wins reconcile of the pass, bounded per pass. */
 async function admitKeepDb(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   const taken = new Set(state.keepDbTaken);
-  const want = await filterYielding(level.paths, entry => !entry.result.inFlight && !taken.has(entry.path) && entry.pageId !== null && entry.revision !== null && entry.slug && entry.state.level !== null
-    && ((entry.result.cls === 'keep_db' && !entry.result.settled) || (entry.result.cls === 'db_ahead' && entry.result.keepDbWrite === true)));
+  const want = await filterYielding(level.paths, entry => !entry.result.inFlight && ((entry.result.cls === 'keep_db' && !entry.result.settled) || (entry.result.cls === 'db_ahead' && entry.result.keepDbWrite === true))
+    && !taken.has(entry.path) && entry.pageId !== null && entry.revision !== null && entry.slug && entry.state.level !== null);
   if (!want.length) return;
   if (input.admission !== 'normal') {
     for (const entry of want) { state.keepDb.paused++; settleAs(entry, { settled: true, action: 'none', paused: 'keep_db' }); }

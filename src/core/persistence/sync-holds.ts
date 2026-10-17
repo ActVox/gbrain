@@ -963,13 +963,19 @@ export function syncImportParser(schemaPack: string | null): SyncImportParser {
   return { parser_version: SYNC_IMPORT_PARSER_VERSION, markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: schemaPack };
 }
 
+/** The importer a page at `path` records (`syncImportParserFor`): every path of one kind records the same parser. */
+export function syncImportKind(path: string): 'image' | 'code' | 'markdown' {
+  return isImageFilePath(path) ? 'image' : isCodeFilePath(path) ? 'code' : 'markdown';
+}
+
 /**
  * #6712 PR 1: the parser fingerprint an import of `path` records and the discovery prescreen expects: a code page names
  * the code chunker and its grammars (`chunkerStamp`), an image the image importer, a Markdown page `syncImportParser`.
  */
 export function syncImportParserFor(path: string, schemaPack: string | null): SyncImportParser {
-  if (isImageFilePath(path)) return { parser_version: 'image=1', markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: null };
-  if (isCodeFilePath(path)) return { parser_version: `code=1;chunker=${chunkerStamp()}`, markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: null };
+  const kind = syncImportKind(path);
+  if (kind === 'image') return { parser_version: 'image=1', markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: null };
+  if (kind === 'code') return { parser_version: `code=1;chunker=${chunkerStamp()}`, markdown_chunker: MARKDOWN_CHUNKER_VERSION, schema_pack: null };
   return syncImportParser(schemaPack);
 }
 

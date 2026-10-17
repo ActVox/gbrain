@@ -43,11 +43,14 @@ export function sameSyncOrigin(stored: string, origin: string, context?: SyncOri
   return recorded === expected || !nested;
 }
 
+/** An empty, `.` or `..` segment of a `/`-separated path (a per-call test: sync validates every origin of a large level, so no split). */
+const UNCONFINED_SEGMENT = /(?:^|\/)\.{0,2}(?:\/|$)/;
+
 export function syncOriginPath(path: string, platform = process.platform): string {
   const normalized = platform === 'win32' ? path.replaceAll('\\', '/') : path;
   if (!normalized || normalized.includes('\0') || normalized.startsWith('/') ||
       platform === 'win32' && normalized.split('/').some(part => /[<>:"|?*]|[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) ||
-      normalized.split('/').some(part => !part || part === '.' || part === '..')) {
+      UNCONFINED_SEGMENT.test(normalized)) {
     throw opError('page_identity_changed', 'The stored sync origin is not a confined relative path.',
       `The stored source path ${JSON.stringify(path)} is empty, absolute, or escapes the checkout, so sync refused to use it. Inspect the source's writer status and report it to the user; the page origin must be repaired, not overwritten.`);
   }
