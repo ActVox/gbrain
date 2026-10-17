@@ -737,6 +737,10 @@ export interface ProjectionDrainResult {
 /**
  * `media` (the explicit `gbrain projections drain` only) also seals the
  * `sealable` images after the Markdown and code rows (image-seal.ts).
+ * Queued Markdown/code rows refresh stale planner statistics first: every
+ * rebuild reads and writes its page by key, and without statistics (PGLite
+ * after v153's activation) each of those statements scans pages, so 2,000
+ * notes beside 93K queued images rebuilt at 14 pages/s instead of 150.
  */
 export async function drainProjections(engine: BrainEngine, opts: { limit?: number; progress?: ProgressReporter; reasons?: readonly string[]; media?: boolean } = {}): Promise<ProjectionDrainResult> {
   const [{ runStart }] = await engine.executeRaw<{ runStart: string }>('SELECT now()::text AS "runStart"');
@@ -749,6 +753,7 @@ export async function drainProjections(engine: BrainEngine, opts: { limit?: numb
   const total = before.pending + (opts.media ? before.sealable : 0);
   opts.progress?.start('projections.drain', opts.limit === undefined ? total : Math.min(total, opts.limit));
   const refreshes = projectionStatisticsRefreshes(engine);
+  if (before.pending > 0) await refreshProjectionStatistics(engine, total);
   const failed: ProjectionRebuildFailure[] = [];
   const probes = projectionJobProbes({ media: opts.media });
   let rebuilt = 0;
