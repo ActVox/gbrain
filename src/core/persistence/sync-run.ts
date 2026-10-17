@@ -497,37 +497,23 @@ async function freezeNext(engine: BrainEngine, cursor: Cursor, key: string, asse
  * - This pass's authority is validated and stamped on the cursor in the same transaction; what it freezes from then on
  *   is authorized for its own grant (`freezeEntry` validates every entry with the cursor's authority).
  * - A remote caller resumes only its own principal's cursor; any other is left to the brain host's CLI.
- * - Processing opt-outs: a flagless resume keeps the cursor's accepted ones (`inherited`); a flag the caller set adds
- *   its opt-out to the requests frozen from now on. Admitted requests keep their frozen options, and a company approval
- *   keeps its exact options.
+ * - Processing options: only a company cursor reaches here, and its approval keeps its exact options (a non-company
+ *   pass keeps its opt-outs on the pass row's episode).
  */
 async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, input: { authority: SyncAuthority; processingOptions: SyncProcessingOptions;
-  syncOptions: SyncCursorOptions; embedDeferred?: boolean; assertActive: () => void; state: HoldRunState }): Promise<Cursor> {
-  const adopted = await adoptCursorCas(engine, key, cursor, input);
-  const optionsDiffer = digest(adopted.cursor.syncOptions ?? input.syncOptions) !== digest(input.syncOptions);
-  if (adopted.inherited.length || adopted.writerChanged || input.state.fanIn?.adopted || optionsDiffer) input.state.adopted = { inherited: adopted.inherited,
-    writerChanged: adopted.writerChanged, syncOptions: adopted.cursor.syncOptions ?? null, processingOptions: adopted.cursor.processingOptions ?? null, optionsDiffer };
-  return adopted.cursor;
-}
-/** The adoption compare-and-swap (see `adoptCursor`). */
-async function adoptCursorCas(engine: BrainEngine, key: string, cursor: Cursor, input: { authority: SyncAuthority; processingOptions: SyncProcessingOptions;
-  embedDeferred?: boolean; assertActive: () => void }): Promise<{ cursor: Cursor; inherited: Array<keyof SyncProcessingOptions>; writerChanged: boolean }> {
+  embedDeferred?: boolean; assertActive: () => void }): Promise<Cursor> {
   const { authority } = input;
   // #6696: a cost-gate deferral is this run's constraint (each request it freezes carries `embedDeferred`), never an opt-out the cursor keeps.
   const processingOptions = input.embedDeferred ? { ...input.processingOptions, noEmbed: false } : input.processingOptions;
   const writerChanged = digest(cursor.authority) !== digest(authority);
   if (writerChanged && authority.writer.remote && (!cursor.authority.writer.remote
       || principalKey(cursor.authority.writer.principal) !== principalKey(authority.writer.principal))) throw localResumeRequired(cursor.sourceId);
-  const stored = cursor.processingOptions;
-  const merged: SyncProcessingOptions = !stored ? processingOptions : cursor.companyReceiptId ? stored
-    : { noEmbed: stored.noEmbed || processingOptions.noEmbed, noExtract: stored.noExtract || processingOptions.noExtract, noSchemaPack: stored.noSchemaPack || processingOptions.noSchemaPack };
-  const inherited = stored && !cursor.companyReceiptId ? SYNC_PROCESSING_KEYS.filter(option => stored[option] && !processingOptions[option]) : [];
-  if (!writerChanged && stored && digest(merged) === digest(stored)) return { cursor, inherited, writerChanged };
-  const next: Cursor = { ...cursor, authority, processingOptions: merged };
+  if (!writerChanged && cursor.processingOptions) return cursor;
+  const next: Cursor = { ...cursor, authority, processingOptions: cursor.processingOptions ?? processingOptions };
   if (writerChanged) await withoutUnadmitted(engine, next);
   const saved = await saveCursor(engine, key, cursor, next, false, input.assertActive, tx => validateSyncAuthority(tx, authority, '__managed_sync_checkpoint__'));
   if (writerChanged) await faultPoint('sync:cursor_adopted', { sourceId: cursor.sourceId });
-  return { cursor: saved, inherited, writerChanged };
+  return saved;
 }
 /** #5988: a managed dry run lists the holds the pending (or newly discovered) imports would earn, read-only. */
 async function managedDryRun(engine: BrainEngine, value: Cursor, base: Cursor, run: { company: boolean; processingOptions: SyncProcessingOptions;
@@ -1527,7 +1513,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     if (resolved.waiting) return resolved.waiting;
     cursor = await readCursor(engine, key);
     assertActive();
-    if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, syncOptions, embedDeferred: opts.embedDeferred, assertActive, state });
+    if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, embedDeferred: opts.embedDeferred, assertActive });
     assertActive();
     const companyStop = company && cursor && !cursor.done && !opts.dryRun ? await recordedStop(engine, key, cursor.runId) : null;
     if (companyStop && cursor) {
