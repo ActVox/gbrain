@@ -113,6 +113,8 @@ export interface SyncResult {
   reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial' | 'drain_lease_held'
     /** #6712 PR 4b (design v3.2 §9): a live pass's endings. `selection_scoped` rides a converged scoped pass (`synced`). */
     | 'not_converged' | 'admission_paused' | 'reconcile_host_required' | 'grant_scope' | 'reconcile_read_incomplete' | 'selection_scoped';
+  /** #6712 PR 4b (design §5): a remote caller's `reconcile_host_required` ending: what it committed, what it left by reason, and the owner-host fix. */
+  reconcile?: import('../core/persistence/sync-pass-apply.ts').RemoteReconcile;
   /** #6712 PR 4b: the live pass that produced this result (non-company managed sources; sync-pass-run.ts). */
   pass?: { pass_id: string; kind: 'idle' | 'hold_only' | 'full'; round: number; outcome: string; stop_reason: string | null; candidates: number; settled: number;
     remaining: number; not_converged_streak: number };

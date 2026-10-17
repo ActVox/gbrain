@@ -40,7 +40,7 @@ import { resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
-import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts } from './sync-pass-apply.ts';
+import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
 
@@ -348,8 +348,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       levelSlugMode = level.slugMode;
       lastLevel = level;
       value.telemetry.timings_ms = level.timings_ms;
-      if (bootstrap && round === 1) await writeLegacyMarkers(engine, level);
-      await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions }, applied);
+      if (bootstrap && round === 1 && !remote) await writeLegacyMarkers(engine, level);
+      await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions,
+        grantPrefixes: remote ? authority.writer.slugPrefixes : null }, applied);
       assertActive();
       if (applied.sweptAll && !value.obligations.legacy_sweep) value.obligations.legacy_sweep = { first_full_at: new Date().toISOString() };
       const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
@@ -369,7 +370,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (r.action === 'delete') {
           if (admission !== 'normal') { S.set(settledKey(entry.path, entry.state.level), 'paused_deletes'); counts.pausedDeletes++; continue; }
           deletes.push(entry);
-        } else if (r.action === 'import' || r.action === 'reparse' || r.cls === 'drift' || r.cls === 'dirty') imports.push(entry);
+        } else if (r.action === 'import' || r.action === 'reparse' || (!remote && (r.cls === 'drift' || r.cls === 'dirty'))) imports.push(entry);
         else owed.push(entry);
       }
       const candidates = deletes.length + imports.length;
@@ -384,8 +385,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       }
       if (!candidates && inFlight.length) { await save('resumable', 'writer_pending'); return result('partial', 'writer_pending'); }
       if (!candidates) {
+        if (remote) {
+          // Design §5: a remote caller stops after its one-sided work; the owner host settles and stamps the rest.
+          const reconcile = remoteReconcile(level, { committed: counts.added + counts.modified + counts.deleted + counts.renamed, grantPrefixes: authority.writer.slugPrefixes });
+          await save('blocked', 'reconcile_host_required');
+          return { ...result('blocked_by_failures', 'reconcile_host_required'), reconcile };
+        }
         if (mismatch.length || owed.length) break;
-        if (remote) { await save('blocked', 'reconcile_host_required'); return result('blocked_by_failures', 'reconcile_host_required'); }
         if (round === 1 && configured && context.source.last_commit === head && !episode && !retry.length && !tail) {
           // v3 §3.3: a pass that finds nothing at last_commit = T admits no checkpoint; it keeps master's up_to_date (only
           // last_sync_at), and its full round refreshes the converged watermark so the next tick can be idle.

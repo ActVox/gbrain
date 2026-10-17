@@ -48,6 +48,8 @@ import type { ShadowLevel, ShadowPath } from './sync-pass.ts';
 import { SETTLE_MISMATCH_STREAK, type ManagedSyncPassValue, type PassRoundSummary } from './sync-pass-row.ts';
 import { syncClassAction, type SyncClassAction } from './sync-classify.ts';
 import type { SyncAdmission } from './sync-admission.ts';
+import type { Action } from '../agent-output.ts';
+import { slugUnderBoundPrefixes } from '../ops/context.ts';
 
 /** Legacy pages the sweep screens per pass after the incarnation's first full round (design §2.7, [estimated]). */
 export const PASS_LEGACY_SWEEP_MAX = 500;
@@ -94,6 +96,8 @@ export interface PassApplyInput {
   obligations: ManagedSyncPassValue['obligations'];
   context: ManagedSyncContext;
   processingOptions: SyncProcessingOptions;
+  /** A remote caller's slug-prefix grant (null: source-wide): paths outside it are left unsettled and never counted (design §5). */
+  grantPrefixes?: readonly string[] | null;
   /** Test seam: the read-only same-content screen (default `readOnlySameContentScreen`). */
   screen?: (level: ShadowLevel, paths: ShadowPath[]) => Promise<Map<string, 'same' | 'differs' | 'unknown'>>;
 }
@@ -116,8 +120,11 @@ function levelMeta(level: ShadowLevel, entry: ShadowPath): Partial<GitHoldMeta> 
 /** Runs the round's settle-side work (module header) and settles the paths it finished in `level.paths`. */
 export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   if (input.fullRound && !input.remote) await retireMarkers(engine, level, state);
+  if (input.remote && input.grantPrefixes) {
+    for (const entry of level.paths) if (!grantSees(level, entry, input.grantPrefixes) && !entry.result.settled) settleAs(entry, { settled: true, action: 'none', classAction: 'none' });
+  }
   await applyDeleteValve(engine, level, input, state);
-  if (input.remote) return;
+  if (input.remote) { summarizeRound(level, state); return; }
   await writePassHolds(engine, level, input, state);
   await adoptRecords(engine, level, state);
   await sweepLegacy(engine, level, input, state);
@@ -334,6 +341,40 @@ async function admitKeepDb(engine: BrainEngine, level: ShadowLevel, input: PassA
     state.keepDbTaken.push(entry.path);
     settleAs(entry, { settled: false, inFlight: true, action: 'keep_db' });
   }
+}
+
+/** Whether a slug-prefix grant sees the path's page (its live slug, else the slug its origin imports to). */
+function grantSees(level: ShadowLevel, entry: ShadowPath, prefixes: readonly string[]): boolean {
+  const slug = entry.slug ?? resolveSlugForPath(passEntryPaths(level, entry.path).sourcePath);
+  return !!slug && slugUnderBoundPrefixes(prefixes, slug);
+}
+
+/** Why a remote caller left a visible path unsettled (design §5). */
+export type RemoteUnsettledReason = 'drift' | 'bootstrap' | 'unproven_delete' | 'grant_scope';
+export interface RemoteReconcile { committed: number; unsettled: Partial<Record<RemoteUnsettledReason, number>>; fix: Action }
+
+/**
+ * Design §5: a remote caller's ending. It admitted the one-sided work it could (`committed`), and leaves to the owner host
+ * what only the host settles: two-sided paths (`drift`), legacy pages the host's sweep checks (`bootstrap`), deletions
+ * without a proof (`unproven_delete`), and, for a slug-fenced grant, the stamp itself (`grant_scope`). Counts cover only
+ * pages the grant sees; nothing here implies another writer.
+ */
+export function remoteReconcile(level: ShadowLevel, input: { committed: number; grantPrefixes: readonly string[] | null }): RemoteReconcile {
+  const unsettled: RemoteReconcile['unsettled'] = {};
+  const bump = (reason: RemoteUnsettledReason) => { unsettled[reason] = (unsettled[reason] ?? 0) + 1; };
+  for (const entry of level.paths) {
+    if (input.grantPrefixes && !grantSees(level, entry, input.grantPrefixes)) continue;
+    const r = entry.result;
+    if (r.cls === 'legacy_unverified') { bump('bootstrap'); continue; }
+    if (r.settled || r.inFlight) continue;
+    if (r.cls === 'delete_drift') bump('unproven_delete');
+    else if (['drift', 'keep_db', 'deleted_edited', 'dirty', 'spelling', 'held'].includes(r.cls)) bump('drift');
+  }
+  if (input.grantPrefixes) unsettled.grant_scope = 1;
+  const verify = { argv: ['gbrain', 'sync', 'status', '--source', level.sourceId, '--json'] };
+  return { committed: input.committed, unsettled, fix: { argv: ['gbrain', 'sync', '--source', level.sourceId], consent: [], actor: 'user', requires_exclusive: false, verify,
+    user_message: `Run gbrain sync --source ${level.sourceId} on the brain host that owns this source: it settles what a remote caller cannot (${Object.keys(unsettled).join(', ') || 'the converged stamp'}).`,
+    why: `This remote sync committed ${input.committed} one-sided write(s). Holds, deletion markers, keep_db writes and the converged stamp are written only by the owner host's own sync, so the source is not stamped until it runs there.` } };
 }
 
 /** Once per pass: release the concept drift skips of pages the pass classified `matched` (§4). */
