@@ -239,9 +239,9 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   ghostPagesEntry,
   missingRecordedFilesEntry,
   syncConfigKeysEntry,
-  fenceIntegrityEntry,
   // #6712 PR 4a: the read-only convergence shadow (deep tier: a full level read per source).
   managedSyncConvergenceEntry,
+  fenceIntegrityEntry,
   searchModeEntry,
 ];
 
