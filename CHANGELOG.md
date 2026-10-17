@@ -10,6 +10,24 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.288.0] - 2026-10-17
+
+**`gbrain sync --dry-run --json` now shows what the coming level-triggered reconcile would do, without doing any of it.** This is the read-only shadow of #6712 PR 4. It compares every path in Git with its record and page, puts each one in exactly one class, and reports the counts. It writes nothing, and sync behaves exactly as before.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync --source <id> --dry-run --json` on a managed source | the dry-run plan only | also a `convergence` receipt: per-class counts, each with an `action` (`none`, `owner`: sync finishes it, `repair`: a person decides), predicted decisions, deletes with the mass-delete valve's verdict, up to 20 sample paths per class, and `timings_ms` |
+| Sharing that receipt | paths and slugs were in it | `--redact-paths` turns sample paths into `sha256:` prefixes and drops slugs |
+| `gbrain sync status --source <id> --json --detail` | no convergence view | an additive `convergence` block (`dry_run: true`) and `convergence_read`. A plain status reports `convergence: null` with `convergence_read: not_read`, and no existing field changes meaning |
+| `gbrain doctor --tier deep` | — | informational `managed_sync_convergence` check |
+| `gbrain errors reconcile_read_incomplete` / `convergence_read_failed` | unknown code | explained, with a read-only fix |
+
+### What you need to do
+
+Nothing. To help validate the next release, run `gbrain sync --source <id> --dry-run --json --redact-paths` and share the `convergence` counts.
+
 ## [0.60.287.0] - 2026-10-17
 
 **A batch of page purges no longer holds a source's write queue for hours (#6884).** Each page purge used to read and case-fold the whole write journal to find old requests that still carried the page's claims, so on a journal of about 540k requests one purge took about 20 minutes and a nightly purge batch blocked ordinary writes for about 2.8 hours. Now one sweep serves a batch of queued purges, later purges read only the rows added since, and the purge run stops submitting when the writer's queue is full instead of failing thousands of pages.
