@@ -58,7 +58,7 @@ async function runManagedSyncMovementCheck(ctx: DoctorContext): Promise<Check[]>
     const stranded = parked.filter(strandedQueue);
     const unknown = pending.filter(m => m.movement_state === 'unknown');
     const slow = await slowNoChangePasses(connectedEngine(ctx));
-    const details = { slow_passes: slow, count: stuck.length, parked: parked.length, stranded: stranded.length, ...(unknown.length ? { unknown: unknown.length, health: 'unknown' } : {}), sources: pending.map(m => ({ source_id: m.source_id, movement_state: m.movement_state, data_moving: m.data_moving,
+    const details = { ...(slow.length ? { slow_passes: slow } : {}), count: stuck.length, parked: parked.length, stranded: stranded.length, ...(unknown.length ? { unknown: unknown.length, health: 'unknown' } : {}), sources: pending.map(m => ({ source_id: m.source_id, movement_state: m.movement_state, data_moving: m.data_moving,
       not_moving_since: m.not_moving_since, last_commit_at: m.last_commit_at, last_progress_at: m.last_progress_at, cursor: m.cursor, pass: m.pass, head: m.head, live: m.live, admitted: m.admitted,
       ceiling_ms: m.ceiling_ms, writer_status_command: m.writer_status_command, ...(m.unknown ? { unknown: m.unknown } : {}) })), docs: DOCS };
     if (stranded.length) {
