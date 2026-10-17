@@ -31,8 +31,8 @@ export const INGEST_LOG_UNMARKED_INDEX = {
   sql: 'CREATE INDEX IF NOT EXISTS ingest_log_unmarked_idx ON ingest_log (created_at) WHERE writer_segment_reader IS NOT TRUE',
 };
 
-export const v252: Migration = {
-  version: 252,
+export const v253: Migration = {
+  version: 253,
   name: 'segment_reader_marks',
   idempotent: true,
   transaction: false,
@@ -45,6 +45,6 @@ export const v252: Migration = {
     ALTER TABLE ingest_log ADD COLUMN IF NOT EXISTS writer_segment_reader boolean;
   `,
   handler: async engine => {
-    await buildIndexOnline(engine, 252, INGEST_LOG_UNMARKED_INDEX, { notice: migrationNotice });
+    await buildIndexOnline(engine, 253, INGEST_LOG_UNMARKED_INDEX, { notice: migrationNotice });
   },
 };

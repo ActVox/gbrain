@@ -47,7 +47,7 @@ END;
 $func$ LANGUAGE plpgsql;`;
 
 /**
- * The segment texts each staging staged or deduped onto (migration v253). A create keeps its manifest rows in memory
+ * The segment texts each staging staged or deduped onto (migration v254). A create keeps its manifest rows in memory
  * until it publishes and a replace stages its texts before its manifest rows, so this is the only durable record of
  * which texts a live staging still needs: a page purge keeps exactly those of the texts no manifest row references.
  * Rows go with their staging; they hold hashes, never text.

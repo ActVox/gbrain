@@ -2,10 +2,10 @@
  * The released chunk readers keep working on a schema this branch migrated (Wave B PR 2, mixed-version window).
  *
  * 1. Protects: a process still running the released binary (master's chunkGenerationFilter, which names
- *    content_chunks.retired_generation) reads chunks of a brain whose schema this branch migrated through v250,
- *    with segmented storage on or off; v250 keeps the column (nothing at head writes or reads it) and still
+ *    content_chunks.retired_generation) reads chunks of a brain whose schema this branch migrated through v251,
+ *    with segmented storage on or off; v251 keeps the column (nothing at head writes or reads it) and still
  *    builds the GC index.
- * 2. Fails when: v250 drops retired_generation before the writer floor excludes every binary whose search,
+ * 2. Fails when: v251 drops retired_generation before the writer floor excludes every binary whose search,
  *    get_chunks or embed queue selects it (they fail with 42703 on ordinary search).
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set. The filter text is copied verbatim from
  *    origin/master 3ed487d2 src/core/search/safe-chunks.ts, so the probe does not move when head's filter changes.
@@ -39,7 +39,7 @@ function sections(tag: string, n = 60): string {
 const page = (body: string) => `---\ntitle: Mixed version\ntype: note\n---\n\n${body}`;
 
 for (const kind of testBackends()) {
-  describe(`v250 keeps the column master's chunk readers select (${kind})`, () => {
+  describe(`v251 keeps the column master's chunk readers select (${kind})`, () => {
     let engine: BrainEngine;
     let close: () => Promise<void>;
 
@@ -73,7 +73,7 @@ for (const kind of testBackends()) {
       }, 120_000);
     }
 
-    test('v250 builds the GC index and leaves retired_generation in place', async () => {
+    test('v251 builds the GC index and leaves retired_generation in place', async () => {
       const [column] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.columns
         WHERE table_name = 'content_chunks' AND column_name = 'retired_generation'`);
       expect(Number(column!.n)).toBe(1);
