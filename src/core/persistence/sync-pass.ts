@@ -69,12 +69,12 @@ export interface PassLevelInput {
 /** PGLite's keyset page size (design v3.2 §2.1). */
 const PGLITE_KEYSET_ROWS = 2_000;
 /**
- * Rows per `FETCH` of Postgres's `I⋈P` cursor, `POSTGRES_FETCHES_AHEAD` in flight. Results that have arrived decode in one
- * stretch the event loop cannot break (about 4 µs a row: one 25k-row fetch held timers for about 100 ms at 600k pages), and
- * the fetches in flight can arrive together, so a stretch is bounded by their rows; the fetch queued behind keeps the round
- * trip off the read's critical path.
+ * Rows per `FETCH` of Postgres's `I⋈P` cursor, `POSTGRES_FETCHES_AHEAD` in flight. A result decodes in one stretch the
+ * event loop cannot break (about 4 µs a row: one 25k-row fetch held timers for about 100 ms at 600k pages), and the read
+ * yields a timer turn between results, so fetches that arrived together still decode one stretch each; the fetches queued
+ * behind keep their round trips off the read's critical path.
  */
-const POSTGRES_FETCH_ROWS = 8_000, POSTGRES_FETCHES_AHEAD = 2;
+const POSTGRES_FETCH_ROWS = 8_000, POSTGRES_FETCHES_AHEAD = 4;
 /** Blob bytes read for adoption by hash and the screen, per blob. */
 const LEVEL_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
@@ -243,8 +243,10 @@ type Exec = Pick<BrainEngine, 'executeRaw'>;
 async function withRoundSnapshot<T>(engine: BrainEngine, fn: (exec: Exec) => Promise<T>): Promise<T> {
   if (engine.kind === 'pglite') return fn(engine);
   return engine.transaction(async tx => {
-    await tx.executeRaw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    return fn(tx);
+    const isolation = tx.executeRaw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const read = fn(tx);
+    try { await isolation; } catch (error) { read.catch(() => undefined); throw error; }
+    return read;
   });
 }
 
@@ -309,18 +311,20 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
   };
   let statements = 0;
   if (kind === 'postgres') {
-    await exec.executeRaw('SET LOCAL cursor_tuple_fraction = 1');
-    await exec.executeRaw(`DECLARE sync_pass_pages NO SCROLL CURSOR FOR ${select}`, params);
+    const declared = Promise.all([exec.executeRaw('SET LOCAL cursor_tuple_fraction = 1'), exec.executeRaw(`DECLARE sync_pass_pages NO SCROLL CURSOR FOR ${select}`, params)]);
+    declared.catch(() => undefined);
     statements += 2;
     // A queued fetch is awaited in turn; its own catch only keeps a failure behind an earlier one from going unhandled.
     const fetch = () => { statements++; const page = exec.executeRaw<Raw>(`FETCH ${POSTGRES_FETCH_ROWS} FROM sync_pass_pages`); page.catch(() => undefined); return page; };
     const ahead = Array.from({ length: POSTGRES_FETCHES_AHEAD }, fetch);
+    await declared;
     for (;;) {
       const page = await ahead.shift()!;
       const more = page.length === POSTGRES_FETCH_ROWS;
       if (more) ahead.push(fetch());
       take(page);
       if (!more) { for (const queued of ahead) await queued; return { pages, statements }; }
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
   let after = 0;
