@@ -76,6 +76,13 @@ export interface ManagedSyncPassValue {
     legacy_markers_at?: string;
     /** #6712 PR 4b (design §2.6): the set hash of a withheld mass delete; with the env valve set the next tick runs a full round to apply it. */
     deletes_withheld?: string | null;
+    /**
+     * #6694 on the pass: the slug-root mode a subdirectory source's pass admitted pages under before a stamp published it. Later
+     * passes read under it, so a pin changed meanwhile is refused `slug_root_mode_mismatch` at the stamp instead of importing the
+     * same files again under the other mode's slugs. A configured stamp clears it; keeping the new pin retires it
+     * (`gbrain repair managed-sync-orphans`, `slug_mode_refused`).
+     */
+    slug_mode?: 'git-root' | 'source-root';
     /** #6712 PR 3 (L7) on the pass: the page request a blocked pass stopped on, which the next pass replays while what refused it is unchanged. */
     blocked?: { request_id: string; pass_id: string };
   };
@@ -142,10 +149,12 @@ export async function readLivePassRows(engine: Exec, sourceIds?: readonly string
 /**
  * Writes the pass row inside `tx` (the caller has run `assertDrainLease` in the same transaction). `pin`: the pass that
  * just took the lease replaces whatever row a former holder left; otherwise the write lands only while the row still
- * carries `leaseToken`. Returns false when it did not land (another pass pinned since).
+ * carries `leaseToken`. Returns false when it did not land (another pass pinned since). `clock`: `telemetry.started_at` is the
+ * transaction's clock (`now()`, as an ISO string), so the write needs no earlier read of it.
  */
-export async function writePassRow(tx: Exec, value: ManagedSyncPassValue, opts: { pin?: boolean } = {}): Promise<boolean> {
-  const rows = await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at) VALUES($1,$2,jsonb_build_array($3::text::jsonb),now())
+export async function writePassRow(tx: Exec, value: ManagedSyncPassValue, opts: { pin?: boolean; clock?: boolean } = {}): Promise<boolean> {
+  const json = opts.clock ? `jsonb_set($3::text::jsonb,'{telemetry,started_at}',to_jsonb(to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))` : '$3::text::jsonb';
+  const rows = await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at) VALUES($1,$2,jsonb_build_array(${json}),now())
     ON CONFLICT (op,fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys, updated_at=now()
       WHERE $4::boolean OR op_checkpoints.completed_keys->0->>'lease_token'=$5 RETURNING 1`,
   [MANAGED_SYNC_PASS_OP, passFingerprint(value.source_id, value.incarnation), JSON.stringify(value), opts.pin === true, value.lease_token]);

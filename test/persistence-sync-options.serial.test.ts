@@ -815,7 +815,12 @@ check('cancellation while a pass waits on an accepted request leaves its receipt
     await disposePersistenceConsumer(engine);
     const after = await syncState(engine, f.id);
     expect(passTelemetry(after, f.id)).toMatchObject({ outcome: 'resumable', stop_reason: 'timeout' });
-    expect(withoutPassRow(after, f.id)).toEqual(withoutPassRow(before, f.id));
+    // The queued receipt's wait diagnostics are the consumer's scheduling state, not its identity: on Postgres the consumer
+    // that stops with the cancelled pass records consumer_stopping where the earlier one left writer_busy.
+    const receipts = (state: typeof before) => ({ ...withoutPassRow(state, f.id),
+      requests: state.requests.map(row => { const { blocked_reason: _reason, updated_at: _at, ...rest } = row as Record<string, unknown>; return rest; }) });
+    expect(receipts(after)).toEqual(receipts(before));
+    expect(after.requests).toEqual([expect.objectContaining({ id: accepted.id, request_id: accepted.request_id, digest: accepted.digest, state: 'queued' })]);
   } finally { engine.executeRaw = execute; engine.transaction = transaction; await disposePersistenceConsumer(engine); await lock?.release(); }
   expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 1 });
   const imports = await engine.executeRaw("SELECT * FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]);

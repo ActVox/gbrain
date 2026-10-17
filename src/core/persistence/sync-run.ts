@@ -14,12 +14,12 @@ import { preflightSyncCapacity } from './sync-capacity-preflight.ts';
 import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
-import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type SyncDiscovery } from './sync-discovery.ts';
+import { assertSyncEntryOrigin, discoverManagedSync, readManagedSyncRows, resolveManagedSyncContext, readSyncFile, syncGit, type SyncDiscovery } from './sync-discovery.ts';
 import { checkpointRevival } from './sync-slug-mode.ts';
 import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
-import { assertManagedSyncActive, assertSyncDispatchActive, managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, syncProcessingOptions, SYNC_PROCESSING_KEYS, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
+import { activeManagedBrainId, assertSyncDispatchActive, managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, syncProcessingOptions, SYNC_PROCESSING_KEYS, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { prepareManagedSyncMutation, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { startClaimPhase } from './claim-phase.ts';
 import { screeningRequest } from './noop-kernel.ts';
@@ -144,9 +144,10 @@ export interface Cursor extends SyncDiscovery { runId: string; index: number; au
    * #6712 PR 4b: a live pass's round batch (sync-pass-run.ts), held in memory under a `pass:` key with no cursor row. Its
    * intents carry `passId` (no cursor fields) and a request id derived from `(passId, path, level)`; `stamp`: the batch is
    * the pass's stamp (no entries; its checkpoint publishes the stamp). `fullEpisode`: the open `--full` episode its imports
-   * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint).
+   * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint). `passLegacyWaived`:
+   * the batch indexes a #5751 waiver passed (no provenance recorded), which the pass settles at their level.
    */
-  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[]; }
+  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[]; passLegacyWaived?: number[]; }
 export interface CursorProgress { startedAt: number; startIndex: number; lastAt: number; lastIndex: number }
 /**
  * #6278 (1.5): the breaker state a run carries in its cursor. `stalled` lists the `preparation_stalled` receipts this run
@@ -1221,10 +1222,12 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
   if (opts.dryRun || currentDrainLease(opts.sourceId ?? 'default')) return performManagedPass(engine, opts, slice);
   const sourceId = opts.sourceId ?? 'default';
   const remote = currentSubmissionAuthority()?.kind === 'remote_generic';
+  let tailClear = false;
   return withDrainLease(engine, sourceId, { holder: opts.drainHolder ?? { kind: slice ? 'owner_slice' : 'cli', id: null }, remote },
-    signal => performManagedPass(engine, signal ? { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, signal]) : signal } : opts, slice))
-    // #6712 PR 2: an owner slice is time-bounded, so its tail gets the slice's budget (pages it leaves stay stale, with the notice).
-    .then(result => withSyncTail(engine, sourceId, result, { signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, ...(slice ? { budgetMs: slice.maxMs } : {}) }))
+    signal => performManagedPass(engine, signal ? { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, signal]) : signal } : opts, slice)
+      .finally(() => { tailClear = currentDrainLease(sourceId)?.tailClear === true; }))
+    // #6712 PR 2: an owner slice's tail gets the slice's budget. PR 4b: an idle pass that read no owed tail under the lease reads none.
+    .then(result => tailClear ? result : withSyncTail(engine, sourceId, result, { signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, ...(slice ? { budgetMs: slice.maxMs } : {}) }))
     .catch(async error => {
       if (!(error instanceof LockUnavailableError) || error.lockId !== syncLockId(sourceId)) throw error;
       return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null), { remote });
@@ -1238,7 +1241,7 @@ async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: {
   const cursor = state.cursor?.() ?? null;
   try {
     const report = await buildHoldReport(engine, { sourceId: state.sourceId, incarnation: state.incarnation, runId: cursor?.runId ?? '', remote: state.remote === true,
-      policy: await readSyncHoldPolicy(engine), pendingScreen: synced.reason === 'writer_yield',
+      policy: readSyncHoldPolicy(engine), pendingScreen: synced.reason === 'writer_yield',
       screened: 'entries' in (cursor ?? {}) ? (cursor as Cursor).entries.slice(0, cursor!.index).filter(entry => entry.action === 'import').length : 0 });
     const recovered = state.remote ? undefined : recoveredReport(state.sourceId, cursor?.counts.recovered);
     const fences = fencesNormalizedReport(state.sourceId, cursor?.counts.fences, state.remote === true);
@@ -1264,16 +1267,18 @@ async function resolvePassCursor(engine: BrainEngine, input: { sourceId: string;
   return { key: resolution.key, waiting: { ...result(header, 'partial', 'writer_pending'), ...(input.remote ? {} : { retryWait: { ...resolution.waitFor!, retry_after_ms: 5000 } }) } };
 }
 async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxPages: number; maxMs: number } | undefined, state: HoldRunState): Promise<SyncResult> {
-  await assertManagedSyncActive(engine);
-  if (opts.sourceId && !currentCompanyBrainSync(opts.sourceId) && await getCompanyBrainProfile(engine, opts.sourceId)) {
-    return (await import('../company-brain/runtime.ts')).performCompanyBrainSync(engine, opts);
-  }
+  // #6712 PR 4b: the mode, the company profile and the source's rows in one round trip; each check refuses in its old order.
+  const rows = readManagedSyncRows(engine, opts.sourceId ?? 'default'); rows.catch(() => undefined);
+  const [active, profile] = await Promise.allSettled([activeManagedBrainId(engine),
+    opts.sourceId && !currentCompanyBrainSync(opts.sourceId) ? getCompanyBrainProfile(engine, opts.sourceId) : null]);
+  for (const read of [active, profile]) if (read.status === 'rejected') throw read.reason;
+  if (profile.status === 'fulfilled' && profile.value) return (await import('../company-brain/runtime.ts')).performCompanyBrainSync(engine, opts);
   assertPersistenceAccepting(engine);
   validateManagedSyncOptions(opts);
-  const context = await resolveManagedSyncContext(engine, opts);
+  const context = await resolveManagedSyncContext(engine, opts, rows);
   // Independent reads, one round trip; a refusal still wins over the authority's own error, as when they ran in turn.
   const reads = await Promise.allSettled([opts.dryRun ? null : assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId),
-    managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root)] as const);
+    managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root, (active as PromiseFulfilledResult<string>).value)] as const);
   for (const read of reads) if (read.status === 'rejected') throw read.reason;
   const authority = (reads[1] as PromiseFulfilledResult<SyncAuthority>).value;
   const company = currentCompanyBrainSync(context.sourceId);

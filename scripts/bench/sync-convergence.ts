@@ -6,7 +6,7 @@
  * host it ran on.
  *
  *   bun scripts/bench/sync-convergence.ts --engine pglite|postgres|pgbouncer
- *     [--preset 61k|600k | --files N] [--rtt 57] [--idle-rounds 20] [--full-rounds 7] [--warmup 1]
+ *     [--preset 61k|600k|6858 | --files N] [--rtt 57] [--idle-rounds 20] [--full-rounds 7] [--warmup 1]
  *     [--drift K] [--batch 5000] [--sample-ms 50] [--cache-dir <dir>] [--work-dir <dir>]
  *     [--pg-port 55442] [--pooler-port 55444] [--database-url <admin url>] [--raw-idle] [--episode] [--live] [--seed-only] [--keep] [--out <file.json>]
  *
@@ -15,6 +15,13 @@
  *               git fast-import commit, worktree materialized with
  *               read-tree -u --reset; cached under --cache-dir by N and the
  *               content version (default ~/.capy/work/6712/bench-fixtures).
+ *               Files are 1-2 KB except under --preset 6858, the #6858 shape
+ *               (308k files, about 7.3 GB with large blobs): every 100th file
+ *               (i % 100 === 99, 3,080 files) is a large Markdown file of
+ *               2,150,000 bytes plus (i * 7919) % 134,375 more (about 2.2 MB),
+ *               about 6.83 GB, and the other 304,920 files are the usual
+ *               1-2 KB notes, about 0.48 GB. The drift file (i = 0) and the
+ *               first live full rounds' edits (i = 7919 k) are small files.
  *   2. seed     a fresh brain (PGLite datastore in --work-dir, or a new
  *               database on the Docker pgvector Postgres) gets the managed
  *               source by direct SQL: source row at the fixture's base commit,
@@ -59,7 +66,7 @@ import { LatencyProxy } from '../../test/helpers/latency-proxy.ts';
 import { VERSION } from '../../src/version.ts';
 import {
   PRESETS, PGBOUNCER_CONTAINER, applyDrift, breakdown, ensureFixture, ensurePostgres, fixtureContent, fixturePath, git, gitVersion, hostInfo, measureRtt, mib, readVmHwm, removeContainer,
-  resetFixture, seedSource, startPgbouncer, startRssSampler, summarize,
+  resetFixture, seedSource, startPgbouncer, startRssSampler, summarize, type LargeBlobs,
 } from './sync-convergence-lib.ts';
 
 const REPO = resolve(import.meta.dir, '../..');
@@ -71,7 +78,7 @@ type EngineKind = 'pglite' | 'postgres' | 'pgbouncer';
 type SyncPassModule = Pick<typeof import('../../src/core/persistence/sync-pass.ts'), 'shadowConvergence' | 'idleTickProbe'>;
 
 /** `target`: the HEAD the idle tick assumes converged (PR 4a writes no pass row; see idleTickProbe's assumeConverged), or null to time the raw tick. */
-interface ChildConfig { engine: EngineKind; database_url?: string; database_path?: string; source_id: string; target: string | null; episode: boolean; live?: { repo: string; files: number }; idle_rounds: number; full_rounds: number; warmup: number; sample_ms: number }
+interface ChildConfig { engine: EngineKind; database_url?: string; database_path?: string; source_id: string; target: string | null; episode: boolean; live?: { repo: string; files: number; large?: LargeBlobs }; idle_rounds: number; full_rounds: number; warmup: number; sample_ms: number }
 
 function flag(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -148,7 +155,7 @@ async function runChild(config: ChildConfig): Promise<number> {
 }
 
 /** --live: the PR 4b pass, timed through performManagedSync. */
-async function runLive(engine: import('../../src/core/engine.ts').BrainEngine, config: ChildConfig, live: { repo: string; files: number },
+async function runLive(engine: import('../../src/core/engine.ts').BrainEngine, config: ChildConfig, live: NonNullable<ChildConfig['live']>,
   ctx: { sampler: ReturnType<typeof startRssSampler>; connectMs: number; rssAfterConnect: number; seededPages: number; out: (value: unknown) => void }): Promise<number> {
   const { performManagedSync } = await import('../../src/core/persistence/sync-run.ts');
   const { disposePersistenceConsumer } = await import('../../src/core/persistence/service.ts');
@@ -161,7 +168,7 @@ async function runLive(engine: import('../../src/core/engine.ts').BrainEngine, c
   let edits = 0;
   const commitOne = () => {
     const path = fixturePath((edits * 7919) % live.files);
-    writeFileSync(join(live.repo, path), fixtureContent((edits * 7919) % live.files, 1000 + edits));
+    writeFileSync(join(live.repo, path), fixtureContent((edits * 7919) % live.files, 1000 + edits, live.large));
     edits++;
     git(live.repo, ['add', '--', path]);
     git(live.repo, ['-c', 'user.name=Bench', '-c', 'user.email=bench@example.invalid', 'commit', '-q', '-m', 'bench edit ' + edits]);
@@ -196,7 +203,8 @@ async function runParent(): Promise<number> {
   if (!['pglite', 'postgres', 'pgbouncer'].includes(engineKind)) { log('--engine takes pglite, postgres or pgbouncer'); return 2; }
   const preset = flag('preset', '');
   if (preset && !PRESETS[preset]) { log(`--preset takes ${Object.keys(PRESETS).join(' or ')}; got ${preset}`); return 2; }
-  const files = preset ? PRESETS[preset]! : wholeNumber('files', '2000', 1);
+  const files = preset ? PRESETS[preset]!.files : wholeNumber('files', '2000', 1);
+  const large = preset ? PRESETS[preset]!.large : undefined;
   const rtt = Number(flag('rtt', '57'));
   if (!(rtt >= 0)) { log(`--rtt takes milliseconds of at least 0; got ${flag('rtt', '57')}`); return 2; }
   const idleRounds = wholeNumber('idle-rounds', '20', 1), fullRounds = wholeNumber('full-rounds', '7', 1), warmup = wholeNumber('warmup', '1');
@@ -212,7 +220,7 @@ async function runParent(): Promise<number> {
   const phases: Record<string, unknown> = {};
   const cleanups: Array<() => Promise<void> | void> = [];
   try {
-    const fixture = await ensureFixture(cacheDir, files, log);
+    const fixture = await ensureFixture(cacheDir, files, log, large);
     resetFixture(fixture);
     phases.fixture = { cached: fixture.cached, generate_ms: Math.round(fixture.generate_ms), generation_timings_ms: fixture.timings_ms, base: fixture.base };
     log(`fixture: ${fixture.cached ? 'cached' : 'generated'} ${fixture.repo} (${files} files)`);
@@ -274,7 +282,7 @@ async function runParent(): Promise<number> {
     let measured: Record<string, unknown> | null = null;
     if (!seedOnly) {
       const configPath = join(workDir, 'child.json');
-      writeFileSync(configPath, JSON.stringify({ engine: engineKind, database_url: childUrl, database_path: databasePath, source_id: SOURCE_ID, target: rawIdle ? null : head, episode, ...(live ? { live: { repo: fixture.repo, files } } : {}),
+      writeFileSync(configPath, JSON.stringify({ engine: engineKind, database_url: childUrl, database_path: databasePath, source_id: SOURCE_ID, target: rawIdle ? null : head, episode, ...(live ? { live: { repo: fixture.repo, files, large } } : {}),
         idle_rounds: idleRounds, full_rounds: fullRounds, warmup, sample_ms: sampleMs } satisfies ChildConfig));
       log(`measure: ${warmup} warm-up, ${idleRounds} idle ticks, ${fullRounds} full rounds (${engineKind}${engineKind === 'pglite' ? '' : `, ${rtt} ms RTT`})`);
       const t = performance.now();

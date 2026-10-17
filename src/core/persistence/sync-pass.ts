@@ -58,6 +58,8 @@ export interface PassLevelInput {
   bootstrap?: boolean;
   /** The pass imports without the schema pack (`no-schema-pack` or an episode carrying it): its parser expects no pack. */
   noSchemaPack?: boolean;
+  /** #6694: the slug-root mode an unstamped pass of this source admitted under (`obligations.slug_mode`); a subdirectory source reads under it, not its pin. */
+  slugMode?: 'git-root' | 'source-root';
 }
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -267,7 +269,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   t = timer();
   const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead] = await Promise.allSettled([
     currentCompanyBrainSync(sourceId) ? Promise.resolve(true) : getCompanyBrainProfile(engine, sourceId).then(profile => !!profile),
-    scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
+    scope && input.pass?.slugMode ? Promise.resolve(input.pass.slugMode) : scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
     syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
     engine.getConfig('sync.include_hidden'),
     input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
@@ -567,21 +569,24 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
  * #6712 PR 4b (design v3.2 §2.2): the idle tick's database reads in one statement: the pass row, whether a request of the
  * worktree is newer than the converged watermark (a range on the unique `sequence` index; `requestHwm` overrides the
  * row's), whether any request is open (`persistence_requests_pending`), and how many of the ids recorded in
- * `converged.open_at_stamp` are still open (`r:<request>` requests, `e:<effect>` Git effects).
+ * `converged.open_at_stamp` are still open (`r:<request>` requests, `e:<effect>` Git effects; `openAtStamp` null reads the
+ * row's, so the probe needs no earlier read of the row).
  */
 export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; incarnation: string; worktreeId: string;
-  requestHwm: string | number | null; openAtStamp: readonly string[] }): Promise<{ passRow: Record<string, unknown> | null; newer: boolean; pending: boolean; stillOpen: number }> {
+  requestHwm: string | number | null; openAtStamp: readonly string[] | null }): Promise<{ passRow: Record<string, unknown> | null; newer: boolean; pending: boolean; stillOpen: number }> {
   const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean; still_open: number | string }>(`WITH pass AS (
-      SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
+      SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2),
+    stamp AS (SELECT unnest(COALESCE($5::text[], ARRAY(SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(value->'obligations'->'converged'->'open_at_stamp')='array'
+      THEN value->'obligations'->'converged'->'open_at_stamp' ELSE '[]'::jsonb END) FROM pass))) AS id)
     SELECT (SELECT value FROM pass) AS pass_row,
       EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'obligations'->'converged'->>'request_hwm')::bigint, 0)
         AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)) AS newer,
       EXISTS (SELECT 1 FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)) AS pending,
       (SELECT count(*) FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)
-        AND 'r:'||request_id::text = ANY($5::text[]))
+        AND 'r:'||request_id::text IN (SELECT id FROM stamp))
         + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
-            WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text = ANY($5::text[])) AS still_open`,
-    [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, [...input.openAtStamp], input.sourceId, input.incarnation]);
+            WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text IN (SELECT id FROM stamp)) AS still_open`,
+    [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, input.openAtStamp ? [...input.openAtStamp] : null, input.sourceId, input.incarnation]);
   return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0) };
 }
 

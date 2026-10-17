@@ -1467,9 +1467,10 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    frontmatter_holds: 1 source(s) are blocked by a file gbrain could not import (notes). The next scheduled or manual sync recovers a blocked source automatically; to do it now run gbrain sync --source notes --no-pull.
    ```
 
-2. The sync converts the blocked request in place: both broken files are held,
-   the readable one imports (after quoting `author`, which gbrain reports so the
-   generator can be fixed), and the checkpoint advances.
+2. The sync recovers the source: both broken files are held, the readable one
+   imports (after quoting `author`, which gbrain reports so the generator can be
+   fixed), and the checkpoint advances. The old failed request stays in the
+   journal as it was; the sync no longer resumes from it.
 
    ```console
    $ gbrain sync --source notes --no-pull
@@ -1477,7 +1478,6 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    Held notes/digest.md: invalid_frontmatter (needs_interpretation) at line 4, key "title"; its page is missing until the file imports. Next: gbrain repair frontmatter --source notes --include-ambiguous (docs/guides/write-refusals.md#invalid_frontmatter-needs_interpretation)
    Held notes/standup.md: invalid_frontmatter (needs_interpretation) at line 2, key "title"; its page keeps its last good revision and is read-only for put_page until the file is repaired. Next: gbrain repair frontmatter --source notes --include-ambiguous (docs/guides/write-refusals.md#invalid_frontmatter-needs_interpretation)
    2 file(s) held this run, 2 held in source notes; they do not block sync. Inspect them with 'gbrain sources status notes'; the repair preview proposes each fix and writes nothing. Preview the repair: gbrain repair frontmatter --source notes
-   Converted 1 failed request(s) of the blocked cursor in place: <id>.
    1 file(s) under notes/ imported only after quoting unquoted frontmatter values: whatever writes them emits YAML other tools refuse. Fix the generator to quote values (or write through put_page); the preview shows the on-disk quoting fix. Preview: gbrain repair frontmatter --source notes
    ```
 
@@ -1552,13 +1552,11 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    "held_since": "<time>",
    "actor": "agent",
    "docs": "docs/guides/write-refusals.md#invalid_frontmatter-needs_interpretation"
-   "outcome": "held",
    ```
 
    Every hold carries `code`, `reason`, `key`, `line`, a location-only
    `message` (never a frontmatter value), `stale` (a page exists and keeps its
-   older revision), `fix` (the exact argv) and `docs`. `recent_conversions`
-   records the blocked request the upgrade converted.
+   older revision), `fix` (the exact argv) and `docs`.
 
 7. Later the user approves the digest interpretation (keep the later title).
    The apply creates its page and clears the last hold; the next sync is clean.
@@ -1829,9 +1827,9 @@ exists). An older gbrain blocked the source on the first fence it refused.
    [AGENT]   fence_holds: 1 source(s) are blocked by a file whose facts or takes fence gbrain could not import (notes). The next scheduled or manual sync recovers each with no command; to do it now run gbrain sync --source notes --no-pull. The file is then held and the rest of the source imports. 3 malformed fence(s) are known so far (gbrain doctor --only fence_integrity counts them by tier); nothing repairs them by itself until a maintenance run is active, so preview them and apply the plan the preview prints once the user agrees. Preview (read-only, no model call): gbrain repair fences. Pause automatic fence repair first with: gbrain config set fences.repair.enabled false. Recipe: docs/guides/repair.md#fences
    ```
 
-2. One sync gets the source going again: the blocked request is converted in
-   place, the meeting note's fence is rewritten (claims and row numbers
-   unchanged), and the other two files are held while the rest imports.
+2. One sync gets the source going again: the meeting note's fence is rewritten
+   (claims and row numbers unchanged), and the other two files are held while
+   the rest imports. The old failed request stays in the journal as it was.
 
    ```console
    $ gbrain sync --source notes --no-pull
@@ -1839,8 +1837,7 @@ exists). An older gbrain blocked the source on the first fence it refused.
    Held companies/acme-example.md: invalid_fence (no_header) in the facts fence (body), at line 6; its page is missing until the file imports. Next: gbrain repair fences --source notes --only companies/acme-example.md, then gbrain repair fences --source notes --only companies/acme-example.md --apply (docs/guides/write-refusals.md#fence-no_header)
    Held projects/widget-launch.md: invalid_fence (holder_unresolved) in the takes fence (body), row 1, column who, at line 9; its page is missing until the file imports. Next: gbrain repair fences --source notes --only projects/widget-launch.md, then gbrain repair fences --source notes --only projects/widget-launch.md --apply (docs/guides/write-refusals.md#fence-holder_unresolved)
    2 file(s) held this run, 2 held in source notes; they do not block sync. Inspect them with 'gbrain sources status notes'; then nothing repairs the fence and slug-conflict holds by itself (no maintenance run is active), so preview the content repairs with gbrain repair content --source notes (read-only, no model call: it lists each held file with its planned repair or the exact edit, kind by kind, and prints the apply command with --expect <hash>[,<hash>]), then run the apply command it prints. Preview the repair: gbrain repair content --source notes
-   Converted 1 failed request(s) of the blocked cursor in place: <id>.
-   Normalized fences in 1 file(s) (kind_map x1, close_fence x1). 1 file(s) under meetings/ had a malformed facts or takes fence that sync rewrote losslessly and committed (claims and existing row numbers unchanged); whatever writes them emits fences gbrain has to repair. Write facts with `remember` and takes with `takes_add` (or emit the canonical columns) so rows never need normalizing. Re-read a normalized page before editing it.
+   Normalized fences in 1 file(s) (close_fence x1, kind_map x1). 1 file(s) under meetings/ had a malformed facts or takes fence that sync rewrote losslessly and committed (claims and existing row numbers unchanged); whatever writes them emits fences gbrain has to repair. Write facts with `remember` and takes with `takes_add` (or emit the canonical columns) so rows never need normalizing. Re-read a normalized page before editing it.
    ```
 
 3. `gbrain sources status <id>` lists each fence hold with its fence, section,
