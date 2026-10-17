@@ -83,6 +83,11 @@ export interface PreparationStallMeta {
   sync_argv: string[];
 }
 export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | FenceReason;
+/** #6712 PR 4b: the sides a `file_drift` Decision can be about, and the states of a deleted side (design v3.2 §4). */
+export const FILE_DRIFT_SIDES = ['both', 'unknown', 'deleted'] as const;
+export type FileDriftSide = typeof FILE_DRIFT_SIDES[number];
+export const FILE_DRIFT_DELETED_STATES = ['tombstone_edited', 'purged_differs', 'file_gone'] as const;
+export type FileDriftDeletedState = typeof FILE_DRIFT_DELETED_STATES[number];
 
 export interface GitHoldMeta {
   reason?: GitHoldReason;
@@ -106,6 +111,14 @@ export interface GitHoldMeta {
   page_revision?: string;
   /** #6712 PR 1 `file_drift`: which side moved since the page's last recorded import (`unknown`: no usable record); `page_revision` is the page's revision when held. */
   sides?: 'database' | 'both' | 'unknown';
+  /**
+   * #6712 PR 4b `file_drift`: which side a Decision is about (design v3.2 §4): `both` (the file and the page moved), `unknown`
+   * (no import record says which), `deleted` (one side is a deletion, named by `state`). Absent on holds an older gbrain
+   * wrote; `fileDriftSide` reads those from `sides`.
+   */
+  side?: FileDriftSide;
+  /** #6712 PR 4b `file_drift` with `side: 'deleted'`: which deletion the file disagrees with (design v3.2 §4). */
+  state?: FileDriftDeletedState;
   /** #6517 `file_drift`: the page survived a shared-origin delete that kept its file; the fix leads with importing the file. */
   shared_origin?: true;
   /** #6340 `concurrent_write`: the revision the entry was frozen against (the page's live revision is `page_revision`). */
@@ -206,6 +219,9 @@ export interface GitHoldItem {
   fence?: FenceHoldLocation;
   /** #6377 `frontmatter_slug_conflict`: the content-repair lane's last verdict or attempt (codes and slugs). */
   content_repair?: ContentHoldRepairState;
+  /** #6712 PR 4b `file_drift`: the Decision's side, and for a deleted side its state (`GitHoldMeta.side` / `state`). */
+  side?: FileDriftSide;
+  state?: FileDriftDeletedState;
   message: string;
   slug: string | null;
   /** True when a page exists and keeps its last good revision; false when the file's page is missing. */
@@ -570,6 +586,47 @@ export function holdRepairSteps(sourceId: string, route: HoldRepairRoute, auto?:
 }
 
 /**
+ * #6712 PR 4b: the side of a `file_drift` hold. A hold an older gbrain wrote carries only `sides`: `both` and `unknown` read
+ * as that side; a `database` hold (a one-sided database move sync no longer holds) has none, so no `--held --side` selects it.
+ */
+export function fileDriftSide(meta: Pick<GitHoldMeta, 'side' | 'sides'>): FileDriftSide | undefined {
+  return meta.side ?? (meta.sides === 'both' || meta.sides === 'unknown' ? meta.sides : undefined);
+}
+
+/** #6712 PR 4b: what `gbrain repair file-drift --prefer <prefer>` does to a page of this side and state, as every surface names it. */
+export function fileDriftActionVerb(side: FileDriftSide, state: FileDriftDeletedState | undefined, prefer: 'file' | 'database'): string {
+  if (side !== 'deleted') return prefer === 'database' ? 'rewrite the file from the page' : 'import the file into the page';
+  if (state === 'tombstone_edited') return prefer === 'database' ? 'keep the deletion and remove the file' : 'restore and import';
+  if (state === 'purged_differs') return prefer === 'database' ? 'remove the file' : 'import as a new page';
+  return prefer === 'database' ? 'recreate the file' : 'soft-delete the page';
+}
+
+/** #6712 PR 4b: the bulk preview of the held `file_drift` pages of one side (and deleted state), narrowed to `path` when given. */
+export function heldDriftPreviewArgv(sourceId: string, side: FileDriftSide, state: FileDriftDeletedState | undefined, prefer: 'file' | 'database', path?: string): string[] {
+  return ['gbrain', 'repair', 'file-drift', '--source', sourceId, '--held', '--side', side, ...(side === 'deleted' && state ? ['--state', state] : []),
+    ...(path ? ['--only', path] : []), '--prefer', prefer];
+}
+
+/** #6712 PR 4b: the Decision for a `file_drift` hold whose one side is a deletion; each option names its action verb. */
+function deletedDriftFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'meta'> & Partial<Pick<GitHoldRecord, 'slug'>>, state: FileDriftDeletedState): Action {
+  const source = record.source_id;
+  const slug = record.slug ?? '<slug>';
+  const revision = record.meta.page_revision ? ` (revision ${record.meta.page_revision})` : '';
+  const preview = (prefer: 'database' | 'file') => heldDriftPreviewArgv(source, 'deleted', state, prefer, record.path);
+  const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+  const what = state === 'tombstone_edited' ? `Page ${slug} was deleted${revision} and ${record.path} then changed, so sync held the file instead of restoring the page or dropping the edit. `
+    : state === 'purged_differs' ? `The page of ${record.path} was purged and the file differs from what the brain held, so sync held the file instead of importing it as a new page. `
+    : `${record.path} is gone from the last commit but page ${slug} changed${revision}, so sync held the deletion instead of removing a page that changed. `;
+  const options = `This preview (writes nothing) shows --prefer database: ${fileDriftActionVerb('deleted', state, 'database')}; ${preview('file').join(' ')} previews --prefer file: `
+    + `${fileDriftActionVerb('deleted', state, 'file')}. `;
+  return { argv: preview('database'), consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/repair.md#deleted-canonical-files',
+    why: `${what}${options}Decide with the user, run the apply command the preview prints, then sync again. The rest of the source is not blocked.`,
+    then: { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+      why: `Re-screens ${record.path} after the repair (a changed file or page revision re-screens it by itself).` },
+    verify };
+}
+
+/**
  * The exact next step for one hold: the repair preview for frontmatter, the
  * split or exclude for size, and for a fence hold the step its state calls
  * for (`fenceHoldFix`: that file's `gbrain repair fences --only <path>`
@@ -617,13 +674,14 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
         verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
     }
     case 'file_drift': {
+      if (record.meta.side === 'deleted' && record.meta.state) return deletedDriftFix(record, record.meta.state);
       const slug = record.slug ?? '<slug>';
       const by = record.meta.competing_request_id ? `${record.meta.competing_operation ?? 'a database'} request ${record.meta.competing_request_id} wrote page ${slug} straight to the database`
         : `page ${slug} changed in the database${record.meta.page_revision ? ` (revision ${record.meta.page_revision})` : ''}`;
       const preview = (prefer: 'database' | 'file') => ['gbrain', 'repair', 'file-drift', '--source', source, '--slug', slug, '--prefer', prefer];
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
-      const held = `${by} since ${record.path} was last imported, so sync held the file instead of overwriting the database version (${record.meta.sides === 'database' ? 'the file did not change in Git'
-        : record.meta.sides === 'both' ? 'the file changed too' : 'no import record says which side changed'}). `;
+      const held = `${by} since ${record.path} was last imported, so sync held the file instead of overwriting the database version (${record.meta.sides === 'database' && !record.meta.side ? 'the file did not change in Git'
+        : fileDriftSide(record.meta) === 'both' ? 'the file changed too' : 'no import record says which side changed'}). `;
       const decide = 'Decide with the user which version wins, run the apply command the preview prints, then sync again. The rest of the source is not blocked.';
       // #6517: a shared-origin delete kept the file for this surviving page, and its receipt names importing the file.
       const shared = record.meta.shared_origin === true;
@@ -719,6 +777,8 @@ export function gitHoldItem(record: GitHoldRecord, auto?: FenceAutoRepair): GitH
     ...(record.meta.key ? { key: record.meta.key } : {}), ...(record.meta.line !== undefined ? { line: record.meta.line } : {}),
     ...(fence ? { fence } : {}),
     ...(record.code === 'frontmatter_slug_conflict' && record.meta.content_repair ? { content_repair: record.meta.content_repair } : {}),
+    ...(record.code === 'file_drift' && fileDriftSide(record.meta) ? { side: fileDriftSide(record.meta) } : {}),
+    ...(record.code === 'file_drift' && record.meta.side === 'deleted' && record.meta.state ? { state: record.meta.state } : {}),
     message: record.message, slug: record.slug, stale: record.page_id !== null, held_since: record.held_at,
     fix: gitHoldFix(record, auto), docs: gitHoldDocs(record.code, record.meta.reason, record.meta) };
 }
