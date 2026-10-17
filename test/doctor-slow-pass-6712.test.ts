@@ -23,7 +23,7 @@ const setup = ({ root }: { root: string }) => {
   git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'notes');
 };
 
-type Check = { status: string; message: string; details: { slow_passes: Array<{ source_id: string; duration_ms: number; target_ms: number; kind: string }> }; fix?: { argv: string[] } };
+type Check = { status: string; message: string; details: { slow_passes?: Array<{ source_id: string; duration_ms: number; target_ms: number; kind: string }> }; fix?: { argv: string[] } };
 const doctor = async (engine: BrainEngine) => (await managedSyncMovementEntry.run({ engine } as never) as unknown as Check[])[0]!;
 const telemetry = async (engine: BrainEngine) => (await engine.executeRaw<{ t: Record<string, unknown> }>(
   "SELECT completed_keys->0->'telemetry' AS t FROM op_checkpoints WHERE op=$1 AND completed_keys->0->>'source_id'='default'", [MANAGED_SYNC_PASS_OP]))[0]!.t;
@@ -40,7 +40,7 @@ describe('#6712 PR 4b: doctor warns on a slow no-change pass', () => {
     expect(Object.keys(idle.timings_ms as Record<string, number>).sort()).toEqual(['kind', 'setup']);
 
     await setTelemetry(engine, { duration_ms: 400 });
-    expect(await doctor(engine)).toMatchObject({ status: 'ok', details: { slow_passes: [] } });
+    { const ok = await doctor(engine); expect(ok.status).toBe('ok'); expect(ok.details.slow_passes).toBeUndefined(); }
 
     await setTelemetry(engine, { duration_ms: 900, timings_ms: { setup: 850, kind: 50 } });
     const slow = await doctor(engine);
@@ -56,7 +56,7 @@ describe('#6712 PR 4b: doctor warns on a slow no-change pass', () => {
     await setTelemetry(engine, { kind: 'full', duration_ms: 2500 });
     expect(await doctor(engine)).toMatchObject({ status: 'warn', details: { slow_passes: [expect.objectContaining({ kind: 'full', target_ms: 2000 })] } });
     await setTelemetry(engine, { outcome: 'synced', duration_ms: 60_000 });
-    expect(await doctor(engine)).toMatchObject({ status: 'ok', details: { slow_passes: [] } });
+    { const ok = await doctor(engine); expect(ok.status).toBe('ok'); expect(ok.details.slow_passes).toBeUndefined(); }
   }, { setup }), 120_000);
 
   test('it is never a fail, however slow the pass', () => managedBrain(async ({ engine }) => {
