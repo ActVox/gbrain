@@ -106,7 +106,7 @@ test/managed-sweep-refused-window-retry.test.ts
 test/managed-sweep-timeline.test.ts
 test/managed-sync-blocked-job-6858.test.ts
 test/managed-sync-bulk.test.ts
-test/managed-sync-checkpoint-replaced.test.ts
+test/managed-sync-checkpoint-controls-company.serial.test.ts
 test/managed-sync-chunker-version.test.ts
 test/managed-sync-concurrent-write-hold.test.ts
 test/managed-sync-connection-loss.test.ts
@@ -162,7 +162,6 @@ test/persistence-reconcile-git-dirty-6138.test.ts
 test/persistence-skill-bundles.serial.test.ts
 test/persistence-skill-crash.slow.test.ts
 test/persistence-skip-cost.test.ts
-test/persistence-sync-cursor-adoption.test.ts
 test/persistence-sync-cursor-options.test.ts
 test/persistence-sync-cursor-strategy-6696.test.ts
 test/persistence-sync-fence-holds.test.ts

@@ -89,7 +89,6 @@
   "test/managed-sweep-refused-window-retry.test.ts": 11493,
   "test/managed-sweep-timeline.test.ts": 5607,
   "test/managed-sync-bulk.test.ts": 193028,
-  "test/managed-sync-checkpoint-replaced.test.ts": 8941,
   "test/managed-sync-chunker-version.test.ts": 8968,
   "test/managed-sync-concurrent-write-hold.test.ts": 16198,
   "test/managed-sync-drain.test.ts": 10209,
