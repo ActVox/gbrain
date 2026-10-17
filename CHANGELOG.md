@@ -51,6 +51,7 @@ Nothing runs on upgrade. Each repair below is preview-first, and you choose when
 - `gbrain projections drain` reports per-class `remaining_by_class` and never says "empty" while image rows remain.
 - A read-only `[AGENT]` notice after upgrading names the drain preview.
 - `gbrain migrate --to <engine>` (the legacy copier) now carries an image chunk's `embedding_image` vector (#6871). Before, a migrated image page arrived without it and needed a paid re-embed to show up in image search.
+- A preparation read issued after its budget ran out (for example a page purge's journal sweep) is now refused before it is sent. Before, it went out with a 1 ms statement timeout, and a fast read could finish inside that, so the purge committed past its deadline instead of releasing.
 
 #### Held embedding budgets (part 3, #6847)
 
