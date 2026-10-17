@@ -1742,7 +1742,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // #5988: Git sync holds (read by readSyncHoldPolicy). `sync.holds=fail`
   // restores fail-closed blocking. Detail, escalation and the parser-regression
   // stop are tuned by GBRAIN_SYNC_* env since #6712 PR 2 (RETIRED_SYNC_KEYS).
-  'sync.holds',
+  'sync.holds', 'sync.slug_conflicts.auto_remove', // #6865: sync-time removal of a stray slug: line naming no page (repair/slug-autoheal.ts); default on
   'fences.normalize', // #6188: inline Tier 1 fence normalization (fence-repair/config.ts); default on
   'fences.repair.enabled', 'fences.repair.llm', // #6188: the fence_repair cycle phase and its Tier 3 model step (fence-repair/config.ts); default on
   'fences.repair.max_usd_per_page', 'fences.repair.max_usd_per_day', // #6188: Tier 3 fence repair caps; 0 = no model spend
