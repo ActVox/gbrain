@@ -1454,7 +1454,6 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   const runStartedAt = new Date().toISOString();
   let key = managedCursorKey(context.incarnation, company); // #6712 PR 1: one per incarnation; resolvePassCursor may pick an older key's cursor
   let cursor: Cursor | null = null;
-  let missingManifestCursor: CursorHeader | null = null;
   if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => live.cursor ?? cursor });
   const dryRun = (value: Cursor, base: Cursor = value) => managedDryRun(engine, value, base, { company: !!company, processingOptions, syncOptions, repoPath: frozenRun.repoPath, remote: authority.writer.remote });
   let phase: ManagedSyncFailure['phase'] = 'resume';
@@ -1669,14 +1668,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
     key = resolved.key;
     if (resolved.waiting) return resolved.waiting;
-    try { cursor = await readCursor(engine, key); }
-    catch (error) {
-      if (!(error instanceof MissingSyncManifest) || opts.dryRun || company) throw error;
-      missingManifestCursor = error.cursor; phase = 'discovery'; discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
-      // #6712 PR 1 (L1): a lost manifest re-discovers HEAD's whole tree (the lost run may have imported files last_commit..HEAD no longer names); the prescreen passes what it imported.
-      const replaced = await replaceCursor(engine, key, error.cursor, { ...await discoverManagedSync(engine, opts, context, undefined, true), authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
-      if ('wait' in replaced) return { ...result(error.cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: replaced.wait }) }; cursor = replaced;
-    }
+    cursor = await readCursor(engine, key);
     assertActive();
     if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, syncOptions, embedDeferred: opts.embedDeferred, assertActive, state });
     assertActive();
@@ -1748,7 +1740,6 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     if (live.cursor) cursor = live.cursor;
     if (signal?.aborted && error instanceof Error && error.name === 'AbortError') {
       if (cursor) return result(cursor, 'partial', 'timeout');
-      if (missingManifestCursor) return result(missingManifestCursor, 'partial', 'timeout');
       const from = authority.writer.remote || opts.full ? null : context.source.last_commit;
       return { status: 'partial', reason: 'timeout', fromCommit: from, toCommit: authority.writer.remote ? '' : discoveryTarget ?? from ?? '',
         added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0, embedded: 0, pagesAffected: [], filesImported: 0, bankedFiles: 0 };
