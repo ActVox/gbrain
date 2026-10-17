@@ -1310,6 +1310,26 @@ More: [docs/guides/write-refusals.md#fetch_failed](../../docs/guides/write-refus
 
 More: [docs/guides/write-refusals.md#file_drift](../../docs/guides/write-refusals.md#file_drift)
 
+### file_drift_mixed_selection
+
+<a id="file_drift_mixed_selection"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair file-drift --held selected held pages of more than one Decision (side, or deleted state), so nothing was previewed: one --prefer must not resolve differently shaped drift in bulk. | Each side and deleted state is its own Decision with its own meaning of --prefer file and --prefer database; resolving them together would apply one choice to questions the user answered differently, or not at all. | Preview one Decision at a time with the narrower commands the message names (--held --side <side>, plus --state <state> for --side deleted), or narrow with --only / --skip. Run: gbrain sources status '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#file-drift](../../docs/guides/repair.md#file-drift)
+
+### file_drift_state_required
+
+<a id="file_drift_state_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair file-drift --held for deleted-side drift needs --state (tombstone_edited, purged_differs or file_gone); nothing was previewed. | In each deleted state --prefer file and --prefer database do opposite things (tombstone_edited: restore and import, or keep the deletion and remove the file; purged_differs: import as a new page, or remove the file; file_gone: soft-delete the page, or recreate the file), so the state is always named explicitly. | Rerun the preview with --side deleted --state <state>, choosing the state gbrain sources status <source> --json lists for the held files. Run: gbrain sources status '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#file-drift](../../docs/guides/repair.md#file-drift)
+
 ### file_removed_during_scan
 
 <a id="file_removed_during_scan"></a>

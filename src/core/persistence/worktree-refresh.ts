@@ -275,7 +275,11 @@ async function worktreeRecoveryPending(engine: BrainEngine, binding: WorktreeBin
   try { const held = await probe(); return held?.publication === true || held?.topology === true; }
   finally { await lock.release(); }
 }
-/** Never wait on a sync: an unexhausted cursor names its own resume command. */
+/**
+ * Never wait on a sync: an unexhausted cursor names its own resume command. #6712 PR 4b (design v3.2 §3.3): a
+ * non-company source's pass is never stranded by a checkout move (it reconciles whatever HEAD it pins next), so only
+ * cursors refuse: a company brain's, and a legacy one the first pass has not retired yet.
+ */
 async function assertNoUnfinishedSync(engine: BrainEngine, members: string[]): Promise<void> {
   const [cursor] = await engine.executeRaw<{ source_id: string; header: Record<string, unknown> }>(`SELECT c.completed_keys->0->>'sourceId' AS source_id,
     c.completed_keys->0 AS header

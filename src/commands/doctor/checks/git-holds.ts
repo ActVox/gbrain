@@ -7,6 +7,7 @@ import { readFenceAutoRepair, type FenceAutoRepair } from '../../../core/fence-r
 import { summarizeFenceCensus } from '../../../core/fence-repair/census.ts';
 import { agentFix } from '../check-fix.ts';
 import { isContentRefusal } from '../../../core/import-screen.ts';
+import { SETTLE_MISMATCH_STREAK } from '../../../core/persistence/sync-pass-row.ts';
 
 const SAMPLE_PATHS = 5;
 
@@ -23,9 +24,21 @@ const SAMPLE_PATHS = 5;
  * Unsupported-image holds (#5493) are listed but never escalate. With fence
  * holds, details carry `fences` and `auto_repair` (whether the maintenance run
  * repairs them by itself), which the post-upgrade banner reads.
+ * #6712 PR 4b (design v3.2 §3.7): a non-company source whose passes keep
+ * stopping (`passHealth`: the newest ended `blocked`, a `not_converged`
+ * streak, or a `settle_mismatch` streak that becomes a hold) is listed under
+ * `details.passes` with its reason, stop reason, the time it began and the
+ * paths whose settle keeps mismatching, and warns even with no file held.
  */
 export async function gitHeldFilesCheck(engine: BrainEngine, sourceIds?: string[]): Promise<Check> {
   try {
+    const { readPassReadings, passStuck, passStuckSince } = await import('../../../core/persistence/sync-pass-readers.ts');
+    const passes = (await readPassReadings(engine, { sourceIds, head: false })).filter(reading => passStuck(reading.health)).map(({ source_id, row, health }) => ({
+      source_id, reason: health.reason!, stop_reason: row.value.telemetry.stop_reason, since: passStuckSince(row), not_converged_streak: row.value.obligations.not_converged_streak ?? 0,
+      mismatch: Object.entries(row.value.obligations.mismatch ?? {}).filter(([, entry]) => entry.streak >= SETTLE_MISMATCH_STREAK - 1).map(([path, entry]) => ({ path, streak: entry.streak })).slice(0, SAMPLE_PATHS) }));
+    const passLines = passes.map(pass => `${pass.source_id}: every pass since ${pass.since} stopped ${pass.reason}${pass.stop_reason ? ` (${pass.stop_reason})` : ''}`
+      + (pass.mismatch.length ? `, settle keeps mismatching on ${pass.mismatch.map(entry => entry.path).join(', ')}` : ''));
+    const passNote = passes.length ? ` Managed sync passes that keep stopping: ${passLines.join('; ')}; inspect with ${passes.map(pass => `gbrain sync status --source ${pass.source_id} --json`).join('; ')}.` : '';
     const [coverage, policy] = await Promise.all([readHeldCoverage(engine, sourceIds ? { sourceIds } : {}), readSyncHoldPolicy(engine)]);
     const listing = new Map((await readGitHoldListing(engine, coverage.map(source => source.source_id), SAMPLE_PATHS)).map(entry => [entry.sourceId, entry.holds]));
     const images = await readGitImageHoldCounts(engine, coverage.map(source => source.source_id));
@@ -43,7 +56,11 @@ export async function gitHeldFilesCheck(engine: BrainEngine, sourceIds?: string[
     });
     const held = sources.reduce((sum, source) => sum + source.held, 0);
     const details = { held, source_ids: sources.map(source => source.source_id), sources: sources.map(({ argv: _argv, ...source }) => source), escalate_count: policy.escalateCount,
-      ...(fences ? { fences, auto_repair: auto } : {}), docs: 'docs/guides/repair.md#held-files' };
+      ...(fences ? { fences, auto_repair: auto } : {}), ...(passes.length ? { passes } : {}), docs: 'docs/guides/repair.md#held-files' };
+    if (!held && passes.length) return { name: 'git_held_files', status: 'warn', details,
+      message: `No Git source files are held, but managed sync does not converge.${passNote}`,
+      fix: agentFix(['gbrain', 'sync', 'status', '--source', passes[0]!.source_id, '--json'],
+        'Read-only: the convergence of the source, the reason its passes stop and the next step (a hold to reconcile, a blocked step, or the resume command).', 'git_held_files', { docs: 'docs/guides/repair.md#held-files' }) };
     if (!held) return { name: 'git_held_files', status: 'ok', message: 'No Git source files are held.', details };
     const escalated = sources.filter(source => source.escalated);
     const single = sources.length === 1 ? sources[0]! : undefined;
@@ -60,7 +77,8 @@ export async function gitHeldFilesCheck(engine: BrainEngine, sourceIds?: string[
           ? 'the write owner (not the files) is the likely cause; inspect it with writer status' : 'a generator or an upgrade is likely writing or reading them wrong; fix the cause'} first. ` : '')
         + 'A page whose newer file is held is read-only for put_page until the file is repaired, so do not retry a refused write. '
         + `Inspect with ${sources.map(source => source.status).join('; ')}; `
-        + (sources.some(source => source.fences || source.stalled) ? `then ${sources.map(source => `${source.source_id}: ${source.next}`).join('; ')}.` : `preview the fix with ${sources.map(source => source.repair).join('; ')}.`),
+        + (sources.some(source => source.fences || source.stalled) ? `then ${sources.map(source => `${source.source_id}: ${source.next}`).join('; ')}.` : `preview the fix with ${sources.map(source => source.repair).join('; ')}.`)
+        + passNote,
       fix: single
         ? agentFix(single.argv, fenceOnly ? `Previews the fence repair of each held file of ${single.source_id} (read-only, no model call): ${single.next}.`
           : stalledOnly ? `Shows what the write owner of ${single.source_id} was stuck on (read-only); the held files are fine. ${single.next}.`

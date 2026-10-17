@@ -62,6 +62,8 @@ export interface ManagedSyncPassValue {
     converged?: PassConverged;
     mismatch: Record<string, { level: string | null; streak: number }>;
     not_converged_streak: number;
+    /** When the current run of unhealthy endings (`blocked`, `not_converged`) began; kept across them, cleared at `synced`/`up_to_date`. The §3.7 readers age a stuck source from it. */
+    stuck_since?: string | null;
     faults: Record<string, { level: string | null; class: string; attempts: number }>;
   };
   telemetry: {
