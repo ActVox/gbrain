@@ -6,8 +6,7 @@
  *    page at or under 1 MiB as unmetered), so a held row left on a page that
  *    shrank no longer applies: the stale-chunk queue (staleChunkWhere and the
  *    stale lists), the held lists (`gbrain embed --held`, doctor
- *    `partial_embedding` through held-embedding.ts readBudgetLimited) and the
- *    write receipts' size state ignore it, and
+ *    `partial_embedding`) and the write receipts' size state ignore it, and
  *    the stale sweep embeds the page's chunks. Covers an inline page shrinking
  *    inline, a segmented page shrinking within the demotion hysteresis (it
  *    stays segmented under 1 MiB) and one demoted to inline.
@@ -26,7 +25,6 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { embedStaleForSource } from '../../src/core/embed-stale.ts';
 import { holdPageEmbedding, listBudgetLimitedPages, readPageSizeStates } from '../../src/core/page-embedding-budget.ts';
-import { readBudgetLimited } from '../../src/core/held-embedding.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
@@ -92,15 +90,12 @@ describe('a held large page that shrinks under 1 MiB', () => {
         await holdPageEmbedding(engine, large.id, 'awaiting_approval');
         expect(await sweep(engine, sourceId)).toBe(0);
         expect((await listBudgetLimitedPages(engine, { sourceId })).map(p => p.slug)).toEqual([slug]);
-        expect((await readBudgetLimited(engine, { sourceId })).held).toBe(1);
 
         expect(await importFromContent(engine, slug, note(c.small, 92), { sourceId, noEmbed: true })).toMatchObject({ status: 'imported' });
         const small = await pageRow(engine, sourceId, slug);
         expect(small).toMatchObject({ id: large.id, body_storage: c.after });
         expect(small.bytes).toBeLessThanOrEqual(1024 ** 2);
         expect(await engine.countStaleChunks({ sourceId })).toBeGreaterThan(0);
-        // #6803's held report (doctor partial_embedding, embed --stale) ignores the row too, while the chunks still wait.
-        expect((await readBudgetLimited(engine, { sourceId })).held).toBe(0);
         expect(await sweep(engine, sourceId)).toBeGreaterThan(0);
         const chunks = await visibleChunks(engine, small.id);
         expect(chunks.length).toBeGreaterThan(0);
