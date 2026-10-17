@@ -22,8 +22,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { isSyncable, matchesAnyGlob } from '../sync.ts';
 import { parseUsdLimit } from '../spend-posture.ts';
 import { digest } from './digest.ts';
-import { readTreeLevel } from './sync-git-stream.ts';
-import { loopYield } from './sync-yield.ts';
+import { walkTreeLevel } from './sync-git-stream.ts';
 import { SYNC_PASS_COST_OP, type PassEpisode, type SyncSelection } from './sync-pass-row.ts';
 
 type Exec = Pick<BrainEngine, 'executeRaw'>;
@@ -76,18 +75,21 @@ export function episodeClosure(input: ClosureInput & { treePaths: Iterable<strin
   return closureOf(input.configured, tallyClosure(input, input.treePaths, { included: true, covers: true, released: 0 }));
 }
 
-/** The closure of an open episode at the pinned target `head` (one `ls-tree` of the whole commit), yielding between stretches. */
+/**
+ * The closure of an open episode at the pinned target `head` (one `ls-tree` of the whole commit), tallied in stretches as the
+ * paths stream in: the pass still holds its level, so a 600k-path commit is never held a second time as a map or a path list.
+ */
 export async function passEpisodeClosure(input: { gitRoot: string; root: string; head: string; slugMode: 'git-root' | 'source-root'; episode: PassEpisode; pass: SyncSelection;
   configuredSelection: SyncSelection; configured: boolean }): Promise<EpisodeClosure> {
   const scope = relative(realpathSync.native(input.gitRoot), realpathSync.native(input.root)).split(sep).join('/');
-  const paths = [...(await readTreeLevel(input.gitRoot, input.head, '')).keys()];
   const closure: ClosureInput = { episode: input.episode.selection, pass: input.pass, configuredSelection: input.configuredSelection, configured: input.configured, scope, slugMode: input.slugMode };
   const tally: ClosureTally = { included: true, covers: true, released: 0 };
-  const step = loopYield();
-  for (let i = 0; i < paths.length; i += CLOSURE_STRETCH) {
-    tallyClosure(closure, paths.slice(i, i + CLOSURE_STRETCH), tally);
-    if (step.due(CLOSURE_STRETCH)) await step.pause();
-  }
+  let stretch: string[] = [];
+  await walkTreeLevel(input.gitRoot, input.head, '', path => {
+    stretch.push(path);
+    if (stretch.length === CLOSURE_STRETCH) { tallyClosure(closure, stretch, tally); stretch = []; }
+  });
+  if (stretch.length) tallyClosure(closure, stretch, tally);
   return closureOf(input.configured, tally);
 }
 const CLOSURE_STRETCH = 2_048;
