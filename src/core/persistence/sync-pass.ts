@@ -374,13 +374,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     spellings.set(folded, [...spellings.get(folded) ?? [], path]);
   }
   // As discovery does, only spellings that name one page are twins: a live origin's page slug, else the slug its path names.
-  const twins = new Set<string>();
+  const twins = new Set<string>(), twinGroups: string[][] = [];
   for (const paths of spellings.values()) {
     if (paths.length < 2) continue;
     const slugOf = (path: string) => { const live = byOrigin.get(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
     const bySlug = new Map<string, string[]>();
     for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
-    for (const group of bySlug.values()) if (group.length > 1) for (const path of group) twins.add(path);
+    for (const group of bySlug.values()) if (group.length > 1) { twinGroups.push(group); for (const path of group) twins.add(path); }
   }
   const reconcilable = [...byOrigin.entries()].filter(([path, row]) => !row.deleted && eligible(path)).length;
   timings.domain = t();
@@ -417,6 +417,21 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (baselineTree === undefined) { const bt = timer(); baselineTree = await readTreeLevel(gitRoot, baselineCommit, scope).catch(() => null); timings.baseline = bt(); }
     return baselineTree?.get(path)?.oid ?? null;
   };
+  // Master refuses a spelling only among the files its sync claims (sync-discovery.ts:538-541): the live page's origin and the
+  // page-less spellings that changed since the cursor. A page-less spelling unchanged since the baseline was never claimed
+  // (#6865), so unless the claimed spellings still collide it settles as `legacy` and the others classify on their own.
+  const legacySpelling = new Set<string>();
+  for (const group of twinGroups) {
+    const unchanged: string[] = [];
+    for (const path of group) {
+      const live = byOrigin.get(path);
+      const level = levelOf(path, probes.get(path));
+      if (!(live && !live.deleted) && level !== null && level === await baselineOf(path)) unchanged.push(path);
+    }
+    if (group.length - unchanged.length > 1) continue;
+    for (const path of group) twins.delete(path);
+    for (const path of unchanged) legacySpelling.add(path);
+  }
 
   const fp = (path: string) => syncImportParserFor(sourceRelative(path), pack?.identity ?? null);
   const stateOf = async (path: string, dirty: SyncPathState['dirty'], probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): Promise<{ state: SyncPathState; row?: PageRow; legacyPageless?: true }> => {
@@ -442,7 +457,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       published: !!attested?.hash && probe?.rawSha256 === attested.hash,
       hold: hold ? { atLevel: holdAtLevel(hold, level, probe?.rawSha256 ?? null) && !moved.has(path), rescreenDue: holdRescreenDue(hold, retry.has(hold.path)), retried: retry.has(hold.path) } : null,
       marker: marker ?? virtualMarker, baseline: needsBaseline ? await baselineOf(path) : null,
-      spelling: twins.has(path),
+      spelling: legacySpelling.has(path) ? 'legacy' : twins.has(path),
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && !!row && !row.deleted && record?.full_episode !== input.pass.episodeFullId
         : input.full === true && !!row && !row.deleted,
       fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
