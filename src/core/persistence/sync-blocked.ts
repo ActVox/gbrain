@@ -12,6 +12,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { readManagedSyncFailures } from './sync-failures.ts';
+import { passFingerprint } from './sync-pass-row.ts';
 
 /** A run blocked longer than this fails doctor `managed_sync_blocked` and turns get_brain_health to `attention`. */
 export const MANAGED_SYNC_BLOCKED_FAIL_MS = 60 * 60_000;
@@ -23,10 +24,16 @@ export async function readBlockedManagedSyncs(engine: BrainEngine, sourceIds?: s
     SELECT c.fingerprint FROM op_checkpoints c LEFT JOIN op_checkpoints f ON f.op='managed-sync-failure' AND f.fingerprint=c.fingerprint
     WHERE c.op='managed-sync' AND COALESCE(c.completed_keys->0->>'done','false')<>'true' AND (f.updated_at IS NULL OR f.updated_at>=c.updated_at)`)).map(row => row.fingerprint));
   const { readPassReadings, passStopCode, passStuck, passStuckSince } = await import('./sync-pass-readers.ts');
+  const failures = await readManagedSyncFailures(engine, sourceIds);
+  // A pass blocked by a failed write names that write's code (its failure row is keyed by the pass fingerprint), as a cursor did.
+  const passFailure = (sourceId: string, incarnation: string) => failures.find(failure => failure.cursor_key === passFingerprint(sourceId, incarnation) && failure.code !== 'sync_incomplete');
   const passes: BlockedManagedSync[] = (await readPassReadings(engine, { sourceIds, head: false })).filter(reading => passStuck(reading.health))
-    .map(reading => ({ source_id: reading.source_id, code: passStopCode(reading), run_id: reading.row.value.telemetry.pass_id, blocked_since: passStuckSince(reading.row) }));
+    .map(reading => {
+      const failure = passStopCode(reading) === 'blocked_by_failures' ? passFailure(reading.source_id, reading.row.value.incarnation) : undefined;
+      return { source_id: reading.source_id, code: failure?.code ?? passStopCode(reading), run_id: reading.row.value.telemetry.pass_id, blocked_since: failure?.first_seen ?? passStuckSince(reading.row) };
+    });
   const passSources = new Set(passes.map(blocked => blocked.source_id));
-  return [...(await readManagedSyncFailures(engine, sourceIds))
+  return [...failures
     .filter(failure => failure.code !== 'sync_incomplete' && cursors.has(failure.cursor_key) && !passSources.has(failure.source_id))
     .map(failure => ({ source_id: failure.source_id, code: failure.code, run_id: failure.run_id, blocked_since: failure.first_seen })), ...passes];
 }

@@ -56,8 +56,8 @@ export interface PassLevelInput {
    * stored markers count.
    */
   bootstrap?: boolean;
-  /** The commit the pass pinned (design §3.1): every round reads this level, never a HEAD that moved during the pass. */
-  head?: string;
+  /** The pass imports without the schema pack (`no-schema-pack` or an episode carrying it): its parser expects no pack. */
+  noSchemaPack?: boolean;
 }
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -80,6 +80,10 @@ export interface ShadowLevel {
   selection: SyncSelection;
   /** Re-screen-due hold paths (Git-root paths): a hold-only round's candidates. */
   rescreenDue: string[];
+  /** Held renames (#5988), by the held destination's Git path: the destination still owes its page the move, and the origin's deletion waits for the hold. */
+  heldRenames: Array<{ path: string; rename: { sourcePath: string; slug: string; pageId: number; revision: string } }>;
+  /** Holds on paths outside the level's domain (no file at L, no page, or no longer eligible): the stamp releases them, as discovery did (#6278 B7). */
+  releasableHolds: string[];
   /** Working mode: the stat cache this round's rehash left (`hashWorkingLevel`); the stamp's round is the one a pass remembers. */
   workingCache: WorkingStatCache | null;
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
@@ -267,7 +271,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
     engine.getConfig('sync.include_hidden'),
     input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
-    loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
+    input.pass?.noSchemaPack ? Promise.resolve(null) : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
     sourceMirrorReadOnly(engine, sourceId),
   ]);
   timings.setup = t();
@@ -287,7 +291,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const gitPathOf = memo((origin: string) => { const o = originPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; });
 
   t = timer();
-  const head = input.pass?.head ?? revParse(gitRoot, 'HEAD');
+  const head = revParse(gitRoot, 'HEAD');
   if (!head) throw new Error(`source ${sourceId}: HEAD does not name a commit, so there is no level to read`);
   // Master's rule (sync-discovery.ts): a detached HEAD forces working mode.
   const detached = syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
@@ -339,9 +343,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   // Spellings of one origin that differ only by case or separator: the domain holds each path once, so a count is enough.
   const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
   const spellings = new Map<string, number>();
+  // Only spellings that are files at L count (discovery's case-only respelling whose old file this sync removes is no refusal).
   for (const path of domain) {
-    const live = byOrigin.get(path);
-    if (!tree.has(path) && !(live && !live.deleted)) continue;
+    if (!tree.has(path) && !(mode === 'working' && (untracked.has(path) || index.has(path)))) continue;
     const folded = fold(path);
     spellings.set(folded, (spellings.get(folded) ?? 0) + 1);
   }
@@ -482,6 +486,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.has(hold.path))), full: input.full === true });
   timings.total = total();
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
+    heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
+    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
     paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };

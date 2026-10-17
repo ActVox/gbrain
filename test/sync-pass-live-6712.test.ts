@@ -22,7 +22,9 @@
  * - a committed edit under a different uncommitted edit (committed mode) is held worktree_dirty, the page and the local
  *   file untouched, and the next pass settles instead of counting a not_converged streak; sync.holds=fail stops the run.
  * - a page written straight to the database at a new file's slug is never overwritten by the file: held file_drift (side unknown).
- * - a commit during a pass: every round reads the pinned level (no storage_error from a moved HEAD); the next pass takes the new commit.
+ * - a commit during a pass: the next round reads the new HEAD and its batch freezes that commit (no storage_error from an older pin).
+ * - --no-schema-pack: a first pass converges (its parser expects no pack); a cost-gate deferral is no inherited opt-out;
+ *   a source configured with a strategy, synced with that strategy named (sync --all), stamps last_commit.
  * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
  *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
@@ -304,9 +306,9 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect((await engine.executeRaw<{ source_path: string | null }>("SELECT source_path FROM pages WHERE source_id='default' AND slug IN ('notes/d','notes/e') ORDER BY slug")).map(row => row.source_path)).toEqual([null, null]);
   }, { setup }), 180_000);
 
-  test('a commit landing during a pass: the pass finishes at its pinned level and the next pass imports the new commit', () => managedBrain(async ({ engine, root }) => {
+  test('a commit landing during a pass: the next round imports it from the new HEAD, and the pass ends there', () => managedBrain(async ({ engine, root }) => {
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
-    const pinned = (writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')), commit(root, 'change a'), git(root, 'rev-parse', 'HEAD'));
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
     let moved = false;
     installFaultHook(async (point, detail) => {
       if (point !== 'consumer:prepared' || moved || detail.operation !== 'submit_job') return;
@@ -316,11 +318,39 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     const during = await performManagedSync(engine, OPTS);
     installFaultHook(undefined);
     expect(moved).toBe(true);
-    expect({ status: during.status, to: during.toCommit }).toEqual({ status: 'synced', to: pinned });
+    expect({ status: during.status, to: during.toCommit, added: during.added, modified: during.modified }).toEqual({ status: 'synced', to: git(root, 'rev-parse', 'HEAD'), added: 1, modified: 1 });
     expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!.page.compiled_truth).toContain('A committed change of notes/a.');
-    const next = await performManagedSync(engine, OPTS);
-    expect({ status: next.status, to: next.toCommit }).toEqual({ status: 'synced', to: git(root, 'rev-parse', 'HEAD') });
     expect((await engine.readPageSnapshot('notes/d', { sourceId: 'default' }))!.page.compiled_truth).toContain('A file committed during the pass.');
+    expect((await engine.executeRaw<{ last_commit: string }>("SELECT last_commit FROM sources WHERE id='default'"))[0]!.last_commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect((await performManagedSync(engine, OPTS)).status).toBe('up_to_date');
+  }, { setup }), 180_000);
+
+  test('--no-schema-pack: a three-file first pass converges, and the next pass under the flag is idle', () => managedBrain(async ({ engine }) => {
+    const first = await performManagedSync(engine, { ...OPTS, noSchemaPack: true });
+    expect({ status: first.status, outcome: first.pass?.outcome, remaining: first.pass?.remaining }).toEqual({ status: 'first_sync', outcome: 'synced', remaining: 0 });
+    expect((await engine.executeRaw<{ last_commit: string | null }>("SELECT last_commit FROM sources WHERE id='default'"))[0]!.last_commit).not.toBeNull();
+    expect((await performManagedSync(engine, { ...OPTS, noSchemaPack: true })).status).toBe('up_to_date');
+  }, { setup }), 180_000);
+
+  test('#6696: a cost-gate deferral is the pass\'s own constraint, never an opt-out the next flagless pass inherits', () => managedBrain(async ({ engine }) => {
+    const deferred = await performManagedSync(engine, { sourceId: 'default', noPull: true, noEmbed: true, embedDeferred: true }, { maxPages: 1, maxMs: 60_000 });
+    expect(deferred.status).toBe('partial');
+    const [row] = await engine.executeRaw<{ episode: unknown }>("SELECT completed_keys->0->'obligations'->'episode' AS episode FROM op_checkpoints WHERE op='managed-sync-pass' AND completed_keys->0->>'source_id'='default'");
+    expect(row!.episode ?? null).toBeNull();
+    const imports = await engine.executeRaw<{ no_embed: boolean; deferred: boolean | null }>("SELECT (intent->'processingOptions'->>'noEmbed')::boolean AS no_embed, (intent->>'embedDeferred')::boolean AS deferred FROM persistence_requests WHERE source_id='default' AND intent->>'kind'='managed_sync_import'");
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.every(request => request.no_embed === false && request.deferred === true)).toBe(true);
+    const next = await performManagedSync(engine, { sourceId: 'default', noPull: true });
+    expect(next.status).toBe('first_sync');
+    expect(next.inherited_options).toBeUndefined();
+  }, { setup }), 180_000);
+
+  test('#6696 C1: a source configured with a strategy, synced with that strategy named (sync --all), is the configured selection and stamps last_commit', () => managedBrain(async ({ engine, root }) => {
+    await engine.executeRaw("UPDATE sources SET config=COALESCE(config,'{}'::jsonb)||jsonb_build_object('strategy','markdown') WHERE id='default'");
+    const first = await performManagedSync(engine, { ...OPTS, strategy: 'markdown' });
+    expect({ status: first.status, reason: first.reason }).toEqual({ status: 'first_sync', reason: undefined });
+    expect((await engine.executeRaw<{ last_commit: string | null }>("SELECT last_commit FROM sources WHERE id='default'"))[0]!.last_commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect((await performManagedSync(engine, { ...OPTS, strategy: 'markdown' })).status).toBe('up_to_date');
   }, { setup }), 180_000);
 
   test('probe 54: a pass intent keeps what the #6862 FIFO guard reads, renameFrom included', () => managedBrain(async ({ engine, root }) => {

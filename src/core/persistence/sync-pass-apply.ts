@@ -50,6 +50,7 @@ import { syncClassAction, type SyncClassAction } from './sync-classify.ts';
 import type { SyncAdmission } from './sync-admission.ts';
 import type { Action } from '../agent-output.ts';
 import { slugUnderBoundPrefixes } from '../ops/context.ts';
+import { syncOriginPath } from './sync-origin.ts';
 
 /** Legacy pages the sweep screens per pass after the incarnation's first full round (design §2.7, [estimated]). */
 export const PASS_LEGACY_SWEEP_MAX = 500;
@@ -208,6 +209,8 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
 async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   type Pending = { entry: ShadowPath; code: GitHoldCode; message: string; slug: string | null; meta: Partial<GitHoldMeta>; kind: keyof PassApplyState['holds'] };
   const pending: Pending[] = [];
+  // A held rename's origin waits for its destination's hold (#5988), whatever its page did meanwhile.
+  const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
   for (const entry of level.paths) {
     const r = entry.result;
     if (r.settled || r.inFlight) continue;
@@ -218,6 +221,7 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
         message: `${path}: sync settled this file at the same level in ${streak.streak} passes in a row, but the next round never classified it settled, so sync held it instead of re-importing it every pass; the rest of the source synced.` });
       continue;
     }
+    if (r.cls === 'delete_drift' && heldRenameOrigins.has(syncOriginPath(passEntryPaths(level, entry.path).sourcePath))) continue;
     if (r.cls === 'delete_drift') {
       pending.push({ entry, code: 'file_drift', slug: entry.slug, kind: 'file_gone', meta: { side: 'deleted', state: 'file_gone', ...(entry.revision ? { page_revision: entry.revision } : {}) },
         message: `${path}: the file is gone, but page ${entry.slug} changed in the database since the file was last imported, so sync held the deletion instead of deleting the page; the rest of the source synced.` });

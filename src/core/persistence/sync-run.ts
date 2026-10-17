@@ -1657,9 +1657,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
             ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done), writeWait: writeWaitOf(waited) }) };
         }
         // #6712 PR 4b: a pass's refused stamp, or a write sync.admission paused at publication, ends the pass, never the page.
-        if (done.state !== 'committed' && cursor.passId && (pending.intent.kind === 'managed_sync_checkpoint' || done.error_code === 'admission_paused')) {
-          return { ...result(cursor, done.error_code === 'admission_paused' ? 'partial' : 'blocked_by_failures', done.error_code === 'admission_paused' ? 'admission_paused' : undefined),
-            ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done) }) };
+        if (done.state !== 'committed' && cursor.passId && done.error_code === 'admission_paused') {
+          return { ...result(cursor, 'partial', 'admission_paused'), ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done) }) };
         }
         // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
         // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
@@ -1710,16 +1709,34 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     // #6712 PR 4b (design v3.2 §3.1): a non-company source syncs by the live level-triggered pass; company brains and dry
     // runs keep the frozen manifest and its cursor.
     if (!company && !opts.dryRun) {
+      // The run's report reads the recovered, normalized and converted totals of every batch of the pass, not its last (stamp) batch.
+      const totals: { recovered?: Cursor['counts']['recovered']; fences?: FencesTally; converted: string[] } = { converted: [] };
+      const sum = (a: Record<string, number> = {}, b: Record<string, number> = {}) => Object.fromEntries([...new Set([...Object.keys(a), ...Object.keys(b)])].map(k => [k, (a[k] ?? 0) + (b[k] ?? 0)]));
+      let folded: Cursor | null = null;
+      state.cursor = () => live.cursor ? { ...live.cursor, counts: { ...live.cursor.counts, recovered: totals.recovered, fences: totals.fences }, convertedFromFailed: totals.converted } : null;
       return await runSyncPass(engine, { opts, slice, context, authority, processingOptions, syncOptions, assertActive, signal, state, runStartedAt,
         drainBatch: async (batchKey, batch, sliceBase) => {
           key = batchKey;
           setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
           try { return await drainCursor(batch, await preparationConfigView(engine), false, sliceBase); }
           catch (error) {
+            assertSyncDispatchActive();
             // An abort mid-batch stops the pass with what the batch committed before it.
             if (signal?.aborted && error instanceof Error && error.name === 'AbortError') return result(live.cursor ?? batch, 'partial', 'timeout');
             throw error;
-          } finally { setPassBatch(batchKey, null); }
+          } finally {
+            setPassBatch(batchKey, null);
+            const done = live.cursor;
+            if (done?.passId && done !== folded) {
+              folded = done;
+              const { recovered, fences } = done.counts;
+              if (recovered) totals.recovered = { count: (totals.recovered?.count ?? 0) + recovered.count, sample_paths: [...totals.recovered?.sample_paths ?? [], ...recovered.sample_paths].slice(0, 5),
+                ...((totals.recovered?.comment_values ?? 0) + (recovered.comment_values ?? 0) ? { comment_values: (totals.recovered?.comment_values ?? 0) + (recovered.comment_values ?? 0) } : {}) };
+              if (fences) totals.fences = { count: (totals.fences?.count ?? 0) + fences.count, by_class: sum(totals.fences?.by_class, fences.by_class),
+                sample_paths: [...totals.fences?.sample_paths ?? [], ...fences.sample_paths].slice(0, 5), dirs: sum(totals.fences?.dirs, fences.dirs) };
+              totals.converted = [...new Set([...totals.converted, ...done.convertedFromFailed ?? []])];
+            }
+          }
         } });
     }
     const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
