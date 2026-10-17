@@ -5263,6 +5263,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ],
         "description": "Lowest trust tier to return (the connection floor still applies).",
         "fullSurfaceOnly": true
+      },
+      "beliefs": {
+        "type": "boolean",
+        "fullSurfaceOnly": true,
+        "description": "Add `beliefs`: each belief that changed in the window, before and after, with cause and evidence (belief ledger); entities narrows it."
       }
     },
     "scope": "read",

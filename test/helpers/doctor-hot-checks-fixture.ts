@@ -173,15 +173,12 @@ export const SYNC_DAY = '<sync-day>';
  * exactly that field, and only after checking it: `stamped` is the day read
  * back from the trend row, it must be one of the days read just before and
  * after the sync (two only when the sync crossed midnight UTC), and every
- * `fence_integrity.details.trend[].by_day[].day` must equal it. The fixture
- * sync's soak counter row (`sync_soak_counters.details.by_day[].day`) is
- * stamped by the sync process's own clock, so it must be one of the two days
- * read around the sync and is stored as the same symbol. Any other field,
- * date-like or not, is left for the golden to compare.
+ * `fence_integrity.details.trend[].by_day[].day` must equal it. Any other
+ * field, date-like or not, is left for the golden to compare.
  */
 export function stampSyncDay(report: unknown, stamped: string, syncDays: readonly [string, string]): unknown {
   if (!syncDays.includes(stamped)) throw new Error(`fence trend day ${stamped} is neither the day before (${syncDays[0]}) nor after (${syncDays[1]}) the fixture sync`);
-  const copy = structuredClone(report) as { checks?: Array<{ name: string; details?: { trend?: Array<{ by_day?: Array<{ day: string }> }>; by_day?: Array<{ day: string }> } }> };
+  const copy = structuredClone(report) as { checks?: Array<{ name: string; details?: { trend?: Array<{ by_day?: Array<{ day: string }> }> } }> };
   for (const check of copy.checks ?? []) {
     if (check.name !== 'fence_integrity') continue;
     for (const trend of check.details?.trend ?? []) for (const entry of trend.by_day ?? []) {
@@ -189,11 +186,23 @@ export function stampSyncDay(report: unknown, stamped: string, syncDays: readonl
       entry.day = SYNC_DAY;
     }
   }
+  return copy;
+}
+
+export const SOAK_DAY = '<soak-day>';
+
+/**
+ * The soak counters are stamped on the real clock too (one `op_checkpoints` row per UTC day the fixture recorded an
+ * intervention), so doctor `sync_soak_counters.details.by_day[].day` is that day. This replaces exactly that field, and
+ * only after checking each entry is a day a soak row was recorded for (`recorded`, read back from the database).
+ */
+export function stampSoakDays(report: unknown, recorded: readonly string[]): unknown {
+  const copy = structuredClone(report) as { checks?: Array<{ name: string; details?: { by_day?: Array<{ day: string }> } }> };
   for (const check of copy.checks ?? []) {
     if (check.name !== 'sync_soak_counters') continue;
     for (const entry of check.details?.by_day ?? []) {
-      if (!syncDays.includes(entry.day)) throw new Error(`sync_soak_counters day ${entry.day} is neither the day before (${syncDays[0]}) nor after (${syncDays[1]}) the fixture sync`);
-      entry.day = SYNC_DAY;
+      if (!recorded.includes(entry.day)) throw new Error(`sync_soak_counters day ${entry.day} is not a day the fixture recorded soak counters (${recorded.join(', ') || 'none'})`);
+      entry.day = SOAK_DAY;
     }
   }
   return copy;
