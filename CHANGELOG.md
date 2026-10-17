@@ -19,7 +19,7 @@ identifiers and attribution are available in the pre-removal Git revision
 | Situation | Before | Now |
 |---|---|---|
 | A graph walk (`traverse_graph`, `gbrain graph`, `think` graph context) | enumerated every simple path, capped at 20,000 paths; a page came back once per depth some path reached it, and an edge once per depth | visits each page once, at its shortest distance, and returns each edge once (one hop past its shallower walked endpoint); the pages and edges reached are the same |
-| A walk over a densely linked cluster (12-page clique, depth 5) | 55 to 90 ms on Postgres under the path cap (22 s before the cap) | 4 to 9 ms |
+| A walk over a densely linked cluster (12-page clique, depth 5) | 44 to 91 ms on Postgres under the path cap (22 s before the cap) | 4 to 9 ms |
 | A walk that reaches a large share of the brain | the 20,000-path cap could stop before deeper pages were reached | stops at 20,000 visited pages, shallowest first; the truncation warning names both caps |
 | `frontierCap` on `traverseGraph` | an approximate per-iteration cap applied before deduplication | an exact per-layer cap on new pages, in (slug, id) order |
 
