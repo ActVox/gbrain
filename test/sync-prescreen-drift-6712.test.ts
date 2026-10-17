@@ -9,7 +9,8 @@
  * - a parser change and a byte change are candidates (reparse and import); a record whose revision no longer names the
  *   page is db_ahead and the page is kept; --full screens every matched page;
  * - a database-only edit to a page whose file did not change is db_ahead: neither imported nor held, the body survives
- *   repeated passes, a second edit and sync.holds=fail; under a storage.keep_db prefix it is db_ahead with the keep_db action;
+ *   repeated passes, a second edit and sync.holds=fail; under a storage.keep_db prefix the pass admits its keep_db write
+ *   (the working copy gets the database bytes);
  * - cold upgrade: a database-only edit with no provenance is held file_drift (sides unknown); with partial or obsolete
  *   provenance it is db_ahead; equal-content controls get records, a changed file on a page sync wrote last imports;
  * - an interrupted first pass resumes and does not re-import what it imported; a pass interrupted before HEAD reverted
@@ -19,7 +20,7 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
@@ -185,7 +186,7 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     expect(await bodyOf(engine, 'notes/a')).toContain('The database-only edit of notes/a.');
   }, { databaseUrl, setup }), 180_000);
 
-  test('under a storage.keep_db prefix the drifted page is neither held nor imported; it is db_ahead with the keep_db action', () => managedBrain(async ({ engine, ctx, root }) => {
+  test('under a storage.keep_db prefix the drifted page is neither held nor imported; the pass admits its keep_db write, the file gets the database bytes', () => managedBrain(async ({ engine, ctx, root }) => {
     await engine.setConfig('sync.write_through', 'false');
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
     await databaseOnlyEdit(engine, ctx, 'notes/a', 'The database-only edit of notes/a.');
@@ -194,8 +195,13 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
     const walk = await performManagedSync(engine, OPTS);
     expect(heldOf(walk)).toEqual([]);
     expect(await bodyOf(engine, 'notes/a')).toContain('The database-only edit of notes/a.');
-    expect(await classOf(engine, 'notes/a.md')).toMatchObject({ cls: 'db_ahead', action: 'keep_db' });
+    // The keep_db write publishes the database bytes to the working copy: committed L still differs, so the path is
+    // dirty and settled (design v3.2 §4, published).
     expect(walk).toMatchObject({ pass: { candidates: 0 } });
+    const [row] = await engine.executeRaw<{ admitted: string | null }>("SELECT completed_keys->0->'telemetry'->'counts'->>'keep_db_admitted' AS admitted FROM op_checkpoints WHERE op='managed-sync-pass'");
+    expect(Number(row?.admitted)).toBe(1);
+    expect(await classOf(engine, 'notes/a.md')).toMatchObject({ cls: 'dirty', settled: true });
+    expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('The database-only edit of notes/a.');
   }, { databaseUrl, setup }), 180_000);
 
   test('cold upgrade: a database-only edit with no provenance is held, with partial or obsolete provenance it is db_ahead; no edit is overwritten, in a tree walk or under --full', () => managedBrain(async ({ engine, ctx, root }) => {

@@ -68,11 +68,19 @@ import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
 import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
+<<<<<<< HEAD
 import { serr } from '../console-prefix.ts';
 import { noteIdentityDowngrades } from '../sync-identity-downgrades.ts';
 import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
 import type { PassStamp } from './sync-prepare.ts';
 import { runSyncPass } from './sync-pass-run.ts';
+=======
+import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
+import type { PassStamp } from './sync-prepare.ts';
+import { runSyncPass } from './sync-pass-run.ts';
+import { serr } from '../console-prefix.ts';
+import { noteIdentityDowngrades } from '../sync-identity-downgrades.ts';
+>>>>>>> origin/capy/6712-pr4b-core
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -1663,8 +1671,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         }
         // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
         // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
-        // pass not_converged).
-        if (done.state !== 'committed' && cursor.passId && done.error_code === 'source_changed') {
+        // pass not_converged). A pinned-worktree conflict is not: it settles as a worktree_dirty hold below.
+        if (cursor.passId && fileChangedAfterAdmission(done)) {
           cursor = await saveCursor(engine, key, cursor, committedPast({ ...cursor, counts: { ...cursor.counts } }, pending));
           assertActive();
           continue;

@@ -56,6 +56,8 @@ export interface PassLevelInput {
    * stored markers count.
    */
   bootstrap?: boolean;
+  /** The commit the pass pinned (design §3.1): every round reads this level, never a HEAD that moved during the pass. */
+  head?: string;
 }
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -285,7 +287,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const gitPathOf = memo((origin: string) => { const o = originPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; });
 
   t = timer();
-  const head = revParse(gitRoot, 'HEAD');
+  const head = input.pass?.head ?? revParse(gitRoot, 'HEAD');
   if (!head) throw new Error(`source ${sourceId}: HEAD does not name a commit, so there is no level to read`);
   // Master's rule (sync-discovery.ts): a detached HEAD forces working mode.
   const detached = syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';

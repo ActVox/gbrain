@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import type { Cursor, RetryWait } from './sync-run.ts';
-import { syncExcludePatterns, syncGit, type ManagedSyncContext, type SyncSlugCollision } from './sync-discovery.ts';
+import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncSlugCollision } from './sync-discovery.ts';
 import type { SyncAuthority, SyncProcessingOptions } from './sync-authority.ts';
 import type { PassStamp, SyncCursorOptions } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
@@ -30,13 +30,13 @@ import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, typ
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
-import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, syncImportParserFor } from './sync-holds.ts';
+import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances, syncImportParserFor } from './sync-holds.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
 import { managedCursorKey, resolveManagedCursor, retireManagedCursor } from './sync-cursor-key.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
-import { resolveSlugForPath } from '../sync.ts';
+import { isCodeFilePath, resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
@@ -118,16 +118,35 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   const leaving = new Map(deletes.map(entry => [entry.path, entry]));
   const fresh = imports.filter(entry => !entry.state.page);
   const slugOf = new Map(fresh.map(entry => [entry.path, resolveSlugForPath(entryPaths(level, entry.path).sourcePath)]));
+  // #6727, as discovery does: a new origin with no live page at its slug takes the one legacy page (no recorded origin)
+  // that folds to it; several, or one the importer cannot write, keep the slug and the freeze holds legacy_slug_conflict.
+  const legacySlugs = new Map<string, Pick<SyncEntry, 'legacySlugs' | 'legacyIdVeto'>>();
+  const adopting = fresh.filter(entry => slugOf.get(entry.path) && !isCodeFilePath(entryPaths(level, entry.path).sourcePath));
+  if (adopting.length) {
+    const identities = await engine.executeRaw<LegacyIdentity>("SELECT id, slug, source_path, deleted_at, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND (source_path IS NULL OR slug=ANY($2::text[]))",
+      [level.sourceId, [...new Set(adopting.map(entry => slugOf.get(entry.path)!))]]);
+    const bySlug = new Map(identities.map(page => [page.slug, page]));
+    const discovery = { root: level.root, gitRoot: level.gitRoot, target: level.head, sourceId: level.sourceId } as SyncDiscovery;
+    for (const entry of adopting) {
+      const named: SyncEntry = { ...entryPaths(level, entry.path), action: 'import', working: working(entry) };
+      slugOf.set(entry.path, await adoptLegacyPage(engine, discovery, identities, bySlug.get(slugOf.get(entry.path)!), slugOf.get(entry.path)!, named));
+      if (named.legacySlugs) legacySlugs.set(entry.path, { legacySlugs: named.legacySlugs, ...(named.legacyIdVeto ? { legacyIdVeto: true as const } : {}) });
+    }
+  }
   const slugs = [...new Set([...slugOf.values()].filter(Boolean))];
   const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean }>(
     'SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])', [level.sourceId, slugs]) : [])
     .map(page => [page.slug, page]));
   const gitPathOfOrigin = (origin: string) => level.slugMode === 'source-root' && level.scope ? `${level.scope}/${syncOriginPath(origin)}` : syncOriginPath(origin);
+  // #6887: a both-moved import imports when the page still holds what its recorded disk blob imports (sync-screen.ts driftBaselineContent).
+  const bothDrift = imports.filter(entry => entry.result.cls === 'drift' && entry.result.side === 'both' && entry.pageId !== null);
+  const baselineRecords = await readSyncImportProvenances(engine, level.sourceId, level.incarnation, bothDrift.map(entry => entry.pageId!));
+  const driftBaseline = (entry: ShadowPath) => entry.result.side === 'both' && entry.pageId !== null ? baselineRecords.get(entry.pageId)?.disk_blob_oid ?? undefined : undefined;
   const entries: PassEntry[] = [], collisions: SyncSlugCollision[] = [], skipped: ShadowPath[] = [];
   const claims = new Map<string, ShadowPath[]>();
   for (const entry of imports) {
     const paths = entryPaths(level, entry.path);
-    const base = { ...paths, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side } : {}) };
+    const base = { ...paths, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side, ...(driftBaseline(entry) ? { driftBaseline: driftBaseline(entry) } : {}) } : {}) };
     if (entry.state.page) { entries.push({ ...base, slug: entry.slug!, pageId: entry.pageId, revision: entry.revision }); continue; }
     const slug = slugOf.get(entry.path);
     if (!slug) { skipped.push(entry); continue; }
@@ -143,10 +162,14 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     if (losers.length) collisions.push({ slug, kept: kept ?? entryPaths(level, winner!.path).sourcePath, skipped: losers.map(entry => entryPaths(level, entry.path).sourcePath) });
     if (!winner) continue;
     const paths = entryPaths(level, winner.path);
-    const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug };
+    const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
     if (holder) {
+      // A live page at the slug with no recorded origin (written straight to the database, or by an older gbrain) attests
+      // neither side: the import is guarded as drift of unknown side, so the freeze imports it only as a proven no-op and
+      // otherwise holds file_drift (as discovery's tree walk guards it, sync-prescreen.ts).
       entries.push({ ...base, pageId: Number(holder.id), revision: holder.revision,
-        ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}) });
+        ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}),
+        ...(holder.source_path === null && !holder.deleted ? { drift: 'unknown' as const } : {}) });
       if (holderPath !== null && deleteEntries.delete(holderPath)) renamed.add(holderPath);
       continue;
     }
@@ -353,7 +376,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       value.telemetry.round = round;
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
-        pass: { episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
+        pass: { head, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       levelSlugMode = level.slugMode;

@@ -10,7 +10,9 @@
  * seeding and the reads are the production calls (scripts/bench/sync-convergence-seeded.ts names the raw SQL it needs).
  *
  * Cases whose 4a prediction differs from the design carry it as today: the mix asserts today, so a fix turns the mix red
- * until the case drops it. The (a) findings this validation found (a write-through-off request outside U_db, an absent
+ * until the case drops it. PR 4b's rulings b1-b6 set the design values the mix now asserts (no case carries today): a
+ * re-screen-due hold is held (b2), a page-less file with no deletion proof imports (b1), an absorbed dirty path is
+ * matched (b3), --full imports legacy-marked paths (b5). The mix is read as PR 4b's first pass finds it (no pass row). The (a) findings this validation found (a write-through-off request outside U_db, an absent
  * working-mode path read as unreadable, a spelling refusal without its dry-run receipt) are fixed in 4a; each keeps a
  * focused test below.
  *
@@ -82,7 +84,7 @@ for (const backend of testBackends()) {
       expectRun(committed);
       expect(committed.receipt.deletes).toMatchObject({ count: 1, verdict: 'apply' });
       expect(committed.receipt.db_ahead).toMatchObject({ pending: 1, db_only: 2, unproven: 1 });
-      expect(committed.receipt).toMatchObject({ keep_db_admitted: 2, legacy_unverified: 1, legacy_pageless: 4, decisions: { both: 0, unknown: 0, deleted: 3 } });
+      expect(committed.receipt).toMatchObject({ keep_db_admitted: 2, legacy_unverified: 1, legacy_pageless: 1, decisions: { both: 0, unknown: 0, deleted: 3 } });
 
       const cli = await cliChecks(engine, committed);
       expect({ dry: cli.dryRunExit, status: cli.statusExit }).toEqual({ dry: 0, status: 0 });
