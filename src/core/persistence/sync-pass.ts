@@ -340,14 +340,25 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
   const domain = new Set<string>([...tree.keys(), ...untracked, ...(mode === 'working' ? [...index.keys()].filter(eligible) : []), ...[...byOrigin.keys()].filter(eligible), ...[...markers.keys()].map(gitPathOf).filter(eligible)]);
-  // Spellings of one origin that differ only by case or separator: the domain holds each path once, so a count is enough.
+  // Spellings of one origin that differ only by case or separator (the domain holds each path once).
   const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
-  const spellings = new Map<string, number>();
-  // Only spellings that are files at L count (discovery's case-only respelling whose old file this sync removes is no refusal).
+  const spellings = new Map<string, string[]>();
+  // Files at L count, and so does a live page's separator-spelled origin; a case-only respelling whose old file this sync
+  // removes is no refusal (discovery's one exception).
   for (const path of domain) {
-    if (!tree.has(path) && !(mode === 'working' && (untracked.has(path) || index.has(path)))) continue;
+    const live = byOrigin.get(path);
+    if (!tree.has(path) && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !(live && !live.deleted && live.source_path.includes('\\'))) continue;
     const folded = fold(path);
-    spellings.set(folded, (spellings.get(folded) ?? 0) + 1);
+    spellings.set(folded, [...spellings.get(folded) ?? [], path]);
+  }
+  // As discovery does, only spellings that name one page are twins: a live origin's page slug, else the slug its path names.
+  const twins = new Set<string>();
+  for (const paths of spellings.values()) {
+    if (paths.length < 2) continue;
+    const slugOf = (path: string) => { const live = byOrigin.get(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
+    const bySlug = new Map<string, string[]>();
+    for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
+    for (const group of bySlug.values()) if (group.length > 1) for (const path of group) twins.add(path);
   }
   const reconcilable = [...byOrigin.entries()].filter(([path, row]) => !row.deleted && eligible(path)).length;
   timings.domain = t();
@@ -409,7 +420,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       published: !!attested?.hash && probe?.rawSha256 === attested.hash,
       hold: hold ? { atLevel: holdAtLevel(hold, level, probe?.rawSha256 ?? null) && !moved.has(path), rescreenDue: holdRescreenDue(hold, retry.has(hold.path)), retried: retry.has(hold.path) } : null,
       marker: marker ?? virtualMarker, baseline: needsBaseline ? await baselineOf(path) : null,
-      spelling: (spellings.get(fold(path)) ?? 0) > 1,
+      spelling: twins.has(path),
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && !!row && !row.deleted && record?.full_episode !== input.pass.episodeFullId
         : input.full === true && !!row && !row.deleted,
       fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,

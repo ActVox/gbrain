@@ -51,7 +51,7 @@ import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
 import { managedSyncWriteDiagnostic, writeWaitOf } from './sync-write-diagnostic.ts';
 import { checkpointSuperseded } from './sync-checkpoint-replaced.ts';
 import { publicFailureDetail } from './publication-failure.ts';
-import { dependentHold, fileDriftHold, sharedOriginSurvivor, fileChangedAfterAdmission, headCommittedBytes, idempotentDeletionProof, originFaultHold, pageChangeProof, pageChangedHold, pinnedWorktreeConflict, receiptPageFaultHold, worktreeDirtyHold } from './sync-page-fault.ts';
+import { dependentHold, fileDriftHold, sharedOriginSurvivor, fileChangedAfterAdmission, headCommittedBytes, liveRevision, idempotentDeletionProof, originFaultHold, pageChangeProof, pageChangedHold, pinnedWorktreeConflict, receiptPageFaultHold, worktreeDirtyHold } from './sync-page-fault.ts';
 import { faultPoint } from './fault-points.ts';
 import { syncCursorOptions } from './sync-slices.ts';
 import { pipelined } from '../page-state/transactions.ts';
@@ -1448,8 +1448,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         }
         // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
         // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
-        // pass not_converged). A pinned-worktree conflict is not: it settles as a worktree_dirty hold below.
-        if (cursor.passId && fileChangedAfterAdmission(done)) {
+        // pass not_converged). A pinned-worktree conflict is not: it settles as a worktree_dirty hold below. So is an import whose
+        // page identity another writer changed after the freeze (a repair created the page at its slug): its page moved.
+        if (cursor.passId && (fileChangedAfterAdmission(done) || (done.error_code === 'page_identity_changed'
+          && await liveRevision(engine, context.sourceId, pending) !== (pending.intent.expected_revision == null ? null : String(pending.intent.expected_revision))))) {
           cursor = await saveCursor(engine, key, cursor, committedPast({ ...cursor, counts: { ...cursor.counts } }, pending));
           assertActive();
           continue;

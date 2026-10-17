@@ -67,11 +67,27 @@ export async function readSyncAdmissionSetting(engine: Exec): Promise<SyncAdmiss
   return { ...setting, set_at: iso(raw_set_at) };
 }
 
+/** The raw setting row: the stored config value and the dating row's value and `set_at`. */
+export interface SyncAdmissionSettingRow { stored: string | null; row_value: string | null; set_at: string | null }
+
+/**
+ * The setting's columns and joins for a read that folds it in (`sync status` rides its source read, keeping its statement
+ * budget): `$k`..`$k+2` bind `SYNC_ADMISSION_SETTING_PARAMS`, and the columns are `admission_stored`, `admission_row_value`
+ * and `admission_set_at`.
+ */
+export const syncAdmissionSettingSql = (k: number) => ({
+  columns: `ac.value AS admission_stored, ao.completed_keys->0->>'value' AS admission_row_value, ao.completed_keys->0->>'set_at' AS admission_set_at`,
+  joins: `LEFT JOIN config ac ON ac.key=$${k} LEFT JOIN op_checkpoints ao ON ao.op=$${k + 1} AND ao.fingerprint=$${k + 2}` });
+export const SYNC_ADMISSION_SETTING_PARAMS = [SYNC_ADMISSION_KEY, SYNC_ADMISSION_SET_OP, SET_FINGERPRINT];
+
 async function readSetting(engine: Exec): Promise<Omit<SyncAdmissionSetting, 'set_at'> & { raw_set_at: string | null }> {
-  const [row] = await engine.executeRaw<{ stored: string | null; row_value: string | null; set_at: string | null }>(
+  const [row] = await engine.executeRaw<SyncAdmissionSettingRow>(
     `SELECT c.value AS stored, o.completed_keys->0->>'value' AS row_value, o.completed_keys->0->>'set_at' AS set_at
        FROM (SELECT 1) one LEFT JOIN config c ON c.key=$1 LEFT JOIN op_checkpoints o ON o.op=$2 AND o.fingerprint=$3`,
-    [SYNC_ADMISSION_KEY, SYNC_ADMISSION_SET_OP, SET_FINGERPRINT]);
+    SYNC_ADMISSION_SETTING_PARAMS);
+  return settingOf(row);
+}
+function settingOf(row: SyncAdmissionSettingRow | undefined): Omit<SyncAdmissionSetting, 'set_at'> & { raw_set_at: string | null } {
   const stored = row?.stored ?? null;
   return { value: parseSyncAdmission(stored), stored, raw_set_at: stored !== null && row?.row_value === stored ? row.set_at : null };
 }
@@ -92,10 +108,10 @@ export async function writeSyncAdmission(engine: Pick<BrainEngine, 'transaction'
  * `sync status`'s `admission` of one source incarnation (design §8). `effective` is always true for `normal`; otherwise
  * it is false while the source's pass row is `open` with `started_at` before `set_at` and its `lease_token` holds the
  * live drain lease, or while a destructive request of the incarnation admitted before `set_at` is still queued,
- * running or recovering.
+ * running or recovering. `read` is the setting row a caller already read with `syncAdmissionSettingSql`.
  */
-export async function syncAdmissionStatus(engine: Exec, sourceId: string, incarnation: string): Promise<SyncAdmissionStatus> {
-  const { value, raw_set_at } = await readSetting(engine);
+export async function syncAdmissionStatus(engine: Exec, sourceId: string, incarnation: string, read?: SyncAdmissionSettingRow): Promise<SyncAdmissionStatus> {
+  const { value, raw_set_at } = read ? settingOf(read) : await readSetting(engine);
   const set_at = iso(raw_set_at);
   if (value === 'normal') return { value, set_at, effective: true };
   const [row] = await engine.executeRaw<{ pinned: boolean; destructive: boolean }>(`SELECT
