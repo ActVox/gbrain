@@ -14,7 +14,7 @@ import { preflightSyncCapacity } from './sync-capacity-preflight.ts';
 import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
-import { assertSyncEntryOrigin, discoverManagedSync, readManagedSyncRows, resolveManagedSyncContext, readSyncFile, syncGit, type SyncDiscovery } from './sync-discovery.ts';
+import { assertSyncEntryOrigin, discoverManagedSync, readManagedSyncRows, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
 import { checkpointRevival } from './sync-slug-mode.ts';
 import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
@@ -1252,6 +1252,97 @@ async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: {
   }
 }
 
+/** ENG-A7: admits the cursor's frozen head while the cursor (or the pass batch) still holds it, under the drain lease; null when the cursor moved. */
+function admitPendingWrite(engine: BrainEngine, key: string, admitting: Cursor, pending: Pending, assertActive: () => void) {
+  return retryWriteAdmission(pending.requestId, remaining => engine.transaction(async tx => {
+    assertActive();
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+      [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
+    const accepted = await admitWriteInTransaction(tx, { requestId: pending.requestId, operation: 'submit_job',
+      sourceId: admitting.sourceId, sourceIncarnation: admitting.incarnation, slug: pending.slug, pageId: pending.pageId,
+      worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation, ownerEpoch: admitting.binding.owner_epoch,
+      principal: admitting.authority.writer.principal, authority: admitting.authority.writer, callerIntent: pending.intent, intent: pending.intent });
+    // ENG-A7: after the counter locks (the publication lock order), admit only while the cursor still holds this entry
+    // with this intent (#6075: a bulk pass may have grouped the head since this pass read it).
+    if (isPassBatchKey(key)) {
+      // #6712 PR 4b: a pass batch has no cursor row; the lease (below) fences it, and the batch must still hold this entry.
+      const head = readPassBatch<Cursor>(key)?.pending;
+      if (head?.requestId !== pending.requestId || digest(head.intent) !== digest(pending.intent)) throw new CursorMoved();
+    } else {
+      const [held] = await tx.executeRaw<{ request_id: string | null; same: boolean | null }>(`SELECT completed_keys->0->'pending'->>'requestId' AS request_id,
+        completed_keys->0->'pending'->'intent' = $3::text::jsonb AS same FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, JSON.stringify(pending.intent)]);
+      if (held?.request_id !== pending.requestId || held.same !== true) throw new CursorMoved();
+    }
+    await assertDrainLease(tx, admitting.sourceId);
+    await assertPassAdmission(tx, [pending.intent]);
+    assertActive();
+    return accepted;
+  }), undefined, error => engine.reconnect({ error })).catch(error => cursorMovedAdmission(engine, key, admitting, pending, error));
+}
+
+/** A pass's recovered, normalized and converted totals, summed over its batches. */
+type PassTotals = { recovered?: Cursor['counts']['recovered']; fences?: FencesTally; converted: string[] };
+function foldPassTotals(totals: PassTotals, done: Cursor): void {
+  const sum = (a: Record<string, number> = {}, b: Record<string, number> = {}) => Object.fromEntries([...new Set([...Object.keys(a), ...Object.keys(b)])].map(k => [k, (a[k] ?? 0) + (b[k] ?? 0)]));
+  const { recovered, fences } = done.counts;
+  if (recovered) totals.recovered = { count: (totals.recovered?.count ?? 0) + recovered.count, sample_paths: [...totals.recovered?.sample_paths ?? [], ...recovered.sample_paths].slice(0, 5),
+    ...((totals.recovered?.comment_values ?? 0) + (recovered.comment_values ?? 0) ? { comment_values: (totals.recovered?.comment_values ?? 0) + (recovered.comment_values ?? 0) } : {}) };
+  if (fences) totals.fences = { count: (totals.fences?.count ?? 0) + fences.count, by_class: sum(totals.fences?.by_class, fences.by_class),
+    sample_paths: [...totals.fences?.sample_paths ?? [], ...fences.sample_paths].slice(0, 5), dirs: sum(totals.fences?.dirs, fences.dirs) };
+  totals.converted = [...new Set([...totals.converted, ...done.convertedFromFailed ?? []])];
+}
+
+/** #6712: whether a stopped company-brain run re-freezes its head with this run's processing options (an approved run keeps its own). */
+async function companyRetryOwed(engine: BrainEngine, cursor: Cursor, companyStop: NonNullable<Awaited<ReturnType<typeof recordedStop>>>,
+  run: { processingOptions: NonNullable<Cursor['processingOptions']>; syncOptions: Cursor['syncOptions']; repoPath: string | undefined; assertActive: () => void }): Promise<boolean> {
+  const { processingOptions, syncOptions, assertActive } = run;
+  const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
+  const unfinished = await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) LIMIT 1", [cursor.sourceId]);
+  assertActive();
+  // #6712: a legacy knock-on is re-frozen in place by the drain (refreezeInPlace), within its stop bound.
+  // The approved manifest pins the content, so a content refusal this version recorded replays until the approval changes.
+  if (!(!unfinished.length && (failed && ['failed', 'conflict', 'cancelled'].includes(failed.state) && !isSyncKnockOn(failed) && !replaysContentRefusal(failed, companyStop, () => true)
+    || !cursor.pending && !cursor.processingOptions))) return false;
+  if (cursor.processingOptions && digest(cursor.processingOptions) !== digest(processingOptions)) {
+    throw syncRunRefusal('invalid_params', 'The approved company sync must retain its original processing options.',
+      { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? syncOptions, repoPath: run.repoPath },
+      `The unfinished company-brain sync of source ${cursor.sourceId} was approved with ${SYNC_PROCESSING_KEYS.map(key => `${key}=${cursor!.processingOptions![key]}`).join(', ')}, and its retry must keep exactly those processing options; nothing was retried.`);
+  }
+  return true;
+}
+
+/** A cursor written under an older source binding (incarnation, worktree, topology, owner epoch or root) never drains. */
+function assertCursorBinding(cursor: Cursor, context: ManagedSyncContext, syncOptions: Cursor['syncOptions'], repoPath: string | undefined): void {
+  if (cursor.incarnation !== context.incarnation || cursor.binding.worktree_id !== context.binding.worktree_id ||
+      String(cursor.binding.topology_generation) !== String(context.binding.topology_generation) ||
+      String(cursor.binding.owner_epoch) !== String(context.binding.owner_epoch) || cursor.root !== context.root) {
+    throw syncRunRefusal('source_changed', 'The unfinished sync cursor belongs to an older source binding.',
+      { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? syncOptions, repoPath },
+      `The unfinished sync cursor of source ${cursor.sourceId} was written under an older binding (its owner epoch, topology generation, worktree or root changed since), so this run stopped without importing; the retry rediscovers against the current binding.`);
+  }
+}
+
+/** Records a run's failure (not transient back-pressure, a lost connection or a statement timeout) and points its message at the retry. */
+async function recordRunFailure(engine: BrainEngine, error: unknown, run: { cursor: Cursor | null; key: string; phase: ManagedSyncFailure['phase']; discoveryTarget: string | null;
+  discoveryRun: string; context: ManagedSyncContext; remote: boolean; syncOptions: Cursor['syncOptions']; processingOptions: NonNullable<Cursor['processingOptions']>; repoPath: string | undefined }): Promise<void> {
+  const { cursor, key, phase, discoveryTarget, discoveryRun, context, syncOptions, processingOptions } = run;
+  const code = error instanceof OperationError ? error.code : 'storage_error';
+  // A refresh fence, or an admission refused while other requests hold the writer's outstanding cap (#6278: the drain
+  // waits for them), is transient admission back-pressure, not a sync failure to record. #6340: neither is a lost
+  // database connection or a statement timeout: the cursor and its frozen manifest stay, and the next pass resumes them.
+  if (!['permission_denied', 'worktree_refreshing', 'refresh_recovery_required'].includes(code) && !isWriteCapacityWait(error) && !(error instanceof LockStolenError)
+    && !isRetryableConnError(error) && !isStatementTimeoutError(error)) {
+    const [stored] = cursor ? [] : await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]);
+    const failedCursor = cursor ?? stored?.completed_keys?.[0];
+    const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,
+      message: error instanceof Error ? error.message : String(error), request_id: failedCursor?.pending?.requestId ?? null,
+      run_id: failedCursor?.runId ?? discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
+      syncOptions: failedCursor?.syncOptions ?? syncOptions, processingOptions: failedCursor?.processingOptions ?? processingOptions, phase, state: 'failed',
+      observation_id: failedCursor ? `${failedCursor.runId}:${failedCursor.index}:${phase}:${code}` : `${key}:discovery:${discoveryTarget}:${code}` });
+    if (error instanceof Error) error.message = run.remote ? 'Managed sync is blocked; ask the host operator to inspect doctor.' : `${formatManagedSyncFailure(failure)} Fix the cause, then run: ${managedSyncRetryCommand(failure, run.repoPath)}`;
+  }
+}
+
 /**
  * #6712 PR 1: the key this pass reads and the older keys folded in (`resolveManagedCursor`). A remote caller folds nothing
  * in: the cursors it would cancel or retire may belong to another principal (it adopts only its own). A superseded run's
@@ -1397,30 +1488,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           continue;
         }
         const admitting = cursor;
-        const row = prior ?? await retryWriteAdmission(pending.requestId, remaining => engine.transaction(async tx => {
-          assertActive();
-          await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
-            [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
-          const accepted = await admitWriteInTransaction(tx, { requestId: pending.requestId, operation: 'submit_job',
-            sourceId: admitting.sourceId, sourceIncarnation: admitting.incarnation, slug: pending.slug, pageId: pending.pageId,
-            worktreeId: admitting.binding.worktree_id, topologyGeneration: admitting.binding.topology_generation, ownerEpoch: admitting.binding.owner_epoch,
-            principal: admitting.authority.writer.principal, authority: admitting.authority.writer, callerIntent: pending.intent, intent: pending.intent });
-          // ENG-A7: after the counter locks (the publication lock order), admit only while the cursor still holds this entry
-          // with this intent (#6075: a bulk pass may have grouped the head since this pass read it).
-          if (isPassBatchKey(key)) {
-            // #6712 PR 4b: a pass batch has no cursor row; the lease (below) fences it, and the batch must still hold this entry.
-            const head = readPassBatch<Cursor>(key)?.pending;
-            if (head?.requestId !== pending.requestId || digest(head.intent) !== digest(pending.intent)) throw new CursorMoved();
-          } else {
-            const [held] = await tx.executeRaw<{ request_id: string | null; same: boolean | null }>(`SELECT completed_keys->0->'pending'->>'requestId' AS request_id,
-              completed_keys->0->'pending'->'intent' = $3::text::jsonb AS same FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key, JSON.stringify(pending.intent)]);
-            if (held?.request_id !== pending.requestId || held.same !== true) throw new CursorMoved();
-          }
-          await assertDrainLease(tx, admitting.sourceId);
-          await assertPassAdmission(tx, [pending.intent]);
-          assertActive();
-          return accepted;
-        }), undefined, error => engine.reconnect({ error })).catch(error => cursorMovedAdmission(engine, key, admitting, pending, error));
+        const row = prior ?? await admitPendingWrite(engine, key, admitting, pending, assertActive);
         if (!row) { cursor = await currentCursor(engine, key, cursor); continue; }
         await validateSyncAuthority(engine, cursor.authority, pending.slug);
         assertSyncDispatchActive(); stampDrainStep('await_receipt', signal);
@@ -1490,8 +1558,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     // runs keep the frozen manifest and its cursor.
     if (!company && !opts.dryRun) {
       // The run's report reads the recovered, normalized and converted totals of every batch of the pass, not its last (stamp) batch.
-      const totals: { recovered?: Cursor['counts']['recovered']; fences?: FencesTally; converted: string[] } = { converted: [] };
-      const sum = (a: Record<string, number> = {}, b: Record<string, number> = {}) => Object.fromEntries([...new Set([...Object.keys(a), ...Object.keys(b)])].map(k => [k, (a[k] ?? 0) + (b[k] ?? 0)]));
+      const totals: PassTotals = { converted: [] };
       let folded: Cursor | null = null;
       state.cursor = () => live.cursor ? { ...live.cursor, counts: { ...live.cursor.counts, recovered: totals.recovered, fences: totals.fences }, convertedFromFailed: totals.converted } : null;
       return await runSyncPass(engine, { opts, slice, context, authority, processingOptions, syncOptions, assertActive, signal, state, runStartedAt,
@@ -1511,12 +1578,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
             const done = live.cursor;
             if (done?.passId && done !== folded) {
               folded = done;
-              const { recovered, fences } = done.counts;
-              if (recovered) totals.recovered = { count: (totals.recovered?.count ?? 0) + recovered.count, sample_paths: [...totals.recovered?.sample_paths ?? [], ...recovered.sample_paths].slice(0, 5),
-                ...((totals.recovered?.comment_values ?? 0) + (recovered.comment_values ?? 0) ? { comment_values: (totals.recovered?.comment_values ?? 0) + (recovered.comment_values ?? 0) } : {}) };
-              if (fences) totals.fences = { count: (totals.fences?.count ?? 0) + fences.count, by_class: sum(totals.fences?.by_class, fences.by_class),
-                sample_paths: [...totals.fences?.sample_paths ?? [], ...fences.sample_paths].slice(0, 5), dirs: sum(totals.fences?.dirs, fences.dirs) };
-              totals.converted = [...new Set([...totals.converted, ...done.convertedFromFailed ?? []])];
+              foldPassTotals(totals, done);
             }
           }
         } });
@@ -1529,23 +1591,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     if (cursor && !cursor.done && !opts.dryRun) cursor = await adoptCursor(engine, key, cursor, { authority, processingOptions, embedDeferred: opts.embedDeferred, assertActive });
     assertActive();
     const companyStop = company && cursor && !cursor.done && !opts.dryRun ? await recordedStop(engine, key, cursor.runId) : null;
-    if (companyStop && cursor) {
-      const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
-      const unfinished = await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND (state IN ('queued','running','recovering') OR recovery IS NOT NULL) LIMIT 1", [cursor.sourceId]);
-      assertActive();
-      // #6712: a legacy knock-on is re-frozen in place by the drain (refreezeInPlace), within its stop bound.
-      // The approved manifest pins the content, so a content refusal this version recorded replays until the approval changes.
-      if (!unfinished.length && (failed && ['failed', 'conflict', 'cancelled'].includes(failed.state) && !isSyncKnockOn(failed) && !replaysContentRefusal(failed, companyStop, () => true)
-        || !cursor.pending && !cursor.processingOptions)) {
-        if (cursor.processingOptions && digest(cursor.processingOptions) !== digest(processingOptions)) {
-          throw syncRunRefusal('invalid_params', 'The approved company sync must retain its original processing options.',
-            { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? syncOptions, repoPath: frozenRun.repoPath },
-            `The unfinished company-brain sync of source ${cursor.sourceId} was approved with ${SYNC_PROCESSING_KEYS.map(key => `${key}=${cursor!.processingOptions![key]}`).join(', ')}, and its retry must keep exactly those processing options; nothing was retried.`);
-        }
-        phase = 'freeze';
-        const retry = { ...cursor, processingOptions };
-        cursor = await saveCursor(engine, key, cursor, { ...retry, pending: await freezeEntry(engine, retry, key, assertActive, frozenRun) as Pending }, true, assertActive);
-      }
+    if (companyStop && cursor && await companyRetryOwed(engine, cursor, companyStop, { processingOptions, syncOptions, repoPath: frozenRun.repoPath, assertActive })) {
+      phase = 'freeze';
+      const retry = { ...cursor, processingOptions };
+      cursor = await saveCursor(engine, key, cursor, { ...retry, pending: await freezeEntry(engine, retry, key, assertActive, frozenRun) as Pending }, true, assertActive);
     }
     const startupConfig = await preparationConfigView(engine); // #5984 G3: one config read answers the startup's config reads
     assertActive();
@@ -1581,13 +1630,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         fresh.retryTaken?.length ? tx => clearGitHoldRetryPaths(tx, fresh.sourceId, fresh.incarnation, fresh.retryTaken!) : undefined);
     }
     assertActive();
-    if (cursor.incarnation !== context.incarnation || cursor.binding.worktree_id !== context.binding.worktree_id ||
-        String(cursor.binding.topology_generation) !== String(context.binding.topology_generation) ||
-        String(cursor.binding.owner_epoch) !== String(context.binding.owner_epoch) || cursor.root !== context.root) {
-      throw syncRunRefusal('source_changed', 'The unfinished sync cursor belongs to an older source binding.',
-        { sourceId: cursor.sourceId, processingOptions: cursor.processingOptions, syncOptions: cursor.syncOptions ?? syncOptions, repoPath: frozenRun.repoPath },
-        `The unfinished sync cursor of source ${cursor.sourceId} was written under an older binding (its owner epoch, topology generation, worktree or root changed since), so this run stopped without importing; the retry rediscovers against the current binding.`);
-    }
+    assertCursorBinding(cursor, context, syncOptions, frozenRun.repoPath);
     if (opts.dryRun) return dryRun(cursor);
     return await drainCursor(cursor, startupConfig) as SyncResult;
   } catch (error) {
@@ -1600,21 +1643,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0, embedded: 0, pagesAffected: [], filesImported: 0, bankedFiles: 0 };
     }
     if (!opts.dryRun) {
-      const code = error instanceof OperationError ? error.code : 'storage_error';
-      // A refresh fence, or an admission refused while other requests hold the writer's outstanding cap (#6278: the drain
-      // waits for them), is transient admission back-pressure, not a sync failure to record. #6340: neither is a lost
-      // database connection or a statement timeout: the cursor and its frozen manifest stay, and the next pass resumes them.
-      if (!['permission_denied', 'worktree_refreshing', 'refresh_recovery_required'].includes(code) && !isWriteCapacityWait(error) && !(error instanceof LockStolenError)
-        && !isRetryableConnError(error) && !isStatementTimeoutError(error)) {
-        const [stored] = cursor ? [] : await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]);
-        const failedCursor = cursor ?? stored?.completed_keys?.[0];
-        const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,
-          message: error instanceof Error ? error.message : String(error), request_id: failedCursor?.pending?.requestId ?? null,
-          run_id: failedCursor?.runId ?? discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
-          syncOptions: failedCursor?.syncOptions ?? syncOptions, processingOptions: failedCursor?.processingOptions ?? processingOptions, phase, state: 'failed',
-          observation_id: failedCursor ? `${failedCursor.runId}:${failedCursor.index}:${phase}:${code}` : `${key}:discovery:${discoveryTarget}:${code}` });
-        if (error instanceof Error) error.message = authority.writer.remote ? 'Managed sync is blocked; ask the host operator to inspect doctor.' : `${formatManagedSyncFailure(failure)} Fix the cause, then run: ${managedSyncRetryCommand(failure, frozenRun.repoPath)}`;
-      }
+      await recordRunFailure(engine, error, { cursor, key, phase, discoveryTarget, discoveryRun, context, remote: authority.writer.remote, syncOptions, processingOptions, repoPath: frozenRun.repoPath });
     }
     throw error;
   }

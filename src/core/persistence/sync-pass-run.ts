@@ -313,15 +313,15 @@ async function writeLegacyMarkers(engine: BrainEngine, level: ShadowLevel): Prom
   return rows.length;
 }
 
-/** The pass of one managed, non-company source (module header). */
-export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Promise<SyncResult> {
+/**
+ * The pass's pin (design §2.2): its reads, mode, selection, options, kind and the row it opens; `ended` when the legacy
+ * cursors' retirement ends the pass before it pins.
+ */
+async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNullable<ReturnType<typeof currentDrainLease>>, started: number) {
   const { opts, context, authority, assertActive } = input;
   const { sourceId, incarnation } = context;
   const remote = authority.writer.remote;
-  const lease = currentDrainLease(sourceId);
-  if (!lease) throw new Error(`The live sync pass of ${sourceId} runs only under the source's drain lease.`);
-  lease.tailClear = false;
-  const started = Date.now(), startedAt = new Date(started).toISOString();
+  const startedAt = new Date(started).toISOString();
   // Pin (design §2.2): the row, sync.admission, HEAD and the mode. The reads the kind needs ride the same round trip: the
   // selection's patterns, the schema pack, the tail, the retry row, the source's holds and the idle probe (which reads the
   // row's watermark and open ids itself). #6712 PR 4b: the legacy cursors' retirement runs beside them; it writes none of
@@ -334,14 +334,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     engine.executeRaw(`SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=ANY($1::text[]) LIMIT 1`, [passFailureKeys(sourceId, incarnation)])] as const);
   pin.catch(() => undefined);
   const handover = await retireLegacyCursors(engine, { sourceId, incarnation, remote, assertActive });
-  const empty = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : context.source.last_commit ?? '',
-    added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0, embedded: 0, pagesAffected: [], filesImported: 0, bankedFiles: 0, ...(reason ? { reason } : {}) });
-  if (handover.wait) return { ...empty('partial', 'writer_pending'), ...(remote ? {} : { retryWait: handover.wait }) };
-  if (handover.hostRequired) return empty('blocked_by_failures', 'reconcile_host_required');
+  const empty = (status: SyncResult['status'], reason?: SyncResult['reason']) => emptyPassResult(context, remote, status, reason);
+  if (handover.wait) return { ended: { ...empty('partial', 'writer_pending'), ...(remote ? {} : { retryWait: handover.wait }) } };
+  if (handover.hostRequired) return { ended: empty('blocked_by_failures', 'reconcile_host_required') };
   const [prior, admission, configuredWorking, patterns, loadedPack, tail, retry, sourceHolds, rowProbe, failed] = await pin;
   assertActive();
   const [headLine, refLine] = syncGit(context.gitRoot, ['rev-parse', 'HEAD', '--abbrev-ref', 'HEAD']).split('\n');
-  let head = headLine!.trim();
+  const head = headLine!.trim();
   const detached = refLine?.trim() === 'HEAD';
   const mode: SyncSelection['mode'] = detached || (opts.workingTree ?? configuredWorking === 'true') ? 'working' : 'committed';
   const selection = passSelection(patterns, opts, context, mode);
@@ -361,7 +360,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   // A pass that admits under an opt-out opens an episode carrying it (design §6), when it admits its first batch.
   const optOutEpisode: PassEpisode | null = !obligations.episode && (requested.noEmbed || requested.noExtract || requested.noSchemaPack) ? { opened_at: startedAt, selection,
     inherited: { noEmbed: requested.noEmbed, noExtract: requested.noExtract, noSchemaPack: requested.noSchemaPack, from: 'flag' } } : null;
-  let episode = obligations.episode;
+  const episode = obligations.episode;
   // A flagless pass keeps the open episode's opt-outs (#6712 PR 1's inherited_options contract).
   const processingOptions: SyncProcessingOptions = { noEmbed: requested.noEmbed || !!episode?.inherited.noEmbed, noExtract: requested.noExtract || !!episode?.inherited.noExtract,
     noSchemaPack: requested.noSchemaPack || !!episode?.inherited.noSchemaPack };
@@ -397,30 +396,135 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       counts: {}, duration_ms: null, timings_ms: {} } };
   // The incarnation's legacy markers (§2.7 b1) are owed until a local pass wrote them, not only by its first row.
   const markersOwed = () => remote ? !prior : !value.obligations.legacy_markers_at;
+  return { prior, admission, tail, retry, failed, head, mode, selection, configured, selectionFp, parserFp, obligations, passId, optOutEpisode, episode,
+    processingOptions, inherited, pack, converged, cacheKey, kindStarted, working, kind, value, markersOwed };
+}
+
+/** A pass result that imported nothing, at the source's last commit. */
+function emptyPassResult(context: ManagedSyncContext, remote: boolean, status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult {
+  return { status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : context.source.last_commit ?? '',
+    added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0, embedded: 0, pagesAffected: [], filesImported: 0, bankedFiles: 0, ...(reason ? { reason } : {}) };
+}
+
+/** Master's up_to_date for an idle tick (a complete check that found nothing): only last_sync_at, plus the pass row's count. */
+async function stampIdlePass(engine: BrainEngine, input: SyncPassInput, lease: NonNullable<ReturnType<typeof currentDrainLease>>, started: number, pinned: Exclude<Awaited<ReturnType<typeof pinPass>>, { ended: SyncResult }>): Promise<SyncResult> {
+  const { opts, context, authority, assertActive } = input;
+  const { sourceId, incarnation } = context;
+  const remote = authority.writer.remote;
+  const { value, converged, episode, passId, kindStarted, failed, tail, head, inherited } = pinned;
+  const at = new Date().toISOString();
+  value.obligations.converged = { ...converged!, passes_since_full: converged!.passes_since_full + 1 };
+  value.obligations.stuck_since = null;
+  // Design §7: an owner approval (--yes) on an idle tick still makes an unknown cost known again.
+  if (opts.costApproved && value.obligations.cost?.approved_usd === null) value.obligations.cost = (await passCostDecision(engine, { sourceId, incarnation,
+    scope: episode?.full_id ?? passId, priorRow: true, prior: value.obligations.cost, approved: true })).cost;
+  value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started, timings_ms: { setup: kindStarted - started, kind: Date.now() - kindStarted } };
+  await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
+    assertActive();
+    // One round trip: the lease check, the stamp and the row (started at the transaction's clock) are pipelined; a lost
+    // lease rolls the other two back.
+    await pipelined(tx, [() => assertDrainLease(tx, sourceId), () => tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]),
+      () => writePassRow(tx, value, { pin: true, clock: true })]);
+  }, principalAttribution(authority.writer.principal)));
+  // A failure is recorded only under the lease this pass holds, so none recorded at pin means none to clear.
+  if (failed.length) await clearPassFailures(engine, sourceId, incarnation);
+  // Nor can a tail be owed since the pin read none: the lease's holder reads none after it (sync-run.ts).
+  lease.tailClear = !tail;
+  return { ...emptyPassResult(context, remote, 'up_to_date'), toCommit: remote ? '' : head, ...(inherited.length ? { inherited_options: inherited } : {}) };
+}
+
+/**
+ * A round's unsettled paths by what the pass does with them: deletes and imports to batch, in-flight writes to wait for,
+ * settle mismatches, and owed paths it cannot settle. A path settled earlier in this pass is admitted at most once more.
+ */
+async function triageRound(level: ShadowLevel, input: { S: Map<string, string>; legacyWaived: Set<string>; readmitted: Set<string>; admission: string; remote: boolean;
+  counts: { pausedDeletes: number } }) {
+  const { S, legacyWaived, readmitted, admission, remote, counts } = input;
+  const settledKey = (path: string, levelOid: string | null) => `${path}\0${levelOid ?? ''}`;
+  const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
+  const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
+  const step = loopYield();
+  for (const entry of level.paths) {
+    if (step.due()) await step.pause();
+    const r = entry.result;
+    if (r.settled) continue;
+    if (r.inFlight) { inFlight.push(entry); continue; }
+    if (S.has(settledKey(entry.path, entry.state.level))) {
+      // A hold this pass wrote or re-screened at L, or a slug collision it skipped, is that path's fate here, even when
+      // its code re-screens every pass or the skipped twin still classifies as an import.
+      if (entry.state.hold?.atLevel || S.get(settledKey(entry.path, entry.state.level)) === 'collision'
+        || legacyWaived.has(settledKey(entryPaths(level, entry.path).path, entry.state.level))) continue;
+      // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
+      const again = settledKey(entry.path, entry.state.level);
+      if (readmitted.has(again)) { mismatch.push(entry); continue; }
+      readmitted.add(again);
+    }
+    if (r.action === 'delete') {
+      if (heldRenameOrigins.has(syncOriginPath(entryPaths(level, entry.path).sourcePath))) { S.set(settledKey(entry.path, entry.state.level), 'rename_held'); continue; }
+      if (admission !== 'normal') { S.set(settledKey(entry.path, entry.state.level), 'paused_deletes'); counts.pausedDeletes++; continue; }
+      deletes.push(entry);
+    } else if (r.action === 'import' || r.action === 'reparse' || (!remote && (r.cls === 'drift' || r.cls === 'dirty'))) imports.push(entry);
+    else owed.push(entry);
+  }
+  return { deletes, imports, inFlight, mismatch, owed };
+}
+
+/**
+ * v3 §3.3: a pass that finds nothing at last_commit = T admits no checkpoint; it keeps master's up_to_date (only
+ * last_sync_at), and its full round refreshes the converged watermark so the next tick can be idle.
+ */
+async function stampUnchangedPass(engine: BrainEngine, input: SyncPassInput, round: { value: ManagedSyncPassValue; level: ShadowLevel; head: string; kind: PassKind;
+  converged: ManagedSyncPassValue['obligations']['converged']; parserFp: string; pack: string | null; selectionFp: string; passId: string; startedAt: string; started: number;
+  counts: Record<string, number>; applied: ReturnType<typeof newPassApplyState> }): Promise<void> {
+  const { context, authority, assertActive } = input;
+  const { sourceId, incarnation } = context;
+  const { value, level, head, kind, converged, parserFp, pack, selectionFp, passId, startedAt, started, counts, applied } = round;
+  const at = new Date().toISOString();
+  await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
+    assertActive();
+    await assertDrainLease(tx, sourceId);
+    await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
+    // Holds on paths that left the level go with it here too, as a stamp releases them.
+    for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
+    await recordPassFenceTrend(tx, { worktreeId: context.binding.worktree_id, sourceId, passId, since: converged?.request_hwm ?? null });
+    const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP);
+    value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
+      last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
+    Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });
+    value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts, ...passApplyCounts(applied) },
+      classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}) };
+    await writePassRow(tx, value);
+  }, principalAttribution(authority.writer.principal)));
+}
+
+/**
+ * Design §3.1: a path settled in this pass that does not classify settled is a settle mismatch, counted per (path, level)
+ * across passes (lane B turns a streak of SETTLE_MISMATCH_STREAK into a settle_mismatch hold).
+ */
+function mismatchStreaks(before: ManagedSyncPassValue['obligations']['mismatch'], mismatched: ShadowPath[]): ManagedSyncPassValue['obligations']['mismatch'] {
+  return Object.fromEntries(mismatched.map(entry => {
+    const seen = before?.[entry.path];
+    return [entry.path, { level: entry.state.level, streak: seen && seen.level === entry.state.level ? seen.streak + 1 : 1 }];
+  }));
+}
+
+/** The pass of one managed, non-company source (module header). */
+export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Promise<SyncResult> {
+  const { opts, context, authority, assertActive } = input;
+  const { sourceId, incarnation } = context;
+  const remote = authority.writer.remote;
+  const lease = currentDrainLease(sourceId);
+  if (!lease) throw new Error(`The live sync pass of ${sourceId} runs only under the source's drain lease.`);
+  lease.tailClear = false;
+  const started = Date.now(), startedAt = new Date(started).toISOString();
+  const pinned = await pinPass(engine, input, lease, started);
+  if (pinned.ended) return pinned.ended;
+  const { prior, admission, tail, retry, failed, mode, selection, configured, selectionFp, parserFp, obligations, passId, optOutEpisode,
+    processingOptions, inherited, pack, converged, cacheKey, working, kind, value, markersOwed } = pinned;
+  let { head, episode } = pinned;
 
   if (kind === 'idle' && working.cache) rememberWorkingStatCache(cacheKey, working.cache);
-  if (kind === 'idle') {
-    // Master's up_to_date (a complete check that found nothing): only last_sync_at, plus the pass row's count.
-    const at = new Date().toISOString();
-    value.obligations.converged = { ...converged!, passes_since_full: converged!.passes_since_full + 1 };
-    value.obligations.stuck_since = null;
-    // Design §7: an owner approval (--yes) on an idle tick still makes an unknown cost known again.
-    if (opts.costApproved && value.obligations.cost?.approved_usd === null) value.obligations.cost = (await passCostDecision(engine, { sourceId, incarnation,
-      scope: episode?.full_id ?? passId, priorRow: true, prior: value.obligations.cost, approved: true })).cost;
-    value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, duration_ms: Date.now() - started, timings_ms: { setup: kindStarted - started, kind: Date.now() - kindStarted } };
-    await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
-      assertActive();
-      // One round trip: the lease check, the stamp and the row (started at the transaction's clock) are pipelined; a lost
-      // lease rolls the other two back.
-      await pipelined(tx, [() => assertDrainLease(tx, sourceId), () => tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]),
-        () => writePassRow(tx, value, { pin: true, clock: true })]);
-    }, principalAttribution(authority.writer.principal)));
-    // A failure is recorded only under the lease this pass holds, so none recorded at pin means none to clear.
-    if (failed.length) await clearPassFailures(engine, sourceId, incarnation);
-    // Nor can a tail be owed since the pin read none: the lease's holder reads none after it (sync-run.ts).
-    lease.tailClear = !tail;
-    return { ...empty('up_to_date'), toCommit: remote ? '' : head, ...(inherited.length ? { inherited_options: inherited } : {}) };
-  }
+  if (kind === 'idle') return stampIdlePass(engine, input, lease, started, pinned);
   // Design §7: the cost decision at pin; an unknown or spent envelope defers embeddings for this pass (never inherited).
   const costScope = episode?.full_id ?? passId;
   const costDecision = await passCostDecision(engine, { sourceId, incarnation, scope: costScope, priorRow: !!prior, prior: obligations.cost, approved: opts.costApproved === true });
@@ -589,32 +693,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       assertActive();
       if (applied.sweptAll && !value.obligations.legacy_sweep) value.obligations.legacy_sweep = { first_full_at: new Date().toISOString() };
       if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
-      const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
+      const { deletes, imports, inFlight, mismatch, owed } = await triageRound(level, { S, legacyWaived, readmitted, admission, remote, counts });
       lastMismatch = mismatch;
-      const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
-      const step = loopYield();
-      for (const entry of level.paths) {
-        if (step.due()) await step.pause();
-        const r = entry.result;
-        if (r.settled) continue;
-        if (r.inFlight) { inFlight.push(entry); continue; }
-        if (S.has(settledKey(entry.path, entry.state.level))) {
-          // A hold this pass wrote or re-screened at L, or a slug collision it skipped, is that path's fate here, even when
-          // its code re-screens every pass or the skipped twin still classifies as an import.
-          if (entry.state.hold?.atLevel || S.get(settledKey(entry.path, entry.state.level)) === 'collision'
-            || legacyWaived.has(settledKey(entryPaths(level, entry.path).path, entry.state.level))) continue;
-          // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
-          const again = settledKey(entry.path, entry.state.level);
-          if (readmitted.has(again)) { mismatch.push(entry); continue; }
-          readmitted.add(again);
-        }
-        if (r.action === 'delete') {
-          if (heldRenameOrigins.has(syncOriginPath(entryPaths(level, entry.path).sourcePath))) { S.set(settledKey(entry.path, entry.state.level), 'rename_held'); continue; }
-          if (admission !== 'normal') { S.set(settledKey(entry.path, entry.state.level), 'paused_deletes'); counts.pausedDeletes++; continue; }
-          deletes.push(entry);
-        } else if (r.action === 'import' || r.action === 'reparse' || (!remote && (r.cls === 'drift' || r.cls === 'dirty'))) imports.push(entry);
-        else owed.push(entry);
-      }
       // Origins that differ only by case or separator spelling may be one file on another platform: refuse rather than guess, as discovery does.
       const spelled = owed.filter(entry => entry.result.cls === 'spelling').map(entry => entryPaths(level, entry.path).sourcePath);
       if (spelled.length) {
@@ -651,24 +731,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         }
         if (mismatch.length || owed.length) break;
         if (round === 1 && configured && context.source.last_commit === head && !episode && !retry.length && !tail && !value.obligations.slug_mode) {
-          // v3 §3.3: a pass that finds nothing at last_commit = T admits no checkpoint; it keeps master's up_to_date (only
-          // last_sync_at), and its full round refreshes the converged watermark so the next tick can be idle.
-          const at = new Date().toISOString();
-          await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
-            assertActive();
-            await assertDrainLease(tx, sourceId);
-            await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
-            // Holds on paths that left the level go with it here too, as a stamp releases them.
-            for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
-            await recordPassFenceTrend(tx, { worktreeId: context.binding.worktree_id, sourceId, passId, since: converged?.request_hwm ?? null });
-            const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP);
-            value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
-              last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
-            Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });
-            value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts, ...passApplyCounts(applied) },
-              classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}) };
-            await writePassRow(tx, value);
-          }, principalAttribution(authority.writer.principal)));
+          // v3 §3.3: a pass that finds nothing at last_commit = T admits no checkpoint (`stampUnchangedPass`).
+          await stampUnchangedPass(engine, input, { value, level, head, kind, converged, parserFp, pack, selectionFp, passId, startedAt, started, counts, applied });
           rememberLevel();
           await clearPassFailures(engine, sourceId, incarnation);
           await finishPassApply(engine, sourceId, applied);
@@ -726,11 +790,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     // Not converged (design §3.1): four rounds, or a settle mismatch or a path this release cannot settle.
     // A path settled in this pass that does not classify settled is a settle mismatch: counted per (path, level) across
     // passes; lane B turns a streak of SETTLE_MISMATCH_STREAK into a settle_mismatch hold.
-    const before = value.obligations.mismatch;
-    value.obligations.mismatch = Object.fromEntries(lastMismatch.map(entry => {
-      const seen = before[entry.path];
-      return [entry.path, { level: entry.state.level, streak: seen && seen.level === entry.state.level ? seen.streak + 1 : 1 }];
-    }));
+    value.obligations.mismatch = mismatchStreaks(value.obligations.mismatch, lastMismatch);
     value.obligations.not_converged_streak = (value.obligations.not_converged_streak ?? 0) + 1;
     await finishPassApply(engine, sourceId, applied);
     await save('resumable', 'not_converged');
