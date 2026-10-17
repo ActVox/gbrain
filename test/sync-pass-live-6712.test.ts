@@ -25,6 +25,9 @@
  * - a commit during a pass: the next round reads the new HEAD and its batch freezes that commit (no storage_error from an older pin).
  * - --no-schema-pack: a first pass converges (its parser expects no pack); a cost-gate deferral is no inherited opt-out;
  *   a source configured with a strategy, synced with that strategy named (sync --all), stamps last_commit.
+ * - idle-tick batching: a converged tick still clears a recorded failure, writes its pass row at the transaction clock
+ *   (one pipelined statement set), and with no failure recorded and no tail owed at pin it issues neither the clears nor
+ *   the post-lease tail read.
  * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
  *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
@@ -37,6 +40,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { SYNC_ADMISSION_KEY } from '../src/core/persistence/sync-admission.ts';
+import { SYNC_TAIL_OP } from '../src/core/persistence/sync-tail-record.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
 import { readGitHold, SYNC_IMPORT_PROVENANCE_OP, writeGitHold } from '../src/core/persistence/sync-holds.ts';
@@ -167,6 +171,28 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect(await readGitHold(engine, 'default', incarnation, 'notes/a.md')).toBeNull();
     const idle = await performManagedSync(engine, OPTS);
     expect({ status: idle.status, pass: idle.pass }).toEqual({ status: 'up_to_date', pass: undefined });
+  }, { setup }), 180_000);
+
+  test('idle-tick batching: a converged tick clears a recorded failure and stamps the pass row at the transaction clock; with none recorded and no tail owed it issues neither the clears nor the post-lease tail read', () => managedBrain(async ({ engine }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const incarnation = await incarnationOf(engine);
+    const failure = "SELECT count(*)::int AS n FROM op_checkpoints WHERE op='managed-sync-failure' AND fingerprint=$1";
+    await engine.executeRaw("INSERT INTO op_checkpoints(op,fingerprint,completed_keys) VALUES('managed-sync-failure',$1,'[{}]'::jsonb)", [`default:${incarnation}`]);
+    expect((await performManagedSync(engine, OPTS)).status).toBe('up_to_date');
+    expect((await engine.executeRaw<{ n: number }>(failure, [`default:${incarnation}`]))[0]!.n).toBe(0);
+    const statements: Array<{ sql: string; params: unknown[] }> = [];
+    const executeRaw = engine.executeRaw;
+    // A transaction's engine inherits this method: only the engine's own statements are recorded.
+    engine.executeRaw = function (this: BrainEngine, sql: string, params?: unknown[], opts?: never) {
+      if (this === engine) statements.push({ sql, params: params ?? [] });
+      return executeRaw.call(this, sql, params, opts);
+    } as typeof engine.executeRaw;
+    try { expect((await performManagedSync(engine, OPTS)).status).toBe('up_to_date'); } finally { delete (engine as { executeRaw?: unknown }).executeRaw; }
+    expect({ clears: statements.filter(s => /DELETE FROM op_checkpoints WHERE op='managed-sync-failure'/.test(s.sql)).length,
+      tailReads: statements.filter(s => s.params[0] === SYNC_TAIL_OP).length }).toEqual({ clears: 0, tailReads: 1 });
+    const [row] = await engine.executeRaw<{ started: string; updated: string }>(`SELECT completed_keys->0->'telemetry'->>'started_at' AS started,
+      to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated FROM op_checkpoints WHERE op='managed-sync-pass' AND fingerprint=$1`, [`default:${incarnation}`]);
+    expect({ started: new Date(row!.started).toISOString(), updated: row!.updated }).toEqual({ started: row!.updated, updated: row!.updated });
   }, { setup }), 180_000);
 
   test('probe 46 (reparse half): a parser change on a fileSame and dbSame page re-imports it as reparse, with no hold', () => managedBrain(async ({ engine }) => {

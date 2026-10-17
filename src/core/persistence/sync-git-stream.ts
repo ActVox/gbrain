@@ -63,6 +63,10 @@ function* lines(items: readonly string[], terminator: string): Generator<Buffer>
  * can mark them unknown.
  */
 export async function readTreeLevel(gitRoot: string, commit: string, scope: string): Promise<Map<string, GitTreeEntry>> {
+  // #6712 PR 4b: a commit's tree never changes, so the last one read by commit id is reused (a pass's second round); callers
+  // only read the map.
+  const key = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit) ? `${gitRoot}\0${commit}\0${scope}` : null;
+  if (key !== null && lastTree?.key === key) return lastTree.tree;
   const tree = new Map<string, GitTreeEntry>();
   await readRecords(gitRoot, ['ls-tree', '-r', '-z', commit, '--', scope === '' ? '.' : scope], 'ls-tree', record => {
     const tab = record.indexOf('\t');
@@ -70,8 +74,10 @@ export async function readTreeLevel(gitRoot: string, commit: string, scope: stri
     if (!OID.test(oid)) throw malformed('ls-tree', record);
     if (type === 'blob' || type === 'commit') tree.set(record.slice(tab + 1), { mode, oid });
   });
+  if (key !== null) lastTree = { key, tree };
   return tree;
 }
+let lastTree: { key: string; tree: Map<string, GitTreeEntry> } | null = null;
 
 /** `X`: the index (never the worktree), keyed by Git-root-relative path; a conflicted path keeps its highest stage. */
 export async function readIndexLevel(gitRoot: string): Promise<Map<string, GitIndexEntry>> {
