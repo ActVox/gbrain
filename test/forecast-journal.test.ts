@@ -45,6 +45,11 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       await b.put('companies/dune-example', takesPage([{ claim: 'Dune-example has the strongest team in its market', who: 'bob-example', since: '2024-02' }]));
       await resolve(b, 'Acme-example will reach $5M ARR by the end of 2024', 'correct');
       await scanStatedHorizons(b.engine, { apply: true, sourceId: b.sourceId });
+      const bluefinId = (await b.engine.executeRaw<{ id: number }>(`SELECT id FROM takes WHERE claim LIKE 'Bluefin-example%'`))[0]!.id;
+      for (const [model, at, verdict, confidence] of [['anthropic:claude-opus-5-5', '2026-10-01T00:00:00Z', 'unresolvable', 0.4], ['openai:some-unmeasured-model', '2026-10-10T00:00:00Z', 'incorrect', 0.97]] as const) {
+        await b.engine.executeRaw(`INSERT INTO take_grade_cache (take_id, prompt_version, judge_model_id, evidence_signature, graded_at, verdict, confidence)
+          VALUES ($1, 'hybrid-evidence-v2', $2, 'sig', $3::timestamptz, $4, $5)`, [bluefinId, model, at, verdict, confidence]);
+      }
 
       const j = await readForecastJournal(b.engine, { sourceId: b.sourceId, asOf: AS_OF });
       expect(j.totals).toEqual({ predictions: 4, resolved: 1, unresolved: 3, open: 1, overdue: 1, undated: 1, certified_prediction_times: 0 });
@@ -53,7 +58,9 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
         horizon: { date: '2024-12-31', basis: 'stated', current: true },
         resolution: { quality: 'correct', resolved_by: 'owner', resolved_source: 'notes/2025-03-01-update' },
         prediction: { at: '2023-02', basis: 'since_date', certified: false } });
-      expect(by['companies/bluefin-example']).toMatchObject({ state: 'overdue', horizon: { date: '2025-06-30' }, resolution: null });
+      expect(by['companies/bluefin-example']).toMatchObject({ state: 'overdue', horizon: { date: '2025-06-30' }, resolution: null,
+        grade: { verdict: 'incorrect', confidence: 0.97, applied: false, judge_model_id: 'openai:some-unmeasured-model', judge_measured: false, graded_at: '2026-10-10T00:00:00.000Z' } });
+      expect(by['companies/acme-example']!.grade).toBeNull();
       expect(by['companies/cobalt-example']).toMatchObject({ state: 'open', horizon: { date: '2030-12-31' } });
       expect(by['companies/dune-example']).toMatchObject({ state: 'undated', horizon: null });
 

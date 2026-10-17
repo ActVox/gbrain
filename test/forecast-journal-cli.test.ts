@@ -72,8 +72,11 @@ describe('gbrain takes journal', () => {
     expect([overdue.entries.length, overdue.totals.predictions]).toEqual([1, 4]);
   });
 
-  test('the text form labels uncertified prediction times and prints the denominator', async () => {
+  test('the text form labels uncertified prediction times, prints the denominator and the newest cached grade', async () => {
+    await engine.executeRaw(`INSERT INTO take_grade_cache (take_id, prompt_version, judge_model_id, evidence_signature, verdict, confidence)
+      SELECT id, 'hybrid-evidence-v2', 'openai:some-unmeasured-model', 'sig', 'incorrect', 0.97 FROM takes WHERE claim LIKE 'Bluefin-example%'`);
     const text = await capture(() => runTakes(engine, ['journal']));
+    expect(text).toContain('grade incorrect @ 0.97 (judge not measured)');
     expect(text).toContain('4 predictions: 2 resolved, 2 unresolved (1 overdue, 1 open, 0 undated)');
     expect(text).toContain('[overdue]');
     expect(text).toContain('2023-06 (since_date, uncertified)');

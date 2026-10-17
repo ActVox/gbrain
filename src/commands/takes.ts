@@ -942,7 +942,8 @@ async function cmdJournal(engine: BrainEngine, args: string[]): Promise<void> {
     const horizon = e.horizon ? `${e.horizon.date} (${e.horizon.basis})` : 'none';
     const weight = e.weight === null ? '' : ` w=${e.weight.toFixed(2)}`;
     const resolution = e.resolution ? `  resolved ${e.resolution.quality}${e.resolution.resolved_at ? ` ${e.resolution.resolved_at.slice(0, 10)}` : ''}${e.resolution.resolved_by ? ` by ${e.resolution.resolved_by}` : ''}` : '';
-    console.log(`\n[${e.state}] ${e.page_slug}#${e.row_num}  ${e.holder}${weight}  predicted ${predicted}  horizon ${horizon}${resolution}\n  ${e.claim}`);
+    const grade = e.grade ? `  grade ${e.grade.verdict} @ ${e.grade.confidence.toFixed(2)}${e.grade.applied ? ' applied' : ''}${e.grade.judge_measured ? '' : ' (judge not measured)'}` : '';
+    console.log(`\n[${e.state}] ${e.page_slug}#${e.row_num}  ${e.holder}${weight}  predicted ${predicted}  horizon ${horizon}${resolution}${grade}\n  ${e.claim}`);
   }
   if (journal.entries.length < (state ? t[state as 'resolved'] : t.predictions)) console.log(`\nShowing ${journal.entries.length}; the totals count every match.`);
 }

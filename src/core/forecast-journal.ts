@@ -20,6 +20,7 @@
 import type { BrainEngine } from './engine.ts';
 import { coverageAt, coverageIntervals } from './belief/coverage-report.ts';
 import { takeClaimHash } from './belief/keys.ts';
+import { gradeJudgeMeasured } from './cycle/grade-takes-measured.ts';
 import { readTakeHorizons, type HorizonBasis } from './takes-horizon.ts';
 
 export type JournalState = 'resolved' | 'overdue' | 'open' | 'undated';
@@ -30,6 +31,8 @@ export interface JournalEntry {
   horizon: { date: string; basis: HorizonBasis; current: true } | null;
   state: JournalState;
   resolution: { quality: string; resolved_at: string | null; resolved_by: string | null; resolved_source: string | null } | null;
+  /** The newest cached grade_takes verdict (W6), applied or not; judge_measured says whether the W6 eval measured its judge and prompt. */
+  grade: { verdict: string; confidence: number; applied: boolean; judge_model_id: string; judge_measured: boolean; graded_at: string } | null;
 }
 export interface JournalTotals { predictions: number; resolved: number; unresolved: number; open: number; overdue: number; undated: number; certified_prediction_times: number }
 export interface JournalQuery {
@@ -138,6 +141,13 @@ export async function readForecastJournal(engine: BrainEngine, q: JournalQuery =
   const rows = await readPredictions(engine, q);
   const horizons = await readTakeHorizons(engine, rows.map(r => Number(r.id)));
   const recorded = await recordedPredictionTimes(engine, rows);
+  const grades = new Map((await engine.executeRaw<{ take_id: number | string; verdict: string; confidence: number | string; applied: boolean; judge_model_id: string; prompt_version: string; graded_at: string | Date }>(
+    `SELECT DISTINCT ON (take_id) take_id, verdict, confidence, applied, judge_model_id, prompt_version, graded_at
+       FROM take_grade_cache WHERE take_id = ANY($1::bigint[]) ORDER BY take_id, graded_at DESC`,
+    [rows.map(r => Number(r.id))])).map(g => [Number(g.take_id), {
+      verdict: g.verdict, confidence: Number(g.confidence), applied: g.applied, judge_model_id: g.judge_model_id,
+      judge_measured: gradeJudgeMeasured(g.judge_model_id, g.prompt_version), graded_at: iso(g.graded_at)!,
+    }]));
   const all: JournalEntry[] = rows.map(r => {
     const h = horizons.get(Number(r.id));
     const horizon = h?.current ? { date: h.horizon_date, basis: h.basis, current: true as const } : null;
@@ -148,6 +158,7 @@ export async function readForecastJournal(engine: BrainEngine, q: JournalQuery =
       take_id: Number(r.id), source_id: r.source_id, page_slug: r.page_slug, row_num: r.row_num, claim: r.claim, kind: r.kind, holder: r.holder,
       weight: r.weight == null ? null : Number(r.weight), prediction, horizon, state,
       resolution: r.resolved_quality ? { quality: r.resolved_quality, resolved_at: iso(r.resolved_at), resolved_by: r.resolved_by, resolved_source: r.resolved_source } : null,
+      grade: grades.get(Number(r.id)) ?? null,
     };
   });
   const count = (s: JournalState) => all.filter(e => e.state === s).length;

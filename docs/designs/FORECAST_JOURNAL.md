@@ -58,7 +58,7 @@ A recorded time is certified only where `coverageAt` certifies that instant, whi
 - its state: `resolved`, `overdue`, `open` or `undated`;
 - its resolution: quality, `resolved_by` and `resolved_source`.
 
-It filters by `--holder`, `--about <slug-prefix>`, `--state`, `--since`, `--until` and `--source-id`, and `--limit` caps the list. The totals always count every match, so the unresolved denominator survives any filter on state or limit. A thin client refuses it as host-bound. There is no MCP op. The grade verdict cached by `gbrain takes grades` (W6, #6882) joins the entry once W6 lands.
+It filters by `--holder`, `--about <slug-prefix>`, `--state`, `--since`, `--until` and `--source-id`, and `--limit` caps the list. The totals always count every match, so the unresolved denominator survives any filter on state or limit. A thin client refuses it as host-bound. There is no MCP op. Each entry also carries `grade`: the newest verdict `grade_takes` cached for the take (W6, the one `gbrain takes grades` lists), applied or not, with `judge_measured` saying whether the W6 eval measured its judge and prompt.
 
 ## Slice 3: `takes_scorecard {group_by}`
 
