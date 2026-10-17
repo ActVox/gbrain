@@ -12,30 +12,23 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.293.0] - 2026-10-17
 
-**Graph walks are breadth-first: each page and edge comes back once, at its shortest depth, and dense clusters walk in milliseconds.** First step of the graph-traversal plan (HydraDB evaluation, autoplan run-20261017033903).
+**CI only: the unit-lane PostgreSQL arms run in 14 shards, sized from fresh measured timings.** Nothing changes for gbrain users.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A graph walk (`traverse_graph`, `gbrain graph`, `think` graph context) | enumerated every simple path, capped at 20,000 paths; a page came back once per depth some path reached it, and an edge once per depth | visits each page once, at its shortest distance, and returns each edge once (one hop past its shallower walked endpoint); the pages and edges reached are the same |
-| A walk over a densely linked cluster (12-page clique, depth 5) | 44 to 91 ms on Postgres under the path cap (22 s before the cap) | 4 to 9 ms |
-| A walk that reaches a large share of the brain | the 20,000-path cap could stop before deeper pages were reached | stops at 20,000 visited pages, shallowest first; the truncation warning names both caps |
-| `frontierCap` on `traverseGraph` | an approximate per-iteration cap applied before deduplication | an exact per-layer cap on new pages, in (slug, id) order |
-
-Every per-hop filter is unchanged and still applies at every step: soft delete, `excludePrivate` (page and link-origin privacy), source scope, link type and temporal policy.
+| Measured runtime of the 316 unit-lane PostgreSQL arm files | the shard weights predated current timings (6,697 s in total), so 12 shards looked like they fit the 570 s per-shard budget | re-mined from a green 24-job persistence-validation run (7,696 s in total): 12 shards would carry about 643 s each, so the lane now runs 14 shards of at most 551 s |
+| A shard that selects no files | its error said `shard N/8` and suggested a 12-shard command | names the real shard count, and the workflow pin test keeps it in step with `ARM_SHARDS` |
 
 ### What you need to do
 
-Nothing. Callers that relied on a page appearing at several depths now see it once, at its shortest depth.
+Nothing.
 
 ### For contributors
 
-- `src/core/engine-sql/links.ts`: one breadth-first CTE (`bfsWalkCtes`) serves `traverseGraph` and `traversePathsDetailed` on both engines.
-- `test/traverse-bfs.test.ts` checks the walks against a TypeScript shortest-path reference and the old CTE on seeded random graphs, and checks that a private, out-of-scope, private-origin or soft-deleted page in the middle of a chain stops the walk.
-- The dense-hub fixture (`test/helpers/dense-hub.ts`) now has 12 ring links per spoke, so the row-cap tests still overflow 5,000 edges now that each edge is returned once.
-- `scripts/bench-graph-walk.ts` times the walks on PGLite and, with `GBRAIN_BENCH_DATABASE_URL`, on Postgres.
-- `relationalFanout` still enumerates paths (3 hops at most); moving it to breadth-first changes search ranking and is a follow-up.
+- `persistence-validation.yml` `unit-postgres-arms` is now a 14-shard matrix (`ARM_SHARDS` in `scripts/postgres-unit-arms.ts`). Its required checks are named `Unit-lane PostgreSQL arms N/14 / Bun …`.
+- The 20-minute step timeout and the 570 s budget rule (twice a shard's measured weight still ends a minute inside the step) are unchanged; re-mine `scripts/postgres-arm-weights.json` with `bun scripts/postgres-unit-arms.ts mine <job.log>…` after adding heavy arm files.
 
 ## [0.60.292.0] - 2026-10-17
 
