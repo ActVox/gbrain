@@ -462,7 +462,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   };
   const identityDowngrades: DowngradedRename[] = [];
   const fileRefusals = new Map<string, SyncFileRefusal>();
-  const keptCount = () => lastLevel?.paths.filter(entry => entry.result.cls === 'kept' && !entry.gitProvenance).length ?? 0;
+  const keptCount = () => lastLevel?.paths.filter(entry => entry.result.cls === 'kept').length ?? 0;
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
