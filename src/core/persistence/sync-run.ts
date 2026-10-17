@@ -14,8 +14,8 @@ import { preflightSyncCapacity } from './sync-capacity-preflight.ts';
 import { preparationConfigView } from './config-snapshot.ts';
 import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
-import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
-import { CHECKPOINT_MOVED_MESSAGE, checkpointRevival } from './sync-slug-mode.ts';
+import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncFile, syncGit, type SyncDiscovery } from './sync-discovery.ts';
+import { checkpointRevival } from './sync-slug-mode.ts';
 import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
@@ -62,7 +62,7 @@ import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
-import { receiptClass, recordedStop, replaysContentRefusal, replaysUnchangedRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
+import { receiptClass, recordedStop, replaysContentRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
 import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
 import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
@@ -788,7 +788,7 @@ export const STOPS_PER_ENTRY = 3;
  * receipt, a systemic stop an earlier invocation recorded, or a legacy knock-on an older gbrain cancelled) is re-frozen in
  * place under a fresh request: the cursor does not advance past it and the failed receipt is recorded as converted
  * (`convertedFromFailed`), so it never blocks the checkpoint. Bounded by `STOPS_PER_ENTRY` re-freezes in a row at the
- * entry (`Pending.stops`); null past the bound, so the failure is recorded and the next sync resets the bound (`retryRecordedFailure`).
+ * entry (`Pending.stops`); null past the bound, so the failure is recorded and the next sync takes the entry again (a pass re-classifies its path; a company run retries its recorded stop).
  */
 async function refreezeInPlace(engine: BrainEngine, input: SettleInput): Promise<Cursor | null> {
   const { cursor, key, pending, assertActive } = input;
@@ -1360,62 +1360,6 @@ interface HoldRunState { sourceId?: string; incarnation?: string; remote?: boole
  * #5988: every result (resumed, no-change and blocked runs included) carries this run's holds and the source's outstanding total.
  */
 
-/**
- * #6712 PR 3 (L7): a plain sync retries the failure an earlier invocation recorded for this run (`stopRecorded`), which
- * `--retry-failed` (now its deprecated alias) used to do on request. A stop the drain re-freezes in place (a transport fault,
- * a resumable systemic stop, a legacy knock-on) is left to the drain, its `STOPS_PER_ENTRY` bound reset once spent; a
- * checkpoint refused only by a receipt that no longer blocks it revives in the drain. Under the hold screen a page's refusal
- * converts in place with the frozen manifest (#5988, #6340); a content refusal a newer commit may fix, and every other
- * recorded failure, rediscovers from HEAD. Null when nothing applies: no failure of this run is recorded, its request is
- * unfinished or committed (the drain advances past it, keeping the run's counts), a refusal would refuse the same bytes again,
- * or it needs a person's decision (a slug-mode refusal, a moved source checkpoint: `gbrain repair managed-sync-orphans`).
- */
-async function retryRecordedFailure(engine: BrainEngine, cursor: Cursor, key: string, input: { opts: SyncOpts; context: ManagedSyncContext; authority: SyncAuthority;
-  processingOptions: SyncProcessingOptions; syncOptions: SyncCursorOptions; startupConfig: BrainEngine; frozenRun: Parameters<typeof freezeEntry>[4]; runStartedAt: string;
-  discoveryRun: string; assertActive: () => void }): Promise<{ cursor: Cursor; discoveryTarget?: string } | { wait: RetryWait } | null> {
-  const { opts, context, authority, processingOptions, syncOptions, assertActive } = input;
-  const recorded = await recordedStop(engine, key, cursor.runId);
-  assertActive();
-  if (!recorded) return null;
-  const failed = cursor.pending ? await getWriteRequest(engine, admittedBy(cursor.pending, cursor), cursor.pending.requestId) : null;
-  assertActive();
-  const terminal = !!failed && ['failed', 'conflict', 'cancelled'].includes(failed.state);
-  if (failed && !terminal) return null;
-  const fault = terminal ? receiptClass(failed!) : null;
-  if (terminal && cursor.pending && cursor.pending.intent.kind !== 'managed_sync_checkpoint'
-    && (fault === 'transport' || isSyncKnockOn(failed!) || (fault === 'systemic' && resumableStop(failed!)))) {
-    if ((cursor.pending.stops ?? 0) < STOPS_PER_ENTRY) return null;
-    const { stops: _stops, ...pending } = cursor.pending;
-    return { cursor: await saveCursor(engine, key, cursor, { ...cursor, pending }, false, assertActive) };
-  }
-  if (terminal && cursor.pending?.intent.kind === 'managed_sync_checkpoint' && cursor.index === cursor.entries.length
-    && (revivableCheckpointRefusal(failed!) || await checkpointRevival(engine, cursor, cursor.pending.intent, failed!))
-    && !await probeCheckpointBlocker(engine, cursor.binding.worktree_id, cursor.runId, cursor.convertedFromFailed ?? [], cursor.settled ?? null)) return null;
-  // A slug-mode refusal the pin still disagrees with is a person's choice (rediscovering would adopt the new pin), and a
-  // checkpoint the source's last_commit moved away from is never rediscovered by itself (#6834: a path-sliced run would
-  // rediscover its slice's older target and move last_commit backward). Both stay recorded with their decision;
-  // `gbrain repair managed-sync-orphans` retires the cursor (and its slice record), and the next sync discovers again.
-  if (terminal && (failed!.error_code === 'slug_root_mode_mismatch'
-    || cursor.pending?.intent.kind === 'managed_sync_checkpoint' && failed!.error_code === 'revision_conflict' && failed!.error_message === CHECKPOINT_MOVED_MESSAGE)) return null;
-  const page = terminal && cursor.pending!.intent.kind !== 'managed_sync_checkpoint';
-  // The screen converts with the cursor's own options; a content, fence or stalled-preparation refusal it keeps replays.
-  const head = () => syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
-  const screen = page && !(isContentRefusal(failed!.error_code, failed!.error_message) && head() !== cursor.target) ? await loadSyncScreenRun(input.startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote) : null;
-  const converted = screen ? await convertBlockedCursor(engine, cursor, key, assertActive, { ...input.frozenRun, screen, observedAt: cursor.discoveredAt ?? input.runStartedAt }) : cursor;
-  assertActive();
-  if (screen && (converted !== cursor || isContentRefusal(failed!.error_code, failed!.error_message) || fenceReceiptLocation(failed!) || preparationStalled(failed!))) return { cursor: converted };
-  if (page && replaysUnchangedRefusal(failed!, recorded, { root: cursor.root, intent: cursor.pending!.intent, target: cursor.target, head })) return null;
-  const blocker = await oldRunBlocker(engine, cursor, key);
-  assertActive();
-  if (blocker) return { wait: blocker };
-  const discoveryTarget = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
-  const discovery = await discoverManagedSync(engine, opts, context);
-  assertActive();
-  const replaced = await replaceCursor(engine, key, header(cursor), { ...discovery, authority, processingOptions, syncOptions, runId: input.discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, assertActive);
-  if ('wait' in replaced) return replaced;
-  return { cursor: replaced, discoveryTarget };
-}
-
 /** #6643: a request the whole-manifest retirement must wait for, named with its producer, instead of a silent no-op. */
 export interface RetryWait { request_id: string; kind: string | null; slug: string; state: string; recovery: boolean; retry_after_ms: number }
 /**
@@ -1528,13 +1472,13 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   const finishing = (done: Cursor) => { opts.onProgress?.({ phase: 'managed_sync.finish', bankedFiles: done.index, total: done.entries.length }); };
   /** One cursor's drain (or, #6712 PR 4b, one round batch of a live pass): the freeze, screen, waive, group, admit, await and settle loop. */
   const live: { cursor: Cursor | null } = { cursor: null };
-  const drainCursor = async (from: Cursor, startupConfig: Awaited<ReturnType<typeof preparationConfigView>>, retried: boolean,
+  const drainCursor = async (from: Cursor, startupConfig: Awaited<ReturnType<typeof preparationConfigView>>,
     sliceBase?: { started: number; pages: number }): Promise<SyncResult | Cursor> => {
     let cursor = from;
     try {
       frozenRun.screen = company ? null : await loadSyncScreenRun(startupConfig, cursor.sourceId, cursor.processingOptions ?? processingOptions, authority.writer.remote);
       const observedAt = frozenRun.observedAt = cursor.discoveredAt ?? runStartedAt;
-      if (frozenRun.screen && !retried && cursor.pending && !cursor.done) {
+      if (frozenRun.screen && cursor.pending && !cursor.done) {
         phase = 'freeze';
         cursor = await convertBlockedCursor(engine, cursor, key, assertActive, frozenRun);
       }
@@ -1714,7 +1658,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         drainBatch: async (batchKey, batch, sliceBase) => {
           key = batchKey;
           setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
-          try { return await drainCursor(batch, await preparationConfigView(engine), false, sliceBase); }
+          try { return await drainCursor(batch, await preparationConfigView(engine), sliceBase); }
           catch (error) {
             // An abort mid-batch stops the pass with what the batch committed before it.
             if (signal?.aborted && error instanceof Error && error.name === 'AbortError') return result(live.cursor ?? batch, 'partial', 'timeout');
@@ -1756,12 +1700,6 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       }
     }
     const startupConfig = await preparationConfigView(engine); // #5984 G3: one config read answers the startup's config reads
-    let retried: Awaited<ReturnType<typeof retryRecordedFailure>> = null;
-    if (cursor && !opts.dryRun && !company && !cursor.done) {
-      retried = await retryRecordedFailure(engine, cursor, key, { opts, context, authority, processingOptions, syncOptions, startupConfig, frozenRun, runStartedAt, discoveryRun, assertActive });
-      if (retried && 'wait' in retried) return { ...result(cursor, 'partial', 'writer_pending'), ...(authority.writer.remote ? {} : { retryWait: retried.wait }) };
-      if (retried) { cursor = retried.cursor; if (retried.discoveryTarget) { phase = 'discovery'; discoveryTarget = retried.discoveryTarget; } }
-    }
     assertActive();
     // #5988: a finished run is not pending work; the dry run previews the holds of what a new run would discover.
     if (cursor?.done && opts.dryRun) return dryRun({ ...await discoverManagedSync(engine, opts, context), authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 } }, cursor);
@@ -1804,7 +1742,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         `The unfinished sync cursor of source ${cursor.sourceId} was written under an older binding (its owner epoch, topology generation, worktree or root changed since), so this run stopped without importing; the retry rediscovers against the current binding.`);
     }
     if (opts.dryRun) return dryRun(cursor);
-    return await drainCursor(cursor, startupConfig, retried !== null) as SyncResult;
+    return await drainCursor(cursor, startupConfig) as SyncResult;
   } catch (error) {
     assertSyncDispatchActive();
     if (live.cursor) cursor = live.cursor;
