@@ -1422,6 +1422,11 @@ export class PostgresEngine implements BrainEngine {
     return this.keywordStatementTimeout ??= loadKeywordStatementTimeout(this, this._savedConfig?.keyword_statement_timeout_ms);
   }
 
+  async keywordBoundedRead<T>(read: (db: Pick<BrainEngine, 'executeRaw'>) => Promise<T>): Promise<T> {
+    const statementTimeout = await this.keywordStatementTimeoutSetting();
+    return this.withScopedReadTransaction(undefined, undefined, tx => read(this.engineSqlOn(tx)), { alwaysTransaction: true, settings: { statement_timeout: statementTimeout } });
+  }
+
   private async vectorIterativeScanSupported(): Promise<boolean> {
     this.vectorIterativeScan ??= this.executeRaw<{ extversion: string }>(VECTOR_EXTENSION_VERSION_SQL)
       .then(rows => supportsHnswIterativeScan(rows[0]?.extversion));

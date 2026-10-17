@@ -2677,6 +2677,15 @@ export interface BrainEngine {
     opts?: { signal?: AbortSignal },
   ): Promise<T[]>;
 
+  /**
+   * Runs `read` in one unscoped read transaction under the keyword statement bound
+   * (`search.keyword_statement_timeout_ms`, transaction-local): a search-time read outside the engine's own keyword
+   * statements that must not wait on a lock without a bound (the explain_target probe and the segmented-region read,
+   * each with its chunk-manifest probe through `db`). A statement past the bound fails with 57014. PGLite runs
+   * `read` on the engine itself and sets no statement timeout, as for its keyword statements.
+   */
+  keywordBoundedRead<T>(read: (db: Pick<BrainEngine, 'executeRaw'>) => Promise<T>): Promise<T>;
+
   // ============================================================
   // v0.20.0 Cathedral II: code edges (Layer 5 populates, Layer 7 consumes)
   // ============================================================

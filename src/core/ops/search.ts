@@ -546,7 +546,9 @@ function parseExplainTarget(raw: string): { slug: string; sourceId?: string } {
 /**
  * explain_target, before the search: resolve the target among the pages this
  * caller can read (one probe under the same scope and visibility the search
- * uses). Returns the trace to thread into the search, or an early diagnosis
+ * uses, with its chunk-manifest probe in one read under the keyword statement
+ * bound, engine.keywordBoundedRead; a failed or cancelled probe leaves the bare
+ * trace). Returns the trace to thread into the search, or an early diagnosis
  * (not visible / ambiguous) that needs no trace.
  */
 async function prepareExplainTarget(
@@ -557,8 +559,8 @@ async function prepareExplainTarget(
   const retry = { tool, arguments: explainRetryArgs(p) };
   let probe;
   try {
-    probe = await probeTarget((sql, params) => ctx.engine.executeRaw(sql, params), slug,
-      { ...scope, excludePrivate, requireSafeChunks: ctx.remote !== false }, await chunkManifestReads(ctx.engine));
+    probe = await ctx.engine.keywordBoundedRead(async db => probeTarget((sql, params) => db.executeRaw(sql, params), slug,
+      { ...scope, excludePrivate, requireSafeChunks: ctx.remote !== false }, await chunkManifestReads(ctx.engine, db)));
   } catch {
     return { trace: new TargetTrace({ slug, sourceId }) };
   }

@@ -52,21 +52,25 @@ function pageKey(r: SearchResult): string {
  * Occurrence positions of the chunks of segmented pages among `results`, for
  * dedupResults' `regions`: chunk id -> stored byte where the chunk's live
  * occurrence starts. One query, run only when some page has more results
- * than MAX_PER_PAGE (otherwise the region rule changes nothing); a failed
- * read leaves every page under the inline rule.
+ * than MAX_PER_PAGE (otherwise the region rule changes nothing), with its
+ * chunk-manifest probe in one read under the keyword statement bound
+ * (engine.keywordBoundedRead); a failed read, a cancelled one included,
+ * leaves every page under the inline rule.
  */
-export async function segmentRegions(engine: Pick<BrainEngine, 'kind' | 'executeRaw'>, results: readonly SearchResult[]): Promise<Map<number, number>> {
+export async function segmentRegions(engine: Pick<BrainEngine, 'kind' | 'executeRaw' | 'keywordBoundedRead'>, results: readonly SearchResult[]): Promise<Map<number, number>> {
   const counts = new Map<string, number>();
   for (const r of results) counts.set(pageKey(r), (counts.get(pageKey(r)) ?? 0) + 1);
   const ids = results.filter(r => counts.get(pageKey(r))! > MAX_PER_PAGE && r.chunk_id > 0).map(r => r.chunk_id);
   if (ids.length === 0) return new Map();
   try {
-    if (!await chunkManifestReads(engine)) return new Map();
-    const rows = await engine.executeRaw<{ id: number; byte_start: number | string }>(`SELECT cc.id, m.byte_start FROM content_chunks cc
-      JOIN pages p ON p.id = cc.page_id AND p.body_storage = 'segmented'
-      ${chunkManifestJoin('p', 'cc', 'm')}
-      WHERE cc.id = ANY($1::int[]) AND m.byte_start IS NOT NULL AND ${chunkVisibleFilter('p', 'cc')}`, [ids]);
-    return new Map(rows.map(r => [Number(r.id), Number(r.byte_start)]));
+    return await engine.keywordBoundedRead(async db => {
+      if (!await chunkManifestReads(engine, db)) return new Map<number, number>();
+      const rows = await db.executeRaw<{ id: number; byte_start: number | string }>(`SELECT cc.id, m.byte_start FROM content_chunks cc
+        JOIN pages p ON p.id = cc.page_id AND p.body_storage = 'segmented'
+        ${chunkManifestJoin('p', 'cc', 'm')}
+        WHERE cc.id = ANY($1::int[]) AND m.byte_start IS NOT NULL AND ${chunkVisibleFilter('p', 'cc')}`, [ids]);
+      return new Map(rows.map(r => [Number(r.id), Number(r.byte_start)]));
+    });
   } catch {
     return new Map();
   }
