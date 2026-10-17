@@ -646,6 +646,13 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No managed sync run is blocked.",
+            "name": "managed_sync_blocked",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "docs": "docs/guides/repair.md#receipt-compaction",
               "last_compaction": {
@@ -670,7 +677,7 @@
               "by_day": [
                 {
                   "content_decisions": 0,
-                  "day": "2026-10-16",
+                  "day": "<sync-day>",
                   "interventions": 1
                 }
               ],
@@ -4612,6 +4619,13 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No managed sync run is blocked.",
+            "name": "managed_sync_blocked",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "docs": "docs/guides/repair.md#receipt-compaction",
               "last_compaction": {
@@ -4636,7 +4650,7 @@
               "by_day": [
                 {
                   "content_decisions": 0,
-                  "day": "2026-10-16",
+                  "day": "<sync-day>",
                   "interventions": 1
                 }
               ],

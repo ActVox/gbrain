@@ -10,6 +10,76 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.272.0] - 2026-10-16
+
+**A page that stops a managed sync no longer stops its source silently, and gbrain stops rewriting busy files just to refresh an assessment marker.** On a managed Postgres brain one page write was resolved the documented way (`gbrain repair stuck-recovery --keep disk`), and its source then indexed nothing for 21 hours (#6858). The request ended `conflict` / `source_changed` with a message no classifier knew, so the run parked `blocked_by_failures`. Every autopilot freshness sync job returned that parked run and was recorded `completed`, so nothing retried and nothing alerted. The trigger was gbrain itself: managed sync rewrote the canonical file of an oversized page only to refresh its `embed_skip` marker, whose `assessed_at` changes whenever the body does, and that rewrite was the publication an agent's own edit of the hot file collided with.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `repair stuck-recovery --keep disk` abandons a managed sync import | the run parked `blocked_by_failures` until `sync --retry-failed` | the next plain sync retries the page after the rest of its run: it imports the kept file when it is committed, holds it `worktree_dirty` when it is an uncommitted edit, and syncs the rest of the source in the same pass |
+| The `--keep disk` result for any other write | named only `sources reconcile … --preview` | names both follow-ups in order: `sources reconcile … --preview --auto-additive` (still preview-first), then `gbrain sync --source <id> --no-pull`; a sync import names the plain sync |
+| An autopilot (or any) `sync` job whose managed run is blocked, stalled or capped | `completed`, with the parked result | `dead`; the error names the stop and the run's `next` command, and `jobs get` keeps `outcome`, `drain` and `next` in the job's progress |
+| A managed sync run blocked on a page | `sync_failures` warned and failed only after 72 h | new doctor check `managed_sync_blocked`: warns at once and fails after an hour, with `gbrain sync status --source <id> --json` as its fix |
+| get_brain_health with a source blocked over an hour | `ok` | `attention`, with a `sync_blocked` count band (no source names) |
+| A managed incremental `gbrain sync` on a large repository whose chunker stamp predates the current chunker | read and token-counted every file before the first write (131 s and 1.4 GB on a 308k-file, 2.7 GB test repo), priced a `chunker_drift` ceiling and could auto-defer cheap embeds | prices only the changed files, as the run embeds them (first write on a blocked 52-page retry went from 58 s to 5 s in the same test); `--full` and classic sources are unchanged |
+| A managed sync import of an oversized, quarantined or flagged page | rewrote the canonical file with the gate's marker (a file publication with a recovery record, every time the body changed) | stores the marker in the database only and leaves the file as committed; a file whose marker is missing or stale is not file/database drift |
+
+### What you need to do
+
+Nothing. Markers already written into files stay where they are (nothing rewrites files on upgrade), and a later import of the same file no longer touches them. If your monitoring treats a dead `sync` job as an incident, that is now the intended signal: `gbrain sync status --source <id> --json` names the page and its exit. Since v0.60.269.0 a plain `gbrain sync` also retries the failure an earlier run recorded, so once the cause is cleared the next freshness job resumes the run by itself.
+
+### Still open on #6858
+
+A supported low-latency mode (ask 6) is a separate proposal. The repository-scaling preparation cost of ask 5 came from the embed cost estimate above; the remaining per-run work that grows with the repository (git discovery, the identity freeze) measured about 3 s at 308k pages.
+
+## [0.60.271.0] - 2026-10-16
+
+**A page write no longer waits behind a sync group that an idle managed sync started in the moment it was being claimed.** While a managed sync drains with lanes, the lanes can sit idle between groups. If an agent's page write arrived just then and its own process was still claiming it, the drain skipped the write and started the next sync group, so the write waited for that group: about 730 ms instead of about 60 ms in the test traces. The FIFO claim now holds that group back, as the lane-head claim already did. The sync still gets one group after each such write commits, so a stream of writes cannot stall it. Three flaky tests on master are fixed with it.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| a page write admitted while a managed sync's lanes are idle and its own process is claiming it | the drain could start a sync group first; the write waited for that group | the write goes first |
+| a steady stream of page writes during a managed sync | sync groups kept moving | sync groups keep moving: at least one after every second write |
+| a page write stalled in another process's preparation, earlier in the queue than the sync rows | the sync behind it kept going | unchanged |
+
+### What to do
+
+Nothing. Nothing is rewritten on upgrade and there is no migration.
+
+### Itemized changes
+
+- `claimNextWrite` (`src/core/persistence/journal.ts`) applies the lane-head claim's foreground-waiting guard (now one fragment, `FOREGROUND_WAITING_ON`) to sync rows the waiting write would pass. The waiting writes are read once per claim in a materialized CTE. The consumer (`src/core/persistence/consumer.ts`) keeps a per-worktree sync-head cursor (`syncHeadSeen`), fed by FIFO and lane-head claims, so one foreground commit since the last sync head earns the sync side one head.
+- New no-op fault point `consumer:claiming` before each FIFO and lane-head claim. `test/managed-sync-foreground-priority.test.ts` parks the drain's claims there instead of parking lanes at `lane:applied`, which let each lane take one more group first (the lanes-2 flake); a forced probe covers that race.
+- `test/claim-fifo-foreground-waiting.test.ts` (PGLite, and Postgres through `test/postgres-unit-arms.txt`): a write row-locked by its own process's claim is not overtaken by a sync head, and a stream of such writes still lets the sync side claim a head after every second write.
+- `SyncOpts.governMs` test seam (the drain governor's tick). `test/belief-ledger-purge-review.test.ts` "#1 (CI stall)" sets it instead of racing the governor's 10 s confirmation against its deadline's 10 s cooperative stop (master red at v0.60.268.0): it asserts `blocked` / `drain_stalled` with the governor first and, as a forced probe, `resumable` / `deadline` with the deadline first.
+- `test/sync-managed-help-l7-6712.test.ts` "--retry-failed is a deprecated alias" failed whenever an earlier test file in the same `bun test` process had already run `sync --retry-failed`, because the coaching notice prints once per process. It now resets that flag first (`resetRetryFailedNoticeForTests`, `src/commands/sync/args.ts`); the once-per-process assertion is unchanged.
+
+## [0.60.270.0] - 2026-10-16
+
+**Security: an image page edited free of private text can no longer slip back into remote image search.** Suppose an image's OCR text carried a private section and someone later edited that section out of the page. GBrain keeps such a page out of remote search, because the picture still shows what the text no longer says. Until now, re-importing the unchanged image while OCR was off or out of budget put it back: the page became searchable again, and remote callers of image search could see its name and title ranked by the private picture. Now that re-import is skipped unless a fresh OCR pass succeeds, and the page stays exactly as it was.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| an unchanged image whose private OCR section was edited out of its page, re-imported with OCR off or out of budget (`gbrain embed --stale --images`, `gbrain sync --full`) | re-imported, sealed, and ranked in remote `search_by_image` | `skipped`: "This image had protected OCR, so indexing it requires successful fresh OCR. Enable OCR and reimport the image." Body, chunks and seal state unchanged |
+| the same re-import with OCR on and succeeding | re-imported | re-imported and attested from the fresh OCR, as before |
+| a changed image | re-imported | unchanged behaviour |
+
+### What to do
+
+Upgrade. Nothing is rewritten on upgrade and there is no migration. Affected releases are v0.48.3.0 through v0.60.269.0. Exposure needed all three: an image whose OCR held a protected (`facts`/`takes`) section, a later edit that removed it, and a re-import with OCR disabled or over `embedding_image_ocr_max_images`. If you ran with image OCR off and edited protected text out of image pages, re-import those images with OCR enabled; a page already re-sealed this way can't be told apart from one sealed legitimately.
+
+### Itemized changes
+
+- `importImageFile` (`src/core/import-file.ts`) applies its fresh-OCR requirement to an existing page whose stored row is distrusted (`chunker_version < 0`) when the image hash is unchanged, in addition to a stored body that still carries protected OCR. It never enables OCR or raises the OCR budget on its own.
+- `provenanceDistrusted` (`src/core/search/safe-chunks.ts`) reads the stored `chunker_version` for that check.
+- `test/image-distrusted-reimport.test.ts` (PGLite, and Postgres through `test/e2e/image-distrusted-reimport-postgres.test.ts`) covers OCR disabled and OCR over budget, with a remote `search_by_image` caller, plus the successful-OCR path.
+
 ## [0.60.269.0] - 2026-10-16
 
 **Cheaper managed publishes, one way to retry, and three managed-sync bugs closed (#6712 PR 3).** A 336 KB page with 1,012 facts, 4,100 timeline rows and 50 code references now publishes in one transaction of 67 statements instead of 318, which takes 4.5 s instead of 19.5 s at 57 ms round trip through a transaction pooler. A plain `gbrain sync` retries the failure the previous run recorded, so `--retry-failed` becomes a deprecated alias, and `gbrain sync --help` lists the ten flags a managed brain needs first. Three managed-sync bugs are fixed: final validation timing out at the end of a long catch-up (#6735), a legacy page forked into a twin (#6727), and doctor calling a fresh cursor idle (#6763).

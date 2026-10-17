@@ -40,6 +40,16 @@ describe('Postgres hot-check golden: the fence trend day', () => {
     expect(() => stampSyncDay(runOn('2026-11-19'), '2026-11-20', ['2026-11-20', '2026-11-20'])).toThrow('not the day the fixture sync stamped');
   });
 
+  test('the soak counter day the fixture sync stamped is stored as the sync day, and only a day around the sync passes', () => {
+    const soakDays = (report: Report) => report.checks.filter(c => c.name === 'sync_soak_counters').flatMap(c => (c.details as { by_day?: Array<{ day: string }> } | undefined)?.by_day ?? []).map(d => d.day);
+    expect(soakDays(golden)).toEqual([SYNC_DAY]);
+    expect(soakDays(stampSyncDay(runOn('2026-11-20'), '2026-11-20', ['2026-11-20', '2026-11-20']) as Report)).toEqual([SYNC_DAY]);
+    const soakNextDay = JSON.parse(JSON.stringify(runOn('2026-11-20'))) as Report;
+    for (const c of soakNextDay.checks) if (c.name === 'sync_soak_counters') for (const d of (c.details as { by_day: Array<{ day: string }> }).by_day) d.day = '2026-11-21';
+    expect(stampSyncDay(soakNextDay, '2026-11-20', ['2026-11-20', '2026-11-21'])).toEqual(golden);
+    expect(() => stampSyncDay(soakNextDay, '2026-11-20', ['2026-11-20', '2026-11-20'])).toThrow('sync_soak_counters day 2026-11-21');
+  });
+
   test('only the trend day is replaced: other date-like drift still differs', () => {
     const drifted = runOn('2026-11-20');
     const other = drifted.checks.find(c => c.name !== 'fence_integrity' && typeof c.message === 'string')!;
