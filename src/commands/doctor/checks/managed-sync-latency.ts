@@ -16,7 +16,7 @@ import { readManagedMode } from '../../../core/persistence/managed-mode.ts';
 import { FRESHNESS_FAIL_SECONDS, formatLatency, readFreshnessTarget, readSyncFreshness, type SourceFreshness } from '../../../core/persistence/sync-freshness.ts';
 import { SYNC_ON_COMMIT_KEY } from '../../../core/sync-config-keys.ts';
 
-const DOCS = 'docs/guides/live-sync.md#on-commit-sync';
+const DOCS = 'docs/guides/on-commit-sync.md';
 const p95 = (f: SourceFreshness) => f.commit_to_searchable.p95_seconds ?? 0;
 const line = (f: SourceFreshness) => `${f.source_id} (p95 ${formatLatency(f.commit_to_searchable.p95_seconds)}, p50 ${formatLatency(f.commit_to_searchable.p50_seconds)}, ${f.commit_to_searchable.samples} page(s))`;
 

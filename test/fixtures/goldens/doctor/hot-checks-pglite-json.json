@@ -2411,7 +2411,7 @@
           {
             "category": "brain",
             "details": {
-              "docs": "docs/guides/live-sync.md#on-commit-sync",
+              "docs": "docs/guides/on-commit-sync.md",
               "fail_seconds": 3600,
               "graded": false,
               "on_commit": false,
@@ -6402,7 +6402,7 @@
           {
             "category": "brain",
             "details": {
-              "docs": "docs/guides/live-sync.md#on-commit-sync",
+              "docs": "docs/guides/on-commit-sync.md",
               "fail_seconds": 3600,
               "graded": false,
               "on_commit": false,
