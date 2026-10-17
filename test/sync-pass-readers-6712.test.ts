@@ -225,13 +225,13 @@ describe('the other cursor readers', () => {
     const f = await managedSource();
     const cli = async (args: string[]) => {
       const err: string[] = [];
-      let exit: number | null = null;
-      const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => { exit = code ?? 0; throw new Error('EXIT'); }) as never);
+      const seen: { exit: number | null } = { exit: null };
+      const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => { seen.exit = code ?? 0; throw new Error('EXIT'); }) as never);
       const logSpy = spyOn(console, 'log').mockImplementation(() => {});
       const errSpy = spyOn(console, 'error').mockImplementation((...parts: unknown[]) => { err.push(parts.map(String).join(' ')); });
       try { await runSources(engine, args); } catch (error) { if (!(error instanceof Error && error.message === 'EXIT')) throw error; }
       finally { exitSpy.mockRestore(); logSpy.mockRestore(); errSpy.mockRestore(); }
-      return { exit, err: err.join('\n') };
+      return { exit: seen.exit, err: err.join('\n') };
     };
     const strategy = async () => (await engine.executeRaw<{ strategy: string | null }>("SELECT config->>'strategy' AS strategy FROM sources WHERE id=$1", [f.id]))[0]!.strategy;
     try {
