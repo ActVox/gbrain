@@ -299,6 +299,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const save = async (outcome: PassOutcome, stopReason: string | null) => {
     const ended = outcome !== 'open';
     value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size, counts: { ...counts, ...passApplyCounts(applied) },
+      classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}),
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
     await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value); });

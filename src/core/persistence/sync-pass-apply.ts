@@ -45,7 +45,8 @@ import { readSyncImportProvenances, recordSyncImportProvenances, syncImportParse
 import { assertDrainLease } from './sync-lease.ts';
 import { clearDeletesWithheld, deleteSetHash, readDeletesWithheld, readOriginDeletedMarker, retireOriginDeletedMarker, writeDeletesWithheld, type DeletesWithheld } from './sync-markers.ts';
 import type { ShadowLevel, ShadowPath } from './sync-pass.ts';
-import { SETTLE_MISMATCH_STREAK, type ManagedSyncPassValue } from './sync-pass-row.ts';
+import { SETTLE_MISMATCH_STREAK, type ManagedSyncPassValue, type PassRoundSummary } from './sync-pass-row.ts';
+import { syncClassAction, type SyncClassAction } from './sync-classify.ts';
 import type { SyncAdmission } from './sync-admission.ts';
 
 /** Legacy pages the sweep screens per pass after the incarnation's first full round (design §2.7, [estimated]). */
@@ -72,11 +73,14 @@ export interface PassApplyState {
   /** keep_db paths admitted in this pass: never admitted twice. */
   keepDbTaken: string[];
   matchedSlugs: string[];
+  /** The newest round's classes and summary (design §9), after this module settled what it finished. */
+  classes: Record<string, { count: number; action: SyncClassAction }>;
+  summary: PassRoundSummary | null;
 }
 
 export function newPassApplyState(): PassApplyState {
   return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0 }, settleMismatch: [], adopted: 0,
-    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: [] };
+    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: [], classes: {}, summary: null };
 }
 
 export interface PassApplyInput {
@@ -119,6 +123,32 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
   await sweepLegacy(engine, level, input, state);
   await admitKeepDb(engine, level, input, state);
   for (const entry of level.paths) if (entry.result.cls === 'matched' && entry.slug) state.matchedSlugs.push(entry.slug);
+  summarizeRound(level, state);
+}
+
+/** The round's classes (`in_flight`, `keep_db_pending`, `deletes_withheld` and `paused_*` apart) and level summary (design §9). */
+export function summarizeRound(level: ShadowLevel, state: PassApplyState): void {
+  const RANK: Record<SyncClassAction, number> = { none: 0, owner: 1, repair: 2 };
+  const classes: PassApplyState['classes'] = {};
+  const summary: PassRoundSummary = { db_ahead: { pending: 0, db_only: 0, unproven: 0, by_prefix: {} }, full_skipped_db_ahead: 0, legacy_unverified: 0, legacy_pageless: 0 };
+  for (const entry of level.paths) {
+    const r = entry.result;
+    const key = r.inFlight ? 'in_flight' : r.withheld ? 'deletes_withheld' : r.pending ? 'keep_db_pending' : r.paused ? 'paused_keep_db' : r.cls;
+    const action: SyncClassAction = key === 'deletes_withheld' ? 'repair' : key === 'keep_db_pending' || key === 'paused_keep_db' || key === 'in_flight' ? 'owner' : r.classAction ?? syncClassAction(r.cls);
+    const slot = classes[key] ?? (classes[key] = { count: 0, action });
+    slot.count++;
+    if (RANK[action] > RANK[slot.action]) slot.action = action;
+    if (r.cls === 'db_ahead' && r.sub) {
+      summary.db_ahead[r.sub]++;
+      const prefix = entry.path.includes('/') ? `${entry.path.split('/')[0]}/` : '';
+      summary.db_ahead.by_prefix[prefix] = (summary.db_ahead.by_prefix[prefix] ?? 0) + 1;
+      if (r.fullSkipped) summary.full_skipped_db_ahead++;
+    }
+    if (r.cls === 'legacy_unverified') summary.legacy_unverified++;
+    if (entry.legacyPageless) summary.legacy_pageless++;
+  }
+  state.classes = classes;
+  state.summary = summary;
 }
 
 /** Design §2.5: retire markers whose origin left both `T` and the disk, or that a live page claims again (compare-and-delete). */

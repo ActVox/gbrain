@@ -85,7 +85,18 @@ export interface ManagedSyncPassValue {
     counts: Record<string, number>;
     duration_ms: number | null;
     timings_ms: Record<string, number>;
+    /** #6712 PR 4b (design §9): the newest round's classes (`{count, action}`) and level summary, for `sync status`'s live `convergence`. */
+    classes?: Record<string, { count: number; action: 'none' | 'owner' | 'repair' }>;
+    summary?: PassRoundSummary;
   };
+}
+
+/** What `sync status`'s live `convergence` reads of the newest round besides its classes (design §9). */
+export interface PassRoundSummary {
+  db_ahead: { pending: number; db_only: number; unproven: number; by_prefix: Record<string, number> };
+  full_skipped_db_ahead: number;
+  legacy_unverified: number;
+  legacy_pageless: number;
 }
 
 export const OPEN_AT_STAMP_CAP = 256;
