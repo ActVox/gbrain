@@ -98,7 +98,7 @@ export interface ShadowLevel {
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
 interface PageRow { id: number | string; slug: string; source_path: string; revision: string; deleted: boolean; request_id: string | null;
-  record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
+  record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser' | 'working'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
 
 const recordOids = (record: PageRow['record']): string[] =>
   record ? [record.blob_oid, record.disk_blob_oid].filter((oid): oid is string => typeof oid === 'string' && oid.length > 0) : [];
@@ -128,16 +128,16 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
       p.revision_write_request_id::text AS request_id,
       c.completed_keys IS NOT NULL AS has_record, c.completed_keys->0->>'origin' AS rec_origin, c.completed_keys->0->>'blob_oid' AS rec_blob_oid,
       c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser,
-      c.completed_keys->0->>'full_episode' AS rec_full_episode
+      c.completed_keys->0->>'full_episode' AS rec_full_episode, (c.completed_keys->0->'working')::text AS rec_working
     FROM pages p LEFT JOIN op_checkpoints c ON c.op=$2 AND c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin: string | null; rec_blob_oid: string | null;
-    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null; rec_full_episode: string | null };
+    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null; rec_full_episode: string | null; rec_working: string | null };
   const rows: PageRow[] = [];
-  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, rec_full_episode, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
+  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, rec_full_episode, rec_working, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
     record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined,
-      full_episode: rec_full_episode } : null }); };
+      full_episode: rec_full_episode, ...(rec_working === 'true' || rec_working === 'false' ? { working: rec_working === 'true' } : {}) } : null }); };
   if (kind === 'postgres') { take(await exec.executeRaw<Raw>(select, params)); return { rows, statements: 1 }; }
   let after = 0, statements = 0;
   for (;;) {
@@ -439,8 +439,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const row = byOrigin.get(path);
     const level = levelOf(path, probe);
     // Presence decides only rows 4-6 (a level of absent); a committed path in T is not read here (Dp covers it).
-    const presentNow = mode === 'working' ? level !== null : level === null ? readPresent(root, path, scope) : true;
     const record = row?.record ?? null;
+    // #5459 (`keptWorkingTreePages`): a page whose import provenance is the pinned Git blob follows Git, so a lingering
+    // untracked copy of its file does not keep it.
+    const fromGit = record?.working === false || (record?.working === undefined && !!record?.blob_oid);
+    const presentNow = mode === 'working' ? level !== null : level === null ? !fromGit && readPresent(root, path, scope) : true;
     const recordBlobOids = recordOids(record);
     const attested = row && (row.arm1 || row.attested_hash) ? { hash: row.attested_hash ?? null, arm1: row.arm1 === true } : null;
     const hold = holdByGitPath.get(path);

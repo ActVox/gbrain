@@ -457,11 +457,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   };
   const identityDowngrades: DowngradedRename[] = [];
   const fileRefusals = new Map<string, SyncFileRefusal>();
+  const keptCount = () => lastLevel?.paths.filter(entry => entry.result.cls === 'kept').length ?? 0;
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
     ...(collisions.length ? { slugCollisions: collisions } : {}), ...(fileRefusals.size ? { fileRefusals: [...fileRefusals.values()] } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
-    ...(sizeStates ? { size_states: sizeStates } : {}), ...(legacySkips.contextualMode || legacySkips.canonicalBytes ? { legacySkips: { ...legacySkips } } : {}),
+    ...(sizeStates ? { size_states: sizeStates } : {}), ...(keptCount() ? { working_tree_kept: keptCount() } : {}), ...(legacySkips.contextualMode || legacySkips.canonicalBytes ? { legacySkips: { ...legacySkips } } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
   try {
