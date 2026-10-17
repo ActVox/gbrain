@@ -144,11 +144,10 @@ export interface Cursor extends SyncDiscovery { runId: string; index: number; au
    * #6712 PR 4b: a live pass's round batch (sync-pass-run.ts), held in memory under a `pass:` key with no cursor row. Its
    * intents carry `passId` (no cursor fields) and a request id derived from `(passId, path, level)`; `stamp`: the batch is
    * the pass's stamp (no entries; its checkpoint publishes the stamp). `fullEpisode`: the open `--full` episode its imports
-   * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint).
+   * record. `failureKey`: the key a recorded failure of the batch is filed under (the pass row's fingerprint). `passLegacyWaived`:
+   * the batch indexes a #5751 waiver passed (no provenance recorded), which the pass settles at their level.
    */
-  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[];
-  /** #5751 on a pass: the batch indexes a legacy kernel waiver (`contextual_mode`, `canonical_file_differs`) passed; they record no import, so the pass settles them for itself. */
-  legacyWaived?: number[]; }
+  passId?: string; stamp?: PassStamp; fullEpisode?: string; failureKey?: string; resumeArgs?: string[]; passLegacyWaived?: number[]; }
 export interface CursorProgress { startedAt: number; startIndex: number; lastAt: number; lastIndex: number }
 /**
  * #6278 (1.5): the breaker state a run carries in its cursor. `stalled` lists the `preparation_stalled` receipts this run

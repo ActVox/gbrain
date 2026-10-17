@@ -97,8 +97,7 @@ test('#5751 unchanged legacy working-tree files admit nothing on any run, and th
 test('#5751 a run mixing skipped legacy files and a new file commits its checkpoint', async () => each(async engine => {
   const f = await legacyFixture(engine);
   writeFileSync(join(f.root, 'fresh.md'), '---\ntitle: Fresh\n---\nA new untracked observation.\n');
-  // #6712 PR 4b (design v3.2 §3.3, §6): only a pass at the configured selection (mode included) stamps last_commit, so the
-  // source is configured for working-tree sync, as a brain that syncs its working tree is.
+  // #6712 PR 4b (design v3.2 §3.3): a pass stamps last_commit only at the configured selection, so working mode is the configuration here.
   await engine.setConfig('sync.include_working_tree', 'true');
   const result = await performManagedSync(engine, f.working).finally(() => engine.unsetConfig('sync.include_working_tree'));
   await disposePersistenceConsumer(engine);
