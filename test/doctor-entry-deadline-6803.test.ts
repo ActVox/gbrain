@@ -10,7 +10,7 @@
  * - Postgres: a locked config read does not outlive the run's deadline.
  * - Postgres: entry A running out of time mid-forecast never makes entry B report a counter-only ok, and
  *   the run forecasts once.
- * - The frontmatter scan stops at its entry's deadline and reports what it read (partial), not unknown.
+ * - The frontmatter scan stops at its entry's deadline and names the source it did not finish, not unknown.
  * - --only X --budget-ms N gives X the whole N; the budget-unknown fix names --budget-ms above the time taken,
  *   and running it completes the check (scaled down: 200 ms entry budget, 600 ms statements).
  */
@@ -43,23 +43,30 @@ function ctxFor(engine: BrainEngine, args: string[]): DoctorContext {
   };
 }
 
-/** The engine with executeRaw delayed for statements matching `slow›, and statements matching `count› counted. */
-function instrumented(engine: BrainEngine, opts: { slow?: { match: RegExp; ms: number }; count?: RegExp } = {}): BrainEngine & { counted: number } {
-  const state = { counted: 0 };
+/**
+ * The engine with executeRaw delayed for statements matching `slow›, and statements matching `count› counted.
+ * `settled()` resolves once every delayed statement has finished, so none outlives its test.
+ */
+function instrumented(engine: BrainEngine, opts: { slow?: { match: RegExp; ms: number }; count?: RegExp } = {}): BrainEngine & { counted: number; settled: () => Promise<void> } {
+  const state = { counted: 0, delayed: new Set<Promise<unknown>>() };
   return new Proxy(engine, {
     get(target, key) {
       if (key === 'counted') return state.counted;
+      if (key === 'settled') return async () => { await Promise.allSettled([...state.delayed]); };
       if (key === 'executeRaw') {
-        return async (sql: string, params?: unknown[], o?: unknown) => {
+        return (sql: string, params?: unknown[], o?: unknown) => {
           if (opts.count?.test(sql)) state.counted++;
-          if (opts.slow?.match.test(sql)) await new Promise((r) => setTimeout(r, opts.slow!.ms));
-          return target.executeRaw(sql, params, o as never);
+          if (!opts.slow?.match.test(sql)) return target.executeRaw(sql, params, o as never);
+          const run = new Promise((r) => setTimeout(r, opts.slow!.ms)).then(() => target.executeRaw(sql, params, o as never));
+          state.delayed.add(run);
+          void run.finally(() => state.delayed.delete(run)).catch(() => undefined);
+          return run;
         };
       }
       const value = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },
-  }) as BrainEngine & { counted: number };
+  }) as BrainEngine & { counted: number; settled: () => Promise<void> };
 }
 
 const byName = (checks: Check[], name: string) => checks.find((c) => c.name === name);
@@ -147,21 +154,27 @@ for (const kind of testBackends()) {
       });
     }, 60_000);
 
-    test('the frontmatter scan stops at its entry deadline and reports what it read', async () => {
+    test('the frontmatter scan stops at its entry deadline and names the source it did not finish', async () => {
+      // The source's page-count read (which the scan races against its deadline before walking) is held past
+      // the entry deadline, so the deadline always lands inside the scan whatever the runner's disk speed.
+      // A scan still on its own 30 s timeout would wait the count out, walk every file and report clean.
       const root = join(scratch, 'fm-example');
       mkdirSync(root, { recursive: true });
-      for (let i = 0; i < 20_000; i++) writeFileSync(join(root, `note-${i}.md`), `---\ntitle: Note ${i}\n---\n\nBody ${i}.\n`);
+      for (let i = 0; i < 200; i++) writeFileSync(join(root, `note-${i}.md`), `---\ntitle: Note ${i}\n---\n\nBody ${i}.\n`);
       await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2) ON CONFLICT (id) DO UPDATE SET local_path=EXCLUDED.local_path', ['fm-example', root]);
+      const slowCount = instrumented(engine, { slow: { match: /SELECT COUNT\(\*\)::text AS n FROM pages WHERE source_id/, ms: 1_500 } });
       try {
         await withEntryBudget(600, async () => {
           const started = Date.now();
-          const checks = await runDoctorRegistry(ctxFor(engine, ['--json', '--scope=brain']), [connectionGateEntry, frontmatterEntry]);
+          const checks = await runDoctorRegistry(ctxFor(slowCount, ['--json', '--scope=brain']), [connectionGateEntry, frontmatterEntry]);
           const fm = byName(checks, 'frontmatter_integrity')!;
           expect(fm.details?.health, JSON.stringify(fm)).not.toBe('unknown');
           expect(fm.message).toMatch(/partial|NOT SCANNED/i);
+          expect(fm.message).toContain('fm-example: NOT SCANNED');
           expect(Date.now() - started).toBeLessThan(600 + 400);
         });
       } finally {
+        await slowCount.settled();
         await engine.executeRaw('DELETE FROM sources WHERE id=$1', ['fm-example']);
       }
     }, 120_000);
