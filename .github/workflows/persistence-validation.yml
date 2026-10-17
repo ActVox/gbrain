@@ -173,9 +173,9 @@ jobs:
           if-no-files-found: error
 
   # Unit-lane suites whose PostgreSQL arm is gated on DATABASE_URL: the unit,
-  # serial and slow lanes unset it, so these arms run only here and in the
-  # scheduled race hunt (both arms per file; the PGLite arm also runs in the
-  # unit lane). The list is test/postgres-unit-arms.txt;
+  # serial and slow lanes unset it, so these arms run only here, in
+  # ci:ubicloud's pg-arms lane and in the scheduled race hunt (both arms per
+  # file; the PGLite arm also runs in the unit lane). The list is test/postgres-unit-arms.txt;
   # scripts/check-postgres-lane-coverage.ts fails a new DATABASE_URL-gated arm
   # until it is listed there or wrapped in a test/e2e registerPostgresTests
   # file. The eight shards (ARM_SHARDS in scripts/postgres-unit-arms.ts) are

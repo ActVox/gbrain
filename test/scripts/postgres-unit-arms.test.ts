@@ -47,6 +47,17 @@ describe('postgres-unit-arms list', () => {
     expect(sums.filter(ms => ms > ARM_SHARD_BUDGET_MS * 0.8)).toEqual([]);
   });
 
+  test('ci:ubicloud\'s pg-arms lane runs each file with the workflow step\'s own command', () => {
+    const command = 'bun --no-env-file test --timeout=120000';
+    const workflow = readFileSync(join(REPO, '.github', 'workflows', 'persistence-validation.yml'), 'utf8');
+    const item = readFileSync(join(REPO, 'scripts', 'ubicloud', 'ci-item.sh'), 'utf8');
+    const lane = item.slice(item.indexOf('    pg-arms)'), item.indexOf(';;', item.indexOf('    pg-arms)')));
+    expect(workflow).toContain(command);
+    expect(lane).toContain(`${command} "$1"`);
+    expect(lane).toContain('GBRAIN_TEST_ALLOW_DATABASE_URL=1');
+    expect(lane).toContain('-u GBRAIN_TEST_TIMEOUT_MULTIPLIER');
+  });
+
   test('comments and blank lines are ignored; a new path is a one-line edit', () => {
     expect(parseArmsList('# header\n\ntest/a.test.ts\ntest/b/c.serial.test.ts\n')).toEqual({ files: ['test/a.test.ts', 'test/b/c.serial.test.ts'], errors: [] });
   });
