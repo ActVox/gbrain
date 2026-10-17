@@ -387,7 +387,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   let costDeferred: string | null = null;
   if (costDecision.defer && !processingOptions.noEmbed) { processingOptions.noEmbed = true; costDeferred = costDecision.defer; }
 
-  const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0 };
+  const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0,
+    skippedContextualMode: 0, skippedCanonicalBytes: 0 };
   const collisions: SyncSlugCollision[] = [];
   const S = new Map<string, string>();
   const settledKey = (path: string, level: string | null) => `${path}\0${level ?? ''}`;
@@ -402,6 +403,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const rememberLevel = () => { if (lastLevel?.workingCache) rememberWorkingStatCache(cacheKey, lastLevel.workingCache); };
   const applied = newPassApplyState();
   const readmitted = new Set<string>();
+  // #5751: a waiver records no provenance for these, so the path still classifies unsettled; its fate at this level is the waiver.
+  const legacyWaived = new Set<string>();
 
   const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
     const ended = outcome !== 'open';
@@ -415,6 +418,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
+    ...(counts.skippedContextualMode || counts.skippedCanonicalBytes ? { legacySkips: { contextualMode: counts.skippedContextualMode, canonicalBytes: counts.skippedCanonicalBytes } } : {}),
     ...(collisions.length ? { slugCollisions: collisions } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
@@ -449,7 +453,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if ('entries' in drained) {
       const c = drained.counts;
       Object.assign(counts, { added: counts.added + c.added, modified: counts.modified + c.modified, deleted: counts.deleted + c.deleted, renamed: counts.renamed + (c.renamed ?? 0),
-        chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0) });
+        chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0),
+        skippedContextualMode: counts.skippedContextualMode + (c.skippedContextualMode ?? 0), skippedCanonicalBytes: counts.skippedCanonicalBytes + (c.skippedCanonicalBytes ?? 0) });
+      for (const index of drained.passLegacyWaived ?? []) legacyWaived.add(settledKey(entries[index]!.path, entries[index]!.level));
       sliceBase.pages += drained.index;
       roundSettled += drained.index;
       return null;
@@ -459,7 +465,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const stop = async (drained: SyncResult): Promise<SyncResult> => {
     Object.assign(counts, { added: counts.added + drained.added, modified: counts.modified + drained.modified, deleted: counts.deleted + drained.deleted,
       renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
-      waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
+      waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0), skippedContextualMode: counts.skippedContextualMode + (drained.legacySkips?.contextualMode ?? 0),
+      skippedCanonicalBytes: counts.skippedCanonicalBytes + (drained.legacySkips?.canonicalBytes ?? 0) });
     sliceBase.pages += drained.filesImported ?? 0;
     if (drained.reason === 'writer_yield') yieldSettled = roundSettled + (drained.managedCursor?.index ?? 0);
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
@@ -521,7 +528,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (r.inFlight) { inFlight.push(entry); continue; }
         if (S.has(settledKey(entry.path, entry.state.level))) {
           // A hold this pass wrote or re-screened at L is that path's fate here, even when its code re-screens every pass.
-          if (entry.state.hold?.atLevel) continue;
+          if (entry.state.hold?.atLevel || legacyWaived.has(settledKey(entryPaths(level, entry.path).path, entry.state.level))) continue;
           // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
           const again = settledKey(entry.path, entry.state.level);
           if (readmitted.has(again)) { mismatch.push(entry); continue; }
