@@ -180,7 +180,11 @@ test('forced probe: a fence that passes the screen but collides with a stored ta
   expect(await s.failedRequests()).toHaveLength(1);
 }), 180_000);
 
-test('sync.holds=fail blocks with the typed refusal; the next sync after the upgrade converts the legacy receipt with no --retry-failed', () => each(async engine => {
+// #6712 PR 4b: a non-company source has no blocked cursor to convert (the persistence-sync-holds ruling): the next pass
+// re-classifies the file and holds it under its own run, and the receipt an older release left stays exactly as it was.
+const receiptRow = (engine: BrainEngine, requestId: string) => engine.executeRaw('SELECT state,error_code,error_message,error_detail,compacted FROM persistence_requests WHERE request_id=$1::uuid', [requestId]);
+
+test('sync.holds=fail blocks with the typed refusal; the next sync after the upgrade holds the file with no --retry-failed and leaves the legacy receipt as it was', () => each(async engine => {
   await engine.setConfig('sync.holds', 'fail');
   const s = await source(engine, { 'people/malformed.md': MALFORMED, 'notes/ok.md': note('Ok') });
   const blocked = await s.sync();
@@ -209,15 +213,17 @@ test('sync.holds=fail blocks with the typed refusal; the next sync after the upg
   expectNoSecrets(JSON.stringify(remote));
   expect((await frontmatterHoldsBannerNote(engine)) ?? '').not.toContain(s.id);
   await engine.unsetConfig('sync.holds');
+  const legacy = await receiptRow(engine, failed!.request_id);
   const converted = await s.sync();
-  expect(converted.converted_from_failed).toEqual([failed!.request_id]);
+  expect(converted.converted_from_failed ?? []).not.toContain(failed!.request_id);
+  expect(await receiptRow(engine, failed!.request_id)).toEqual(legacy);
   expect(converted).toMatchObject({ status: 'first_sync', held_count: 1 });
   expect(converted.held![0]).toMatchObject({ path: 'people/malformed.md', code: 'invalid_fence', fence: { fence: 'takes', section: 'body' } });
   expect(await engine.getPage('notes/ok', { sourceId: s.id })).not.toBeNull();
   expect(await fenceHoldsBannerNote(engine)).toBeNull();
 }), 180_000);
 
-test('a legacy stored-row receipt holds the same bytes from the receipt; a compacted receipt converts only through the re-screen', () => each(async engine => {
+test('a legacy stored-row receipt: the pass holds the same bytes by its own refusal; a compacted receipt: the re-screen holds them; both receipts stay as they were', () => each(async engine => {
   const s = await source(engine, { 'people/probe.md': takesPage('Probe', take(1)) });
   await s.sync();
   await s.storedTake('people/probe', 2, 'Database-only take');
@@ -228,8 +234,11 @@ test('a legacy stored-row receipt holds the same bytes from the receipt; a compa
   await engine.executeRaw('UPDATE persistence_requests SET error_message=$2,error_detail=NULL WHERE request_id=$1::uuid',
     [failed!.request_id, "A takes fence row number is already used by a different take that is not in this page's canonical fence."]);
   await engine.unsetConfig('sync.holds');
+  const legacy = await receiptRow(engine, failed!.request_id);
   const converted = await s.sync();
-  expect(converted).toMatchObject({ status: 'synced', held_count: 1, converted_from_failed: [failed!.request_id] });
+  expect(converted).toMatchObject({ status: 'synced', held_count: 1 });
+  expect(converted.converted_from_failed ?? []).not.toContain(failed!.request_id);
+  expect(await receiptRow(engine, failed!.request_id)).toEqual(legacy);
   // The legacy message named no section; it comes from the refused bytes.
   expect(converted.held![0]).toMatchObject({ code: 'invalid_fence', reason: 'prepare_time', fence: { reason: 'stored_row_collision', fence: 'takes', section: 'body' } });
 
@@ -240,7 +249,11 @@ test('a legacy stored-row receipt holds the same bytes from the receipt; a compa
   const [compacted] = await t.failedRequests();
   await engine.executeRaw('UPDATE persistence_requests SET error_message=NULL,error_detail=NULL,compacted=true WHERE request_id=$1::uuid', [compacted!.request_id]);
   await engine.unsetConfig('sync.holds');
-  expect(await t.sync()).toMatchObject({ status: 'first_sync', held_count: 1, converted_from_failed: [compacted!.request_id] });
+  const compactedRow = await receiptRow(engine, compacted!.request_id);
+  const rescreened = await t.sync();
+  expect(rescreened).toMatchObject({ status: 'first_sync', held_count: 1 });
+  expect(rescreened.converted_from_failed ?? []).not.toContain(compacted!.request_id);
+  expect(await receiptRow(engine, compacted!.request_id)).toEqual(compactedRow);
 
   // ...but an arbitrary invalid_params receipt, compacted or not, is never a fence hold: once the file is clean, the next
   // plain sync retries it (#6712 PR 3, L7: no --retry-failed) and nothing is held or converted.
