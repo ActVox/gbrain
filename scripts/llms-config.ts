@@ -336,6 +336,7 @@ export const SECTIONS: DocSection[] = [
         title: "docs/guides/minions-fix.md",
         description: "Troubleshooting the Minions job queue.",
         path: "docs/guides/minions-fix.md",
+        includeInFull: false,
       },
       {
         title: "docs/guides/repair.md",

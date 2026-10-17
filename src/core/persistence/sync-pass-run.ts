@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import type { Cursor, RetryWait } from './sync-run.ts';
-import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncSlugCollision } from './sync-discovery.ts';
+import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncSlugCollision } from './sync-discovery.ts';
 import type { SyncAuthority, SyncProcessingOptions } from './sync-authority.ts';
 import type { PassStamp, SyncCursorOptions } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
@@ -120,16 +120,17 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   const slugOf = new Map(fresh.map(entry => [entry.path, resolveSlugForPath(entryPaths(level, entry.path).sourcePath)]));
   // #6727, as discovery does: a new origin with no live page at its slug takes the one legacy page (no recorded origin)
   // that folds to it; several, or one the importer cannot write, keep the slug and the freeze holds legacy_slug_conflict.
-  const legacySlugs = new Map<string, string[]>();
+  const legacySlugs = new Map<string, Pick<SyncEntry, 'legacySlugs' | 'legacyIdVeto'>>();
   const adopting = fresh.filter(entry => slugOf.get(entry.path) && !isCodeFilePath(entryPaths(level, entry.path).sourcePath));
   if (adopting.length) {
-    const identities = await engine.executeRaw<LegacyIdentity>('SELECT id, slug, source_path, deleted_at FROM pages WHERE source_id=$1 AND (source_path IS NULL OR slug=ANY($2::text[]))',
+    const identities = await engine.executeRaw<LegacyIdentity>("SELECT id, slug, source_path, deleted_at, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND (source_path IS NULL OR slug=ANY($2::text[]))",
       [level.sourceId, [...new Set(adopting.map(entry => slugOf.get(entry.path)!))]]);
     const bySlug = new Map(identities.map(page => [page.slug, page]));
+    const discovery = { root: level.root, gitRoot: level.gitRoot, target: level.head, sourceId: level.sourceId } as SyncDiscovery;
     for (const entry of adopting) {
-      const named: { legacySlugs?: string[] } = {};
-      slugOf.set(entry.path, await adoptLegacyPage(engine, identities, bySlug.get(slugOf.get(entry.path)!), slugOf.get(entry.path)!, named));
-      if (named.legacySlugs) legacySlugs.set(entry.path, named.legacySlugs);
+      const named: SyncEntry = { ...entryPaths(level, entry.path), action: 'import', working: working(entry) };
+      slugOf.set(entry.path, await adoptLegacyPage(engine, discovery, identities, bySlug.get(slugOf.get(entry.path)!), slugOf.get(entry.path)!, named));
+      if (named.legacySlugs) legacySlugs.set(entry.path, { legacySlugs: named.legacySlugs, ...(named.legacyIdVeto ? { legacyIdVeto: true as const } : {}) });
     }
   }
   const slugs = [...new Set([...slugOf.values()].filter(Boolean))];
@@ -157,7 +158,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     if (losers.length) collisions.push({ slug, kept: kept ?? entryPaths(level, winner!.path).sourcePath, skipped: losers.map(entry => entryPaths(level, entry.path).sourcePath) });
     if (!winner) continue;
     const paths = entryPaths(level, winner.path);
-    const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...(legacySlugs.has(winner.path) ? { legacySlugs: legacySlugs.get(winner.path)! } : {}) };
+    const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
     if (holder) {
       entries.push({ ...base, pageId: Number(holder.id), revision: holder.revision,
         ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}) });
