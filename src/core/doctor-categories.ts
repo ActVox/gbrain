@@ -75,6 +75,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ontology_facts_fenced',
   'orphan_persistence_bindings',
   'foreign_ownership_marker',
+  'coordination_lock_location',
   'safe_index_pending',
   'self_capture',
   'brain_score',
@@ -206,6 +207,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'missing_recorded_files',
   // #6865: committed files of a managed Git source with no page and no hold, from the stored detector result (doctor/checks/unindexed-files.ts).
   'unindexed_files',
+  // #6712: live pages whose database-only edit an incremental sync overwrote without a hold (doctor/checks/overwritten-edits.ts).
+  'sync_overwritten_db_edits',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
