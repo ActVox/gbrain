@@ -106,7 +106,7 @@ test/managed-sweep-refused-window-retry.test.ts
 test/managed-sweep-timeline.test.ts
 test/managed-sync-blocked-job-6858.test.ts
 test/managed-sync-bulk.test.ts
-test/managed-sync-checkpoint-controls-company.serial.test.ts
+test/managed-sync-checkpoint-controls-company.test.ts
 test/managed-sync-chunker-version.test.ts
 test/managed-sync-concurrent-write-hold.test.ts
 test/managed-sync-connection-loss.test.ts
