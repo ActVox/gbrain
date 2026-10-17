@@ -76,6 +76,13 @@ export interface ManagedSyncPassValue {
     legacy_markers_at?: string;
     /** #6712 PR 4b (design §2.6): the set hash of a withheld mass delete; with the env valve set the next tick runs a full round to apply it. */
     deletes_withheld?: string | null;
+    /**
+     * #6694 on the pass: the slug-root mode a subdirectory source's pass admitted pages under before a stamp published it. Later
+     * passes read under it, so a pin changed meanwhile is refused `slug_root_mode_mismatch` at the stamp instead of importing the
+     * same files again under the other mode's slugs. A configured stamp clears it; keeping the new pin retires it
+     * (`gbrain repair managed-sync-orphans`, `slug_mode_refused`).
+     */
+    slug_mode?: 'git-root' | 'source-root';
     /** #6712 PR 3 (L7) on the pass: the page request a blocked pass stopped on, which the next pass replays while what refused it is unchanged. */
     blocked?: { request_id: string; pass_id: string };
   };

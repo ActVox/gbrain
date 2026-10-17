@@ -401,12 +401,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   let costDeferred: string | null = null;
   if (costDecision.defer && !processingOptions.noEmbed) { processingOptions.noEmbed = true; costDeferred = costDecision.defer; }
 
-  const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0 };
+  const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0,
+    skippedContextualMode: 0, skippedCanonicalBytes: 0 };
   const collisions: SyncSlugCollision[] = [];
   const S = new Map<string, string>();
   const settledKey = (path: string, level: string | null) => `${path}\0${level ?? ''}`;
-  // The entries this round's batches settled before the round folds its candidates into S: a slice that yields mid-round
-  // (writer_yield) reports them (yieldSettled); a blocked stop reports S as it replays.
+  // The entries this round's batches settled before the round folds its candidates into S: a slice that stops mid-round
+  // reports them (yieldSettled); a blocked stop reports S as it replays.
   let roundSettled = 0, yieldSettled = 0;
   const retryConsumed = new Set<string>(retry);
   const sliceBase = { started: performance.now(), pages: 0 };
@@ -416,6 +417,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const rememberLevel = () => { if (lastLevel?.workingCache) rememberWorkingStatCache(cacheKey, lastLevel.workingCache); };
   const applied = newPassApplyState();
   const readmitted = new Set<string>();
+  // #5751: a waiver records no provenance for these, so the path still classifies unsettled; its fate at this level is the waiver.
+  const legacyWaived = new Set<string>();
 
   const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
     const ended = outcome !== 'open';
@@ -429,6 +432,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
+    ...(counts.skippedContextualMode || counts.skippedCanonicalBytes ? { legacySkips: { contextualMode: counts.skippedContextualMode, canonicalBytes: counts.skippedCanonicalBytes } } : {}),
     ...(collisions.length ? { slugCollisions: collisions } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
@@ -463,7 +467,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if ('entries' in drained) {
       const c = drained.counts;
       Object.assign(counts, { added: counts.added + c.added, modified: counts.modified + c.modified, deleted: counts.deleted + c.deleted, renamed: counts.renamed + (c.renamed ?? 0),
-        chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0) });
+        chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0),
+        skippedContextualMode: counts.skippedContextualMode + (c.skippedContextualMode ?? 0), skippedCanonicalBytes: counts.skippedCanonicalBytes + (c.skippedCanonicalBytes ?? 0) });
+      for (const index of drained.passLegacyWaived ?? []) legacyWaived.add(settledKey(entries[index]!.path, entries[index]!.level));
       sliceBase.pages += drained.index;
       roundSettled += drained.index;
       return null;
@@ -473,9 +479,16 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const stop = async (drained: SyncResult): Promise<SyncResult> => {
     Object.assign(counts, { added: counts.added + drained.added, modified: counts.modified + drained.modified, deleted: counts.deleted + drained.deleted,
       renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
-      waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
+      waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0), skippedContextualMode: counts.skippedContextualMode + (drained.legacySkips?.contextualMode ?? 0),
+      skippedCanonicalBytes: counts.skippedCanonicalBytes + (drained.legacySkips?.canonicalBytes ?? 0) });
     sliceBase.pages += drained.filesImported ?? 0;
-    if (drained.reason === 'writer_yield') yieldSettled = roundSettled + (drained.managedCursor?.index ?? 0);
+    // A slice that stops mid-batch (a writer yield, a deadline, an abort) settled the entries its cursor passed: they count as
+    // settled and leave the round's remaining; a blocked stop reports what its replay reports.
+    if (drained.status !== 'blocked_by_failures') {
+      const passed = drained.managedCursor?.index ?? 0;
+      yieldSettled = roundSettled + passed;
+      value.telemetry.remaining = Math.max(0, value.telemetry.remaining - passed);
+    }
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
     const blockedOn = drained.managedWrite?.path ? drained.managedWrite.write_request.request_id : null;
     if (outcome === 'blocked' && blockedOn && obligations.blocked?.request_id !== blockedOn) obligations.blocked = { request_id: blockedOn, pass_id: passId };
@@ -512,7 +525,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       lastLevel = null;
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
-          cache: levelCache } });
+          slugMode: value.obligations.slug_mode, cache: levelCache } });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is
@@ -541,8 +554,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (r.settled) continue;
         if (r.inFlight) { inFlight.push(entry); continue; }
         if (S.has(settledKey(entry.path, entry.state.level))) {
-          // A hold this pass wrote or re-screened at L is that path's fate here, even when its code re-screens every pass.
-          if (entry.state.hold?.atLevel) continue;
+          // A hold this pass wrote or re-screened at L, or a slug collision it skipped, is that path's fate here, even when
+          // its code re-screens every pass or the skipped twin still classifies as an import.
+          if (entry.state.hold?.atLevel || S.get(settledKey(entry.path, entry.state.level)) === 'collision'
+            || legacyWaived.has(settledKey(entryPaths(level, entry.path).path, entry.state.level))) continue;
           // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
           const again = settledKey(entry.path, entry.state.level);
           if (readmitted.has(again)) { mismatch.push(entry); continue; }
@@ -590,7 +605,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
           return { ...result('blocked_by_failures', 'reconcile_host_required'), reconcile };
         }
         if (mismatch.length || owed.length) break;
-        if (round === 1 && configured && context.source.last_commit === head && !episode && !retry.length && !tail) {
+        if (round === 1 && configured && context.source.last_commit === head && !episode && !retry.length && !tail && !value.obligations.slug_mode) {
           // v3 §3.3: a pass that finds nothing at last_commit = T admits no checkpoint; it keeps master's up_to_date (only
           // last_sync_at), and its full round refreshes the converged watermark so the next tick can be idle.
           const at = new Date().toISOString();
@@ -637,6 +652,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         S.set(settledKey(entry.path, entry.state.level), 'collision'); counts.collisions++;
       }
       if (optOutEpisode && !value.obligations.episode && built.entries.length) value.obligations.episode = episode = optOutEpisode;
+      // #6694: the mode this pass publishes pages under is recorded before the first of them, so a pin changed before the stamp refuses there.
+      if (level.scope && built.entries.length && !value.obligations.slug_mode) { value.obligations.slug_mode = level.slugMode; await save('open', null); }
       for (let i = 0; i < built.entries.length; i += PASS_BATCH_MAX) {
         const chunk = built.entries.slice(i, i + PASS_BATCH_MAX);
         const stopped = await drain(chunk);
@@ -652,7 +669,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       }
       // Every candidate of the round settled: committed, waived, held, deferred to a hold, a collision, or (a rename's
       // deletion) carried by its import.
-      for (const entry of [...deletes, ...imports]) S.set(settledKey(entry.path, entry.state.level), 'settled');
+      for (const entry of [...deletes, ...imports]) if (!S.has(settledKey(entry.path, entry.state.level))) S.set(settledKey(entry.path, entry.state.level), 'settled');
       roundSettled = 0;
       lastMismatch = [];
     }
