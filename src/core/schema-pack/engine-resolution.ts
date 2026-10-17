@@ -18,7 +18,7 @@ export async function engineSchemaInput(
   options: EngineSchemaOptions,
 ): Promise<LoadActivePackInput> {
   const [dbConfig, sourceValue] = await Promise.all([readDbSchemaPack(engine),
-    options.sourceId ? engine?.getConfig(`schema_pack.source.${options.sourceId}`) : undefined]);
+    (async () => options.sourceId ? engine?.getConfig(`schema_pack.source.${options.sourceId}`) : undefined)()]);
   const perSourceDb = new Map<string, string>();
   const value = sourceValue?.trim();
   if (options.sourceId && value) perSourceDb.set(options.sourceId, value);
