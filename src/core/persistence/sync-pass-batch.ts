@@ -58,6 +58,20 @@ export function passRequestId(passId: string, path: string, level: string | null
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/**
+ * The converged watermark a pass records (design v3.2 §2.2): the worktree's highest request `sequence`, and the requests
+ * (`r:<id>`) and Git effects (`e:<id>`) still open, at most `cap` (null above it: no idle until a full round re-reads).
+ */
+export async function readConvergedWatermark(tx: Pick<BrainEngine, 'executeRaw'>, worktreeId: string, selfRequestId: string | null, cap: number):
+  Promise<{ request_hwm: string; open_at_stamp: string[] | null }> {
+  const [hwm] = await tx.executeRaw<{ hwm: string | null }>('SELECT max(sequence)::text AS hwm FROM persistence_requests WHERE worktree_id=$1::uuid', [worktreeId]);
+  const open = await tx.executeRaw<{ id: string }>(`(SELECT 'r:'||request_id::text AS id FROM persistence_requests
+      WHERE worktree_id=$1::uuid AND state IN ('queued','running','recovering') AND request_id IS DISTINCT FROM $2::uuid LIMIT $3)
+    UNION ALL (SELECT 'e:'||e.id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
+      WHERE r.worktree_id=$1::uuid AND e.kind='git' AND e.state IN ('queued','running') LIMIT $3)`, [worktreeId, selfRequestId, cap + 1]);
+  return { request_hwm: hwm?.hwm ?? '0', open_at_stamp: open.length > cap ? null : open.map(row => row.id) };
+}
+
 /** A round batch's entry: the discovery shape plus the level `L` it was classified at (the request identity's third part). */
 export interface PassEntry extends SyncEntry { level: string | null }
 

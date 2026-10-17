@@ -50,6 +50,7 @@ import { recordPassTail, recordSyncTail } from './sync-tail-record.ts';
 import { readPassRow, writePassRow, OPEN_AT_STAMP_CAP, type ManagedSyncPassValue } from './sync-pass-row.ts';
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
 import { syncLockId } from '../db-lock.ts';
+import { readConvergedWatermark } from './sync-pass-batch.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
 import { clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
@@ -516,14 +517,10 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
   await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract });
   for (const path of stamp.releasedHolds) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
-  const [hwm] = await tx.executeRaw<{ hwm: string | null }>('SELECT max(sequence)::text AS hwm FROM persistence_requests WHERE worktree_id=$1::uuid', [row.worktree_id]);
-  const openIds = await tx.executeRaw<{ id: string }>(`(SELECT 'r:'||request_id::text AS id FROM persistence_requests
-      WHERE worktree_id=$1::uuid AND state IN ('queued','running','recovering') AND request_id<>$2::uuid LIMIT $3)
-    UNION ALL (SELECT 'e:'||e.id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
-      WHERE r.worktree_id=$1::uuid AND e.kind='git' AND e.state IN ('queued','running') LIMIT $3)`, [row.worktree_id, row.request_id, OPEN_AT_STAMP_CAP + 1]);
+  const watermark = await readConvergedWatermark(tx, row.worktree_id!, row.request_id, OPEN_AT_STAMP_CAP);
   const value: ManagedSyncPassValue = structuredClone(pass.value);
   const at = new Date().toISOString(), prior = value.obligations.converged;
-  value.obligations.converged = { target: p.target, at, request_hwm: hwm?.hwm ?? '0', open_at_stamp: openIds.length > OPEN_AT_STAMP_CAP ? null : openIds.map(open => open.id),
+  value.obligations.converged = { target: p.target, at, ...watermark,
     parser_fp: stamp.parserFp, pack: stamp.pack, selection_fp: stamp.selectionFp, last_full_at: stamp.full || !prior ? at : prior.last_full_at,
     passes_since_full: stamp.full || !prior ? 0 : prior.passes_since_full + 1 };
   if (stamp.closesEpisode) delete value.obligations.episode;
@@ -540,7 +537,7 @@ async function applyManagedSyncCheckpoint(tx: BrainEngine, row: WriteRequest, p:
   const [cursor] = await tx.executeRaw<{ completed_keys: [{ runId: string; index: number; total: number }] }>(
     "SELECT completed_keys FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 FOR UPDATE", [p.cursorKey]);
   // #6513: validation passed under this run; a replacement that landed since is the same supersession, not an index lag.
-  const replaced = checkpointCursorReplaced(p, cursor?.completed_keys[0]?.runId, row.source_id);
+  const replaced = checkpointCursorReplaced({ kind: p.kind, runId: p.runId ?? '' }, cursor?.completed_keys[0]?.runId, row.source_id);
   if (replaced) throw syncPublicationRefusal(replaced.code, replaced.message, row, p, replaced.cause);
   if (!cursor || cursor.completed_keys[0].runId !== p.runId || cursor.completed_keys[0].index !== p.total || cursor.completed_keys[0].total !== p.total) {
     throw syncPublicationRefusal('revision_conflict', 'The sync cursor is not fully committed.', row, p,
@@ -573,7 +570,7 @@ async function applyManagedSyncCheckpoint(tx: BrainEngine, row: WriteRequest, p:
   if (settled && (p.from === null || p.syncOptions?.full === true)) await tx.executeRaw('UPDATE sources SET chunker_version=$2 WHERE id=$1', [row.source_id, chunkerStamp()]);
   await tx.executeRaw("UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,done}','true'::jsonb),updated_at=now() WHERE op='managed-sync' AND fingerprint=$1", [p.cursorKey]);
   // #6712 PR 2 (L5): the tail (statistics, links) runs after the lease is released; it is owed from this commit on.
-  await recordSyncTail(tx, row.source_id, p.cursorKey, p.runId);
+  await recordSyncTail(tx, row.source_id, p.cursorKey!, p.runId!);
   for (const path of p.releasedHolds ?? []) await releaseHold(tx, path);
   return { status: 'synced', source_id: row.source_id, committed_pages: p.total };
 }
@@ -650,7 +647,7 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
       async () => {
         const cursor = await shared;
         // #6513: a checkpoint whose cursor another run replaced is superseded, not conflicted; a page keeps `revision_conflict`.
-        const replaced = checkpointCursorReplaced(p, cursor?.run_id, row.source_id);
+        const replaced = checkpointCursorReplaced({ kind: p.kind, runId: p.runId ?? '' }, cursor?.run_id, row.source_id);
         if (replaced) throw syncPublicationRefusal(replaced.code, replaced.message, row, p, replaced.cause);
         if (cursor && (cursor.run_id !== p.runId || (cursor.request_id !== row.request_id && !cursor.group?.includes(row.request_id) && !(screening?.unsaved && cursor.request_id == null)))) {
           throw cursorFenceRefusal(row, p, cursor);

@@ -20,12 +20,12 @@ import type { Cursor, RetryWait } from './sync-run.ts';
 import { syncExcludePatterns, syncGit, type ManagedSyncContext, type SyncSlugCollision } from './sync-discovery.ts';
 import type { SyncAuthority, SyncProcessingOptions } from './sync-authority.ts';
 import type { PassStamp, SyncCursorOptions } from './sync-prepare.ts';
-import { passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
+import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { passIdleProbe, readShadowLevel, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
 import { syncPassKind } from './sync-classify.ts';
-import { PASS_BATCH_KEY_PREFIX, setPassBatch, SyncAdmissionPaused, type PassEntry } from './sync-pass-batch.ts';
+import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, type PassEntry } from './sync-pass-batch.ts';
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
@@ -73,7 +73,7 @@ const parserFingerprint = () => digest(['x.md', 'x.ts', 'x.png'].map(path => syn
  */
 async function retireLegacyCursors(engine: BrainEngine, input: { sourceId: string; incarnation: string; remote: boolean; assertActive: () => void }):
   Promise<{ wait?: RetryWait; hostRequired?: true; episode?: PassEpisode }> {
-  const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: null, assertActive: input.assertActive, foldIn: !input.remote });
+  const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: undefined, assertActive: input.assertActive, foldIn: !input.remote });
   if (resolution.waitFor) return { wait: { ...resolution.waitFor, retry_after_ms: 5000 } };
   const [row] = await engine.executeRaw<{ header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
     "SELECT completed_keys->0 AS header FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1", [resolution.key]);
@@ -221,9 +221,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const requested = input.processingOptions;
   if (opts.full && !obligations.episode?.full_id) obligations.episode = { opened_at: startedAt, full_id: passId, selection,
     inherited: { noEmbed: requested.noEmbed, noExtract: requested.noExtract, noSchemaPack: requested.noSchemaPack, from: obligations.episode?.inherited.from ?? 'flag' } };
-  else if (!obligations.episode && (requested.noEmbed || requested.noExtract || requested.noSchemaPack)) obligations.episode = { opened_at: startedAt, selection,
-    inherited: { noEmbed: requested.noEmbed, noExtract: requested.noExtract, noSchemaPack: requested.noSchemaPack, from: 'flag' } };
-  const episode = obligations.episode;
+  // A pass that admits under an opt-out opens an episode carrying it (design §6), when it admits its first batch.
+  const optOutEpisode: PassEpisode | null = !obligations.episode && (requested.noEmbed || requested.noExtract || requested.noSchemaPack) ? { opened_at: startedAt, selection,
+    inherited: { noEmbed: requested.noEmbed, noExtract: requested.noExtract, noSchemaPack: requested.noSchemaPack, from: 'flag' } } : null;
+  let episode = obligations.episode;
   // A flagless pass keeps the open episode's opt-outs (#6712 PR 1's inherited_options contract).
   const processingOptions: SyncProcessingOptions = { noEmbed: requested.noEmbed || !!episode?.inherited.noEmbed, noExtract: requested.noExtract || !!episode?.inherited.noExtract,
     noSchemaPack: requested.noSchemaPack || !!episode?.inherited.noSchemaPack };
@@ -299,10 +300,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const drain = async (entries: PassEntry[], stamp?: PassStamp): Promise<SyncResult | null> => {
     const key = `${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`;
     const batch = batchCursor(entries, stamp);
-    setPassBatch(key, batch, JSON.stringify({ runId: passId, index: 0 }));
-    let drained: SyncResult | Cursor;
-    try { drained = await input.drainBatch(key, batch, sliceBase); }
-    finally { setPassBatch(key, null); }
+    const drained = await input.drainBatch(key, batch, sliceBase);
     if ('entries' in drained) {
       const c = drained.counts;
       Object.assign(counts, { added: counts.added + c.added, modified: counts.modified + c.modified, deleted: counts.deleted + c.deleted, renamed: counts.renamed + (c.renamed ?? 0),
@@ -336,7 +334,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         const r = entry.result;
         if (r.settled) continue;
         if (r.inFlight) { inFlight.push(entry); continue; }
-        if (S.has(settledKey(entry.path, entry.state.level))) { mismatch.push(entry); continue; }
+        if (S.has(settledKey(entry.path, entry.state.level))) {
+          // A hold this pass wrote or re-screened at L is that path's fate here, even when its code re-screens every pass.
+          if (entry.state.hold?.atLevel) continue;
+          mismatch.push(entry); continue;
+        }
         if (r.action === 'delete') {
           if (admission !== 'normal') { S.set(settledKey(entry.path, entry.state.level), 'paused_deletes'); counts.pausedDeletes++; continue; }
           deletes.push(entry);
@@ -357,6 +359,24 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (!candidates) {
         if (mismatch.length || owed.length) break;
         if (remote) { await save('blocked', 'reconcile_host_required'); return result('blocked_by_failures', 'reconcile_host_required'); }
+        if (round === 1 && configured && context.source.last_commit === head && !episode && !retry.length && !tail) {
+          // v3 §3.3: a pass that finds nothing at last_commit = T admits no checkpoint; it keeps master's up_to_date (only
+          // last_sync_at), and its full round refreshes the converged watermark so the next tick can be idle.
+          const at = new Date().toISOString();
+          await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
+            assertActive();
+            await assertDrainLease(tx, sourceId);
+            await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
+            const watermark = await readConvergedWatermark(tx, context.binding.worktree_id, null, OPEN_AT_STAMP_CAP);
+            value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
+              last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
+            Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });
+            value.telemetry = { ...value.telemetry, outcome: 'up_to_date', ended_at: at, remaining: 0, duration_ms: Date.now() - started, counts: { ...counts } };
+            await writePassRow(tx, value);
+          }, principalAttribution(authority.writer.principal)));
+          await clearPassFailures(engine, sourceId, incarnation);
+          return { ...result('up_to_date'), fromCommit: remote ? null : head };
+        }
         const closesEpisode = !!episode && configured;
         const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id)),
           closesEpisode, retryTaken: [...retry], releasedHolds: [], selectionFp, parserFp, pack, full: kind === 'full',
@@ -364,6 +384,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         await save('open', null);
         const stopped = await drain([], stamp);
         if (stopped) return stop(stopped);
+        value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: configured ? null : 'selection_scoped', remaining: 0 };
         await clearPassFailures(engine, sourceId, incarnation);
         return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
       }
@@ -372,6 +393,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       for (const entry of [...built.skipped, ...built.collisions.flatMap(c => c.skipped.map(sourcePath => imports.find(i => entryPaths(level, i.path).sourcePath === sourcePath)!))].filter(Boolean)) {
         S.set(settledKey(entry.path, entry.state.level), 'collision'); counts.collisions++;
       }
+      if (optOutEpisode && !value.obligations.episode && built.entries.length) value.obligations.episode = episode = optOutEpisode;
       for (let i = 0; i < built.entries.length; i += PASS_BATCH_MAX) {
         const chunk = built.entries.slice(i, i + PASS_BATCH_MAX);
         const stopped = await drain(chunk);
@@ -405,7 +427,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
 /** A converged or idle pass clears what earlier stops recorded: the pass row's failure key and the incarnation's cursor key. */
 async function clearPassFailures(engine: BrainEngine, sourceId: string, incarnation: string): Promise<void> {
   await clearManagedSyncFailureAfterSuccess(engine, passFingerprint(sourceId, incarnation));
-  await clearManagedSyncFailureAfterSuccess(engine, managedCursorKey(incarnation, null));
+  await clearManagedSyncFailureAfterSuccess(engine, managedCursorKey(incarnation, undefined));
 }
 
 export type { SyncAdmission };

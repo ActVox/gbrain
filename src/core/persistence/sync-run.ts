@@ -68,7 +68,7 @@ import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
 import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
-import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, type PassEntry } from './sync-pass-batch.ts';
+import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
 import type { PassStamp } from './sync-prepare.ts';
 import { runSyncPass } from './sync-pass-run.ts';
 
@@ -1700,7 +1700,12 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     // runs keep the frozen manifest and its cursor.
     if (!company && !opts.dryRun) {
       return await runSyncPass(engine, { opts, slice, context, authority, processingOptions, syncOptions, assertActive, signal, state, runStartedAt,
-        drainBatch: async (batchKey, batch, sliceBase) => { key = batchKey; return drainCursor(batch, await preparationConfigView(engine), false, sliceBase); } });
+        drainBatch: async (batchKey, batch, sliceBase) => {
+          key = batchKey;
+          setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
+          try { return await drainCursor(batch, await preparationConfigView(engine), false, sliceBase); }
+          finally { setPassBatch(batchKey, null); }
+        } });
     }
     const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
     key = resolved.key;
@@ -1784,7 +1789,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         `The unfinished sync cursor of source ${cursor.sourceId} was written under an older binding (its owner epoch, topology generation, worktree or root changed since), so this run stopped without importing; the retry rediscovers against the current binding.`);
     }
     if (opts.dryRun) return dryRun(cursor);
-    return await drainCursor(cursor, startupConfig, retried !== null);
+    return await drainCursor(cursor, startupConfig, retried !== null) as SyncResult;
   } catch (error) {
     assertSyncDispatchActive();
     if (live.cursor) cursor = live.cursor;
