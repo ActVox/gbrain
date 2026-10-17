@@ -14,6 +14,8 @@
  *   class by it (`by_action`).
  * - b5: under `--full` or an open episode, a legacy-marked path imports (v3.1 §2.7).
  * - b6: the convergence receipt counts #6885 legacy twin pairs (`legacy_twin_pairs`) with legacy-twins' read-only scan.
+ * - shadow finding (a): a write queued with sync.write_through=false (no worktree) is open work, so the changed file it
+ *   would race is `in_flight`; in working mode a committed `git rm` of a synced file reads absent (`delete`).
  *
  * Each test fails on capy/6712-pr4b (8cda2764b): there a baseline-equal legacy marker settles every page-less file, a
  * re-screen-due hold falls through to `matched` or `legacy_same`, results carry no `classAction`, the receipt has no
@@ -29,7 +31,9 @@ import type { OperationContext } from '../src/core/ops/contract.ts';
 import { classifySyncPath, type SyncPathState } from '../src/core/persistence/sync-classify.ts';
 import { MANAGED_SYNC_PASS_OP, readShadowLevel, shadowConvergence, SYNC_ORIGIN_DELETED_OP } from '../src/core/persistence/sync-pass.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
-import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
+import { preparePageAdmission, submitPageMutation } from '../src/core/persistence/page-mutations.ts';
+import { admitWrite } from '../src/core/persistence/journal.ts';
+import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
@@ -140,5 +144,25 @@ describe('#6712 PR 4b classifier rulings (pglite)', () => {
     expect(receipt!.classes.dirty).toEqual({ count: 2, action: 'repair', by_action: { none: 1, repair: 1 } });
     expect(Object.fromEntries((receipt!.samples.dirty ?? []).map(sample => [sample.path, sample.action]))).toEqual({ 'notes/a.md': 'none', 'notes/b.md': 'repair' });
     expect(receipt!.legacy_twin_pairs).toBe(1);
+  }, { setup }), 180_000);
+
+  test('finding (a): a put_page queued with write-through off makes the changed file in_flight', () => managedBrain(async ({ engine, ctx, root }) => {
+    await engine.setConfig('sync.write_through', 'false');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+    await disposePersistenceConsumer(engine);
+    const current = await engine.readPageSnapshot('notes/a', { sourceId: 'default' });
+    const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/a', request_id: randomUUID(), expected_revision: current!.revision,
+      content: note('notes/a', 'A queued agent edit.') } });
+    const row = await admitWrite(engine, prepared.admission!);
+    expect({ state: row.state, worktree: row.worktree_id ?? null }).toEqual({ state: 'queued', worktree: null });
+    expect(await classOf(engine, 'notes/a.md')).toMatchObject({ cls: 'import', settled: false, inFlight: true });
+  }, { setup }), 180_000);
+
+  test('finding (a): in working mode a committed git rm of a synced file is a delete, not an import of unreadable bytes', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    git(root, 'rm', '-q', 'notes/b.md'); commit(root, 'remove b');
+    const level = await readShadowLevel(engine, { sourceId: 'default', workingTree: true });
+    expect(level!.paths.find(entry => entry.path === 'notes/b.md')?.result).toMatchObject({ cls: 'delete', action: 'delete' });
   }, { setup }), 180_000);
 });

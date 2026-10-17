@@ -375,7 +375,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
             assertActive();
             await assertDrainLease(tx, sourceId);
             await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
-            const watermark = await readConvergedWatermark(tx, context.binding.worktree_id, null, OPEN_AT_STAMP_CAP);
+            const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP);
             value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
               last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
             Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });

@@ -517,7 +517,7 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
   await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract });
   for (const path of stamp.releasedHolds) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
-  const watermark = await readConvergedWatermark(tx, row.worktree_id!, row.request_id, OPEN_AT_STAMP_CAP);
+  const watermark = await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP);
   const value: ManagedSyncPassValue = structuredClone(pass.value);
   const at = new Date().toISOString(), prior = value.obligations.converged;
   value.obligations.converged = { target: p.target, at, ...watermark,
