@@ -1080,18 +1080,19 @@ export function fencesNormalizedReport(sourceId: string, tally: FencesTally | un
  * commands. Remote callers get the counts and a relay instruction only.
  */
 export async function buildHoldReport(engine: Exec, input: { sourceId: string; incarnation: string; runId: string; remote: boolean;
-  policy: SyncHoldPolicy; screened: number; pendingScreen?: boolean }): Promise<Pick<import('../../commands/sync.ts').SyncResult,
+  policy: SyncHoldPolicy | Promise<SyncHoldPolicy>; screened: number; pendingScreen?: boolean }): Promise<Pick<import('../../commands/sync.ts').SyncResult,
   'held' | 'held_count' | 'holds_outstanding' | 'holds_escalated' | 'holds_truncated' | 'holds_pending_screen' | 'holds_fix'>> {
-  const [summary] = await engine.executeRaw<{ count: number | string; images: number | string; fences: number | string; stalled: number | string; concurrent: number | string; dirty: number | string; drift: number | string }>(`SELECT COALESCE((completed_keys->0->>'count')::int,0) AS count,
+  // #6712 PR 4b: the summary, this run's holds and the policy (a caller may pass its read in flight) in one round trip.
+  const [[summary], sourceHolds, policy] = await Promise.all([engine.executeRaw<{ count: number | string; images: number | string; fences: number | string; stalled: number | string; concurrent: number | string; dirty: number | string; drift: number | string }>(`SELECT COALESCE((completed_keys->0->>'count')::int,0) AS count,
       COALESCE((completed_keys->0->>'drift')::int,0) AS drift,
       COALESCE((completed_keys->0->>'images')::int,0) AS images, COALESCE((completed_keys->0->>'fences')::int,0) AS fences, COALESCE((completed_keys->0->>'stalled')::int,0) AS stalled,
       COALESCE((completed_keys->0->>'concurrent')::int,0) AS concurrent, COALESCE((completed_keys->0->>'dirty')::int,0) AS dirty
     FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
-  [GIT_HOLD_SUMMARY_OP, summaryFingerprint(input.sourceId, input.incarnation)]);
+  [GIT_HOLD_SUMMARY_OP, summaryFingerprint(input.sourceId, input.incarnation)]), readGitSourceHolds(engine, { sourceIds: [input.sourceId], runId: input.runId }), input.policy]);
   const outstanding = Number(summary?.count ?? 0);
-  const runHolds = (await readGitSourceHolds(engine, { sourceIds: [input.sourceId], runId: input.runId }))[0]?.holds ?? [];
+  const runHolds = sourceHolds[0]?.holds ?? [];
   if (!outstanding && !runHolds.length) return {};
-  const escalated = holdsEscalated(input.policy, outstanding - Number(summary?.images ?? 0) - Number(summary?.drift ?? 0),
+  const escalated = holdsEscalated(policy, outstanding - Number(summary?.images ?? 0) - Number(summary?.drift ?? 0),
     { held: runHolds.filter(hold => !imageWeight(hold) && !driftWeight(hold)).length, screened: input.screened });
   const fences = Math.max(Number(summary?.fences ?? 0), runHolds.filter(hold => fenceWeight(hold)).length);
   const stalled = Math.max(Number(summary?.stalled ?? 0), runHolds.filter(hold => stalledWeight(hold)).length);
@@ -1116,8 +1117,8 @@ export async function buildHoldReport(engine: Exec, input: { sourceId: string; i
     why: `${runHolds.length} file(s) held this run, ${outstanding} held in source ${input.sourceId}; they do not block sync. Inspect them with 'gbrain sources status ${input.sourceId}'; `
       + (fences || stalled || concurrent || dirty || drift || slugConflicts ? `then ${steps.text}.` : 'the repair preview proposes each fix and writes nothing.')
       + (escalated ? escalation : '') };
-  return { held: runHolds.slice(0, input.policy.cap).map(hold => gitHoldItem(hold, auto)), held_count: runHolds.length, holds_outstanding: outstanding,
-    ...(escalated ? { holds_escalated: true } : {}), ...(runHolds.length > input.policy.cap ? { holds_truncated: true } : {}),
+  return { held: runHolds.slice(0, policy.cap).map(hold => gitHoldItem(hold, auto)), held_count: runHolds.length, holds_outstanding: outstanding,
+    ...(escalated ? { holds_escalated: true } : {}), ...(runHolds.length > policy.cap ? { holds_truncated: true } : {}),
     ...(input.pendingScreen ? { holds_pending_screen: true } : {}), holds_fix: fix };
 }
 
