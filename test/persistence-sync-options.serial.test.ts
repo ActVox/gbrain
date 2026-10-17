@@ -823,7 +823,7 @@ check('cancellation while a pass waits on an accepted request leaves its receipt
     expect(receipts(after)).toEqual(receipts(before));
     expect(after.requests).toEqual([expect.objectContaining({ id: accepted.id, request_id: accepted.request_id, digest: accepted.digest, state: 'queued' })]);
     const [was, now] = [before.requests[0] as { blocked_reason: string | null; updated_at: Date }, after.requests[0] as { blocked_reason: string | null; updated_at: Date }];
-    expect(['writer_busy', 'consumer_stopping']).toContain(now.blocked_reason);
+    expect(['writer_busy', 'consumer_stopping'] as Array<string | null>).toContain(now.blocked_reason);
     expect(new Date(now.updated_at).getTime()).toBeGreaterThanOrEqual(new Date(was.updated_at).getTime());
   } finally { engine.executeRaw = execute; engine.transaction = transaction; await disposePersistenceConsumer(engine); await lock?.release(); }
   expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 1 });
