@@ -258,7 +258,6 @@ import { v254 } from './v254-segment-reader-marks.ts';
 import { v255 } from './v255-page-body-staging-texts.ts';
 import { v256 } from './v256-chunk-retirement-index.ts';
 import { v257 } from './v257-ingest-log-marked-index.ts';
-import { v258 } from './v258-staged-generation-chunk-index.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -515,5 +514,4 @@ export const MIGRATIONS: Migration[] = [
   v255,
   v256,
   v257,
-  v258,
 ];

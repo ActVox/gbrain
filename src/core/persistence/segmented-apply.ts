@@ -172,9 +172,7 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
   const flip = await tx.flipBodyGeneration({ pageId, expectedGeneration: prepared.expectedGeneration, newGeneration: prepared.newGeneration,
     stagingId: prepared.stagingId, closeOccurrences: prepared.closeOccurrences, retireChunkOccurrences: prepared.retireChunkOccurrences,
     retireInlineChunks: input.promotion, retireMaxRows: input.retireMaxRows, body: prepared.body, meta: input.meta });
-  // The cast addresses content_chunks_staged_generation_idx (v258) alone: on a page newer than the table's statistics a plain
-  // page_id lookup ties every page_id index at one row and walks the page's chunks on the smallest.
-  if (!prepared.createRows) await tx.executeRaw('DELETE FROM content_chunks WHERE page_id::bigint=$1 AND body_generation=$2 AND NOT (chunk_index = ANY($3::int[]))',
+  if (!prepared.createRows) await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=$1 AND body_generation=$2 AND NOT (chunk_index = ANY($3::int[]))',
     [pageId, prepared.newGeneration, prepared.stagedChunkIndexes]);
   const createChunks = prepared.createChunks?.slug === input.slug ? prepared.createChunks.chunks : null;
   if (createChunks?.length) await tx.stageSegmentChunks(pageId, prepared.newGeneration, createChunks);
