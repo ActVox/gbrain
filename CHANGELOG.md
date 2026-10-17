@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased] - 2026-10-17
+## [0.60.287.0] - 2026-10-17
 
 **A batch of page purges no longer holds a source's write queue for hours (#6884).** Each page purge used to read and case-fold the whole write journal to find old requests that still carried the page's claims, so on a journal of about 540k requests one purge took about 20 minutes and a nightly purge batch blocked ordinary writes for about 2.8 hours. Now one sweep serves a batch of queued purges, later purges read only the rows added since, and the purge run stops submitting when the writer's queue is full instead of failing thousands of pages.
 
