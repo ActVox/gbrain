@@ -284,7 +284,7 @@ migrated brain has, then checks it exists. A table created since the preview
 is completed in place (`completed`); every statement is `IF NOT EXISTS` and the
 whole table is built in one transaction. The cache refills as searches run.
 If the database role gbrain connects as may not create tables (an owner/app
-role split), the apply refuses with `permission_denied` and creates nothing:
+role split), the apply refuses with `schema_owner_required` and creates nothing:
 run it again connected as the role that owns the schema.
 
 A missing table that holds user data is listed under `user_data_tables` and is

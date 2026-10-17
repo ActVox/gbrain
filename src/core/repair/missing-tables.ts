@@ -43,7 +43,7 @@ export const missingTablesRepair: RepairHandler = {
     return { items: tables.map(toItem), ...(tables.length ? { preview_hash: hash } : {}), residuals: kept.length ? { user_data_tables: kept.length } : {},
       details: { checked: report.checked, recreate: tables, user_data_tables: kept.map(m => m.table) } };
   },
-  async apply(ctx, item) {
+  async apply(ctx, item, opts) {
     const recreate = RECREATE[item.slug];
     if (!recreate) return { applied: false, outcome: 'refused', reason: 'not_rebuildable' };
     const existed = await relationExists(ctx.engine, item.slug);
@@ -52,8 +52,8 @@ export const missingTablesRepair: RepairHandler = {
       await ctx.engine.transaction(tx => recreate(tx));
     } catch (error) {
       if ((error as { code?: string }).code !== '42501') throw error;
-      throw new OperationError('permission_denied', `This database role may not create ${item.slug}, so nothing was recreated.`,
-        `Run the apply again connected as the role that owns the gbrain schema (the one apply-migrations uses): ${PREVIEW} --apply --expect <preview-hash>`, 'docs/guides/repair.md#missing-tables');
+      throw new OperationError('schema_owner_required', `This database role may not create ${item.slug}, so nothing was recreated.`,
+        `Connect as the role that owns the brain tables (the one apply-migrations uses) and run: ${PREVIEW} --apply --expect ${opts?.expect ?? '<preview-hash>'}`, 'docs/guides/repair.md#missing-tables');
     }
     if (!await relationExists(ctx.engine, item.slug)) {
       throw new OperationError('storage_error', `Recreating ${item.slug} ran, but the table still does not exist.`,

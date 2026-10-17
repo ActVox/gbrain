@@ -3106,6 +3106,16 @@ More: [docs/guides/windowed-reads.md#revision_changed](../../docs/guides/windowe
 
 More: [docs/ENGINES.md#schema-lock-blocked](../../docs/ENGINES.md#schema-lock-blocked)
 
+### schema_owner_required
+
+<a id="schema_owner_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The database role this command connects as may not create schema objects (Postgres 42501), so the schema repair created nothing. | On a brain whose tables belong to a separate owner role, the application role cannot run DDL; only the owner can recreate a missing table. | Run the same apply connected as the role that owns the brain tables (the one apply-migrations uses). | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#missing-tables](../../docs/guides/repair.md#missing-tables)
+
 ### schema_pack_emit_mismatch
 
 <a id="schema_pack_emit_mismatch"></a>

@@ -92,6 +92,7 @@ describe('#6911 missing query_cache', () => {
   test('a fact purge commits and verifies with the cache absent', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
       await seed(engine, 'people/fact-example');
+      await engine.executeRaw('DROP TABLE IF EXISTS query_cache');
       const [row] = await engine.executeRaw<{ id: number }>("SELECT id FROM facts WHERE fact=$1 AND entity_slug='people/fact-example'", [CLAIM]);
       const dry = await call(engine, 'purge_fact', { id: Number(row!.id), dry_run: true });
       const done = await call(engine, 'purge_fact', { id: Number(row!.id), confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: randomUUID() });
@@ -104,6 +105,7 @@ describe('#6911 missing query_cache', () => {
     const expected = await shape(fresh, 'query_cache');
     expect(expected.columns.length).toBeGreaterThan(0);
     for (const engine of engines) {
+      await engine.executeRaw('DROP TABLE IF EXISTS query_cache');
       const report = await readMissingTables(engine);
       expect(report).toMatchObject({ status: 'checked', missing: [{ table: 'query_cache', inventory_class: 'rebuild', recreatable: true }] });
       const scope = await resolveRepairScope(engine);
@@ -123,7 +125,7 @@ describe('#6911 missing query_cache', () => {
 
   test('a recreated query_cache takes the live facts vector shape, not the config default', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
-      await engine.executeRaw('DROP TABLE query_cache');
+      await engine.executeRaw('DROP TABLE IF EXISTS query_cache');
       await engine.executeRaw('DROP INDEX IF EXISTS idx_facts_embedding_hnsw');
       await engine.executeRaw('ALTER TABLE facts ALTER COLUMN embedding TYPE halfvec(768) USING NULL');
       const scope = await resolveRepairScope(engine);
@@ -133,6 +135,39 @@ describe('#6911 missing query_cache', () => {
         JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass('query_cache') AND a.attname='embedding'`);
       expect(column).toEqual({ type: 'halfvec', dims: 768 });
     }
+  }), 120_000);
+
+  test('a role that may not create the table gets schema_owner_required and nothing changes', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      await engine.executeRaw('DROP TABLE IF EXISTS query_cache');
+      const scope = await resolveRepairScope(engine);
+      const preview = await runRepair(ctx(engine), missingTablesRepair, scope, { apply: false, explicit: true });
+      const denied = Object.create(engine) as BrainEngine;
+      denied.transaction = async () => { throw Object.assign(new Error('permission denied for schema public'), { code: '42501' }); };
+      const message = await errorCode(runRepair(ctx(denied), missingTablesRepair, scope, { apply: true, explicit: true, expect: preview.preview_hash }));
+      expect(message).toStartWith('schema_owner_required');
+      expect(await engine.executeRaw("SELECT to_regclass('query_cache') IS NULL AS absent")).toEqual([{ absent: true }]);
+      const applied = await runRepair(ctx(engine), missingTablesRepair, scope, { apply: true, explicit: true, expect: preview.preview_hash });
+      expect(applied.outcomes).toMatchObject({ recreated: 1 });
+    }
+  }), 120_000);
+
+  test('a failed PGLite VACUUM is reported as failed, never as ran', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const engine = engines[0]!;
+    await seed(engine, 'people/vacuum-example');
+    const [row] = await engine.executeRaw<{ id: number }>("SELECT id FROM facts WHERE fact=$1 AND entity_slug='people/vacuum-example'", [CLAIM]);
+    const dry = await call(engine, 'purge_fact', { id: Number(row!.id), dry_run: true });
+    const original = Object.getPrototypeOf(engine).executeRaw as typeof engine.executeRaw;
+    engine.executeRaw = (async function (this: BrainEngine, sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) {
+      if (/^\s*VACUUM\b/i.test(sql)) throw new Error('forced vacuum failure');
+      return original.call(this, sql, params, opts);
+    }) as typeof engine.executeRaw;
+    try {
+      const done = await call(engine, 'purge_fact', { id: Number(row!.id), confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: randomUUID(), vacuum: true });
+      const physical = done.residuals.find((r: any) => r.store === 'database_physical');
+      expect(physical.detail).toContain('VACUUM of the touched tables failed (forced vacuum failure)');
+      expect(physical.detail).not.toContain('VACUUM ran');
+    } finally { delete (engine as { executeRaw?: unknown }).executeRaw; }
   }), 120_000);
 
   test('the repair is explicit-only and a missing user-data table still fails the purge loudly', async () => withEnv({ GBRAIN_HOME: home }, async () => {
