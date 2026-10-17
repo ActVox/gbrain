@@ -89,9 +89,6 @@ Managed brains (the flags an operator or cron needs; listed first):
                        path classified the way the level-triggered pass
                        will (counts, predicted decisions, deletes and the
                        mass-delete verdict, samples). Read-only.
-  --redact-paths       With --dry-run --json: sample paths become sha256
-                       prefixes and slugs are dropped, so the counts can
-                       be shared.
   --no-bulk            Managed Postgres sync: publish one page per transaction
                        instead of bulk groups (each page keeps its own write
                        request either way). GBRAIN_SYNC_BULK=0 does the
@@ -116,6 +113,9 @@ Classic brains / advanced (classic sync, processing opt-outs, one-off repair):
   --repo <path>        Path to the brain repo. Defaults to the path
                        saved by 'gbrain init'.
   --full               Force a full re-sync (rare; usually incremental).
+  --redact-paths       With --dry-run --json: sample paths become sha256
+                       prefixes and slugs are dropped, so the counts can
+                       be shared.
   --src-subpath <dir>  Sync only this subdirectory of the git repo (monorepo
                        pattern: N logical sources in one repo). Git pull/diff
                        run at the repo root; imports are scoped to the subdir
