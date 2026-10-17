@@ -1712,7 +1712,11 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           key = batchKey;
           setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
           try { return await drainCursor(batch, await preparationConfigView(engine), false, sliceBase); }
-          finally { setPassBatch(batchKey, null); }
+          catch (error) {
+            // An abort mid-batch stops the pass with what the batch committed before it.
+            if (signal?.aborted && error instanceof Error && error.name === 'AbortError') return result(live.cursor ?? batch, 'partial', 'timeout');
+            throw error;
+          } finally { setPassBatch(batchKey, null); }
         } });
     }
     const resolved = await resolvePassCursor(engine, { sourceId: context.sourceId, incarnation: context.incarnation, company, remote: authority.writer.remote, dryRun: !!opts.dryRun, assertActive, state });
