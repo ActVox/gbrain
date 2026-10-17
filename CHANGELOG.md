@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.274.0] - 2026-10-17
+
+**A refresh no longer gets stuck when a commit lands on top of its target, and `gbrain repair file-drift` can now resolve a page whose file is gone.** Two fixes ahead of the level-triggered reconcile (#6712).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sources refresh` while a commit lands on top of the refresh target | members synced past the target, the refresh stayed `syncing` with the worktree fenced, and `--resume` could not finish it | the refresh completes once every member reached the target or a commit on top of it; `--resume` completes one left `syncing` |
+| A live page whose canonical file is gone from the last commit | `sources reconcile` refused with "repair does not restore files" and nothing offered a per-page fix | `gbrain repair file-drift --slug <slug> --prefer database` recreates the file from the page; `--prefer file` soft-deletes exactly that page (mass-delete valve applies; `gbrain restore <slug> --force` undoes it). Both are preview-first and bound to the page revision and the file's absence |
+| A file deleted only in the worktree (still committed) | the same refusal | listed `deletion_uncommitted`, routed to committing the deletion or `gbrain repair ghost-pages` |
+| A held deletion's next step | a reconcile preview that refused | the file-drift preview |
+
+### What you need to do
+
+Nothing. Both repairs only run when you ask for them, and nothing changes at upgrade. With Git durability off, commit a recreated file yourself; the preview prints the command.
+
 ## [0.60.272.0] - 2026-10-16
 
 **A page that stops a managed sync no longer stops its source silently, and gbrain stops rewriting busy files just to refresh an assessment marker.** On a managed Postgres brain one page write was resolved the documented way (`gbrain repair stuck-recovery --keep disk`), and its source then indexed nothing for 21 hours (#6858). The request ended `conflict` / `source_changed` with a message no classifier knew, so the run parked `blocked_by_failures`. Every autopilot freshness sync job returned that parked run and was recorded `completed`, so nothing retried and nothing alerted. The trigger was gbrain itself: managed sync rewrote the canonical file of an oversized page only to refresh its `embed_skip` marker, whose `assessed_at` changes whenever the body does, and that rewrite was the publication an agent's own edit of the hot file collided with.
