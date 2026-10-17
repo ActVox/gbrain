@@ -256,6 +256,7 @@ test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts
 test/purge-fact.test.ts
 test/purge-global-marker.test.ts
+test/purge-missing-cache-6911.test.ts
 test/purge-read-surfaces.test.ts
 test/recall-page-fill.test.ts
 test/remediation-manual-only.test.ts
@@ -269,6 +270,7 @@ test/repair-frontmatter-keys-sweep-6454.test.ts
 test/repair-frontmatter.test.ts
 test/repair-receipt-compaction.test.ts
 test/repair-rename-identity-6729.test.ts
+test/schema-missing-tables.test.ts
 test/scripts/test-stress-postgres.test.ts
 test/search-read-keyword-bound.test.ts
 test/search/page-rank-cut.test.ts

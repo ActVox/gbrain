@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.291.0] - 2026-10-17
+
+**A brain that lost its `query_cache` table can finish its nightly purge again.** On a brain where `query_cache` was missing although the schema was at head, every coordinated page purge failed with `42P01`, so the dream cycle's purge phase failed every night with `managed_purge_failed` and the tombstone was never purged (#6911). `apply-migrations` and `db-repair` both reported healthy, because the schema version said the table's migration had run.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Page purge with `query_cache` missing | failed with `42P01` every time (`managed_purge_failed`) | commits; the receipt lists `purge.missing_caches` and shows `query_cache` as `not_present` with reason `table_missing` |
+| Fact purge with `query_cache` missing | failed with `42P01` | commits; the store report shows `query_cache` as `not_present` with reason `table_missing` |
+| Purge with a missing table that holds user data | failed | still fails, because the purge cannot say it removed rows it could not reach |
+| `gbrain doctor` with a missing table | nothing flagged it | `schema_missing_tables`: warn for a rebuildable cache or a table without user data, fail for a user-data table; below head it checks the rebuildable caches, whose absence would wedge `apply-migrations` |
+| Getting the cache back | run the old migration handler by hand | `gbrain repair missing-tables` previews, then `--apply --expect <hash>` recreates it empty in the shape a fully migrated brain has |
+| `gbrain forget --purge --vacuum` on PGLite with the cache missing | the VACUUM failed silently, so nothing was vacuumed | the other tables are vacuumed, and the receipt says whether VACUUM ran or failed |
+
+### What you need to do
+
+Nothing, unless doctor reports `schema_missing_tables`. Then ask your agent: *"Doctor says query_cache is missing. Fix it."* It runs `gbrain repair missing-tables`, shows you the preview, and applies it after you agree. The repair runs only when named; nothing changes on upgrade.
+
+If your nightly purge failed on the missing cache for a while, some deleted pages were parked after five failures and stay unpurged. Doctor `purge_parked_pages` lists them; preview with `gbrain pages purge-deleted --retry-parked --dry-run`, then run it without `--dry-run` after you agree.
+
+If doctor fails `schema_missing_tables` on a table that holds user data, restore that table's rows from a backup **before** you run `gbrain upgrade`, `apply-migrations` or `init --migrate-only`: they recreate a base-schema table empty, which clears the check while the rows stay lost.
+
 ## [0.60.290.0] - 2026-10-17
 
 **Every part of gbrain can now read, protect, forget and export pages stored in segments, so large-page storage is ready to turn on in a later release.** Segmented storage (`pages.segmented_storage`) stays off by default, and with it off nothing changes for your brain: pages over 1 MiB are still stored inline up to 24 MiB. This release adds the read side and the safety work that has to exist before the switch can be turned on: reads, row-level security, forget and purge, delete and restore, export and backup, and the derived passes all handle segmented pages. A writer gate keeps the switch off while any recent writer can't read segments.

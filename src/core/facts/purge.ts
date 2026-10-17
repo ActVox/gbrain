@@ -51,6 +51,7 @@ import { noteBelief, withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
 import { appendPurgeCommitted, appendPurgeIntent } from '../belief/purge-mirror.ts';
 import { createPageVersion } from '../page-state/versions.ts';
+import { clearRebuildableCache } from '../persistence/rebuildable-cache.ts';
 import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, redactCarryingFields, redactPurgedKeys, registerLiveCarriers, registerVersionCarriers, sourceHasBeliefEvents,
   type LedgerPurgeReport } from '../belief/purge.ts';
 
@@ -526,7 +527,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       prose = versions.prose;
       const segments = await purgeSegmentStorage(tx, p.sourceId, current.fact, plan, [...new Set([...bodies.segmented, ...versions.segmentedPages])],
         [...bodies.replaced, ...versions.replaced], admitted.id);
-      const cache = (await tx.executeRaw('DELETE FROM query_cache RETURNING 1')).length;
+      const cache = (await clearRebuildableCache(tx, 'query_cache')) ?? 0;
       const pages = pageIds.length ? await tx.executeRaw<{ id: number; slug: string; knowledge_revision: string }>(
         'SELECT id,slug,knowledge_revision::text AS knowledge_revision FROM pages WHERE source_id=$1 AND id=ANY($2::int[]) ORDER BY slug', [p.sourceId, pageIds]) : [];
       await tx.executeRaw(`INSERT INTO persistence_effects(request_id,kind,data,source_id,source_incarnation,worktree_id)
