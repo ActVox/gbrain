@@ -44,7 +44,7 @@ import { readSyncFile, resolveManagedSyncContext } from './sync-discovery.ts';
 import { sha256 } from './digest.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
-import { MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
+import { MANAGED_SYNC_PASS_OP, readPassRow, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
 import type { DeletesWithheld } from './sync-markers.ts';
 import { listIdentityDowngrades } from '../sync-identity-downgrades.ts';
 
@@ -545,7 +545,8 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
     ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []).filter(hold => hold.incarnation === source.incarnation));
   const [failed] = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const header = (await cursorHeader(engine, sourceId, source.incarnation, failed?.cursor_key ?? null))?.header;
-  const resume = managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
+  const passRow = header ? null : await readPassRow(engine, sourceId, source.incarnation);
+  const resume = passRow ? passResumeArgs(sourceId, passRow) : managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
   const context = holds.some(hold => hold.code === 'worktree_dirty') ? await resolveManagedSyncContext(engine, { sourceId, noPull: true }).catch(() => null) : null;
   const auto = await fenceAutoRepairFor(engine, holds);
   const applied: UnblockOutcome['applied'] = [], refused: UnblockOutcome['refused'] = [];
