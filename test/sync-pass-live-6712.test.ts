@@ -63,9 +63,10 @@ const setup = ({ root }: { root: string }) => {
   for (const slug of ['a', 'b', 'c']) writeFileSync(join(root, `notes/${slug}.md`), note(`notes/${slug}`, `The committed body of notes/${slug}.`));
   commit(root, 'notes');
 };
-/** A durability-hardened checkout (the brain-durability post-commit hook), where a repair's Git effect commits. */
+/** A durability-hardened checkout (the brain-durability post-commit hook), where a repair's Git effect commits under the checkout's own identity. */
 const hardened = ({ root }: { root: string }) => {
   setup({ root });
+  git(root, 'config', 'user.name', 'Example'); git(root, 'config', 'user.email', 'example@example.invalid');
   writeFileSync(join(root, '.git', 'hooks', 'post-commit'), '#!/bin/sh\n# gbrain brain-durability post-commit hook (v0.42.44+)\n'); chmodSync(join(root, '.git', 'hooks', 'post-commit'), 0o755);
 };
 const liveSlugs = async (engine: BrainEngine) => (await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id='default' AND deleted_at IS NULL ORDER BY slug")).map(row => row.slug);

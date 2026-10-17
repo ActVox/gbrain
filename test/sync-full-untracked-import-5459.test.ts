@@ -116,7 +116,7 @@ describe('--full tree walk keeps pages imported from untracked working-tree file
     }
   }), 300_000);
 
-  test('an explicit tracked Git deletion is applied even when a copy of the file lingers untracked (Git is the truth for tracked paths)', () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+  test('a Git-imported page whose file left Git but lingers untracked is kept, not counted as a working-tree import', () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
     for (const engine of engines) {
       const { r, id, live, page, incarnation, full } = await managedSource(engine);
       r.write('tracked'); r.commit('add tracked');
@@ -126,10 +126,17 @@ describe('--full tree walk keeps pages imported from untracked working-tree file
       r.git('rm', '-q', '--cached', 'notes/tracked.md'); r.commitStaged('stop tracking');
       // The bytes are still on disk, untracked.
       expect(r.git('status', '--porcelain')).toContain('?? notes/tracked.md');
+      // #6712 PR 4b (design v3.2 §2.3 row 4, `kept`): a live page whose file left T but is still on disk is kept in committed
+      // mode, whatever its provenance; only a page imported from the working tree (or of unknown provenance) is counted.
       const result = await full();
+      expect(await live()).toEqual(['notes/base', 'notes/tracked']);
+      expect((await page('notes/tracked'))!.deleted_at).toBeNull();
+      expect(result.working_tree_kept).toBeUndefined();
+      // Removing the lingering copy as well is the deletion: nothing keeps the page any more.
+      r.remove('tracked');
+      await full();
       expect(await live()).toEqual(['notes/base']);
       expect((await page('notes/tracked'))!.deleted_at).not.toBeNull();
-      expect(result.working_tree_kept).toBeUndefined();
       expect(await readSyncImportProvenance(engine, id, incarnation, tracked.id)).toMatchObject({ working: false });
     }
   }), 300_000);

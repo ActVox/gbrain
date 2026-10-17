@@ -74,7 +74,9 @@ export interface ShadowPath { path: string; slug: string | null; pageId: number 
   /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
   legacyPageless?: true;
   /** #6517 (`selectOriginClaimant`): several live pages, or no live page and several tombstones, record this origin. */
-  ambiguousOrigin?: { kind: 'several_live' | 'several_tombstones'; slugs: string[] } }
+  ambiguousOrigin?: { kind: 'several_live' | 'several_tombstones'; slugs: string[] };
+  /** The page's import record names the pinned Git blob as its bytes (`working: false`, or a blob id on a record from before the stamp). */
+  gitProvenance?: true }
 
 export interface ShadowLevel {
   sourceId: string; incarnation: string; root: string; gitRoot: string; scope: string; slugMode: 'git-root' | 'source-root';
@@ -439,16 +441,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   }
 
   const fp = (path: string) => syncImportParserFor(sourceRelative(path), pack?.identity ?? null);
-  const stateOf = async (path: string, dirty: SyncPathState['dirty'], probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): Promise<{ state: SyncPathState; row?: PageRow; legacyPageless?: true }> => {
+  const stateOf = async (path: string, dirty: SyncPathState['dirty'], probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): Promise<{ state: SyncPathState; row?: PageRow; legacyPageless?: true; gitProvenance?: true }> => {
     const committed = tree.get(path) ?? null;
     const row = byOrigin.get(path);
     const level = levelOf(path, probe);
     // Presence decides only rows 4-6 (a level of absent); a committed path in T is not read here (Dp covers it).
     const record = row?.record ?? null;
-    // #5459 (`keptWorkingTreePages`): a page whose import provenance is the pinned Git blob follows Git, so a lingering
-    // untracked copy of its file does not keep it.
-    const fromGit = record?.working === false || (record?.working === undefined && !!record?.blob_oid);
-    const presentNow = mode === 'working' ? level !== null : level === null ? !fromGit && readPresent(root, path, scope) : true;
+    const presentNow = mode === 'working' ? level !== null : level === null ? readPresent(root, path, scope) : true;
     const recordBlobOids = recordOids(record);
     const attested = row && (row.arm1 || row.attested_hash) ? { hash: row.attested_hash ?? null, arm1: row.arm1 === true } : null;
     const hold = holdByGitPath.get(path);
@@ -472,7 +471,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       keepDb: !mirror && keepDbPrefixes.length > 0 && !!row && isKeepDbSlug(row.slug, keepDbPrefixes),
       openWork: !!row && open.pageIds.has(Number(row.id)) || open.origins.has(originOf(path)),
     };
-    return { state, ...(row ? { row } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
+    // #5459: `working_tree_kept` counts the kept pages whose import provenance is the working tree or unknown, never the Git blob.
+    const gitProvenance = record?.working === false || (record?.working === undefined && !!record?.blob_oid);
+    return { state, ...(row ? { row } : {}), ...(legacyPageless ? { legacyPageless } : {}), ...(gitProvenance ? { gitProvenance } : {}) };
   };
 
   // Bootstrap (the incarnation's first pass; for a read-only level, no pass row yet): page-less paths at their baseline blob
@@ -499,7 +500,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const settledBeforeDirtiness = new Set(['held', 'spelling', 'untracked', 'kept', 'delete', 'delete_drift', 'gone', 'deleted_same', 'deleted_edited', 'legacy_same', 'matched']);
   for (const path of [...domain].sort()) {
     const probe = probes.get(path);
-    const { state, row, legacyPageless } = await stateOf(path, mode === 'committed' && tree.has(path) ? 'clean' : null, probe);
+    const { state, row, legacyPageless, gitProvenance } = await stateOf(path, mode === 'committed' && tree.has(path) ? 'clean' : null, probe);
     const result = classifySyncPath(state);
     // Rows 1-10 precede row 11 and `matched` settles either way, so only the rest are Dp candidates (design v3.2 §2.1).
     const staged = mode === 'committed' && tree.has(path) && (index.get(path)?.oid !== tree.get(path)!.oid || (index.get(path)?.stage ?? 0) !== 0);
@@ -507,7 +508,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const claimed = claimants.get(path) ?? [];
     const { ambiguous } = claimed.length > 1 ? selectOriginClaimant(claimed.map(page => ({ ...page, deleted_at: page.deleted ? true : null }))) : { ambiguous: null };
     const ambiguousOrigin = ambiguous ? { kind: ambiguous, slugs: claimed.filter(page => ambiguous === 'several_tombstones' || !page.deleted).map(page => page.slug) } : undefined;
-    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}), ...(ambiguousOrigin ? { ambiguousOrigin } : {}) });
+    paths.push({ path, slug: row?.slug ?? null, pageId: row ? Number(row.id) : null, revision: row?.revision ?? null, state, result, ...(legacyPageless ? { legacyPageless } : {}), ...(ambiguousOrigin ? { ambiguousOrigin } : {}), ...(gitProvenance ? { gitProvenance } : {}) });
   }
   timings.classify = t();
   if (candidates.length) {

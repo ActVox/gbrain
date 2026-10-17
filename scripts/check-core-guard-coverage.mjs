@@ -36,6 +36,7 @@ const EXEMPT = {
   'src/core/persistence/consumer.ts': 'dispatches to preparers; no page content of its own',
   'src/core/persistence/coordinator.ts': 'takes the ordered source lock from exclusiveSources; prepares nothing itself',
   'src/core/persistence/effect-journal.ts': 'post-publication effects; no page text',
+  'src/core/repair/file-drift.ts': 'removes a held file whose page is deleted: no live page records the path (re-read under the publication guard), the page row is untouched, and core counts only live pages; --prefer file publishes through file-repair.ts',
   'src/core/repair/captured-facts.ts': 'owner-run repair that expires fact rows (shrinks only)',
   'src/core/repair/extractor-facts.ts': 'owner-run repair restoring expired fact rows',
   'src/core/repair/conversation-labels.ts': 'owner-run repair expiring fact rows and writing an outcome row (shrinks only; page text unchanged)',
