@@ -21,6 +21,7 @@
  *   held legacy_slug_conflict and forks no second page.
  * - a committed edit under a different uncommitted edit (committed mode) is held worktree_dirty, the page and the local
  *   file untouched, and the next pass settles instead of counting a not_converged streak; sync.holds=fail stops the run.
+ * - a page written straight to the database at a new file's slug is never overwritten by the file: held file_drift (side unknown).
  * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
  *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
@@ -36,7 +37,7 @@ import { SYNC_ADMISSION_KEY } from '../src/core/persistence/sync-admission.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
 import { readGitHold, SYNC_IMPORT_PROVENANCE_OP, writeGitHold } from '../src/core/persistence/sync-holds.ts';
-import { preparePageAdmission } from '../src/core/persistence/page-mutations.ts';
+import { preparePageAdmission, submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { admitWrite } from '../src/core/persistence/journal.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { drainNext, runDrain } from '../src/core/persistence/sync-drain.ts';
@@ -285,6 +286,21 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     expect(refused).toEqual({ status: 'blocked_by_failures', reason: null });
     expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!.page.compiled_truth).toContain('The committed body of notes/a.');
     expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('An uncommitted draft of notes/a.');
+  }, { setup }), 180_000);
+
+  test('a database-only page at a new file\'s slug is held file_drift and never overwritten', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.setConfig('sync.write_through', 'false');
+    for (const [slug, body] of [['notes/d', 'A database-only page.'], ['notes/e', 'The same body.']] as const)
+      await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content: note(slug, body) } });
+    await waitFor(async () => (await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE state<>'committed'")).length === 0, { timeoutMs: 20_000, label: 'the put_pages commit' });
+    writeFileSync(join(root, 'notes/d.md'), note('notes/d', 'A committed file at the same slug.'));
+    writeFileSync(join(root, 'notes/e.md'), note('notes/e', 'The same body.')); commit(root, 'files at database-only slugs');
+    const result = await performManagedSync(engine, OPTS);
+    // Neither page records an origin, so neither side is attested: both are held (an equal body is not proof the file wrote it).
+    expect((result.held ?? []).map(hold => [hold.path, hold.code])).toEqual([['notes/d.md', 'file_drift'], ['notes/e.md', 'file_drift']]);
+    expect((await engine.readPageSnapshot('notes/d', { sourceId: 'default' }))!.page.compiled_truth).toContain('A database-only page.');
+    expect((await engine.executeRaw<{ source_path: string | null }>("SELECT source_path FROM pages WHERE source_id='default' AND slug IN ('notes/d','notes/e') ORDER BY slug")).map(row => row.source_path)).toEqual([null, null]);
   }, { setup }), 180_000);
 
   test('probe 54: a pass intent keeps what the #6862 FIFO guard reads, renameFrom included', () => managedBrain(async ({ engine, root }) => {

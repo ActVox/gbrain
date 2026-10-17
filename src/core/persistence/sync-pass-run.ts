@@ -164,8 +164,12 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     const paths = entryPaths(level, winner.path);
     const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
     if (holder) {
+      // A live page at the slug with no recorded origin (written straight to the database, or by an older gbrain) attests
+      // neither side: the import is guarded as drift of unknown side, so the freeze imports it only as a proven no-op and
+      // otherwise holds file_drift (as discovery's tree walk guards it, sync-prescreen.ts).
       entries.push({ ...base, pageId: Number(holder.id), revision: holder.revision,
-        ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}) });
+        ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}),
+        ...(holder.source_path === null && !holder.deleted ? { drift: 'unknown' as const } : {}) });
       if (holderPath !== null && deleteEntries.delete(holderPath)) renamed.add(holderPath);
       continue;
     }
