@@ -118,7 +118,8 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
   const terminal = isTerminalOrRecovering(row) ? (await import('../persistence/terminal-classify.ts')).classifyTerminal({ request_id: row.request_id, source_id: row.source_id,
     slug: row.slug, operation: row.operation, state: row.state, error_code: row.error_code, error_detail: row.error_detail ?? null, recovery: row.recovery,
     blocked_reason: row.blocked_reason, compacted: row.compacted, publication_started: row.publication_started, error_message: row.error_message,
-    intent_kind: typeof row.intent?.kind === 'string' ? row.intent.kind : null, build: (row as { admitter_version?: string | null }).admitter_version ?? null }) : null;
+    intent_kind: typeof row.intent?.kind === 'string' ? row.intent.kind : null, build: (row as { admitter_version?: string | null }).admitter_version ?? null,
+    schema_behind: await (await import('../persistence/schema-admission.ts')).readSchemaBehind(ctx.engine) }) : null;
   const { cliRenderContext, renderAction } = await import('../agent-output.ts');
   const render = ctx.remote === false ? cliRenderContext() : { transport: 'stdio' as const, isCallable: () => false, preapproved: () => false };
   const { liveSearchable } = await import('../persistence/searchable.ts');

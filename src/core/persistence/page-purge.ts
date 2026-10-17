@@ -42,6 +42,7 @@ import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { PERSISTENCE_REQUEST_SLUG_INTENT_INDEX } from './schema.ts';
 import { readRequestIndexStates, REQUEST_INDEXES_REPAIR_COMMAND, type RequestIndexState } from './checkpoint-validation.ts';
 import { faultPoint } from './fault-points.ts';
+import { clearRebuildableCache } from './rebuildable-cache.ts';
 import { carryingNeedles, findRequestsForSlugs, JOURNAL_SWEEP_MATCH_CAP, recheckRequestsCarrying, redactRequestIntents, sweepRequestsCarrying, sweepRequestsForGroups,
   type JournalSweep } from './intent-redaction.ts';
 import { dropPurgedFenceRows } from '../facts/purge-overlay.ts';
@@ -297,7 +298,10 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
   removed.write_gate_receipts = await count(`DELETE FROM write_gate_receipts WHERE (target_table='pages' AND target_id=$1) OR (target_table='facts' AND target_id=ANY($2::text[]))
     OR (target_table='takes' AND target_id=ANY($3::text[])) OR (target_table='write_gate_holds' AND target_id=ANY($4::text[])) RETURNING 1`,
   [String(page.id), refs, takeIds.map(String), holds]);
-  removed.query_cache = await count('DELETE FROM query_cache RETURNING 1', []);
+  const missingCaches: string[] = [];
+  const cleared = await clearRebuildableCache(tx, 'query_cache');
+  if (cleared === null) missingCaches.push('query_cache');
+  removed.query_cache = cleared ?? 0;
   removed.facts = await count('DELETE FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 RETURNING 1', [sourceId, slug]);
   removed.take_proposals = await count('DELETE FROM take_proposals WHERE source_id=$1 AND page_slug=$2 RETURNING 1', [sourceId, slug]);
   removed.open_loops = await count('DELETE FROM open_loops WHERE source_id=$1 AND page_slug=$2 RETURNING 1', [sourceId, slug]);
@@ -339,6 +343,7 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
   while (purgeContext.size > PURGE_CONTEXT_LIMIT) purgeContext.delete(purgeContext.keys().next().value!);
   return { status: 'purged', slug, source_id: sourceId, residuals: PURGE_RESIDUALS, journal_sweep: journalSweep, ...(retention ? { retention: true } : {}),
     purge: { content_hash8: storedHash?.slice(0, 8) ?? null, tombstoned: hashes.size > 0, content_hashes_tombstoned: hashes.size, removed,
+      ...(missingCaches.length ? { missing_caches: missingCaches } : {}),
       ...(ledger ? { ledger: { purged_events: ledger.purged_events, redacted_fields: ledger.redacted_fields.length, live_carriers: ledger.live_carriers.length, derived_hidden: ledger.derived_hidden, derived_walk: ledger.derived_walk } } : {}),
       derived: { ...derived, truncated: derivedFrom.truncated },
       blobs: files.map(f => f.storage_path).filter(Boolean) } };

@@ -30,6 +30,7 @@ import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
+import { relationExists } from '../persistence/rebuildable-cache.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -121,6 +122,10 @@ async function segmentTextReport(engine: BrainEngine, sourceId: string, needles:
 }
 
 type ProbeResult = { count: number } | { unverified: string };
+
+/** #6911: a rebuildable cache table that does not exist holds nothing to verify. */
+const missingCache = (store: string): StoreReport => ({ store, status: 'not_present', removed: 0, reason: 'table_missing',
+  detail: `The ${store} table does not exist on this brain; it is a rebuildable cache, so there was nothing to clear. gbrain doctor reports it under schema_missing_tables.` });
 
 /** One bounded probe: `sql` selects matching rows (no LIMIT); the adapter caps rows and the statement time. */
 async function boundedCount(engine: BrainEngine, sql: string, params: unknown[], deadline: number): Promise<ProbeResult> {
@@ -421,7 +426,8 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
   await swept('persistence_requests', `SELECT 1 FROM persistence_requests WHERE source_id=$1 AND (${['intent', 'outcome', 'error_detail', 'error_message']
       .map(c => `strpos(lower(COALESCE(${c}::text,'')),$2)>0 OR strpos(lower(COALESCE(${c}::text,'')),$3)>0`).join(' OR ')})`,
     [src, needle, JSON.stringify(claim).slice(1, -1).toLowerCase()], plan.requests.length, removed.persistence_requests);
-  await swept('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src], 0, removed.query_cache);
+  if (!dryRun && !await relationExists(engine, 'query_cache')) stores.push(missingCache('query_cache'));
+  else await swept('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src], 0, removed.query_cache);
   const refs = plan.factIds.map(String);
   for (const table of ['decide_review_queue', 'decide_review_proposals'] as const) {
     await swept(table, `SELECT 1 FROM ${table} WHERE source_id=$1 AND (a_ref=ANY($2::text[]) OR b_ref=ANY($2::text[]))`, [src, refs], plan.review[table], plan.review[table]);
@@ -452,17 +458,21 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
     AND NOT (visibility=$3 AND ($4='*' OR entity_slug=$4))`, [src, target.fact_hash, target.visibility, plan.subject]);
   const files = await pageFilePaths(engine, src, plan.pages.map(page => page.page_id));
   stores.push(...onDiskReports(files.files, claim, dryRun));
+  let vacuumed: string | null = null;
+  if (input.vacuum && !dryRun && engine.kind === 'pglite') {
+    const tables = ['facts', 'takes', 'pages', 'content_chunks', 'page_versions', 'persistence_requests', ...(await relationExists(engine, 'query_cache') ? ['query_cache'] : [])];
+    vacuumed = await engine.executeRaw(`VACUUM ${tables.join(', ')}`).then(() => 'ran', (error: unknown) => `failed (${(error as Error).message})`);
+  }
   const residuals: StoreReport[] = [];
   if (files.root && files.paths.length) residuals.push(await gitResidualCommits(files.root, files.paths, claim));
   for (const r of OUT_OF_REACH_RESIDUALS) {
     if (r.store === 'git_history' && residuals.length) continue;
-    const detail = r.store === 'database_physical' ? `${r.detail}${engine.kind === 'pglite' ? (input.vacuum ? ' VACUUM ran on the touched tables; filesystem blocks and snapshots may still hold old pages.' : ' PGLite has no autovacuum; rerun with --vacuum to compact the touched tables.') : ' On Postgres the operator runs VACUUM; WAL archives, replicas and PITR windows are outside gbrain.'}` : r.detail;
+    const detail = r.store === 'database_physical' ? `${r.detail}${engine.kind === 'pglite' ? (vacuumed === 'ran' ? ' VACUUM ran on the touched tables; filesystem blocks and snapshots may still hold old pages.' : vacuumed ? ` VACUUM of the touched tables ${vacuumed}; rerun with --vacuum.` : ' PGLite has no autovacuum; rerun with --vacuum to compact the touched tables.') : ' On Postgres the operator runs VACUUM; WAL archives, replicas and PITR windows are outside gbrain.'}` : r.detail;
     residuals.push({ store: r.store, status: 'out_of_reach', detail });
   }
   if (Number(other?.n ?? 0)) residuals.push({ store: 'facts_other_scope', status: 'out_of_scope', reason: plan.subject === '*' ? 'other_visibility' : 'other_subject', remaining: Number(other.n),
     detail: `${other.n} fact row(s) state the same claim about another entity or at another visibility; rerun with --all-subjects to purge every entity's copy.` });
   residuals.push(...stores.filter(s => s.reason === 'source_prose' || s.reason === 'probed_reported' || s.store === 'canonical_markdown' && s.status === 'out_of_scope'));
-  if (input.vacuum && !dryRun && engine.kind === 'pglite') await engine.executeRaw('VACUUM facts, takes, pages, content_chunks, page_versions, persistence_requests, query_cache').catch(() => undefined);
   const next = dryRun
     ? ['Review the residuals with the user, then confirm with the token printed above (gbrain forget <id> --purge asks for it on a terminal).']
     : ['Poll completion with gbrain forget --purge --status --request-id <request_id> until it reports complete.'];
@@ -509,7 +519,8 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('slug_aliases', 'SELECT 1 FROM slug_aliases WHERE source_id=$1 AND canonical_slug=$2', [src, slug]);
   await keyed('files', 'SELECT 1 FROM files WHERE page_slug=$2 AND (source_id=$1 OR source_id IS NULL)', [src, slug]);
   await keyed('write_gate_holds', 'SELECT 1 FROM write_gate_holds WHERE source_id=$1 AND slug=$2', [src, slug]);
-  await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
+  if (!await relationExists(engine, 'query_cache')) stores.push(missingCache('query_cache'));
+  else await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
   // The page's own segment texts only: a text of another page holding the same words is that page's body, never a
   // residue of this purge (an inline page referenced none, so the inventory sweep below must not probe the table).
   if (context && !context.segmentShas.length) stores.push({ store: 'page_segment_texts', status: 'not_present', removed: removed.page_segment_texts ?? 0 });
