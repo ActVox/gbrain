@@ -33,6 +33,7 @@ import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
 import { assertDrainLease } from './sync-lease.ts';
 import { faultPoint } from './fault-points.ts';
 import type { SyncCursorOptions } from './sync-prepare.ts';
+import { SYNC_SLICE_OP } from './sync-slices.ts';
 
 type CompanySync = ReturnType<typeof currentCompanyBrainSync>;
 
@@ -97,7 +98,7 @@ export async function resolveManagedCursor(engine: BrainEngine, input: { sourceI
       if (company) continue;
       await engine.transaction(async tx => {
         await fence(tx);
-        await tx.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 AND COALESCE(completed_keys->0->>'done','false')='true'", [row.key]);
+        await deleteFinishedCursor(tx, row.key);
       });
       await clearManagedSyncFailureAfterSuccess(engine, row.key);
     } else {
@@ -132,15 +133,34 @@ export async function retireManagedCursor(engine: BrainEngine, input: { sourceId
   if (input.done) {
     await engine.transaction(async tx => {
       await fence(tx);
-      await tx.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 AND COALESCE(completed_keys->0->>'done','false')='true'", [input.key]);
+      await deleteFinishedCursor(tx, input.key);
+      await deleteSliceRecords(tx, input.sourceId, input.incarnation);
     });
     await clearManagedSyncFailureAfterSuccess(engine, input.key);
     return null;
   }
   const open = await supersede(engine, { key: input.key, done: false, company_receipt_id: null, run_id: input.runId }, { sourceId: input.sourceId, incarnation: input.incarnation, fence });
-  if (open === null) return null;
-  const busy = open === 'kept' ? await busyRequest(engine, input.sourceId, input.key) : open;
-  return busy ? waitOn(busy) : null;
+  if (open === 'kept') {
+    const busy = await busyRequest(engine, input.sourceId, input.key);
+    return busy ? waitOn(busy) : null;
+  }
+  if (open) return waitOn(open);
+  await engine.transaction(async tx => { await fence(tx); await deleteSliceRecords(tx, input.sourceId, input.incarnation); });
+  return null;
+}
+
+/** A finished cursor row and its frozen manifest, unless another cursor still names that run. */
+async function deleteFinishedCursor(tx: BrainEngine, key: string): Promise<void> {
+  const [row] = await tx.executeRaw<{ run_id: string | null }>(`DELETE FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1
+    AND COALESCE(completed_keys->0->>'done','false')='true' RETURNING completed_keys->0->>'runId' AS run_id`, [key]);
+  if (row?.run_id) await tx.executeRaw(`DELETE FROM op_checkpoints WHERE op='managed-sync-manifest' AND fingerprint=$1
+    AND NOT EXISTS (SELECT 1 FROM op_checkpoints c WHERE c.op='managed-sync' AND c.completed_keys->0->>'runId'=$1)`, [row.run_id]);
+}
+
+/** The incarnation's path-slice records (sync-slices.ts): only a non-company cursor run cuts its target into slices. */
+async function deleteSliceRecords(tx: BrainEngine, sourceId: string, incarnation: string): Promise<void> {
+  const prefix = `${sourceId}:${incarnation}:`;
+  await tx.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND left(fingerprint, length($2))=$2', [SYNC_SLICE_OP, prefix]);
 }
 async function busyRequest(engine: BrainEngine, sourceId: string, key: string): Promise<WriteRequest | null> {
   const open = await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE source_id=$1 AND intent->>'cursorKey'=$2
