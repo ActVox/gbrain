@@ -32,7 +32,7 @@ import { readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGit, 
 import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParserFor,
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
-import { syncOriginPath } from './sync-origin.ts';
+import { sameSyncOrigin, syncOriginPath } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, workingChanged, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
@@ -289,6 +289,15 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const originPath = memo((path: string) => syncOriginPath(path));
   const originOf = memo((gitPath: string) => originPath(slugMode === 'source-root' && scope ? sourceRelative(gitPath) : gitPath));
   const gitPathOf = memo((origin: string) => { const o = originPath(origin); return slugMode === 'source-root' && scope ? `${scope}/${o}` : o; });
+  // #5610: a source-root page whose stored origin is the legacy Git-root spelling (`<scope>/<origin>`) names `<origin>`, by
+  // the one rule discovery and preparation use (sameSyncOrigin; it refuses an origin that could name two files).
+  const originScope = { sourceId, root, scope, slugMode };
+  const pageOrigin = (row: Pick<PageRow, 'slug' | 'source_path'>): string => {
+    const recorded = originPath(row.source_path);
+    if (slugMode !== 'source-root' || !scope || !recorded.startsWith(`${scope}/`)) return recorded;
+    const stripped = recorded.slice(scope.length + 1);
+    return sameSyncOrigin(recorded, stripped, originScope, row.slug) ? stripped : recorded;
+  };
 
   t = timer();
   const head = revParse(gitRoot, 'HEAD');
@@ -335,7 +344,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   t = timer();
   const byOrigin = new Map<string, PageRow>();
   for (const row of pages) {
-    const key = gitPathOf(row.source_path);
+    const key = gitPathOf(pageOrigin(row));
     const prior = byOrigin.get(key);
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
@@ -414,7 +423,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const needsBaseline = row && !row.deleted && (record?.revision == null) && level !== null && !recordBlobOids.includes(level);
     const state: SyncPathState = {
       mode, tree: committed?.oid ?? null, level, present: presentNow, dirty, diskOid: probe?.rawOid ?? null,
-      page: row ? { live: !row.deleted, revision: row.revision, originMatches: !!record && originPath(record.origin) === originPath(row.source_path) } : null,
+      page: row ? { live: !row.deleted, revision: row.revision, originMatches: !!record && originPath(record.origin) === pageOrigin(row) } : null,
       record: record ? { blobOids: recordBlobOids, revision: record.revision != null ? String(record.revision) : null, parserSame: sameParser(record.parser, fp(path)) } : null,
       attested, levelSha256: probe?.rawSha256 ?? null,
       published: !!attested?.hash && probe?.rawSha256 === attested.hash,
