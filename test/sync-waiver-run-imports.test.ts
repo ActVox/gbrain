@@ -123,15 +123,14 @@ test('an owner change during a waiver run\'s screens waives nothing: the run fal
       const value = Reflect.get(target, key);
       return typeof value === 'function' ? value.bind(target) : value;
     } });
+    const before = (await importRequests(engine, f.id)).length;
     try {
       const outcome = await performManagedSync(proxy, { sourceId: f.id, ...OPTS, full: true }).then(result => ({ result }), (error: unknown) => ({ error }));
       expect(bumped).toBe(true);
-      // The run re-reads the owner epoch under its lock and passes nothing; the head's per-entry screen then admits it,
-      // and its publication refuses the stale owner, so the pass stops blocked with nothing settled.
-      expect('result' in outcome).toBe(true);
-      const result = (outcome as { result: Awaited<ReturnType<typeof performManagedSync>> }).result;
-      expect(result).toMatchObject({ status: 'blocked_by_failures', waived: { imports: 0, deletes: 0 }, failureCodes: [{ code: 'owner_unavailable' }],
-        pass: { kind: 'full', outcome: 'blocked', stop_reason: 'blocked_by_failures', candidates: 8, settled: 0, remaining: 8 } });
+      // The run re-reads the owner epoch under its lock and passes nothing; the head's admission then fences the moved
+      // owner epoch (#6712 PR 4b ruling): the sync refuses source_changed, admits nothing and leaves no failed receipt.
+      expect(outcome).toMatchObject({ error: { code: 'source_changed' } });
+      expect((await importRequests(engine, f.id)).length).toBe(before);
     } finally { await disposePersistenceConsumer(proxy); }
   }
 }), 120_000);

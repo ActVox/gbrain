@@ -259,7 +259,6 @@ async function writeCursor(tx: BrainEngine, key: string, before: Cursor | null, 
   // #6643: a cursor records the indexes it settles without a commit from its first save by this build on; a cursor saved
   // before (a run that began on an older build) starts recording at the index it had then.
   if (!next.settled) next.settled = before && before.runId === next.runId ? { from: before.settled?.from ?? before.index, ranges: before.settled?.ranges ?? [] } : { from: 0, ranges: [] };
-  // A batch step fences itself with the drain lease (passBatchStep); a cursor row is fenced here.
   if (isPassBatchKey(key)) return await passBatchStep(tx, key, before && JSON.stringify(header(before)), next, JSON.stringify(header(next)), inTx) ? next : currentCursor(tx, key, next);
   await assertDrainLease(tx, next.sourceId);
   if (before === null) {
@@ -1273,11 +1272,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   validateManagedSyncOptions(opts);
   const context = await resolveManagedSyncContext(engine, opts);
   // Independent reads, one round trip; a refusal still wins over the authority's own error, as when they ran in turn.
-  const [allowed, resolvedAuthority] = await Promise.allSettled([opts.dryRun ? null : assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId),
-    managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root)]);
-  if (allowed.status === 'rejected') throw allowed.reason;
-  if (resolvedAuthority.status === 'rejected') throw resolvedAuthority.reason;
-  const authority = resolvedAuthority.value;
+  const reads = await Promise.allSettled([opts.dryRun ? null : assertManagedSyncAllowed(engine, context.binding.worktree_id, context.sourceId),
+    managedSyncAuthority(engine, context.sourceId, context.incarnation, opts.repoPath ?? context.root)] as const);
+  for (const read of reads) if (read.status === 'rejected') throw read.reason;
+  const authority = (reads[1] as PromiseFulfilledResult<SyncAuthority>).value;
   const company = currentCompanyBrainSync(context.sourceId);
   const processingOptions = syncProcessingOptions(opts);
   const syncOptions = syncCursorOptions(opts);
@@ -1288,7 +1286,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
   if (!company) Object.assign(state, { sourceId: context.sourceId, incarnation: context.incarnation, remote: authority.writer.remote, cursor: () => live.cursor ?? cursor });
   const dryRun = (value: Cursor, base: Cursor = value) => managedDryRun(engine, value, base, { company: !!company, processingOptions, syncOptions, repoPath: frozenRun.repoPath, remote: authority.writer.remote });
   let phase: ManagedSyncFailure['phase'] = 'resume';
-  let discoveryTarget: string | null = null;
+  let discoveryTarget: string | null = null, levelReading = false;
   const discoveryRun = randomUUID();
   const inheritedSignal = currentSourceFilesystemSignal();
   const signal = opts.signal && inheritedSignal ? AbortSignal.any([opts.signal, inheritedSignal]) : opts.signal ?? inheritedSignal; if (signal) frozenRun.signal = signal;
@@ -1312,9 +1310,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0, foregroundBaseline = 0;
       let creditedPages = 0, creditStarted = 0, foregroundQueued = false, screenedAdmit: string | null = null;
       const sliceStarted = sliceBase?.started ?? performance.now(), sliceFirstIndex = cursor.index - (sliceBase?.pages ?? 0), drainStartedAt = opts.drainStartedAt ?? Date.now();
-      // #6712 PR 4b: a local live pass keeps waiting on its own write while this process's consumer is publishing it (up to a
-      // drain's 30 s): a write still publishing past the CLI's 5 s (a cold process, a transaction-mode pooler's describe round
-      // trips) ends no round. A write nobody here is working on (another process holds the worktree) still stops at 5 s.
+      // #6712 PR 4b: a local pass waits on its own write up to 30 s while this process's consumer still holds it (item 7).
       const whileHeld = !opts.drainStartedAt && !!cursor.passId && !authority.writer.remote ? { whileHeldMs: 30_000 } : {};
       const bulk: BulkPass = { settings: opts.bulk && !company ? opts.bulk : { enabled: false, reason: null, size: 1, maxTxnMs: 0 }, perMemberMs: null, foregroundFirst: await foregroundPriority(engine) };
       const waiveBatch = noopWaiversEnabled() && await waiverBatchEnabled(startupConfig), prescreen = { missed: new Set<number>(), limit: Infinity, drainStartedAt, assertActive, signal, onProgress: opts.onProgress,
@@ -1494,8 +1490,10 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       let folded: Cursor | null = null;
       state.cursor = () => live.cursor ? { ...live.cursor, counts: { ...live.cursor.counts, recovered: totals.recovered, fences: totals.fences }, convertedFromFailed: totals.converted } : null;
       return await runSyncPass(engine, { opts, slice, context, authority, processingOptions, syncOptions, assertActive, signal, state, runStartedAt,
+        // A failed level read is recorded as that read (phase discovery, its target, the incarnation's key), not as the last batch.
+        onLevelRead: target => { phase = 'discovery'; discoveryTarget = target; levelReading = true; key = managedCursorKey(context.incarnation, company); },
         drainBatch: async (batchKey, batch, sliceBase) => {
-          key = batchKey;
+          key = batchKey; levelReading = false;
           setPassBatch(batchKey, batch, JSON.stringify(header(batch)));
           try { return await drainCursor(batch, await preparationConfigView(engine), sliceBase); }
           catch (error) {
@@ -1589,7 +1587,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
     return await drainCursor(cursor, startupConfig) as SyncResult;
   } catch (error) {
     assertSyncDispatchActive();
-    if (live.cursor) cursor = live.cursor;
+    if (live.cursor && !levelReading) cursor = live.cursor;
     if (signal?.aborted && error instanceof Error && error.name === 'AbortError') {
       if (cursor) return result(cursor, 'partial', 'timeout');
       const from = authority.writer.remote || opts.full ? null : context.source.last_commit;

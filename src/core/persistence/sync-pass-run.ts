@@ -68,6 +68,8 @@ export interface SyncPassInput {
   state: { sourceId?: string; incarnation?: string; remote?: boolean }; runStartedAt: string;
   /** Drains one round batch through sync-run.ts's cursor loop: the batch back when it drained, or the result it stopped with. */
   drainBatch: (key: string, batch: Cursor, sliceBase: { started: number; pages: number }) => Promise<SyncResult | Cursor>;
+  /** A round's level read starts at `target` (the HEAD it was pinned or last read at): a failure until its first batch is that read's. */
+  onLevelRead: (target: string) => void;
 }
 
 /** The configured patterns a selection unions with its flags: read once, beside the pin's other reads. */
@@ -384,20 +386,14 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   obligations.cost = costDecision.cost;
   let costDeferred: string | null = null;
   if (costDecision.defer && !processingOptions.noEmbed) { processingOptions.noEmbed = true; costDeferred = costDecision.defer; }
-  await engine.transaction(async tx => {
-    // The lease check and the clock read share a round trip: a lost lease aborts the transaction before the row is written.
-    [, value.telemetry.started_at] = await Promise.all([assertDrainLease(tx, sourceId), databaseNow(tx)]);
-    await writePassRow(tx, value, { pin: true });
-    // An interrupt during the pin rolls the pin back with it: no `open` row is left for a pass that never ran.
-    assertActive();
-  });
-  assertActive();
-  registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
 
   const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, chunks: 0, waivedImports: 0, waivedDeletes: 0, held: 0, pausedDeletes: 0, collisions: 0, episodeReleased: 0, costDeferred: costDeferred ? 1 : 0 };
   const collisions: SyncSlugCollision[] = [];
   const S = new Map<string, string>();
   const settledKey = (path: string, level: string | null) => `${path}\0${level ?? ''}`;
+  // The entries this round's batches settled before the round folds its candidates into S: a slice that yields mid-round
+  // (writer_yield) reports them (yieldSettled); a blocked stop reports S as it replays.
+  let roundSettled = 0, yieldSettled = 0;
   const retryConsumed = new Set<string>(retry);
   const sliceBase = { started: performance.now(), pages: 0 };
   let batchNo = 0, waits = 0, candidatesFirst = 0;
@@ -407,13 +403,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const applied = newPassApplyState();
   const readmitted = new Set<string>();
 
-  const save = async (outcome: PassOutcome, stopReason: string | null) => {
+  const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
     const ended = outcome !== 'open';
-    value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size, counts: { ...counts, ...passApplyCounts(applied) },
+    value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size + yieldSettled, counts: { ...counts, ...passApplyCounts(applied) },
       classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}),
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
-    await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value); });
+    await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin }); });
   };
   const identityDowngrades: DowngradedRename[] = [];
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
@@ -421,7 +417,24 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
     ...(collisions.length ? { slugCollisions: collisions } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
-      settled: S.size, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
+      settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
+  try {
+    await engine.transaction(async tx => {
+      // The lease check and the clock read share a round trip: a lost lease aborts the transaction before the row is written.
+      [, value.telemetry.started_at] = await Promise.all([assertDrainLease(tx, sourceId), databaseNow(tx)]);
+      await writePassRow(tx, value, { pin: true });
+      // An interrupt during the pin rolls the pin back with it: no `open` row is left for a pass that never ran.
+      assertActive();
+    });
+  } catch (error) {
+    // A caller abort records the stop on the pass row (the pin it rolled back is replaced); a job abort, a lost lease or a
+    // released context leaves no row.
+    assertSyncDispatchActive();
+    if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout', true).catch(() => undefined); return result('partial', 'timeout'); }
+    throw error;
+  }
+  assertActive();
+  registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
   /** The batch cursor sync-run.ts drains: the discovery shape with no cursor row behind it. */
   const batchCursor = (entries: PassEntry[], stamp?: PassStamp): Cursor => ({ binding: { ...context.binding, owner_epoch: String(context.binding.owner_epoch), topology_generation: String(context.binding.topology_generation) },
     root: context.root, gitRoot: context.gitRoot, sourceId, incarnation, from: context.source.last_commit, target: head, entries, slugMode: levelSlugMode, discoveredAt: startedAt,
@@ -438,6 +451,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       Object.assign(counts, { added: counts.added + c.added, modified: counts.modified + c.modified, deleted: counts.deleted + c.deleted, renamed: counts.renamed + (c.renamed ?? 0),
         chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0) });
       sliceBase.pages += drained.index;
+      roundSettled += drained.index;
       return null;
     }
     return drained;
@@ -447,6 +461,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
       waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
     sliceBase.pages += drained.filesImported ?? 0;
+    if (drained.reason === 'writer_yield') yieldSettled = roundSettled + (drained.managedCursor?.index ?? 0);
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
     const blockedOn = drained.managedWrite?.path ? drained.managedWrite.write_request.request_id : null;
     if (outcome === 'blocked' && blockedOn && obligations.blocked?.request_id !== blockedOn) obligations.blocked = { request_id: blockedOn, pass_id: passId };
@@ -476,6 +491,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     for (let round = 1; round <= PASS_MAX_ROUNDS; round++) {
       assertActive();
       value.telemetry.round = round;
+      input.onLevelRead(head);
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed() } });
       assertActive();
@@ -616,6 +632,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       // Every candidate of the round settled: committed, waived, held, deferred to a hold, a collision, or (a rename's
       // deletion) carried by its import.
       for (const entry of [...deletes, ...imports]) S.set(settledKey(entry.path, entry.state.level), 'settled');
+      roundSettled = 0;
       lastMismatch = [];
     }
     // Not converged (design §3.1): four rounds, or a settle mismatch or a path this release cannot settle.
