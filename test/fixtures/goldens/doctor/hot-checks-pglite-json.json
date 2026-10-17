@@ -1039,6 +1039,13 @@
             "status": "ok"
           },
           {
+            "category": "meta",
+            "elapsed_ms": "<volatile>",
+            "message": "All 147 table(s) the applied migrations create exist.",
+            "name": "schema_missing_tables",
+            "status": "ok"
+          },
+          {
             "category": "ops",
             "elapsed_ms": "<volatile>",
             "message": "Skipped (PGLite — no event trigger support)",
@@ -5259,6 +5266,13 @@
             "elapsed_ms": "<volatile>",
             "message": "1243 column(s) verified against live schema",
             "name": "schema_columns",
+            "status": "ok"
+          },
+          {
+            "category": "meta",
+            "elapsed_ms": "<volatile>",
+            "message": "All 147 table(s) the applied migrations create exist.",
+            "name": "schema_missing_tables",
             "status": "ok"
           },
           {
