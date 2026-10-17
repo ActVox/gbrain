@@ -304,6 +304,8 @@ export async function purgeDeletedPages(
         SELECT slug, deleted_at FROM pages
         WHERE deleted_at IS NOT NULL
           AND deleted_at < now() - (${hours} || ' hours')::interval
+          AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
+            AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
         ORDER BY deleted_at ASC, slug ASC
       `);
       const pages = rows.map((r) => ({
@@ -316,6 +318,9 @@ export async function purgeDeletedPages(
       DELETE FROM pages
       WHERE deleted_at IS NOT NULL
         AND deleted_at < now() - (${hours} || ' hours')::interval
+        -- #6729: the old page of an open rename-identity downgrade waits for its disposition (identityDowngradePurgeHold).
+        AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
+          AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
       RETURNING slug
     `);
     const slugs = rows.map((r) => r.slug);

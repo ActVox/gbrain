@@ -499,7 +499,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   }
   private async doTick(afterProgress: boolean): Promise<void> {
     if (this.stopping) return;
-    const requested = this.fullTickRequested || this.active.size > 0;
+    const requested = this.fullTickRequested;
     this.fullTickRequested = false;
     if (!requested) {
       let work: boolean;
@@ -516,6 +516,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       // #6650: the idle probe sees only lapsed claims; a live-leased claim of a dead owner is looked for here, on its own cadence.
       if (!work) this.deadOwnersSeen = await this.phase('dead_owner_claims', signal => this.deadOwnerClaims(signal, true));
       if (!work && !this.deadOwnersSeen?.length) {
+        if (this.active.size > 0) { this.nextDelayMs = this.pollMs; return; }
         this.nextDelayMs = this.backoff();
         if (!this.maintenanceWorker && Date.now() >= this.nextMaintenance) {
           this.nextMaintenance = Date.now() + 300_000;
