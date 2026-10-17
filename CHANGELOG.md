@@ -12,21 +12,23 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.275.0] - 2026-10-17
 
-**`gbrain sync --dry-run --json` now shows what the coming level-triggered reconcile would do, without doing any of it.** This is the read-only shadow of #6712 PR 4. It compares every path in Git with its record and page, puts each one in exactly one class, and reports the counts. It writes nothing, and sync behaves exactly as before.
+**`gstack-pregate` now reaches a verdict on small machines: on a machine under 8 cores, the test tier goes to the full Ubicloud gate instead of thousands of local files.** On a 4-core machine, a one-line edit to a hub file such as `src/core/config.ts` selected about 3,900 test files, and pregate hit its 40-minute cap after 308 of them. `.gstack/pregate.json` now declares a `remote_gate`. Pregate records the selected files as one remote obligation in seconds, and `gstack-pregate --remote` clears it by running the full gate on the working tree.
 
-### What you'd see
+### How to use it
 
-| Situation | Before | Now |
-|---|---|---|
-| `gbrain sync --source <id> --dry-run --json` on a managed source | the dry-run plan only | also a `convergence` receipt: per-class counts, each with an `action` (`none`, `owner`: sync finishes it, `repair`: a person decides), predicted decisions, deletes with the mass-delete valve's verdict, up to 20 sample paths per class, and `timings_ms` |
-| Sharing that receipt | paths and slugs were in it | `--redact-paths` turns sample paths into `sha256:` prefixes and drops slugs |
-| `gbrain sync status --source <id> --json --detail` | no convergence view | an additive `convergence` block (`dry_run: true`) and `convergence_read`. A plain status reports `convergence: null` with `convergence_read: not_read`, and no existing field changes meaning |
-| `gbrain doctor --tier deep` | — | informational `managed_sync_convergence` check |
-| `gbrain errors reconcile_read_incomplete` / `convergence_read_failed` | unknown code | explained, with a read-only fix |
+```bash
+UBI_OWNER=<thread code> gstack-pregate --stage tests --remote --spend-cap <usd> --allow-repo-commands
+```
 
-### What you need to do
+### Itemized changes
 
-Nothing. To help validate the next release, run `gbrain sync --source <id> --dry-run --json --redact-paths` and share the `convergence` counts.
+- `scripts/pregate-remote-gate.sh` (new) runs `bun run ci:ubicloud` and prints `PREGATE_REMOTE: tree=<tree> tests=<n> failed=<n>`.
+  - `<tree>` is the working-tree content fingerprint (tracked plus untracked-unignored files), computed before and after the gate.
+  - It refuses without `UBI_OWNER`, or when `PREGATE_TREE` names another tree. It prints no receipt when the tree moved during the gate or the gate printed no summary.
+  - Provider API keys are removed from the gate's environment.
+- `.gstack/pregate.json` declares `remote_gate`. `CONTRIBUTING.md` documents the flow.
+- Tests: `test/scripts/pregate-remote-gate.test.ts`.
+- No product or schema change.
 
 ## [0.60.274.0] - 2026-10-17
 
