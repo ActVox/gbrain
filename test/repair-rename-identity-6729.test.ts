@@ -143,8 +143,10 @@ for (const kind of testBackends()) describe(`gbrain repair rename-identity (#672
     expect(await page(s.id, 'notes/plan')).toBeUndefined();
     expect(await engine.executeRaw('SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id=$1', [s.id])).toEqual([{ alias_slug: 'notes/plan', canonical_slug: 'notes/roadmap' }]);
     expect(await pageById(s.fresh.id)).toMatchObject({ slug: `notes/roadmap~purged-${s.fresh.id}`, deleted_at: expect.anything() });
-    // History: the old versions, the provisional's versions, and the import's snapshot of the old body (the new file is the page now).
-    expect(await versions(s.old.id)).toBe(oldVersions + provisionalVersions + 1);
+    // History: the old versions, the provisional's versions, the rename's preimage (updateSlug versions the page as it
+    // stood, for belief page-at-time) and the import's snapshot of the old body (the new file is the page now).
+    const carriedVersions = oldVersions + provisionalVersions + 2;
+    expect(await versions(s.old.id)).toBe(carriedVersions);
     expect(await versions(s.fresh.id)).toBe(0);
     expect(await engine.executeRaw('SELECT summary FROM timeline_entries WHERE page_id=$1', [s.old.id])).toEqual([{ summary: 'Planning kickoff' }]);
     expect((await engine.executeRaw<{ to_page_id: number }>('SELECT to_page_id FROM links WHERE from_page_id=$1', [s.old.id])).map(l => Number(l.to_page_id))).toContain(peer.id);
@@ -167,7 +169,7 @@ for (const kind of testBackends()) describe(`gbrain repair rename-identity (#672
       expect(again.suggestion).toContain('already carried or closed');
     }
     expect(await facts(s.id)).toEqual(after);
-    expect(await versions(s.old.id)).toBe(oldVersions + provisionalVersions + 1);
+    expect(await versions(s.old.id)).toBe(carriedVersions);
     // The next sync keeps the carried page.
     await s.sync();
     expect((await page(s.id, 'notes/roadmap'))!.id).toBe(s.old.id);
