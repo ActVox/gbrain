@@ -10,6 +10,7 @@
       "exit_code": 1,
       "report": {
         "brain_checks_score": 45,
+        "budget_ms": "<volatile>",
         "capped_by": [
           "embeddings_disabled"
         ],
@@ -626,7 +627,7 @@
               "unresolved": {
                 "distinct_intents": 0,
                 "distinct_slugs": 0,
-                "oldest_age_seconds": null,
+                "oldest_age_seconds": "<volatile>",
                 "rows": 0
               },
               "window_days": 7
@@ -853,6 +854,20 @@
             "status": "ok"
           },
           {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
+            "name": "links_extraction_lag",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).",
+            "name": "partial_embedding",
+            "status": "ok"
+          },
+          {
             "category": "ops",
             "elapsed_ms": "<volatile>",
             "message": "Extension installed",
@@ -869,12 +884,59 @@
           {
             "category": "brain",
             "details": {
+              "archived": 0,
+              "as_of": "<ts>+00",
+              "failed": 0,
+              "ocr_required": 0,
+              "oldest_age_seconds": "<volatile>",
+              "pending": 1,
+              "protected": 0,
               "readiness": "projection_pending",
-              "ready": false
+              "ready": false,
+              "reimport": 0,
+              "sealable": 0,
+              "sealable_with_visual": 0
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "message": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn"
           },
@@ -1895,13 +1957,6 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No large page is held or capped by embed.max_usd_per_page.",
-            "name": "partial_embedding",
-            "status": "ok"
-          },
-          {
-            "category": "brain",
-            "elapsed_ms": "<volatile>",
             "message": "No junk-pattern hits in 20 recent page(s) (use --content-audit for full scan)",
             "name": "scraper_junk_pages",
             "status": "ok"
@@ -2371,13 +2426,6 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
-            "name": "links_extraction_lag",
-            "status": "ok"
-          },
-          {
-            "category": "brain",
-            "elapsed_ms": "<volatile>",
             "message": "No full cycle yet for 'default', 'notes', 'plain': they hold no pages or only pages from the last 24h, so there is nothing to consolidate yet.",
             "name": "cycle_freshness",
             "readiness_state": "not_applicable",
@@ -2410,6 +2458,73 @@
             "elapsed_ms": "<volatile>",
             "message": "No configured collectors declare output paths",
             "name": "db_only_collector_collision",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "docs": "docs/guides/on-commit-sync.md",
+              "fail_seconds": 3600,
+              "graded": false,
+              "on_commit": false,
+              "sources": [
+                {
+                  "commit_to_embedded": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "pending": 0,
+                    "samples": 0
+                  },
+                  "commit_to_searchable": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "samples": 0
+                  },
+                  "commits": 0,
+                  "source_id": "default",
+                  "unresolved_commits": 0,
+                  "window_hours": 24
+                },
+                {
+                  "commit_to_embedded": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "pending": 0,
+                    "samples": 0
+                  },
+                  "commit_to_searchable": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "samples": 0
+                  },
+                  "commits": 0,
+                  "source_id": "notes",
+                  "unresolved_commits": 0,
+                  "window_hours": 24
+                },
+                {
+                  "commit_to_embedded": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "pending": 0,
+                    "samples": 0
+                  },
+                  "commit_to_searchable": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "samples": 0
+                  },
+                  "commits": 0,
+                  "source_id": "plain",
+                  "unresolved_commits": 0,
+                  "window_hours": 24
+                }
+              ],
+              "target_seconds": 300
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No commit→searchable samples in the last 24 h (no managed sync imported a new commit).",
+            "name": "managed_sync_latency",
             "status": "ok"
           },
           {
@@ -3056,6 +3171,90 @@
             "status": "ok"
           },
           {
+            "category": "brain",
+            "details": {
+              "docs": "docs/guides/repair.md#unindexed-files",
+              "sources": [
+                {
+                  "source_id": "default",
+                  "state": "missing"
+                },
+                {
+                  "source_id": "notes",
+                  "state": "missing"
+                },
+                {
+                  "source_id": "plain",
+                  "state": "missing"
+                }
+              ]
+            },
+            "elapsed_ms": "<volatile>",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sources",
+                "retry-held",
+                "default",
+                "--unindexed",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sources retry-held default --unindexed --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
+              "next": "run",
+              "requires_exclusive": false,
+              "then": {
+                "actor": "agent",
+                "argv": [
+                  "gbrain",
+                  "sync",
+                  "--source",
+                  "default",
+                  "--no-pull",
+                  "--brain",
+                  "host"
+                ],
+                "command": "gbrain sync --source default --no-pull --brain host",
+                "consent": [],
+                "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
+                "next": "run",
+                "requires_exclusive": false,
+                "verify": {
+                  "argv": [
+                    "gbrain",
+                    "doctor",
+                    "--only",
+                    "unindexed_files",
+                    "--json",
+                    "--brain",
+                    "host"
+                  ]
+                },
+                "why": "The sync re-screens the scheduled files of default: each one that passes imports, each one that refuses is recorded as a hold that gbrain sources status default lists."
+              },
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "unindexed_files",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Finds the committed files of default with no page and no hold (bounded; it continues an incomplete scan), schedules them for a re-screen and stores the result this check reads."
+            },
+            "message": "Unindexed files are not known for default (not computed yet), notes (not computed yet), plain (not computed yet). The maintenance phase unindexed_files computes them on each run and continues an incomplete scan; to compute them now, run gbrain sources retry-held <id> --unindexed.",
+            "name": "unindexed_files",
+            "readiness_state": "unknown",
+            "severity": "info",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "details": {
               "rollback": [],
@@ -3515,7 +3714,7 @@
             "category": "meta",
             "details": {
               "counts": {
-                "global": 15,
+                "global": 16,
                 "mixed": 2,
                 "source": 12
               },
@@ -3548,11 +3747,12 @@
                 "standing_questions": "global",
                 "sync": "source",
                 "synthesize": "mixed",
-                "synthesize_concepts": "global"
+                "synthesize_concepts": "global",
+                "unindexed_files": "global"
               }
             },
             "elapsed_ms": "<volatile>",
-            "message": "Phase taxonomy: 12 source-scoped, 15 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
+            "message": "Phase taxonomy: 12 source-scoped, 16 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, unindexed_files, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
             "name": "cycle_phase_scope",
             "status": "ok"
           },
@@ -3682,11 +3882,14 @@
             "status": "ok"
           }
         ],
+        "complete": true,
         "db_url_source": null,
+        "elapsed_ms": "<volatile>",
         "engine": "pglite",
         "health_score": 35,
         "schema_version": 2,
         "status": "unhealthy",
+        "tier": "standard",
         "top_issues": [
           {
             "action": {
@@ -3907,7 +4110,45 @@
             "tier": "symptom"
           },
           {
-            "fix": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "fix": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn",
             "tier": "symptom"
@@ -3944,9 +4185,11 @@
             "status": "warn",
             "tier": "symptom"
           }
-        ]
+        ],
+        "unknown_sections": []
       },
       "stderr": [
+        "[gbrain doctor] non-interactive run: the check run (not connect or migrations) is capped at 90000 ms (doctor.default_budget_ms); checks past it report health unknown. Off for one run: --budget-ms 0; off for good: gbrain config set doctor.default_budget_ms 0. On PGLite a statement already running cannot be stopped, so a check can finish late.",
         "[backup] checked 3 asset(s): 1 without a git remote (computed_by=doctor)"
       ],
       "stdout": "<json>"
@@ -3961,6 +4204,7 @@
       "exit_code": 1,
       "report": {
         "brain_checks_score": 45,
+        "budget_ms": "<volatile>",
         "capped_by": [
           "embeddings_disabled"
         ],
@@ -4577,7 +4821,7 @@
               "unresolved": {
                 "distinct_intents": 0,
                 "distinct_slugs": 0,
-                "oldest_age_seconds": null,
+                "oldest_age_seconds": "<volatile>",
                 "rows": 0
               },
               "window_days": 7
@@ -4804,6 +5048,20 @@
             "status": "ok"
           },
           {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
+            "name": "links_extraction_lag",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "elapsed_ms": "<volatile>",
+            "message": "No large page has chunks waiting for embedding approval (held or capped by embed.max_usd_per_page).",
+            "name": "partial_embedding",
+            "status": "ok"
+          },
+          {
             "category": "ops",
             "elapsed_ms": "<volatile>",
             "message": "Extension installed",
@@ -4820,12 +5078,59 @@
           {
             "category": "brain",
             "details": {
+              "archived": 0,
+              "as_of": "<ts>+00",
+              "failed": 0,
+              "ocr_required": 0,
+              "oldest_age_seconds": "<volatile>",
+              "pending": 1,
+              "protected": 0,
               "readiness": "projection_pending",
-              "ready": false
+              "ready": false,
+              "reimport": 0,
+              "sealable": 0,
+              "sealable_with_visual": 0
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "message": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn"
           },
@@ -5846,13 +6151,6 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No large page is held or capped by embed.max_usd_per_page.",
-            "name": "partial_embedding",
-            "status": "ok"
-          },
-          {
-            "category": "brain",
-            "elapsed_ms": "<volatile>",
             "message": "No junk-pattern hits in 20 recent page(s) (use --content-audit for full scan)",
             "name": "scraper_junk_pages",
             "status": "ok"
@@ -6322,13 +6620,6 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
-            "name": "links_extraction_lag",
-            "status": "ok"
-          },
-          {
-            "category": "brain",
-            "elapsed_ms": "<volatile>",
             "message": "No full cycle yet for 'default', 'notes', 'plain': they hold no pages or only pages from the last 24h, so there is nothing to consolidate yet.",
             "name": "cycle_freshness",
             "readiness_state": "not_applicable",
@@ -6361,6 +6652,73 @@
             "elapsed_ms": "<volatile>",
             "message": "No configured collectors declare output paths",
             "name": "db_only_collector_collision",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "docs": "docs/guides/on-commit-sync.md",
+              "fail_seconds": 3600,
+              "graded": false,
+              "on_commit": false,
+              "sources": [
+                {
+                  "commit_to_embedded": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "pending": 0,
+                    "samples": 0
+                  },
+                  "commit_to_searchable": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "samples": 0
+                  },
+                  "commits": 0,
+                  "source_id": "default",
+                  "unresolved_commits": 0,
+                  "window_hours": 24
+                },
+                {
+                  "commit_to_embedded": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "pending": 0,
+                    "samples": 0
+                  },
+                  "commit_to_searchable": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "samples": 0
+                  },
+                  "commits": 0,
+                  "source_id": "notes",
+                  "unresolved_commits": 0,
+                  "window_hours": 24
+                },
+                {
+                  "commit_to_embedded": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "pending": 0,
+                    "samples": 0
+                  },
+                  "commit_to_searchable": {
+                    "p50_seconds": null,
+                    "p95_seconds": null,
+                    "samples": 0
+                  },
+                  "commits": 0,
+                  "source_id": "plain",
+                  "unresolved_commits": 0,
+                  "window_hours": 24
+                }
+              ],
+              "target_seconds": 300
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No commit→searchable samples in the last 24 h (no managed sync imported a new commit).",
+            "name": "managed_sync_latency",
             "status": "ok"
           },
           {
@@ -7007,6 +7365,90 @@
             "status": "ok"
           },
           {
+            "category": "brain",
+            "details": {
+              "docs": "docs/guides/repair.md#unindexed-files",
+              "sources": [
+                {
+                  "source_id": "default",
+                  "state": "missing"
+                },
+                {
+                  "source_id": "notes",
+                  "state": "missing"
+                },
+                {
+                  "source_id": "plain",
+                  "state": "missing"
+                }
+              ]
+            },
+            "elapsed_ms": "<volatile>",
+            "fix": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "sources",
+                "retry-held",
+                "default",
+                "--unindexed",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain sources retry-held default --unindexed --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
+              "next": "run",
+              "requires_exclusive": false,
+              "then": {
+                "actor": "agent",
+                "argv": [
+                  "gbrain",
+                  "sync",
+                  "--source",
+                  "default",
+                  "--no-pull",
+                  "--brain",
+                  "host"
+                ],
+                "command": "gbrain sync --source default --no-pull --brain host",
+                "consent": [],
+                "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#unindexed-files",
+                "next": "run",
+                "requires_exclusive": false,
+                "verify": {
+                  "argv": [
+                    "gbrain",
+                    "doctor",
+                    "--only",
+                    "unindexed_files",
+                    "--json",
+                    "--brain",
+                    "host"
+                  ]
+                },
+                "why": "The sync re-screens the scheduled files of default: each one that passes imports, each one that refuses is recorded as a hold that gbrain sources status default lists."
+              },
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "unindexed_files",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Finds the committed files of default with no page and no hold (bounded; it continues an incomplete scan), schedules them for a re-screen and stores the result this check reads."
+            },
+            "message": "Unindexed files are not known for default (not computed yet), notes (not computed yet), plain (not computed yet). The maintenance phase unindexed_files computes them on each run and continues an incomplete scan; to compute them now, run gbrain sources retry-held <id> --unindexed.",
+            "name": "unindexed_files",
+            "readiness_state": "unknown",
+            "severity": "info",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "details": {
               "rollback": [],
@@ -7466,7 +7908,7 @@
             "category": "meta",
             "details": {
               "counts": {
-                "global": 15,
+                "global": 16,
                 "mixed": 2,
                 "source": 12
               },
@@ -7499,11 +7941,12 @@
                 "standing_questions": "global",
                 "sync": "source",
                 "synthesize": "mixed",
-                "synthesize_concepts": "global"
+                "synthesize_concepts": "global",
+                "unindexed_files": "global"
               }
             },
             "elapsed_ms": "<volatile>",
-            "message": "Phase taxonomy: 12 source-scoped, 15 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
+            "message": "Phase taxonomy: 12 source-scoped, 16 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, unindexed_files, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge]. Mixed: [synthesize, patterns].",
             "name": "cycle_phase_scope",
             "status": "ok"
           },
@@ -7633,11 +8076,14 @@
             "status": "ok"
           }
         ],
+        "complete": true,
         "db_url_source": null,
+        "elapsed_ms": "<volatile>",
         "engine": "pglite",
         "health_score": 35,
         "schema_version": 2,
         "status": "unhealthy",
+        "tier": "standard",
         "top_issues": [
           {
             "action": {
@@ -7858,7 +8304,45 @@
             "tier": "symptom"
           },
           {
-            "fix": "Visible pages have missing or stale text projections; search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--limit",
+                "4800",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain projections drain --limit 4800 --brain host",
+              "consent": [],
+              "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md#projection-drain",
+              "next": "run",
+              "preview_argv": [
+                "gbrain",
+                "projections",
+                "drain",
+                "--dry-run",
+                "--json",
+                "--brain",
+                "host"
+              ],
+              "requires_exclusive": false,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "projections",
+                  "drain",
+                  "--dry-run",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "Rebuilds queued Markdown and code projections and seals importer-attested image pages in place, at most 4800 pages per run; repeat until the dry run shows sealable 0."
+            },
+            "fix": "Visible pages have missing or stale text projections (1 queued Markdown/code page(s)); search and code results may be incomplete. Run `gbrain projections drain` to rebuild queued Markdown and code projections now; it is safe while `gbrain serve` runs on Postgres. For code metadata repair, run `gbrain reindex-code --force --no-embed`. If work stays pending, inspect the recorded source path. No repair or embedding was started by this check.",
             "name": "text_projection_readiness",
             "status": "warn",
             "tier": "symptom"
@@ -7895,9 +8379,12 @@
             "status": "warn",
             "tier": "symptom"
           }
-        ]
+        ],
+        "unknown_sections": []
       },
-      "stderr": [],
+      "stderr": [
+        "[gbrain doctor] non-interactive run: the check run (not connect or migrations) is capped at 90000 ms (doctor.default_budget_ms); checks past it report health unknown. Off for one run: --budget-ms 0; off for good: gbrain config set doctor.default_budget_ms 0. On PGLite a statement already running cannot be stopped, so a check can finish late."
+      ],
       "stdout": "<json>"
     }
   },

@@ -290,6 +290,14 @@
         "name": "embedding_state"
       },
       {
+        "category": "brain",
+        "name": "links_extraction_lag"
+      },
+      {
+        "category": "brain",
+        "name": "partial_embedding"
+      },
+      {
         "category": "ops",
         "name": "pgvector"
       },
@@ -591,10 +599,6 @@
       },
       {
         "category": "brain",
-        "name": "partial_embedding"
-      },
-      {
-        "category": "brain",
         "name": "scraper_junk_pages"
       },
       {
@@ -723,10 +727,6 @@
       },
       {
         "category": "brain",
-        "name": "links_extraction_lag"
-      },
-      {
-        "category": "brain",
         "name": "cycle_freshness"
       },
       {
@@ -744,6 +744,10 @@
       {
         "category": "ops",
         "name": "db_only_collector_collision"
+      },
+      {
+        "category": "brain",
+        "name": "managed_sync_latency"
       },
       {
         "category": "brain",
@@ -856,6 +860,10 @@
       {
         "category": "brain",
         "name": "missing_recorded_files"
+      },
+      {
+        "category": "brain",
+        "name": "unindexed_files"
       },
       {
         "category": "meta",
