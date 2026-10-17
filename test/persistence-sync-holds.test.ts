@@ -17,6 +17,7 @@ import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { GIT_HOLD_OP, SYNC_IMPORT_PROVENANCE_OP, gitHoldItem, readGitSourceHolds, recordContentHoldRepair, requestGitHoldRetry } from '../src/core/persistence/sync-holds.ts';
+import { CONTENT_REPAIR_LANE_VERSION } from '../src/core/persistence/sync-fault-class.ts';
 import { printSyncResult, type SyncOpts, type SyncResult } from '../src/commands/sync.ts';
 import { gitHoldStatusLines, readGitHoldStatuses } from '../src/core/persistence/connector-status.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -419,7 +420,7 @@ test('#6377: a slug-conflict hold carries the content-repair verdict only for th
   expect(hold).toMatchObject({ code: 'frontmatter_slug_conflict' });
   expect(gitHoldItem(hold!).fix.argv).toEqual(['gbrain', 'repair', 'content', '--source', s.id, '--only', 'notes/slug.md']);
   expect(gitHoldItem(hold!).fix.why).toContain('The content-repair lane clears this itself on the next maintenance run');
-  const state = { action: 'merge_into' as const, reason: 'merge_recommended', canonical: 'notes/elsewhere', named: 'notes/elsewhere', model: 'anthropic:claude-opus-5-5', at: new Date().toISOString(), next_attempt_after: null };
+  const state = { action: 'merge_into' as const, reason: 'merge_recommended', canonical: 'notes/elsewhere', named: 'notes/elsewhere', model: 'anthropic:claude-opus-5-5', at: new Date().toISOString(), next_attempt_after: null, lane_version: CONTENT_REPAIR_LANE_VERSION };
   // Conditional on the judged bytes and the code: other bytes or another path record nothing.
   expect(await recordContentHoldRepair(engine, { sourceId: s.id, incarnation: hold!.incarnation, path: 'notes/slug.md', upstreamVersion: sha256('other bytes'), state })).toBe(false);
   expect(await recordContentHoldRepair(engine, { sourceId: s.id, incarnation: hold!.incarnation, path: 'notes/ok.md', upstreamVersion: null, state })).toBe(false);
