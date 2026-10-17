@@ -20,12 +20,9 @@ export async function relationExists(engine: Pick<BrainEngine, 'executeRaw'>, ta
   return row?.present === true;
 }
 
-/**
- * Run `sql` (a DELETE ... RETURNING) against a rebuildable cache and return the row count, or 0 with the table
- * appended to `missing` when the cache table does not exist.
- */
-export async function clearRebuildableCache(tx: Pick<BrainEngine, 'executeRaw'>, table: string, sql: string, params: unknown[], missing: string[]): Promise<number> {
+/** Empty a rebuildable cache and return the rows removed, or null when the cache table does not exist. */
+export async function clearRebuildableCache(tx: Pick<BrainEngine, 'executeRaw'>, table: string): Promise<number | null> {
   if (!isRebuildableCache(table)) throw new Error(`clearRebuildableCache: ${table} is not a rebuildable cache in the graduation inventory`);
-  if (!await relationExists(tx, table)) { missing.push(table); return 0; }
-  return (await tx.executeRaw(sql, params)).length;
+  if (!await relationExists(tx, table)) return null;
+  return (await tx.executeRaw(`DELETE FROM ${table} RETURNING 1`)).length;
 }

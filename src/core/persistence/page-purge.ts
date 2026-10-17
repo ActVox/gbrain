@@ -282,7 +282,9 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     OR (target_table='takes' AND target_id=ANY($3::text[])) OR (target_table='write_gate_holds' AND target_id=ANY($4::text[])) RETURNING 1`,
   [String(page.id), refs, takeIds.map(String), holds]);
   const missingCaches: string[] = [];
-  removed.query_cache = await clearRebuildableCache(tx, 'query_cache', 'DELETE FROM query_cache RETURNING 1', [], missingCaches);
+  const cleared = await clearRebuildableCache(tx, 'query_cache');
+  if (cleared === null) missingCaches.push('query_cache');
+  removed.query_cache = cleared ?? 0;
   removed.facts = await count('DELETE FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 RETURNING 1', [sourceId, slug]);
   removed.take_proposals = await count('DELETE FROM take_proposals WHERE source_id=$1 AND page_slug=$2 RETURNING 1', [sourceId, slug]);
   removed.open_loops = await count('DELETE FROM open_loops WHERE source_id=$1 AND page_slug=$2 RETURNING 1', [sourceId, slug]);

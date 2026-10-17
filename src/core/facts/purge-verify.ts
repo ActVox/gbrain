@@ -28,7 +28,7 @@ import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
-import { isRebuildableCache, relationExists } from '../persistence/rebuildable-cache.ts';
+import { relationExists } from '../persistence/rebuildable-cache.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -262,7 +262,6 @@ async function sweptInventoryReports(engine: BrainEngine, reported: ReadonlySet<
     if (entry.class !== 'swept' || reported.has(entry.table)) continue;
     const planned = removed[entry.table] ?? 0;
     if (dryRun) { reports.push({ store: entry.table, status: planned ? 'would_remove' : 'not_present', removed: planned }); continue; }
-    if (isRebuildableCache(entry.table) && !await relationExists(engine, entry.table)) { reports.push(missingCache(entry.table)); continue; }
     const result = await probeTable(engine, entry, sourceId, needles, deadline);
     if ('unverified' in result) reports.push({ store: entry.table, status: 'unverified', reason: result.unverified, removed: planned });
     else if (result.count) reports.push({ store: entry.table, status: 'incomplete', remaining: result.count, removed: planned });

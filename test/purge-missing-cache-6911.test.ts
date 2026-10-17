@@ -22,6 +22,9 @@ import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { readMissingTables } from '../src/core/schema-missing-tables.ts';
 import { runRepair, resolveRepairScope } from '../src/core/repair/core.ts';
 import { missingTablesRepair } from '../src/core/repair/missing-tables.ts';
+import { schemaVersionEntry } from '../src/commands/doctor/checks/schema-health.ts';
+import type { DoctorContext } from '../src/commands/doctor/context.ts';
+import type { Check } from '../src/commands/doctor.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -47,6 +50,10 @@ async function seed(engine: BrainEngine, slug: string): Promise<void> {
 async function purgePage(engine: BrainEngine, slug: string) {
   const snapshot = await engine.readPageSnapshot(slug, { sourceId: 'default', includeDeleted: true });
   return call(engine, 'delete_page', { slug, purge: true, request_id: randomUUID(), expected_revision: snapshot!.revision });
+}
+async function missingTablesCheck(engine: BrainEngine) {
+  const checks = await schemaVersionEntry.run({ engine, progress: { heartbeat() {} } } as unknown as DoctorContext) as Check[];
+  return checks.find(c => c.name === 'schema_missing_tables')!;
 }
 async function errorCode(p: Promise<unknown>): Promise<string> {
   try { await p; return 'ok'; } catch (e) { return e instanceof OperationError ? `${e.canonical ?? e.code}: ${e.message}` : String((e as Error).message); }
@@ -120,6 +127,20 @@ describe('#6911 missing query_cache', () => {
       if (engine.kind === 'pglite') expect(await shape(engine, 'query_cache')).toEqual(expected);
       else expect((await shape(engine, 'query_cache')).columns.map(c => c.column_name)).toEqual(expected.columns.map(c => c.column_name));
       expect(await readMissingTables(engine)).toMatchObject({ status: 'checked', missing: [] });
+      expect(await errorCode(runRepair(ctx(engine), missingTablesRepair, scope, { apply: true, explicit: true, expect: preview.preview_hash }))).not.toBe('ok');
+    }
+  }), 120_000);
+
+  test('an apply leaves a table that reappeared after the preview alone', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      await engine.executeRaw('DROP TABLE IF EXISTS query_cache');
+      const scope = await resolveRepairScope(engine);
+      const preview = await runRepair(ctx(engine), missingTablesRepair, scope, { apply: false, explicit: true });
+      await engine.executeRaw('CREATE TABLE query_cache (id TEXT PRIMARY KEY)');
+      const applied = await runRepair(ctx(engine), missingTablesRepair, scope, { apply: true, explicit: true, expect: preview.preview_hash });
+      expect(applied.outcomes).toEqual({ already_present: 1 });
+      expect((await shape(engine, 'query_cache')).columns.map(c => c.column_name)).toEqual(['id']);
+      await engine.executeRaw('DROP TABLE query_cache');
     }
   }), 120_000);
 
@@ -181,8 +202,32 @@ describe('#6911 missing query_cache', () => {
       const preview = await runRepair(ctx(engine), missingTablesRepair, scope, { apply: false, explicit: true });
       expect(preview.affected).toBe(0);
       expect(preview.residuals).toEqual({ user_data_tables: 1 });
-      expect(await errorCode(purgePage(engine, 'people/loud-example'))).not.toBe('ok');
+      expect(await errorCode(purgePage(engine, 'people/loud-example'))).toStartWith('storage_error');
       expect(await engine.executeRaw("SELECT 1 FROM pages WHERE slug='people/loud-example' AND deleted_at IS NULL")).toHaveLength(1);
     }
   }), 120_000);
+
+  test('doctor fails only a missing user-data table, warns for the rest, and says the base-schema replay hides a lost user-data table', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      await engine.initSchema();
+      await engine.executeRaw('DROP TABLE IF EXISTS query_cache');
+      await engine.executeRaw('DROP TABLE IF EXISTS gbrain_cycle_locks');
+      const warned = await missingTablesCheck(engine);
+      expect(warned.status).toBe('warn');
+      expect(warned.message).toBe('2 table(s) the applied migrations create are missing, and apply-migrations will not recreate them from the migrations that already ran. '
+        + 'Rebuildable cache(s) query_cache: preview recreating them empty with gbrain repair missing-tables, then apply the printed command after the user agrees. '
+        + 'gbrain_cycle_locks hold no user data: gbrain init --migrate-only recreates the ones the base schema defines; report any it does not (see docs/guides/repair.md#missing-tables).');
+      expect(warned.fix?.argv).toEqual(['gbrain', 'repair', 'missing-tables', '--json']);
+      expect((await readMissingTables(engine) as { missing: unknown[] }).missing).toEqual([
+        { table: 'gbrain_cycle_locks', inventory_class: 'discard', loss_kind: 'operational', recreatable: false },
+        { table: 'query_cache', inventory_class: 'rebuild', loss_kind: 'operational', recreatable: true }]);
+      await engine.executeRaw('DROP TABLE IF EXISTS core_edit_notices');
+      const failed = await missingTablesCheck(engine);
+      expect(failed.status).toBe('fail');
+      expect(failed.message).toContain('core_edit_notices hold user data: restore their rows from a backup before running gbrain init --migrate-only, gbrain upgrade or apply-migrations');
+      await engine.initSchema();
+      expect(await readMissingTables(engine)).toMatchObject({ status: 'checked', missing: [{ table: 'query_cache' }] });
+      expect(await engine.executeRaw('SELECT count(*)::int AS n FROM core_edit_notices')).toEqual([{ n: 0 }]);
+    }
+  }), 180_000);
 });

@@ -380,7 +380,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       const chunks = pageIds.length ? (await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=ANY($1::integer[]) RETURNING 1', [pageIds])).length : 0;
       const versions = await redactPageVersions(tx, p.sourceId, current.fact, pageIds);
       prose = versions.prose;
-      const cache = await clearRebuildableCache(tx, 'query_cache', 'DELETE FROM query_cache RETURNING 1', [], []);
+      const cache = (await clearRebuildableCache(tx, 'query_cache')) ?? 0;
       const pages = pageIds.length ? await tx.executeRaw<{ id: number; slug: string; knowledge_revision: string }>(
         'SELECT id,slug,knowledge_revision::text AS knowledge_revision FROM pages WHERE source_id=$1 AND id=ANY($2::int[]) ORDER BY slug', [p.sourceId, pageIds]) : [];
       await tx.executeRaw(`INSERT INTO persistence_effects(request_id,kind,data,source_id,source_incarnation,worktree_id)
