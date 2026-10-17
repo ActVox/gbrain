@@ -1092,27 +1092,55 @@ export interface ManagedSyncBacklog {
   resume_command: string;
   /** #6278: the arguments after `gbrain sync` that resume this cursor with its stored options. */
   resume_args: string[];
+  /**
+   * #6712 PR 4b: set when the entry is a non-company source's pass row (design §3.7), not a cursor. `index`/`total` are
+   * then the newest round's settled and candidate paths, `remaining` its unsettled ones, `last_progress_at` the row's
+   * last write, `discovered_at` the pass's start. `converged_target` is where the source last converged and `head` the
+   * checkout's HEAD on this host (null when unread); `stuck` names a pass that keeps stopping (`blocked`,
+   * `not_converged`, `settle_mismatch`) and `stuck_since` when that began.
+   */
+  pass?: { pass_id: string; kind: string; round: number; outcome: string; stop_reason: string | null; target: string; converged_target: string | null; head: string | null;
+    stuck: 'blocked' | 'not_converged' | 'settle_mismatch' | null; stuck_since: string | null };
 }
 
 /**
  * Unfinished managed cursors with their remaining entries and the rate of
  * their latest drain window (CEO-A18), readable from any process.
+ * #6712 PR 4b (design v3.2 §3.7): plus every source whose pass row is not
+ * `nothing_pending` (`passHealth`: converged at the checkout's HEAD and the
+ * newest pass ended `synced` or `up_to_date`); a source's pass entry replaces
+ * a legacy cursor entry of the same source.
  */
 export async function readManagedSyncBacklog(engine: BrainEngine, sourceIds?: string[]): Promise<ManagedSyncBacklog[]> {
   const rows = await engine.executeRaw<{ header: { sourceId: string; index: number; total: number; done?: boolean; discoveredAt?: string; progress?: { startedAt: number; startIndex: number; lastAt: number; lastIndex: number };
     counts?: { held?: number }; processingOptions?: { noEmbed?: boolean; noExtract?: boolean; noSchemaPack?: boolean }; syncOptions?: Parameters<typeof managedSyncResumeArgs>[0]['syncOptions'] } }>(
     `SELECT completed_keys->0 AS header FROM op_checkpoints WHERE op='managed-sync' AND COALESCE(completed_keys->0->>'done','false')<>'true'`);
-  return rows.map(({ header }) => header).filter(h => h?.sourceId && (!sourceIds || sourceIds.includes(h.sourceId))).map(h => {
+  const { readPassReadings, passResumeArgs, passStuck, passStuckSince } = await import('./sync-pass-readers.ts');
+  const passes: ManagedSyncBacklog[] = (await readPassReadings(engine, { sourceIds })).filter(r => !r.health.nothing_pending).map(({ source_id, row, head, health }) => {
+    const t = row.value.telemetry, args = passResumeArgs(source_id, row), stuck = passStuck(health) ? health.reason as 'blocked' | 'not_converged' | 'settle_mismatch' : null;
+    return { source_id, index: Number(t.settled ?? 0), total: Number(t.candidates ?? 0), remaining: Number(health.remaining ?? t.remaining ?? 0), rate_pages_per_min: null, eta_seconds: null,
+      last_progress_at: row.updated_at, discovered_at: t.started_at ?? null, held: Number(t.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args,
+      pass: { pass_id: t.pass_id, kind: t.kind, round: Number(t.round ?? 0), outcome: t.outcome, stop_reason: t.stop_reason ?? null, target: t.target,
+        converged_target: row.value.obligations.converged?.target ?? null, head, stuck, stuck_since: stuck ? passStuckSince(row) : null } };
+  });
+  const passSources = new Set(passes.map(b => b.source_id));
+  return [...rows.map(({ header }) => header).filter(h => h?.sourceId && (!sourceIds || sourceIds.includes(h.sourceId)) && !passSources.has(h.sourceId)).map(h => {
     const remaining = Math.max(0, Number(h.total) - Number(h.index));
     const p = h.progress;
     const estimate = p ? drainEstimate(remaining, p.lastIndex - p.startIndex, p.lastAt - p.startedAt) : { rate_pages_per_min: null, eta_seconds: null };
     const args = managedSyncResumeArgs({ sourceId: h.sourceId, processingOptions: h.processingOptions, syncOptions: h.syncOptions });
     return { source_id: h.sourceId, index: Number(h.index), total: Number(h.total), remaining, ...estimate,
       last_progress_at: p ? new Date(p.lastAt).toISOString() : null, discovered_at: h.discoveredAt ?? null, held: Number(h.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args };
-  });
+  }), ...passes];
 }
 
 export function formatManagedSyncBacklog(b: ManagedSyncBacklog): string {
+  if (b.pass) {
+    const p = b.pass, behind = p.head && p.converged_target !== p.head && (p.outcome === 'synced' || p.outcome === 'up_to_date');
+    return `${b.source_id}: managed sync pass ${p.outcome === 'open' ? 'running' : `ended ${p.outcome}`}${p.stop_reason ? ` (${p.stop_reason})` : ''}`
+      + (behind ? `, HEAD ${p.head!.slice(0, 8)} is past the converged commit ${p.converged_target?.slice(0, 8) ?? '(none)'}` : ` at round ${p.round} (${b.remaining} of ${b.total} candidate path(s) unsettled)`)
+      + (p.stuck ? `; stopping ${p.stuck} since ${p.stuck_since}` : '') + `. Resume: ${b.resume_command}`;
+  }
   return `${b.source_id}: managed sync cursor at ${b.index}/${b.total} (${b.remaining} remaining`
     + (b.rate_pages_per_min !== null ? `, last drain ${b.rate_pages_per_min} pages/min, indexing ETA ${b.eta_seconds === null ? 'unknown' : formatDuration(b.eta_seconds)}` : ', rate unknown')
     + `). Resume: ${b.resume_command}`;

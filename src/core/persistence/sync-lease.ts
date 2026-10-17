@@ -38,6 +38,7 @@ import type { Action } from '../agent-output.ts';
 import { inspectLock, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
 import { currentRunDeadline, lastForwardProgressAt, noteForwardProgress } from '../forward-progress.ts';
 import { faultPoint } from './fault-points.ts';
+import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
 import { VERSION } from '../../version.ts';
 
 export const DRAIN_LEASE_TTL_MINUTES = 2;
@@ -100,15 +101,19 @@ export async function readDrainHolder(engine: BrainEngine, sourceId: string): Pr
     progress: await holderProgress(engine, sourceId, snap.acquired_at).catch(() => null) };
 }
 
-/** The source's managed-sync commits since `since`, and its last commit or cursor save at all. */
+/**
+ * The source's managed-sync commits since `since`, and its last commit, cursor save or (#6712 PR 4b, design v3.2 §3.7)
+ * pass row write at all: a pass writes its row at the pin, per batch and at the stamp.
+ */
 async function holderProgress(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, since: Date | null): Promise<DrainHolderProgress> {
   const [row] = await engine.executeRaw<{ committed: number | string; last_committed_at: Date | string | null; last_saved_at: Date | string | null }>(`
     SELECT (SELECT count(*) FROM persistence_requests r WHERE r.worktree_id=b.worktree_id AND r.state='committed'
         AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%' AND r.completed_at >= $2::timestamptz) AS committed,
       (SELECT max(r.completed_at) FROM persistence_requests r WHERE r.worktree_id=b.worktree_id AND r.source_incarnation=b.source_incarnation
         AND r.state='committed' AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS last_committed_at,
-      (SELECT max(c.updated_at) FROM op_checkpoints c WHERE c.op='managed-sync' AND c.completed_keys->0->>'sourceId'=$1) AS last_saved_at
-    FROM persistence_source_bindings b WHERE b.source_id=$1`, [sourceId, (since ?? new Date(0)).toISOString()]);
+      GREATEST((SELECT max(c.updated_at) FROM op_checkpoints c WHERE c.op='managed-sync' AND c.completed_keys->0->>'sourceId'=$1),
+        (SELECT c.updated_at FROM op_checkpoints c WHERE c.op=$3 AND c.fingerprint=b.source_id||':'||b.source_incarnation::text)) AS last_saved_at
+    FROM persistence_source_bindings b WHERE b.source_id=$1`, [sourceId, (since ?? new Date(0)).toISOString(), MANAGED_SYNC_PASS_OP]);
   const at = (value: Date | string | null | undefined) => value == null ? null : new Date(value).toISOString();
   const committedAt = at(row?.last_committed_at), savedAt = at(row?.last_saved_at);
   return { committed: Number(row?.committed ?? 0), last_committed_at: committedAt,
