@@ -233,3 +233,4 @@ test/unbound-source-6536.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/writer-status-owner-backends.test.ts
+test/sync-prescreen-both-delta-6712.test.ts

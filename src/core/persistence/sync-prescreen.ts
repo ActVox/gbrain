@@ -12,9 +12,11 @@
  * - **no baseline concern**: the page is still at the recorded revision (only the file or the parser changed), so the
  *   import cannot overwrite a database-only edit.
  * - **drift** (`entry.drift`): the page moved since the record and the file did not (`database`), or both moved
- *   (`both`), or there is no usable record (`unknown`: none, one written before PR 0, or a partial one). `database` is
- *   guarded in every discovery; `both` and `unknown` in a tree walk (first sync, `--full`, an unreachable checkpoint, a
- *   re-discovery), where no Git delta says the file is the side that changed. A page whose current revision a
+ *   (`both`), or there is no usable record (`unknown`: none, one written before PR 0, or a partial one). `database` and
+ *   `both` are guarded in every discovery: a Git delta proves the file changed, never that the page did not (#6712: an
+ *   incremental sync published a committed edit over a database-only `put_page`). `unknown` is guarded in a tree walk
+ *   (first sync, `--full`, an unreachable checkpoint, a re-discovery), where no Git delta says the file is the side that
+ *   changed. A page whose current revision a
  *   committed managed-sync request of this incarnation wrote, or whose writer's write-through wrote to its file
  *   (`pages.revision_write_request_id`, `fileBackedRevisions`), has no database-only edit to protect and is not guarded. A guarded entry is imported only when the freeze proves the import changes
  *   nothing (`sameContentAtOrigin`); otherwise it is held `file_drift` (sync-run.ts `driftHold`).
@@ -52,7 +54,8 @@ export function classifyBaseline(entry: Pick<SyncEntry, 'revision' | 'sourcePath
   if (fileSame && databaseSame && !input.full && sameParser(record!.parser, expected) && syncOriginPath(record!.origin) === syncOriginPath(entry.sourcePath)) return 'prescreened';
   if (databaseSame) return null;
   if (fileSame) return 'database';
-  return input.treeWalk ? complete ? 'both' : 'unknown' : null;
+  if (complete) return 'both';
+  return input.treeWalk ? 'unknown' : null;
 }
 
 /**
