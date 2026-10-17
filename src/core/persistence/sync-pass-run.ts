@@ -42,12 +42,13 @@ import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { loadConfig } from '../config.ts';
 import { startPersistenceConsumer } from './service.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
-import { managedCursorKey, resolveManagedCursor, retireManagedCursor } from './sync-cursor-key.ts';
+import { managedCursorKey, resolveManagedCursor, retireManagedCursor, retireOrphanSliceRecords } from './sync-cursor-key.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { isCodeFilePath, resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
+import { SYNC_SLICE_OP } from './sync-slices.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
@@ -90,10 +91,14 @@ async function retireLegacyCursors(engine: BrainEngine, input: { sourceId: strin
   Promise<{ wait?: RetryWait; hostRequired?: true; episode?: PassEpisode }> {
   const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: undefined, assertActive: input.assertActive, foldIn: !input.remote });
   if (resolution.waitFor) return { wait: { ...resolution.waitFor, retry_after_ms: 5000 } };
-  const [row] = await engine.executeRaw<{ header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
-    "SELECT completed_keys->0 AS header FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1", [resolution.key]);
+  const [row] = await engine.executeRaw<{ slices: boolean; header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
+    `SELECT (SELECT completed_keys->0 FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1) AS header,
+      EXISTS (SELECT 1 FROM op_checkpoints WHERE op=$2 AND left(fingerprint, length($3))=$3) AS slices`, [resolution.key, SYNC_SLICE_OP, `${input.sourceId}:${input.incarnation}:`]);
   const header = row?.header;
-  if (!header) return {};
+  if (!header) {
+    if (row?.slices && !input.remote) await retireOrphanSliceRecords(engine, input.sourceId, input.incarnation);
+    return {};
+  }
   if (input.remote) return header.done ? {} : { hostRequired: true };
   const busy = await retireManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, key: resolution.key, runId: header.runId ?? null, done: header.done === true });
   input.assertActive();

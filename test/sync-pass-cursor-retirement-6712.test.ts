@@ -7,7 +7,8 @@
  * path-slice record, an unfinished cursor under an older key with its manifest, and a finished older-key cursor with
  * its manifest), the pass row `managed-sync-pass` / `<source>:<incarnation>` exists, the unfinished cursor's options seed
  * the pass's episode (`inherited.from = 'legacy_cursor'`, so the pass inherits its `noExtract`), and the same three kinds of rows of a company source in the
- * same brain stay byte-identical (completed_keys and updated_at).
+ * same brain stay byte-identical (completed_keys and updated_at). An orphaned slice record (no cursor row left beside it)
+ * is retired by the first pass too.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -64,8 +65,8 @@ const incarnationOf = async (db: BrainEngine, sourceId: string) =>
   (await db.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]))[0]!.incarnation;
 
 /** A managed brain whose default source is a claimed, committed checkout that has never synced, beside the company source's registration. */
-async function plantManagedBrain(db: BrainEngine): Promise<string> {
-  const root = join(home, 'content'); mkdirSync(join(root, 'notes'), { recursive: true });
+async function plantManagedBrain(db: BrainEngine, dir = 'content'): Promise<string> {
+  const root = join(home, dir); mkdirSync(join(root, 'notes'), { recursive: true });
   await db.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [root]);
   git(root, 'init', '-q');
   for (const name of NAMES) writeFileSync(join(root, `notes/${name}.md`), note(name));
@@ -138,5 +139,22 @@ describe('#6712 PR 4b lane C: the first live pass retires legacy cursor rows (§
     expect(result.inherited_options).toEqual(['noExtract']);
     expect((await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id='default' AND deleted_at IS NULL ORDER BY slug")).map(row => row.slug))
       .toEqual(NAMES.map(name => `notes/${name}`));
+  }), 180_000);
+
+  test('an orphaned slice record, with no cursor row beside it, is retired by the first pass; the company slice stays', () => withEnv(env(), async () => {
+    const db = new PGLiteEngine();
+    await db.connect({}); await db.initSchema();
+    try {
+      const root = await plantManagedBrain(db, 'orphan');
+      const incarnation = await incarnationOf(db, 'default');
+      const head = git(root, 'rev-parse', 'HEAD');
+      await writeSyncSlice(db, 'default', incarnation, syncCursorOptions(OPTS as never), { phase: 'import', after: null, head, target: head });
+      await writeSyncSlice(db, COMPANY, await incarnationOf(db, COMPANY), syncCursorOptions({}), { phase: 'import', after: null, head: 'c0ffee', target: 'c0ffee' });
+      const company = (await legacyRows(db)).filter(isCompanyRow);
+      expect((await legacyRows(db)).map(row => row.op)).toEqual(['managed-sync-slice', 'managed-sync-slice']);
+      const result = await performSync(db, OPTS as never);
+      expect(result.status).toBe('first_sync');
+      expect(await legacyRows(db)).toEqual(company);
+    } finally { await disposePersistenceConsumer(db); await db.disconnect(); }
   }), 180_000);
 });
