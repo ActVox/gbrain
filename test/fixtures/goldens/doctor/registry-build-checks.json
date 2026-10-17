@@ -882,6 +882,10 @@
         "name": "sync_config_keys"
       },
       {
+        "category": "ops",
+        "name": "managed_sync_convergence"
+      },
+      {
         "category": "brain",
         "name": "fence_integrity"
       },
