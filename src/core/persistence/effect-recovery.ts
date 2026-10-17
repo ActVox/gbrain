@@ -15,7 +15,7 @@ import { withFilesystemPublication } from './filesystem-guard.ts';
 import { persistenceFileHash, publishPersistenceFile } from './coordinator.ts';
 import type { EffectRecovery, PersistenceEffect } from './effect-model.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
-import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, publishStreamedStage, upgradeRecoveryStaging } from './staging.ts';
+import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, discardStreamingStage, publishStreamedStage, upgradeRecoveryStaging } from './staging.ts';
 import { existsAt, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { unreadPageFile } from './page-prepare.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
@@ -124,6 +124,8 @@ async function stageStreamedMirror(engine: BrainEngine, effect: PersistenceEffec
   const detail = { effectId: effect.id, requestId: effect.request_id, sourceId: effect.source_id, slug: record.slug, path: stage.path };
   await faultPoint('effect_recovery:before_stage', detail);
   await withFilesystemPublication([record.root], async () => {
+    // A stream a crash cut short is still under its in-progress name; it is discarded and the stage produced again.
+    discardStreamingStage(record);
     if (existsAt(stage.path) || record.beforeHash === record.afterHash || persistenceFileHash(record.path) !== record.beforeHash) return;
     let file = content;
     if (!file) {

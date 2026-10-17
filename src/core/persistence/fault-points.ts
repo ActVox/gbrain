@@ -47,7 +47,10 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'segmented:texts_staged' | 'segmented:manifest_staged' | 'segmented:chunks_staged' | 'segmented:flipped' | 'segmented:projection_staged'
   // A prior file over the single-string ceiling copied to its before stage (large-file.ts `stageBeforeCopy`): after the copy is
   // written under its temporary name (unverified, unflushed: a crash during the copy) and once it is flushed, before its rename.
-  | 'large_file:stage_copying' | 'large_file:stage_flushed';
+  | 'large_file:stage_copying' | 'large_file:stage_flushed'
+  // A streamed file (large-file.ts `stageStreamedContent`: restore_page, a segmented withdrawal mirror) after each piece is
+  // written to its in-progress name, before the stream is verified, flushed and renamed to the reserved stage name.
+  | 'large_file:stage_streaming';
 /**
  * `signal` (#6278, `consumer:preparing` only): the preparation's abort signal, so
  * a stalling hook can model both the reporter's cases: a preparer that honours

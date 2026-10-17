@@ -200,8 +200,9 @@ writes for the page; the withdrawal's Git effect commits it. The file is
 streamed from the segments into its staging file, one segment at a time, and
 never held whole. Its recovery record names that staging file by path and
 SHA-256 instead of holding the file, so the mirror reserves the file once in
-the recovery budget. A mirror interrupted before or after writing the staging
-file finishes on the writer's next pass.
+the recovery budget. A mirror interrupted before, during or after writing the
+staging file finishes on the writer's next pass: a staging file a crash cut
+short is discarded and written again.
 
 <a id="segmented-doctor-skips"></a>
 **What doctor does not read on a segmented page.** Some doctor checks read a

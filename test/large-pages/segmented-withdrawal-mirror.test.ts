@@ -17,9 +17,10 @@
  *    twin's writes and on for the segmented twin's. The interruptions are modelled at the `effect_recovery:before_stage`
  *    and `effect_recovery:staged` seams (fault-points.ts) with a hook that throws once.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { createHash, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import * as fs from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { exportBodyLedger, readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../../src/core/export-snapshot.ts';
 import { serializeMarkdown, slugStampedFrontmatter } from '../../src/core/markdown.ts';
@@ -43,11 +44,29 @@ const FORGOTTEN: Record<string, string> = { [INLINE]: 'Twin Example bike lock is
 const KEPT = 'Twin Example adopted a narwhalbot';
 /** The claim each modelled interruption's purge removes. */
 const CRASH_CLAIMS = { 'effect_recovery:before_stage': 'Twin Example vault code is 1902', 'effect_recovery:staged': 'Twin Example vault code is 6640' };
+/** The claims of the mid-stream death and of the partial stage left at the reserved name. */
+const STREAM_CLAIM = 'Twin Example vault code is 2718';
+const PARTIAL_CLAIM = 'Twin Example vault code is 3141';
 
 const fileOf = (brain: TwinBrain, slug: string) => join(brain.root, slug + '.md');
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 /** A twin's file as `view` neutralizes it, with its own forgotten claim (the twins' only differing text) neutralized too. */
 const twinFile = async (brain: TwinBrain, slug: string) => String((await brain.view(slug)).file).split(FORGOTTEN[slug]!).join('<forgotten>');
+/**
+ * Records every whole-file `readFileSync` of `path` made from the persistence layer (the mirror and Git effects, their
+ * drift checks and recovery), with the call's stack as evidence. The purge's own residual scan (facts/purge-verify.ts)
+ * is outside it.
+ */
+function watchWholeReads(path: string) {
+  const original = fs.readFileSync;
+  const hits: string[] = [];
+  const spy = spyOn(fs, 'readFileSync').mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
+    const stack = new Error().stack ?? '';
+    if (String(args[0]) === path && stack.includes('/src/core/persistence/')) hits.push(stack.split('\n').slice(1, 4).join(' | '));
+    return original(...args);
+  }) as typeof fs.readFileSync);
+  return { hits, restore: () => spy.mockRestore() };
+}
 const resetWork = () => { for (const key of Object.keys(largeFileWork) as (keyof typeof largeFileWork)[]) largeFileWork[key] = 0; };
 /** Staging leftovers (hidden `.<sha>.tmp.<uuid>` siblings) next to the twins' files. */
 const stagingLeft = (brain: TwinBrain) => readdirSync(join(brain.root, 'people')).filter(name => name.includes('.tmp.'));
@@ -56,7 +75,8 @@ const stagingLeft = (brain: TwinBrain) => readdirSync(join(brain.root, 'people')
  * Runs effect passes on this host until the source's mirror and Git effects have all settled; the persistence consumer
  * runs them too, so a claim it holds settles meanwhile. Past the deadline the assertions report the effects' state.
  */
-const settle = (brain: TwinBrain, kind: 'pglite' | 'postgres') => waitFor(async () => {
+const settle = (brain: TwinBrain, kind: 'pglite' | 'postgres', beforePass?: () => Promise<void>) => waitFor(async () => {
+  await beforePass?.();
   const [open] = await brain.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_effects
     WHERE source_id=$1 AND kind IN ('withdrawal-mirror','git') AND (state<>'committed' OR recovery IS NOT NULL)`, [brain.sourceId]);
   if (!open!.n) return true;
@@ -85,14 +105,14 @@ const effectsOf = async (brain: TwinBrain, requestId: string) => (await brain.en
   .map(e => ({ kind: e.kind, state: e.state, error: e.error_code, skipped: (typeof e.data === 'string' ? JSON.parse(e.data) : e.data)?.skipped ?? [] }));
 const SETTLED = [{ kind: 'git', state: 'committed', error: null, skipped: [] }, { kind: 'withdrawal-mirror', state: 'committed', error: null, skipped: [] }];
 
-async function purge(brain: TwinBrain, kind: 'pglite' | 'postgres', slug: string, claim: string) {
+async function purge(brain: TwinBrain, kind: 'pglite' | 'postgres', slug: string, claim: string, beforePass?: () => Promise<void>) {
   const [fact] = await brain.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND fact=$3', [brain.sourceId, slug, claim]);
   const dry = await brain.call('purge_fact', { id: Number(fact!.id), dry_run: true }, slug);
   expect(dry.confirm_token).toBeString();
   const requestId = randomUUID();
   const done = await brain.call('purge_fact', { id: Number(fact!.id), confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: requestId }, slug);
   expect(done.state).toBe('committed');
-  await settle(brain, kind);
+  await settle(brain, kind, beforePass);
   return { requestId, hash8: String(done.purge.hash8) };
 }
 
@@ -127,7 +147,10 @@ for (const kind of testBackends()) {
 
       const inline = await purge(brain, kind, INLINE, CLAIMS[INLINE]!);
       resetWork();
-      const segmented = await purge(brain, kind, SEGMENTED, CLAIMS[SEGMENTED]!);
+      const reads = watchWholeReads(fileOf(brain, SEGMENTED));
+      let segmented: Awaited<ReturnType<typeof purge>>;
+      try { segmented = await purge(brain, kind, SEGMENTED, CLAIMS[SEGMENTED]!); } finally { reads.restore(); }
+      const wholeReads = reads.hits;
       const work = { ...largeFileWork };
 
       // Neither twin's mirror or Git walk passed its page by: both effects committed with nothing skipped.
@@ -149,7 +172,9 @@ for (const kind of testBackends()) {
         expect(await gitAsync(brain.root, 'show', `HEAD:${slug}.md`)).toBe(readFileSync(fileOf(brain, slug), 'utf8'));
       }
 
-      // Streamed: the mirror staged exactly the file's bytes, and no piece it read or wrote was over one segment.
+      // Streamed: the mirror staged exactly the file's bytes, and no piece it read or wrote was over one segment. The
+      // canonical file itself (the drift check before the overwrite, about 1.1 MB) is read in pieces too, never whole.
+      expect(wholeReads).toEqual([]);
       expect(work.bytesWritten).toBe(file.length);
       expect(work.bytesRead).toBeGreaterThanOrEqual(work.bytesWritten);
       expect(work.largestPiece).toBeGreaterThan(0);
@@ -159,13 +184,15 @@ for (const kind of testBackends()) {
     test('forget_fact rewrites the segmented file with the row withdrawn, as the inline twin\'s, and commits it', async () => {
       const before = { [INLINE]: readFileSync(fileOf(brain, INLINE), 'utf8'), [SEGMENTED]: readFileSync(fileOf(brain, SEGMENTED), 'utf8') };
       const receipts: Record<string, string> = {};
-      for (const slug of [INLINE, SEGMENTED]) {
+      const reads = watchWholeReads(fileOf(brain, SEGMENTED));
+      try { for (const slug of [INLINE, SEGMENTED]) {
         const [fact] = await brain.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND fact=$3', [brain.sourceId, slug, FORGOTTEN[slug]]);
         receipts[slug] = randomUUID();
         expect(await brain.call('forget_fact', { id: Number(fact!.id), request_id: receipts[slug] }, slug)).toMatchObject({ state: 'committed' });
         if (slug === INLINE) resetWork();
         await settle(brain, kind);
-      }
+      } } finally { reads.restore(); }
+      const wholeReads = reads.hits;
       const work = { ...largeFileWork };
 
       expect(await effectsOf(brain, receipts[SEGMENTED]!)).toEqual(await effectsOf(brain, receipts[INLINE]!));
@@ -180,6 +207,7 @@ for (const kind of testBackends()) {
         expect(await gitAsync(brain.root, 'status', '--porcelain', '--', slug + '.md')).toBe('');
         expect(await gitAsync(brain.root, 'show', `HEAD:${slug}.md`)).toBe(readFileSync(fileOf(brain, slug), 'utf8'));
       }
+      expect(wholeReads).toEqual([]);
       expect(work.bytesWritten).toBe(file.length);
       expect(work.largestPiece).toBeGreaterThan(0);
       expect(work.largestPiece).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
@@ -194,7 +222,7 @@ for (const kind of testBackends()) {
         await seed.setSwitch(true);
         await seed.put(SEGMENTED, 1_100_000);
       });
-      await extract(brain, SEGMENTED, [...Object.values(CRASH_CLAIMS), KEPT]);
+      await extract(brain, SEGMENTED, [...Object.values(CRASH_CLAIMS), STREAM_CLAIM, PARTIAL_CLAIM, KEPT]);
       expect(await brain.storageOf(SEGMENTED)).toBe('segmented');
       await settle(brain, kind);
     }, 600_000);
@@ -246,5 +274,85 @@ for (const kind of testBackends()) {
         expect(work.largestPiece).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
       }, 600_000);
     }
+
+    test('a mirror whose process dies mid-stream discards the partial file on recovery and publishes', async () => {
+      const recoveryState = async () => (await brain.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_effects
+        WHERE source_id=$1 AND kind='withdrawal-mirror' AND state='queued' AND recovery IS NOT NULL`, [brain.sourceId]))[0]!.n;
+      // The seam fires after each piece written to the in-progress file; on the third the process "dies". A death leaves
+      // that file as it is, while the modelled one (a throw) lets the writer remove it, so its bytes are put back at the
+      // same path once the attempt has released its claim and before recovery runs: the state a death leaves.
+      let pieces = 0;
+      let partial: { path: string; bytes: Buffer; stage: string } | null = null;
+      let restored = false;
+      installFaultHook(async (point, detail) => {
+        if (point !== 'large_file:stage_streaming' || partial || ++pieces < 3) return;
+        const [row] = await brain.engine.executeRaw<{ recovery: any }>('SELECT recovery FROM persistence_effects WHERE source_id=$1 AND recovery IS NOT NULL', [brain.sourceId]);
+        const recovery = typeof row!.recovery === 'string' ? JSON.parse(row!.recovery) : row!.recovery;
+        partial = { path: detail.path!, bytes: readFileSync(detail.path!), stage: recovery.staging.publication.path };
+        throw new Error('modelled death mid-stream');
+      });
+      const putBack = async () => {
+        if (!partial || restored || existsSync(partial.path) || !(await recoveryState())) return;
+        writeFileSync(partial.path, partial.bytes, { flag: 'wx' });
+        restored = true;
+      };
+      resetWork();
+      let receipt: Awaited<ReturnType<typeof purge>>;
+      try { receipt = await purge(brain, kind, SEGMENTED, STREAM_CLAIM, putBack); } finally { installFaultHook(undefined); }
+      const work = { ...largeFileWork };
+      const file = readFileSync(fileOf(brain, SEGMENTED));
+
+      // The death left a partial file under its own in-progress name next to the reserved stage name, never at it.
+      expect(partial).not.toBeNull();
+      const died = partial! as { path: string; bytes: Buffer; stage: string };
+      expect(restored).toBe(true);
+      expect(died.path).not.toBe(died.stage);
+      expect(died.bytes.length).toBeGreaterThan(0);
+      expect(died.bytes.length).toBeLessThan(file.length);
+
+      // Recovery discarded it, streamed the stage again from the segments and published the file without the claim.
+      expect(file.toString('utf8')).not.toContain(STREAM_CLAIM);
+      expect(file.toString('utf8')).toContain(KEPT);
+      expect(file.equals(await exported(brain, SEGMENTED))).toBe(true);
+      expect(await effectsOf(brain, receipt!.requestId)).toEqual(SETTLED);
+      expect(stagingLeft(brain)).toEqual([]);
+      const counters = await brain.engine.executeRaw<{ bytes: string }>('SELECT recovery_bytes::text AS bytes FROM persistence_counters');
+      expect(counters.every(row => Number(row.bytes) === 0)).toBe(true);
+      expect(work.bytesWritten).toBe(died.bytes.length + file.length);
+      expect(work.largestPiece).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
+    }, 600_000);
+
+    // Last: it leaves the source's worktree blocked on purpose.
+    test('a partial file at the reserved stage name still refuses (unexpected_staging_bytes) and leaves the file alone', async () => {
+      const before = readFileSync(fileOf(brain, SEGMENTED));
+      let stage: string | null = null;
+      installFaultHook(async (point, detail) => {
+        if (point !== 'effect_recovery:before_stage' || stage) return;
+        stage = detail.path!;
+        writeFileSync(stage, 'partial bytes', { flag: 'wx' });
+        throw new Error('modelled death after a foreign write at the stage name');
+      });
+      let requestId = '';
+      try {
+        const [fact] = await brain.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND fact=$3', [brain.sourceId, SEGMENTED, PARTIAL_CLAIM]);
+        const dry = await brain.call('purge_fact', { id: Number(fact!.id), dry_run: true }, SEGMENTED);
+        requestId = randomUUID();
+        expect(await brain.call('purge_fact', { id: Number(fact!.id), confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: requestId }, SEGMENTED))
+          .toMatchObject({ state: 'committed' });
+        await waitFor(async () => {
+          await withEnv(brain.env(), async () => {
+            await brain.engine.executeRaw(`UPDATE persistence_effects SET next_attempt_at=now() WHERE source_id=$1 AND state='queued'`, [brain.sourceId]);
+            await runPersistenceEffects(brain.engine, { engine: kind, embedding_disabled: true } as never, { hostId: localHostId(), limit: 20 });
+          });
+          return (await effectsOf(brain, requestId)).find(e => e.kind === 'withdrawal-mirror')?.error === 'unexpected_staging_bytes';
+        }, { timeoutMs: 60_000, intervalMs: 100, label: 'the mirror refused the foreign stage' });
+      } finally { installFaultHook(undefined); }
+      expect(stage).not.toBeNull();
+      expect(readFileSync(stage!, 'utf8')).toBe('partial bytes');
+      expect(readFileSync(fileOf(brain, SEGMENTED)).equals(before)).toBe(true);
+      const [mirror] = await brain.engine.executeRaw<{ recovering: boolean }>(`SELECT e.recovery IS NOT NULL AS recovering FROM persistence_effects e
+        JOIN persistence_requests r ON r.id=e.request_id WHERE r.request_id=$1::uuid AND e.kind='withdrawal-mirror'`, [requestId]);
+      expect(mirror!.recovering).toBe(true);
+    }, 600_000);
   });
 }
