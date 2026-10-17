@@ -82,7 +82,8 @@ for (const backend of testBackends()) {
       const before = await footprint(engine);
       const committed = await evaluate(engine, mix, { label: 'committed' });
       expectRun(committed);
-      expect(committed.receipt.deletes).toMatchObject({ count: 1, verdict: 'apply' });
+      // delete-proof and kept-file (#5459: a Git-imported page whose file left Git is a delete even with a lingering copy).
+      expect(committed.receipt.deletes).toMatchObject({ count: 2, verdict: 'apply' });
       expect(committed.receipt.db_ahead).toMatchObject({ pending: 1, db_only: 2, unproven: 1 });
       expect(committed.receipt).toMatchObject({ keep_db_admitted: 2, legacy_unverified: 1, legacy_pageless: 1, decisions: { both: 0, unknown: 0, deleted: 3 } });
 
@@ -112,8 +113,8 @@ for (const backend of testBackends()) {
 
       const mass = await evaluate(engine, seedMassDelete(root, cases), { label: 'mass' });
       expectRun(mass);
-      expect(mass.receipt.deletes).toMatchObject({ count: 61, verdict: 'withheld' });
-      expect(mass.receipt.deletes_withheld).toMatchObject({ count: 61, set_hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      expect(mass.receipt.deletes).toMatchObject({ count: 62, verdict: 'withheld' });
+      expect(mass.receipt.deletes_withheld).toMatchObject({ count: 62, set_hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
       expect(await footprint(engine)).toBe(before);
     }, mixSetup), 600_000);
 

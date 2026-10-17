@@ -28,6 +28,9 @@ import { readShadowLevel } from '../src/core/persistence/sync-pass.ts';
 import { purgeDeletedPagesCoordinated } from '../src/core/persistence/purge-deleted.ts';
 import { resolveRepairScope, type RepairKind } from '../src/core/repair/core.ts';
 import { EXPLICIT_REPAIR_REGISTRY, repairRunner } from '../src/core/repair/registry.ts';
+import { LEGACY_TWINS_INTENT, prepareLegacyTwinMerge, scanLegacyTwins } from '../src/core/repair/legacy-twins.ts';
+import { maintenancePreflight } from '../src/core/persistence/prepared-maintenance.ts';
+import { registerLocalWriter } from '../src/core/persistence/identity.ts';
 import { runRepairCommand } from '../src/commands/repair.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -267,6 +270,22 @@ for (const backend of testBackends()) describe(`#6885 repair legacy-twins (${bac
       expect(await links(f.ids.twin)).toContainEqual([f.ids.second, f.ids.twin]);
     });
   }, 180_000);
+
+  test('a core twin: a remote merge request is refused core_delete_owner_only and nothing changes; the owner merge proceeds', () => fixture(async f => {
+    const scan = await scanLegacyTwins(engine, f.sourceId);
+    expect(scan.pairs.map(pair => pair.twin.slug)).toEqual([TWIN]);
+    const authority = (await maintenancePreflight(engine, f.sourceId))!;
+    const stdio = await registerLocalWriter(engine, 'stdio', { sourceIds: ['*'], operations: null, scopes: ['read', 'write'], slugPrefixes: null });
+    const row = { request_id: randomUUID(), source_id: f.sourceId, slug: TWIN, page_id: String(f.ids.twin), source_incarnation: authority.writer.sourceIncarnation,
+      authority: { ...authority.writer, remote: true, principal: { kind: 'local_stdio', id: stdio.id } }, intent: { kind: LEGACY_TWINS_INTENT, expected_revision: scan.pairs[0]!.twin.revision, pair: scan.pairs[0], owner: scan.owner } } as never;
+    expect((await refusal(() => prepareLegacyTwinMerge(engine, row, {} as never))).code).toBe('core_delete_owner_only');
+    expect(await pageRow(f.sourceId, f.ids.twin)).toMatchObject({ deleted: false, source_path: FILE });
+    expect((await pageRow(f.sourceId, f.ids.legacy))!.source_path).toBeNull();
+    const preview = await repair(f.sourceId);
+    expect(await repair(f.sourceId, { apply: true, expect: preview.preview_hash })).toMatchObject({ applied: 1, outcomes: { merged: 1 } });
+    expect(await pageRow(f.sourceId, f.ids.twin)).toMatchObject({ deleted: true, source_path: null });
+    expect(await pageRow(f.sourceId, f.ids.legacy)).toMatchObject({ deleted: false, source_path: FILE });
+  }, { extra: { [FILE]: '---\ntitle: Foo Bar\nalways_load: true\n---\nA synthetic observation about Foo Bar.\n' } }), 180_000);
 
   test('several legacy pages folding to one twin are one decision; nothing is merged', () => fixture(async f => {
     await raw(() => engine.executeRaw(`INSERT INTO pages(source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash)
