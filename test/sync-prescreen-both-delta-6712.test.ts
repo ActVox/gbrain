@@ -12,7 +12,7 @@
  * The first test fails on the base (the page loses the edit and no hold is written). PGLite always; Postgres too when
  * DATABASE_URL is set.
  */
-import { expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -44,28 +44,30 @@ async function putPage(engine: BrainEngine, ctx: OperationContext, slug: string,
   await waitFor(async () => (await engine.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [requestId]))[0]?.state === 'committed', { timeoutMs: 30_000 });
 }
 
-test('a delta sync holds a committed file edit over a database-only put_page instead of publishing it', () => managedBrain(async ({ engine, ctx, root }) => {
-  expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
-  await engine.setConfig('sync.write_through', 'false');
-  await putPage(engine, ctx, 'notes/a', 'DBONLYMARKER agent edit.');
-  writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'The second committed body.'));
-  writeFileSync(join(root, 'notes/b.md'), note('notes/b', 'A file-only edit.'));
-  commit(root, 'edit a and b');
-  await performManagedSync(engine, OPTS);
-  expect(await bodyOf(engine, 'notes/a')).toContain('DBONLYMARKER');
-  const hold = await holdOf(engine, 'notes/a.md');
-  expect(hold?.code).toBe('file_drift');
-  expect(await bodyOf(engine, 'notes/b')).toContain('A file-only edit.');
-  expect(await holdOf(engine, 'notes/b.md')).toBeNull();
-}, { setup }), 120_000);
+for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DATABASE_URL] : [undefined]) describe(`#6712 delta drift guard (${databaseUrl ? 'postgres' : 'pglite'})`, () => {
+  test('a delta sync holds a committed file edit over a database-only put_page instead of publishing it', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.setConfig('sync.write_through', 'false');
+    await putPage(engine, ctx, 'notes/a', 'DBONLYMARKER agent edit.');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'The second committed body.'));
+    writeFileSync(join(root, 'notes/b.md'), note('notes/b', 'A file-only edit.'));
+    commit(root, 'edit a and b');
+    await performManagedSync(engine, OPTS);
+    expect(await bodyOf(engine, 'notes/a')).toContain('DBONLYMARKER');
+    const hold = await holdOf(engine, 'notes/a.md');
+    expect(hold?.code).toBe('file_drift');
+    expect(await bodyOf(engine, 'notes/b')).toContain('A file-only edit.');
+    expect(await holdOf(engine, 'notes/b.md')).toBeNull();
+  }, { setup, databaseUrl }), 120_000);
 
-test('a page whose revision write-through wrote to its file is not guarded: the committed edit imports', () => managedBrain(async ({ engine, ctx, root }) => {
-  expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
-  await putPage(engine, ctx, 'notes/a', 'A write-through edit.');
-  commit(root, 'write-through publication');
-  writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A later committed body.'));
-  commit(root, 'edit a');
-  await performManagedSync(engine, OPTS);
-  expect(await bodyOf(engine, 'notes/a')).toContain('A later committed body.');
-  expect(await holdOf(engine, 'notes/a.md')).toBeNull();
-}, { setup }), 120_000);
+  test('a page whose revision write-through wrote to its file is not guarded: the committed edit imports', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await putPage(engine, ctx, 'notes/a', 'A write-through edit.');
+    commit(root, 'write-through publication');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A later committed body.'));
+    commit(root, 'edit a');
+    await performManagedSync(engine, OPTS);
+    expect(await bodyOf(engine, 'notes/a')).toContain('A later committed body.');
+    expect(await holdOf(engine, 'notes/a.md')).toBeNull();
+  }, { setup, databaseUrl }), 120_000);
+});

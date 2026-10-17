@@ -216,6 +216,7 @@ test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-legacy-slug-adoption-6727.test.ts
 test/sync-origin-live-wins-6517.test.ts
+test/sync-prescreen-both-delta-6712.test.ts
 test/sync-prescreen-drift-6712.test.ts
 test/sync-slug-root-mode-6694.test.ts
 test/sync-staged-catchup.test.ts
@@ -233,4 +234,3 @@ test/unbound-source-6536.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/writer-status-owner-backends.test.ts
-test/sync-prescreen-both-delta-6712.test.ts
