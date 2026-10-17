@@ -10,6 +10,111 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.277.0] - 2026-10-16
+
+**Your agent can now finish a rename that sync split in two, find people and companies in every source it can read, and stop chasing warnings that only describe the past (fix wave 18).** When you move a note and rewrite it in the same commit, sync sometimes cannot tell it was a move, so it keeps the old page aside and starts a new one. Until now the only way out was to bring the old page back. Now one command, run after you agree, moves the old page's history, links and facts onto the new name, or closes the pair and lets the old page go.
+
+Asking about a person or company now looks in every source you can read, not only the one you are connected to, and a context pack brings that entity's own facts with it. Facts pulled from your meetings get attached to the right person page more often, for free, before gbrain ever offers to pay for a re-read. Several doctor warnings learned to tell history from a live problem, so an agent stops "fixing" something that already healed. A batch of reliability fixes rides along: writer locks stay out of your checkout, a guarded eval stops every process it started, a Claude Code answer that ran past its length cap is never treated as complete, and `gbrain bootstrap harness` no longer reports success while old tokens still wait to be cleaned up.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| sync kept an old page aside after a move-and-edit (doctor `rename_identity_downgrades`) | the only offered fix was restoring the old page | `gbrain repair rename-identity --source <id> --slug <new-slug>` previews carrying the old page's history, links and facts onto the new slug; `--close` releases the pair instead. On a managed source only `--close` is available this release |
+| `entity` or `context_pack` for a name that lives in another source you can read | `found: false` | the card, with `source_id`; `source_id` pins one source |
+| `context_pack` for a person | cards plus recent hot facts | also `entity_facts[]`: up to 5 of each packed entity's own facts |
+| a meeting page's facts about people it links | often stored with no entity | stored on the person or company the page links; `gbrain facts relink --conversation` links old ones at no cost |
+| a meeting page titled like a person page | `volunteer_context` could point at the meeting | it points at the person page |
+| doctor `facts_extraction_health` after the cause was fixed | kept warning and suggested raising the threshold | reports the 24 h count as history and names only jobs still dead, each with `gbrain jobs retry <id>` |
+| a gbrain fence marker such as `<!--- gbrain:facts -->` | linked every page to a page titled "gbrain" | ignored; one rescan removes the false links |
+| `gbrain bootstrap harness` with old shared-skills tokens still pending cleanup | exit 0 | exit 14 (`bootstrap_cleanup_pending`) with a per-token `cleanup` list and a `fix` |
+| a GBRAIN_HOME inside the source checkout | the writer lock landed inside the checkout | the lock goes under `GBRAIN_COORDINATION_HOME`, else `~/.gbrain/persistence` |
+| `scripts/eval-spend-guard.sh` interrupted, or SIGKILLed | helpers and grandchildren kept running | the whole process group stops; after a SIGKILL the next run reports the stale run and how to stop it, and kills nothing itself |
+| a managed sync backlog that cannot be read | `nothing_pending` | `movement_state: unknown`; `gbrain sources writer movement` exits 1 with `movement_unknown` |
+| a v0.11.0 upgrade on a Postgres brain with no `sync.repo_path` | wedged after three partial runs | completes, records Phase F as skipped and prints the install command |
+
+## To take advantage of v0.60.277.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your agent reads `skills/migrations/v0.60.277.0.md` the next time you interact with it.** There is no schema migration. The note covers the rename remedy, the bootstrap exit 14, the coordination lock home for container installs and the one-time mention rescan.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor --only rename_identity_downgrades,unlinked_facts,coordination_lock_location,facts_extraction_health --json
+   gbrain stats
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
+### Itemized changes
+
+#### Finishing a split rename (#6729)
+
+- New explicit-only, preview-bound repair kind `gbrain repair rename-identity`. Without `--slug` it lists the open pairs. `--slug <new-slug>` (and `--from <old-slug>` when two pairs share a new slug) previews one pair; `--apply --expect <hash> --yes` (destructive consent) carries the old page id onto the new slug with its versions, timeline, links, facts and aliases, imports the new file as an edit and retires the provisional page. Facts of both pages survive, or the carry refuses `fact_rows_collide` before writing. `--close` settles the pair without moving anything. Both release the purge hold. `--all`, the maintenance cycle and the remediation plan never run it. Contributed by @javieraldape (PR #6732, rewritten).
+- On a managed source carrying identity is not available yet: the preview states `managed_remedy_unavailable` and names `--close`, and an apply refuses with that code.
+- The sync report, `gbrain sync status --json` (`identity_downgrades[].remedy`) and doctor `rename_identity_downgrades` name each pair's preview and apply commands. Doctor's fix is the first pair's apply behind `ask_user`; `gbrain restore` stays the named alternative wherever the source admits it.
+
+#### Entities across sources and their facts (#6723, #6724, #6725)
+
+- `entity` and `context_pack` resolve names across every source the caller can read: the home source first, then the others by id. `source_id` pins one source (refusals match `recall`), `context_pack` takes source-qualified `entity_refs`, and every card, `names` row and suggestion carries `source_id`. A bound connection whose own source misses a name gets a `source_binding_narrowed` notice. Sources outside the grant are never read. The new parameters are on the full MCP surface; the starter tool list is unchanged.
+- Each pack card's activation verdict, newer mentions, records, page status and pinned questions now come from its own source.
+- `context_pack` returns `entity_facts[]` (up to 5 per card, newest first, in the card's source and visibility) and renders a `## Entity facts` section before hot memory. A remote caller still never sees a private fact, and remote entity cards and packs still carry no open loops.
+- `volunteer_context` and the retrieval reflex point at one page per name per source: the exact slug, then the linkable entity type, then anything else. Contributed by @javieraldape.
+
+#### Conversation facts (#6731, #6764)
+
+- `gbrain extract-conversation-facts` hints the page's own linked entities (frontmatter attendees and linked entity pages, same source, up to 40) to the extractor, and runs free write-time subject inference on facts that come back without an entity. Contributed by @troyhoffman-oss (design from #6736, reimplemented).
+- New `gbrain facts relink --conversation` links existing conversation facts that name exactly one entity page, with no model call. Doctor `unlinked_facts` counts conversation rows on their own and prescribes the free relink first; only for rows it could not resolve does it offer a paid re-extraction of the named pages (up to 50), capped at `--max-cost-usd <N>` with the amount the user approves. A page already re-extracted on its current content is not offered again until it changes. A re-extraction keeps a relinked fact's entity.
+
+#### Doctor tells history from live problems (#6761, #6758, #6759, #6778)
+
+- `facts_extraction_health` reports its 24 h count as rolling history with an ages-out time and separately names facts-absorb jobs still dead.
+- Facts absorb waits for its write up to the job deadline (was 5 s). A write still committing is logged `write_pending_accepted`, writer contention before admission `write_deferred_unadmitted`; neither counts toward the threshold.
+- Agent-contract events record the gbrain version that wrote them; doctor `agent_contract` splits counts by build. Contributed by @Kkkkkuro (idea from #6790).
+- `persistence_counter_drift` names each scope's direction and splits the receipts behind it.
+
+#### Writer locks, processes and sync movement (#6765, #6774, #6719, #6781)
+
+- A checkout that contains GBRAIN_HOME no longer gets its writer lock inside the checkout: a claim places it under `GBRAIN_COORDINATION_HOME` (absolute, outside the checkout), else `~/.gbrain/persistence`. A recorded lock always wins, a writer transfer keeps it, and a reservation an older release wedged is repaired by the next claim on its host. `gbrain sources writer status --json` shows `coordination_lock`, and the new doctor check `coordination_lock_location` warns when `GBRAIN_COORDINATION_HOME` disagrees with a recorded lock. Contributed by @lubosxyz.
+- A graduation marker whose boot id or PID namespace this process cannot read is unknown, never alive. Contributed by @lubosxyz.
+- A terminal write failure with origin `owner_exception` gets its own hint pointing at `gbrain write-request <id> --json` instead of a database-trigger guess. Contributed by @Kkkkkuro (idea from #6790).
+- An unreadable managed sync backlog is `movement_state: unknown` (`unknown.reason: backlog_read_failed`) on every surface, and `gbrain sources writer movement` exits 1 with the new code `movement_unknown`.
+
+#### Smaller fixes
+
+- `claude-cli` rebuilds an answer Claude Code continued past its output cap from the event stream; when it cannot prove the full text, the call returns nothing, finishes `length` and reports `continuation_unproven` (#6791).
+- The mention scan ignores HTML comments, so gbrain's fence markers stop linking every page to a page titled "gbrain" (#6740). One rescan runs on the next extract or maintenance pass. "Discussed in" timeline bullets the bug already wrote stay until you delete them by hand; they no longer come back.
+- `gbrain-base-v2` is 1.4.0 and declares the `question` page type, so pinning a question no longer makes doctor warn (#6742).
+- Atoms extracted from a page carry that page's content date, not the extraction run's (#6720). Existing atoms are not backfilled yet. Contributed by @javieraldape (idea from #6737).
+- Dream-cycle summaries record `created:`, so they pass `gbrain lint`'s temporal check (#6773). Contributed by @lubosxyz.
+- The patterns phase sends `expected_revision` when it updates an existing pattern page (#6779).
+- An embedding provider that reports one over-long input as a 5xx is no longer retried as transient; the chunk is isolated and split (#6772). Contributed by @lubosxyz (reimplemented with stricter matching).
+- `gbrain bootstrap harness` exits 14 (`bootstrap_cleanup_pending`) while earlier shared-skills enrollments or carried token ids still await cleanup; each carried id is revoked on its own once nothing holds it (#6743).
+- The first Claude Code prompt hook in a new folder records `ok` with prompt-only context instead of `degraded` (#6739).
+- On a Postgres brain with no `sync.repo_path` the v0.11.0 migration skips the autopilot install instead of wedging, a brain already wedged that way clears on the next `apply-migrations`, and wedged-migration advice names `migrations/completed.jsonl` (#6755). Contributed by @lubosxyz (#6769, reimplemented).
+- Managed `gbrain sources add --kind google` keeps `--contacts-dir`, `--future-days` and `--loops-exclude-labels` (#6717). A managed google source added before this fix lacks them; set them again.
+- `gbrain config set` accepts twelve keys gbrain already read at runtime but refused as unknown (#6780).
+- `scripts/eval-spend-guard.sh` and `gbrain claw-test` stop their whole process group on an interrupt or timeout; a guard that was SIGKILLed leaves a run lease the next run reports (#6776, #6775). Contributed by @lubosxyz.
+- The maintain skill falls back to `get_brain_health` without admin scope (#6748).
+
+### For contributors
+
+- `bun run ci:local` hydrates the admin/dist volume from the worktree and refuses only on an unreadable tracked file (#6756).
+- The OpenCode door test surfaces provider error events (#6049).
+- Guides for reading `extract_health` halts (#6760) and for the dream triage threshold and synthesize cooldown (#6753).
+- New error codes: `continuation_unproven`, `bootstrap_cleanup_pending` (exit 14), `fact_rows_collide`, `managed_remedy_unavailable`, `movement_unknown`. New exit code 14 in `src/core/exit-codes.ts`.
+- `FACTS_ABSORB_REASONS` gains `write_pending_accepted` and `write_deferred_unadmitted`; `REPAIR_KINDS` gains `rename-identity`; new doctor check `coordination_lock_location`.
+- Migration note: `skills/migrations/v0.60.277.0.md`.
+
 ## [0.60.275.0] - 2026-10-17
 
 **Sync stops handing one page's history to another when Git guesses a rename, and background work on a managed brain stops spending write ids it can never use (fix wave 18a).** When you move a note and edit it in the same commit, Git only guesses that it was a move. Two notes made from the same template and moved together could be paired the wrong way round, and sync then carried one page's facts, links and aliases onto the other. Now sync keeps a page across a guessed move only when the files agree: the same `id`, or the same unique `slug:` line or title. Anything else becomes a new page, and the old one stays restorable, with the exact restore command printed and the purge holding it until someone decides. Contributed by @javieraldape (PR #6732, rewritten).

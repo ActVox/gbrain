@@ -70,13 +70,16 @@ describe('apply-migrations with a wedged migration (#6696 C5)', () => {
     wedge(WEDGED);
     const proc = Bun.spawn([process.execPath, '-e', `
       import { describeMigrationFailure } from './src/commands/upgrade.ts';
+      import { CODES } from './src/core/error-registry.ts';
       console.log(await describeMigrationFailure({}, '${WEDGED}'));
+      console.log(CODES.migrations_pending.suggestion);
     `], { cwd: REPO, env: { ...process.env, HOME: home, GBRAIN_HOME: home }, stdout: 'pipe', stderr: 'pipe' });
     const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     expect(code, stderr).toBe(0);
     expect(stdout).toContain(ledgerPath());
     expect(stdout).toContain('phases[].detail, if present');
     expect(stdout).toContain(`gbrain apply-migrations --force-retry ${WEDGED}`);
+    expect(stdout).toContain('migrations/completed.jsonl (phases[].detail, if present');
     expect(stdout).not.toContain('upgrade-errors.jsonl');
   }, 30_000);
 
