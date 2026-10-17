@@ -10,6 +10,16 @@
  * returns `blocked_by_failures`, or the next run rediscovers from index 0) and
  * passes with the resolver (`sync-page-fault.ts`), the receipt conversions and
  * the ledger skip. Synthetic content only.
+ *
+ * #6712 PR 4b: a non-company source runs the live pass, which has no frozen manifest or cursor. The rewritten probes
+ * protect the same data under the pass: after an interrupted pass the next pass pins the new HEAD and imports a page
+ * committed since, without re-importing what the interrupted pass absorbed; a database edit landing between passes on a
+ * page whose file changed too is held file_drift (both sides), one that already holds the file's import is waived, and
+ * one deleted there is held file_drift on its deleted side (tombstone_edited) and stays deleted;
+ * a dropped connection leaves no failure-ledger row and the relaunch imports only what is left; a file committed after
+ * admission is passed over and imported in a later round, and one that moves under every request stops the pass
+ * not_converged after PASS_MAX_ROUNDS requests without a hold. The cursor conversion probes (--retry-failed in place)
+ * still describe the cursor engine.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
@@ -32,6 +42,8 @@ import { withEnv } from './helpers/with-env.ts';
 import { loadSyncFailures } from '../src/core/sync-failure-ledger.ts';
 import { parseMarkdown } from '../src/core/markdown.ts';
 import { contentHash } from '../src/core/utils.ts';
+import { PASS_MAX_ROUNDS } from '../src/core/persistence/sync-pass-run.ts';
+import { readShadowLevel } from '../src/core/persistence/sync-pass.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-page-fault-holds-'));
 const engines: BrainEngine[] = [];
@@ -87,23 +99,29 @@ afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-test('a resumed cursor imports a page committed past its pinned target instead of refusing it (#6320, from PR #6323)', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+test('after an interrupted pass, the next pass pins the new HEAD and imports a page committed past the interrupted target instead of refusing it (#6320, from PR #6323)', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('First observation, version one.'), 'b.md': note('Second observation, version one.') });
     expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
     writeFileSync(join(f.root, 'a.md'), note('First observation, version two.')); writeFileSync(join(f.root, 'b.md'), note('Second observation, version two.'));
-    const pin = commit(f.root, 'version two of both');
+    commit(f.root, 'version two of both');
     await interruptedAfter(engine, f.opts, 1);
-    // A live checkout keeps committing while the cursor drains: b.md moves past the pin.
+    // A live checkout keeps committing: b.md moves past the interrupted pass's target.
     writeFileSync(join(f.root, 'b.md'), note('Second observation, version three.')); const head = commit(f.root, 'version three of b, past the pin');
     expect(headCommittedBytes({ root: f.root, gitRoot: f.root }, 'b.md')).toMatchObject({ oid: git(f.root, 'rev-parse', 'HEAD:b.md') });
+    const before = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='a.md'", [f.id]);
     const resumed = await performManagedSync(engine, f.opts);
-    expect(resumed).toMatchObject({ status: 'synced', toCommit: pin }); expect(resumed.held_count ?? 0).toBe(0); expect(resumed.managedWrite).toBeUndefined();
+    // a.md was absorbed by the interrupted pass, so only b.md is a candidate, imported at HEAD.
+    expect(resumed).toMatchObject({ status: 'synced', toCommit: head, modified: 1, pass: { kind: 'full', candidates: 1, outcome: 'synced' } });
+    expect(resumed.held_count ?? 0).toBe(0); expect(resumed.managedWrite).toBeUndefined();
+    expect(await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='a.md'", [f.id])).toEqual(before);
+    expect((await engine.getPage('a', { sourceId: f.id }))?.compiled_truth).toContain('version two');
     expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain('version three');
     expect(readFileSync(join(f.root, 'b.md'), 'utf8')).toBe(note('Second observation, version three.'));
     expect(git(f.root, 'status', '--porcelain')).toBe('');
     const next = await performManagedSync(engine, f.opts);
-    expect(next).toMatchObject({ toCommit: head, status: 'synced', modified: 0, waived: { imports: 1, deletes: 0 } });
+    expect(next).toMatchObject({ toCommit: head, status: 'up_to_date', modified: 0 });
+    expect(next.pass).toBeUndefined();
     expect(loadSyncFailures().filter(row => row.source_id === f.id)).toHaveLength(0);
     expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
   }
@@ -240,44 +258,49 @@ test('#6513: a cursor an older run left blocked on the canonical-writeback confl
   }
 }), 120_000);
 
-test('a page edited in the database after the manifest froze is held concurrent_write with its revisions; one that already holds the import is re-bound and waived', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+test('a page edited in the database after an interrupted pass, whose file changed too, is held file_drift with both sides; one that already holds the import is waived; one deleted there is held on its deleted side and stays deleted', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('Alpha one.'), 'b.md': note('Beta one.'), 'c.md': note('Gamma one.'), 'd.md': note('Delta one.') });
     expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
     for (const name of ['a', 'b', 'c', 'd']) writeFileSync(join(f.root, `${name}.md`), note(`${name} two.`));
     const pin = commit(f.root, 'version two');
     await interruptedAfter(engine, f.opts, 1);
-    const frozen = await cursorOf(engine, f.id);
     // b: a database-only edit that diverges from the file; c: a database write that already carries exactly what the file would import.
+    // No import of either is in flight when they land, so the pass classifies them: b moved on both sides, c already holds the file's import.
     await dbWrite(engine, f.id, 'b', 'Beta, edited straight in the database.');
     const parsed = parseMarkdown(note('c two.'), 'c.md');
     const page = { type: parsed.type, title: parsed.title, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline ?? '', frontmatter: parsed.frontmatter };
     await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.putPage('c', { ...page, content_hash: contentHash(page) }, { sourceId: f.id }), TEST_WRITE_ATTRIBUTION));
     const resumed = await performManagedSync(engine, f.opts);
-    expect(resumed).toMatchObject({ status: 'synced', toCommit: pin, held_count: 1, held: [{ path: 'b.md', code: 'concurrent_write' }] });
+    expect(resumed).toMatchObject({ status: 'synced', toCommit: pin, held_count: 1, held: [{ path: 'b.md', code: 'file_drift' }], modified: 1, waived: { imports: 1 } });
     expect(resumed.managedWrite).toBeUndefined();
-    expect((await cursorOf(engine, f.id))?.run_id).toBe(frozen.run_id);
     expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toBe('Beta, edited straight in the database.');
     expect((await engine.getPage('c', { sourceId: f.id }))?.compiled_truth).toBe(parsed.compiled_truth);
     expect((await engine.getPage('d', { sourceId: f.id }))?.compiled_truth).toContain('d two.');
     const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [f.id]);
     const hold = (await readGitHold(engine, f.id, source.incarnation, 'b.md'))!;
-    expect(hold.meta.page_revision).toBeDefined(); expect(hold.meta.expected_revision).toBeDefined();
-    expect(hold.meta.page_revision).not.toBe(hold.meta.expected_revision);
-    expect(resumed.held![0]!.fix.argv).toEqual(['gbrain', 'sources', 'reconcile', f.id, 'b', '--preview']);
+    expect(hold.meta).toMatchObject({ sides: 'both', page_revision: (await engine.readPageSnapshot('b', { sourceId: f.id }))!.revision, blob_oid: git(f.root, 'rev-parse', `${pin}:b.md`) });
+    expect(resumed.held![0]!.fix.argv).toEqual(['gbrain', 'repair', 'file-drift', '--source', f.id, '--slug', 'b', '--prefer', 'database']);
     expect(await readGitHold(engine, f.id, source.incarnation, 'c.md')).toBeNull();
+    const level = (await readShadowLevel(engine, { sourceId: f.id }))!;
+    expect(level.paths.find(entry => entry.path === 'b.md')?.result).toMatchObject({ cls: 'held', settled: true });
+    expect(level.paths.find(entry => entry.path === 'c.md')?.result).toMatchObject({ cls: 'matched', settled: true });
     expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
-    // A page deleted in the database after the freeze holds the same way; the page stays deleted. #6712: b still holds its
-    // database-only edit, so the next committed edit of b.md is held file_drift instead of overwriting it.
+    // A page deleted in the database after an interrupted pass, whose file changed too, is held file_drift on its deleted
+    // side and stays deleted; b's file moved again, so its hold is re-screened at the new level and held again.
     for (const name of ['a', 'b', 'c', 'd']) writeFileSync(join(f.root, `${name}.md`), note(`${name} three.`));
     const pin3 = commit(f.root, 'version three');
     await interruptedAfter(engine, f.opts, 1);
     await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.softDeletePage('d', { sourceId: f.id }), TEST_WRITE_ATTRIBUTION));
     const third = await performManagedSync(engine, f.opts);
     expect(third).toMatchObject({ status: 'synced', toCommit: pin3 });
-    expect(third.held?.map(hold => [hold.path, hold.code])).toEqual([['b.md', 'file_drift'], ['d.md', 'concurrent_write']]);
+    expect(third.held?.map(hold => [hold.path, hold.code])).toEqual([['b.md', 'file_drift'], ['d.md', 'file_drift']]);
+    expect(await readGitHold(engine, f.id, source.incarnation, 'd.md')).toMatchObject({ code: 'file_drift', meta: { side: 'deleted', state: 'tombstone_edited', blob_oid: git(f.root, 'rev-parse', `${pin3}:d.md`) } });
+    expect(await readGitHold(engine, f.id, source.incarnation, 'b.md')).toMatchObject({ code: 'file_drift', meta: { sides: 'both', blob_oid: git(f.root, 'rev-parse', `${pin3}:b.md`) } });
     expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toBe('Beta, edited straight in the database.');
     expect(await engine.getPage('d', { sourceId: f.id })).toBeNull();
+    expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toBe('Beta, edited straight in the database.');
+    expect((await engine.getPage('c', { sourceId: f.id }))?.compiled_truth).toContain('c three.');
   }
 }), 120_000);
 
@@ -321,7 +344,7 @@ test('a cursor an older run left blocked on a pinned-worktree conflict converts 
   }
 }), 120_000);
 
-test('a dropped database connection mid-run leaves no failure-ledger row, and the relaunch resumes the same run at the stored index without discovery', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+test('a dropped database connection mid-pass leaves no failure-ledger row, and the relaunch finishes without re-importing what the dropped pass committed', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('Alpha one.'), 'b.md': note('Beta one.'), 'c.md': note('Gamma one.'), 'd.md': note('Delta one.') });
     expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
@@ -339,26 +362,26 @@ test('a dropped database connection mid-run leaves no failure-ledger row, and th
       await performManagedSync(engine, { ...f.opts, onProgress: p => { if (p.phase === 'managed_sync.page_committed' && p.bankedFiles === 2) armed = true; } }).catch(error => { died = error; });
     } finally { engine.executeRaw = executeRaw; await disposePersistenceConsumer(engine); }
     expect(String((died as Error)?.message)).toContain('ECONNABORTED');
-    // No failure-ledger row (the read view still reports the unfinished cursor as `sync_incomplete`, which is not a recorded failure).
+    // No failure-ledger row, and no unfinished cursor for the read view to report.
     expect(await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync-failure' AND completed_keys::text LIKE $1", [`%${f.id}%`])).toEqual([]);
-    expect((await readManagedSyncFailures(engine, [f.id])).map(row => row.code)).toEqual(['sync_incomplete']);
-    const stored = await cursorOf(engine, f.id);
-    expect(stored).toMatchObject({ target: pin }); expect(stored.done).toBeFalsy();
-    expect(stored.index).toBeGreaterThanOrEqual(2);
-    // With or without --retry-failed (the operator's loop passes it), the relaunch resumes the stored run: no rediscovery.
+    expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
+    expect(await cursorOf(engine, f.id)).toBeUndefined();
+    const importsOf = async (path: string) => (await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'=$2 AND state='committed'", [f.id, path]))[0]!.n;
+    // The dropped pass committed a and b (one import each since the first sync); c and d are still the first sync's.
+    expect(await importsOf('a.md')).toBe(2); expect(await importsOf('b.md')).toBe(2);
+    expect((await engine.getPage('c', { sourceId: f.id }))?.compiled_truth).toContain('Gamma one.');
+    // With or without --retry-failed (the operator's loop passes it), the relaunch's pass imports only c and d, then the source is idle.
     for (const retryFailed of [true, false]) {
-      const discoveries = countDiscoveries(engine, f.id);
-      try {
-        const resumed = await performManagedSync(engine, { ...f.opts, retryFailed });
-        expect(resumed.status).toBe(retryFailed ? 'synced' : 'up_to_date');
-        if (retryFailed) { expect(resumed).toMatchObject({ runId: stored.run_id, toCommit: pin }); expect(discoveries.count()).toBe(0); }
-      } finally { discoveries.restore(); }
+      const resumed = await performManagedSync(engine, { ...f.opts, retryFailed });
+      if (retryFailed) expect(resumed).toMatchObject({ status: 'synced', toCommit: pin, modified: 2, pass: { kind: 'full', candidates: 2, outcome: 'synced' } });
+      else expect(resumed).toMatchObject({ status: 'up_to_date', toCommit: pin });
     }
-    expect((await engine.getPage('d', { sourceId: f.id }))?.compiled_truth).toContain('d two.');
+    for (const path of ['a.md', 'b.md', 'c.md', 'd.md']) expect(await importsOf(path)).toBe(2);
+    for (const name of ['a', 'b', 'c', 'd']) expect((await engine.getPage(name, { sourceId: f.id }))?.compiled_truth).toContain(`${name} two.`);
   }
 }), 120_000);
 
-test('when HEAD moves past the pinned target during the run, the drain takes exactly one more pass and ends at HEAD', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+test('when HEAD moves past the pass\'s first level during the run, its next round reads the new HEAD and the drain ends there in one pass', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   const { drainManagedSync } = await import('../src/core/persistence/sync-drain.ts');
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('Alpha one.'), 'b.md': note('Beta one.'), 'c.md': note('Gamma one.') });
@@ -373,8 +396,10 @@ test('when HEAD moves past the pinned target during the run, the drain takes exa
         moved = commit(f.root, 'commits during the run');
       } } }, false);
     expect(moved).not.toBeNull();
-    expect(result).toMatchObject({ status: 'synced', toCommit: moved, drain: { outcome: 'synced', extra_pass: { from: pin, to: moved } } });
-    expect(result.drain!.passes).toBeGreaterThanOrEqual(2);
+    // #6712 PR 4b: each round reads the current HEAD, so the pass that started at pin imports the commits made under it.
+    expect(pin).not.toBe(moved);
+    expect(result).toMatchObject({ status: 'synced', toCommit: moved, drain: { outcome: 'synced', passes: 1 } });
+    expect(result.drain?.extra_pass).toBeUndefined();
     expect((await engine.getPage('d', { sourceId: f.id }))?.compiled_truth).toContain('committed during the run');
     expect((await engine.getPage('c', { sourceId: f.id }))?.compiled_truth).toContain('c three');
     expect((await engine.executeRaw<{ last_commit: string }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(moved!);
@@ -384,53 +409,76 @@ test('when HEAD moves past the pinned target during the run, the drain takes exa
   }
 }), 120_000);
 
-test('a file committed between admission and publication (raw_file_changed) is retried after the manifest end and imported as HEAD has it; #6712: a file that keeps changing is held after DEFER_PER_ENTRY retries', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+test('a file committed between admission and publication (raw_file_changed) is passed over and imported in a later round as HEAD has it; #6712: a file that keeps changing stops the pass not_converged after PASS_MAX_ROUNDS requests, unheld, and the next sync imports it', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('Alpha one.'), 'b.md': note('Beta one.'), 'c.md': note('Gamma one.') });
     expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
     for (const name of ['a', 'b', 'c']) writeFileSync(join(f.root, `${name}.md`), note(`${name} two.`));
     const pin = commit(f.root, 'version two');
-    // The admission transaction's last statement re-checks the cursor still holds this entry (ENG-A7). Right after it, for b.md,
-    // another agent commits version three: publication then finds the file's bytes changed after admission.
+    // Right after the pass admits b.md's import (its request row is inserted), another agent commits a newer version:
+    // publication then finds the file's bytes changed after admission.
     const executeRaw = engine.executeRaw;
     let commits = 0, versions = 0;
-    const armed = (sql: string, params?: unknown[]) => sql.includes("completed_keys->0->'pending'->>'requestId' AS request_id") && sql.includes('FOR SHARE') && String(params?.[2] ?? '').includes('"path":"b.md"');
+    const armed = (sql: string, params?: unknown[]) => { const text = JSON.stringify(params ?? []).replaceAll('\\"', '"'); return sql.includes('INSERT INTO persistence_requests') && text.includes('"path":"b.md"') && text.includes('managed_sync_import'); };
     engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
       const rows = await executeRaw.call(this, sql, params);
       if (armed(sql, params) && commits < versions) { writeFileSync(join(f.root, 'b.md'), note(`b round ${versions} change ${commits}, committed after admission.`)); commit(f.root, `b moves after admission ${commits}`); commits++; }
       return rows;
     } as BrainEngine['executeRaw'];
+    let seen = 0;
+    /** b.md's import requests since the last call, as [state, error_message]. */
+    const newRequests = async () => {
+      const rows = await engine.executeRaw<{ state: string; error_message: string | null }>("SELECT state, error_message FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='b.md' ORDER BY sequence", [f.id]);
+      const fresh = rows.slice(seen).map(row => [row.state, row.error_message]); seen = rows.length;
+      return fresh;
+    };
+    const CHANGED = ['conflict', 'The imported file changed after sync admission.'];
     try {
+      await newRequests();
       versions = 1;
       const once = await performManagedSync(engine, { ...f.opts, noBulk: true });
-      expect(once).toMatchObject({ status: 'synced', toCommit: pin });
+      // #6712 PR 4b: the round after the refusal reads the new HEAD, so the pass ends at the commit it imported, past pin.
+      expect(once).toMatchObject({ status: 'synced', toCommit: git(f.root, 'rev-parse', 'HEAD'), pass: { outcome: 'synced' } });
+      expect(once.toCommit).not.toBe(pin);
       expect(once.held ?? []).toEqual([]);
-      expect(once.converted_from_failed).toHaveLength(1);
+      // One refused request, passed over; the next round imports the file as HEAD has it. No second refusal, no double import.
+      expect(await newRequests()).toEqual([CHANGED, ['committed', null]]);
       expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain('b round 1 change 0');
       expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
-      // #6712: a file that moves again under its retried request is deferred again, and imported once it holds still.
+      // #6712: a file that moves again under its next request is passed over again, and imported once it holds still.
       for (const name of ['a', 'b', 'c']) writeFileSync(join(f.root, `${name}.md`), note(`${name} four.`));
       commit(f.root, 'version four');
       commits = 0; versions = 2;
       const twice = await performManagedSync(engine, { ...f.opts, noBulk: true });
-      expect(twice.status).toBe('synced');
+      expect(twice).toMatchObject({ status: 'synced', pass: { outcome: 'synced' } });
       expect(twice.held ?? []).toEqual([]);
-      expect(twice.converted_from_failed).toHaveLength(2);
       expect(commits).toBe(2);
+      expect(await newRequests()).toEqual([CHANGED, CHANGED, ['committed', null]]);
       expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain('b round 2 change 1');
-      // A file that moves under every retry is held after DEFER_PER_ENTRY of them (never a fifth request for the same entry).
+      // A file that moves under every request gets one per round: PASS_MAX_ROUNDS of them, then the pass stops not_converged.
+      // It is not held, and the page keeps the last version it imported.
       for (const name of ['a', 'b', 'c']) writeFileSync(join(f.root, `${name}.md`), note(`${name} five.`));
       const pin5 = commit(f.root, 'version five');
-      commits = 0; versions = DEFER_PER_ENTRY + 1;
+      commits = 0; versions = PASS_MAX_ROUNDS + 1;
       const restless = await performManagedSync(engine, { ...f.opts, noBulk: true });
-      expect(restless).toMatchObject({ status: 'synced', toCommit: pin5, held_count: 1, held: [{ path: 'b.md', code: 'worktree_dirty' }] });
-      expect(commits).toBe(DEFER_PER_ENTRY + 1);
+      // Its last round read the commit before the one made under that round's request.
+      expect(restless.toCommit).not.toBe(pin5);
+      expect(restless).toMatchObject({ status: 'partial', reason: 'not_converged', toCommit: git(f.root, 'rev-parse', 'HEAD~1'), pass: { round: PASS_MAX_ROUNDS, outcome: 'resumable', stop_reason: 'not_converged', not_converged_streak: 1 } });
+      expect(restless.held_count ?? 0).toBe(0);
+      expect(commits).toBe(PASS_MAX_ROUNDS);
+      expect(await newRequests()).toEqual(Array.from({ length: PASS_MAX_ROUNDS }, () => CHANGED));
       expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain('b round 2 change 1');
-      // The next sync re-screens the hold (the blob at HEAD differs from the hold's) and imports the latest commit.
+      expect((await engine.getPage('a', { sourceId: f.id }))?.compiled_truth).toContain('a five.');
+      // Once the file holds still, the next sync imports the latest commit.
+      versions = 0;
       const settled = await performManagedSync(engine, { ...f.opts, noBulk: true });
-      expect(settled.status).toBe('synced');
-      expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain(`b round ${DEFER_PER_ENTRY + 1} change ${DEFER_PER_ENTRY}`);
+      expect(settled).toMatchObject({ status: 'synced', modified: 1, pass: { outcome: 'synced' } });
+      expect(await newRequests()).toEqual([['committed', null]]);
+      expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain(`b round ${PASS_MAX_ROUNDS + 1} change ${PASS_MAX_ROUNDS - 1}`);
       expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
+      const [row] = await engine.executeRaw<{ streak: number }>("SELECT (completed_keys->0->'obligations'->>'not_converged_streak')::int AS streak FROM op_checkpoints WHERE op='managed-sync-pass' AND completed_keys->0->>'source_id'=$1", [f.id]);
+      expect(row?.streak).toBe(0);
+      expect((await performManagedSync(engine, { ...f.opts, noBulk: true })).status).toBe('up_to_date');
     } finally { engine.executeRaw = executeRaw; await disposePersistenceConsumer(engine); }
   }
 }), 120_000);

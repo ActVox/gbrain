@@ -126,6 +126,8 @@ export interface PassStamp {
   full: boolean;
   /** The tail obligation: pages the pass changed, and whether their links are extracted. */
   changed: number; extract: boolean;
+  /** When the pass pinned, on the database clock: the tail reads the pages its requests imported since then. */
+  since?: string;
 }
 /**
  * #5984: the source-wide part of sync validation (managed mode, configured
@@ -514,7 +516,7 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
       `Another sync moved the commit checkpoint of ${row.source_id} while this pass published.`);
     if (stamp.stampChunker) await tx.executeRaw('UPDATE sources SET chunker_version=$2 WHERE id=$1', [row.source_id, chunkerStamp()]);
   }
-  await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract });
+  await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract, ...(stamp.since ? { since: stamp.since } : {}) });
   for (const path of stamp.releasedHolds) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
   const watermark = await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP);

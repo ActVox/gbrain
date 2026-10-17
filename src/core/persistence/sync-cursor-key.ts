@@ -143,6 +143,11 @@ export async function retireManagedCursor(engine: BrainEngine, input: { sourceId
   return null;
 }
 
+/** #6712 PR 4b: an orphaned path-slice record, left with no cursor row beside it, goes on the incarnation's first pass too. */
+export async function retireOrphanSliceRecords(engine: BrainEngine, sourceId: string, incarnation: string): Promise<void> {
+  await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await deleteSliceRecords(tx, sourceId, incarnation); });
+}
+
 /** A finished cursor row and its frozen manifest, unless another cursor still names that run. */
 async function deleteFinishedCursor(tx: BrainEngine, key: string): Promise<void> {
   const [row] = await tx.executeRaw<{ run_id: string | null }>(`DELETE FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1

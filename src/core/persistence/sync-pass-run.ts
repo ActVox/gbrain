@@ -14,12 +14,19 @@
  *   converging stop `resumable` (`not_converged`).
  */
 import { randomUUID } from 'node:crypto';
+import { opError } from '../ops/contract.ts';
+import { confirmedSyncDelta } from '../sync-rename-identity.ts';
+import type { DowngradedRename } from '../sync.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import type { Cursor, RetryWait } from './sync-run.ts';
+import { getWriteRequestById } from './journal.ts';
+import type { WriteRequest } from './model.ts';
+import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
+import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
 import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncSlugCollision } from './sync-discovery.ts';
-import type { SyncAuthority, SyncProcessingOptions } from './sync-authority.ts';
-import type { PassStamp, SyncCursorOptions } from './sync-prepare.ts';
+import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
+import type { PassStamp, SyncCursorOptions, SyncIntent } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
@@ -30,15 +37,18 @@ import { PASS_BATCH_KEY_PREFIX, readConvergedWatermark, SyncAdmissionPaused, typ
 import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
-import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances, syncImportParserFor } from './sync-holds.ts';
+import { clearGitHold, holdRescreenDue, readGitHoldRetryPaths, readSyncHoldPolicy, readGitSourceHolds, readSyncImportProvenances, syncImportParserFor } from './sync-holds.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
+import { loadConfig } from '../config.ts';
+import { startPersistenceConsumer } from './service.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
-import { managedCursorKey, resolveManagedCursor, retireManagedCursor } from './sync-cursor-key.ts';
+import { managedCursorKey, resolveManagedCursor, retireManagedCursor, retireOrphanSliceRecords } from './sync-cursor-key.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { isCodeFilePath, resolveSlugForPath } from '../sync.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
+import { SYNC_SLICE_OP } from './sync-slices.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
@@ -81,10 +91,14 @@ async function retireLegacyCursors(engine: BrainEngine, input: { sourceId: strin
   Promise<{ wait?: RetryWait; hostRequired?: true; episode?: PassEpisode }> {
   const resolution = await resolveManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, company: undefined, assertActive: input.assertActive, foldIn: !input.remote });
   if (resolution.waitFor) return { wait: { ...resolution.waitFor, retry_after_ms: 5000 } };
-  const [row] = await engine.executeRaw<{ header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
-    "SELECT completed_keys->0 AS header FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1", [resolution.key]);
+  const [row] = await engine.executeRaw<{ slices: boolean; header: { runId?: string; done?: boolean; processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions & { exclude?: string[]; includeHidden?: string[]; strategy?: string; srcSubpath?: string; workingTree?: boolean } } | null }>(
+    `SELECT (SELECT completed_keys->0 FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1) AS header,
+      EXISTS (SELECT 1 FROM op_checkpoints WHERE op=$2 AND left(fingerprint, length($3))=$3) AS slices`, [resolution.key, SYNC_SLICE_OP, `${input.sourceId}:${input.incarnation}:`]);
   const header = row?.header;
-  if (!header) return {};
+  if (!header) {
+    if (row?.slices && !input.remote) await retireOrphanSliceRecords(engine, input.sourceId, input.incarnation);
+    return {};
+  }
   if (input.remote) return header.done ? {} : { hostRequired: true };
   const busy = await retireManagedCursor(engine, { sourceId: input.sourceId, incarnation: input.incarnation, key: resolution.key, runId: header.runId ?? null, done: header.done === true });
   input.assertActive();
@@ -111,7 +125,7 @@ function entryPaths(level: ShadowLevel, gitPath: string): { path: string; source
  * page moves to the new slug). Deletes first, then imports.
  */
 async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: ShadowPath[], imports: ShadowPath[]):
-  Promise<{ entries: PassEntry[]; collisions: SyncSlugCollision[]; skipped: ShadowPath[] }> {
+  Promise<{ entries: PassEntry[]; collisions: SyncSlugCollision[]; skipped: ShadowPath[]; downgrades: DowngradedRename[] }> {
   const working = (entry: ShadowPath) => level.mode === 'working' && entry.state.level !== entry.state.tree;
   const deleteEntries = new Map<string, PassEntry>(deletes.map(entry => [entry.path, { ...entryPaths(level, entry.path), action: 'delete' as const, working: level.mode === 'working',
     slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null }]));
@@ -153,6 +167,16 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     claims.set(slug, [...claims.get(slug) ?? [], entry]);
   }
   const renamed = new Set<string>();
+  let renames: Promise<Map<string, string> | null> | null = null;
+  const downgrades: DowngradedRename[] = [];
+  const gitRenames = () => renames ??= (async () => {
+    if (level.mode !== 'committed' || !level.baselineCommit || level.baselineCommit === level.head || (!deleteEntries.size && !level.heldRenames.length)) return null;
+    const delta = await confirmedSyncDelta(engine, level.gitRoot, level.baselineCommit, level.head, { sourceId: level.sourceId, sourcePathOf: path => entryPaths(level, path).sourcePath });
+    if (delta.status !== 'ok') return null;
+    // #6729: the inexact renames whose identity was not kept are reported (and recorded) as discovery reported them.
+    downgrades.push(...(delta.manifest.downgradedRenames ?? []).map(pair => ({ ...pair, from: entryPaths(level, pair.from).sourcePath, to: entryPaths(level, pair.to).sourcePath })));
+    return new Map(delta.manifest.renamed.map(pair => [pair.to, pair.from]));
+  })();
   for (const [slug, claimants] of claims) {
     const holder = holders.get(slug);
     const holderPath = holder?.source_path ? gitPathOfOrigin(holder.source_path) : null;
@@ -173,10 +197,23 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
       if (holderPath !== null && deleteEntries.delete(holderPath)) renamed.add(holderPath);
       continue;
     }
+    // #5988: a held rename destination still owes its page the move: re-bound while the origin page is unchanged, else held rename_held.
+    // A held destination renamed again (a Git rename of the held path) carries the held identity on.
+    const heldAt = (path: string | undefined) => path === undefined ? undefined : level.heldRenames.find(row => row.path === path)?.rename;
+    const held = heldAt(winner.path) ?? (level.heldRenames.length ? heldAt((await gitRenames())?.get(winner.path)) : undefined);
+    const origin = held ? (await engine.executeRaw<{ source_path: string | null; revision: string; deleted: boolean }>(
+      'SELECT source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id=$1 AND id=$2', [level.sourceId, held.pageId]))[0] : undefined;
+    if (held && origin && !origin.deleted && origin.source_path !== null && syncOriginPath(origin.source_path) === syncOriginPath(held.sourcePath)) {
+      entries.push({ ...base, pageId: null, revision: null, ...(origin.revision === held.revision ? { renameFrom: held } : { renameHeld: held }) });
+      continue;
+    }
     const moved = [...leaving.values()].filter(gone => deleteEntries.has(gone.path) && !renamed.has(gone.path) && gone.state.record?.blobOids.includes(winner.state.level ?? ''));
     const twins = fresh.filter(other => other.state.level === winner.state.level);
-    if (moved.length === 1 && twins.length === 1) {
-      const gone = moved[0]!;
+    // #6729: a Git rename with an edit keeps its page when Git pairs it and the identity is confirmed, as discovery's delta does.
+    const inexact = moved.length === 1 && twins.length === 1 ? null : (await gitRenames())?.get(winner.path);
+    const gitMoved = inexact && deleteEntries.has(inexact) && !renamed.has(inexact) ? leaving.get(inexact) : undefined;
+    if (gitMoved?.pageId != null || (moved.length === 1 && twins.length === 1)) {
+      const gone = gitMoved ?? moved[0]!;
       const origin = entryPaths(level, gone.path).sourcePath;
       entries.push({ ...base, pageId: null, revision: null, renameFrom: { sourcePath: origin, slug: gone.slug!, pageId: gone.pageId!, revision: gone.revision! } });
       deleteEntries.delete(gone.path); renamed.add(gone.path);
@@ -184,22 +221,49 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
     entries.push({ ...base, pageId: null, revision: null });
   }
-  return { entries: [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))], collisions, skipped };
+  return { entries: [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))], collisions, skipped, downgrades };
 }
 
-/** Waits (bounded) until no open request or Git effect of the worktree names one of the in-flight pages or origins. */
-async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: ShadowPath[], budgetMs: number, assertActive: () => void): Promise<void> {
+/**
+ * Waits (bounded) until no open request or Git effect of the worktree names one of the in-flight pages or origins, and
+ * returns what the requests open at its start committed meanwhile: an earlier drain's work this pass reports as its own.
+ */
+async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: ShadowPath[], budgetMs: number, assertActive: () => void): Promise<{ added: number; modified: number; deleted: number; renamed: number }> {
   const pageIds = inFlight.flatMap(entry => entry.pageId === null ? [] : [entry.pageId]);
   const origins = inFlight.map(entry => entryPaths(level, entry.path).sourcePath);
+  const names = `r.page_id=ANY($2::int[]) OR r.intent->>'sourcePath'=ANY($3::text[])`;
+  const opened = await engine.executeRaw<{ id: string }>(`SELECT r.id FROM persistence_requests r WHERE r.source_id=$1 AND r.state IN ('queued','running','recovering') AND (${names})`,
+    [level.sourceId, pageIds, origins]);
   const until = Date.now() + budgetMs;
   while (Date.now() < until) {
     const [open] = await engine.executeRaw(`SELECT 1 FROM persistence_requests r WHERE r.source_id=$1 AND (r.state IN ('queued','running','recovering')
         OR EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.state IN ('queued','running')))
-      AND (r.page_id=ANY($2::int[]) OR r.intent->>'sourcePath'=ANY($3::text[])) LIMIT 1`, [level.sourceId, pageIds, origins]);
+      AND (${names}) LIMIT 1`, [level.sourceId, pageIds, origins]);
     assertActive();
-    if (!open) return;
+    if (!open) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
+  const credited = { added: 0, modified: 0, deleted: 0, renamed: 0 };
+  if (!opened.length) return credited;
+  const created = new Set(inFlight.filter(entry => entry.pageId === null).map(entry => entryPaths(level, entry.path).sourcePath));
+  const committed = await engine.executeRaw<{ kind: string | null; source_path: string | null; renamed: boolean }>(`SELECT intent->>'kind' AS kind, intent->>'sourcePath' AS source_path,
+    intent ? 'renameFrom' AS renamed FROM persistence_requests WHERE id=ANY($1::uuid[]) AND state='committed'`, [opened.map(row => row.id)]);
+  for (const row of committed) {
+    if (row.kind === 'managed_sync_delete') credited.deleted++;
+    else if (row.kind !== 'managed_sync_import') continue;
+    else if (row.renamed) credited.renamed++;
+    else if (row.source_path !== null && created.has(row.source_path)) credited.added++;
+    else credited.modified++;
+  }
+  return credited;
+}
+
+/** The oldest open request naming one of the in-flight pages or origins. */
+async function openInFlightRequest(engine: BrainEngine, level: ShadowLevel, inFlight: ShadowPath[]): Promise<WriteRequest | null> {
+  const [row] = await engine.executeRaw<{ id: string }>(`SELECT r.id FROM persistence_requests r WHERE r.source_id=$1 AND r.state IN ('queued','running','recovering')
+    AND (r.page_id=ANY($2::int[]) OR r.intent->>'sourcePath'=ANY($3::text[])) ORDER BY r.sequence LIMIT 1`,
+  [level.sourceId, inFlight.flatMap(entry => entry.pageId === null ? [] : [entry.pageId]), inFlight.map(entry => entryPaths(level, entry.path).sourcePath)]);
+  return row ? getWriteRequestById(engine, row.id) : null;
 }
 
 /** Design §2.7 (b1): the incarnation's first pass writes a `legacy` marker, with its deletion proof, for each page-less path deleted before PR 4. */
@@ -234,20 +298,21 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   // Pin (design §2.2): the row, sync.admission, HEAD and the mode.
   const [prior, admission, configuredWorking] = await Promise.all([readPassRow(engine, sourceId, incarnation), readSyncAdmission(engine), engine.getConfig('sync.include_working_tree')]);
   assertActive();
-  const head = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
+  let head = syncGit(context.gitRoot, ['rev-parse', 'HEAD']).trim();
   const detached = syncGit(context.gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
   const mode: SyncSelection['mode'] = detached || (opts.workingTree ?? configuredWorking === 'true') ? 'working' : 'committed';
   const selection = await passSelection(engine, opts, context, mode);
-  const configured = !remote && !opts.exclude?.length && !opts.includeHidden?.length && !opts.strategy && opts.srcSubpath === undefined
+  const configured = !remote && !opts.exclude?.length && !opts.includeHidden?.length && opts.srcSubpath === undefined
+    && (opts.strategy === undefined || opts.strategy === ((context.source.config?.strategy as string | undefined) ?? 'markdown'))
     && (detached || opts.workingTree === undefined || opts.workingTree === (configuredWorking === 'true'));
   const selectionFp = digest(selection), parserFp = parserFingerprint();
-  const pack = (await loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null))?.identity ?? null;
   const obligations: ManagedSyncPassValue['obligations'] = prior ? structuredClone(prior.value.obligations)
     : { baseline_commit: context.source.last_commit, mismatch: {}, not_converged_streak: 0, faults: {} };
   obligations.mismatch ??= {}; obligations.faults ??= {}; obligations.not_converged_streak ??= 0;
   if (handover.episode && !obligations.episode) obligations.episode = handover.episode;
   const passId = randomUUID();
-  const requested = input.processingOptions;
+  // #6696: a cost-gate deferral rides as noEmbed but is this run's constraint (its requests carry embedDeferred), never an opt-out an episode keeps.
+  const requested = opts.embedDeferred ? { ...input.processingOptions, noEmbed: false } : input.processingOptions;
   if (opts.full && !obligations.episode?.full_id) obligations.episode = { opened_at: startedAt, full_id: passId, selection,
     inherited: { noEmbed: requested.noEmbed, noExtract: requested.noExtract, noSchemaPack: requested.noSchemaPack, from: obligations.episode?.inherited.from ?? 'flag' } };
   // A pass that admits under an opt-out opens an episode carrying it (design §6), when it admits its first batch.
@@ -258,6 +323,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const processingOptions: SyncProcessingOptions = { noEmbed: requested.noEmbed || !!episode?.inherited.noEmbed, noExtract: requested.noExtract || !!episode?.inherited.noExtract,
     noSchemaPack: requested.noSchemaPack || !!episode?.inherited.noSchemaPack };
   const inherited = (['noEmbed', 'noExtract', 'noSchemaPack'] as const).filter(key => processingOptions[key] && !requested[key]);
+  const pack = processingOptions.noSchemaPack ? null : (await loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null))?.identity ?? null;
 
   // The kind (design §2.2), from the real converged state.
   const converged = obligations.converged;
@@ -334,10 +400,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
     await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value); });
   };
+  const identityDowngrades: DowngradedRename[] = [];
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
-    ...(collisions.length ? { slugCollisions: collisions } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
+    ...(collisions.length ? { slugCollisions: collisions } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
   /** The batch cursor sync-run.ts drains: the discovery shape with no cursor row behind it. */
@@ -366,19 +433,41 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0) });
     sliceBase.pages += drained.filesImported ?? 0;
     const outcome: PassOutcome = drained.status === 'blocked_by_failures' ? 'blocked' : 'resumable';
+    const blockedOn = drained.managedWrite?.path ? drained.managedWrite.write_request.request_id : null;
+    if (outcome === 'blocked' && blockedOn && obligations.blocked?.request_id !== blockedOn) obligations.blocked = { request_id: blockedOn, pass_id: passId };
     await save(outcome, drained.reason ?? (outcome === 'blocked' ? 'blocked_by_failures' : null));
     const { runId: _run, managedCursor: _cursor, ...rest } = drained;
     return { ...rest, ...result(drained.status, drained.reason) };
   };
 
   try {
+    // A page refusal the last pass stopped on replays, with no new request, while what decided it is unchanged (#6712 PR 3, L7).
+    // Under the hold policy the next pass re-admits it instead, and its refusal settles as a hold.
+    const blocked = obligations.blocked;
+    delete obligations.blocked;
+    if (blocked && (await readSyncHoldPolicy(engine)).mode === 'fail') {
+      const [row] = await engine.executeRaw<{ id: string }>('SELECT id FROM persistence_requests WHERE source_id=$1 AND request_id=$2', [sourceId, blocked.request_id]);
+      const failed = row ? await getWriteRequestById(engine, row.id) : null;
+      const intent = failed?.intent as unknown as SyncIntent | null | undefined;
+      const recorded = failed && intent && ['failed', 'conflict', 'cancelled'].includes(failed.state) ? await recordedStop(engine, passFingerprint(sourceId, incarnation), blocked.pass_id) : null;
+      assertActive();
+      if (failed && intent && recorded && replaysUnchangedRefusal(failed, recorded, { root: context.root, intent, target: intent.target ?? '', head: () => head })) {
+        obligations.blocked = blocked;
+        const replay: Cursor = { ...batchCursor([]), runId: blocked.pass_id, pending: { requestId: failed.request_id, slug: failed.slug, pageId: failed.page_id, intent } };
+        const drained = await input.drainBatch(`${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`, replay, sliceBase);
+        if (!('entries' in drained)) return await stop(drained);
+      }
+    }
     for (let round = 1; round <= PASS_MAX_ROUNDS; round++) {
       assertActive();
       value.telemetry.round = round;
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
-        pass: { head, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
+        pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap } });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
+      // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is
+      // imported by the next round, never frozen from an older pin it is not in).
+      head = value.telemetry.target = level.head;
       levelSlugMode = level.slugMode;
       lastLevel = level;
       value.telemetry.timings_ms = level.timings_ms;
@@ -390,6 +479,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
       const deletes: ShadowPath[] = [], imports: ShadowPath[] = [], inFlight: ShadowPath[] = [], mismatch: ShadowPath[] = [], owed: ShadowPath[] = [];
       lastMismatch = mismatch;
+      const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
       for (const entry of level.paths) {
         const r = entry.result;
         if (r.settled) continue;
@@ -403,10 +493,18 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
           readmitted.add(again);
         }
         if (r.action === 'delete') {
+          if (heldRenameOrigins.has(syncOriginPath(entryPaths(level, entry.path).sourcePath))) { S.set(settledKey(entry.path, entry.state.level), 'rename_held'); continue; }
           if (admission !== 'normal') { S.set(settledKey(entry.path, entry.state.level), 'paused_deletes'); counts.pausedDeletes++; continue; }
           deletes.push(entry);
         } else if (r.action === 'import' || r.action === 'reparse' || (!remote && (r.cls === 'drift' || r.cls === 'dirty'))) imports.push(entry);
         else owed.push(entry);
+      }
+      // Origins that differ only by case or separator spelling may be one file on another platform: refuse rather than guess, as discovery does.
+      const spelled = owed.filter(entry => entry.result.cls === 'spelling').map(entry => entryPaths(level, entry.path).sourcePath);
+      if (spelled.length) {
+        await save('blocked', 'page_identity_changed');
+        throw opError('page_identity_changed', 'Sync origins for one slug differ only by case or separator spelling.',
+          `Files in ${sourceId} differ only by case or separator spelling (${spelled.slice(0, 3).join(', ')}); nothing was written. Keep one spelling, rename or remove the others and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
       }
       const candidates = deletes.length + imports.length;
       if (round === 1) candidatesFirst = candidates + inFlight.length + owed.length;
@@ -415,10 +513,19 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (admission === 'classify_only') { await save('resumable', 'admission_paused'); return result('partial', 'admission_paused'); }
       if (!candidates && inFlight.length && waits < IN_FLIGHT_WAITS) {
         waits++; round--;
-        await awaitInFlight(engine, level, inFlight, opts.drainStartedAt ? 30_000 : 5_000, assertActive);
+        startPersistenceConsumer(engine, loadConfig() ?? { engine: engine.kind }).wake(true);
+        const credited = await awaitInFlight(engine, level, inFlight, opts.drainStartedAt ? 30_000 : 5_000, assertActive);
+        Object.assign(counts, { added: counts.added + credited.added, modified: counts.modified + credited.modified, deleted: counts.deleted + credited.deleted, renamed: counts.renamed + credited.renamed });
+        sliceBase.pages += credited.added + credited.modified + credited.renamed;
         continue;
       }
-      if (!candidates && inFlight.length) { await save('resumable', 'writer_pending'); return result('partial', 'writer_pending'); }
+      if (!candidates && inFlight.length) {
+        await save('resumable', 'writer_pending');
+        // The request an agent waits on, as the cursor's writer_pending named it.
+        const waiting = remote ? null : await openInFlightRequest(engine, level, inFlight);
+        return { ...result('partial', 'writer_pending'), ...(waiting?.intent ? { managedWrite: managedSyncWriteDiagnostic({ sourceId, root: context.root, processingOptions,
+          syncOptions: input.syncOptions ?? null }, { slug: waiting.slug, intent: waiting.intent as unknown as SyncIntent }, waiting) } : {}) };
+      }
       if (!candidates) {
         if (remote) {
           // Design §5: a remote caller stops after its one-sided work; the owner host settles and stamps the rest.
@@ -435,6 +542,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
             assertActive();
             await assertDrainLease(tx, sourceId);
             await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
+            // Holds on paths that left the level go with it here too, as a stamp releases them.
+            for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
             const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP);
             value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
               last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
@@ -454,8 +563,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         const closesEpisode = closure?.closes === true;
         if (closure?.released) counts.episodeReleased = closure.released;
         const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
-          closesEpisode, retryTaken: [...retry], releasedHolds: [], selectionFp, parserFp, pack, full: kind === 'full',
-          changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: !processingOptions.noExtract };
+          closesEpisode, retryTaken: [...retry], releasedHolds: level.releasableHolds, selectionFp, parserFp, pack, full: kind === 'full',
+          changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: !processingOptions.noExtract, since: value.telemetry.started_at };
         await save('open', null);
         const stopped = await drain([], stamp);
         if (stopped) return stop(stopped);
@@ -467,6 +576,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       }
       const built = await batchEntries(engine, level, deletes, imports);
       collisions.push(...built.collisions);
+      identityDowngrades.push(...built.downgrades.filter(pair => !identityDowngrades.some(seen => seen.from === pair.from && seen.to === pair.to)));
       for (const entry of [...built.skipped, ...built.collisions.flatMap(c => c.skipped.map(sourcePath => imports.find(i => entryPaths(level, i.path).sourcePath === sourcePath)!))].filter(Boolean)) {
         S.set(settledKey(entry.path, entry.state.level), 'collision'); counts.collisions++;
       }
@@ -502,6 +612,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     await save('resumable', 'not_converged');
     return result('partial', 'not_converged');
   } catch (error) {
+    assertSyncDispatchActive();
     if (error instanceof SyncAdmissionPaused) { await save('resumable', 'admission_paused').catch(() => undefined); return result('partial', 'admission_paused'); }
     if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout'); }
     // A Git listing that did not finish cleanly classifies nothing (design v3.2 §9): the pass stops blocked, having written nothing for that round.
