@@ -277,7 +277,7 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
   // read then holds about one string per field per page and decodes no parser text per page.
   // The record's fields come out of its JSON once, in a subquery. On Postgres `OFFSET 0` keeps it unflattened, so the hash
   // join builds over those few text columns instead of the whole record (600k: about 3.1 s of serial server time to 2.0 s);
-  // PGLite's keyset statements need it flattened, so each probes the record by primary key.
+  // PGLite's keyset statements and a confirm round's few rows need it flattened, so each probes the record by primary key.
   const select = `SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision, p.deleted_at IS NOT NULL AS deleted,
       p.revision_write_request_id::text AS request_id, c.fingerprint IS NOT NULL AS has_record,
       c.origin IS NOT DISTINCT FROM p.source_path AS rec_origin_same,
@@ -292,7 +292,7 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
     FROM pages p LEFT JOIN (SELECT fingerprint, completed_keys->0->>'origin' AS origin, completed_keys->0->>'blob_oid' AS blob_oid,
         completed_keys->0->>'disk_blob_oid' AS disk_blob_oid, completed_keys->0->>'revision' AS revision,
         completed_keys->0->'parser' AS parser, completed_keys->0->>'full_episode' AS full_episode, (completed_keys->0->'working')::text AS working
-      FROM op_checkpoints WHERE op=$2${kind === 'postgres' ? ' OFFSET 0' : ''}) c ON c.fingerprint=$3||p.id::text
+      FROM op_checkpoints WHERE op=$2${kind === 'postgres' && !only ? ' OFFSET 0' : ''}) c ON c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`, JSON.stringify(expected)];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin_same: boolean; rec_origin: string | null; rec_blob_oid: string | null;
@@ -806,7 +806,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
   if (reuse) reuse.cache.pages = undefined;
   const round = (marking: boolean) => withRoundSnapshot(engine, async exec => {
     const base = marking ? prior?.mark : undefined;
-    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded }))) : null;
+    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres' }))) : null;
     const marked = marking && !base ? confirmGuard(readLevelMark(exec, sourceId, incarnation)) : null;
     // PGLite has no snapshot: the mark (or the proof, the next round's mark) runs before the reads it vouches for.
     if (kind === 'pglite') await (proof ?? marked)?.catch(() => undefined);
@@ -822,7 +822,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
     const [work, markers, passRow] = await others;
     if (reuse && mark) reuse.cache.pages = { key, mark, table: read!.pages };
     const confirm = confirmed?.confirm ?? unkeyed;
-    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (proof || marked ? 1 : 0), ...(confirm ? { confirm } : {}) };
+    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 2 : 1) : 0), ...(confirm ? { confirm } : {}) };
   });
   if (!reuse || reuse.working) return round(false);
   try { return await round(true); } catch (error) {

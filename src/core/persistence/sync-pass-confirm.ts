@@ -26,11 +26,11 @@
  * - Git: HEAD must equal the previous round's and the mode be committed (both are in the reuse key); `T` is cached by commit
  *   and the index (`X`) is re-read by every round. Working mode always takes the full read.
  *
- * Visibility: a row's `xmin` (a 32-bit xid) widens to 64 bits in the 2^32 window below S2's `xmax` (an unfrozen xid is
- * within 2^31 of it), and the row is unchanged only when that is below S1's `xmin`: every transaction below it, a
- * subtransaction's included (`pg_visible_in_snapshot` cannot see subtransactions, which savepoints create), had ended
- * before S1. The frozen ids (below 3) are unchanged. The `txid_*` snapshot functions exist on every supported Postgres and
- * on PGLite. More than 2^31 xids between S1 and S2 takes the full read.
+ * Visibility: a row is unchanged only when its `xmin` is older than S1's `xmin` (`age(xmin) > age(S1.xmin)`, both counted
+ * back from S2's transaction counter in the 32-bit xid space; `age` of a frozen id is the largest): every transaction
+ * below S1's `xmin`, a subtransaction's included (`pg_visible_in_snapshot` cannot see subtransactions, which savepoints
+ * create), had ended before S1. `age` and the `txid_*` snapshot functions exist on every supported Postgres and on
+ * PGLite. More than 2^31 xids between S1's `xmin` and S2's `xmax` takes the full read (`age` would wrap).
  */
 import { GIT_HOLD_OP, GIT_HOLD_RETRY_OP, GIT_HOLD_SUMMARY_OP, SYNC_IMPORT_PROVENANCE_OP } from './sync-holds.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, SYNC_ORIGIN_DELETED_OP } from './sync-pass-row.ts';
@@ -40,8 +40,8 @@ type Exec = Pick<BrainEngine, 'executeRaw'>;
 
 export const CONFIRM_OPS = [SYNC_IMPORT_PROVENANCE_OP, GIT_HOLD_OP, GIT_HOLD_SUMMARY_OP, GIT_HOLD_RETRY_OP, SYNC_ORIGIN_DELETED_OP, SYNC_DELETES_WITHHELD_OP, MANAGED_SYNC_PASS_OP];
 
-/** A round's mark: its snapshot's `xmin` and `xmax` (64-bit), each `CONFIRM_OPS` op's row count for the incarnation and its holds' fingerprints. */
-export interface LevelMark { xmin: string; xmax: string; ops: Record<string, number>; holds: string[] }
+/** A round's mark: its snapshot's `xmin` (64-bit), each `CONFIRM_OPS` op's row count for the incarnation and its holds' fingerprints. */
+export interface LevelMark { xmin: string; ops: Record<string, number>; holds: string[] }
 
 /** The incarnation's `CONFIRM_OPS` rows (`o`: the table alias's prefix; `ops` and `scope`: their placeholders). */
 const opScope = (o: string, ops: string, scope: string) => `${o}op = ANY(${ops}::text[]) AND (${o}fingerprint = ${scope} OR starts_with(${o}fingerprint, ${scope} || ':'))`;
@@ -50,29 +50,31 @@ const opCounts = (ops: string, scope: string) => `(SELECT COALESCE(jsonb_object_
 
 /** The round's mark, read inside its snapshot (on PGLite, before the round's other reads, so whatever lands later reads as changed). */
 export async function readLevelMark(exec: Exec, sourceId: string, incarnation: string): Promise<LevelMark> {
-  const [row] = await exec.executeRaw<{ xmin: string; xmax: string; ops: Record<string, number> | null; holds: string[] }>(
-    `SELECT txid_snapshot_xmin(txid_current_snapshot())::text AS xmin, txid_snapshot_xmax(txid_current_snapshot())::text AS xmax, ${opCounts('$1', '$2')}`,
+  const [row] = await exec.executeRaw<{ xmin: string; ops: Record<string, number> | null; holds: string[] }>(
+    `SELECT txid_snapshot_xmin(txid_current_snapshot())::text AS xmin, ${opCounts('$1', '$2')}`,
     [CONFIRM_OPS, `${sourceId}:${incarnation}`]);
-  return { xmin: row!.xmin, xmax: row!.xmax, ops: row!.ops ?? {}, holds: row!.holds };
+  return { xmin: row!.xmin, ops: row!.ops ?? {}, holds: row!.holds };
 }
 
-/** Whether `col` (an xid) was committed before S1: widened below S2's `xmax` (`x.hi`), it is below S1's `xmin` (`x.lo`). */
-const unchanged = (col: string) => {
-  const wide = `((x.hi - x.hi % 4294967296) + ${col}::text::bigint)`;
-  return `(${col}::text::bigint < 3 OR (CASE WHEN ${wide} >= x.hi THEN ${wide} - 4294967296 ELSE ${wide} END) < x.lo)`;
-};
+/** Whether `col` (an xid) was committed before S1: it is older than S1's `xmin` (`age` of a frozen id is the largest). */
+const unchanged = (col: string) => `age(${col}) > x.lo_age`;
 
-const PROOF = `WITH x AS MATERIALIZED (SELECT $4::bigint AS lo, txid_snapshot_xmin(txid_current_snapshot()) AS now_lo,
-    txid_snapshot_xmax(txid_current_snapshot()) AS hi)
-  SELECT x.now_lo::text AS xmin, x.hi::text AS xmax, (x.hi - $5::bigint)::float8 AS span, ${opCounts('$2', '$3')},
-    (SELECT count(*)::int FROM pages WHERE source_id=$1 AND source_path IS NOT NULL) AS pages,
-    (SELECT COALESCE(jsonb_agg(jsonb_build_array(p.id::text, r.id IS NOT NULL, p.knowledge_revision::text)), '[]'::jsonb)
-      FROM pages p LEFT JOIN persistence_requests r ON r.id=p.revision_write_request_id AND r.source_id=$1
-        AND r.state='committed' AND r.intent->>'passId'=$6 AND r.outcome->>'revision'=p.knowledge_revision::text
-      WHERE p.source_id=$1 AND NOT ${unchanged('p.xmin')}) AS pages_changed,
-    (SELECT COALESCE(jsonb_agg(jsonb_build_array(o.op, o.fingerprint, o.completed_keys->0->>'revision', o.completed_keys->0->>'run_id')), '[]'::jsonb)
-      FROM op_checkpoints o WHERE ${opScope('o.', '$2', '$3')} AND NOT ${unchanged('o.xmin')}) AS ops_changed
-  FROM x`;
+/** One scan of the source's pages and one of the incarnation's op rows: the counts, and the rows S1 does not prove unchanged. */
+const PROOF = `WITH x AS MATERIALIZED (SELECT txid_snapshot_xmin(txid_current_snapshot()) AS now_lo, txid_snapshot_xmax(txid_current_snapshot()) AS hi,
+    age(($4::bigint % 4294967296)::text::xid) AS lo_age),
+  pg AS (SELECT count(*) FILTER (WHERE p.source_path IS NOT NULL)::int AS n,
+      COALESCE(jsonb_agg(jsonb_build_array(p.id::text, EXISTS (SELECT 1 FROM persistence_requests r WHERE r.id=p.revision_write_request_id AND r.source_id=$1
+        AND r.state='committed' AND r.intent->>'passId'=$5 AND r.outcome->>'revision'=p.knowledge_revision::text), p.knowledge_revision::text))
+        FILTER (WHERE NOT ${unchanged('p.xmin')}), '[]'::jsonb) AS changed
+    FROM pages p, x WHERE p.source_id=$1),
+  oc AS (SELECT o.op, count(*)::int AS n, jsonb_agg(jsonb_build_array(o.op, o.fingerprint, o.completed_keys->0->>'revision', o.completed_keys->0->>'run_id'))
+        FILTER (WHERE NOT ${unchanged('o.xmin')}) AS changed
+    FROM op_checkpoints o, x WHERE ${opScope('o.', '$2', '$3')} GROUP BY o.op)
+  SELECT x.now_lo::text AS xmin, (x.hi - $4::bigint)::float8 AS span, pg.n AS pages, pg.changed AS pages_changed,
+    (SELECT COALESCE(jsonb_object_agg(op, n), '{}'::jsonb) FROM oc) AS ops,
+    (SELECT COALESCE(jsonb_agg(c), '[]'::jsonb) FROM oc, jsonb_array_elements(COALESCE(oc.changed, '[]'::jsonb)) c) AS ops_changed,
+    (SELECT COALESCE(jsonb_agg(fingerprint), '[]'::jsonb) FROM op_checkpoints WHERE op='${GIT_HOLD_OP}' AND starts_with(fingerprint, $3 || ':')) AS holds
+  FROM x, pg`;
 
 /**
  * What the pass may reuse: the pages it wrote since S1 (`pages`, by id), which of them changed their import record
@@ -84,12 +86,16 @@ export type ConfirmProof = { ok: true; mark: LevelMark; pages: string[]; records
  * Proves, in S2 (the round's snapshot), that every change since `base` (S1) to what the level read consumes is the pass's
  * own write (see the header). The counts still need the reused rows: `countsMatch` checks them after the delta read.
  */
-export async function proveConfirm(exec: Exec, input: { sourceId: string; incarnation: string; passId: string; base: LevelMark; recorded?: ReadonlySet<number> }): Promise<ConfirmProof> {
+export async function proveConfirm(exec: Exec, input: { sourceId: string; incarnation: string; passId: string; base: LevelMark; recorded?: ReadonlySet<number>; postgres: boolean }): Promise<ConfirmProof> {
   const scope = `${input.sourceId}:${input.incarnation}`;
-  const [row] = await exec.executeRaw<{ xmin: string; xmax: string; span: number; ops: Record<string, number> | null; holds: string[]; pages: number;
+  // Two plain scans: compiling them (JIT, which the planner's cost picks at 600k) cost more than running them (about 200 ms).
+  const jit = input.postgres ? exec.executeRaw('SET LOCAL jit = off') : Promise.resolve([]);
+  jit.catch(() => undefined);
+  const [row] = await exec.executeRaw<{ xmin: string; span: number; ops: Record<string, number> | null; holds: string[]; pages: number;
     pages_changed: Array<[string, boolean, string]>; ops_changed: Array<[string, string, string | null, string | null]> }>(
-    PROOF, [input.sourceId, CONFIRM_OPS, scope, input.base.xmin, input.base.xmax, input.passId]);
-  const mark: LevelMark = { xmin: row!.xmin, xmax: row!.xmax, ops: row!.ops ?? {}, holds: row!.holds };
+    PROOF, [input.sourceId, CONFIRM_OPS, scope, input.base.xmin, input.passId]);
+  await jit;
+  const mark: LevelMark = { xmin: row!.xmin, ops: row!.ops ?? {}, holds: row!.holds };
   if (!(Number(row!.span) >= 0 && Number(row!.span) < 2 ** 31)) return { ok: false, reason: 'xid_span', mark };
   const revisions = new Map<string, string>();
   for (const [id, ours, revision] of row!.pages_changed) {
