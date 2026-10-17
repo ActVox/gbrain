@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runTakes } from '../src/commands/takes.ts';
-import { GRADE_TAKES_MEASURED_MODELS, gradeJudgeMeasured } from '../src/core/cycle/grade-takes-measured.ts';
+import { GRADE_TAKES_MEASURED_MODELS, GRADE_TAKES_MEASURED_PROMPT_VERSION, gradeJudgeMeasured } from '../src/core/cycle/grade-takes-measured.ts';
 
 let engine: PGLiteEngine;
 const takeIds: Record<string, number> = {};
@@ -34,11 +34,11 @@ async function pageWithTake(slug: string, claim: string): Promise<number> {
   return take!.id;
 }
 
-async function grade(takeId: number, verdict: string, confidence: number, gradedAt: string, applied = false, judge = 'claude-sonnet-4-6'): Promise<void> {
+async function grade(takeId: number, verdict: string, confidence: number, gradedAt: string, applied = false, judge = 'claude-sonnet-4-6', prompt = 'hybrid-evidence-v1'): Promise<void> {
   await engine.executeRaw(
     `INSERT INTO take_grade_cache (take_id, prompt_version, judge_model_id, evidence_signature, graded_at, verdict, confidence, applied)
-     VALUES ($1, 'hybrid-evidence-v1', $2, $3, $4::timestamptz, $5, $6, $7)`,
-    [takeId, judge, `sig-${takeId}-${gradedAt}`, gradedAt, verdict, confidence, applied],
+     VALUES ($1, $8, $2, $3, $4::timestamptz, $5, $6, $7)`,
+    [takeId, judge, `sig-${takeId}-${gradedAt}`, gradedAt, verdict, confidence, applied, prompt],
   );
 }
 
@@ -51,7 +51,8 @@ beforeAll(async () => {
   takeIds.gone = await pageWithTake('companies/gone-example', 'Gone-example will be acquired before 2025');
   await grade(takeIds.acme!, 'unresolvable', 0.4, '2026-01-01T00:00:00Z');
   await grade(takeIds.acme!, 'correct', 0.97, '2026-03-01T00:00:00Z', true, 'gpt-6.1-sol');
-  await grade(takeIds.bluefin!, 'incorrect', 0.8, '2026-02-01T00:00:00Z');
+  await grade(takeIds.bluefin!, 'unresolvable', 0.5, '2026-01-15T00:00:00Z', false, 'gpt-6.1-sol', 'hybrid-evidence-v2');
+  await grade(takeIds.bluefin!, 'incorrect', 0.8, '2026-02-01T00:00:00Z', false, 'openai:gpt-6.1-sol', 'hybrid-evidence-v2');
   await grade(takeIds.gone!, 'correct', 0.99, '2026-02-15T00:00:00Z');
   await engine.executeRaw(`UPDATE pages SET deleted_at = now() WHERE slug = 'companies/gone-example'`);
 });
@@ -79,11 +80,18 @@ describe('gbrain takes grades', () => {
     expect(await ids('--limit', '1')).toEqual([takeIds.acme]);
   });
 
-  test('marks every judge the W6 eval did not measure', async () => {
-    expect(GRADE_TAKES_MEASURED_MODELS).toEqual([]);
-    expect(gradeJudgeMeasured('claude-sonnet-4-6')).toBe(false);
+  test('marks a verdict measured only for a measured judge asked with the measured prompt', async () => {
+    expect(GRADE_TAKES_MEASURED_MODELS).toEqual(['openai:gpt-6.1-sol']);
+    expect(gradeJudgeMeasured('gpt-6.1-sol', GRADE_TAKES_MEASURED_PROMPT_VERSION)).toBe(true);
+    expect(gradeJudgeMeasured('openai:gpt-6.1-sol', 'hybrid-evidence-v2')).toBe(true);
+    expect(gradeJudgeMeasured('gpt-6.1-sol', 'hybrid-evidence-v1')).toBe(false);
+    expect(gradeJudgeMeasured('claude-sonnet-5-5', 'hybrid-evidence-v2')).toBe(false);
+    expect(gradeJudgeMeasured('claude-sonnet-4-6', 'hybrid-evidence-v2')).toBe(false);
+    const rows = JSON.parse(await capture(() => runTakes(engine, ['grades', '--json'])));
+    expect(rows.map((r: { take_id: number; judge_measured: boolean }) => [r.take_id, r.judge_measured])).toEqual([[takeIds.acme, false], [takeIds.bluefin, true]]);
     const out = await capture(() => runTakes(engine, ['grades']));
     expect(out).toContain('companies/acme-example#1 [alice-example] correct @ 0.97 applied  judge gpt-6.1-sol (not measured by W6)');
+    expect(out).toContain('companies/bluefin-example#1 [alice-example] incorrect @ 0.80  judge openai:gpt-6.1-sol  2026-02-01');
     expect(out).toContain('Acme-example will reach $5M ARR by the end of 2024  (made 2023-02-01)');
     expect(out).not.toContain('Gone-example');
   });

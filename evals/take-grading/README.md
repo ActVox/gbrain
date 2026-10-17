@@ -4,7 +4,19 @@ Measures which chat models may grade a forecasting take: when the `grade_takes` 
 
 ## Current result
 
-Not yet measured on the counted split; `GRADE_TAKES_MEASURED_MODELS` is empty. The dev rounds that shaped prompt `hybrid-evidence-v2` and the parser are summarized in the preregistration.
+Measured 2026-10-16 at gbrain `d99b84694` (branch `capy/w6-take-grading`, prompt `hybrid-evidence-v2`, threshold 0.95), the commit that froze the preregistration; one run per model over the 790 counted takes, $9.25 in all. Only gpt-6.1-sol qualifies.
+
+| Model | Applied | Wrong applied | Upper 95% | Coverage | Abstention | No answer | USD per verdict | Latency p50 / p95 | Qualifies |
+|---|---|---|---|---|---|---|---|---|---|
+| `openai:gpt-6.1-sol` | 496 | 0 | 0.6% | 99.2% | 100% | 1 | $0.0016 | 2.4 s / 3.2 s | yes |
+| `anthropic:claude-sonnet-5-5` | 121 | 1 | 3.9% | 24.0% | 99.6% | 14 | $0.0032 | 1.7 s / 4.5 s | no |
+| `anthropic:claude-opus-5-5` | 2 | 0 | 77.6% | 0.4% | 100% | 3 | $0.0069 | 2.7 s / 4.9 s | no |
+
+So `GRADE_TAKES_MEASURED_MODELS` is `openai:gpt-6.1-sol`, for verdicts asked with prompt `hybrid-evidence-v2` (`GRADE_TAKES_MEASURED_PROMPT_VERSION`). gpt-6.1-sol gave the gold verdict on every one of the 750 takes in the rule and held back on every unresolvable one; it sits near the ceiling of these synthetic fixtures, so the result says the judge reads clean evidence correctly, not how it does on a real brain's messier evidence. Opus 5.5 gave the gold verdict on all 500 resolvable takes but at confidence below 0.95 on all but two, so the rule applies almost none of its verdicts; it called 5 pre-horizon takes `incorrect` below the threshold. Sonnet 5.5's one wrong applied verdict (`counted-world_no_evidence-013`) graded a real-world proposition with no evidence from its own knowledge; it also called 13 pre-horizon takes `incorrect` below the threshold.
+
+Exploratory sets, outside the rule: on `partial` (a stated target missed by a margin), all three models answer `incorrect` (gpt-6.1-sol 18 of 20, applied at 0.96 or more), so whether a shortfall is `partial` or `incorrect` is a grading policy to settle before auto-resolve. On `world_counterfactual`, gpt-6.1-sol applied all 20 verdicts on the brain's evidence over the real outcome; Sonnet 5.5 and Opus 5.5 applied none.
+
+Of the 18 answers with no verdict, 12 (Sonnet 5.5 9, Opus 5.5 3) used the judge's whole 600-token output ceiling and left a short or empty visible answer, so the Anthropic models spend the ceiling on thinking; the judge call passes no thinking setting. Four were Sonnet 5.5 JSON with a stray trailing `,"}`, one was gpt-6.1-sol JSON missing its closing brace, and one was a Sonnet 5.5 answer that corrected itself from `incorrect` to `correct`, which the parser rejects by design. A thinking setting or a larger ceiling for the judge, and a tolerant parse of the trailing comma, are proposed for a later dated preregistration and not changed here; each costs coverage, never correctness. Raw rows, `summary.json`, `summary.md` and `verdict.json` live in gbrain-evals (`docs/benchmarks/2026-10-16-take-grading/`); nothing is committed under `results/` here.
 
 ## What's here
 

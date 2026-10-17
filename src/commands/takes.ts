@@ -312,7 +312,8 @@ async function cmdScorecard(engine: BrainEngine, args: string[]): Promise<void> 
  * W6: the review surface for grade_takes. The cycle caches a verdict per take
  * (`take_grade_cache`) and, with auto-resolve off, applies none; this lists
  * the newest verdict per take so the owner can review them, marking verdicts
- * whose judge model the W6 eval did not measure (`GRADE_TAKES_MEASURED_MODELS`).
+ * whose judge model and prompt the W6 eval did not measure
+ * (`GRADE_TAKES_MEASURED_MODELS`, `GRADE_TAKES_MEASURED_PROMPT_VERSION`).
  * Trusted local only: there is no MCP op, so a thin client refuses it.
  */
 async function cmdGrades(engine: BrainEngine, args: string[]): Promise<void> {
@@ -367,7 +368,7 @@ async function cmdGrades(engine: BrainEngine, args: string[]): Promise<void> {
     ...r,
     confidence: Number(r.confidence),
     graded_at: r.graded_at instanceof Date ? r.graded_at.toISOString() : String(r.graded_at),
-    judge_measured: gradeJudgeMeasured(r.judge_model_id),
+    judge_measured: gradeJudgeMeasured(r.judge_model_id, r.prompt_version),
   }));
 
   if (json) {
