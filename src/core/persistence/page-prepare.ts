@@ -210,7 +210,7 @@ function snapshotLedger(snapshot: PageSnapshot): BodyLedger {
 }
 /**
  * Wave B: `fileMatchesSnapshot` for a segmented page whose body was not read back (over the single-string ceiling).
- * The same comparison with each body region replaced by its SHA-256 on both sides: the file's regions as the streamed
+ * The same comparison (the gate's safety markers stripped on both sides) with each body region replaced by its SHA-256 on both sides: the file's regions as the streamed
  * importer's scan splits them, the stored ones from the trusted stored body (body-digests.ts), one segment at a time.
  * The withdrawal overlay leaves a body without a facts fence unchanged; a file whose body has one under a ledger
  * that applies cannot be overlaid streamed, so it refuses (`page_body_segmented`) instead of reading as drift.
@@ -232,8 +232,8 @@ async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: By
     const parsed = { ...file.parsed, compiled_truth: fileDigests.truth, timeline: fileDigests.timeline };
     const type = importedFileType(parsed, snapshot.page, inferred);
     stored ??= await storedBodyDigests(engine, Number(snapshot.page.id), ledger);
-    return digest(canonical({ ...parsed, type }, parsed.tags))
-      === digest(canonical({ ...withoutBody(snapshot.page), compiled_truth: stored.truth, timeline: stored.timeline }, snapshot.tags));
+    return digest(canonical({ ...parsed, frontmatter: withoutSafetyAssessments(parsed.frontmatter), type }, parsed.tags))
+      === digest(canonical({ ...withoutBody(snapshot.page), frontmatter: withoutSafetyAssessments(snapshot.page.frontmatter ?? {}), compiled_truth: stored.truth, timeline: stored.timeline }, snapshot.tags));
   };
   const raw = await matches({ prefix: new Uint8Array(0), skip: 0 }, false);
   if (raw === true) return true;

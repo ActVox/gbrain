@@ -23,13 +23,16 @@ import * as fs from 'node:fs';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { exportBodyLedger, readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../../src/core/export-snapshot.ts';
+import { buildEmbedSkipMarker, EMBED_SKIP_KEY } from '../../src/core/embed-skip.ts';
 import { serializeMarkdown, slugStampedFrontmatter } from '../../src/core/markdown.ts';
+import { buildContentFlagMarker, CONTENT_FLAG_KEY } from '../../src/core/quarantine.ts';
 import { SEGMENT_MAX_BYTES } from '../../src/core/page-body/limits.ts';
 import { runPersistenceEffects } from '../../src/core/persistence/effects.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import { largeFileWork } from '../../src/core/persistence/large-file.ts';
 import { durableGitRepo, gitAsync } from '../helpers/git-publication.ts';
+import { withManagedFixtureWrite } from '../helpers/managed-e2e-fixture-write.ts';
 import { openTwinBrain, type TwinBrain } from '../helpers/segmented-twins.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 import { waitFor } from '../helpers/wait-for.ts';
@@ -47,6 +50,8 @@ const CRASH_CLAIMS = { 'effect_recovery:before_stage': 'Twin Example vault code 
 /** The claims of the mid-stream death and of the partial stage left at the reserved name. */
 const STREAM_CLAIM = 'Twin Example vault code is 2718';
 const PARTIAL_CLAIM = 'Twin Example vault code is 3141';
+/** The claim purged from a page the content gate marked in the database only. */
+const MARKED_CLAIM = 'Twin Example safe code is 6022';
 
 const fileOf = (brain: TwinBrain, slug: string) => join(brain.root, slug + '.md');
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -211,6 +216,42 @@ for (const kind of testBackends()) {
       expect(work.bytesWritten).toBe(file.length);
       expect(work.largestPiece).toBeGreaterThan(0);
       expect(work.largestPiece).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
+    }, 600_000);
+  });
+
+  describe(kind + ': a withdrawal mirrors a segmented page the content gate marked in the database only', () => {
+    let brain: TwinBrain;
+
+    beforeAll(async () => {
+      brain = await openTwinBrain(kind, [], async seed => {
+        await seed.setSwitch(true);
+        await seed.put(SEGMENTED, 1_100_000);
+      });
+      await extract(brain, SEGMENTED, [MARKED_CLAIM, KEPT]);
+      expect(await brain.storageOf(SEGMENTED)).toBe('segmented');
+      await settle(brain, kind);
+      // The content gate's assessments are database state an import stamps (import-screen.ts), never written to the file.
+      const markers = { [EMBED_SKIP_KEY]: buildEmbedSkipMarker(1_100_000), [CONTENT_FLAG_KEY]: buildContentFlagMarker('markup_heavy', 'synthetic assessment') };
+      await withManagedFixtureWrite(brain.engine, [brain.sourceId], tx => tx.executeRaw('UPDATE pages SET frontmatter=frontmatter||$3::text::jsonb WHERE source_id=$1 AND slug=$2', [brain.sourceId, SEGMENTED, JSON.stringify(markers)]));
+    }, 600_000);
+
+    afterAll(() => brain.close(), 120_000);
+
+    test('purge_fact rewrites the file without the claim instead of reading the markers as drift', async () => {
+      const [row] = await brain.engine.executeRaw<{ frontmatter: Record<string, unknown> }>('SELECT frontmatter FROM pages WHERE source_id=$1 AND slug=$2', [brain.sourceId, SEGMENTED]);
+      expect(Object.keys(row!.frontmatter)).toEqual(expect.arrayContaining([EMBED_SKIP_KEY, CONTENT_FLAG_KEY]));
+      const before = readFileSync(fileOf(brain, SEGMENTED), 'utf8');
+      expect(before).toContain(MARKED_CLAIM);
+      expect(before).not.toContain(EMBED_SKIP_KEY);
+      expect(before).not.toContain(CONTENT_FLAG_KEY);
+
+      const receipt = await purge(brain, kind, SEGMENTED, MARKED_CLAIM);
+      expect(await effectsOf(brain, receipt.requestId)).toEqual(SETTLED);
+      const file = readFileSync(fileOf(brain, SEGMENTED));
+      expect(file.toString('utf8')).not.toContain(MARKED_CLAIM);
+      expect(file.toString('utf8')).toContain(KEPT);
+      expect(file.equals(await exported(brain, SEGMENTED))).toBe(true);
+      expect(stagingLeft(brain)).toEqual([]);
     }, 600_000);
   });
 
