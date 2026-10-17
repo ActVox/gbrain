@@ -2089,6 +2089,15 @@ ran out; `2` when the score target is unreachable and there was no repair step
 to run, or a resume was refused. `healthy` is true only when every recovery
 check is clean after the run; `repairs_completed` counts the repair steps that finished.
 
+### Doctor budgets
+
+Every doctor check runs under a budget, so a slow check reports `unknown` instead of holding the run.
+
+- **Order:** the ops sections run first, then the cheap incident checks (`persistence_capacity`, `managed_sync_not_moving`, `managed_sync_blocked`, `text_projection_readiness`, `partial_embedding`, `links_extraction_lag`), then the full scans.
+- **Per check:** `doctor.entry_budget_ms` (default 15000). A check's database statements stop at its budget: Postgres cancels the statement; PGLite refuses the next one but cannot stop one already running, so a check there can finish late. The frontmatter and fence scans report what they read by then.
+- **Per run:** a non-interactive `gbrain doctor --json` (stderr not a terminal, no `--budget-ms`, `--tier`, `--fix` or remediation flag) caps its check run at `doctor.default_budget_ms` (file plane, default 90000; connect and migrations are not counted) and says so on stderr. `--budget-ms 0` turns it off for one run; `gbrain config set doctor.default_budget_ms 0` turns it off for good.
+- **Past a budget:** the check reports `details.health: "unknown"` with `details.limit` (`entry` or `overall`) and prints `gbrain doctor --only <check> --budget-ms N --json`, which gives that check the whole N.
+
 ## Recover after an upgrade
 
 <a id="recover-after-upgrading-to-this-release"></a>
