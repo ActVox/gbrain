@@ -83,11 +83,16 @@ async function writePass(f: Fixture, s: PassShape, updatedAt?: string): Promise<
   if (updatedAt) await engine.executeRaw('UPDATE op_checkpoints SET updated_at=$3::timestamptz WHERE op=$1 AND fingerprint=$2', [MANAGED_SYNC_PASS_OP, `${f.id}:${f.incarnation}`, updatedAt]);
   return value;
 }
-/** A pass that ends `ending` on every five-minute tick for an hour (12 ticks); the newest row is five minutes old. */
+/**
+ * A pass that ends `ending` on every five-minute tick for an hour (12 ticks); the newest row is five minutes old. It has been
+ * stopping for 61 minutes: doctor `managed_sync_blocked` and the health band fail only past the hour (strictly longer than
+ * MANAGED_SYNC_BLOCKED_FAIL_MS), so a `stuck_since` of exactly an hour would sit on the boundary.
+ */
 async function stuckForAnHour(f: Fixture & { head: string }, ending: 'blocked' | 'not_converged' | 'settle_mismatch'): Promise<void> {
+  const stuckSince = ago(61 * MIN);
   for (let tick = 1; tick <= 12; tick++) {
     await writePass(f, { outcome: ending === 'blocked' ? 'blocked' : 'resumable', stop_reason: ending === 'blocked' ? 'reconcile_read_incomplete' : 'not_converged',
-      not_converged_streak: ending === 'not_converged' ? tick : 0, remaining: 3, target: f.head, stuck_since: ago(60 * MIN),
+      not_converged_streak: ending === 'not_converged' ? tick : 0, remaining: 3, target: f.head, stuck_since: stuckSince,
       mismatch: ending === 'settle_mismatch' ? { 'notes/flaky.md': { level: 'abc', streak: Math.min(tick, 2) } } : {} }, ago((65 - tick * 5) * MIN));
   }
 }
