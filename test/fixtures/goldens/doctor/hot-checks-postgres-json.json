@@ -646,6 +646,13 @@
           },
           {
             "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No managed sync run is blocked.",
+            "name": "managed_sync_blocked",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
             "details": {
               "docs": "docs/guides/repair.md#receipt-compaction",
               "last_compaction": {
@@ -4627,6 +4634,13 @@
             "elapsed_ms": "<volatile>",
             "message": "No managed sync is pending.",
             "name": "managed_sync_not_moving",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "No managed sync run is blocked.",
+            "name": "managed_sync_blocked",
             "status": "ok"
           },
           {

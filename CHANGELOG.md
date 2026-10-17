@@ -37,6 +37,30 @@ To turn it on, run `gbrain config set sync.on_commit true` on the brain host. Th
 - New doctor check `managed_sync_latency` (`src/commands/doctor/checks/managed-sync-latency.ts`); the doctor goldens are regenerated for it.
 - Tests: `test/serve-head-watcher.test.ts` (debounce, single flight, follow-up, resume cap, error handling, stop), `test/serve-head-watcher-managed.serial.test.ts` (a real managed source on PGLite and Postgres: a commit becomes searchable with no manual sync), `test/sync-freshness-6858.test.ts` (percentiles, exclusions, doctor thresholds, the additive `sync status --json` block). The two database tests are listed in `test/postgres-unit-arms.txt`.
 
+## [0.60.272.0] - 2026-10-16
+
+**A page that stops a managed sync no longer stops its source silently, and gbrain stops rewriting busy files just to refresh an assessment marker.** On a managed Postgres brain one page write was resolved the documented way (`gbrain repair stuck-recovery --keep disk`), and its source then indexed nothing for 21 hours (#6858). The request ended `conflict` / `source_changed` with a message no classifier knew, so the run parked `blocked_by_failures`. Every autopilot freshness sync job returned that parked run and was recorded `completed`, so nothing retried and nothing alerted. The trigger was gbrain itself: managed sync rewrote the canonical file of an oversized page only to refresh its `embed_skip` marker, whose `assessed_at` changes whenever the body does, and that rewrite was the publication an agent's own edit of the hot file collided with.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `repair stuck-recovery --keep disk` abandons a managed sync import | the run parked `blocked_by_failures` until `sync --retry-failed` | the next plain sync retries the page after the rest of its run: it imports the kept file when it is committed, holds it `worktree_dirty` when it is an uncommitted edit, and syncs the rest of the source in the same pass |
+| The `--keep disk` result for any other write | named only `sources reconcile … --preview` | names both follow-ups in order: `sources reconcile … --preview --auto-additive` (still preview-first), then `gbrain sync --source <id> --no-pull`; a sync import names the plain sync |
+| An autopilot (or any) `sync` job whose managed run is blocked, stalled or capped | `completed`, with the parked result | `dead`; the error names the stop and the run's `next` command, and `jobs get` keeps `outcome`, `drain` and `next` in the job's progress |
+| A managed sync run blocked on a page | `sync_failures` warned and failed only after 72 h | new doctor check `managed_sync_blocked`: warns at once and fails after an hour, with `gbrain sync status --source <id> --json` as its fix |
+| get_brain_health with a source blocked over an hour | `ok` | `attention`, with a `sync_blocked` count band (no source names) |
+| A managed incremental `gbrain sync` on a large repository whose chunker stamp predates the current chunker | read and token-counted every file before the first write (131 s and 1.4 GB on a 308k-file, 2.7 GB test repo), priced a `chunker_drift` ceiling and could auto-defer cheap embeds | prices only the changed files, as the run embeds them (first write on a blocked 52-page retry went from 58 s to 5 s in the same test); `--full` and classic sources are unchanged |
+| A managed sync import of an oversized, quarantined or flagged page | rewrote the canonical file with the gate's marker (a file publication with a recovery record, every time the body changed) | stores the marker in the database only and leaves the file as committed; a file whose marker is missing or stale is not file/database drift |
+
+### What you need to do
+
+Nothing. Markers already written into files stay where they are (nothing rewrites files on upgrade), and a later import of the same file no longer touches them. If your monitoring treats a dead `sync` job as an incident, that is now the intended signal: `gbrain sync status --source <id> --json` names the page and its exit. Since v0.60.269.0 a plain `gbrain sync` also retries the failure an earlier run recorded, so once the cause is cleared the next freshness job resumes the run by itself.
+
+### Still open on #6858
+
+A supported low-latency mode (ask 6) is a separate proposal. The repository-scaling preparation cost of ask 5 came from the embed cost estimate above; the remaining per-run work that grows with the repository (git discovery, the identity freeze) measured about 3 s at 308k pages.
+
 ## [0.60.271.0] - 2026-10-16
 
 **A page write no longer waits behind a sync group that an idle managed sync started in the moment it was being claimed.** While a managed sync drains with lanes, the lanes can sit idle between groups. If an agent's page write arrived just then and its own process was still claiming it, the drain skipped the write and started the next sync group, so the write waited for that group: about 730 ms instead of about 60 ms in the test traces. The FIFO claim now holds that group back, as the lane-head claim already did. The sync still gets one group after each such write commits, so a stream of writes cannot stall it. Three flaky tests on master are fixed with it.
