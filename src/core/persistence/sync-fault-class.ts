@@ -103,6 +103,9 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // Connection class: transport only; the cursor and manifest stand.
   { code: 'connection_lost', class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: 'three reruns in a row end connection_lost (the database is unreachable from this host)' },
   { code: 'database_contention', class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: 'three reruns in a row stop on it' },
+  // The database ended a write's statements (SQLSTATE 57014) persistence.max_preparation_attempts times; the run re-freezes the entry in place.
+  { code: 'write_interrupted', class: 'connection', safe_actions: ['retry'], needs_human: false,
+    escalate: 'a rerun ends write_interrupted on the same entry again: gbrain sources writer status --source <source> --json (read-only) names the load on the write owner' },
   { code: 'write_capacity', class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: 'writer status shows the cap held by requests that never settle' },
   // #6696 (A5): a background sync paused near a cumulative cap; interactive writes keep the rest and the pause lifts as capacity returns.
   { code: 'write_capacity_backpressure', class: 'connection', safe_actions: ['retry'], needs_human: false,
