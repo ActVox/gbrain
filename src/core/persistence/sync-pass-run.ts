@@ -520,8 +520,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         if (r.settled) continue;
         if (r.inFlight) { inFlight.push(entry); continue; }
         if (S.has(settledKey(entry.path, entry.state.level))) {
-          // A hold this pass wrote or re-screened at L is that path's fate here, even when its code re-screens every pass.
-          if (entry.state.hold?.atLevel) continue;
+          // A hold this pass wrote or re-screened at L, or a slug collision it skipped, is that path's fate here, even when
+          // its code re-screens every pass or the skipped twin still classifies as an import.
+          if (entry.state.hold?.atLevel || S.get(settledKey(entry.path, entry.state.level)) === 'collision') continue;
           // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
           const again = settledKey(entry.path, entry.state.level);
           if (readmitted.has(again)) { mismatch.push(entry); continue; }
@@ -631,7 +632,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       }
       // Every candidate of the round settled: committed, waived, held, deferred to a hold, a collision, or (a rename's
       // deletion) carried by its import.
-      for (const entry of [...deletes, ...imports]) S.set(settledKey(entry.path, entry.state.level), 'settled');
+      for (const entry of [...deletes, ...imports]) if (!S.has(settledKey(entry.path, entry.state.level))) S.set(settledKey(entry.path, entry.state.level), 'settled');
       roundSettled = 0;
       lastMismatch = [];
     }
