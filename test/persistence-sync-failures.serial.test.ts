@@ -290,8 +290,8 @@ test('managed failure retry hints name the failed cursor options locally, shell-
     const d = await fixture(engine, { 'note.md': 'A stable discovery observation.\n' });
     const execute = engine.executeRaw;
     engine.executeRaw = function (this: BrainEngine, sql: string, params?: unknown[]) {
-      // #6712 PR 4b: the pass's level read stands where the cursor's discovery read stood.
-      if (sql.includes('FROM pages p LEFT JOIN op_checkpoints c') && params?.[0] === d.id) throw new OperationError('storage_error', 'Synthetic discovery failure');
+      // #6712 PR 4b: the pass's level read (a Postgres cursor declared over it, or PGLite keyset pages) stands where the cursor's discovery read stood.
+      if (sql.includes('SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision') && params?.[0] === d.id) throw new OperationError('storage_error', 'Synthetic discovery failure');
       return execute.call(this, sql, params);
     } as BrainEngine['executeRaw'];
     let thrown: Error | undefined;
@@ -326,7 +326,7 @@ test('a pass that fails reading its level or freezing a changed page stays diagn
     const d = await fixture(engine, { 'note.md': 'A stable level observation.\n' });
     const execute = engine.executeRaw;
     engine.executeRaw = function (this: BrainEngine, sql: string, params?: unknown[]) {
-      if (sql.includes('FROM pages p LEFT JOIN op_checkpoints c') && params?.[0] === d.id) throw new OperationError('storage_error', 'Synthetic level read failure');
+      if (sql.includes('SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision') && params?.[0] === d.id) throw new OperationError('storage_error', 'Synthetic level read failure');
       return execute.call(this, sql, params);
     } as BrainEngine['executeRaw'];
     try {

@@ -616,7 +616,7 @@ type SyncBarrier = 'pass-pin-commit' | 'pass-classify' | 'foreground' | 'freeze'
 const isLeaseCheck = (sql: string) => sql.startsWith('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid');
 function matchesSyncBarrier(boundary: SyncBarrier, sql: string, params: unknown[] | undefined, transactional: boolean): boolean {
   if (boundary === 'pass-pin-commit') return transactional && sql.startsWith('INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at)') && params?.[0] === 'managed-sync-pass' && params?.[3] === true;
-  if (boundary === 'pass-classify') return sql.startsWith('SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision');
+  if (boundary === 'pass-classify') return sql.replace(/^DECLARE sync_pass_pages NO SCROLL CURSOR FOR /, '').startsWith('SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision');
   if (boundary === 'foreground') return sql.includes("NOT(COALESCE(intent->>'kind','') LIKE 'managed_sync_%') LIMIT 1");
   if (boundary === 'freeze') return sql.startsWith('SELECT id,slug,source_path,deleted_at FROM pages WHERE source_id=') && !transactional;
   if (boundary === 'request-lookup') return sql.startsWith('SELECT') && sql.includes('FROM persistence_requests') && sql.includes('request_id=') && !transactional;
