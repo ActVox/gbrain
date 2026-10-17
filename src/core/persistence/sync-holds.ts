@@ -604,6 +604,17 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       const slug = record.slug ?? '<slug>';
       const by = record.meta.competing_request_id ? `${record.meta.competing_operation ?? 'a database'} request ${record.meta.competing_request_id} wrote page ${slug} straight to the database`
         : `page ${slug} changed in the database${record.meta.page_revision ? ` (revision ${record.meta.page_revision})` : ''} after the sync enumerated it`;
+      // #6712 wave: a held deletion has no file left to reconcile; repair file-drift resolves a page whose file is gone from the commit.
+      if (record.meta.deleted) {
+        const preview = (prefer: 'database' | 'file') => ['gbrain', 'repair', 'file-drift', '--source', source, '--slug', slug, '--prefer', prefer];
+        const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+        return { argv: preview('database'), consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/repair.md#deleted-canonical-files',
+          why: `${record.path} was deleted in Git while ${by}, so sync held the deletion instead of removing a page that changed. This preview (writes nothing) keeps the page and recreates its file; `
+            + `${preview('file').join(' ')} previews the deletion instead (soft-deletes exactly that page). Decide with the user, run the apply command the preview prints, then sync again. The rest of the source is not blocked.`,
+          then: { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+            why: `Re-screens ${record.path} after the repair (a changed file or page revision re-screens it by itself).` },
+          verify };
+      }
       return { argv: ['gbrain', 'sources', 'reconcile', source, slug, '--preview'], consent: [], actor: 'agent', requires_exclusive: false,
         why: `${record.path} changed in Git while ${by}, so the two versions diverge and neither was overwritten. `
           + `The reconcile preview shows both and writes nothing; resolve it with the user, apply it, then re-screen the file with gbrain sources retry-held ${source} and gbrain sync --source ${source} --no-pull. The rest of the source is not blocked.`,
