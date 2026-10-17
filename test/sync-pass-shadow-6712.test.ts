@@ -179,8 +179,14 @@ describe('#6712 PR 4a convergence shadow (pglite)', () => {
     expect(await footprint(engine)).toBe(before);
   }, { setup }), 120_000);
 
-  test('sync status: plain status skips the heavy convergence read; --detail reports it with dry_run: true', () => managedBrain(async ({ engine }) => {
+  test('sync status: plain status reports the live pass row, and without one it skips the heavy convergence read; --detail reports it with dry_run: true', () => managedBrain(async ({ engine }) => {
     expect((await performManagedSync(engine, SYNC)).status).toBe('first_sync');
+    // #6712 PR 4b: a live pass's row is the convergence plain status reports, read in the status's own statements.
+    const live = await readSyncStatus(engine, 'default', { detail: false });
+    expect(live.convergence_read).toEqual({ status: 'read' });
+    expect(live.convergence).toMatchObject({ dry_run: false, outcome: 'synced', candidates: 3, settled: 3 });
+    // A source with no pass row (no pass has run there yet) keeps the 4a contract.
+    await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync-pass' AND completed_keys->0->>'source_id'='default'");
     const plain = await readSyncStatus(engine, 'default', { detail: false });
     expect(plain.convergence).toBeNull();
     expect(plain.convergence_read).toMatchObject({ status: 'not_read', fix: { argv: ['gbrain', 'sync', 'status', '--source', 'default', '--detail', '--json'] } });

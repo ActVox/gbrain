@@ -4,8 +4,12 @@
  * delete as a delete hold, a rename with its endpoints; the checkpoint never
  * holds; `sync.holds=fail` keeps blocking. The hold lands behind the narrowed
  * gate: an unrelated maintenance write on the same source no longer blocks
- * it, a write on the same page still does, and a run killed before the cursor
- * consumed the failure holds the entry at the start of the next run. Every
+ * it, a write on the same page still does (#6712 PR 4b: the live pass does not
+ * admit a file whose page has open work, so it mints no request until that
+ * write settles), and once the cause is gone the next run imports the file
+ * under a new request. A breaker trip stops the pass blocked; once the cause is
+ * fixed the next pass imports every file and clears the holds. A retry-held
+ * schedule survives a killed pass and is consumed by the pass's stamp. Every
  * surface routes the hold to writer status, then `sources retry-held` and the
  * same sync with its options, never to frontmatter repair. #6712: the hold is
  * transient, so every sync retries it until it has been held
@@ -134,7 +138,6 @@ test('an import whose preparation stalls is held in the same run, the run finish
   expect(await engine.getPage('notes/z', { sourceId: s.id })).not.toBeNull();
   const failed = await s.failedRequests();
   expect(failed).toEqual([expect.objectContaining({ error_code: 'preparation_stalled', state: 'failed', path: 'notes/stuck.md' })]);
-  expect(result.converted_from_failed).toEqual([failed[0]!.request_id]);
   expect(await s.ledger()).toEqual([]);
   const [hold] = result.held!;
   expect(hold).toMatchObject({ path: 'notes/stuck.md', code: 'preparation_stalled', stale: false, docs: 'docs/guides/write-refusals.md#preparation_stalled' });
@@ -237,7 +240,7 @@ test('a stalled rename holds the destination with its origin; the hold gate lock
   expect(await engine.getPage('notes/new', { sourceId: s.id })).not.toBeNull();
 }), 180_000);
 
-test('sync.holds=fail keeps blocking with the typed receipt; the next run after holds are on converts it at its start (a kill before the cursor consumed the failure)', () => each(async engine => {
+test('sync.holds=fail keeps blocking with the typed receipt; once the cause is gone and holds are on, the next run re-admits the file under a new request and imports it', () => each(async engine => {
   await engine.setConfig('sync.holds', 'fail');
   const s = await source(engine, { 'notes/a.md': note('A'), 'notes/stuck.md': note('Stuck') });
   stallPaths(engine, s.id, new Set(['notes/stuck.md']));
@@ -247,14 +250,19 @@ test('sync.holds=fail keeps blocking with the typed receipt; the next run after 
   expect(await s.holds()).toEqual([]);
   expect(await s.ledger()).toHaveLength(1);
   const [failed] = await s.failedRequests();
-  // The cursor is still pending on the failed receipt (as after a watchdog kill): the next run with holds on converts it before admitting anything.
+  expect(failed).toMatchObject({ path: 'notes/stuck.md', error_code: 'preparation_stalled' });
+  // The pass keeps no cursor pending on the failed receipt: the next run classifies the file again and, the stall gone, imports it.
   await engine.unsetConfig('sync.holds');
   installFaultHook(undefined);
-  const converted = await s.sync();
-  expect(converted).toMatchObject({ status: 'first_sync', held_count: 1, converted_from_failed: [failed!.request_id] });
-  expect(converted.held![0]).toMatchObject({ path: 'notes/stuck.md', code: 'preparation_stalled' });
+  const resumed = await s.sync();
+  expect(resumed).toMatchObject({ status: 'first_sync', pass: { outcome: 'synced' } });
+  expect(resumed.held_count ?? 0).toBe(0);
+  expect(await s.holds()).toEqual([]);
   expect(await engine.getPage('notes/a', { sourceId: s.id })).not.toBeNull();
-  expect(await s.failedRequests()).toHaveLength(1);
+  expect(await engine.getPage('notes/stuck', { sourceId: s.id })).not.toBeNull();
+  expect(await s.failedRequests()).toEqual([failed]);
+  const [imports] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='notes/stuck.md' AND state='committed'", [s.id]);
+  expect(imports!.n).toBe(1);
 }), 180_000);
 
 test('narrowed gate: an unfinished maintenance write on another page of the same source no longer blocks the hold; one on the same page still does', () => each(async engine => {
@@ -273,22 +281,25 @@ test('narrowed gate: an unfinished maintenance write on another page of the same
   expect(result).toMatchObject({ status: 'synced', modified: 1, held_count: 1 });
   expect(result.held![0]).toMatchObject({ path: 'notes/stuck.md', code: 'preparation_stalled', stale: true });
   await unrelated.finish();
-  // Same page, by page id: the hold waits for it, and the run yields writer_pending within its wait budget.
+  // Same page, by page id: the pass does not admit a file whose page has open work (in_flight), so it mints no request and
+  // the hold keeps its receipt; the run yields writer_pending within its wait budget.
   installFaultHook(undefined);
   await retryHeld(engine, s.id);
   s.write('notes/stuck.md', note('Stuck v3')); commit(s.root, 'edit again');
   const samePage = await s.unfinishedWrite('notes/stuck', stuck);
   stallPaths(engine, s.id, new Set(['notes/stuck.md']));
+  const receipts = (await s.failedRequests()).length;
+  const receipt = (await s.holds())[0]!.meta.stall!.request_id;
   const pending = await s.sync();
-  expect(pending).toMatchObject({ status: 'partial', reason: 'writer_pending' });
+  expect(pending).toMatchObject({ status: 'partial', reason: 'writer_pending', pass: { outcome: 'resumable', stop_reason: 'writer_pending' } });
+  expect(await s.failedRequests()).toHaveLength(receipts);
   expect(await s.holds()).toHaveLength(1);
-  expect((await s.holds())[0]!.meta.stall!.request_id).not.toBe((await s.failedRequests()).at(-1)!.request_id);
-  // Once it settles, the next pass holds the entry from the same failed receipt without a new request.
+  expect((await s.holds())[0]!.meta.stall!.request_id).toBe(receipt);
+  // Once it settles, the next pass admits the file; it stalls again and is held under that new receipt.
   await samePage.finish();
-  const before = (await s.failedRequests()).length;
   const held = await s.sync();
   expect(held).toMatchObject({ status: 'synced', held_count: 1 });
-  expect((await s.failedRequests()).length).toBe(before);
+  expect(await s.failedRequests()).toHaveLength(receipts + 1);
   expect((await s.holds())[0]!.meta.stall!.request_id).toBe((await s.failedRequests()).at(-1)!.request_id);
   // The same-path match also works for a write that names the file rather than the slug.
   installFaultHook(undefined);
@@ -297,8 +308,11 @@ test('narrowed gate: an unfinished maintenance write on another page of the same
   const byPath = await s.unfinishedWrite('elsewhere/slug', null, 'notes/stuck.md');
   stallPaths(engine, s.id, new Set(['notes/stuck.md']));
   expect(await s.sync()).toMatchObject({ status: 'partial', reason: 'writer_pending' });
+  expect(await s.failedRequests()).toHaveLength(receipts + 1);
   await byPath.finish();
   expect(await s.sync()).toMatchObject({ status: 'synced', held_count: 1 });
+  expect(await s.failedRequests()).toHaveLength(receipts + 2);
+  expect(await engine.getPage('notes/stuck', { sourceId: s.id })).toMatchObject({ compiled_truth: expect.stringContaining('Stuck.') });
 }), 240_000);
 
 test('bulk groups: a stalled first, middle or last member is held, the committed prefix stays, the rest is re-frozen and the run finishes in one invocation', () => each(async engine => {
@@ -391,7 +405,7 @@ test('retry-held while the stall persists: the file is re-held once under the ne
   expect(await s.holds()).toHaveLength(1);
 }), 180_000);
 
-test('a scheduled re-screen survives a run killed before it reached the file; a run killed after freezing it carries it in its manifest and leaves no stale schedule', () => each(async engine => {
+test('a scheduled re-screen survives a run killed before it reached the file and a pass killed after its batch froze it (only the stamp consumes it); the next run imports the file and consumes the schedule', () => each(async engine => {
   const s = await source(engine, { 'notes/a.md': note('A'), 'notes/stuck.md': note('Stuck') });
   stallPaths(engine, s.id, new Set(['notes/stuck.md']));
   expect(await s.sync()).toMatchObject({ status: 'first_sync', held_count: 1 });
@@ -402,17 +416,19 @@ test('a scheduled re-screen survives a run killed before it reached the file; a 
   const aborted = new AbortController(); aborted.abort();
   expect((await s.sync({ signal: aborted.signal })).status).toBe('partial');
   expect(await readGitHoldRetryPaths(engine, s.id, incarnation)).toEqual(['notes/stuck.md']);
-  // Killed right after the fresh cursor is saved: the manifest carries the entry and the schedule was consumed with the same save.
+  // Killed right after the pass's batch froze the file, before admitting it: no request was minted, and the schedule stays,
+  // because only the pass's stamp consumes it.
+  const requests = (await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='notes/stuck.md'", [s.id]))[0]!.n;
   let killed = 0;
   installFaultHook(async (point, detail) => { if (point === 'sync:mid_checkpoint' && detail.sourceId === s.id && killed++ === 0) throw new Error('injected kill after the cursor save'); });
   await expect(s.sync()).rejects.toThrow('injected kill');
   installFaultHook(undefined);
   expect(killed).toBe(1);
-  const [cursor] = await engine.executeRaw<{ c: { entries?: Array<{ path: string }>; total: number; index: number } }>(
-    "SELECT completed_keys->0 AS c FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [s.id]);
-  expect(cursor!.c).toMatchObject({ total: 1, index: 0 });
-  expect(await readGitHoldRetryPaths(engine, s.id, incarnation)).toEqual([]);
-  // The next run resumes that cursor and imports the file; nothing is left scheduled, so the run after it has nothing to do.
+  expect(await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [s.id])).toEqual([]);
+  expect((await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='notes/stuck.md'", [s.id]))[0]!.n).toBe(requests);
+  expect(await readGitHoldRetryPaths(engine, s.id, incarnation)).toEqual(['notes/stuck.md']);
+  expect(await engine.getPage('notes/stuck', { sourceId: s.id })).toBeNull();
+  // The next run imports the file and its stamp consumes the schedule, so the run after it has nothing to do.
   expect(await s.sync()).toMatchObject({ status: 'synced', added: 1 });
   expect(await engine.getPage('notes/stuck', { sourceId: s.id })).not.toBeNull();
   expect(await s.holds()).toEqual([]);
@@ -422,7 +438,7 @@ test('a scheduled re-screen survives a run killed before it reached the file; a 
 
 // ── #6278 (B2): the systemic breaker ──
 
-test('breaker: five consecutive stalled entries with no commit between stop the run with one systemic diagnostic; the next run re-freezes and re-screens instead of holding', () => each(async engine => {
+test('breaker: five consecutive stalled entries with no commit between stop the run with one systemic diagnostic; once the cause is fixed the next run imports every file and clears the holds', () => each(async engine => {
   const files: Record<string, string> = {};
   for (let i = 0; i < 7; i++) files[`notes/s${i}.md`] = note(`S${i}`);
   const s = await source(engine, files);
@@ -432,25 +448,21 @@ test('breaker: five consecutive stalled entries with no commit between stop the 
     breaker: { code: 'preparation_systemic', rule: 'consecutive', stalled: 5, consecutive: 5 } });
   expect(tripped.breaker!.fix.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', s.id, '--json']);
   expect(tripped.managedWrite?.write_error).toBe('preparation_stalled');
-  // Four holds were written before the trip; the fifth receipt is counted, not held, and the cursor still points at it.
+  // Four holds were written before the trip; the fifth receipt is counted, not held, and the pass stopped blocked.
   expect((await s.holds()).map(hold => hold.path).sort()).toEqual(['notes/s0.md', 'notes/s1.md', 'notes/s2.md', 'notes/s3.md']);
   expect(await s.failedRequests()).toHaveLength(5);
-  const [cursor] = await engine.executeRaw<{ c: { index: number; breaker: { stalled: string[]; streak: number; tripped?: { rule: string } }; pending: { intent: { path: string } } } }>(
-    "SELECT completed_keys->0 AS c FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [s.id]);
-  expect(cursor!.c).toMatchObject({ index: 4, pending: { intent: { path: 'notes/s4.md' } }, breaker: { streak: 5, tripped: { rule: 'consecutive' } } });
-  expect(cursor!.c.breaker.stalled).toHaveLength(5);
-  // Cause fixed: the next run re-freezes the stopped entry under a fresh request (nothing held), finishes, and scheduled the run's four stalled holds
-  // for a re-screen. B7: that schedule is the same catch-up's work, so the pass yields (`writer_yield`) for the drain's next pass to discover and take it.
+  expect(tripped.pass).toMatchObject({ outcome: 'blocked', stop_reason: 'blocked_by_failures' });
+  for (let i = 0; i < 7; i++) expect(await engine.getPage(`notes/s${i}`, { sourceId: s.id })).toBeNull();
+  // Cause fixed: the next pass re-screens the four transient holds and imports every file under fresh requests (nothing held,
+  // no new failed receipt), and the run after it has nothing to do.
   installFaultHook(undefined);
   const resumed = await s.sync();
-  expect(resumed).toMatchObject({ status: 'partial', reason: 'writer_yield', added: 3, managedCursor: { index: 7, total: 7 } });
-  expect(resumed.converted_from_failed).toEqual([...cursor!.c.breaker.stalled]);
+  expect(resumed).toMatchObject({ status: 'first_sync', added: 7, pass: { outcome: 'synced', candidates: 7 } });
+  expect(resumed.held_count ?? 0).toBe(0);
   expect(await s.failedRequests()).toHaveLength(5);
-  expect(await engine.getPage('notes/s4', { sourceId: s.id })).not.toBeNull();
-  expect(await s.holds()).toHaveLength(4);
-  const rescreened = await s.sync();
-  expect(rescreened).toMatchObject({ status: 'synced', added: 4 });
+  for (let i = 0; i < 7; i++) expect(await engine.getPage(`notes/s${i}`, { sourceId: s.id })).not.toBeNull();
   expect(await s.holds()).toEqual([]);
+  expect(await s.sync()).toMatchObject({ status: 'up_to_date' });
 }), 240_000);
 
 test('breaker: the count rule trips above GBRAIN_SYNC_HOLD_ESCALATE_COUNT (greater than), and a committed page resets the consecutive streak', () => each(async engine => {

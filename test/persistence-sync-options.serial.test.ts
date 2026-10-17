@@ -132,27 +132,34 @@ check('noSchemaPack bypasses the configured pack and noExtract queues no optiona
   });
 });
 
-// #6712 PR 1: a changed-option resume no longer refuses `invalid_params`; it inherits the cursor's opt-outs (reported in
-// `inherited_options`) and still never rewrites accepted work.
+// #6712 PR 1: a changed-option resume no longer refuses `invalid_params`; it inherits the interrupted run's opt-outs
+// (reported in `inherited_options`) and still never rewrites accepted work. #6712 PR 4b: a non-company source runs the
+// live pass, whose open episode carries the opt-outs (there is no cursor), so every import of the source keeps them.
+const importIntents = (engine: BrainEngine, source: string) => engine.executeRaw<{ id: string; intent: SyncIntent }>(
+  "SELECT id,intent FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import' ORDER BY sequence", [source]);
 check('interrupted options survive resume and changed-option retries cannot rewrite accepted work', async engine => {
   const f = await fixture(engine, 2);
   const first = await performManagedSync(engine, f.opts, { maxPages: 1, maxMs: 1000 });
   expect(first).toMatchObject({ status: 'partial', filesImported: 1 });
   const requests = await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE source_id=$1', [f.id]);
   const resumed = await performManagedSync(engine, { ...f.opts, noEmbed: false, noSchemaPack: false, noExtract: false });
-  expect(resumed).toMatchObject({ status: 'first_sync', runId: first.runId, filesImported: 2 });
+  expect(resumed).toMatchObject({ status: 'first_sync', filesImported: 1, pass: { kind: 'full' } });
   expect([...(resumed.inherited_options ?? [])].sort()).toEqual(['noEmbed', 'noExtract', 'noSchemaPack']);
   expect(await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE id=ANY($1::uuid[])', [requests.map(row => (row as { id: string }).id)])).toEqual(requests);
-  expect((await cursor(engine, f.id)).value.processingOptions).toEqual({ noEmbed: true, noSchemaPack: true, noExtract: true });
+  const imports = await importIntents(engine, f.id);
+  expect(imports).toHaveLength(2);
+  for (const row of imports) expect(row.intent.processingOptions).toEqual({ noEmbed: true, noSchemaPack: true, noExtract: true });
   expect(await engine.executeRaw("SELECT kind FROM persistence_effects WHERE source_id=$1 AND kind IN ('embedding','facts-backstop')", [f.id])).toEqual([]);
   const retry = await fixture(engine, 2);
-  const interrupted = await performManagedSync(engine, retry.opts, { maxPages: 1, maxMs: 1000 });
+  expect(await performManagedSync(engine, retry.opts, { maxPages: 1, maxMs: 1000 })).toMatchObject({ status: 'partial', filesImported: 1 });
   const original = await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE source_id=$1 ORDER BY id', [retry.id]);
   // Without a failure (the refusal used to record one) `--retry-failed` has nothing to rediscover: it resumes the
-  // interrupted run with the cursor's opt-outs.
+  // interrupted pass with its opt-outs.
   const rediscovered = await performManagedSync(engine, { ...retry.opts, noSchemaPack: false, retryFailed: true });
-  expect(rediscovered).toMatchObject({ status: 'first_sync', runId: interrupted.runId, inherited_options: ['noSchemaPack'] });
-  expect((await cursor(engine, retry.id)).value.processingOptions.noSchemaPack).toBe(true);
+  expect(rediscovered).toMatchObject({ status: 'first_sync', filesImported: 1, inherited_options: ['noSchemaPack'] });
+  const retried = await importIntents(engine, retry.id);
+  expect(retried).toHaveLength(2);
+  for (const row of retried) expect(row.intent.processingOptions?.noSchemaPack).toBe(true);
   expect(await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE id=ANY($1::uuid[]) ORDER BY id', [original.map(row => row.id)])).toEqual(original);
 });
 
@@ -305,10 +312,11 @@ test('fresh processes resume persisted pending opt-outs under the original reque
         expect(resumed.before).toEqual(frozen!);
         expect(resumed.changedOptions).toEqual({ inherited: noEmbed ? ['noEmbed'] : [] });
         expect(resumed.afterChangedOptions).toEqual(resumed.after);
-        expect(resumed.result).toMatchObject({ status: 'first_sync', runId: pending!.runId, added: 1, filesImported: 1 });
+        expect(resumed.result).toMatchObject({ status: 'first_sync', added: 1, filesImported: 1, pass: { outcome: 'synced' } });
+        expect(frozen![0].intent.passId).toBe(pending!.pass!.pass_id);
         expect(resumed.after).toHaveLength(2);
         expect(resumed.after[0]).toEqual({ ...frozen![0], state: 'committed' });
-        expect(resumed.after[1]).toMatchObject({ state: 'committed', intent: { kind: 'managed_sync_checkpoint', runId: pending!.runId } });
+        expect(resumed.after[1]).toMatchObject({ state: 'committed', intent: { kind: 'managed_sync_checkpoint', passId: resumed.result.pass.pass_id } });
         expect(resumed.beforeDrain).toEqual(noEmbed ? [] : [{ kind: 'embedding', state: 'queued' }]);
         expect(resumed.effects).toEqual(noEmbed ? [] : [{ kind: 'embedding', state: 'committed' }]);
         expect(resumed.networkCalls).toBe(0);
@@ -667,7 +675,16 @@ for (const boundary of ['discovery', 'discovery-commit', 'foreground', 'freeze',
         else await outer;
         expect(observed).toBe(true);
         await disposePersistenceConsumer(engine);
-        expect(await syncState(engine, f.id)).toEqual(before!);
+        const after = await syncState(engine, f.id);
+        if (interrupted === 'explicit-abort' || interrupted === 'caller-abort') {
+          // #6712 PR 4b: a caller abort returns partial and the live pass records that stop on its pass row (a lost lease or a
+          // released context cannot write it, a job abort rejects); every other row is as the interrupt found it.
+          const passRow = (row: Record<string, unknown>) => row.op === 'managed-sync-pass' && String(row.fingerprint).startsWith(`${f.id}:`);
+          const [row] = after.checkpoints.filter(passRow) as Array<{ completed_keys: Array<{ telemetry: unknown }> }>;
+          expect(row.completed_keys[0].telemetry).toMatchObject({ outcome: 'resumable', stop_reason: 'timeout', counts: { added: 0, modified: 0, deleted: 0 } });
+          expect({ ...after, checkpoints: after.checkpoints.filter(row => !passRow(row)) })
+            .toEqual({ ...before!, checkpoints: before!.checkpoints.filter(row => !passRow(row)) });
+        } else expect(after).toEqual(before!);
         expect(readFileSync(join(f.root, 'records/example-0.md'), 'utf8')).toBe(body.replace('synthetic record', 'synthetic record 0'));
         console.info(`SYNC_ADMISSION_ABORT engine=${engine.kind} boundary=${boundary} case=${interrupted} requests_at_interrupt=0 state_unchanged=true`);
       } finally {
@@ -774,17 +791,20 @@ for (const boundary of ['accepted-commit', 'receipt-banking'] as const) check(`c
     expect(first).toMatchObject({ status: 'partial', reason: 'timeout', added: 1, filesImported: 1, bankedFiles: 1 });
     expect(observed).toBe(true);
     await disposePersistenceConsumer(engine);
-    const banked = await cursor(engine, f.id), before = await syncState(engine, f.id);
-    expect(banked.value).toMatchObject({ index: 1, counts: { added: 1 } });
-    expect(banked.value.pending).toBeUndefined();
+    // #6712 PR 4b: the live pass has no cursor; its pass row banks the accepted page and records the stop.
+    const before = await syncState(engine, f.id);
+    const [passRow] = before.checkpoints.filter(row => row.op === 'managed-sync-pass' && String(row.fingerprint).startsWith(`${f.id}:`)) as Array<{ completed_keys: Array<{ telemetry: unknown }> }>;
+    expect(passRow.completed_keys[0].telemetry).toMatchObject({ outcome: 'resumable', stop_reason: 'timeout', counts: { added: 1 } });
     expect(before.requests).toHaveLength(1);
     expect(before.requests[0]).toMatchObject({ state: 'committed' });
     expect(before.pages).toHaveLength(1);
     expect(before.effects).toEqual([]);
     expect(before.source).toEqual([{ last_commit: null, last_sync_at: null }]);
     engine.executeRaw = execute; engine.transaction = transaction;
-    expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', runId: first.runId, added: 2, filesImported: 2 });
+    // The next pass imports only the page the stopped pass never admitted.
+    expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 1, filesImported: 1 });
     expect(await engine.executeRaw('SELECT * FROM persistence_requests WHERE id=$1', [before.requests[0].id])).toEqual(before.requests);
+    expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id])).toHaveLength(2);
   } finally { engine.executeRaw = execute; engine.transaction = transaction; }
 });
 
@@ -797,22 +817,25 @@ check('cancelled waits retain the accepted pending receipt and resume it after o
     if (value && typeof value === 'object' && 'request_id' in value && 'source_id' in value && value.source_id === f.id) abort.abort();
     return value;
   } as BrainEngine['transaction'];
-  let requestId: string, runId: string;
+  let requestId: string;
   try {
     const pending = await performSync(engine, { ...f.opts, signal: abort.signal });
     expect(abort.signal.aborted).toBe(true);
     expect(pending).toMatchObject({ status: 'partial', reason: 'timeout', filesImported: 0,
       managedWrite: { write_error: 'write_pending' } });
     expect(['queued', 'running', 'recovering']).toContain(pending.managedWrite!.write_request.state);
-    requestId = pending.managedWrite!.write_request.request_id; runId = pending.runId!;
+    requestId = pending.managedWrite!.write_request.request_id;
     await disposePersistenceConsumer(engine);
-    const frozen = await cursor(engine, f.id), state = await syncState(engine, f.id);
-    expect(frozen.value.pending.requestId).toBe(requestId);
+    // #6712 PR 4b: the live pass has no cursor; its pass row records the stop and the accepted request stays queued under its id.
+    const state = await syncState(engine, f.id);
+    const [passRow] = state.checkpoints.filter(row => row.op === 'managed-sync-pass' && String(row.fingerprint).startsWith(`${f.id}:`)) as Array<{ completed_keys: Array<{ telemetry: unknown }> }>;
+    expect(passRow.completed_keys[0].telemetry).toMatchObject({ outcome: 'resumable', stop_reason: 'timeout' });
     expect(state.requests).toHaveLength(1);
+    expect(state.requests[0]).toMatchObject({ request_id: requestId, state: 'queued' });
     expect(state.pages).toEqual([]); expect(state.effects).toEqual([]);
     expect(state.source).toEqual([{ last_commit: null, last_sync_at: null }]);
   } finally { engine.transaction = transaction; await disposePersistenceConsumer(engine); await lock?.release(); }
-  expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', runId: runId!, added: 1 });
+  expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 1, filesImported: 1, pass: { outcome: 'synced' } });
   expect(await engine.executeRaw("SELECT request_id,state FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]))
     .toEqual([{ request_id: requestId!, state: 'committed' }]);
 });

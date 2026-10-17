@@ -16,6 +16,7 @@ import { loadSyncFailures, acknowledgeFailures, autoSkipFailures } from '../src/
 import { printSyncResult, runSync } from '../src/commands/sync.ts';
 import { buildSingleSyncJsonEnvelope } from '../src/core/sync-embed-backfill.ts';
 import { readManagedSyncFailures } from '../src/core/persistence/sync-failures.ts';
+import { readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
 import { classifyManagedSyncOrphans, retireManagedSyncOrphan } from '../src/core/persistence/managed-sync-orphans.ts';
 import { checkSyncFailures } from '../src/commands/doctor/checks/sync-failures.ts';
 import { purgeStaleCheckpoints } from '../src/core/op-checkpoint.ts';
@@ -58,8 +59,10 @@ beforeAll(async () => {
   for (const engine of engines) await engine.setConfig('sync.holds', 'fail');
 }, 120_000);
 
-// #6712 PR 3 (L7): the next plain sync retries a recorded failure through the guarded rediscovery --retry-failed used to run.
-test('withdrawal-conflicted sync resumes through guarded rediscovery on the next plain sync and cannot restore the fact', async () => withEnv(env, async () => {
+// #6712 PR 4b: the withdrawal moves the page and the commit moves its file, so the live pass sees both sides moved (drift):
+// it refuses file_drift under sync.holds=fail on every plain sync without a new request, holds it under the default policy,
+// and never imports the file over the withdrawal.
+test('a withdrawal that conflicts with a committed edit is drift: refused file_drift on every plain sync, held under the default policy, and the fact is never restored', async () => withEnv(env, async () => {
   for (const engine of engines) {
     const body = renderFactsTable([{ rowNum: 1, claim: 'synthetic sync withdrawal', visibility: 'world', kind: 'fact', confidence: 1,
       notability: 'medium', active: true }]);
@@ -73,15 +76,27 @@ test('withdrawal-conflicted sync resumes through guarded rediscovery on the next
     expect((await performManagedSync(engine, options, { maxPages: 1, maxMs: 1000 })).status).toBe('partial');
     await disposePersistenceConsumer(engine);
     await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => recordFactWithdrawal(tx, fact.id, f.id), TEST_WRITE_ATTRIBUTION));
-    await expect(performManagedSync(engine, options)).rejects.toMatchObject({ code: 'revision_conflict' });
-    expect(await readManagedSyncFailures(engine, [f.id])).toEqual([expect.objectContaining({ phase: 'freeze', path: 'z.md', code: 'revision_conflict' })]);
-    const repaired = await performManagedSync(engine, options);
-    expect(repaired.status).toBe('synced');
-    const current = (await engine.readPageSnapshot('z', { sourceId: f.id }))!;
-    expect(current.page.compiled_truth).toContain('Preserve this new prose.');
-    expect(parseFactsFence(current.page.compiled_truth).facts[0].forgotten).toBe(true);
-    expect(parseFactsFence(readFileSync(join(f.root, 'z.md'), 'utf8')).facts[0].forgotten).toBe(true);
-    expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(0);
+    const requests = () => engine.executeRaw('SELECT id,state FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [f.id]);
+    const before = await requests();
+    const withdrawn = async () => {
+      const current = (await engine.readPageSnapshot('z', { sourceId: f.id }))!;
+      expect(current.page.compiled_truth).not.toContain('Preserve this new prose.');
+      expect(parseFactsFence(current.page.compiled_truth).facts[0].forgotten).toBe(true);
+      expect(readFileSync(join(f.root, 'z.md'), 'utf8')).toBe(`Preserve this new prose.\n${body}`);
+    };
+    await expect(performManagedSync(engine, options)).rejects.toMatchObject({ code: 'file_drift' });
+    expect(await readManagedSyncFailures(engine, [f.id])).toEqual([expect.objectContaining({ phase: 'freeze', path: 'z.md', code: 'file_drift' })]);
+    await expect(performManagedSync(engine, options)).rejects.toMatchObject({ code: 'file_drift' });
+    expect(await requests()).toEqual(before);
+    await withdrawn();
+    await engine.unsetConfig('sync.holds');
+    try {
+      const held = await performManagedSync(engine, options);
+      expect(held).toMatchObject({ status: 'synced', held: [{ path: 'z.md', code: 'file_drift' }] });
+      expect(((await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]?.holds ?? []).map(hold => [hold.path, hold.code, hold.meta.side])).toEqual([['z.md', 'file_drift', 'both']]);
+      await withdrawn();
+      expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(0);
+    } finally { await engine.setConfig('sync.holds', 'fail'); }
   }
 }), 120_000);
 afterAll(async () => {
@@ -162,7 +177,9 @@ test.each(['lone_cr', 'trailing_spaces', 'bom', 'content'] as const)('fresh CRLF
   }
 }), 120_000);
 
-test('CRLF checkout of a newer commit does not replace the stale blob pinned by an unfinished run', async () => withEnv(env, async () => {
+// #6712 PR 4b: no unfinished run pins the stale blob any more. The next pass pins the newer commit, whose CRLF checkout is
+// the same content, and imports it; the bytes the interrupted pass saw for z.md are never published.
+test('CRLF checkout of a newer commit after an interrupted pass imports the newer commit; the stale blob the interrupted pass saw is never published', async () => withEnv(env, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': 'Original first observation.\n', 'z.md': 'Original last observation.\n' });
     const options = { sourceId: f.id, noPull: true };
@@ -174,17 +191,14 @@ test('CRLF checkout of a newer commit does not replace the stale blob pinned by 
     const newer = 'Newer last observation.\n';
     writeFileSync(join(f.root, 'z.md'), newer); const newerHead = commit(f.root);
     writeFileSync(join(f.root, 'z.md'), newer.replace(/\n/g, '\r\n'));
-    const blocked = await performManagedSync(engine, options);
-    expect(blocked).toMatchObject({ status: 'blocked_by_failures', toCommit: pinned, failureCodes: [{ code: 'source_changed', count: 1 }] });
-    expect(blocked.managedWrite?.line_endings).toBeUndefined();
-    expect((await engine.getPage('z', { sourceId: f.id }))?.compiled_truth).toBe('Original last observation.');
-    expect(readFileSync(join(f.root, 'z.md'), 'utf8')).toBe(newer.replace(/\n/g, '\r\n'));
-    expect((await engine.executeRaw<{ last_commit: string }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
-    // #6712 PR 3 (L7): the next plain sync retries the recorded failure as --retry-failed did: it rediscovers at HEAD, so the
-    // newer bytes import under their own commit and the pinned run never publishes them.
-    expect(await performManagedSync(engine, options)).toMatchObject({ status: 'synced', toCommit: newerHead });
+    const resumed = await performManagedSync(engine, options);
+    expect(resumed).toMatchObject({ status: 'synced', toCommit: newerHead, modified: 1, pass: { kind: 'full', outcome: 'synced', candidates: 1 } });
+    expect(resumed.managedWrite?.line_endings).toBeUndefined();
     expect((await engine.getPage('z', { sourceId: f.id }))?.compiled_truth).toBe('Newer last observation.');
+    expect(readFileSync(join(f.root, 'z.md'), 'utf8')).toBe(newer.replace(/\n/g, '\r\n'));
     expect((await engine.executeRaw<{ last_commit: string }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(newerHead);
+    // z.md was imported by the first sync and by the newer commit, never at the stale pinned blob.
+    expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND intent->>'path'='z.md' AND intent->>'kind'='managed_sync_import'", [f.id])).toHaveLength(2);
   }
 }), 120_000);
 
@@ -391,7 +405,9 @@ test('local single and all-source CLI JSON carry durable diagnostics and fail th
     try {
       await runSync(engine, [...flags, '--source', f.id]);
       const single = JSON.parse(stdout.trim());
-      expect(single).toEqual(expect.objectContaining({ sync_status: 'blocked_by_failures', failures: [expect.objectContaining({ path: 'bad.md', source_id: f.id, request_id: expect.any(String), phase: 'receipt' })], counts_scope: 'run_cumulative' }));
+      // #6712 PR 4b: the pass has no cursor run, so the envelope carries no run-cumulative counts (no run_id, no counts_scope).
+      expect(single).toEqual(expect.objectContaining({ sync_status: 'blocked_by_failures', outcome: 'blocked', failures: [expect.objectContaining({ path: 'bad.md', source_id: f.id, request_id: expect.any(String), phase: 'receipt' })] }));
+      expect(single).not.toHaveProperty('counts_scope');
       expect(currentExitCode()).toBe(1); expect(stderr).toContain(`After repair, run gbrain sync --source ${f.id} --no-pull --no-embed --no-extract --no-schema-pack to retry it under a new request.`);
       expect(stderr).not.toContain('--retry-failed'); expect(stderr).not.toContain('--skip-failed');
       stdout = ''; stderr = '';
@@ -472,26 +488,38 @@ test('remote pending sync keeps its private receipt off the response while resum
       expect(requests).toHaveLength(1);
       const serialized = JSON.stringify(pending);
       for (const privateValue of ['private-pending', 'A private observation', f.root, f.head, requests[0].request_id]) expect(serialized).not.toContain(privateValue);
-      expect(await run()).toEqual(pending);
+      // #6712 PR 4b: each pass has its own pass_id; otherwise the second pending result is identical and resumes the same request.
+      const again = await run();
+      expect(again.pass!.pass_id).not.toBe(pending.pass!.pass_id);
+      expect({ ...again, pass: { ...again.pass!, pass_id: '' } }).toEqual({ ...pending, pass: { ...pending.pass!, pass_id: '' } });
       expect(await engine.executeRaw('SELECT request_id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual(requests);
-      expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(1);
+      // A pass that waits on its own queued request stops resumable (writer_pending) and records no failure; only a blocked stop does.
+      expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(0);
       await lock!.release();
-      expect(await run()).toMatchObject({ status: 'first_sync', added: 1 });
+      // The same request commits once the worktree is free, but a remote caller cannot stamp the converged checkpoint: the
+      // pass stops for the brain host, with the page imported and last_commit untouched.
+      expect(await run()).toMatchObject({ status: 'blocked_by_failures', reason: 'reconcile_host_required',
+        pass: { kind: 'full', outcome: 'blocked', stop_reason: 'reconcile_host_required', candidates: 0 } });
+      expect((await engine.getPage('private-pending', { sourceId: f.id }))?.compiled_truth).toContain('A private observation awaiting publication.');
+      expect(await engine.executeRaw('SELECT request_id,state FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([{ request_id: requests[0].request_id, state: 'committed' }]);
+      expect((await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBeNull();
     } finally { await lock?.release(); await disposePersistenceConsumer(engine); }
   }
 }), 120_000);
 
-// #6712 PR 1 (L1): a lost manifest no longer blocks until an explicit idle retry. The next plain sync re-discovers against
-// HEAD and finishes under a new run; the page the lost run already imported is prescreened (the old cursor is a skip-ahead).
-test('missing manifest re-discovers against HEAD on the next sync; the page the lost run imported is prescreened', async () => withEnv(env, async () => {
+// #6712 PR 4b: a non-company source keeps no manifest. An interrupted pass resumes on the next plain sync under a new pass,
+// and the page it already imported is no longer a candidate (it is not imported twice).
+test('an interrupted pass resumes on the next sync; the page it imported is not a candidate again', async () => withEnv(env, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': 'First committed observation.\n', 'b.md': 'Second committed observation.\n' });
     const options = { sourceId: f.id, noPull: true };
     const partial = await performManagedSync(engine, options, { maxPages: 1, maxMs: 1000 });
-    await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync-manifest' AND fingerprint=$1", [partial.runId]);
+    expect(partial).toMatchObject({ status: 'partial', reason: 'writer_yield', filesImported: 1 });
     const resumed = await performManagedSync(engine, options);
-    expect(resumed.status).toBe('first_sync'); expect(resumed.runId).not.toBe(partial.runId);
-    expect(resumed.prescreened).toBe(1);
+    expect(resumed).toMatchObject({ status: 'first_sync', pass: { kind: 'full', outcome: 'synced', candidates: 1 } });
+    expect(resumed.pass!.pass_id).not.toBe(partial.pass!.pass_id);
+    const imports = await engine.executeRaw<{ path: string }>("SELECT intent->>'path' AS path FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]);
+    expect(imports.map(row => row.path).sort()).toEqual(['a.md', 'b.md']);
     expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(0);
     expect((await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
   }
